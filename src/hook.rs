@@ -677,30 +677,41 @@ fn read_paths(agent: &str, payload: &Value, cwd: &Path) -> Vec<String> {
 }
 
 /// claude-mem's Codex adapter (`codex-file-context.ts`): the files a shell command's readers name.
-/// The command splits into words as a shell splits it (none when it does not: an open quote), and
-/// into commands at each operator word; a command whose first word that is no option is a reader
-/// (`cat`, `head`, `tail`, `less`, `more`, `bat`, `view`, `nl`, `tac`, by its file name) names the
-/// files among its words past its options: `head`'s and `tail`'s `-n`, `-c`, `--lines` and
-/// `--bytes` take the next word as their value, and after `--` no word is an option.
+/// The command splits into words as a POSIX shell splits it (`shell_tokens`; none when a quote is
+/// left open) and into commands at each operator outside quotes; a redirection and its target stay
+/// out of the command's words without ending it (Greptile on #456). A command whose first word that
+/// is no option is a reader (`cat`, `head`, `tail`, `less`, `more`, `bat`, `view`, `nl`, `tac`, by
+/// its file name) names the files among its words past its options: `head`'s and `tail`'s `-n`,
+/// `-c`, `--lines` and `--bytes` take the next word as their value, and after `--` no word is an
+/// option.
 fn shell_read_paths(command: &str, cwd: &Path) -> Vec<String> {
     const READERS: [&str; 9] = [
         "cat", "head", "tail", "less", "more", "bat", "view", "nl", "tac",
     ];
-    const OPERATORS: [&str; 14] = [
-        "||", "&&", ";;", "|&", "<(", ">>", ">&", "&", ";", "(", ")", "|", "<", ">",
-    ];
-    let option = |w: &str| w.starts_with('-') || w.starts_with('+');
-    let Some(words) = shlex::split(command) else {
+    let Some(tokens) = shell_tokens(command) else {
         return Vec::new();
     };
+    let mut commands: Vec<Vec<&str>> = vec![Vec::new()];
+    let mut target = false;
+    for (text, operator) in &tokens {
+        if *operator {
+            target = text.contains(['<', '>']);
+            if !target {
+                commands.push(Vec::new());
+            }
+        } else if !std::mem::take(&mut target)
+            && let Some(words) = commands.last_mut()
+        {
+            words.push(text);
+        }
+    }
+    let option = |w: &str| w.starts_with('-') || w.starts_with('+');
     let mut paths = Vec::new();
-    // shortcut: an operator splits commands only as a word of its own (`ls;cat a` stays one
-    // command, which claude-mem's shell-quote splits); split inside words if notes go missing.
-    for segment in words.split(|w| OPERATORS.contains(&w.as_str())) {
-        let Some(at) = segment.iter().position(|w| !option(w)) else {
+    for words in commands {
+        let Some(at) = words.iter().position(|w| !option(w)) else {
             continue;
         };
-        let reader = Path::new(&segment[at])
+        let reader = Path::new(words[at])
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
@@ -713,20 +724,79 @@ fn shell_read_paths(command: &str, cwd: &Path) -> Vec<String> {
             &[]
         };
         let (mut skip, mut ended) = (false, false);
-        for word in &segment[at + 1..] {
+        for word in &words[at + 1..] {
             if std::mem::take(&mut skip) {
                 continue;
             }
-            if !ended && word == "--" {
+            if !ended && *word == "--" {
                 ended = true;
             } else if !ended && option(word) {
-                skip = valued.contains(&word.as_str());
+                skip = valued.contains(word);
             } else if cwd.join(word).is_file() {
-                paths.push(word.clone());
+                paths.push((*word).to_owned());
             }
         }
     }
     paths
+}
+
+/// A shell command's words as a POSIX shell splits them, its quotes and backslashes taken off, each
+/// with whether it is an operator: a run of `|`, `&`, `;`, `<`, `>`, or a `(` or `)`, outside
+/// quotes, which the shell reads as one even with no space around it; a quoted one is a word
+/// (Greptile on #456). None when a quote is left open.
+fn shell_tokens(command: &str) -> Option<Vec<(String, bool)>> {
+    let mut tokens = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                let w = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        q => w.push(q),
+                    }
+                }
+            }
+            '"' => {
+                let w = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            e @ ('"' | '\\' | '$' | '`') => w.push(e),
+                            '\n' => {}
+                            e => {
+                                w.push('\\');
+                                w.push(e);
+                            }
+                        },
+                        q => w.push(q),
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some('\n') => {}
+                e => word.get_or_insert_with(String::new).push(e.unwrap_or('\\')),
+            },
+            c if c.is_whitespace() => tokens.extend(word.take().map(|w| (w, false))),
+            '|' | '&' | ';' | '<' | '>' | '(' | ')' => {
+                tokens.extend(word.take().map(|w| (w, false)));
+                let mut op = c.to_string();
+                while !matches!(c, '(' | ')')
+                    && let Some(&n) = chars.peek().filter(|n| "|&;<>".contains(**n))
+                {
+                    op.push(n);
+                    chars.next();
+                }
+                tokens.push((op, true));
+            }
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    tokens.extend(word.map(|w| (w, false)));
+    Some(tokens)
 }
 
 /// Whether `tool` is an MCP read tool as claude-mem's Codex matcher takes one:
@@ -2958,7 +3028,8 @@ mod tests {
                 &hook(r.s.home.path(), "codex", "PreToolUse", &payload),
             )
         };
-        let absolute = format!("/usr/bin/cat {}/src/a.rs", r.c);
+        // Quoted: a Windows path's backslashes are escapes to a POSIX shell.
+        let absolute = format!("/usr/bin/cat '{}/src/a.rs'", r.c);
         let reads = [
             ("Bash", json!({"command": "cat src/a.rs"})),
             (
@@ -3003,7 +3074,7 @@ mod tests {
     #[test]
     fn shell_read_paths_take_the_files_a_commands_readers_name() {
         let dir = tempfile::tempdir().unwrap();
-        for f in ["a.rs", "-b.rs", "c d.rs"] {
+        for f in ["a.rs", "-b.rs", "c d.rs", "out.txt"] {
             std::fs::write(dir.path().join(f), "x").unwrap();
         }
         let paths = |c: &str| shell_read_paths(c, dir.path());
@@ -3022,6 +3093,15 @@ mod tests {
         assert_eq!(paths("git show a.rs"), none);
         assert_eq!(paths("echo a.rs > a.rs"), none);
         assert_eq!(paths("cat \"a.rs"), none);
+        // Greptile on #456: a redirection's target is no path and ends no command; a quoted
+        // operator is a word; an operator needs no space around it.
+        assert_eq!(paths("cat a.rs > out.txt c\\ d.rs"), ["a.rs", "c d.rs"]);
+        assert_eq!(paths("cat a.rs > cat -- -b.rs"), ["a.rs", "-b.rs"]);
+        assert_eq!(paths("cat a.rs 2>/dev/null"), ["a.rs"]);
+        assert_eq!(paths("cat a.rs >&2 c\\ d.rs"), ["a.rs", "c d.rs"]);
+        assert_eq!(paths("echo '|' cat a.rs"), none);
+        assert_eq!(paths("echo \"a;\" cat a.rs"), none);
+        assert_eq!(paths("ls;cat \"c d.rs\"&&nl a.rs"), ["c d.rs", "a.rs"]);
     }
 
     /// G25: the hook takes for an MCP read what Codex's matcher sends it (`setup::CODEX_READS`).
