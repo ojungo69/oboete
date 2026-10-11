@@ -546,6 +546,25 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
 - 設定した backup の場所が無いとき（外付けの drive やクラウドのフォルダが mount されていない）、purge は
   空とみなして step 4 を記録し、export はその場所を作り直す。両方を 1 つの設計で直す件は #457。
 
+2c-2 の実装で決めたこと（2026-10-11）:
+
+- raw.db の写しは store としてではなく素の SQLite の接続で開く（identity・device・schema に触れない）。
+  `secure_delete` を有効にし、1 つの transaction で書き換え、WAL を truncate する。その uid の op を持た
+  ない写し（claim より前の写し）はそのまま。開けない・書き換えられない・truncate できない写しは -wal・
+  -shm・-journal と一緒に消す。`raw.db.restoring` も同じく消す。segment と同じ worker の lock の下で走る。
+- step 5 は step 4 の直後に同じ purge が行う（`shown` の掃除をもう一度）。`local` は step 5 で「done」。
+  step 4 で止まったときだけ「purged here and in the backups; its last check pending」と言い、次の継続は
+  step 4 の走査（もう何も書き換えない）と step 5 をする。2c-1 の step 4 の文言はこれに替わる。
+- preview は segment を purge と同じ走査で、何も書かずに数える（生きているもの・退けられたもの・消すもの）。
+  backup の場所が読めないときは数の代わりにそう言う。raw.db の写しは候補の数だけを言う（その uid を持てば
+  書き換え、書き換えられなければ消す）: read-only の接続は -shm のない写しの WAL を戻せないので、preview は
+  写しを開かない。
+- preview は、seal が保証しない segment で判定できない行を持つものを「消すもの」に数える（purge と同じ判定）。
+- 写しとして取るのは、隔離がつける名前（`raw.db.quarantined-<ms>`・`raw.db.restored.quarantined-<ms>`、
+  `<ms>` は数字だけ）と `raw.db.restored` だけ。ほかの名前のファイルは書き換えも削除もしない（segment と
+  同じ。Codex on #453）。写しを消したら、step 4 を記録する前にホームの directory を sync する（unix。
+  Greptile on #453 の backup の場所と同じ）。
+
 試験（2c の分）:
 
 1. purge の後、raw.db・raw.db-wal・knowledge.db とその WAL・`state/`・backup の場所のどのファイルにも、

@@ -128,6 +128,12 @@ pub struct UidPreview {
     /// The first line of each claim it supersedes: with it gone, none of them is superseded by
     /// it any more, so each is current again unless another claim supersedes it.
     pub again: Vec<String>,
+    /// The backup segments its purge would rewrite or remove (2c, decision 9); None when the
+    /// backup location cannot be read now.
+    pub segments: Option<crate::backup::OpsPurge>,
+    /// The copies of raw.db set aside, each rewritten where it holds the uid or removed when it
+    /// cannot be.
+    pub copies: usize,
 }
 
 /// One record a request forgets, bodyless (rule 3): where it was, its import origin (the one
@@ -406,6 +412,8 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
                     ops,
                     vectors: 0,
                     again,
+                    segments: None,
+                    copies: 0,
                 },
                 body,
             ));
@@ -427,6 +435,8 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
                     ops,
                     vectors: 0,
                     again: Vec::new(),
+                    segments: None,
+                    copies: 0,
                 },
                 title,
             ));
@@ -442,6 +452,8 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
                 ops,
                 vectors: 0,
                 again: Vec::new(),
+                segments: None,
+                copies: 0,
             };
             shown = Some((preview, Some(first)));
         }
@@ -455,6 +467,11 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
              WHERE key = ?1 AND kind IN ('c', 'k', 'p') AND skipped IS NULL",
         )?;
     }
+    // 2c, decision 9: what step 4 would rewrite or remove (a placeholder job: only the count
+    // matters here).
+    let only = std::collections::HashMap::from([(uid.clone(), String::new())]);
+    uid_preview.segments = crate::backup::ops_to_purge(home, &only).ok();
+    uid_preview.copies = crate::raw::copies_set_aside(home)?.len();
     Ok(Preview {
         target: Target::Uid { uid },
         records: Vec::new(),
@@ -522,8 +539,11 @@ pub fn start(home: &Path, preview: &Preview) -> Result<(Status, Report)> {
 const PENDING: &str = "hidden; physical purge pending";
 /// D5 item 7: past its rebuild, knowledge.db still holds the uid.
 const STOPPED: &str = "stopped: knowledge.db still holds it after its rebuild";
-/// 2c: past step 4, no backup segment holds its text; the copies of raw.db set aside still may.
-const SEGMENTS_PURGED: &str = "purged here and in the backup segments; raw.db copies pending";
+/// 2c: past step 4, no backup segment or copy of raw.db holds its text; step 5's last look at the
+/// hook state is to come (it follows at once, unless the purge stopped between the two).
+const BACKUPS_PURGED: &str = "purged here and in the backups; its last check pending";
+/// 2c, decision 7: past step 5.
+const DONE: &str = "done";
 
 /// Each job, its local state read from the stores (D5 item 9): a uid job past step 3 whose ops
 /// hold no text is purged here, or stopped while knowledge.db still holds its uid.
@@ -553,7 +573,8 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
         .map(|(r, step, purged)| {
             let local = match &r.target {
                 Target::Uid { uid } if *purged && holding.contains(uid) => STOPPED,
-                _ if *purged && *step >= 4 => SEGMENTS_PURGED,
+                _ if *purged && *step >= 5 => DONE,
+                _ if *purged && *step >= 4 => BACKUPS_PURGED,
                 _ if *purged => "purged here; backups pending",
                 _ => PENDING,
             };
@@ -617,9 +638,15 @@ pub struct Purged {
     pub segments: usize,
     /// Backup segments removed: no seal vouched for them and they could not be read whole (2c).
     pub segments_removed: usize,
+    /// Copies of raw.db set aside whose ops of a forgotten uid were rewritten without their text
+    /// (2c).
+    pub copies: usize,
+    /// Copies of raw.db removed: they did not open or could not be rewritten, and a restore's
+    /// partial build (2c).
+    pub copies_removed: usize,
 }
 
-/// Each uid job a purge goes on with, by state rather than step (D5 item 7): one not past step 4,
+/// Each uid job a purge goes on with, by state rather than step (D5 item 7): one not past step 5,
 /// or whose ops hold text again (a restore can bring the bodies back): its job, uid and step, and
 /// whether its ops hold text.
 fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
@@ -627,7 +654,7 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
     for (request, step) in raw.forget_jobs()? {
         if let Target::Uid { uid } = request.target {
             let held = raw.uid_has_ops(&uid)?;
-            if held || step < 4 {
+            if held || step < 5 {
                 due.push((request.job, uid, step, held));
             }
         }
@@ -798,8 +825,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             }
         }
     }
-    // Step 4 (2c, decisions 2-4): the backup's ops segments, for every uid job past step 3 whose
-    // ops hold no text, stopped ones too (decision 8), in one pass for all their uids.
+    // Step 4 (2c, decisions 2-5): the backup's ops segments and the copies of raw.db set aside,
+    // for every uid job past step 3 whose ops hold no text, stopped ones too (decision 8), in one
+    // pass for all their uids.
     let mut jobs = std::collections::HashMap::new();
     let mut past = Vec::new();
     for (request, step) in raw.forget_jobs()? {
@@ -815,9 +843,20 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     if !jobs.is_empty() {
         let ops = crate::backup::purge_ops(home, &jobs)?;
-        (purged.segments, purged.segments_removed) = (ops.rewritten, ops.removed);
+        (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
+        (purged.copies, purged.copies_removed) = crate::raw::purge_copies(home, &jobs)?;
         for job in &past {
             raw.finish_forget_step(job, 4)?;
+        }
+        // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A hook
+        // that read before the registration wrote it before the registration committed (#439's
+        // fence), so this finds nothing as a rule.
+        let forgotten: HashSet<String> = jobs.keys().cloned().collect();
+        purged.shown += crate::hookstate::update_all(home, "shown", |v| {
+            crate::hook::without_uids(v, &forgotten)
+        })?;
+        for job in &past {
+            raw.finish_forget_step(job, 5)?;
         }
     }
     Ok(Some(purged))
@@ -1183,10 +1222,10 @@ fn uid_limits(kind: &str) -> String {
          knowledge.db is rebuilt from raw.db without it. That takes minutes on a large store \
          (a minute and a half for 70,000 records), and a session that starts meanwhile gets part \
          of its memory or none; two forgets one after the other rebuild twice. Then the \
-         backup segments are rewritten without it, those set aside too; copies of raw.db set \
-         aside keep it until their purge is built, hidden from every reader and never sent again. \
-         A backup location in a cloud folder may keep earlier versions of a segment in its \
-         history, which forget does not reach.\n\
+         backups are rewritten without it: the backup segments, those set aside too, and the \
+         copies of raw.db set aside; one that cannot be read or rewritten is removed. A backup \
+         location in a cloud folder may keep earlier versions of a segment in its history, which \
+         forget does not reach.\n\
          A packet already handed to an agent and a call already sent are not taken back.\n\
          The request is logged by this uid, without the text.\n",
     );
@@ -1288,6 +1327,25 @@ pub fn run(
                 crate::redact::outbound(again)
             );
         }
+        match &u.segments {
+            Some(s) if s.live + s.aside + s.removed > 0 => println!(
+                "Backup segments rewritten without it: {} live, {} set aside; damaged ones that \
+                 cannot be read, removed: {}",
+                s.live, s.aside, s.removed
+            ),
+            Some(_) => {}
+            None => println!(
+                "The backup location cannot be read now: the purge rewrites its segments once it \
+                 can."
+            ),
+        }
+        if u.copies > 0 {
+            println!(
+                "Copies of raw.db set aside, rewritten where they hold it or removed when they \
+                 cannot be: {}",
+                u.copies
+            );
+        }
     }
     p.validate()?;
     match &p.uid {
@@ -1358,6 +1416,18 @@ fn say_purged(p: &Purged) -> Result<()> {
         println!(
             "Damaged backup segments that could not be read, removed: {}",
             p.segments_removed
+        );
+    }
+    if p.copies > 0 {
+        println!(
+            "Copies of raw.db set aside, rewritten without it: {}",
+            p.copies
+        );
+    }
+    if p.copies_removed > 0 {
+        println!(
+            "Copies of raw.db that could not be rewritten, and a restore's partial build, removed: {}",
+            p.copies_removed
         );
     }
     anyhow::ensure!(
@@ -1566,6 +1636,12 @@ mod tests {
             ops: 1,
             vectors: 0,
             again,
+            // The worker's pass backed its op up in one segment.
+            segments: Some(crate::backup::OpsPurge {
+                live: 1,
+                ..Default::default()
+            }),
+            copies: 0,
         };
         assert_eq!(p.uid, Some(shown));
         p.validate().unwrap();
@@ -1766,7 +1842,7 @@ mod tests {
             }
         }
         assert_eq!(rewritten, 3);
-        assert!(uid_jobs(&home).iter().all(|j| j.2 == 4));
+        assert!(uid_jobs(&home).iter().all(|j| j.2 == 5));
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
@@ -2036,7 +2112,7 @@ mod tests {
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, true));
         assert!(purged.unfinished.is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
     }
 
     /// D5 (2b-1): one purge at a time: while another holds `state/purge.lock`, a purge does
@@ -2102,10 +2178,10 @@ mod tests {
         assert!(purged.stopped.is_empty());
         let uids = HashSet::from([tabs, doc]);
         assert!(knowledge_holding(&home, &uids).unwrap().is_empty());
-        assert!(uid_jobs(&home).iter().all(|j| j.2 == 4));
+        assert!(uid_jobs(&home).iter().all(|j| j.2 == 5));
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
         let local: Vec<&str> = status(&home).unwrap().iter().map(|s| s.local).collect();
-        assert_eq!(local, [SEGMENTS_PURGED; 2]);
+        assert_eq!(local, [DONE; 2]);
     }
 
     /// D5 (2b, item 5, test 6): no forgotten uid's vector comes back, neither from the knowledge.db
@@ -2192,7 +2268,7 @@ mod tests {
         assert_eq!((purged.jobs, purged.ops, purged.rebuilt), (1, 0, true));
         assert!(purged.aside > 0);
         assert!(aside_files(&home).unwrap().is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
     }
 
     /// D5 (2b, item 7, test 6): a restore that brings a purged op's text back is purged again,
@@ -2207,7 +2283,7 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
         // The bodies an older raw.db held, back in place.
         let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
         for (device, seq, _, body) in &before {
@@ -2225,7 +2301,7 @@ mod tests {
         assert_eq!(CONTINUED.get(), 1);
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.jobs, purged.ops), (1, 1));
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Use tabs.")));
     }
 
@@ -2462,7 +2538,7 @@ mod tests {
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!(purged.ops, 1);
         assert!(purged.unfinished.is_empty());
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
     }
 
     /// D5 (2b, item 8, test 7): a worker that finds a uid job its purge left starts `oboete forget
@@ -2698,6 +2774,17 @@ mod tests {
         for file in &notes {
             std::fs::write(file, "the owner's notes").unwrap();
         }
+        let shown = preview(&home, Target::parse_uid(&uid).unwrap()).unwrap();
+        let counted = crate::backup::OpsPurge {
+            live: 3,
+            aside: 1,
+            removed: 2,
+        };
+        assert_eq!(shown.uid.unwrap().segments, Some(counted));
+        assert!(
+            left.iter().all(|p| p.exists()) && broken.exists() && cut.exists(),
+            "the preview changed a file"
+        );
         forget(&home, &uid);
         let job = uid_jobs(&home)[0].1.clone();
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
@@ -2743,8 +2830,8 @@ mod tests {
             assert!(seal.starts_with(&file_sha(segment)), "{seal}");
         }
         assert!(!PathBuf::from(format!("{}.sha256", unsealed.display())).exists());
-        assert_eq!(uid_jobs(&home)[0].2, 4);
-        assert_eq!(status(&home).unwrap()[0].local, SEGMENTS_PURGED);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
+        assert_eq!(status(&home).unwrap()[0].local, DONE);
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
 
         // Test 5: raw.db lost, restored from the rewritten segments.
@@ -2822,9 +2909,9 @@ mod tests {
         }
     }
 
-    /// D5 (Codex on #453): a job at step 4 whose ops hold its text again (as a restore can bring
-    /// the bodies back) is purged from step 2 again, and its step goes back to 2, so a rebuild
-    /// that stops leaves it due; the next purge rebuilds and finishes it.
+    /// D5 (Codex on #453): a done job whose ops hold its text again (as a restore can bring the
+    /// bodies back) is purged from step 2 again, and its step goes back to 2, so a rebuild that
+    /// stops leaves it due; the next purge rebuilds and finishes it.
     #[test]
     fn a_job_whose_text_came_back_stays_due_until_its_rebuild_finishes() {
         let (s, uid, _) = backed_up_canary();
@@ -2839,7 +2926,7 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         purge(&home).unwrap().unwrap();
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
         let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
         for (device, seq, body) in &bodies {
             conn.execute(
@@ -2856,12 +2943,12 @@ mod tests {
         assert_eq!(due(&raw::open(&home).unwrap()).unwrap().len(), 1);
         let purged = purge(&home).unwrap().unwrap();
         assert!(purged.rebuilt);
-        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains(CANARY)));
     }
 
     /// D5 (2c, CodeRabbit on #453): two jobs of one uid (the logs brought a request back beside
-    /// the one raw.db holds, under another job id) both reach step 4.
+    /// the one raw.db holds, under another job id) both reach step 4, and then step 5.
     #[test]
     fn every_job_of_a_uid_reaches_step_4() {
         let (s, uid, _) = backed_up_canary();
@@ -2878,14 +2965,14 @@ mod tests {
         assert_eq!(uid_jobs(&home).len(), 2);
         purge(&home).unwrap().unwrap();
         let jobs = uid_jobs(&home);
-        assert!(jobs.iter().all(|j| j.0 == uid && j.2 == 4), "{jobs:?}");
+        assert!(jobs.iter().all(|j| j.0 == uid && j.2 == 5), "{jobs:?}");
         assert_eq!(backup_canaries(&home), Vec::<String>::new());
     }
 
     /// D5 (2c, Greptile on #453): a purge stopped inside a write, after the data and before its
     /// rename (a replacement's file, a set-aside segment's rewrite in place), leaves only hidden
-    /// files the next purge takes for leftovers (`backup::leftover`); that purge leaves none, and
-    /// no file holds the text.
+    /// files the next purge takes for leftovers (`backup::leftover`); that purge leaves none, no
+    /// file holds the text, and the job is done.
     #[test]
     fn a_purge_stopped_inside_a_write_leaves_only_what_the_next_one_removes() {
         for stage in ["purge_part_unrenamed", "purge_rewrite_unrenamed"] {
@@ -2918,7 +3005,7 @@ mod tests {
             purge(&home).unwrap().unwrap();
             assert_eq!(hidden(), Vec::<String>::new(), "{stage}");
             assert_eq!(backup_canaries(&home), Vec::<String>::new(), "{stage}");
-            assert_eq!(uid_jobs(&home)[0].2, 4, "{stage}");
+            assert_eq!(uid_jobs(&home)[0].2, 5, "{stage}");
         }
     }
 
@@ -2978,7 +3065,7 @@ mod tests {
                 .filter(|n| n.starts_with('.'))
                 .collect();
             assert_eq!(hidden, Vec::<String>::new(), "{stage}");
-            assert_eq!(uid_jobs(&home)[0].2, 4, "{stage}");
+            assert_eq!(uid_jobs(&home)[0].2, 5, "{stage}");
         }
     }
 
@@ -3006,16 +3093,211 @@ mod tests {
             assert_eq!(purged.rebuilt, another);
             assert!(purged.stopped.is_empty(), "{another}: {:?}", purged.stopped);
             assert_eq!(purged.segments, if another { 2 } else { 1 });
-            assert!(uid_jobs(&home).iter().all(|j| j.2 == 4));
+            assert!(uid_jobs(&home).iter().all(|j| j.2 == 5));
             let local: Vec<&str> = status(&home).unwrap().iter().map(|s| s.local).collect();
             let expected: &[&str] = if another {
-                &[STOPPED, SEGMENTS_PURGED]
+                &[STOPPED, DONE]
             } else {
                 &[STOPPED]
             };
             assert_eq!(local, expected);
             assert_eq!(backup_canaries(&home), Vec::<String>::new());
         }
+    }
+
+    /// `home`'s raw.db copied under `name`, its WAL beside it, as a quarantine moves the pair.
+    fn copy_raw(home: &Path, name: &str) -> PathBuf {
+        let to = home.join(name);
+        std::fs::copy(home.join("raw.db"), &to).unwrap();
+        if home.join("raw.db-wal").exists() {
+            std::fs::copy(home.join("raw.db-wal"), format!("{}-wal", to.display())).unwrap();
+        }
+        to
+    }
+
+    /// The bodies of the ops a copy of raw.db holds, by (device, op_seq).
+    fn copy_ops(path: &Path) -> Vec<(String, i64, String)> {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let mut st = conn
+            .prepare("SELECT device, op_seq, body FROM ops ORDER BY device, op_seq")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// D5 (2c, decision 5, tests 1 and 4): a purge rewrites the forgotten uid's ops in every copy
+    /// of raw.db set aside, and in a stopped restore's build beside raw.db, leaving no byte of the
+    /// text in the copy or beside it and every other op as it was; a copy that does not open goes
+    /// with its sidecars, and a restore's partial build too.
+    #[test]
+    fn a_purge_rewrites_the_copies_of_raw_db_set_aside() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let named = |prefix: &str| crate::backup::fresh_name(&home, prefix).unwrap();
+        s.said("s", "github.com/o/r", 500, "An older record.");
+        // From before the claim: nothing in it to rewrite.
+        let older = copy_raw(&home, &named("raw.db.quarantined-"));
+        let older_ops = copy_ops(&older);
+        let uid = canary_claim(&mut s);
+        s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let copies = [
+            copy_raw(&home, &named("raw.db.quarantined-")),
+            copy_raw(&home, &named("raw.db.restored.quarantined-")),
+            copy_raw(&home, "raw.db.restored"),
+        ];
+        let before: Vec<_> = copies.iter().map(|c| copy_ops(c)).collect();
+        let broken = home.join(named("raw.db.quarantined-"));
+        let sidecars =
+            |p: &Path| ["-wal", "-shm"].map(|x| PathBuf::from(format!("{}{x}", p.display())));
+        for path in std::iter::once(broken.clone()).chain(sidecars(&broken)) {
+            std::fs::write(path, format!("not a database: {CANARY}")).unwrap();
+        }
+        let partial = copy_raw(&home, "raw.db.restoring");
+        std::fs::write(home.join("raw.db.restoring-journal"), CANARY).unwrap();
+        // A file of the owner's under a name like a quarantine's: not a copy.
+        let notes = home.join("raw.db.quarantined-notes");
+        std::fs::write(&notes, "the owner's notes").unwrap();
+        let shown = preview(&home, Target::parse_uid(&uid).unwrap()).unwrap();
+        assert_eq!(shown.uid.unwrap().copies, 6);
+        forget(&home, &uid);
+        let job = uid_jobs(&home)[0].1.clone();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.copies, purged.copies_removed), (3, 2));
+        let forgotten = serde_json::json!({ "forgotten": job }).to_string();
+        for (copy, was) in copies.iter().zip(&before) {
+            let now = copy_ops(copy);
+            assert_eq!(now.len(), was.len());
+            let mut changed = 0;
+            for (now, was) in now.iter().zip(was) {
+                assert_eq!((&now.0, now.1), (&was.0, was.1));
+                if was.2.contains(CANARY) {
+                    assert_eq!(now.2, forgotten);
+                    changed += 1;
+                } else {
+                    assert_eq!(now.2, was.2);
+                }
+            }
+            assert_eq!(changed, 1, "{copy:?}");
+        }
+        let holds = |p: &Path| {
+            std::fs::read(p).is_ok_and(|b| b.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()))
+        };
+        let mut left = Vec::new();
+        for e in std::fs::read_dir(&home).unwrap().flatten() {
+            if e.path().is_file() && holds(&e.path()) {
+                left.push(e.file_name());
+            }
+        }
+        assert_eq!(left, Vec::<std::ffi::OsString>::new());
+        for gone in std::iter::once(broken.clone())
+            .chain(sidecars(&broken))
+            .chain([partial, home.join("raw.db.restoring-journal")])
+        {
+            assert!(!gone.exists(), "{gone:?}");
+        }
+        assert!(home.join("raw.db.restored").exists());
+        assert_eq!(
+            std::fs::read_to_string(&notes).unwrap(),
+            "the owner's notes"
+        );
+        assert_eq!(copy_ops(&older), older_ops);
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// D5 (2c, decision 5): a copy of raw.db another connection reads cannot have its WAL truncated
+    /// (the old page, the text in it, would stay in the file): it is removed instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_another_connection_reads_is_removed() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = canary_claim(&mut s);
+        s.run();
+        let home = s.home.path().to_owned();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        let reader = rusqlite::Connection::open(&copy).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let held: i64 = reader
+            .query_row("SELECT COUNT(*) FROM ops", [], |r| r.get(0))
+            .unwrap();
+        assert!(held > 0);
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        drop(reader);
+        assert_eq!((purged.copies, purged.copies_removed), (0, 1));
+        assert!(!copy.exists());
+    }
+
+    /// D5 (2c, decision 7, test 7): a session's shown value written with a forgotten uid after the
+    /// purge's rebuild swept them (by a hook that read before the registration, which #439's fence
+    /// makes wait) loses it at step 5, and the job is done.
+    #[test]
+    fn step_5_sweeps_the_shown_values_again_and_the_job_is_done() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let (at, left) = (home.clone(), uid.clone());
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let value = format!(r#"{{"{left}":{{"fp":"f","body":"Use tabs."}},"k":{{"fp":"g","body":"Kept."}}}}"#);
+                crate::hookstate::update(&at, "claude", "late", "shown", |_| Some(value)).unwrap();
+            }))
+        });
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.shown, 1);
+        let shown = crate::hookstate::value(&home, "claude", "late", "shown").unwrap();
+        assert!(!shown.contains(&uid) && shown.contains("Kept."), "{shown}");
+        assert_eq!(uid_jobs(&home)[0].2, 5);
+        assert_eq!(status(&home).unwrap()[0].local, DONE);
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// D5 (2c, decision 7): a purge whose last sweep of the hook state fails stops after step 4,
+    /// and `status` says so; the next purge goes on with step 5 without a rebuild.
+    #[cfg(unix)]
+    #[test]
+    fn a_purge_stopped_before_step_5_goes_on_with_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        // After the rebuild's sweep: an agent's directory the last sweep cannot list.
+        let agent = home.join("state/hooks/claude");
+        let at = agent.clone();
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::create_dir_all(&at).unwrap();
+                std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o000)).unwrap();
+            }))
+        });
+        let stopped = purge(&home);
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if stopped.is_ok() {
+            return; // root lists every directory
+        }
+        assert_eq!(uid_jobs(&home)[0].2, 4);
+        assert_eq!(status(&home).unwrap()[0].local, BACKUPS_PURGED);
+        let purged = purge(&home).unwrap().unwrap();
+        assert!(!purged.rebuilt);
+        assert_eq!(uid_jobs(&home)[0].2, 5);
+        assert_eq!(status(&home).unwrap()[0].local, DONE);
     }
 
     /// D5: from the commit of its request, version 2 in both logs, a uid is passed over by every
