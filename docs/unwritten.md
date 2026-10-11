@@ -14,8 +14,9 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   newest file's there or in `bad/` (U4), chosen under the keep lock (U5) and padded to 20 digits, so
   the names sort as the files were kept, those of two processes in one millisecond too, and a file
   set aside never takes the name of one set aside before; mode 0600, written to a temporary name
-  and renamed, so a file is whole or absent, and the directory synced after the rename (the home
-  too when the directory is new): the rename is the only copy's entry. A temporary file found
+  and renamed, so a file is whole or absent, and the directory and the home synced after the rename
+  (the home every time: a keep killed after making the directory left its entry unsynced): the
+  rename is the only copy's entry. A temporary file found
   under the keep lock is a keep's that was killed before its rename, and is removed. Not `spool/`: v1
   left a directory of that name, and `oboete migrate --finish` deletes it.
 - **U2. When.** A hook whose store does not open within its 2 s, or whose append fails, keeps the

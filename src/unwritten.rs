@@ -33,7 +33,6 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         return Ok(());
     }
     let dir = home.join(DIR);
-    let made = !dir.exists();
     std::fs::create_dir_all(&dir)?;
     crate::db::private(&dir, 0o700);
     // One keep at a time from the bound's check to the rename: overlapping failed calls would each
@@ -90,23 +89,16 @@ pub fn keep(home: &Path, events: &[Captured], ruleset: &str) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
-    // The rename is the only copy's entry: synced with its directory, and a new directory with the
-    // home (Codex and CodeRabbit on #440). The file is in place even when a sync fails.
+    // The rename is the only copy's entry: synced with its directory, and the directory's own entry
+    // with the home at every keep, since one killed after making the directory left it unsynced
+    // (Codex and CodeRabbit on #440). The file is in place even when a sync fails.
     #[cfg(unix)]
     if let Err(e) = std::fs::File::open(&dir)
         .and_then(|d| d.sync_all())
-        .and_then(|()| {
-            if made {
-                std::fs::File::open(home)?.sync_all()
-            } else {
-                Ok(())
-            }
-        })
+        .and_then(|()| std::fs::File::open(home)?.sync_all())
     {
         eprintln!("oboete: {DIR}/ not synced after a keep: {e}");
     }
-    #[cfg(not(unix))]
-    let _ = made;
     Ok(())
 }
 
