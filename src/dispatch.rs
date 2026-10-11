@@ -54,6 +54,13 @@ pub(crate) fn exclusive(home: &Path) -> Result<File> {
     lock(home, true, crate::db::OPEN_WRITE_WAIT)
 }
 
+/// Milestone 5 D5 (#439): a reader's shared hold, from its first read until its answer is built,
+/// so no forget commits while a read is in flight. Taken after raw.db is open: a restore and a
+/// registration take raw.lock first too. Waits `wait` at most for an exclusive holder.
+pub(crate) fn reading(home: &Path, wait: Duration) -> Result<File> {
+    lock(home, false, wait)
+}
+
 fn lock(home: &Path, exclusive: bool, wait: Duration) -> Result<File> {
     let path = home.join("dispatch.lock");
     let mut options = OpenOptions::new();

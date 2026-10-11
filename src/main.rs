@@ -847,6 +847,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
 fn claims_listed(home: &std::path::Path, repo: &str) -> Result<String> {
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits).
     let raw = raw::open(home)?;
+    // Milestone 5 D5 (#439): no forget commits until the listing is built.
+    let _read = dispatch::reading(home, db::OPEN_WRITE_WAIT)?;
     let k = knowledge::open(home)?;
     claims::schema(&k)?;
     let mut out = String::new();
@@ -862,12 +864,40 @@ fn claims_listed(home: &std::path::Path, repo: &str) -> Result<String> {
         let body = redact::outbound(&c.body).replace('\n', " ");
         out.push_str(&format!("{}  {} {}  {body}\n", c.uid, c.kind, c.status));
     }
+    #[cfg(test)]
+    if let Some(between) = tests::LISTED.take() {
+        between();
+    }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Run after `oboete claims` built its listing (#439).
+        pub(super) static LISTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Milestone 5 D5 (#439): a forget registered while `oboete claims` lists waits for the
+    /// listing: it is the one read before the commit, and the next leaves the claim out.
+    #[test]
+    fn a_forget_registered_while_claims_are_listed_waits_for_the_listing() {
+        let mut s = search::b::fixture::Store::new();
+        let gone = s.decided("r", 5, "Ship on Fridays.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let (h, u) = (home.clone(), gone.clone());
+        let (sent, started) = std::sync::mpsc::channel();
+        LISTED.set(Some(Box::new(move || {
+            sent.send(forget::registering(&h, &u)).unwrap();
+        })));
+        assert!(claims_listed(&home, "r").unwrap().contains(&gone));
+        started.recv().unwrap().join().unwrap();
+        assert!(!claims_listed(&home, "r").unwrap().contains(&gone));
+    }
 
     /// Milestone 5 D5: `oboete claims` lists no forgotten claim, and an owner's mute of one is
     /// refused as of a claim that is not there.

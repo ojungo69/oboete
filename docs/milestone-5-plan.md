@@ -365,6 +365,59 @@ vector も持ち越さない）、進み方と再開（step の数字ではな�
    rebuild は 1 回。worker は未完了の job があると `--continue` を起動し、10 分のうちに二度は起動しない。
 8. checkpoint が truncate できない（読み手が古い snapshot を持つ）とき、step は 2 のまま進まない。
 
+#### #439 の決定（読取りの柵。2026-10-11）
+
+2a は、登録の commit の後に始まる読取りを `claims::Pending` と `Raw::forgotten` で、commit の時に
+進行中の読取りを出口ごとの確かめ直し（search・get・cite・timeline・viewer の claim・manifest・hook の
+packet）で、忘れた uid を返さないようにした。#439 は、別の process で進行中の読取りの出口がさらに
+四つ（`get_many`、`oboete claims`、uid の preview の sample、`trec_run`）あることを示した。出口を
+一つずつ塞ぐ代わりに、一つの仕組みにする。
+
+1. **柵は `dispatch.lock`。** 読み手は、読み始めてから答えを組み立て終えるまで `dispatch.lock` を
+   共有で持つ（送り手と同じ `dispatch::Admission::shared`）。登録・op 本文の書換え・要求の適用・
+   exclusion・restore の入替えは今までどおり排他で取るので、登録はどの読取りも送信も進行中でない
+   ときにだけ commit する。送信と読取りは共有どうしで互いを待たない。読取りの途中の送信（search の
+   query の埋め込み）は同じ lock をもう一度共有で取るが、共有どうしは衝突しない。別の lock file に
+   しないのは、読取りの途中で送る読み手が二つの lock を登録と逆の順で取って行き詰まるため。
+   **順序は raw.lock が先。** restore は raw.lock を排他で持ったまま入替えで `dispatch.lock` を排他で
+   取り、登録は raw を開いた（raw.lock を共有で持つ）後に取る。読み手も raw を開いてから柵を取る:
+   柵を先に取って raw を開くと、restore と互いを待って 10 秒の後に失敗する。
+2. **柵を取るのは読取りの関数の入口、raw を開いた直後。** `search::b` の検索（`query` とその変種が通る `search`）・
+   `get`・`get_many`・`cite`・`timeline`・`claim`（viewer の claim）・manifest を組み立てる関数
+   （hook の SessionStart、`oboete inject`、viewer の Context が通る）・`oboete claims`・forget の
+   preview・`trec_run`（`oboete claims` は main の一覧の関数で取る）。CLI・MCP・viewer の呼び手は変えない。関数が返すとき答えはでき上がって
+   いて、その後の整形と書出し（MCP の応答、HTTP の応答、stdout）は読み直さない。書出しは柵の外に
+   置く: 詰まった stdout が lock を持ち続けて登録を止めることはない。いくつもの読取りをまとめる
+   関数（`get_many`、`trec_run`）は全体で一回取る。中の関数が取る分は共有どうしで重なり、外の柵を
+   持つ間は排他が取られていないので待たない。
+3. **hook。** 記録（raw への追記）の後、注入の読取り（manifest・プロンプトの claim）の前に柵を取り、
+   見せたものの記録（`shown`、OpenCode の受領）を書き終えてから放す（出力を書く前）。これで、登録の
+   前に読んだ hook が掃除の後に `shown` を書く窓（2b の 7 の注記）も閉じる。待つのは 1 秒まで。取れ
+   なければその呼出しは注入せず、stderr にそう書く（記録は済んでいる。MUST-M16: hook は agent を止め
+   ない）。2a の確かめ直しに戻して注入する道は取らない: 排他が 1 秒を超えるのは restore の入替え
+   （knowledge.db も入れ替わる）ぐらいで、そのときの注入は元から空に近い。Claude Code の PreToolUse の
+   file note も同じ。
+4. **出口の確かめ直しは外す。** 柵の下では何も変えないので、2a が出口に足した確かめ直し（`get` の
+   文書と claim の一覧、`claim`、`cite`、`timeline`、search の埋め込みの後、hook の
+   `forgotten_now`）は外す。読み始めの `Pending::read` と `forgotten_set` は残す（commit の後に
+   始まる読取りのため）。
+5. **同じ process の中の登録。** 柵を持ったまま同じ process で登録すると、自分の共有の記述子に阻まれて
+   排他が取れず、10 秒待って失敗する。`oboete forget` は preview の柵を放してから登録する。
+6. **待ち時間。** hook の外の読取りは `OPEN_WRITE_WAIT`（10 秒）まで待つ。排他を持つのは commit の
+   短い間と restore の rename の間だけなので、ふつうは待たない。登録は、読取りが続けて重なると
+   10 秒で「busy: try again」になる（今の送信と同じ）。
+
+試験:
+
+1. 各読取りの途中（試験用の seam）で別の thread が登録を始めると、登録はその読取りが答えを組み
+   立て終えるまで commit しない。その読取りは uid を返してよい（commit の前に読んだ）。commit の
+   後の同じ読取りは uid を返さない。柵を外す mutation で落ちる（出口の確かめ直しはもう無い）。
+   2a の試験で同じ thread の seam から登録していたもの（`get`・`cite`・`timeline` と hook の packet）は
+   この形に書き直す: 同じ thread では自分の柵に阻まれて登録できない。
+2. hook: 注入の読取りの後、`shown` を書く前に登録を始めても、hook が `shown` を書き終えるまで
+   commit しない。柵が取れないとき（排他を持ったまま）、hook は記録して注入しない。
+3. `oboete forget <uid> --yes` は preview の後に登録できる（自分の柵で止まらない）。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |

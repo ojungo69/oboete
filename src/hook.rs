@@ -20,6 +20,9 @@ const MAX_FIELD: usize = 8_000;
 const REDACT_OVERLAP: usize = 4_000;
 /// Set on the curator CLIs oboete runs, so the curator's own session is never captured.
 pub const SKIP_ENV: &str = "OBOETE_SKIP";
+/// Milestone 5 D5 (#439): how long an injection waits for the read fence; past it, it injects
+/// nothing (MUST-M16: a hook never holds the agent up).
+const READ_WAIT: Duration = Duration::from_secs(1);
 /// Blocks that are not part of what was asked or read, removed before anything is stored, in this
 /// order: context an IDE or another memory tool puts in front of the text (it may quote
 /// `<private>`), claude-mem's copy of the past that it writes into instruction files an agent
@@ -86,6 +89,9 @@ fn run_io(
     let mut took_compaction: Option<String> = None;
     // X5: the note on the files Claude Code is about to read, as the answer's context.
     let mut noted: Option<String> = None;
+    // Milestone 5 D5 (#439): the read fence, from the injection's first read until what it shows
+    // is recorded (the shown set, OpenCode's receipt), so no forget commits in between.
+    let mut fence: Option<std::fs::File> = None;
     let result: Result<()> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(());
@@ -187,22 +193,6 @@ fn run_io(
         {
             injecting = true;
         }
-        // A manifest that cannot be read is no recording failure: the row is written.
-        if injecting {
-            // Pi's extension has no MCP client, so no work state tools: no section for it.
-            let work = agent != "pi";
-            manifest =
-                checkout_manifest(home, &store, &labels, &settings, work).unwrap_or_else(|e| {
-                    eprintln!("oboete: manifest not read: {e:#}");
-                    unread = true;
-                    None
-                });
-            stopped =
-                crate::curate::stopped(home, &store, crate::db::now_ms()).unwrap_or_else(|e| {
-                    eprintln!("oboete: curation's state not read: {e:#}");
-                    None
-                });
-        }
         // The prompt point (Step 6), after the record, as SessionStart's manifest: nothing read
         // there fails the hook. Grok's UserPromptSubmit keeps its picks for its next tool call.
         let prompt = recorded.prompt.as_deref();
@@ -212,35 +202,38 @@ fn run_io(
             ("agy", "PreInvocation") | (_, "UserPromptSubmit") => prompt.map(Ask::Prompt),
             _ => None,
         };
-        if let Some(ask) = ask {
+        if injecting || ask.is_some() {
+            fence = crate::dispatch::reading(home, READ_WAIT)
+                .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
+                .ok();
+        }
+        // A manifest that cannot be read is no recording failure: the row is written.
+        if injecting {
+            if fence.is_some() {
+                // Pi's extension has no MCP client, so no work state tools: no section for it.
+                let work = agent != "pi";
+                manifest = checkout_manifest(home, &store, &labels, &settings, work)
+                    .unwrap_or_else(|e| {
+                        eprintln!("oboete: manifest not read: {e:#}");
+                        unread = true;
+                        None
+                    });
+            } else {
+                unread = true;
+            }
+            stopped =
+                crate::curate::stopped(home, &store, crate::db::now_ms()).unwrap_or_else(|e| {
+                    eprintln!("oboete: curation's state not read: {e:#}");
+                    None
+                });
+        }
+        if let Some(ask) = ask.filter(|_| fence.is_some()) {
             let shown = manifest.as_ref().map(|m: &Start| m.shown.as_slice());
             prompted = prompt_point(home, &store, agent, &labels, &settings, ask, shown)
                 .unwrap_or_else(|e| {
                     eprintln!("oboete: nothing injected for the prompt: {e:#}");
                     None
                 });
-        }
-        // Milestone 5 D5 (Codex on #435): a forget registered while this call read holds at its
-        // edge too. A packet that shows a uid forgotten since is not sent (the next call's reads
-        // leave the uid out), nor one whose check cannot be made.
-        if manifest.is_some() || prompted.is_some() {
-            let forgotten = forgotten_now(&store).map(Some).unwrap_or_else(|e| {
-                eprintln!("oboete: nothing injected: the forgotten uids are not read: {e:#}");
-                None
-            });
-            let shows = |uid: &String| forgotten.as_ref().is_none_or(|f| f.contains(uid));
-            if manifest
-                .as_ref()
-                .is_some_and(|m| m.shown.iter().any(|s| shows(&s.uid)))
-            {
-                manifest = None;
-            }
-            if prompted
-                .as_ref()
-                .is_some_and(|p| p.named.iter().any(|(_, _, n)| shows(&n.uid)))
-            {
-                prompted = None;
-            }
         }
         Ok(())
     })();
@@ -394,6 +387,12 @@ fn run_io(
             out = Some(response.to_string());
         }
     }
+    // What it shows is recorded: the fence goes before the answer is written.
+    #[cfg(test)]
+    if let Some(between) = BEFORE_EDGE.take() {
+        between();
+    }
+    drop(fence);
     if let Some(out) = &out {
         writeln!(output, "{out}")?;
     } else if let Some(note) = &noted {
@@ -744,6 +743,11 @@ pub fn start_text_read(
             &settings.rules,
         )
     });
+    // Milestone 5 D5 (#439): no forget commits until the manifest is built, for every reader of
+    // it (a hook and `oboete inject` hold their own fence around this and what they record).
+    let _read = store
+        .map(|_| crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT))
+        .transpose()?;
     let manifest = match store {
         Some(store) => crate::consumer::manifest::text(
             home,
@@ -759,15 +763,12 @@ pub fn start_text_read(
         )?,
         None => None,
     };
-    // Milestone 5 D5 (Codex on #435): a forget registered while it was read holds at its edge,
-    // for every reader of it (a hook, the viewer's Context page, `oboete inject`).
-    let manifest = match (manifest, store) {
-        (Some(m), Some(store)) => {
-            let forgotten = forgotten_now(store)?;
-            (!m.shown.iter().any(|s| forgotten.contains(&s.uid))).then_some(m)
-        }
-        (manifest, _) => manifest,
-    };
+    #[cfg(test)]
+    if manifest.is_some()
+        && let Some(between) = BEFORE_EDGE.take()
+    {
+        between();
+    }
     Ok(match work {
         Some(work) => Some(Start {
             work: Some(work),
@@ -779,18 +780,9 @@ pub fn start_text_read(
 
 #[cfg(test)]
 thread_local! {
-    /// A forget registered after a packet's reads, before its last check.
+    /// Run after the manifest's reads, and after what a call shows is recorded (#439).
     static BEFORE_EDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
-}
-
-/// The forgotten uids as a packet leaves (milestone 5 D5): read after every read that built it.
-fn forgotten_now(raw: &crate::raw::Raw) -> Result<std::collections::HashSet<String>> {
-    #[cfg(test)]
-    if let Some(between) = BEFORE_EDGE.take() {
-        between();
-    }
-    raw.forgotten_set()
 }
 
 /// The failure line, then each block inside the memory fence after what it holds. Cursor drops a
@@ -1422,31 +1414,45 @@ fn shown_set(home: &Path, agent: &str, session: &str) -> serde_json::Map<String,
 /// `oboete inject`: what a SessionStart hook shows for the checkout at `cwd` (the recording-failure
 /// line, then the manifest in its fence). OpenCode's plugin reads its context here, since
 /// OpenCode drops a hook's output.
-fn injection_packet(home: &Path, cwd: &Path, session: Option<&str>) -> (String, Option<Start>) {
+fn injection_packet(
+    home: &Path,
+    cwd: &Path,
+    session: Option<&str>,
+) -> (String, Option<Start>, Option<std::fs::File>) {
     // The failure line does not wait on the settings or raw.db: one that cannot be read may be
     // the failure it reports.
     let store = crate::raw::open_within(home, Duration::from_secs(2))
         .inspect_err(|e| eprintln!("oboete: manifest not read: {e:#}"))
         .ok();
-    // A manifest that cannot be read keeps the store for the stop line (Codex on #438).
-    let manifest = store.as_ref().and_then(|store| {
-        (|| -> Result<Option<Start>> {
-            let settings = crate::capture::Settings::load(home)?;
-            let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
-            checkout_manifest(home, store, &labels, &settings, true)
-        })()
-        .unwrap_or_else(|e| {
-            eprintln!("oboete: manifest not read: {e:#}");
-            None
-        })
+    // Milestone 5 D5 (#439): as a hook holds it, the read fence, returned for the caller to keep
+    // until what it shows is recorded; one not had within a second shows no manifest.
+    let fence = store.as_ref().and_then(|_| {
+        crate::dispatch::reading(home, READ_WAIT)
+            .inspect_err(|e| eprintln!("oboete: manifest not read: {e:#}"))
+            .ok()
     });
+    // A manifest that cannot be read keeps the store for the stop line (Codex on #438).
+    let manifest = store
+        .as_ref()
+        .filter(|_| fence.is_some())
+        .and_then(|store| {
+            (|| -> Result<Option<Start>> {
+                let settings = crate::capture::Settings::load(home)?;
+                let labels = json!({"session_id": session.unwrap_or("unknown"), "cwd": cwd});
+                checkout_manifest(home, store, &labels, &settings, true)
+            })()
+            .unwrap_or_else(|e| {
+                eprintln!("oboete: manifest not read: {e:#}");
+                None
+            })
+        });
     let text = joined(home, store.as_ref(), manifest.as_ref());
-    (text, manifest)
+    (text, manifest, fence)
 }
 
 /// Plaintext callers keep the existing render-time accounting; the OpenCode SDK uses JSON.
 pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
-    let (text, manifest) = injection_packet(home, cwd, session);
+    let (text, manifest, _fence) = injection_packet(home, cwd, session);
     if let (Some(start), Some(session)) = (&manifest, session) {
         remember(
             home,
@@ -1458,12 +1464,16 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
                 .filter(|s| text.lines().any(|l| l == s.line)),
         );
     }
+    #[cfg(test)]
+    if let Some(between) = BEFORE_EDGE.take() {
+        between();
+    }
     text
 }
 
 /// OpenCode's manifest packet: the SDK acknowledges its shown-set snapshot after insertion.
 pub fn inject_json(home: &Path, cwd: &Path, session: Option<&str>) -> Value {
-    let (text, manifest) = injection_packet(home, cwd, session);
+    let (text, manifest, _fence) = injection_packet(home, cwd, session);
     let mut response = injection("opencode", "SessionStart", &text);
     if let (Some(start), Some(session)) = (&manifest, session)
         && !text.is_empty()
@@ -1479,6 +1489,10 @@ pub fn inject_json(home: &Path, cwd: &Path, session: Option<&str>) -> Value {
             Ok(None) => {}
             Err(e) => eprintln!("oboete: manifest receipt not kept: {e:#}"),
         }
+    }
+    #[cfg(test)]
+    if let Some(between) = BEFORE_EDGE.take() {
+        between();
     }
     response
 }
@@ -3155,61 +3169,100 @@ mod tests {
         assert!(file() == before && wal() == frames, "knowledge.db changed");
     }
 
-    /// Milestone 5 D5 (Codex on #435): a claim forgotten after a packet's reads, before it
-    /// leaves, is not in it: at the manifest's edge (`oboete inject`, the viewer's Context page and
-    /// a hook share it), and at a hook call's own edge, for SessionStart and for a prompt.
+    /// Milestone 5 D5 (#439): a forget registered while a packet is read waits until the call has
+    /// recorded what it shows, at `oboete inject` (text and JSON), at SessionStart and at a prompt,
+    /// and until the manifest is built for a reader that holds no fence of its own (the viewer's
+    /// Context page): the packet is the one read before the commit, and the next leaves it out.
     #[test]
-    fn a_claim_forgotten_while_a_packet_is_read_is_not_sent() {
+    fn a_forget_registered_while_a_packet_is_read_waits_for_it() {
         let mut p = Prompts::new(true);
         let texts = [
             "Parser errors go to stderr.",
             "Lexer warnings go to a log.",
             "Linker errors go to stdout.",
+            "Loader errors go to a file.",
+            "Packer warnings go to stdout.",
         ];
         let uids: Vec<String> = texts.iter().map(|t| p.decided(1, t, &[])).collect();
         p.s.run();
         let home = p.s.home.path().to_owned();
-        let forget = |h: &Path, u: &str| {
-            let target = crate::forget::Target::parse_uid(u).unwrap();
-            let p = crate::forget::preview(h, target).unwrap();
-            crate::forget::start(h, &p).unwrap();
-        };
-        // At the first check a packet makes (`then`: at its second).
-        let forget_inside = |uid: &str, then: bool| {
-            let (h, u) = (home.clone(), uid.to_owned());
-            let at = Box::new(move || forget(&h, &u));
+        let (sent, started) = std::sync::mpsc::channel();
+        // At the call's first check, or (`then`) at its second: the manifest's reads come first.
+        let forget_at = |uid: &str, then: bool| {
+            let (h, u, sent) = (home.clone(), uid.to_owned(), sent.clone());
+            let at: Box<dyn FnOnce()> = Box::new(move || {
+                sent.send(crate::forget::registering(&h, &u)).unwrap();
+            });
             BEFORE_EDGE.set(Some(if then {
                 Box::new(move || BEFORE_EDGE.set(Some(at)))
             } else {
                 at
             }));
         };
-        let plain = inject_text(&home, Path::new(&p.c), None);
-        assert!(texts.iter().all(|t| plain.contains(t)));
-        forget_inside(&uids[0], false);
-        let plain = inject_text(&home, Path::new(&p.c), None);
+        let after = || started.recv().unwrap().join().unwrap();
+        let cwd = Path::new(&p.c).to_owned();
+        forget_at(&uids[0], true);
+        assert!(inject_text(&home, &cwd, Some("o1")).contains(texts[0]));
+        after();
+        assert!(!inject_text(&home, &cwd, Some("o2")).contains(texts[0]));
+        forget_at(&uids[1], true);
         assert!(
-            BEFORE_EDGE.take().is_none(),
-            "the forget ran inside the read"
+            inject_json(&home, &cwd, Some("o3"))
+                .to_string()
+                .contains(texts[1])
         );
-        assert!(!plain.contains(texts[0]));
-        assert!(p.hook("SessionStart", "a", json!({})).contains(texts[1]));
-        forget_inside(&uids[1], true);
-        let start = p.hook("SessionStart", "b", json!({}));
+        after();
         assert!(
-            BEFORE_EDGE.take().is_none(),
-            "the forget ran inside SessionStart"
+            !inject_json(&home, &cwd, Some("o4"))
+                .to_string()
+                .contains(texts[1])
         );
-        assert!(!start.contains(texts[1]));
-        let ask = "where do the linker errors go";
-        assert!(p.prompt("c", ask).contains(texts[2]));
-        forget_inside(&uids[2], false);
-        let text = p.prompt("d", ask);
+        forget_at(&uids[2], true);
+        assert!(p.hook("SessionStart", "a", json!({})).contains(texts[2]));
+        after();
+        assert!(!p.hook("SessionStart", "b", json!({})).contains(texts[2]));
+        let ask = "where do the loader errors go";
+        forget_at(&uids[3], false);
+        assert!(p.prompt("c", ask).contains(texts[3]));
+        after();
+        assert!(!p.prompt("d", ask).contains(texts[3]));
+        let store = crate::raw::open(&home).unwrap();
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let manifest = |session: &str| {
+            let labels = json!({"session_id": session, "cwd": cwd});
+            checkout_manifest(&home, &store, &labels, &settings, false)
+                .unwrap()
+                .map(|m| m.text)
+                .unwrap_or_default()
+        };
+        forget_at(&uids[4], false);
+        assert!(manifest("v1").contains(texts[4]));
+        after();
+        assert!(!manifest("v2").contains(texts[4]));
+    }
+
+    /// Milestone 5 D5 (#439): a call that cannot have the read fence within a second (a forget's
+    /// write holds the lock) records its event and injects nothing; the next one injects.
+    #[test]
+    fn a_call_without_the_read_fence_records_and_injects_nothing() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let before = p.s.raw.after(p.s.raw.device(), 0, 1_000).unwrap().len();
+        let held = crate::dispatch::exclusive(&home).unwrap();
+        let start = std::time::Instant::now();
         assert!(
-            BEFORE_EDGE.take().is_none(),
-            "the forget ran inside the prompt"
+            !p.hook("SessionStart", "a", json!({}))
+                .contains("Parser errors")
         );
-        assert!(!text.contains(texts[2]));
+        assert!(start.elapsed() >= READ_WAIT);
+        drop(held);
+        assert!(p.s.raw.after(p.s.raw.device(), 0, 1_000).unwrap().len() > before);
+        assert!(
+            p.hook("SessionStart", "b", json!({}))
+                .contains("Parser errors")
+        );
     }
 
     /// #295 row 2 (D2): an earlier decision the prompt matches comes with the later one that ended

@@ -403,6 +403,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     // raw.db first: its shared hold on raw.lock keeps a restore from swapping the stores while
     // this reads them (Task 8).
     let raw = crate::raw::open(home)?;
+    // Milestone 5 D5 (#439): no forget commits until the answer is built, the query's call too.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let k = crate::knowledge::open(home)?;
     // The index the vector side reads: the active embedder's (Step 8's switch to a new one comes
     // with the second embedder, Task 10).
@@ -550,14 +552,6 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             _ => hits.extend(imports.into_iter().chain(records)),
         }
         hits.extend(lowered);
-        // Read again as the answer leaves: a forget registered while the call was out or the legs
-        // read holds here too (D5; Codex's adversarial review of slice 2a, CodeRabbit on #435).
-        // Cards, summaries and records go with their records (slice 3).
-        let forgotten = raw.forgotten_set()?;
-        hits.retain(|h| {
-            matches!(h.class, Class::Card | Class::Summary | Class::Raw)
-                || !forgotten.contains(&h.key)
-        });
         if let Some(filter) = &q.types {
             hits.retain(|h| filter.matches(h));
         }
@@ -799,6 +793,8 @@ pub fn trec_run(
 ) -> Result<()> {
     anyhow::ensure!(!arms.is_empty(), "no arm to run");
     let raw = crate::raw::open(home)?;
+    // Milestone 5 D5 (#439): one fence for every query and the sidecar read after them.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let k = crate::knowledge::open(home)?;
     claims::schema(&k)?;
     let claims: bool = k.query_row("SELECT EXISTS (SELECT 1 FROM active)", [], |r| r.get(0))?;
@@ -854,6 +850,10 @@ pub fn trec_run(
                 }
             }
         }
+    }
+    #[cfg(test)]
+    if let Some(between) = BETWEEN.take() {
+        between();
     }
     let docs = sidecar(&raw, &k, &printed)?;
     std::fs::create_dir_all(out)?;
@@ -1963,57 +1963,49 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     let Some((raw, k)) = stores(home)? else {
         return Ok(None);
     };
+    // Milestone 5 D5 (#439): no forget commits until the answer is built.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    get_in(home, &raw, &k, id)
+}
+
+fn get_in(home: &Path, raw: &Raw, k: &Connection, id: &str) -> Result<Option<String>> {
     let rules = redact::Rules::load(home)?;
     // A session summary by the ID session start shows it under (docs/summaries.md S10): `S` and
     // its op seq, a letter no uid, record key or imported uid starts with.
-    if let Some(s) = crate::turns::get(&k, &raw, id, &rules)? {
+    if let Some(s) = crate::turns::get(k, raw, id, &rules)? {
         return Ok(Some(summary_text(&s, raw.device())));
     }
     // A card by the ID session start shows it under (docs/cards.md S6): `<op seq>.<n>`, a dot
     // that no uid, record key or imported uid has.
-    if let Some(c) = crate::cards::get(&k, &raw, id, &rules)? {
+    if let Some(c) = crate::cards::get(k, raw, id, &rules)? {
         return Ok(Some(card_text(&c, raw.device())));
     }
-    Ok(match named(&raw, &k, id)? {
+    Ok(match named(raw, k, id)? {
         None => None,
-        Some(Named::Claim(uid)) => claim_text(&raw, &k, &uid)?,
-        Some(Named::Claims(mut uids)) => {
-            let mut lines = Vec::new();
-            for uid in &uids {
-                if let Some(c) = claims::active_one(&k, uid)? {
-                    lines.push((
-                        uid.clone(),
-                        format!(
-                            "{uid} {} {} {}{}: {}\n",
-                            &crate::db::utc(c.valid_from)[..10],
-                            c.kind,
-                            c.status,
-                            muted_label(claims::muted(&k, uid)?),
-                            one_line(&redact::outbound(&c.body), 80)
-                        ),
-                    ));
-                }
-            }
-            // A forget registered while they were read holds too (D5), as in `search`.
-            let forgotten = raw.forgotten_set()?;
-            uids.retain(|uid| !forgotten.contains(uid));
+        Some(Named::Claim(uid)) => claim_text(raw, k, &uid)?,
+        Some(Named::Claims(uids)) => {
             let mut out = format!("{} claims start with {}:\n", uids.len(), id.trim());
-            for (uid, line) in lines {
-                if !forgotten.contains(&uid) {
-                    out.push_str(&line);
+            for uid in &uids {
+                if let Some(c) = claims::active_one(k, uid)? {
+                    out.push_str(&format!(
+                        "{uid} {} {} {}{}: {}\n",
+                        &crate::db::utc(c.valid_from)[..10],
+                        c.kind,
+                        c.status,
+                        muted_label(claims::muted(k, uid)?),
+                        one_line(&redact::outbound(&c.body), 80)
+                    ));
                 }
             }
             Some(out)
         }
         Some(Named::Imported(uid)) => {
-            let text = imported_text(&k, &uid)?;
+            let text = imported_text(k, &uid)?;
             #[cfg(test)]
             if let Some(between) = BETWEEN.take() {
                 between();
             }
-            // A forget registered after `named` read the document holds here too (D5; Codex on
-            // #435), as in `claim`.
-            if raw.forgotten(&uid)? { None } else { text }
+            text
         }
         Some(Named::Record(id, e)) => Some(record_text(&id, &e)),
     })
@@ -2026,10 +2018,20 @@ pub fn get_many(home: &Path, ids: &[String]) -> Result<String> {
         (1..=20).contains(&ids.len()),
         "ids must contain 1 to 20 ids"
     );
+    // One fence for the whole answer (#439): a forget between two ids would leave the first in it.
+    let stores = stores(home)?;
+    let _read = stores
+        .as_ref()
+        .map(|_| crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT))
+        .transpose()?;
     let mut out = String::new();
     for id in ids {
         out.push_str(&format!("## {id}\n"));
-        match get(home, id)? {
+        let text = match &stores {
+            Some((raw, k)) => get_in(home, raw, k, id)?,
+            None => None,
+        };
+        match text {
             Some(text) => out.push_str(&text),
             None => out.push_str(&format!("no document {id} (ids come from search)\n")),
         }
@@ -2185,6 +2187,8 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
     let Some((raw, k)) = stores(home)? else {
         return Ok(None);
     };
+    // Milestone 5 D5 (#439): no forget commits until the view is built.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     // One snapshot of knowledge.db for every read below, so the history and what `Pending`
     // reads (Anchors' checkpoint, the evidence) agree: Anchors dropping a derivation and moving
     // its checkpoint between them would show the body it dropped (Codex's security review of
@@ -2294,11 +2298,6 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
         quotes,
         history,
     };
-    // A forget of the uid registered after `named` read it holds here too, as the view leaves
-    // (D5; Codex's adversarial review of slice 2a, and Codex on #435).
-    if raw.forgotten(&view.uid)? {
-        return Ok(None);
-    }
     Ok(Some(view))
 }
 
@@ -2339,6 +2338,8 @@ pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
     let Some((raw, k)) = stores(home)? else {
         return Ok(uids.iter().map(|u| not_a_claim(u)).collect());
     };
+    // Milestone 5 D5 (#439): no forget commits until the answer is built.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     // One snapshot of knowledge.db, as `claim` reads it.
     let _snapshot = k.unchecked_transaction()?;
     let cited = uids
@@ -2373,19 +2374,7 @@ pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
     if let Some(between) = BETWEEN.take() {
         between();
     }
-    // And one forgotten while they were read (D5), as in `search`.
-    let forgotten = raw.forgotten_set()?;
-    Ok(cited
-        .into_iter()
-        .zip(uids)
-        .map(|(c, uid)| {
-            if forgotten.contains(uid) {
-                not_a_claim(uid)
-            } else {
-                c
-            }
-        })
-        .collect())
+    Ok(cited)
 }
 
 /// The quotes of `uid`'s active derivation, in order.
@@ -2512,6 +2501,8 @@ pub fn timeline(
     let Some((raw, k)) = stores(home)? else {
         return Ok(Vec::new());
     };
+    // Milestone 5 D5 (#439): no forget commits until the answer is built.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
     let pending = claims::Pending::read(&raw, &k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
@@ -2596,19 +2587,13 @@ pub fn timeline(
         from,
         &key,
     )?;
-    // A forget registered while the pages were read holds too (D5; Codex on #435), as in `search`.
-    let unforgotten = |mut items: Vec<Item>| -> Result<Vec<Item>> {
-        #[cfg(test)]
-        if let Some(between) = BETWEEN.take() {
-            between();
-        }
-        let forgotten = raw.forgotten_set()?;
-        items.retain(|i| i.class == "start" || !forgotten.contains(&i.key));
-        Ok(items)
-    };
+    #[cfg(test)]
+    if let Some(between) = BETWEEN.take() {
+        between();
+    }
     let Some(at) = at else {
         before.truncate(limit);
-        return unforgotten(before);
+        return Ok(before);
     };
     let mut after = read(
         &format!(
@@ -2623,7 +2608,7 @@ pub fn timeline(
     after.truncate(later);
     after.reverse();
     after.append(&mut before);
-    unforgotten(after)
+    Ok(after)
 }
 
 /// A timeline entry on one line, as the CLI prints it and MCP returns it, with its repository when
@@ -4333,10 +4318,10 @@ mod tests {
         assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
     }
 
-    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a document forgotten while the
-    /// query's call is out takes no place in the answer, though its list was read before.
+    /// Milestone 5 D5 (#439): a forget registered while the query's call is out waits for the
+    /// search: its answer is the one read before the commit, and the next leaves the document out.
     #[test]
-    fn a_document_forgotten_while_the_query_is_out_is_not_returned() {
+    fn a_forget_registered_while_the_query_is_out_waits_for_the_search() {
         use crate::embed::stub::Stub;
         let stub = Stub::start();
         let mut s = Store::new();
@@ -4356,72 +4341,96 @@ mod tests {
         let sent = stub.requests();
         let held = stub.hold();
         let search = {
-            let home = home.clone();
+            let (home, ask) = (home.clone(), ask.clone());
             std::thread::spawn(move || query(&home, &ask).unwrap())
         };
         // The call is out, and the full-text lists have been read beside it.
         while stub.requests() == sent {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let target = crate::forget::Target::parse_uid(&doc).unwrap();
-        let p = crate::forget::preview(&home, target).unwrap();
-        crate::forget::start(&home, &p).unwrap();
+        let registering = crate::forget::registering(&home, &doc);
         let answer = search.join().unwrap();
         drop(held);
-        assert!(!found(&answer), "{:?}", keys(&answer));
+        assert!(found(&answer), "{:?}", keys(&answer));
+        registering.join().unwrap();
+        assert!(!found(&query(&home, &ask).unwrap()));
     }
 
-    /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a claim forgotten after `named`
-    /// read it, before the rest of the read, is not shown.
+    /// Milestone 5 D5 (#439): a forget registered after `named` read the claim, before the rest of
+    /// the read, waits for the view: it is the one read before the commit, and the next is none.
     #[test]
-    fn a_claim_forgotten_inside_its_read_is_not_shown() {
+    fn a_forget_registered_inside_a_claims_read_waits_for_it() {
         let mut s = Store::new();
         let uid = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
         s.run();
         let home = s.home.path().to_owned();
         let (h, u) = (home.clone(), uid.clone());
+        let (sent, started) = std::sync::mpsc::channel();
         BETWEEN.set(Some(Box::new(move || {
-            let target = crate::forget::Target::parse_uid(&u).unwrap();
-            let p = crate::forget::preview(&h, target).unwrap();
-            crate::forget::start(&h, &p).unwrap();
+            sent.send(crate::forget::registering(&h, &u)).unwrap();
         })));
+        assert!(claim(&home, &uid).unwrap().is_some());
+        started.recv().unwrap().join().unwrap();
         assert!(claim(&home, &uid).unwrap().is_none());
-        assert!(BETWEEN.take().is_none(), "the forget ran inside the read");
     }
 
-    /// Milestone 5 D5 (Codex on #435): a document or a claim forgotten while `get`, `cite` or
-    /// `timeline` reads it is not in what it returns.
+    /// Milestone 5 D5 (#439): a forget registered while `get`, `get_many`, `cite` or `timeline`
+    /// reads waits until its answer is built, `get_many`'s whole answer and not each id: the answer
+    /// is the one read before the commit, and the next leaves the uid out.
     #[test]
-    fn what_is_forgotten_inside_get_cite_or_timeline_is_not_returned() {
+    fn a_forget_registered_inside_get_cite_or_timeline_waits_for_it() {
         let mut s = Store::new();
         let cited = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
         let listed = s.decided(R, 2_500, "Deploy on Fridays.", &[]);
         let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        let first = s.imported("o2", "r", 3_100, "Parser notes", "The parser reads tabs.");
+        let second = s.imported("o3", "r", 3_200, "Lexer notes", "The lexer reads tabs.");
         s.run();
         let home = s.home.path().to_owned();
         let all = || timeline(&home, None, None, None, 10).unwrap();
-        assert!(get(&home, &doc).unwrap().is_some());
-        assert!(cite(&home, std::slice::from_ref(&cited)).unwrap()[0]["label"] == "citable");
-        assert!(all().iter().any(|i| i.key == listed));
+        let (sent, started) = std::sync::mpsc::channel();
         let forget_inside = |uid: &str| {
-            let (h, u) = (home.clone(), uid.to_owned());
+            let (h, u, sent) = (home.clone(), uid.to_owned(), sent.clone());
             BETWEEN.set(Some(Box::new(move || {
-                let target = crate::forget::Target::parse_uid(&u).unwrap();
-                let p = crate::forget::preview(&h, target).unwrap();
-                crate::forget::start(&h, &p).unwrap();
+                sent.send(crate::forget::registering(&h, &u)).unwrap();
             })));
         };
+        let after = || started.recv().unwrap().join().unwrap();
         forget_inside(&doc);
+        assert!(get(&home, &doc).unwrap().is_some());
+        after();
         assert!(get(&home, &doc).unwrap().is_none());
-        assert!(BETWEEN.take().is_none(), "the forget ran inside get");
+        // Registered while the first id is read, and still waiting while the second is.
+        let (h, u, sent2) = (home.clone(), first.clone(), sent.clone());
+        BETWEEN.set(Some(Box::new(move || {
+            sent2.send(crate::forget::registering(&h, &u)).unwrap();
+            BETWEEN.set(Some(Box::new(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let raw = crate::raw::open(&h).unwrap();
+                assert!(!raw.forgotten(&u).unwrap(), "committed between two ids");
+            })));
+        })));
+        let both = [first.clone(), second.clone()];
+        assert!(
+            get_many(&home, &both)
+                .unwrap()
+                .contains("The parser reads tabs.")
+        );
+        after();
+        assert!(
+            !get_many(&home, &both)
+                .unwrap()
+                .contains("The parser reads tabs.")
+        );
         forget_inside(&cited);
+        assert!(cite(&home, std::slice::from_ref(&cited)).unwrap()[0]["label"] == "citable");
+        after();
         let answer = cite(&home, std::slice::from_ref(&cited)).unwrap();
         assert!(answer == [serde_json::json!({"uid": cited, "error": "not a claim"})]);
-        assert!(BETWEEN.take().is_none(), "the forget ran inside cite");
         forget_inside(&listed);
+        assert!(all().iter().any(|i| i.key == listed));
+        after();
         assert!(!all().iter().any(|i| i.key == listed));
-        assert!(BETWEEN.take().is_none(), "the forget ran inside timeline");
     }
 
     /// D8 with the query's call beside the full-text sides: a redaction rule added while the call
@@ -4981,6 +4990,32 @@ mod tests {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// Milestone 5 D5 (#439): a forget registered after a run's queries, before its sidecar is
+    /// read, waits for the run: the sidecar is the one read before the commit.
+    #[test]
+    fn a_forget_registered_between_a_runs_queries_and_its_sidecar_waits_for_it() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, _) = eval_home(&stub);
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        let uid: String = k
+            .query_row("SELECT uid FROM imported ORDER BY ts LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let (h, u) = (home.clone(), uid.clone());
+        let (sent, started) = std::sync::mpsc::channel();
+        BETWEEN.set(Some(Box::new(move || {
+            sent.send(crate::forget::registering(&h, &u)).unwrap();
+        })));
+        let out = tempfile::tempdir().unwrap();
+        let questions = r#"{"qid":"q1","text":"deploy","session":"s9"}"#;
+        trec_run(&home, questions, 10, &[RawArm::Off], out.path()).unwrap();
+        started.recv().unwrap().join().unwrap();
+        let docs = std::fs::read_to_string(out.path().join("b-docs.jsonl")).unwrap();
+        assert!(docs.contains(&uid));
     }
 
     /// Task 6 (rows 30-1, 30-14): every key a run prints has its sidecar row, a record's as
