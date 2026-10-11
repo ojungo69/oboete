@@ -36,7 +36,9 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   by a call stopped between the commit and the removal is removed by the next write-back, not
   written again (#454; not its name, which starts again from 0 once the directory empties). Each
   keep puts a random id in its file, so the hash names that keep alone: two calls in one
-  millisecond with one payload keep the same events, and both are written. A
+  millisecond with one payload keep the same events, and both are written. A file kept before
+  the id has none, and two of them can hold the same bytes: its hash is not kept, so it is
+  written, and if left behind, written again (#460). A
   raw.db put back from an older copy lost those hashes too, and may write such a file again: a
   duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's events behind
   the files and fails, so the marker is set and the worker is asked to restore the store; any

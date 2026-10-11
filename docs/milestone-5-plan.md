@@ -663,8 +663,9 @@ Slice 3 は 5 つの PR に分け、この順に作る。後の PR はこの節�
   ファイルを追記せずに消す（commit と削除の間で止まった call の重複がなくなる）。名前は使わない:
   `unwritten/` が空になると番号は 0 からやり直す（U1）ので、名前で比べると新しいファイルを捨てる。
   内容の hash だけでも足りない: 同じ payload の 2 つの call が同じミリ秒に同じ event を残しうる。そこで
-  keep ごとにランダムな id をファイルに入れ、hash がその keep だけを指すようにする（id のない以前の
-  ファイルは内容の hash のまま）。forget に限らない。
+  keep ごとにランダムな id をファイルに入れ、hash がその keep だけを指すようにする。id のない以前の
+  ファイルは同じ内容の別の keep がありうるので hash を記録せず、従来どおり書く（残れば重複しうる。
+  Greptile・Codex・CodeRabbit on #460）。forget に限らない。
   raw.db が古いコピーに戻った場合は記録も戻るので、そのファイルが残っていれば従来どおり重複しうる
   （U3 の限界のまま）。
 - **live record を取り直す経路を閉じる。** live の forget を受け付けると、hook が同じ出来事をもう一度
@@ -673,7 +674,9 @@ Slice 3 は 5 つの PR に分け、この順に作る。後の PR はこの節�
   記録する）。後者は忘れた prompt を「足りない」と数えて記録し直すので、deny のある session では回復
   しない（回復は transcript からの取込みであり、`check_cross_source_forget` と同じ扱い）。hook は raw.db
   の `denied_records` を読むだけで、読めなければ回復を飛ばして SessionEnd 自体は記録する（制御状態が
-  記録を止めない、D1）。
+  記録を止めない、D1）。確かめと数えは reader の hold（`dispatch::reading`）の中で行い、forget はその
+  前か後に commit する（登録が hold を持つ間は回復しない）。session は agent が送った id で名指す: 後から
+  label を伏せる規則が足されても同じ hash になる（Greptile・Codex on #460）。
 - **曖昧な transcript の identity**（同じ session に同じ fingerprint が複数ある、native session id が
   先頭にない）: 第一 slice は再 import で identity が変わりうるので拒否した。同じ要求が同じ session の
   live か v1 の record（cut に数える deny）を含むときは、その session の transcript batch がすべて

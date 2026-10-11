@@ -169,8 +169,11 @@ fn write_back_counting(home: &Path, raw: &mut crate::raw::Raw, written: &mut usi
         }
         // #454: the file's hash (its keep's random id within) is kept in the transaction that writes
         // its events, so a file left behind by a call stopped before this removal is removed next
-        // time, not written again.
-        match raw.append_kept(&kept.events, &kept.ruleset, &crate::forget::hash(&bytes)) {
+        // time, not written again. A file kept before the id has none: two such files of one
+        // payload in one millisecond hold the same bytes, so its hash names no one keep and is not
+        // kept (Greptile, Codex, CodeRabbit on #460); left behind, it is written again, as before.
+        let hash = kept.id.is_some().then(|| crate::forget::hash(&bytes));
+        match raw.append_kept(&kept.events, &kept.ruleset, hash.as_deref()) {
             Ok(appended) => {
                 std::fs::remove_file(&path)?;
                 *written += usize::from(appended);
@@ -531,6 +534,32 @@ mod tests {
         keep(h, &[prompt("twice", 4)], "r").unwrap();
         assert_eq!(written(write_back(h, &mut raw)), 2);
         assert_eq!(events(&raw).len(), 4);
+    }
+
+    /// Greptile, Codex, CodeRabbit on #460: two files kept before the keep's id, of one payload in
+    /// one millisecond, hold the same bytes: both are written, neither taken for the other.
+    #[test]
+    fn two_files_kept_before_the_id_are_both_written() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        keep(h, &[prompt("twice", 4)], "r").unwrap();
+        keep(h, &[prompt("twice", 4)], "r").unwrap();
+        let kept = files(&h.join(DIR)).unwrap();
+        assert_eq!(kept.len(), 2);
+        for file in &kept {
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            assert!(v.as_object_mut().unwrap().remove("id").is_some());
+            std::fs::write(file, v.to_string()).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(&kept[0]).unwrap(),
+            std::fs::read(&kept[1]).unwrap()
+        );
+        let mut raw = crate::raw::open(h).unwrap();
+        assert_eq!(written(write_back(h, &mut raw)), 2);
+        assert_eq!(events(&raw).len(), 2);
+        assert_eq!(counts(h).unwrap(), (0, 0));
     }
 
     /// U3: one write-back at a time: while another call holds it, a call writes nothing back, and

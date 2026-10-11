@@ -1994,22 +1994,23 @@ impl Raw {
     }
 
     /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
-    /// ledger rows and the kept file's `hash`, in one transaction: all of them or none. False, and
-    /// nothing appended, when that file was written back before (#454: a call stopped between
-    /// that commit and the file's removal left it behind).
+    /// ledger rows and the kept file's `hash` when it has one, in one transaction: all of them or
+    /// none. False, and nothing appended, when that file was written back before (#454: a call
+    /// stopped between that commit and the file's removal left it behind).
     pub fn append_kept(
         &mut self,
         events: &[crate::capture::Captured],
         ruleset: &str,
-        hash: &str,
+        hash: Option<&str>,
     ) -> Result<bool> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if tx.execute(
-            "INSERT OR IGNORE INTO unwritten_written(hash, at) VALUES(?1, ?2)",
-            params![hash, crate::db::now_ms()],
-        )? == 0
+        if let Some(hash) = hash
+            && tx.execute(
+                "INSERT OR IGNORE INTO unwritten_written(hash, at) VALUES(?1, ?2)",
+                params![hash, crate::db::now_ms()],
+            )? == 0
         {
             return Ok(false);
         }

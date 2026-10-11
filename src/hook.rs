@@ -2148,7 +2148,17 @@ fn adapt(
         // not, and a forgotten prompt is no longer held, so a session with a forget recovers none
         // (as a transcript import of it is refused). A read that fails recovers none either; the
         // SessionEnd itself is still recorded.
-        if raw.session_forgotten(agent, &session).unwrap_or(true) {
+        // The check and the counts under a reader's hold, so a forget commits before both or after
+        // both (Greptile, Codex on #460); none while a registration keeps it. The session is named
+        // by the id the agent sent, which a rule that masks its label since does not change
+        // (Greptile on #460).
+        let Ok(_read) = crate::dispatch::reading(home, READ_WAIT) else {
+            return Ok(vec![(event.into(), p)]);
+        };
+        if str_field(&p, &["session_id", "sessionId"])
+            .map_or(Ok(false), |id| raw.session_forgotten(agent, id))
+            .unwrap_or(true)
+        {
             return Ok(vec![(event.into(), p)]);
         }
         let counts = raw.prompt_counts(agent, &session)?;
@@ -6287,6 +6297,98 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["end"]);
         assert_eq!(prompts(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Greptile on #460: a forget names the session by the id Cursor sent: a rule that masks the
+    /// label after the forget does not let the SessionEnd recover the forgotten prompt.
+    #[test]
+    fn a_cursor_session_masked_after_its_forget_recovers_no_turn() {
+        let dir = tmp("cursor-forget-masked");
+        let payloads = cursor_fixture(&dir);
+        let transcript = dir.join("transcript.jsonl");
+        let lines = [
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Read hello.txt and explain the result."}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"Seen."}]}}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Say hi."}]}}),
+        ];
+        let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, body.join("\n") + "\n").unwrap();
+        hook(
+            &dir,
+            "cursor",
+            "UserPromptSubmit",
+            &payloads["UserPromptSubmit"],
+        );
+        let prompts = || -> i64 {
+            rusqlite::Connection::open(dir.join("raw.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM records WHERE type = 'event' AND kind = 'prompt'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let raw = crate::raw::open(&dir).unwrap();
+        let target = crate::forget::Target::Record {
+            device: raw.device().into(),
+            seq: rusqlite::Connection::open(dir.join("raw.db"))
+                .unwrap()
+                .query_row("SELECT seq FROM records WHERE kind = 'prompt'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap(),
+        };
+        crate::forget::start(&dir, &crate::forget::preview(&dir, target).unwrap()).unwrap();
+        drop(raw);
+        let session = payloads["SessionEnd"]["conversation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{{ id = \"sess\", regex = '{session}' }}]\n"),
+        )
+        .unwrap();
+        let mut end = payloads["SessionEnd"].clone();
+        end["transcript_path"] = json!(transcript);
+        hook(&dir, "cursor", "SessionEnd", &end);
+        assert_eq!(prompts(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Greptile, Codex on #460: the recovery's check and counts run under a reader's hold, so
+    /// while a forget's registration keeps dispatch the SessionEnd recovers no turn, rather than
+    /// count past a forget that commits meanwhile.
+    #[test]
+    fn a_cursor_recovery_during_a_registration_recovers_no_turn() {
+        let dir = tmp("cursor-recovery-held");
+        let payloads = cursor_fixture(&dir);
+        let transcript = dir.join("transcript.jsonl");
+        let lines = [
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Read hello.txt and explain the result."}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"Seen."}]}}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Say hi."}]}}),
+        ];
+        let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, body.join("\n") + "\n").unwrap();
+        hook(
+            &dir,
+            "cursor",
+            "UserPromptSubmit",
+            &payloads["UserPromptSubmit"],
+        );
+        let mut end = payloads["SessionEnd"].clone();
+        end["transcript_path"] = json!(transcript);
+        let held = crate::dispatch::exclusive(&dir).unwrap();
+        hook(&dir, "cursor", "SessionEnd", &end);
+        drop(held);
+        let kinds: Vec<String> = recorded(&dir, "cursor", "cursor-session")
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, ["prompt", "end"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

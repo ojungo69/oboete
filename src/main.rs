@@ -94,8 +94,9 @@ enum Cmd {
     /// Rebuild knowledge.db (claims, cards, summaries, indexes, manifests) from raw.db and its op log,
     /// with no AI call
     Rebuild,
-    /// Register an irreversible forget of raw records with native import identities (physical
-    /// purge remains unfinished; legacy/hook raw is not supported by this first slice)
+    /// Register an irreversible forget: raw records, with their sessions' records from other
+    /// sources, or a claim's or an imported document's uid (a record's physical purge is not built
+    /// yet)
     Forget {
         /// Raw id from search: <device>:<seq>
         #[arg(long, conflicts_with_all = ["span", "status"])]
