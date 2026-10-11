@@ -86,10 +86,19 @@ pub struct TimelineArgs {
     /// A repository instead of the current one: its path or its key.
     #[serde(default)]
     repo: Option<String>,
-    /// An id `get` takes: what is around its time instead of the newest.
+    /// An id `get` takes: what is around it instead of the newest.
     #[serde(default)]
     anchor: Option<String>,
-    /// Maximum number of entries (default 20, at most 100).
+    /// Search words whose first hit is the anchor, instead of `anchor`.
+    #[serde(default)]
+    query: Option<String>,
+    /// Entries before the anchor (default 3, at most 50).
+    #[serde(default)]
+    depth_before: Option<usize>,
+    /// Entries after the anchor (default 3, at most 50).
+    #[serde(default)]
+    depth_after: Option<usize>,
+    /// Without an anchor or query: how many of the newest entries (default 20, at most 100).
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -255,7 +264,7 @@ impl Oboete {
 
     #[tool(
         name = "timeline",
-        description = "Step 2: read context around an interesting id from search before get(ids=[...]) fetches the chosen details. Claims, imported history and session starts, newest first, each with its id and UTC time. With anchor (a claim, imported document or record id), what is around that item's time; without one, the newest entries.",
+        description = "Step 2: get context around a result before get(ids=[...]) fetches the chosen details. Give anchor (any id from search) or query (its first search hit is the anchor), and depth_before / depth_after (default 3 each). Shows cards, session summaries, prompts, claims, imported history and session starts by day, cards in tables by file, the anchor marked. Without anchor or query, the newest entries.",
         annotations(read_only_hint = true)
     )]
     fn timeline(
@@ -266,19 +275,36 @@ impl Oboete {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
-        let limit = a.limit.unwrap_or(20).min(MAX_LIMIT);
-        let anchor = a.anchor.filter(|a| !a.is_empty());
-        let items =
-            match search::timeline(&self.home, repo.as_deref(), anchor.as_deref(), None, limit) {
-                Ok(items) => items,
-                // An anchor of nothing is the caller's to change.
-                Err(e) if anchor.is_some() => return failed(format!("{e:#}")),
-                Err(e) => return Err(internal(e)),
-            };
-        let out: String = items
-            .iter()
-            .map(|i| search::item_line(i, repo.is_none()))
-            .collect();
+        let given = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+        let around = match (given(a.anchor), given(a.query)) {
+            (Some(_), Some(_)) => return failed("give anchor or query, not both".into()),
+            (Some(anchor), None) => search::Around::Anchor(anchor),
+            (None, Some(text)) => search::Around::Query(search::Query {
+                text,
+                caller: Some(repo::key(&self.cwd)),
+                all: repo.is_none(),
+                repo: repo.clone(),
+                raw: search::RawArm::Below,
+                ..Default::default()
+            }),
+            (None, None) => search::Around::Newest(a.limit.unwrap_or(20)),
+        };
+        let anchored = !matches!(around, search::Around::Newest(_));
+        let depth = |d: Option<usize>| d.unwrap_or(3);
+        let depths = (depth(a.depth_before), depth(a.depth_after));
+        let out = match search::timeline_text(
+            &self.home,
+            repo.as_deref(),
+            &self.cwd,
+            around,
+            depths,
+            &chrono::Local,
+        ) {
+            Ok(out) => out,
+            // An anchor or query of nothing is the caller's to change.
+            Err(e) if anchored => return failed(format!("{e:#}")),
+            Err(e) => return Err(internal(e)),
+        };
         text(if out.is_empty() {
             "nothing yet".into()
         } else {
@@ -465,6 +491,9 @@ mod tests {
             all: Some(true),
             repo: None,
             anchor: anchor.map(String::from),
+            query: None,
+            depth_before: None,
+            depth_after: None,
             limit: None,
         }
     }
@@ -1414,7 +1443,8 @@ mod tests {
             .unwrap();
         assert_eq!(missing.is_error, Some(true));
         let tl = body(server.timeline(Parameters(timeline_args(None))).unwrap());
-        assert!(tl.contains(&uid) && !tl.contains(&token), "{tl}");
+        // A claim by its first 12 characters, as search's lines show it (docs/tools.md T4).
+        assert!(tl.contains(&uid[..12]) && !tl.contains(&token), "{tl}");
         let lost = server
             .timeline(Parameters(timeline_args(Some("nope"))))
             .unwrap();
@@ -1432,6 +1462,48 @@ mod tests {
                 "work_state_write"
             ]
         );
+    }
+
+    /// docs/tools.md slice 2, test 2 (T1): `anchor` or `query`, not both; a query's anchor is
+    /// search's first hit, and a query with no hit says so; the depths reach the text.
+    #[test]
+    fn timeline_takes_an_anchor_or_a_query() {
+        let (mut s, server, uid) = seeded("Use the trigram tokenizer.");
+        s.decided(
+            "github.com/o/r",
+            1_700_000_060_000,
+            "Keep the reader streaming.",
+            &[],
+        );
+        s.run();
+        let call = |a: TimelineArgs| server.timeline(Parameters(a)).unwrap();
+        let query = |text: &str| TimelineArgs {
+            query: Some(text.into()),
+            ..timeline_args(None)
+        };
+        let both = call(TimelineArgs {
+            anchor: Some(uid.clone()),
+            ..query("trigram")
+        });
+        assert_eq!(both.is_error, Some(true));
+        assert!(body(both).contains("give anchor or query, not both"));
+        let none = call(query("zeppelin"));
+        assert_eq!(none.is_error, Some(true));
+        assert!(body(none).contains("nothing matches \"zeppelin\" to anchor on"));
+        let found = body(call(TimelineArgs {
+            depth_before: Some(0),
+            depth_after: Some(1),
+            ..query("trigram")
+        }));
+        let lines = [
+            "# Timeline for query: \"trigram\"".to_owned(),
+            format!("**Anchor:** {} - Use the trigram tokenizer.", &uid[..12]),
+            "**Window:** 0 records before -> 1 records after | **Items:** 2".to_owned(),
+        ];
+        for line in lines {
+            assert!(found.contains(&line), "{line}: {found}");
+        }
+        assert!(found.contains("> Keep the reader streaming."), "{found}");
     }
 
     /// A93: the public tool result says whether search was hybrid or why it used full text,
