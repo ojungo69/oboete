@@ -316,6 +316,14 @@ pub struct Status {
 pub fn preview(home: &Path, target: Target) -> Result<Preview> {
     anyhow::ensure!(crate::raw::exists(home), "no raw store to forget from");
     let raw = crate::raw::open(home)?;
+    // Milestone 5 D5 (#439): every target's sample is read under the read fence, so a forget by
+    // another process cannot commit between its checks and its sample (a record's or a span's too:
+    // Codex on #446). Dropped before any registration: `start` takes the lock alone.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    #[cfg(test)]
+    if let Some(between) = SAMPLING.take() {
+        between();
+    }
     match target {
         Target::Uid { uid } => uid_preview(home, &raw, uid),
         target => raw.forget_preview(target),
@@ -329,19 +337,11 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
 fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Preview> {
     use rusqlite::OptionalExtension;
     well_formed(&uid)?;
-    // Milestone 5 D5 (#439): its sample is read under the read fence, so a forget of the uid by
-    // another process cannot commit between the check below and the sample. Dropped before any
-    // registration: `start` takes the lock alone.
-    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     anyhow::ensure!(
         raw.home_id_proven()?,
         "this store has no verified home identity: forget was not registered"
     );
     anyhow::ensure!(!raw.forgotten(&uid)?, "{uid} is forgotten already");
-    #[cfg(test)]
-    if let Some(between) = SAMPLING.take() {
-        between();
-    }
     let path = home.join("knowledge.db");
     // A store with no knowledge.db yet reads as an empty one: the op log decides below.
     let k = if path.exists() {
@@ -476,10 +476,18 @@ thread_local! {
 /// read is done.
 #[cfg(test)]
 pub(crate) fn registering(home: &Path, uid: &str) -> std::thread::JoinHandle<()> {
-    let (h, u) = (home.to_owned(), uid.to_owned());
+    let t = registering_target(home, Target::parse_uid(uid).unwrap());
+    assert!(!crate::raw::open(home).unwrap().forgotten(uid).unwrap());
+    t
+}
+
+/// `registering` for any target.
+#[cfg(test)]
+fn registering_target(home: &Path, target: Target) -> std::thread::JoinHandle<()> {
+    let h = home.to_owned();
     crate::dispatch::blocked(home); // an earlier registration's wait is not this one's
     let t = std::thread::spawn(move || {
-        let p = preview(&h, Target::parse_uid(&u).unwrap()).unwrap();
+        let p = preview(&h, target).unwrap();
         start(&h, &p).unwrap();
     });
     // Until the registration has met the read's fence: a thread that has not reached it yet
@@ -491,7 +499,6 @@ pub(crate) fn registering(home: &Path, uid: &str) -> std::thread::JoinHandle<()>
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(!t.is_finished(), "the forget did not wait for the read");
-    assert!(!crate::raw::open(home).unwrap().forgotten(uid).unwrap());
     t
 }
 
@@ -1077,8 +1084,8 @@ mod tests {
     use super::*;
     use crate::raw::{self, Item};
 
-    /// D5 (#439): a forget registered by another process between a preview's check and its sample
-    /// waits for the preview: its sample is the one read before the commit.
+    /// D5 (#439): a forget registered by another process while a preview reads waits for the
+    /// preview: its sample is the one read before the commit.
     #[test]
     fn a_forget_registered_inside_a_preview_waits_for_it() {
         let mut s = crate::search::b::fixture::Store::new();
@@ -1094,6 +1101,20 @@ mod tests {
         assert!(p.sample.as_deref().is_some_and(|s| s.contains("Use tabs.")));
         started.recv().unwrap().join().unwrap();
         assert!(preview(&home, Target::parse_uid(&uid).unwrap()).is_err());
+        // A record's preview holds it too (Codex on #446).
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let seq = native(&mut raw, "a", r#"{"prompt":"a synthetic canary"}"#);
+        let (h, target) = (home.path().to_owned(), record(&raw, seq));
+        let (sent, started) = std::sync::mpsc::channel();
+        let registered = target.clone();
+        SAMPLING.set(Some(Box::new(move || {
+            sent.send(registering_target(&h, registered)).unwrap();
+        })));
+        let p = preview(home.path(), target).unwrap();
+        assert!(p.sample.as_deref().is_some_and(|s| s.contains("canary")));
+        started.recv().unwrap().join().unwrap();
+        assert!(!shown(&raw, seq));
     }
 
     #[test]

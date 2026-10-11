@@ -385,7 +385,7 @@ packet）で、忘れた uid を返さないようにした。#439 は、別の 
 2. **柵を取るのは読取りの関数の入口、raw を開いた直後。** `search::b` の検索（`query` とその変種が通る `search`）・
    `get`・`get_many`・`cite`・`timeline`・`claim`（viewer の claim）・manifest を組み立てる関数
    （hook の SessionStart、`oboete inject`、viewer の Context が通る）・`oboete claims`・forget の
-   preview・`trec_run`（`oboete claims` は main の一覧の関数で取る）。CLI・MCP・viewer の呼び手は変えない。関数が返すとき答えはでき上がって
+   preview（uid・record・span のどれも）・`trec_run`（`oboete claims` は main の一覧の関数で取る）。CLI・MCP・viewer の呼び手は変えない。関数が返すとき答えはでき上がって
    いて、その後の整形と書出し（MCP の応答、HTTP の応答、stdout）は読み直さない。書出しは柵の外に
    置く: 詰まった stdout が lock を持ち続けて登録を止めることはない。いくつもの読取りをまとめる
    関数（`get_many`、`trec_run`）は全体で一回取る。中の関数が取る分は共有どうしで重なり、外の柵を
