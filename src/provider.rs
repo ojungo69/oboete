@@ -4385,7 +4385,8 @@ mod tests {
         // The owned loop's deadline tests blocked input after both real fixture processes are
         // ready; starting an interpreter is a separately bounded setup operation.
         let timeout = Duration::from_secs(if cfg!(windows) { 10 } else { 1 });
-        let startup = Duration::from_secs(20);
+        // Two Python starts on a busy Windows runner have taken longer than 20 s (#451).
+        let startup = Duration::from_secs(if cfg!(windows) { 60 } else { 20 });
         // The reader outlives every wait after the fixture's start and the run: the run's 2 s, the
         // lock's 2 s and the receive's 5 s (Codex on #445).
         let watchdog = (startup.as_secs() + timeout.as_secs() + 9).to_string();
