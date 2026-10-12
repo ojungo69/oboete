@@ -789,6 +789,10 @@ const DONE: &str = "done";
 /// (slice 3d) and its backups are to come (D4: no more than is true).
 const RAW_PURGED: &str = "purged from raw and its index here; the claims, cards and summaries made \
                           from it, and the backups, pending";
+/// Slice 3c-2: past step 4 too, no backup segment or copy of raw.db holds its text; what was made
+/// from it is to come (slice 3d).
+const RECORD_BACKUPS_PURGED: &str =
+    "purged here and in the backups; the claims, cards and summaries made from it pending";
 
 /// Each job, its local state read from the stores (D5 item 9): a uid job past step 3 whose ops
 /// hold no text is purged here, or stopped while knowledge.db still holds its uid.
@@ -820,6 +824,7 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
             Target::Uid { .. } if *purged && *step >= 5 => DONE,
             Target::Uid { .. } if *purged && *step >= 4 => BACKUPS_PURGED,
             Target::Uid { .. } if *purged => "purged here; backups pending",
+            _ if *purged && *step >= 4 => RECORD_BACKUPS_PURGED,
             _ if *purged => RAW_PURGED,
             _ => PENDING,
         };
@@ -902,12 +907,13 @@ pub struct Purged {
     pub shown: usize,
     /// Jobs whose uid knowledge.db still holds after the rebuild: an op it came from was missed.
     pub stopped: Vec<String>,
-    /// Backup segments whose ops of a forgotten uid were rewritten without their text (2c).
+    /// Backup segments whose ops of a forgotten uid (2c) or lines of a forgotten record (slice
+    /// 3c-2) were rewritten without their text.
     pub segments: usize,
     /// Backup segments removed: no seal vouched for them and they could not be read whole (2c).
     pub segments_removed: usize,
-    /// Copies of raw.db set aside whose ops of a forgotten uid were rewritten without their text
-    /// (2c).
+    /// Copies of raw.db set aside whose ops of a forgotten uid or rows of a forgotten record were
+    /// rewritten without their text (2c, slice 3c-2).
     pub copies: usize,
     /// Copies of raw.db removed: they did not open or could not be rewritten, and a restore's
     /// partial build (2c).
@@ -930,7 +936,7 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
     Ok(due)
 }
 
-/// Each record job a purge goes on with (slice 3c), by state as a uid job: one not past step 3,
+/// Each record job a purge goes on with (slice 3c), by state as a uid job: one not past step 4,
 /// or a forgotten record of which holds its text again: its job and step, and whether one does.
 /// A denial whose record holds its text with no job row (a restore from segments alone brings
 /// back the denial, not the job: spec 6.3) is its job's, at step 0: the purge goes on with it by
@@ -941,7 +947,7 @@ fn records_due(raw: &crate::raw::Raw) -> Result<Vec<(String, i64, bool)>> {
     for (request, step) in raw.forget_jobs()? {
         if !matches!(request.target, Target::Uid { .. }) {
             let held = holding.remove(&request.job);
-            if held || step < 3 {
+            if held || step < 4 {
                 due.push((request.job, step, held));
             }
         }
@@ -1156,36 +1162,62 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     // Step 4 (2c, decisions 2-5): the backup's ops segments and the copies of raw.db set aside,
     // for every uid job past step 3 whose ops hold no text, stopped ones too (decision 8), in one
-    // pass for all their uids.
+    // pass for all their uids. Slice 3c-2: the record segments and the copies' rows too, for every
+    // record job past step 3 whose rows hold no text, when one has not had them yet: they are read
+    // whole each time, by every forgotten record's identity.
     let mut jobs = std::collections::HashMap::new();
-    let mut past = Vec::new();
+    let (mut past, mut records_past) = (Vec::new(), Vec::new());
+    // Rows this purge rewrote may be in them, a denial's with no job row too (a restore from
+    // segments alone, Codex on #469), which has no step to owe them by.
+    let mut records_owed = purged.records > 0;
+    let held = raw.record_jobs_holding()?;
     for (request, step) in raw.forget_jobs()? {
-        if let Target::Uid { uid } = request.target
-            && step >= 3
-            && !raw.uid_has_ops(&uid)?
-        {
-            // One job's id per uid for the bodies, and every job of it recorded: the logs can
-            // bring back a second (CodeRabbit on #453).
-            jobs.entry(uid).or_insert_with(|| request.job.clone());
-            past.push(request.job);
+        match request.target {
+            Target::Uid { uid } => {
+                if step >= 3 && !raw.uid_has_ops(&uid)? {
+                    // One job's id per uid for the bodies, and every job of it recorded: the logs
+                    // can bring back a second (CodeRabbit on #453).
+                    jobs.entry(uid).or_insert_with(|| request.job.clone());
+                    past.push(request.job);
+                }
+            }
+            _ if step >= 3 && !held.contains(&request.job) => {
+                records_owed |= step == 3;
+                records_past.push(request.job);
+            }
+            _ => {}
         }
     }
-    if !jobs.is_empty() {
-        let ops = crate::backup::purge_ops(home, &jobs)?;
-        (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
-        (purged.copies, purged.copies_removed) = crate::raw::purge_copies(home, &jobs)?;
-        for job in &past {
+    if !jobs.is_empty() || records_owed {
+        let origins = if records_owed {
+            raw.forgotten_origins()?
+        } else {
+            crate::raw::ForgottenOrigins::new()
+        };
+        if !jobs.is_empty() {
+            let ops = crate::backup::purge_ops(home, &jobs)?;
+            (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
+        }
+        if records_owed {
+            let lines = crate::backup::purge_record_segments(home, &origins)?;
+            purged.segments += lines.live + lines.aside;
+            purged.segments_removed += lines.removed;
+        }
+        (purged.copies, purged.copies_removed) = crate::raw::purge_copies(home, &jobs, &origins)?;
+        for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 4)?;
         }
-        // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A hook
-        // that read before the registration wrote it before the registration committed (#439's
-        // fence), so this finds nothing as a rule.
-        let forgotten: HashSet<String> = jobs.keys().cloned().collect();
-        purged.shown += crate::hookstate::update_all(home, "shown", |v| {
-            crate::hook::without_uids(v, &forgotten)
-        })?;
-        for job in &past {
-            raw.finish_forget_step(job, 5)?;
+        if !jobs.is_empty() {
+            // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A
+            // hook that read before the registration wrote it before the registration committed
+            // (#439's fence), so this finds nothing as a rule.
+            let forgotten: HashSet<String> = jobs.keys().cloned().collect();
+            purged.shown += crate::hookstate::update_all(home, "shown", |v| {
+                crate::hook::without_uids(v, &forgotten)
+            })?;
+            for job in &past {
+                raw.finish_forget_step(job, 5)?;
+            }
         }
     }
     Ok(Some(purged))
@@ -1599,10 +1631,10 @@ fn limits(sources: &[String]) -> String {
     let mut out = String::from(
         "Its row in raw.db is rewritten without the text right after registration (its seq and \
          time stay), then knowledge.db is rebuilt from raw.db without it: minutes on a large \
-         store, and a session that starts meanwhile gets part of its memory or none. The claims, \
-         cards and session summaries made from it stay until a later version purges them, and \
-         older backup segments and copies of raw.db set aside still hold its text, hidden again \
-         when they are restored.\n\
+         store, and a session that starts meanwhile gets part of its memory or none. Then the \
+         backup's segments and the copies of raw.db set aside are rewritten without it too; one \
+         that cannot be read or rewritten, which no reader of oboete uses, is removed. The claims, \
+         cards and session summaries made from it stay until a later version purges them.\n\
          A packet already handed to an agent and a curation call already sent are not taken \
          back.\n\
          If raw.db, both request logs and the backups made since the request are lost (an \
@@ -2559,7 +2591,12 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
             .unwrap();
         assert_eq!(ledger, 0);
-        assert!(status(&home).unwrap().iter().all(|j| j.local == RAW_PURGED));
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
         let again = purge(&home).unwrap().unwrap();
         assert_eq!((again.jobs, again.records, again.rebuilt), (0, 0, false));
         // A restore from a backup made before the purge gives a row its text back, its job past
@@ -2578,7 +2615,12 @@ mod tests {
             store_hits(&home, RECORD_CANARY.as_bytes()),
             Vec::<&str>::new()
         );
-        assert!(status(&home).unwrap().iter().all(|j| j.local == RAW_PURGED));
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
         // The requests applied again find the same records and add no tombstone.
         let mut raw = crate::raw::open(&home).unwrap();
         let requests = raw.forget_requests().unwrap();
@@ -2655,6 +2697,9 @@ mod tests {
             store_hits(&home, RECORD_CANARY.as_bytes()),
             Vec::<&str>::new()
         );
+        // Slice 3c-2: and the segment the restore read, with no job to owe it.
+        assert_eq!(purged.segments, 1);
+        assert_eq!(backup_hits(&home, RECORD_CANARY), Vec::<String>::new());
         assert_eq!(row(&home, &device, kept).0, "event");
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
@@ -3426,6 +3471,12 @@ mod tests {
     /// The live ops segments of the backup location, of every device, by name: in op order for
     /// each.
     fn ops_segments(home: &Path) -> Vec<PathBuf> {
+        segments_of(home, true)
+    }
+
+    /// The live segments of the backup location of one kind (ops or records), of every device, by
+    /// name: in seq order for each.
+    fn segments_of(home: &Path, ops: bool) -> Vec<PathBuf> {
         let dir = crate::backup::dir(home).unwrap();
         let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
@@ -3434,7 +3485,7 @@ mod tests {
             .filter(|p| {
                 p.file_name()
                     .and_then(crate::backup::segment_name)
-                    .is_some_and(|(ops, ..)| ops)
+                    .is_some_and(|(is_ops, ..)| is_ops == ops)
             })
             .collect();
         found.sort();
@@ -3457,7 +3508,13 @@ mod tests {
     /// The names of the files in the backup location that hold `CANARY`, each segment's text read
     /// decompressed.
     fn backup_canaries(home: &Path) -> Vec<String> {
-        let holds = |b: &[u8]| b.windows(CANARY.len()).any(|w| w == CANARY.as_bytes());
+        backup_hits(home, CANARY)
+    }
+
+    /// The names of the files in the backup location that hold `text`, each segment's text read
+    /// decompressed.
+    fn backup_hits(home: &Path, text: &str) -> Vec<String> {
+        let holds = |b: &[u8]| b.windows(text.len()).any(|w| w == text.as_bytes());
         let mut found = Vec::new();
         for e in std::fs::read_dir(crate::backup::dir(home).unwrap())
             .unwrap()
@@ -4007,6 +4064,339 @@ mod tests {
         );
         assert_eq!(copy_ops(&older), older_ops);
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Slice 3c-2: a live record and an import with its identity, to be forgotten, and the records
+    /// kept beside them, one an import with no identity (as v1's touch records are), exported in
+    /// one record segment: the store, its device, the seqs to forget and the seqs kept.
+    fn backed_up_records() -> (crate::search::b::fixture::Store, String, [i64; 2], [i64; 2]) {
+        let mut s = crate::search::b::fixture::Store::new();
+        let live = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Remember {RECORD_CANARY}."),
+        );
+        let mut event = crate::raw::test_event(
+            &serde_json::json!({ "prompt": format!("Imported {RECORD_CANARY}.") }).to_string(),
+        );
+        (event.source, event.session, event.ts) = ("transcript".into(), "t".into(), 2_000);
+        let identity = crate::raw::ImportIdentity {
+            origin: origin("synthetic", "imported"),
+            session: session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let captured = |event| crate::capture::Captured {
+            event,
+            ledger: Vec::new(),
+        };
+        let imported = s
+            .raw
+            .append_imported_origins(&[captured(event)], &[identity], "", None)
+            .unwrap()[0];
+        let mut touch = crate::raw::test_event(r#"{"repo":"kept without identity"}"#);
+        (touch.source, touch.kind, touch.session, touch.ts) =
+            ("oboete-v1".into(), "touch".into(), "v".into(), 2_500);
+        let bare = s.raw.append_imported(&[captured(touch)], "", None).unwrap()[0];
+        let kept = s.said("s", "github.com/o/r", 3_000, "Kept text.");
+        crate::backup::export(s.home.path()).unwrap();
+        assert_eq!(segments_of(s.home.path(), false).len(), 1);
+        let device = s.raw.device().to_owned();
+        (s, device, [live, imported], [bare, kept])
+    }
+
+    /// `seqs` forgotten one by one, and the store let go: its home, kept until dropped.
+    fn forget_records(
+        s: crate::search::b::fixture::Store,
+        device: &str,
+        seqs: [i64; 2],
+    ) -> tempfile::TempDir {
+        let home = s.home.path().to_owned();
+        for seq in seqs {
+            let target = Target::Record {
+                device: device.to_owned(),
+                seq,
+            };
+            start(&home, &preview(&home, target).unwrap()).unwrap();
+        }
+        let crate::search::b::fixture::Store { home: kept, raw } = s;
+        drop(raw);
+        kept
+    }
+
+    /// Slice 3c-2, tests 1 and 2: a purge makes each forgotten record's line, in every record
+    /// segment of the backup location, of any device, live or set aside, the Removed line an export
+    /// writes for it now, and rewrites its row in every copy of raw.db set aside: no file holds the
+    /// text then. An import with no identity, which no forget can name, stays byte for byte, in the
+    /// segments and in the copy. A damaged segment no seal vouches for is removed; a sealed one with
+    /// a line this version cannot judge is rewritten around it. The seals hold, a second purge has
+    /// nothing to do, and a restore from the segments brings the forgotten records back as Removed
+    /// rows and the others with their text.
+    #[test]
+    fn a_purge_rewrites_the_record_segments_and_copies_without_the_records_text() {
+        let (s, device, forgotten, kept) = backed_up_records();
+        let home = s.home.path().to_owned();
+        let dir = crate::backup::dir(&home).unwrap();
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, '/prompt', 'r', 0, 4, 0, 'v')",
+                rusqlite::params![device, forgotten[0]],
+            )
+            .unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        let first = segments_of(&home, false)[0].clone();
+        let name = first.file_name().unwrap().to_str().unwrap().to_owned();
+        let before = segment_text(&first);
+        assert!(before.contains(RECORD_CANARY));
+        // Another device's, sealed (2c, decision 2); one set aside; a damaged one no seal vouches
+        // for, the canary's line cut short; and a sealed one with a line of a kind this version does
+        // not know.
+        let tail = name.strip_prefix(&format!("{device}-")).unwrap().to_owned();
+        let other = dir.join(format!("0ther0-{tail}"));
+        std::fs::copy(&first, &other).unwrap();
+        std::fs::copy(
+            dir.join(format!("{name}.sha256")),
+            format!("{}.sha256", other.display()),
+        )
+        .unwrap();
+        let aside =
+            dir.join(crate::backup::fresh_name(&dir, &format!("{name}.quarantined-")).unwrap());
+        std::fs::copy(&first, &aside).unwrap();
+        let cut = dir.join(format!("0ther2-{tail}"));
+        let damaged: Vec<&str> = before
+            .lines()
+            .map(|l| {
+                if l.contains(RECORD_CANARY) {
+                    &l[..l.len() - 2]
+                } else {
+                    l
+                }
+            })
+            .collect();
+        std::fs::write(
+            &cut,
+            zstd::bulk::compress(damaged.join("\n").as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+        // What an export's write left before its rename.
+        let left = dir.join(format!(".{name}.tmp"));
+        std::fs::copy(&first, &left).unwrap();
+        let unknown = r#"{"type":"a later kind"}"#;
+        let future = dir.join(format!("0ther3-{tail}"));
+        let text = format!("{}\n{unknown}\n", before.trim_end());
+        std::fs::write(&future, zstd::bulk::compress(text.as_bytes(), 3).unwrap()).unwrap();
+        std::fs::write(
+            format!("{}.sha256", future.display()),
+            format!("{}  0ther3-{tail}\n", file_sha(&future)),
+        )
+        .unwrap();
+        // A device whose record this store does not hold, whose denial it does (a request another
+        // machine logged): its segment's line is judged by its identity alone.
+        let far = dir.join(format!("0ther9-{tail}"));
+        let far_import = origin("synthetic", "far");
+        let lines = [
+            serde_json::json!({"device": "0ther9", "seq": 7, "type": "event", "ts": 5,
+                "kind": "prompt", "agent": "claude", "session": "x", "source": "hook",
+                "body": format!(r#"{{"prompt":"Far {RECORD_CANARY}."}}"#), "ledger": []}),
+            serde_json::json!({"device": "0ther9", "seq": 8, "type": "event", "ts": 6,
+                "kind": "prompt", "agent": "claude", "session": "y", "source": "transcript",
+                "body": format!(r#"{{"prompt":"Far import {RECORD_CANARY}."}}"#), "ledger": [],
+                "import_identity": {"origin": far_import, "session": "y", "ambiguous": false}}),
+        ];
+        std::fs::write(
+            &far,
+            zstd::bulk::compress(format!("{}\n{}\n", lines[0], lines[1]).as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}.sha256", far.display()),
+            format!("{}  0ther9-{tail}\n", file_sha(&far)),
+        )
+        .unwrap();
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+                 VALUES(?1, '0ther9', 7, 5, 'x', 'far'), (?2, '0ther9', 8, NULL, 'y', 'far')",
+                [live_origin("0ther9", 7, 5), far_import.clone()],
+            )
+            .unwrap();
+        let _home = forget_records(s, &device, forgotten);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.records, 2);
+        assert_eq!((purged.segments, purged.segments_removed), (5, 1));
+        // Its import keeps the identity its line holds: the store has none of it.
+        let far_lines: Vec<serde_json::Value> = segment_text(&far)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            far_lines,
+            [
+                serde_json::json!({"device": "0ther9", "seq": 7, "type": "removed",
+                    "source": "hook", "kind": "prompt", "ts": 5}),
+                serde_json::json!({"device": "0ther9", "seq": 8, "type": "removed",
+                    "source": "transcript", "kind": "prompt", "ts": 6,
+                    "import_identity": {"origin": far_import, "session": "y", "ambiguous": false}}),
+            ]
+        );
+        assert_eq!((purged.copies, purged.copies_removed), (1, 0));
+        assert!(!cut.exists() && !left.exists());
+        assert_eq!(backup_hits(&home, RECORD_CANARY), Vec::<String>::new());
+        let holds = |p: &Path| {
+            std::fs::read(p).is_ok_and(|b| {
+                b.windows(RECORD_CANARY.len())
+                    .any(|w| w == RECORD_CANARY.as_bytes())
+            })
+        };
+        let left: Vec<std::ffi::OsString> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_file() && holds(&e.path()))
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, Vec::<std::ffi::OsString>::new());
+        // Each forgotten line is the one an export writes now, every other line as it was.
+        let now: std::collections::HashMap<i64, serde_json::Value> = crate::raw::open(&home)
+            .unwrap()
+            .export_lines(0, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|(seq, l)| (seq, serde_json::from_str(&l).unwrap()))
+            .collect();
+        let after = segment_text(&first);
+        assert_eq!(after.lines().count(), before.lines().count());
+        let mut changed = 0;
+        for (was, is) in before.lines().zip(after.lines()) {
+            let seq = serde_json::from_str::<serde_json::Value>(was).unwrap()["seq"]
+                .as_i64()
+                .unwrap();
+            if forgotten.contains(&seq) {
+                let is: serde_json::Value = serde_json::from_str(is).unwrap();
+                assert_eq!(
+                    (&is, &is["type"]),
+                    (&now[&seq], &serde_json::json!("removed"))
+                );
+                changed += 1;
+            } else {
+                assert_eq!(is, was, "{seq}");
+            }
+        }
+        assert_eq!(changed, 2);
+        assert!(after.contains("kept without identity"));
+        assert_eq!(
+            (segment_text(&other), segment_text(&aside)),
+            (after.clone(), after.clone())
+        );
+        assert_eq!(
+            segment_text(&future),
+            format!("{}\n{unknown}\n", after.trim_end())
+        );
+        assert_eq!(crate::backup::verify(&dir).unwrap().len(), 0);
+        // The copy: the forgotten rows rewritten and their ledger rows gone, the others kept.
+        let conn = rusqlite::Connection::open(&copy).unwrap();
+        for seq in forgotten {
+            let (kind, empty): (String, bool) = conn
+                .query_row(
+                    "SELECT type, body IS NULL AND session IS NULL FROM records
+                     WHERE device = ?1 AND seq = ?2",
+                    rusqlite::params![device, seq],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((kind.as_str(), empty), ("removed", true), "{seq}");
+        }
+        let ledger: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ledger, 0);
+        for seq in kept {
+            let kind: String = conn
+                .query_row(
+                    "SELECT type FROM records WHERE device = ?1 AND seq = ?2",
+                    rusqlite::params![device, seq],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(kind, "event", "{seq}");
+        }
+        drop(conn);
+        assert!(holds_text(&copy, "kept without identity"));
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        // raw.db lost, restored from the rewritten segments of this device.
+        for file in [&other, &future, &far] {
+            std::fs::remove_file(file).unwrap();
+            std::fs::remove_file(format!("{}.sha256", file.display())).unwrap();
+        }
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        drop(crate::backup::open_raw(&home).unwrap());
+        for seq in forgotten {
+            assert_eq!(row(&home, &device, seq).0, "removed", "{seq}");
+        }
+        for seq in kept {
+            assert_eq!(row(&home, &device, seq).0, "event", "{seq}");
+        }
+        assert_eq!(
+            store_hits(&home, RECORD_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        assert!(!store_hits(&home, b"kept without identity").is_empty());
+    }
+
+    /// Whether the file at `path` holds `text`.
+    fn holds_text(path: &Path, text: &str) -> bool {
+        std::fs::read(path).is_ok_and(|b| b.windows(text.len()).any(|w| w == text.as_bytes()))
+    }
+
+    /// Slice 3c-2: a purge stopped inside a record segment's replacement leaves its record jobs at
+    /// step 3, whose status says the backups are pending; the next purge finishes them without a
+    /// rebuild.
+    #[test]
+    fn a_purge_stopped_inside_a_record_segments_replacement_finishes_on_the_next() {
+        for stage in ["purge_segment_written", "purge_segment_renamed"] {
+            let (s, device, forgotten, _) = backed_up_records();
+            let home = s.home.path().to_owned();
+            let _home = forget_records(s, &device, forgotten);
+            crate::backup::FAIL_AFTER.set(Some(stage));
+            assert!(purge(&home).is_err(), "{stage}");
+            assert!(
+                status(&home).unwrap().iter().all(|j| j.local == RAW_PURGED),
+                "{stage}"
+            );
+            let purged = purge(&home).unwrap().unwrap();
+            assert!(!purged.rebuilt, "{stage}");
+            assert!(
+                status(&home)
+                    .unwrap()
+                    .iter()
+                    .all(|j| j.local == RECORD_BACKUPS_PURGED),
+                "{stage}"
+            );
+            let first = &segments_of(&home, false)[0];
+            let seal = std::fs::read_to_string(format!("{}.sha256", first.display())).unwrap();
+            assert_eq!(seal.lines().count(), 1, "{stage}: {seal}");
+            assert!(seal.starts_with(&file_sha(first)), "{stage}: {seal}");
+            assert_eq!(
+                backup_hits(&home, RECORD_CANARY),
+                Vec::<String>::new(),
+                "{stage}"
+            );
+        }
     }
 
     /// D5 (2c, Greptile on #458): a copy holding an op whose holding a uid's text cannot be told (a

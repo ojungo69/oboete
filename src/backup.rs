@@ -966,10 +966,12 @@ pub(crate) fn checksum_matches(text: &str, sha256: &str) -> bool {
         .any(|line| line.split_whitespace().next() == Some(sha256))
 }
 
-/// What a purge of the ops segments did, or would do (milestone 5 D5, 2c).
+/// What a purge of the ops segments did, or would do (milestone 5 D5, 2c), or of the record
+/// segments (slice 3c-2).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct OpsPurge {
-    /// Live segments whose ops of a forgotten uid were rewritten without their text.
+    /// Live segments whose ops of a forgotten uid (whose lines of a forgotten record) were
+    /// rewritten without their text.
     pub live: usize,
     /// Segments set aside, likewise.
     pub aside: usize,
@@ -991,7 +993,12 @@ pub(crate) fn purge_ops(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
 ) -> Result<OpsPurge> {
-    walk_ops(home, jobs, true)
+    walk(
+        home,
+        Kind::Ops,
+        &|text| purge_lines(text, |l| purged_line(l, jobs)),
+        true,
+    )
 }
 
 /// What `purge_ops` would do for `jobs`, counted without changing a file (2c, decision 9).
@@ -999,12 +1006,36 @@ pub(crate) fn ops_to_purge(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
 ) -> Result<OpsPurge> {
-    walk_ops(home, jobs, false)
+    walk(
+        home,
+        Kind::Ops,
+        &|text| purge_lines(text, |l| purged_line(l, jobs)),
+        false,
+    )
 }
 
-fn walk_ops(
+/// Slice 3c-2: every record segment of the backup location, of any device, live or set aside, with
+/// each event line of a forgotten record (its identity in `origins`) made the Removed line an export
+/// writes for it now, as `purge_ops` rewrites the ops segments: by the same steps, and with the
+/// same removals.
+pub(crate) fn purge_record_segments(
     home: &Path,
-    jobs: &std::collections::HashMap<String, String>,
+    origins: &raw::ForgottenOrigins,
+) -> Result<OpsPurge> {
+    walk(
+        home,
+        Kind::Records,
+        &|text| purge_lines(text, |l| purged_record_line(l, origins)),
+        true,
+    )
+}
+
+/// The segments of `kind` walked, each one's text given to `judge` (its rewrite, if any line
+/// changes, and whether a line could not be judged).
+fn walk(
+    home: &Path,
+    kind: Kind,
+    judge: &dyn Fn(&str) -> (Option<String>, bool),
     apply: bool,
 ) -> Result<OpsPurge> {
     let dir = dir(home)?;
@@ -1024,10 +1055,10 @@ fn walk_ops(
             if apply && leftover(name) {
                 std::fs::remove_file(&path)?;
             }
-        } else if ops_segment(name) {
+        } else if segment(name, kind) {
             // Under the names oboete gives only, as for the set-aside ones (Codex on #453).
             segments.push((path, false));
-        } else if set_aside(name) {
+        } else if set_aside(name, kind) {
             segments.push((path, true));
         }
     }
@@ -1056,7 +1087,7 @@ fn walk_ops(
                     seal_line(&sha, name).as_bytes(),
                 )?;
             }
-            if let (Some(text), _) = purge_lines(&read_whole(&data)?, jobs) {
+            if let (Some(text), _) = judge(&read_whole(&data)?) {
                 if apply {
                     replace(&dir, name, &sha, text.as_bytes())?;
                 }
@@ -1067,7 +1098,7 @@ fn walk_ops(
         // 2c, decision 4: no seal vouches for it, and no reader of oboete uses it. It is removed
         // when it is not read whole, or holds a line of which it cannot be told (`Line::Unknown`,
         // Codex on #453): it may hold the text.
-        match read_whole(&data).map(|text| purge_lines(&text, jobs)) {
+        match read_whole(&data).map(|text| judge(&text)) {
             Ok((None, false)) => {}
             Ok((Some(text), false)) => {
                 if apply {
@@ -1114,30 +1145,35 @@ pub(crate) fn leftover(name: &str) -> bool {
         .and_then(|n| n.strip_suffix(".tmp")?.strip_suffix(PURGE_PART))
         .or_else(|| n.strip_suffix(".tmp"))
         .or_else(|| n.strip_suffix(PURGE_PART))
-        .is_some_and(|n| ops_segment(n) || set_aside(n))
+        .is_some_and(|n| {
+            [Kind::Ops, Kind::Records]
+                .into_iter()
+                .any(|kind| segment(n, kind) || set_aside(n, kind))
+        })
 }
 
-/// Whether `name` is an ops segment's exactly as export names one (`name`: a device of letters and
-/// digits, the op range zero-padded): `segment_name` takes any device, an empty or a hidden one's
+/// Whether `name` is a segment's of `kind` exactly as export names one (`name`: a device of letters
+/// and digits, the range zero-padded): `segment_name` takes any device, an empty or a hidden one's
 /// too, and any number (Codex on #453).
-fn ops_segment(name: &str) -> bool {
+fn segment(name: &str, kind: Kind) -> bool {
     segment_name(std::ffi::OsStr::new(name)).is_some_and(|(ops, device, first, last)| {
-        ops && !device.is_empty()
+        ops == (kind == Kind::Ops)
+            && !device.is_empty()
             && device.chars().all(|c| c.is_ascii_alphanumeric())
-            // An export's op range starts at 1 and never runs backwards (Codex on #453).
+            // An export's range starts at 1 and never runs backwards (Codex on #453).
             && first >= 1
             && last >= first
-            && self::name(&device, first, last, Kind::Ops) == name
+            && self::name(&device, first, last, kind) == name
     })
 }
 
-/// Whether `name` is an ops segment's set aside as an export names it (`<segment>.quarantined-
+/// Whether `name` is a segment's of `kind` set aside as an export names it (`<segment>.quarantined-
 /// <ms>`, `fresh_name`): a file of another name is not oboete's to rewrite or remove (Codex on
 /// #453).
-fn set_aside(name: &str) -> bool {
+fn set_aside(name: &str, kind: Kind) -> bool {
     name.rsplit_once(".quarantined-")
-        .is_some_and(|(segment, stamp)| {
-            !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()) && ops_segment(segment)
+        .is_some_and(|(seg, stamp)| {
+            !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()) && segment(seg, kind)
         })
 }
 
@@ -1185,20 +1221,18 @@ fn read_whole(data: &[u8]) -> Result<String> {
     Ok(text)
 }
 
-/// `text`'s lines with each op of a uid in `jobs` given the body `{"forgotten":"<job>"}` that
-/// raw.db's purge gives it (2c, decision 2), every other line byte for byte (None when no line
-/// changes), and whether a line was kept of which it cannot be told (`Line::Unknown`).
-fn purge_lines(
-    text: &str,
-    jobs: &std::collections::HashMap<String, String>,
-) -> (Option<String>, bool) {
+/// `text`'s lines as `judge` makes each: an op of a uid in the jobs given the body
+/// `{"forgotten":"<job>"}` that raw.db's purge gives it (2c, decision 2), a forgotten record's line
+/// made a Removed line (3c-2), every other line byte for byte (None when no line changes), and
+/// whether a line was kept of which it cannot be told (`Line::Unknown`).
+fn purge_lines(text: &str, judge: impl Fn(&str) -> Line) -> (Option<String>, bool) {
     let mut out = String::with_capacity(text.len());
     let (mut changed, mut unknown) = (false, false);
     for piece in text.split_inclusive('\n') {
         let (line, end) = piece
             .strip_suffix('\n')
             .map_or((piece, ""), |line| (line, "\n"));
-        match purged_line(line, jobs) {
+        match judge(line) {
             Line::Purged(new) => {
                 out.push_str(&new);
                 changed = true;
@@ -1257,6 +1291,68 @@ fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> 
         }
         None => Line::Kept,
     }
+}
+
+/// One record backup line (`Raw::export_lines`), judged as raw.db's record purge judges its row
+/// (3c-2): an event line whose identity a denial names becomes the Removed line an export writes for
+/// that row now (its device, seq, original metadata, home lineage and import identity); a Removed or
+/// tombstone line stays. The identity is a live record's from its device, seq and time, an import's
+/// its `import_identity`. An imported event line without one stays: an import is given its identity
+/// when it is recorded and never later, so it had none and no forget can name it (a scope forget
+/// passes it over). A line that does not parse, or a live one without its time, cannot be judged.
+fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins) -> Line {
+    if line.trim().is_empty() {
+        return Line::Kept;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Line::Unknown;
+    };
+    match v["type"].as_str() {
+        Some("event") => {}
+        Some("removed" | "tombstone") => return Line::Kept,
+        _ => return Line::Unknown,
+    }
+    let identity = match v["source"].as_str() {
+        Some(source) if raw::is_live(source) => {
+            match (v["device"].as_str(), v["seq"].as_i64(), v["ts"].as_i64()) {
+                (Some(device), Some(seq), Some(ts)) => {
+                    Some(crate::forget::live_origin(device, seq, ts))
+                }
+                _ => None,
+            }
+        }
+        Some(_) => match v["import_identity"]["origin"].as_str() {
+            Some(origin) => Some(origin.to_owned()),
+            None => return Line::Kept,
+        },
+        None => None,
+    };
+    let Some(identity) = identity else {
+        return Line::Unknown;
+    };
+    let Some(held) = origins.get(&identity) else {
+        return Line::Kept;
+    };
+    let mut removed =
+        serde_json::json!({"device": v["device"], "seq": v["seq"], "type": "removed"});
+    for key in [
+        "source",
+        "kind",
+        "ts",
+        "home_id",
+        "home_id_proven",
+        "import_identity",
+    ] {
+        if let Some(value) = v.get(key) {
+            removed[key] = value.clone();
+        }
+    }
+    // As the store holds it now: a live record has one since its forget (slice 3a).
+    if let Some((session, ambiguous)) = held {
+        removed["import_identity"] =
+            serde_json::json!({ "origin": identity, "session": session, "ambiguous": ambiguous });
+    }
+    Line::Purged(removed.to_string())
 }
 
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as
@@ -2034,7 +2130,7 @@ pub(crate) mod tests {
         }
 
         let seg = "d0-000000000001-000000000002.ops.zst";
-        assert!(ops_segment(seg) && !ops_segment(&format!(".{seg}")));
+        assert!(segment(seg, Kind::Ops) && !segment(&format!(".{seg}"), Kind::Ops));
         for name in [
             "d-1-2.ops.zst",
             "-000000000001-000000000002.ops.zst",
@@ -2042,9 +2138,12 @@ pub(crate) mod tests {
             "d0-000000000001-000000000002.records.zst",
             "d.0-000000000001-000000000002.ops.zst",
         ] {
-            assert!(!ops_segment(name), "{name}");
+            assert!(!segment(name, Kind::Ops), "{name}");
         }
-        assert!(set_aside(&format!("{seg}.quarantined-1700000000000")));
+        assert!(set_aside(
+            &format!("{seg}.quarantined-1700000000000"),
+            Kind::Ops
+        ));
         for name in [
             "notes.ops.zst.quarantined-old".to_owned(),
             format!("{seg}.quarantined-"),
@@ -2052,7 +2151,7 @@ pub(crate) mod tests {
             format!("{seg}.sha256.quarantined-1"),
             "d0-000000000001-000000000002.records.zst.quarantined-1".to_owned(),
         ] {
-            assert!(!set_aside(&name), "{name}");
+            assert!(!set_aside(&name, Kind::Ops), "{name}");
         }
         for name in [
             format!(".{seg}.tmp"),
@@ -2070,6 +2169,19 @@ pub(crate) mod tests {
             ".notes.tmp".to_owned(),
         ] {
             assert!(!leftover(&name), "{name}");
+        }
+        // Slice 3c-2: a record segment's names, likewise.
+        let rec = "d0-000000000001-000000000002.seg.zst";
+        assert!(segment(rec, Kind::Records) && !segment(rec, Kind::Ops));
+        assert!(!segment(seg, Kind::Records));
+        let aside = format!("{rec}.quarantined-1700000000000");
+        assert!(set_aside(&aside, Kind::Records) && !set_aside(&aside, Kind::Ops));
+        for name in [
+            format!(".{rec}.tmp"),
+            format!("..{rec}.purge.tmp"),
+            format!(".{aside}.tmp"),
+        ] {
+            assert!(leftover(&name), "{name}");
         }
     }
 
