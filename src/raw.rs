@@ -4620,6 +4620,7 @@ impl Rebuild {
                 )?;
             }
         }
+        link_live_denials(&self.conn)?;
         for r in &self.forget {
             r.check()?;
             apply_request(&self.conn, &device, r)?;
@@ -4629,6 +4630,38 @@ impl Rebuild {
         // No forget op among them is lost: each is appended again, or its uid is forgotten already.
         Ok(dropped - forgets.len())
     }
+}
+
+/// Slice 3a's link of a forgotten live record to its identity, made again for the denials a
+/// restore brought back from tombstone lines: a segment written before the forget holds the
+/// record without it. A denial whose record this store holds, live, at the time that gives the
+/// same identity gets it, so the purge finds the record's text by the state when no log brings the
+/// request back (Codex on #469).
+fn link_live_denials(conn: &Connection) -> Result<()> {
+    let live = LIVE.map(|s| format!("'{s}'")).join(",");
+    let rows: Vec<(String, String, i64, String, i64)> = conn
+        .prepare(&format!(
+            "SELECT d.origin, d.device, d.seq, d.session, r.ts FROM denied_records d
+             JOIN records r ON r.device = d.device AND r.seq = d.seq
+             WHERE r.type IN ('event', 'removed') AND r.source IN ({live})
+               AND r.kind IS NOT NULL AND r.kind <> ''
+               AND NOT EXISTS (SELECT 1 FROM import_origins o
+                               WHERE o.device = d.device AND o.seq = d.seq)"
+        ))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (origin, device, seq, session, ts) in rows {
+        if crate::forget::live_origin(&device, seq, ts) == origin {
+            conn.execute(
+                "INSERT OR IGNORE INTO import_origins(device, seq, origin, native_session, ambiguous)
+                 VALUES(?1, ?2, ?3, ?4, 0)",
+                params![device, seq, origin, session],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Applies one forget request by identity (D1 rule 5), inside the caller's write transaction:

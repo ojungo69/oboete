@@ -826,6 +826,10 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
   the claims, cards and summaries made from it, and the backups, pending」。rebuild は op を読み直すので、
   その record を言い換えた claim・card・summary は 3d まで残る。restore で本文が戻った job は step 2 から
   やり直す（2b の「状態で決める」）。job ごとの本文の有無は 1 回の集約で読む（job ごとの EXISTS は #467 と同じ形）。
+  segment だけの restore（両ログを失った後）は deny を戻し job の行を戻さない（spec 6.3）: 本文を持つ忘れた
+  record の deny に job の行がなければ、その job を step 0 として状態で purge する（step は記録しない）。restore は
+  live の record と deny を identity で結び直す（3a の結びつけ。segment が forget の前のものなら行に無い）。
+  Codex on #469。
 - **切れ目（rule 10）**: `transcript_cut` は `recorded` と、その session hash の deny の ts の最小の小さい方を
   返す。session の live record が全部書き換わり `earliest_by_session` に行がないときは deny の最小だけ
   （無ければ切れ目が消え、登録前の turn が取り込まれる）。deny の ts は切れ目に数える record にだけある。

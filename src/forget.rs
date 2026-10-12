@@ -932,17 +932,21 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
 
 /// Each record job a purge goes on with (slice 3c), by state as a uid job: one not past step 3,
 /// or a forgotten record of which holds its text again: its job and step, and whether one does.
+/// A denial whose record holds its text with no job row (a restore from segments alone brings
+/// back the denial, not the job: spec 6.3) is its job's, at step 0: the purge goes on with it by
+/// the state, with no step to record (Codex on #469).
 fn records_due(raw: &crate::raw::Raw) -> Result<Vec<(String, i64, bool)>> {
-    let holding = raw.record_jobs_holding()?;
+    let mut holding = raw.record_jobs_holding()?;
     let mut due = Vec::new();
     for (request, step) in raw.forget_jobs()? {
         if !matches!(request.target, Target::Uid { .. }) {
-            let held = holding.contains(&request.job);
+            let held = holding.remove(&request.job);
             if held || step < 3 {
                 due.push((request.job, step, held));
             }
         }
     }
+    due.extend(holding.into_iter().map(|job| (job, 0, true)));
     Ok(due)
 }
 
@@ -1270,7 +1274,14 @@ fn logs(home: &Path, report: &mut Report) -> Vec<PathBuf> {
 fn read_log(path: &Path, device: Option<&str>, report: &mut Report) -> Option<Vec<Request>> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        // A log under a file is no log but a place it cannot be read from: Windows says the path
+        // is not found where Linux says a part of it is not a directory.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !path.parent().is_some_and(Path::is_file) =>
+        {
+            return Some(Vec::new());
+        }
         Err(e) => {
             report
                 .problems
@@ -2577,6 +2588,75 @@ mod tests {
             .unwrap();
         raw.forget_apply(&requests).unwrap();
         assert_eq!(tombstones(&raw), before);
+    }
+
+    /// Codex on #469: raw.db and both request logs lost, the backup restored. A segment from
+    /// before the forget brings the records back with their text, a later one their denials, not
+    /// their jobs: the purge finds them by the state, a live record by its identity linked again,
+    /// and leaves no byte of their text in the stores.
+    #[test]
+    fn a_restore_from_segments_alone_has_its_forgotten_text_purged() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let live = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Remember {RECORD_CANARY}."),
+        );
+        let mut event = crate::raw::test_event(
+            &serde_json::json!({ "prompt": format!("Imported {RECORD_CANARY}.") }).to_string(),
+        );
+        (event.source, event.session, event.ts) = ("transcript".into(), "t".into(), 2_000);
+        let identity = crate::raw::ImportIdentity {
+            origin: origin("synthetic", "imported"),
+            session: session(&event.agent, &event.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let imported = s
+            .raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event,
+                    ledger: Vec::new(),
+                }],
+                &[identity],
+                "",
+                None,
+            )
+            .unwrap()[0];
+        let kept = s.said("s", "github.com/o/r", 3_000, "Kept text.");
+        crate::backup::export(s.home.path()).unwrap();
+        let home = s.home.path().to_owned();
+        let device = s.raw.device().to_owned();
+        let crate::search::b::fixture::Store { home: _home, raw } = s;
+        drop(raw);
+        for seq in [live, imported] {
+            let target = Target::Record {
+                device: device.clone(),
+                seq,
+            };
+            start(&home, &preview(&home, target).unwrap()).unwrap();
+        }
+        crate::backup::export(&home).unwrap();
+        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forget_jobs().unwrap().is_empty());
+        assert_eq!(records_due(&raw).unwrap().len(), 2);
+        drop(raw);
+        assert!(!store_hits(&home, RECORD_CANARY.as_bytes()).is_empty());
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.records, purged.rebuilt), (2, true));
+        assert_eq!(
+            store_hits(&home, RECORD_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        assert_eq!(row(&home, &device, kept).0, "event");
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
     /// Slice 3c, test 2 (rule 10): a session whose live records are all purged keeps its transcript
