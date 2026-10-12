@@ -2638,14 +2638,18 @@ impl Raw {
             let Some(uid) = crate::claims::op_uid(&body) else {
                 continue;
             };
-            let key: (String, i64) = (row.get(0)?, row.get(1)?);
-            match quoted_entry(forgotten, row.get(2)?, &body) {
+            let (key, ts): ((String, i64), i64) = ((row.get(0)?, row.get(1)?), row.get(2)?);
+            match quoted_entry(forgotten, ts, &body) {
                 // Slice 3e-1: this op alone, its uid not tombstoned.
-                Some((_, job, at)) if job == MASK_JOB => {
+                Some((_, job, _)) if job == MASK_JOB => {
                     claims.masked.push(key.clone());
                     // Its latest mask: a window that showed it before then showed its text
                     // (Codex on #480).
-                    later(&mut claims.masked_uids, &uid, at.unwrap_or(i64::MAX));
+                    later(
+                        &mut claims.masked_uids,
+                        &uid,
+                        latest_mask(forgotten, ts, &body),
+                    );
                 }
                 Some((_, job, _)) => {
                     claims
@@ -5926,8 +5930,8 @@ impl Judge {
             {
                 // Slice 3e-1: a masked record's claim is not forgotten by its uid.
                 match r {
-                    (_, job, at) if job == MASK_JOB => {
-                        later(&mut masked, &uid, at.unwrap_or(i64::MAX));
+                    (_, job, _) if job == MASK_JOB => {
+                        later(&mut masked, &uid, latest_mask(&self.forgotten, ts, body));
                     }
                     (_, job, _) => {
                         uids.entry(uid).or_insert_with(|| job.clone());
@@ -6119,9 +6123,7 @@ fn quoted_entry<'a>(
         items(&body["evidence"]).iter().find_map(|e| {
             let r = forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?)?;
             let takes = if masked {
-                r.1 == MASK_JOB
-                    && r.2
-                        .is_none_or(|at| ts <= at.saturating_add(SHOWN_MARGIN_MS))
+                masked_after(r, ts)
             } else {
                 r.1 != MASK_JOB
             };
@@ -6129,6 +6131,27 @@ fn quoted_entry<'a>(
         })
     };
     quoted(false).or_else(|| quoted(true))
+}
+
+/// Slice 3e-1: whether `r` is a masked record whose mask came after an op written at `ts`
+/// (`SHOWN_MARGIN_MS`).
+fn masked_after(r: &(i64, String, Option<i64>), ts: i64) -> bool {
+    r.1 == MASK_JOB
+        && r.2
+            .is_none_or(|at| ts <= at.saturating_add(SHOWN_MARGIN_MS))
+}
+
+/// Slice 3e-1: the latest mask of the masked records claim op `body`, written at `ts`, quotes and
+/// came before: a window that named its uid before then showed the text of one of them, not only
+/// the first's (Codex on #480). A mask a restore lost the time of is as late as can be.
+fn latest_mask(forgotten: &Forgotten, ts: i64, body: &serde_json::Value) -> i64 {
+    items(&body["evidence"])
+        .iter()
+        .filter_map(|e| forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?))
+        .filter(|r| masked_after(r, ts))
+        .map(|r| r.2.unwrap_or(i64::MAX))
+        .max()
+        .unwrap_or(i64::MAX)
 }
 
 /// Slice 3e-1: `uid`'s mask time in `masked`, the later of the one it has and `at`.

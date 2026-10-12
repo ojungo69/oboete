@@ -1095,7 +1095,8 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
   時刻）。window op と turn op は 3d-2 の規則 (a) と同じ（span・goals・読んだ span にその record があり、
   tombstone の時刻と `SHOWN_MARGIN_MS` より前に書かれた）。claim op はその record を引用し、同じ時刻より
   前に書かれたもの（引用が範囲に重ならない claim も: window ごと recurate されるので、同じ文から作り直される。
-  伏せた record を複数引用する op はそれぞれの伏せ字の時刻で見て、uid の時刻は最も遅い伏せ字、Codex on #480）。
+  伏せた record を複数引用する op はそれぞれの伏せ字の時刻で見て、uid の時刻は op が先に来たすべての伏せ字のうち
+  最も遅いもの、Codex on #480）。
   その claim を candidates・carried に名指し、同じ時刻より前に書かれた window op も（curator が claim の文を
   見た）。claim op の本文は window と turn の後に書き換える（uid の forget op がないので、それまでは op が
   名指しの手がかり。途中で止まっても次の purge が同じ順で続ける）。

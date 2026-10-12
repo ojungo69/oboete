@@ -7852,7 +7852,7 @@ mod tests {
 
     /// Slice 3e-1: a claim uid two derivations give, each quoting another masked record, holds its
     /// latest mask: a window that named it before then, and after the older mask, saw the text the
-    /// later one hides (Codex on #480).
+    /// later one hides (Codex on #480); and so does a claim op that quotes both records.
     #[test]
     fn a_window_that_named_a_claim_before_its_latest_mask_loses_its_text() {
         use serde_json::json;
@@ -7878,17 +7878,24 @@ mod tests {
             "They rotate acme-731904.",
             json!({"candidates": [uid]}),
         );
-        let seqs = s.raw.append_ops(&[a, b, shown]).unwrap();
+        // And one claim op that quotes both masked records, named by a window as well.
+        let c = claim_op(&device, &[(r1, &said), (r2, other)], "Both were said.");
+        let both = raw::op_uid(c.0, &c.1).unwrap();
+        let named = window_op(r0, r0, "They said both.", json!({"candidates": [both]}));
+        let seqs = s.raw.append_ops(&[a, b, shown, c, named]).unwrap();
         std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
         s.run();
         // The first derivation at t0, its record masked a second later, the second derivation at
-        // t0 + 2 s, the window at t0 + 5 min, the second record masked at t0 + 10 min.
+        // t0 + 2 s, the window at t0 + 5 min, the second record masked at t0 + 10 min; the claim
+        // that quotes both at t0 and the window that named it at t0 + 5 min.
         let t0 = crate::db::now_ms() - 3_600_000;
         let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
         for (seq, ts) in [
             (seqs[0], t0),
             (seqs[1], t0 + 2_000),
             (seqs[2], t0 + 300_000),
+            (seqs[3], t0),
+            (seqs[4], t0 + 300_000),
         ] {
             conn.execute(
                 "UPDATE ops SET ts = ?1 WHERE op_seq = ?2",
@@ -7907,7 +7914,9 @@ mod tests {
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
         purge(&home).unwrap().unwrap();
-        assert!(op_bodies(&home)[&seqs[2]].get("forgotten").is_some());
+        let bodies = op_bodies(&home);
+        assert!(bodies[&seqs[2]].get("forgotten").is_some());
+        assert!(bodies[&seqs[4]].get("forgotten").is_some());
     }
 
     /// Slice 3e-1: a restore between the purge's rebuild and its last steps, which put a row back
