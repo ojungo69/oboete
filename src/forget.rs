@@ -1264,7 +1264,14 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // does not hold judged by the same rules: every ops segment, as one set aside may hold
         // such an op (Codex and CodeRabbit on #472).
         let (origins, judge) = if records_owed {
-            (raw.forgotten_origins()?, raw.judge()?)
+            let mut judge = raw.judge()?;
+            // And what only they hold, read first: the claims made from a forgotten record, every
+            // op of their uids, and the spans of the windows (Codex on #472).
+            judge.widen(home)?;
+            for (uid, job) in judge.uids() {
+                jobs.entry(uid.clone()).or_insert_with(|| job.clone());
+            }
+            (raw.forgotten_origins()?, judge)
         } else {
             Default::default()
         };
@@ -3380,23 +3387,62 @@ mod tests {
         let gone = format!("Parsers stay in {WINDOW_CANARY} mode.");
         let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
         let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let r3 = s.said("s", "github.com/o/r", 3_000, "Tests run nightly.");
         let said = |what: &str| format!("{what}: {WINDOW_CANARY}.");
         let kept = "Kept: another record's window.";
+        let claim = claim_op(&device, &[(r1, &gone)], &said("its claim"));
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        // Another span's window that showed the claim, a turn that read its card, and the owner's
+        // correction of the claim: only the claim's uid ties them to the record (Codex on #472).
         let seqs = s
             .raw
             .append_ops(&[
                 window_op(r1, r1, &said("its span"), json!({})),
                 turn_op(r1, r1, &[], &said("its turn")),
-                claim_op(&device, &[(r1, &gone)], &said("its claim")),
+                claim,
                 window_op(r2, r2, kept, json!({})),
+                window_op(r3, r3, &said("its candidate"), json!({"candidates": [uid]})),
+                turn_op(r3, r3, &[(r3, r3)], &said("its card's turn")),
+                (
+                    raw::OpKind::Correction,
+                    json!({"uid": uid, "body": said("its correction")}),
+                ),
             ])
             .unwrap();
         let home = s.home.path().to_owned();
         crate::backup::export(&home).unwrap();
+        // And a claim and a window that showed it which only the copy holds.
+        let r4 = s.said("s", "github.com/o/r", 4_000, "Logs rotate daily.");
+        let late = claim_op(
+            &device,
+            &[(r2, "Deploys run on Fridays."), (r1, &gone)],
+            &said("its late claim"),
+        );
+        let late_uid = raw::op_uid(late.0, &late.1).unwrap();
+        s.raw
+            .append_ops(&[
+                late,
+                window_op(
+                    r4,
+                    r4,
+                    &said("its late candidate"),
+                    json!({"candidates": [late_uid]}),
+                ),
+            ])
+            .unwrap();
         let copy = copy_raw(
             &home,
             &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
         );
+        // The claim, the window that showed it and what names its uid, the segments' alone.
+        let only_segments = [seqs[2], seqs[4], seqs[5], seqs[6]];
+        rusqlite::Connection::open(&copy)
+            .unwrap()
+            .execute(
+                "DELETE FROM ops WHERE op_seq IN (SELECT value FROM json_each(?1))",
+                [serde_json::to_string(&only_segments).unwrap()],
+            )
+            .unwrap();
         rusqlite::Connection::open(home.join("raw.db"))
             .unwrap()
             .execute("DELETE FROM ops WHERE op_seq >= ?1", [seqs[0]])
@@ -3411,7 +3457,7 @@ mod tests {
                 .filter(|(.., b)| b.contains(text))
                 .count()
         };
-        assert_eq!((held(WINDOW_CANARY), held(kept)), (3, 1));
+        assert_eq!((held(WINDOW_CANARY), held(kept)), (4, 1));
         purge(&home).unwrap().unwrap();
         assert_eq!(backup_hits(&home, WINDOW_CANARY), Vec::<String>::new());
         assert_eq!((held(WINDOW_CANARY), held(kept)), (0, 1));
@@ -5115,13 +5161,19 @@ mod tests {
     fn a_copy_with_an_op_that_cannot_be_judged_is_removed_even_after_a_stopped_removal() {
         let mut s = crate::search::b::fixture::Store::new();
         let uid = canary_claim(&mut s);
+        let seq = s.said("s", "github.com/o/r", 2_000, "Use tabs.");
         s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        s.raw
+            .append_ops(&[window_op(seq, seq, "Tabs.", serde_json::json!({}))])
+            .unwrap();
         s.run();
         let home = s.home.path().to_owned();
         let damaged = [
             "UPDATE ops SET body = substr(body, 1, 10) WHERE type = 'claim' AND body LIKE '%Use tabs.%'",
             "UPDATE ops SET body = '{}' WHERE type = 'claim' AND body LIKE '%Use tabs.%'",
             "UPDATE ops SET type = 'a kind no name gives' WHERE type = 'claim' AND body LIKE '%Use tabs.%'",
+            // A window's card may be in it (Codex on #472).
+            "UPDATE ops SET body = substr(body, 1, 10) WHERE type = 'window'",
         ]
         .map(|sql| {
             let copy = copy_raw(

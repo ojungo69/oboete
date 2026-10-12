@@ -1260,6 +1260,37 @@ enum Line {
     Unknown,
 }
 
+/// An ops segment's line: its fields, its op's kind and its op's body.
+fn op_line(line: &str) -> Option<(serde_json::Value, raw::OpKind, serde_json::Value)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
+    let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
+    Some((v, kind, body))
+}
+
+/// Each op of every ops segment, live or set aside, as `purge_ops` reads it, with no file
+/// changed: a segment or a line that cannot be read is passed over (`purge_ops` removes it when it
+/// cannot judge it).
+pub(crate) fn each_op(home: &Path, f: &mut raw::EachOp) -> Result<()> {
+    let f = std::cell::RefCell::new(f);
+    walk(
+        home,
+        Kind::Ops,
+        &|text| {
+            for (v, kind, body) in text.lines().filter_map(op_line) {
+                let at = (
+                    v["device"].as_str().unwrap_or(""),
+                    v["op_seq"].as_i64().unwrap_or(0),
+                );
+                (f.borrow_mut())(kind, at, v["ts"].as_i64().unwrap_or(0), &body);
+            }
+            (None, false)
+        },
+        false,
+    )?;
+    Ok(())
+}
+
 /// One backup line, judged as raw.db's purge judges its op (`raw::op_uid`); a line rewritten keeps
 /// its other fields' values, in serde_json's key order: every reader parses the line.
 fn purged_line(
@@ -1270,13 +1301,7 @@ fn purged_line(
     if line.trim().is_empty() {
         return Line::Kept;
     }
-    let parsed = || -> Option<_> {
-        let v: serde_json::Value = serde_json::from_str(line).ok()?;
-        let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
-        let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
-        Some((v, kind, body))
-    };
-    let Some((mut v, kind, body)) = parsed() else {
+    let Some((mut v, kind, body)) = op_line(line) else {
         return Line::Unknown;
     };
     // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does not hold

@@ -989,8 +989,12 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   で raw.db の書き換えた本文にする（2c の uid の判定に、鍵から本文への表を足す）。raw.db が持たない op
   （古い写しに戻した raw.db の先の、set aside された segment やコピーにだけある op）は、その op 自身の本文で
   同じ規則（`Judge`）にかける: window・turn op と、忘れた record を引用する claim op（Codex と CodeRabbit on
-  #472）。そのため record の job が step 4 を負う間は、uid の job がなくても ops segment を全部読む。turn の
-  (b) は raw.db の window op の span で判定する。step 5 はそのまま（shown は claim の uid だけを持つ）。
+  #472）。そのため record の job が step 4 を負う間は、uid の job がなくても ops segment を全部読む。判定の
+  前に segment とコピーを 1 度読み、raw.db が持たない claim op のうち忘れた record を引用するものの uid
+  （window の candidates・carried が名指す。その uid の op はすべて書き換える: Correction も）と、raw.db が
+  持たない window op の span（turn の (b) が読む）を `Judge` に足す（Codex on #472 の 2 回目）。コピーの
+  window・turn op の本文が parse できないときは、claim と同じくコピーを消す。step 5 はそのまま（shown は
+  claim の uid だけを持つ）。
 - **recurate**: claims consumer が `forgotten` を持つ curated の window op を読んだとき、その span 全体を
   recurate の列に入れる（op は自分。Removed の行は次の window の文に入らず、その op の `removed` に載るので
   `Span::minus` で切らない）。今は Anchors が、消えた引用を持つ claim op の window を入れるが、3d-1 の書換えの
