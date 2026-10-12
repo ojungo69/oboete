@@ -6317,6 +6317,7 @@ mod tests {
                 tier: 1,
                 why: String::new(),
                 tainted: false,
+                support: Vec::new(),
             })
             .unwrap()
         };

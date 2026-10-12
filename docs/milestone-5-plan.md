@@ -1019,9 +1019,40 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   recurate の列に当たった window の span が入り、rebuild の後も入っている。その span を recuration した op は
   当たらない。restore で window op の本文が戻ると purge し直す。status は done、preview の数。
 
-#### 3d-3〜3e（各 PR で詳細を決める）
-- **3d-3**: #167（claim op に status の支えの anchor を持たせ、その record が消えたら proposed に戻す。op の
-  形の変更）。
+#### 3d-3: status を支える record（#167）
+
+gates は claim の status を、引用の行のほかの record で上げることがある: assistant の提案を次の user の
+turn が受け入れたとき（`accepted`）、user の素の「はい」や選択肢の番号が window の中の reply に答える
+とき（`answers_a_reply`、`picks_an_option`）、window の中の通ったテストの実行で done を残すとき
+（`passing_run`）。claim op はその record を持たないので、その record が消えても（rescan の tombstone、
+forget、後の withdraw）claim は decided や done のまま残り、rebuild でも残る。
+
+- **op の形**: claim op に `support`（その status が立つ record の `{device, seq}` の一覧、どれか 1 つが
+  残っていれば立つ）を足す。空のときは書かない（今までの op と同じ形、uid は変わらない）。本文も引用も
+  持たない: その record を忘れても claim op はその record の byte を持たないので 3d-1 の対象（引用する
+  claim）にならず、claim は残って status だけが下がる（#167 の受入: 「the claim itself stays」）。
+- **gates**: status を上げた条件が引用の行でないときだけ、その record を `Draft` に載せる（`tainted` と同じく
+  gates だけが書く）。受け入れ: 受け入れた user の turn。答え: 答えた reply（前の window の reply に答える
+  とき、つまり `ended` や `offered` で決まったときは window の中にないので持たない。制限）。通った実行:
+  window の中の同じ session と repository の通った実行すべて（どれか 1 つで gate を通る）。user 自身の
+  言葉で立つ status は持たない。
+- **consumer**: claims consumer は derivation を作るとき support の record がどれも残っていなければ（行が
+  消えた、または丸ごとの tombstone。一部の mask は残っているとみなす: 通ったテストの出力の token が
+  伏せられても実行は通っている）status を `proposed` にし（gates が下げるのと同じ）、support を
+  knowledge.db の `support(op_device, op_seq, device, seq)` に入れる。Anchors は tombstone の対象の record を
+  support に持つ derivation を探し、どれも残っていなければ `proposed` にする（claim は消さない、recurate
+  の列にも入れない: recuration の gates も同じく下げる）。読み手は derivation の status を読むので
+  （owner の Correction の status が先）、hook の配達も検索もそれに従う。rebuild は consumer がそのときの raw で
+  決めるので同じになる。
+- **forget**: support の record を忘れると、その claim は残って proposed になる（spec 6.3 の limits に 1 行）。
+  window op の文は 3d-2 の規則（span にある）で消える。
+- 受入テスト: 受け入れ・答え・通った実行で立つ claim の op が support を持ち、user 自身の言葉で立つ claim は
+  持たない。support の record を tombstone すると live の consumer でも rebuild でも proposed、claim は残る。
+  通った実行が 2 つあって 1 つ消えても done のまま。引用の record を消すと今までどおり（evidence lost）。
+  owner の Correction の status は下がらない。record forget で支えを忘れた claim は proposed で残り、その op は
+  書き換わらない。
+
+#### 3e（PR で詳細を決める）
 - **3e**: rescan の hit を範囲 target（device、seq、offset、length）として 3c の書換えに通す（preview
   なし）。retention は同じ書換えで tombstone を作らず、未 curate の raw は残し、claim は `raw expired`
   と表示する（spec 6.2）。#186（rescan が一部を伏せた directive を event から決定的に作り直す）も 3e:

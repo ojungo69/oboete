@@ -22,6 +22,15 @@ pub struct Evidence {
     pub claim_at: Option<i64>,
 }
 
+/// A record a claim's status stands on that is not one of its quotes' (#167, milestone 5 slice
+/// 3d-3): the user turn that accepts a proposal, the reply a bare answer accepts, or a passing run.
+/// Its identity only, never its text: a forget of it lowers the claim and leaves its op as it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Support {
+    pub device: String,
+    pub seq: i64,
+}
+
 /// The body of a claim op, which the curation phase writes (Task 7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaimOp {
@@ -50,6 +59,11 @@ pub struct ClaimOp {
     /// next window does not promote it (#144).
     #[serde(default)]
     pub tainted: bool,
+    /// The records its status stands on besides its quotes (#167): it stands while one of them is
+    /// left, and with none it is a proposal, as the gates would have made it. Left out when there
+    /// are none, so such an op is as it always was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub support: Vec<Support>,
 }
 
 /// Spec 3.2's kinds.
@@ -193,6 +207,13 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            PRIMARY KEY (op_device, op_seq, to_uid)
          );
          CREATE INDEX IF NOT EXISTS edges_to ON edges(to_uid);
+         -- The records each derivation's status stands on besides its quotes (#167).
+         CREATE TABLE IF NOT EXISTS support(
+           op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, device TEXT NOT NULL,
+           seq INTEGER NOT NULL,
+           PRIMARY KEY (op_device, op_seq, device, seq)
+         );
+         CREATE INDEX IF NOT EXISTS support_record ON support(device, seq);
          -- Each uid's active derivation: the highest tier, then the newest (MUST-M18).
          CREATE TABLE IF NOT EXISTS claims(
            rowid INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE,
@@ -648,6 +669,7 @@ pub(crate) fn pref_add_recorded(
         tier: 0,
         why: String::new(),
         tainted: false,
+        support: Vec::new(),
     };
     let append = (|| -> Result<Vec<i64>> {
         raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])

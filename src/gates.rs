@@ -124,6 +124,10 @@ const OUTSIDE: &str = "supersedes only its repository's candidates and claims in
 /// A claim's body in characters (spec 6.5): a longer one is dropped, never cut.
 const MAX_BODY_CHARS: usize = 1_000;
 
+/// The most records a claim's status stands on that its op names (#167): a window can hold many
+/// passing runs, and the op must stay within the op cap.
+const MAX_SUPPORT: usize = 16;
+
 /// What the gates let through, and what they did to the rest.
 #[derive(Debug, Default, PartialEq)]
 pub struct Gated {
@@ -249,7 +253,16 @@ pub fn check(
                 None => answers_a_reply(w, i, &tools, ended),
             };
         d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools);
-        let accepts = speaker == "assistant proposal" && !d.tainted && accepted(w, i);
+        let acceptance = (speaker == "assistant proposal" && !d.tainted)
+            .then(|| accepted(w, i))
+            .flatten();
+        let accepts = acceptance.is_some();
+        // The passing runs a done claim not in the user's own words stands on.
+        let runs: Vec<&Line> = if d.status == "done" && !own_words {
+            passing_runs(w, line).collect()
+        } else {
+            Vec::new()
+        };
         let below = match d.status.as_str() {
             "decided" if paste => Some("a span pasted from a tool line is not the user's words"),
             "decided" if d.tainted => {
@@ -259,7 +272,7 @@ pub fn check(
                 Some("decided needs the user's words or an acceptance right after")
             }
             // A bare "yes" names nothing done, whatever ran (spec 3.3).
-            "done" if asked || is_bare || !own_words && !passing_run(w, line) => {
+            "done" if asked || is_bare || !own_words && runs.is_empty() => {
                 Some("done needs the user's words or a passing run")
             }
             "retracted" if !own_words => Some("retracted needs the user's words"),
@@ -269,6 +282,29 @@ pub fn check(
             d.status = "proposed".into();
             lower(&d, why);
         }
+        // #167: a status the quote's own words do not carry stands on the record that raised it:
+        // the acceptance, the reply a bare answer accepts (none when that reply is in an earlier
+        // window), or the passing runs. Each is found only where the words are not the user's own.
+        let raised: Vec<&Line> = match d.status.as_str() {
+            "decided" => acceptance
+                .or_else(|| answers.then(|| turn_before(w, i)).flatten().map(|(_, l)| l))
+                .into_iter()
+                .collect(),
+            "done" => runs,
+            _ => Vec::new(),
+        };
+        let mut seqs: Vec<i64> = raised.iter().map(|l| l.seq).collect();
+        seqs.dedup();
+        // shortcut: at most `MAX_SUPPORT` runs, the window's first; a claim whose kept runs are
+        // all removed drops while a later one stands. Keep the nearest if that is seen.
+        seqs.truncate(MAX_SUPPORT);
+        d.support = seqs
+            .into_iter()
+            .map(|seq| crate::claims::Support {
+                device: w.device.clone(),
+                seq,
+            })
+            .collect();
         g.kept.push((d, evidence));
         own.push((own_words, pick.is_some(), line.repo.as_deref(), &line.key));
     }
@@ -425,17 +461,28 @@ fn question(text: &str) -> bool {
     text.trim_end().ends_with(['?', '？'])
 }
 
-/// The next turn of the same session after line `i`, past tool calls and harness lines, is the
-/// user's in the same repository and accepts: no other reply of the assistant comes between (spec
-/// 3.3, "right after").
-fn accepted(w: &Window, i: usize) -> bool {
+/// The next turn of the same session after line `i`, past tool calls and harness lines, when it is
+/// the user's in the same repository and accepts: no other reply of the assistant comes between
+/// (spec 3.3, "right after").
+fn accepted(w: &Window, i: usize) -> Option<&Line> {
     let line = &w.lines[i];
     w.lines[i + 1..]
         .iter()
         .filter(|l| l.key == line.key)
         .find(|l| matches!(l.role, Role::User | Role::Assistant | Role::Answer))
         // After a checkout change the turn is in another repository: not this proposal's answer.
-        .is_some_and(|l| l.role != Role::Assistant && l.repo == line.repo && turn_accepts(l))
+        .filter(|l| l.role != Role::Assistant && l.repo == line.repo && turn_accepts(l))
+}
+
+/// The turn before line `i` in its session, past tool calls and harness lines, and its index.
+fn turn_before(w: &Window, i: usize) -> Option<(usize, &Line)> {
+    let key = &w.lines[i].key;
+    w.lines[..i]
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, l)| &l.key == key)
+        .find(|(_, l)| matches!(l.role, Role::User | Role::Assistant | Role::Answer))
 }
 
 /// User line `i` accepts, and the turn before it in the same session, past tool calls and harness
@@ -445,14 +492,8 @@ fn accepted(w: &Window, i: usize) -> bool {
 /// window must have ended on an untainted proposal of this repository (`ended`, #144).
 fn answers_a_reply(w: &Window, i: usize, tools: &str, ended: &[String]) -> bool {
     let key = &w.lines[i].key;
-    let before = w.lines[..i]
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, l)| &l.key == key)
-        .find(|(_, l)| matches!(l.role, Role::User | Role::Assistant | Role::Answer));
     turn_accepts(&w.lines[i])
-        && match before {
+        && match turn_before(w, i) {
             Some((j, l)) => {
                 l.role == Role::Assistant
                     && l.repo == w.lines[i].repo
@@ -620,15 +661,10 @@ fn picks(quote: &str) -> Option<String> {
 /// docs/milestone-3.md).
 fn picks_an_option(w: &Window, i: usize, label: &str, offered: &[(String, Vec<String>)]) -> bool {
     let line = &w.lines[i];
-    let before = w.lines[..i]
-        .iter()
-        .rev()
-        .filter(|l| l.key == line.key)
-        .find(|l| matches!(l.role, Role::User | Role::Assistant | Role::Answer));
     !question(&line.text)
         && !negated(&line.text)
-        && match before {
-            Some(l) => {
+        && match turn_before(w, i) {
+            Some((_, l)) => {
                 l.role == Role::Assistant
                     && l.repo == line.repo
                     && said(&l.text)
@@ -669,7 +705,7 @@ fn letters(text: &str) -> usize {
 /// prints is a `0 failed`, and it reports no error (`1 error`, a line that starts `error:`). Its
 /// output only, decoded when structured: an input such as `echo passed` ran nothing, and a read
 /// of a file that says tests passed ran none.
-fn passing_run(w: &Window, line: &Line) -> bool {
+fn passing_runs<'w>(w: &'w Window, line: &Line) -> impl Iterator<Item = &'w Line> {
     static NONE_FAILED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static ERRORS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static PASS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -678,7 +714,7 @@ fn passing_run(w: &Window, line: &Line) -> bool {
     let errors = ERRORS.get_or_init(|| {
         regex::Regex::new(r"(?m)\b[1-9]\d*\s+errors?\b|^\s*error(?:\[|:)").unwrap()
     });
-    w.lines.iter().any(|l| {
+    w.lines.iter().filter(move |l| {
         l.key == line.key
             && l.repo == line.repo
             && l.role == (Role::Tool { failed: false })
@@ -871,6 +907,7 @@ mod tests {
             supersedes: Vec::new(),
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         let e = locate(w, &line, quote).unwrap();
         (d, e, line_index(w, &line).unwrap())
@@ -1275,6 +1312,88 @@ mod tests {
         let quote = "The cache is probably stale";
         let got = one(&w, "decided", "assistant inferred", quote);
         assert_eq!(got, is("proposed", "assistant inferred"));
+    }
+
+    /// #167: a status the quote's own words do not carry names the records it stands on: the
+    /// acceptance after a proposal, the reply a bare yes accepts, each passing run a done claim
+    /// rests on (once each). One in the user's own words names none, nor a pick of options an
+    /// earlier window offered (its reply is not in the window), nor a status the gates lowered.
+    #[test]
+    fn a_raised_status_names_the_records_it_stands_on() {
+        let gated = |w: &Window, status: &str, speaker: &str, quote: &str, offered| {
+            let d = draft(w, "c1", status, speaker, quote);
+            let (d, _) = check(w, &[], &[], &[], offered, vec![d], &Rules::default())
+                .kept
+                .remove(0);
+            assert!(d.support.iter().all(|s| s.device == w.device));
+            (
+                d.status,
+                d.support.iter().map(|s| s.seq).collect::<Vec<i64>>(),
+            )
+        };
+        let at =
+            |w: &Window, text: &str| w.lines.iter().find(|l| l.text.contains(text)).unwrap().seq;
+        let w = window(&[
+            reply("Let's keep the parsed files in a cache."),
+            user("Yes, go ahead."),
+        ]);
+        let proposal = "keep the parsed files in a cache";
+        assert_eq!(
+            gated(&w, "decided", "assistant proposal", proposal, &[]),
+            ("decided".into(), vec![at(&w, "go ahead")])
+        );
+        let w = window(&[user("We keep the parsed files in a cache.")]);
+        let own = "We keep the parsed files in a cache";
+        assert_eq!(
+            gated(&w, "decided", "user", own, &[]),
+            ("decided".into(), vec![])
+        );
+        let w = window(&[
+            reply("Shall we keep the parsed files in a cache?"),
+            user("Yes."),
+        ]);
+        assert_eq!(
+            gated(&w, "decided", "user", "Yes", &[]),
+            ("decided".into(), vec![at(&w, "Shall we")])
+        );
+        let w = window(&[user("１番で")]);
+        let offered = [(w.lines[0].key.clone(), vec!["1".into(), "2".into()])];
+        assert_eq!(
+            gated(&w, "decided", "user", "１番で", &offered),
+            ("decided".into(), vec![])
+        );
+        let fixed = "It should be fixed now.";
+        let passing = |n: u32| tool(&format!("test result: ok. {n} passed; 0 failed"), false);
+        let w = window(&[passing(4), reply(fixed), passing(5), passing(6)]);
+        let quote = "It should be fixed now";
+        assert_eq!(
+            gated(&w, "done", "assistant proposal", quote, &[]),
+            (
+                "done".into(),
+                vec![at(&w, "4 passed"), at(&w, "5 passed"), at(&w, "6 passed")]
+            )
+        );
+        let w = window(&[passing(4), user("The parser is fixed now.")]);
+        assert_eq!(
+            gated(&w, "done", "user", "The parser is fixed now", &[]),
+            ("done".into(), vec![])
+        );
+        let w = window(&[reply(fixed)]);
+        assert_eq!(
+            gated(&w, "done", "assistant proposal", quote, &[]),
+            ("proposed".into(), vec![])
+        );
+        // At most `MAX_SUPPORT` runs, the window's first.
+        let mut events: Vec<(&str, Value)> = (0..20).map(passing).collect();
+        events.push(reply(fixed));
+        let w = window(&events);
+        let (_, runs) = gated(&w, "done", "assistant proposal", quote, &[]);
+        assert_eq!(
+            runs,
+            (0..MAX_SUPPORT as u32)
+                .map(|n| at(&w, &format!("ok. {n} passed")))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// MUST-M1: narration with no passing run leaves the item open.
