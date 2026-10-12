@@ -6896,6 +6896,27 @@ fn insert_event(
     Ok(seq)
 }
 
+/// Slice 3e-2: `ops` split, in order, into appends within one batch's caps (`MAX_BATCH_OPS`,
+/// `MAX_BATCH_BYTES`) for ops written apart (Codex on #485); `append_ops` checks each op's own cap.
+pub(crate) fn append_batches(
+    ops: &[(OpKind, serde_json::Value)],
+) -> Vec<&[(OpKind, serde_json::Value)]> {
+    let mut batches = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, (_, body)) in ops.iter().enumerate() {
+        let size = body.to_string().len();
+        if i > start && (i - start == MAX_BATCH_OPS || bytes + size > MAX_BATCH_BYTES) {
+            batches.push(&ops[start..i]);
+            (start, bytes) = (i, 0);
+        }
+        bytes += size;
+    }
+    if start < ops.len() {
+        batches.push(&ops[start..]);
+    }
+    batches
+}
+
 /// `ops` serialized, each within `MAX_OP_BYTES` and all within one append's caps.
 fn within_batch_cap(ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<(&'static str, String)>> {
     let bodies = ops
@@ -7412,6 +7433,21 @@ mod tests {
             raw.removed_in(&device, 1, 2, Some(6)).unwrap(),
             [(1, None, None), first]
         );
+    }
+
+    /// Slice 3e-2 (Codex on #485): ops written apart go in appends within one batch's caps, the
+    /// bytes' as well as the count's, in order.
+    #[test]
+    fn append_batches_keep_each_append_within_its_caps() {
+        let op = |n: usize| (OpKind::Claim, serde_json::json!({ "body": "x".repeat(n) }));
+        let big: Vec<_> = (0..80).map(|_| op(60_000)).collect();
+        let batches = append_batches(&big);
+        assert_eq!(batches.len(), 2);
+        for batch in &batches {
+            within_batch_cap(batch).unwrap();
+        }
+        assert_eq!(batches.concat(), big);
+        assert!(append_batches(&[]).is_empty());
     }
 
     #[test]

@@ -1173,8 +1173,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             if masks.is_some() {
                 crate::backup::fail_after("masked_claims_purged")?;
                 let again = raw.masked_preferences(&forgotten(&raw)?)?;
-                if !again.is_empty() {
-                    raw.append_ops(&again)?;
+                for batch in crate::raw::append_batches(&again) {
+                    raw.append_ops(batch)?;
                 }
                 purged.preferences = again.len();
             }
@@ -8668,6 +8668,46 @@ mod tests {
             .map(|b| b["body"].clone())
             .collect();
         assert_eq!(bodies, [serde_json::json!(twice)]);
+    }
+
+    /// Slice 3e-2 (Codex on #485): more preferences to write again than one append takes go in
+    /// appends within its caps.
+    #[test]
+    fn preferences_written_again_go_in_appends_within_the_caps() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let (home, device) = (s.home.path().to_owned(), s.raw.device().to_owned());
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let n = crate::raw::MAX_BATCH_OPS + 1;
+        let mut ops = Vec::new();
+        for i in 0..n {
+            let text = format!("Rule {i} keeps {MASKED}.");
+            let c = crate::capture::directive(&text, 1_000 + i as i64, &settings);
+            let quote = crate::curate::long_text(&c.event).unwrap();
+            let evidence = crate::claims::Evidence {
+                device: device.clone(),
+                seq: s.raw.append(&c.event).unwrap(),
+                offset: 0,
+                length: quote.len() as i64,
+                sentence: 0,
+                quote,
+                claim_at: None,
+            };
+            let op = crate::claims::preference_op(evidence);
+            ops.push((raw::OpKind::Claim, serde_json::to_value(op).unwrap()));
+        }
+        let batches = crate::raw::append_batches(&ops);
+        assert_eq!(
+            batches.iter().map(|b| b.len()).collect::<Vec<_>>(),
+            [n - 1, 1]
+        );
+        for batch in batches {
+            s.raw.append_ops(batch).unwrap();
+        }
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, n);
     }
 
     /// Slice 3e-2: a preference forgotten by its uid is not written again when a rescan masks part
