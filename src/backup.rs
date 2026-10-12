@@ -1294,8 +1294,34 @@ pub(crate) fn each_op(home: &Path, f: &mut raw::EachOp) -> Result<()> {
 }
 
 /// One backup line, judged as raw.db's purge judges its op (`raw::op_uid`); a line rewritten keeps
-/// its other fields' values, in serde_json's key order: every reader parses the line.
+/// its other fields' values, in serde_json's key order: every reader parses the line. Slice 3e-4:
+/// and the text left masked with the rules raw.db's ops are masked with (`Judge::text`).
 fn purged_line(
+    line: &str,
+    jobs: &std::collections::HashMap<String, String>,
+    judge: &raw::Judge,
+) -> Line {
+    let judged = judged_line(line, jobs, judge);
+    let Some(rules) = &judge.text else {
+        return judged;
+    };
+    if matches!(judged, Line::Unknown) {
+        return judged;
+    }
+    let text = match &judged {
+        Line::Purged(text) => text.as_str(),
+        _ => line,
+    };
+    let masked = op_line(text).and_then(|(mut v, kind, _)| {
+        let now = raw::masked_op_text(kind, v["body"].as_str()?, rules)?;
+        v["body"] = now.into();
+        Some(v.to_string())
+    });
+    masked.map_or(judged, Line::Purged)
+}
+
+/// `purged_line` by what forget took.
+fn judged_line(
     line: &str,
     jobs: &std::collections::HashMap<String, String>,
     judge: &raw::Judge,

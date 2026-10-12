@@ -1247,6 +1247,58 @@ curate の raw（checkpoint の上、pending の window、v1 の取り込み）�
 - 証拠の record が期限切れの claim の status（3d-3 の support が期限切れのとき proposed に戻すか）。
 - 期限切れを読み手がどう見分けるか（tombstone も deny もない Removed の行で推すか、専用の行の種類か）。
 
+#### 3e-4: 規則が変わった後の op の文（#478）
+
+3e-1 の purge が伏せ字を及ぼすのは、伏せた record から作られた op（時刻と出所で辿れる claim・window・
+turn）だけ。それ以外の op の文（owner の Correction の body、作業メモ、取り込んだ文書、curator が自分で
+書いた語、別の record を引用して伏せた文を写した claim）は、書いた時の規則でしか伏せていない（読む時は
+egress の gate が今の規則で伏せる）。
+
+- **今の規則で op の文を伏せる**: 規則の版（`Rules::version`: `[redaction]` の規則と残す値で決まる）が
+  raw.db の meta `ops_text_scanned`（op の文を最後に走査した版）と違う間、purge が step 2 で raw.db の
+  op を全部読み、本文の JSON の文字列値ごとに今の規則で探し（`redact::ranges`）、見つかった所を 3e-1 と
+  同じく `*` にする（`masked`: 文字の境界まで広げ、byte 数は同じ）。値を解析して書き直すので JSON は
+  壊れず、キーの順も変わらない（`preserve_order`）。再 curate の列には入れない。
+- **伏せない値**（`OP_NAMES`）: oboete が付ける名前（識別子と自分の語彙）の値: `uid`、`id`、
+  `supersedes`、`candidates`、`carried`、`copied`、`device`、`forgotten`、`job`、`source`、`source_id`、
+  `session`、`repo`、`list`、`kind`、`type`、`status`、`speaker`、`scope`、`recipe`、`outcome`、`agent`、
+  `provider`、`reason`、`dropped`、`lowered`。それに record の文をそのまま写した `quote`（その record の
+  伏せ字が決める。引用だけを走査すると、行頭に固定した規則が record の欄の途中とは違う所に当たり、
+  引用が読めなくなる）。キーも伏せない。`fields`（作業メモと turn の要約）の中は全部が文。forget の op
+  （uid と job）と migration の op（checkpoint と v1 の session id の SHA-256）は文を持たないので読まない。
+  64 桁の 16 進を探す利用者の規則が uid を書き換えると、訂正・forget・取り込みの対応が切れ、forget した
+  claim が戻る（`view::gated_with_ids` と同じ考え）。repo と list を伏せると op の所属が変わる。名前は
+  評価用の store 3 つにある op の文字列の欄を全部数えて決めた（値は読まない）。
+- **進み方**: 版が違えば走査する（新しい store とこの版より前の store も 1 回。何も見つからなければ何も
+  書かない）。走査は書く transaction の外で、書換えは dispatch の下の `RECORD_PURGE_BATCH` ごとの
+  transaction（本文が読んだ時のままの op だけ）。op を書き換えた transaction で meta `ops_text_pending`
+  を立て、それがある間 knowledge.db を作り直す（止まった purge が残しても、次の回の走査は何も書かないが
+  作り直す）。step 4 は版が違う回ごとに backup の ops segment とコピーの op を全部読み、同じ書換えを
+  する（raw.db が持たない op にも）。raw.db-wal を truncate でき step 4 まで終わった回が、始めに読んだ版を
+  記録して pending を消す（途中で版が変わったら次の回がもう一度走査する）。記録は走査を始めた raw.db
+  にだけする（始めた印 `ops_text_scanning`）: 途中の restore が segment から作り直した raw.db（新しい
+  meta）はその segment の op を持つので、走査を払わない。worker の `continue_due` は版が違う間、raw.db の
+  op を自分で読み、規則が何も伏せなければ走査を記録して purge を起こさず（新しい store の最初の回も）、
+  伏せるものがあれば `forget --continue` を起こす（設定が読めない間は待つ）。
+- **3e-1・3e-2 の後**: 走査は 3e-1 の書換え（伏せた record から作られた op）と 3e-2 の preference の後。
+  3e-1 の判定は変えない（伏せる前に書かれ伏せた record を引用する claim は、走査で引用がまた一致しても
+  作り直しのために文を失う）。3e-2 が作り直した op は文が伏せた引用そのものなので変わらない。
+- **報告**: `Ops whose text the current redaction rules masked: N`。raw.db-wal を truncate できなかった
+  回は 3e-1 と同じく未完了（`MASK_JOB`）。
+- **限界**: キー（作業メモの fields の名前など）と上の名前の値は伏せない（repo に当たる規則でも）。
+  worker が raw.db の op に何も見つけずに記録した版では、backup とコピーだけが持つ op（restore の後）を
+  読まない（他の理由で purge が走れば読む）。
+  vector の cache は伏せる前の文から作った vector をその sha で持ち続ける（文字ではない。作り直した
+  vector_keys は伏せた文の sha を指す）。他の端末の op は M6。規則を変えるたびに op を全部読む（測る）。
+- 受入テスト（#478）: (1) window の span の record が秘密を持ち、同じ window の claim が別の record を
+  引用して body に秘密を写し、後の window がその claim を候補に出して summary に秘密を写す: purge の後、
+  どれも秘密を持たず、claim は伏せた body で current のまま、どちらの window もこのためには再 curate の
+  列に入らない。(2) Correction の body、作業メモ、取り込み、window の summary が秘密を持ち、規則を足す:
+  rescan と purge の後、raw.db・その WAL・knowledge.db・ops segment・raw.db のコピーに 0 件、各 op は
+  前と同じに読める（Correction は uid の status を直したまま）。(3) 同じ規則の 2 回目の purge は走査
+  しない、3 つ目の規則でまた走査する。(4) 64 桁の 16 進の規則を足しても、Correction・forget・候補の
+  uid は変わらない。(5) 大きなコピーで走査の時間と hook の待ちを測る。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |

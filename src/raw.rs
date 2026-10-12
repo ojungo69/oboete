@@ -2486,6 +2486,104 @@ impl Raw {
         Ok(())
     }
 
+    /// Slice 3e-4 (#478): whether the text of raw.db's ops is owed a scan with the redaction rules
+    /// of `version`: they were last scanned with others (or never: a store from before this
+    /// version), or a purge that masked some has not finished.
+    pub(crate) fn ops_text_owed(&self, version: &str) -> Result<bool> {
+        let (scanned, pending): (Option<String>, bool) = self.conn.query_row(
+            "SELECT (SELECT value FROM meta WHERE key = 'ops_text_scanned'),
+                    EXISTS(SELECT 1 FROM meta WHERE key = 'ops_text_pending')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(pending || scanned.as_deref() != Some(version))
+    }
+
+    /// Slice 3e-4: whether a purge masked op text it has not finished with: knowledge.db and the
+    /// backups owe it.
+    pub(crate) fn ops_text_pending(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ops_text_pending')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Slice 3e-4: the ops whose text `rules` mask now (`masked_op_text`), each with its device, op
+    /// seq, its body as read and as masked, in one read with no write lock.
+    pub(crate) fn op_text_masks(&self, rules: &crate::redact::Rules) -> Result<Vec<OpText>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT device, op_seq, type, body FROM ops")?;
+        let mut rows = st.query([])?;
+        let mut found = Vec::new();
+        while let Some(row) = rows.next()? {
+            let Some(kind) = OpKind::from_name(row.get_ref(2)?.as_str()?) else {
+                continue;
+            };
+            let body: String = row.get(3)?;
+            if let Some(now) = masked_op_text(kind, &body, rules) {
+                found.push((row.get(0)?, row.get(1)?, body, now));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Slice 3e-4: `found` (`op_text_masks`) written, in transactions of `RECORD_PURGE_BATCH` ops
+    /// under dispatch, each op only while its body is the one read, with the pending mark: the
+    /// rebuild and the backups owe it until `ops_text_scanned`. How many ops it rewrote.
+    pub(crate) fn mask_op_text(&mut self, found: &[OpText]) -> Result<usize> {
+        let mut rewritten = 0;
+        for batch in found.chunks(RECORD_PURGE_BATCH) {
+            let _dispatch = crate::dispatch::exclusive(&self.home)
+                .context("the text of the ops was not masked")?;
+            self.current()?;
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES('ops_text_pending', '1')",
+                [],
+            )?;
+            {
+                let mut st = tx.prepare_cached(
+                    "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body = ?4",
+                )?;
+                for (device, op_seq, was, now) in batch {
+                    rewritten += st.execute(params![now, device, op_seq, was])?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(rewritten)
+    }
+
+    /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
+    /// only while it holds the mark: a raw.db a restore made meanwhile (a new meta) holds the ops
+    /// its segments held, and stays owed.
+    pub(crate) fn op_text_scan_begun(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES('ops_text_scanning', '1')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Slice 3e-4: the text of raw.db's ops masked with the rules of `version` everywhere a purge
+    /// puts it, recorded with the marks taken away, in one transaction, when the scan was begun in
+    /// this raw.db (`op_text_scan_begun`). Whether it was.
+    pub(crate) fn ops_text_scanned(&self, version: &str) -> Result<bool> {
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let begun = tx.execute("DELETE FROM meta WHERE key = 'ops_text_scanning'", [])? == 1;
+        if begun {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('ops_text_scanned', ?1)",
+                [version],
+            )?;
+            tx.execute("DELETE FROM meta WHERE key = 'ops_text_pending'", [])?;
+        }
+        tx.commit()?;
+        Ok(begun)
+    }
+
     /// D5: `uid`'s ops in the op log when knowledge.db has not read them yet (right after an
     /// import, or while the worker lags; Codex on #435): a claim's, its uid computed as the
     /// consumer computes it, with the corrections that name it, or a document's import ops. Its
@@ -6001,7 +6099,7 @@ fn rewrite_copy(
     }
     // A copy from before the op log holds no uid's op (CodeRabbit on #458).
     let mut keys: Vec<(String, i64, String)> = Vec::new();
-    if (!jobs.is_empty() || !judge.forgotten.is_empty()) && has("ops")? {
+    if (!jobs.is_empty() || !judge.forgotten.is_empty() || judge.text.is_some()) && has("ops")? {
         let mut st = tx.prepare("SELECT device, op_seq, type, ts, body, batch FROM ops")?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
@@ -6009,36 +6107,40 @@ fn rewrite_copy(
                 .context("an op of a kind that cannot be named")?;
             let key: (String, i64) = (row.get(0)?, row.get(1)?);
             let (ts, batch): (i64, Option<i64>) = (row.get(3)?, row.get(5)?);
+            let text: String = row.get(4)?;
             // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does
             // not hold judged by its own (Codex and CodeRabbit on #472).
             // A body that does not parse may hold a card's or a summary's text: it fails the copy,
             // as a claim's does (Codex on #472).
-            if matches!(kind, OpKind::Window | OpKind::Turn) {
-                let body = serde_json::from_str(&row.get::<_, String>(4)?)
-                    .context("an op whose body does not parse")?;
-                if let Some(now) = judge.purged(kind, (&key.0, key.1), ts, batch, &body) {
-                    keys.push((key.0, key.1, now));
-                }
-                continue;
-            }
-            if !matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
-                continue;
-            }
-            let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(4)?)
-                .context("an op whose body does not parse")?;
-            match op_uid(kind, &body) {
-                Some(uid) => {
-                    let now = match jobs.get(&uid) {
+            let now = if matches!(kind, OpKind::Window | OpKind::Turn) {
+                let body =
+                    serde_json::from_str(&text).context("an op whose body does not parse")?;
+                judge.purged(kind, (&key.0, key.1), ts, batch, &body)
+            } else if matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
+                let body: serde_json::Value =
+                    serde_json::from_str(&text).context("an op whose body does not parse")?;
+                match op_uid(kind, &body) {
+                    Some(uid) => match jobs.get(&uid) {
                         Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
                         // A claim op raw.db does not hold that quotes a forgotten record, or of a
                         // window's batch a record job took (3d-4).
                         None => judge.purged(kind, (&key.0, key.1), ts, batch, &body),
-                    };
-                    if let Some(now) = now {
-                        keys.push((key.0, key.1, now));
+                    },
+                    None => {
+                        anyhow::ensure!(forgotten_body(&body), "an op that names no uid");
+                        None
                     }
                 }
-                None => anyhow::ensure!(forgotten_body(&body), "an op that names no uid"),
+            } else {
+                None
+            };
+            // Slice 3e-4: and the text left, masked with the rules now as raw.db's.
+            let now = match &judge.text {
+                Some(rules) => masked_op_text(kind, now.as_deref().unwrap_or(&text), rules).or(now),
+                None => now,
+            };
+            if let Some(now) = now {
+                keys.push((key.0, key.1, now));
             }
         }
     }
@@ -6289,6 +6391,9 @@ pub(crate) struct Judge {
     /// text when it holds the same body, not another op a restore gave that op seq to (Codex on
     /// #485).
     now: std::collections::HashMap<(String, i64), serde_json::Value>,
+    /// Slice 3e-4 (#478): the redaction rules every op's text is masked with, as raw.db's, when it
+    /// is owed a scan with them (`masked_op_text`).
+    pub(crate) text: Option<crate::redact::Rules>,
 }
 
 impl Judge {
@@ -6805,6 +6910,86 @@ fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Re
         OpKind::Correction => anchor(&body["anchor"]),
         _ => Ok(false),
     }
+}
+
+/// Slice 3e-4: an op whose text the rules now mask, its device, op seq, body as read and as masked.
+pub(crate) type OpText = (String, i64, String, String);
+
+/// Slice 3e-4 (#478): the keys of an op's body whose values oboete gives (identifiers and the
+/// words of its own vocabulary), or a record holds verbatim (a quote, which its record's mask
+/// covers): no rule masks them in an op. A user's rule for 64 hex digits would otherwise change the
+/// uid a correction, a forget or an import names (as `view::gated_with_ids` keeps them), and one
+/// for a repository which op is whose. Inside `fields` (a work state's, a turn's) every value is
+/// text.
+const OP_NAMES: &[&str] = &[
+    "agent",
+    "candidates",
+    "carried",
+    "copied",
+    "device",
+    "dropped",
+    "forgotten",
+    "id",
+    "job",
+    "kind",
+    "list",
+    "lowered",
+    "outcome",
+    "provider",
+    "quote",
+    "reason",
+    "recipe",
+    "repo",
+    "scope",
+    "session",
+    "source",
+    "source_id",
+    "speaker",
+    "status",
+    "supersedes",
+    "type",
+    "uid",
+];
+
+/// Slice 3e-4 (#478): an op's `body` of `kind` with each string `rules` find something in masked as
+/// a rescan masks a record (`masked`: `*` for every byte of each character a finding touches), but
+/// the values of `OP_NAMES`; none when they find nothing or the body does not parse. A forget's op
+/// (a uid and a job) and a migration's (a checkpoint and hashes) hold no text.
+pub(crate) fn masked_op_text(
+    kind: OpKind,
+    body: &str,
+    rules: &crate::redact::Rules,
+) -> Option<String> {
+    fn walk(v: &mut serde_json::Value, rules: &crate::redact::Rules, names: bool) -> bool {
+        match v {
+            serde_json::Value::String(text) => {
+                let now = crate::redact::ranges(text, rules)
+                    .into_iter()
+                    .fold(text.clone(), |t, (start, end)| {
+                        masked(&t, start as i64, (end - start) as i64)
+                    });
+                let changed = now != *text;
+                *text = now;
+                changed
+            }
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .fold(false, |changed, item| walk(item, rules, names) | changed),
+            serde_json::Value::Object(map) => map.iter_mut().fold(false, |changed, (key, item)| {
+                if names && OP_NAMES.contains(&key.as_str()) {
+                    changed
+                } else {
+                    walk(item, rules, names && key != "fields") | changed
+                }
+            }),
+            _ => false,
+        }
+    }
+    if matches!(kind, OpKind::Forget | OpKind::Migration) {
+        return None;
+    }
+    let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
+    walk(&mut v, rules, true).then(|| v.to_string())
 }
 
 /// `body` with the bytes from `offset` for `length` replaced by `*`, widened to whole characters

@@ -219,7 +219,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 - The cost of this scan over 256 KB per tool call is measured in M14, together with the write. If it breaks the hook target, outputs above the measured size keep head and tail with an explicit marker, redacted in full, instead of being kept whole.
 - This is a security-relevant change and is reviewed under rules/security.md.
 - A redaction ledger records rule id, offset, length, time and ruleset version. It never records the value.
-- When the ruleset gains a pattern, old raw is rescanned. New hits become range tombstones, masked at compaction (RD/constraints-synthesis.md S2-2): forget's purge masks them in raw.db's rows, what was made from the text before the mask, knowledge.db, the backups and the copies of raw.db (6.2).
+- When the ruleset gains a pattern, old raw is rescanned. New hits become range tombstones, masked at compaction (RD/constraints-synthesis.md S2-2): forget's purge masks them in raw.db's rows, what was made from the text before the mask, knowledge.db, the backups and the copies of raw.db, and, once for each version of the rules, what they find in the text of every op (6.2).
 
 ### 2.3 Capture sources and content
 
@@ -675,6 +675,7 @@ The four levels below are owner decision 19.
   - The worker also creates one internal kind: a redaction-rescan hit becomes a range target (device, seq, byte offset, length) with no preview (§2.2, RD/sections-1-4.md:21; RD/constraints-synthesis.md:150-153). It runs the same pipeline below.
     - Its progress is a count in raw.db, not a `forget_jobs` row per hit: one new rule can hit thousands of records. A purge that has done every step records how many range tombstones it read; while raw.db holds more (a later rescan, a store from before this rule, one rebuilt from segments), the masks are owed, and doctor shows it (Claude; overrulable).
     - A preference (`oboete pref add`) whose directive it masks part of is written again by the purge from the masked text, with the same uid, as no curator makes one from a directive (#186; docs/milestone-5-plan.md, 3e-2).
+    - Once for each version of the rules, the purge also masks what they find in the text of every op that no masked record traces to (an owner's correction, a work state, an imported document, a curator's own words), byte for byte as in a record, everywhere it masks a record. It leaves the identifiers and the words of oboete's own vocabulary that an op names, so a user's rule for hex digits cannot change a uid (#478; docs/milestone-5-plan.md, 3e-4) (Claude; overrulable).
     - The record stays: its bytes in the range become `*`, as many as there were, so every offset into it still holds. A claim quoting the record from before the mask loses its op's text but its uid is not tombstoned, because a recuration of the masked text derives the same uid (MUST-M18), as RD/constraints-synthesis.md:153 has it ("curated again") (Claude; overrulable).
 - **Claim-uid targets**: forgetting a claim or document uid deletes that row and denies its uid. It does not remove the raw span the claim came from, which stays searchable. (Claude; overrulable)
   - The preview says "raw records: 0" and names the span to forget when the text itself must go.
