@@ -612,6 +612,30 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
         .into_cli()
 }
 
+/// What `oboete pref add` writes in a claim op's `recipe`.
+pub(crate) const PREF_RECIPE: &str = "oboete pref add";
+
+/// The claim op `oboete pref add` writes for a directive whose whole text is `evidence`'s quote: a
+/// decided global preference in the owner's own words, its body the quote. Slice 3e-2: a purge
+/// writes it again from a directive's masked text.
+pub(crate) fn preference_op(evidence: Evidence) -> ClaimOp {
+    ClaimOp {
+        id: "p1".into(),
+        kind: "preference".into(),
+        status: "decided".into(),
+        speaker: "user".into(),
+        scope: "global".into(),
+        body: evidence.quote.clone(),
+        evidence: vec![evidence],
+        supersedes: Vec::new(),
+        recipe: PREF_RECIPE.into(),
+        tier: 0,
+        why: String::new(),
+        tainted: false,
+        support: Vec::new(),
+    }
+}
+
 pub(crate) fn pref_add_recorded(
     home: &std::path::Path,
     text: &str,
@@ -652,25 +676,11 @@ pub(crate) fn pref_add_recorded(
         offset: 0,
         length,
         sentence: 0,
-        quote: quote.clone(),
+        quote,
         claim_at: None,
     };
     let uid = uid("preference", &evidence);
-    let op = ClaimOp {
-        id: "p1".into(),
-        kind: "preference".into(),
-        status: "decided".into(),
-        speaker: "user".into(),
-        scope: "global".into(),
-        body: quote,
-        evidence: vec![evidence],
-        supersedes: Vec::new(),
-        recipe: "oboete pref add".into(),
-        tier: 0,
-        why: String::new(),
-        tainted: false,
-        support: Vec::new(),
-    };
+    let op = preference_op(evidence);
     let append = (|| -> Result<Vec<i64>> {
         raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])
     })();

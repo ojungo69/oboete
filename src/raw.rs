@@ -2643,6 +2643,9 @@ impl Raw {
             };
             let (key, ts): ((String, i64), i64) = ((row.get(0)?, row.get(1)?), row.get(2)?);
             match quoted_entry(forgotten, ts, &body) {
+                // Slice 3e-2: a preference written again from its directive's masked text holds
+                // no byte a mask hides, however soon after the mask it was written.
+                Some((_, job, _)) if job == MASK_JOB && self.reads_now(&body)? => {}
                 // Slice 3e-1: this op alone, its uid not tombstoned.
                 Some((_, job, _)) if job == MASK_JOB => {
                     claims.masked.push(key.clone());
@@ -3073,7 +3076,111 @@ impl Raw {
         };
         let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
+        if masks {
+            judge.now = self
+                .preferences_now()?
+                .into_iter()
+                .map(|(at, (_, body))| (at, body))
+                .collect();
+        }
         Ok(judge)
+    }
+
+    /// Slice 3e-2: the preference claim ops (`oboete pref add`) whose body, their one quote, reads
+    /// as their directive reads now, by device and op seq, with their uids and bodies: one a purge
+    /// wrote again from a directive's masked text, or one never masked, holds no byte a mask hides.
+    pub(crate) fn preferences_now(
+        &self,
+    ) -> Result<std::collections::HashMap<(String, i64), (String, serde_json::Value)>> {
+        let mut now = std::collections::HashMap::new();
+        // `instr`, never a JSON function: a body that does not parse cannot fail the purge.
+        let mut st = self.conn.prepare(
+            "SELECT device, op_seq, body FROM ops WHERE type = 'claim'
+               AND instr(body, '\"oboete pref add\"') > 0",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)
+            else {
+                continue;
+            };
+            if self.reads_now(&body)?
+                && let Some(uid) = crate::claims::op_uid(&body)
+            {
+                now.insert((row.get(0)?, row.get(1)?), (uid, body));
+            }
+        }
+        Ok(now)
+    }
+
+    /// Slice 3e-2: whether claim op `body` is a preference as `oboete pref add` writes it
+    /// (`claims::preference_op`), field for field, its one quote its record's whole text as it
+    /// reads now (`consumer::claims::live`): it holds nothing else. An op of another shape may hold
+    /// more, in its `why` or in a field no op of ours has (Codex on #485); a quote of the start of
+    /// a directive has the same uid and would stand in for its preference (CodeRabbit on #485).
+    fn reads_now(&self, body: &serde_json::Value) -> Result<bool> {
+        let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(body.clone()) else {
+            return Ok(false);
+        };
+        let [e] = c.evidence.as_slice() else {
+            return Ok(false);
+        };
+        let written = serde_json::to_value(crate::claims::preference_op(e.clone()))?;
+        Ok(*body == written
+            && crate::consumer::claims::live(self, e)?.is_some_and(|event| {
+                crate::curate::long_text(&event).is_some_and(|text| text.len() == e.quote.len())
+            }))
+    }
+
+    /// Slice 3e-2 (#186): the preference claim ops to append for the directives (`oboete pref
+    /// add`) a rescan masked: each as `pref add` wrote it, from the directive's text as it reads
+    /// now, so with the same uid (MUST-M18: a mask keeps every byte's place, so the quote keeps
+    /// its offset and length), when no op of that uid reads so already and the uid is not
+    /// forgotten. Its derivation makes the preference current again with its masked text, the
+    /// owner's corrections still on it. By state: a purge that stopped after taking the old op's
+    /// text writes it on its next run.
+    pub(crate) fn masked_preferences(
+        &self,
+        forgotten: &Forgotten,
+    ) -> Result<Vec<(OpKind, serde_json::Value)>> {
+        let now: std::collections::HashSet<String> = self
+            .preferences_now()?
+            .into_values()
+            .map(|(uid, _)| uid)
+            .collect();
+        let mut ops = Vec::new();
+        for (device, records) in &forgotten.records {
+            for (seq, ..) in records.iter().filter(|r| r.1 == MASK_JOB) {
+                let read = self
+                    .after(device, seq - 1, 1)?
+                    .into_iter()
+                    .find(|r| r.seq == *seq);
+                let Some(Item::Event(e)) = read.map(|r| r.item) else {
+                    continue;
+                };
+                let Some(quote) = (e.kind == "directive")
+                    .then(|| crate::curate::long_text(&e))
+                    .flatten()
+                else {
+                    continue;
+                };
+                let evidence = crate::claims::Evidence {
+                    device: device.clone(),
+                    seq: *seq,
+                    offset: 0,
+                    length: i64::try_from(quote.len())?,
+                    sentence: 0,
+                    quote,
+                    claim_at: None,
+                };
+                let uid = crate::claims::uid("preference", &evidence);
+                if !now.contains(&uid) && !self.forgotten(&uid)? {
+                    let op = crate::claims::preference_op(evidence);
+                    ops.push((OpKind::Claim, serde_json::to_value(op)?));
+                }
+            }
+        }
+        Ok(ops)
     }
 
     /// Slice 3d-2: the window and turn ops of `ops` rewritten without their text, as
@@ -6177,6 +6284,11 @@ pub(crate) struct Judge {
     batches: std::collections::HashMap<(String, i64), String>,
     /// Slice 3d-4: when each of `copied` was written again (`Raw::remade`).
     remade: std::collections::HashMap<String, i64>,
+    /// Slice 3e-2: the preference claim ops in raw.db that read as their directive reads now
+    /// (`Raw::preferences_now`), with their bodies: a line or a copy's op at the same key keeps its
+    /// text when it holds the same body, not another op a restore gave that op seq to (Codex on
+    /// #485).
+    now: std::collections::HashMap<(String, i64), serde_json::Value>,
 }
 
 impl Judge {
@@ -6310,6 +6422,13 @@ impl Judge {
                 Some(body.to_string())
             }
             OpKind::Claim => {
+                if self
+                    .now
+                    .get(&(at.0.to_owned(), at.1))
+                    .is_some_and(|now| now == body)
+                {
+                    return None;
+                }
                 let job = match quoted_entry(&self.forgotten, ts, body) {
                     Some(r) => &r.1,
                     None => self.batches.get(&(at.0.to_owned(), batch?))?,
@@ -6793,6 +6912,27 @@ fn insert_event(
         )?;
     }
     Ok(seq)
+}
+
+/// Slice 3e-2: `ops` split, in order, into appends within one batch's caps (`MAX_BATCH_OPS`,
+/// `MAX_BATCH_BYTES`) for ops written apart (Codex on #485); `append_ops` checks each op's own cap.
+pub(crate) fn append_batches(
+    ops: &[(OpKind, serde_json::Value)],
+) -> Vec<&[(OpKind, serde_json::Value)]> {
+    let mut batches = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, (_, body)) in ops.iter().enumerate() {
+        let size = body.to_string().len();
+        if i > start && (i - start == MAX_BATCH_OPS || bytes + size > MAX_BATCH_BYTES) {
+            batches.push(&ops[start..i]);
+            (start, bytes) = (i, 0);
+        }
+        bytes += size;
+    }
+    if start < ops.len() {
+        batches.push(&ops[start..]);
+    }
+    batches
 }
 
 /// `ops` serialized, each within `MAX_OP_BYTES` and all within one append's caps.
@@ -7311,6 +7451,21 @@ mod tests {
             raw.removed_in(&device, 1, 2, Some(6)).unwrap(),
             [(1, None, None), first]
         );
+    }
+
+    /// Slice 3e-2 (Codex on #485): ops written apart go in appends within one batch's caps, the
+    /// bytes' as well as the count's, in order.
+    #[test]
+    fn append_batches_keep_each_append_within_its_caps() {
+        let op = |n: usize| (OpKind::Claim, serde_json::json!({ "body": "x".repeat(n) }));
+        let big: Vec<_> = (0..80).map(|_| op(60_000)).collect();
+        let batches = append_batches(&big);
+        assert_eq!(batches.len(), 2);
+        for batch in &batches {
+            within_batch_cap(batch).unwrap();
+        }
+        assert_eq!(batches.concat(), big);
+        assert!(append_batches(&[]).is_empty());
     }
 
     #[test]

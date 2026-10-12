@@ -1206,8 +1206,37 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
 #### 3e-2: 伏せた directive（#186）
 
 `oboete pref add` の directive は window を持たないので、3e-1 で claim op が本文を失うと recurate では
-作り直されない。伏せ字の後、directive の event から `pref_add` と同じ経路で claim op を作り直す（伏せた文の
-引用、同じ uid）。受入は #186 のとおり。
+作り直されない（curate は directive を window に出さない。recurate の列に入っても `covered` で終わる）。
+preference は伏せた文で残るはずが、消えていた。
+
+- **作り直す場所は purge**: 3e-1 の purge が伏せた record を引用する claim op を書き換えた後、同じ worker
+  の lock の下で、伏せ字を持つ record のうち directive（event の kind）ごとに、その event を今読める形
+  （伏せ字の後）で読み、`pref_add` と同じ op（`claims::preference_op`: 文全体の引用、offset 0、
+  sentence 0、body は引用と同じ、recipe `oboete pref add`）を足す。伏せ字は byte ごとに `*` にして長さを
+  変えない（3e-1 の `masked`）ので、引用の offset と length はそのままで、uid は kind と (device, seq,
+  sentence) なので同じ（MUST-M18）。owner の Correction（status・body・mute）は uid に付くのでそのまま
+  効く。consumer が derive し、preference は伏せた文で current に戻る。rescan から purge までの間は
+  Anchors が今どおり落とす（隠れる側）。
+- **状態で決める**: 作り直すかは「その uid の op で、引用が今の directive の文のとおりに読めるものがない」
+  かどうかで決め、書き換えた op からは読まない。古い op の文を取った後で止まった purge も、次の回で足す
+  （伏せ字は払われるまで残る）。uid が forget されたもの（`forget --uid`）と、record ごと消えたもの
+  （読めない）は足さない。
+- **作り直した op を後の purge が消さない**: 3e-1 の claim op の規則は時刻（伏せ字の時刻と
+  `SHOWN_MARGIN_MS` より前に書かれた op）なので、伏せ字の 1 分以内に足した op を、後の purge（別の
+  伏せ字で印が立った回）が書き換えてしまう。preference の op は本文が引用そのもので、他に何も読んで
+  いないので、引用が今の event のとおりに読める（`consumer::claims::live`）ものは伏せる前の byte を
+  持たない。raw.db の `record_claims` はそれを数えず、step 4（segment とコピー）は raw.db でそう読める
+  op の行を書き換えない（`Judge` の `now`。raw.db が持たない行は今までどおり時刻で決める: 多めに取る側）。
+  同じ directive をさらに伏せる規則が来れば、引用が今の文と違うので取られ、2 回伏せた文から作り直す。
+- **限界**: 伏せ字は byte ごとに `*` にするので、多 byte の文字を伏せると文字数が増える。1,000 文字の上限
+  （`MAX_BODY_CHARS`）を超えた preference は consumer が skip する（今と同じく消え、`claim_skips` に理由）。
+  `pref add` が 2 つの append の間で止まって op のない directive も、伏せ字の purge で preference を得る
+  （owner が頼んだもの）。他の端末の directive は M6。
+- 受入テスト（#186）: `pref add "Use tabs, key acme-…"` に mute を付け、backup を書き、規則を足して
+  rescan、purge: preference は伏せた文を body に持つ current の global claim で、uid と mute は同じ。
+  raw.db・knowledge.db・backup に鍵の byte がない。別の record にだけ当たる規則を足して purge しても、
+  作り直した op は書き換えられない。directive の別の語を伏せる規則を足し、古い op の文を取った直後で
+  purge を止める: 次の purge が 2 回伏せた文から作り直し、文を持つ preference の op はそれだけ。
 
 #### 3e-3: 保存期間（retention）
 
