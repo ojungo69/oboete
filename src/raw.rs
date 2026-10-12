@@ -3113,8 +3113,10 @@ impl Raw {
         Ok(now)
     }
 
-    /// Slice 3e-2: whether claim op `body` is a preference (`oboete pref add`) whose body is its one
-    /// quote, which reads as its directive reads now (`consumer::claims::live`).
+    /// Slice 3e-2: whether claim op `body` is a preference as `oboete pref add` writes it
+    /// (`claims::preference_op`), field for field, its one quote reading as its record reads now
+    /// (`consumer::claims::live`): it holds nothing else. An op of another shape may hold more, in
+    /// its `why` or in a field no op of ours has (Codex on #485).
     fn reads_now(&self, body: &serde_json::Value) -> Result<bool> {
         let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(body.clone()) else {
             return Ok(false);
@@ -3122,9 +3124,8 @@ impl Raw {
         let [e] = c.evidence.as_slice() else {
             return Ok(false);
         };
-        Ok(c.recipe == crate::claims::PREF_RECIPE
-            && c.body == e.quote
-            && crate::consumer::claims::live(self, e)?.is_some())
+        let written = serde_json::to_value(crate::claims::preference_op(e.clone()))?;
+        Ok(*body == written && crate::consumer::claims::live(self, e)?.is_some())
     }
 
     /// Slice 3e-2 (#186): the preference claim ops to append for the directives (`oboete pref

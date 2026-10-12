@@ -8670,6 +8670,49 @@ mod tests {
         assert_eq!(bodies, [serde_json::json!(twice)]);
     }
 
+    /// Slice 3e-2 (Codex on #485): an op that calls itself a preference, its body its one quote and
+    /// that quote reading now, but that holds more than `pref add` writes (a `why`, a field no op of
+    /// ours has) is not one it wrote: a mask of its record takes its text, in raw.db and in the
+    /// backup.
+    #[test]
+    fn an_op_shaped_as_a_preference_that_holds_more_loses_its_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        crate::claims::pref_add(&home, &format!("Use tabs, key {MASKED}, always.")).unwrap();
+        let written = op_bodies(&home)
+            .into_values()
+            .find(|b| b["recipe"] == crate::claims::PREF_RECIPE)
+            .unwrap();
+        let mut e: crate::claims::Evidence =
+            serde_json::from_value(written["evidence"][0].clone()).unwrap();
+        e.quote = "Use tabs".into();
+        e.length = 8;
+        let prefix = serde_json::to_value(crate::claims::preference_op(e)).unwrap();
+        let (mut why, mut extra) = (prefix.clone(), prefix);
+        why["why"] = format!("key {MASKED}").into();
+        extra["note"] = MASKED.into();
+        let seqs = s
+            .raw
+            .append_ops(&[(raw::OpKind::Claim, why), (raw::OpKind::Claim, extra)])
+            .unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        let bodies = op_bodies(&home);
+        for seq in seqs {
+            assert_eq!(
+                bodies[&seq],
+                serde_json::json!({"forgotten": crate::raw::MASK_JOB})
+            );
+        }
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
+    }
+
     /// Slice 3e-2 (Codex on #485): more preferences to write again than one append takes go in
     /// appends within its caps.
     #[test]
