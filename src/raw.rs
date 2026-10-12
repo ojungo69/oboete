@@ -2550,6 +2550,32 @@ impl Raw {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Slice 3c-2: whether rows of forgotten records were rewritten and the backup's segments and
+    /// the copies of raw.db set aside may still hold their text. Kept in raw.db, so a purge that
+    /// stops before step 4 is done owes it after a denial with no job row too (a restore from
+    /// segments alone, Codex on #470), which has no step to owe it by.
+    pub(crate) fn record_backups_owed(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'record_backups_owed')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// `record_backups_owed` set (before the rows are rewritten) or cleared (once step 4 is done).
+    pub(crate) fn owe_record_backups(&self, owed: bool) -> Result<()> {
+        if owed {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('record_backups_owed', '1')",
+                [],
+            )?;
+        } else {
+            self.conn
+                .execute("DELETE FROM meta WHERE key = 'record_backups_owed'", [])?;
+        }
+        Ok(())
+    }
+
     /// Every forgotten record's identity (slice 3c-2): what a backup's line and a copy's row are
     /// judged by.
     pub(crate) fn forgotten_origins(&self) -> Result<ForgottenOrigins> {

@@ -1036,12 +1036,12 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
     }
-    let (due, records_due) = {
+    let (due, records_due, owed) = {
         let raw = crate::raw::open(home)?;
-        (due(&raw)?, records_due(&raw)?)
+        (due(&raw)?, records_due(&raw)?, raw.record_backups_owed()?)
     };
     purged.jobs = due.len() + records_due.len();
-    if purged.jobs == 0 {
+    if purged.jobs == 0 && !owed {
         return Ok(Some(purged));
     }
     // Step 2 for the jobs whose ops (a record job: whose rows, slice 3c) hold text, or that never
@@ -1061,6 +1061,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             }
         }
         if records_step_2 {
+            raw.owe_record_backups(true)?;
             purged.records = raw.purge_records()?;
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
@@ -1167,9 +1168,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // whole each time, by every forgotten record's identity.
     let mut jobs = std::collections::HashMap::new();
     let (mut past, mut records_past) = (Vec::new(), Vec::new());
-    // Rows this purge rewrote may be in them, a denial's with no job row too (a restore from
-    // segments alone, Codex on #469), which has no step to owe them by.
-    let mut records_owed = purged.records > 0;
+    // Rows a purge rewrote may be in them, a denial's with no job row too (a restore from segments
+    // alone, Codex on #469 and #470), which has no step to owe them by.
+    let mut records_owed = raw.record_backups_owed()?;
     let held = raw.record_jobs_holding()?;
     for (request, step) in raw.forget_jobs()? {
         match request.target {
@@ -1206,6 +1207,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         (purged.copies, purged.copies_removed) = crate::raw::purge_copies(home, &jobs, &origins)?;
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 4)?;
+        }
+        if records_owed {
+            raw.owe_record_backups(false)?;
         }
         if !jobs.is_empty() {
             // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A
@@ -1253,7 +1257,9 @@ pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
         return;
     }
     let waiting = due(raw)
-        .and_then(|due| Ok(!due.is_empty() || !records_due(raw)?.is_empty()))
+        .and_then(|due| {
+            Ok(!due.is_empty() || !records_due(raw)?.is_empty() || raw.record_backups_owed()?)
+        })
         .unwrap_or_else(|e| {
             eprintln!("oboete: forget jobs not read: {e:#}");
             false
@@ -2638,58 +2644,7 @@ mod tests {
     /// and leaves no byte of their text in the stores.
     #[test]
     fn a_restore_from_segments_alone_has_its_forgotten_text_purged() {
-        let mut s = crate::search::b::fixture::Store::new();
-        let live = s.said(
-            "s",
-            "github.com/o/r",
-            1_000,
-            &format!("Remember {RECORD_CANARY}."),
-        );
-        let mut event = crate::raw::test_event(
-            &serde_json::json!({ "prompt": format!("Imported {RECORD_CANARY}.") }).to_string(),
-        );
-        (event.source, event.session, event.ts) = ("transcript".into(), "t".into(), 2_000);
-        let identity = crate::raw::ImportIdentity {
-            origin: origin("synthetic", "imported"),
-            session: session(&event.agent, &event.session),
-            ambiguous: None,
-            unverified: false,
-        };
-        let imported = s
-            .raw
-            .append_imported_origins(
-                &[crate::capture::Captured {
-                    event,
-                    ledger: Vec::new(),
-                }],
-                &[identity],
-                "",
-                None,
-            )
-            .unwrap()[0];
-        let kept = s.said("s", "github.com/o/r", 3_000, "Kept text.");
-        crate::backup::export(s.home.path()).unwrap();
-        let home = s.home.path().to_owned();
-        let device = s.raw.device().to_owned();
-        let crate::search::b::fixture::Store { home: _home, raw } = s;
-        drop(raw);
-        for seq in [live, imported] {
-            let target = Target::Record {
-                device: device.clone(),
-                seq,
-            };
-            start(&home, &preview(&home, target).unwrap()).unwrap();
-        }
-        crate::backup::export(&home).unwrap();
-        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
-            let _ = std::fs::remove_file(home.join(f));
-        }
-        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
-        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
-        let raw = crate::backup::open_raw(&home).unwrap();
-        assert!(raw.forget_jobs().unwrap().is_empty());
-        assert_eq!(records_due(&raw).unwrap().len(), 2);
-        drop(raw);
+        let (_home, home, device, _, kept) = restored_without_jobs();
         assert!(!store_hits(&home, RECORD_CANARY.as_bytes()).is_empty());
         let purged = purge(&home).unwrap().unwrap();
         assert_eq!((purged.records, purged.rebuilt), (2, true));
@@ -2700,7 +2655,60 @@ mod tests {
         // Slice 3c-2: and the segment the restore read, with no job to owe it.
         assert_eq!(purged.segments, 1);
         assert_eq!(backup_hits(&home, RECORD_CANARY), Vec::<String>::new());
-        assert_eq!(row(&home, &device, kept).0, "event");
+        for seq in kept {
+            assert_eq!(row(&home, &device, seq).0, "event");
+        }
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// `backed_up_records`' two forgotten, their tombstones exported after them, then raw.db and
+    /// both request logs lost and the backup restored: their denials are back, not their jobs.
+    fn restored_without_jobs() -> (tempfile::TempDir, PathBuf, String, [i64; 2], [i64; 2]) {
+        let (s, device, forgotten, kept) = backed_up_records();
+        let home = s.home.path().to_owned();
+        let guard = forget_records(s, &device, forgotten);
+        crate::backup::export(&home).unwrap();
+        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forget_jobs().unwrap().is_empty());
+        assert_eq!(records_due(&raw).unwrap().len(), 2);
+        (guard, home, device, forgotten, kept)
+    }
+
+    /// Codex on #470: a purge of denials with no job row stopped inside a record segment's
+    /// replacement leaves the backups owed in raw.db: a worker starts a continuation for them, the
+    /// next purge, with no job and no row holding text, rewrites them, and the one after has
+    /// nothing to do.
+    #[test]
+    fn a_purge_stopped_before_its_backups_owes_them_with_no_job() {
+        let (_home, home, _, _, _) = restored_without_jobs();
+        crate::backup::FAIL_AFTER.set(Some("purge_segment_written"));
+        assert!(purge(&home).is_err());
+        assert_eq!(
+            store_hits(&home, RECORD_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        assert!(!backup_hits(&home, RECORD_CANARY).is_empty());
+        let raw = crate::raw::open(&home).unwrap();
+        assert!(records_due(&raw).unwrap().is_empty());
+        assert!(raw.record_backups_owed().unwrap());
+        let before = CONTINUED.get();
+        continue_due(&home, &raw);
+        assert_eq!(CONTINUED.get(), before + 1);
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert!(!purged.rebuilt);
+        assert_eq!(backup_hits(&home, RECORD_CANARY), Vec::<String>::new());
+        assert!(
+            !crate::raw::open(&home)
+                .unwrap()
+                .record_backups_owed()
+                .unwrap()
+        );
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 

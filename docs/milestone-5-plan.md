@@ -870,8 +870,9 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
   本文・label を NULL、ledger 行を削除）を、identity が集合にある行に。取り込みの行の identity はコピーの
   `import_origins`（行の無いもの、表の無い版はそのまま残す）。書き換えられないコピーは 2c-2 と同じく削除。
 - **step 4**: uid の job と同じ回に、step 3 を終え step 4 の前にいる record の job があれば segment とコピーを
-  書き換え、その job に step 4。この purge が行を書き換えた時も書き換える（job の行のない deny は step を
-  持たない。segment だけの restore の後、Codex on #469）。record の job の step 5 は 3d が決める（3d が派生の uid の job を登録する
+  書き換え、その job に step 4。行を書き換える前に raw.db の meta に印（`record_backups_owed`）を置き、
+  segment とコピーを書き換え終えたら消す: job の行のない deny（segment だけの restore の後。step を持たない）も、
+  purge が途中で止まった後の続きで書き換え、worker の `forget --continue` もこの印を見る（Codex on #469・#470）。record の job の step 5 は 3d が決める（3d が派生の uid の job を登録する
   段）。3c-2 では record の job は step 4 で止まり、`due` は本文を持つ行があるか step 4 の前の job。
 - **status（D4）**: step 4 の record の job は「purged here and in the backups; the claims, cards and
   summaries made from it pending」。3d まで done にしない。
