@@ -1043,7 +1043,8 @@ forget、後の withdraw）claim は decided や done のまま残り、rebuild 
   support に持つ derivation を探し、どれも残っていなければ `proposed` にする（claim は消さない、recurate
   の列にも入れない: recuration の gates も同じく下げる）。読み手は derivation の status を読むので
   （owner の Correction の status が先）、hook の配達も検索もそれに従う。rebuild は consumer がそのときの raw で
-  決めるので同じになる。
+  決めるので同じになる。Anchors がまだ読んでいない tombstone が support の record に当たる claim は、引用に
+  当たるときと同じく読みから外す（`claims::Pending`。下がった後に出る。Codex on #473）。
 - **forget**: support の record を忘れると、その claim は残って proposed になる（spec 6.3 の limits に 1 行）。
   window op の文は 3d-2 の規則（span にある）で消える。
 - 受入テスト: 受け入れ・答え・通った実行で立つ claim の op が support を持ち、user 自身の言葉で立つ claim は

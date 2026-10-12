@@ -1470,8 +1470,9 @@ mod tests {
             )
         };
         let a = uid("decision", &accepted.evidence[0]);
+        let d = uid("fix", &fixed.evidence[0]);
         raw.append_ops(&[op(&earlier)]).unwrap();
-        raw.append_ops(&[op(&accepted), op(&fixed)]).unwrap();
+        let ops = raw.append_ops(&[op(&accepted), op(&fixed)]).unwrap();
         let statuses = |k: &Connection| -> Vec<(String, String)> {
             let mut got: Vec<(String, String)> = current(k, "r")
                 .unwrap()
@@ -1503,6 +1504,16 @@ mod tests {
         assert_eq!(statuses(&k), standing);
         // The acceptance and the other run removed: proposals, and the decision the proposal
         // superseded is current again.
+        let pending = |raw: &Raw, k: &Connection| {
+            let p = crate::claims::Pending::read(raw, k).unwrap();
+            [
+                p.touches(k, &a).unwrap(),
+                p.touches(k, &d).unwrap(),
+                p.touches_op(k, &dev, ops[0]).unwrap(),
+                p.touches_op(k, &dev, ops[1]).unwrap(),
+            ]
+        };
+        assert_eq!(pending(&raw, &k), [false; 4]);
         for seq in [s_yes, run2] {
             raw.append_tombstone(Target::Record {
                 device: dev.clone(),
@@ -1510,6 +1521,8 @@ mod tests {
             })
             .unwrap();
         }
+        // Until Anchors lowers them, a reader leaves them out (Codex on #473).
+        assert_eq!(pending(&raw, &k), [true; 4]);
         run(&raw, &mut k);
         let lowered = [
             pair(done, "proposed"),
