@@ -3844,6 +3844,99 @@ mod tests {
         }
     }
 
+    /// Slice 3d-4 (Codex on #481): what a window was shown of a claim it named is every wording of
+    /// it: the body the owner's correction gave a claim quoting the forgotten record, and each
+    /// wording windows gave a copied claim's uid. A claim that repeated 32 bytes of either is
+    /// copied, and the window that named it is taken.
+    #[test]
+    fn every_wording_of_a_named_claim_is_what_its_window_showed() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (second, corrected) = (
+            "scanary-9d3b5e7f1a2c4e6b8d0f1a3c",
+            "ccanary-2e4f6a8c0b1d3f5a7c9e1b3d",
+        );
+        let gone = format!("Parsers stay in {BATCH_CANARY} mode and {second} too.");
+        let (deploys, tests) = ("Deploys run on Fridays.", "Tests run on CI.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, deploys);
+        let r3 = s.said("s", "github.com/o/r", 3_000, tests);
+        let claim = |seq: i64, quote: &str, sentence: i64, body: &str| {
+            let mut op = claim_op(&device, &[(seq, quote)], body);
+            op.1["evidence"][0]["sentence"] = sentence.into();
+            op
+        };
+        let uid = |op: &(raw::OpKind, serde_json::Value)| raw::op_uid(op.0, &op.1).unwrap();
+        // The claim quoting R1, whose body the owner corrected to one only the correction holds.
+        let c1 = claim(r1, &gone, 0, "Parsers stay strict.");
+        let u1 = uid(&c1);
+        let fix = json!({"uid": u1, "anchor": {"device": device, "seq": r1},
+            "body": format!("Parsers keep {corrected} on.")});
+        // Two wordings of one claim of R2, each repeating another canary of R1.
+        let a1 = claim(r2, deploys, 0, &format!("Deploys follow {BATCH_CANARY}."));
+        let a2 = claim(r2, deploys, 0, &format!("Deploys keep {second} on."));
+        let ua = uid(&a1);
+        assert_eq!(uid(&a2), ua);
+        // Claims of R3 that repeat the corrected body, and the second wording.
+        let b1 = claim(r3, tests, 0, &format!("Tests check {corrected} first."));
+        let b2 = claim(r3, tests, 1, &format!("Tests check {second} last."));
+        let (ub1, ub2) = (uid(&b1), uid(&b2));
+        let mut append = |ops: &[(raw::OpKind, serde_json::Value)]| s.raw.append_ops(ops).unwrap();
+        append(&[window_op(r1, r1, "Its span.", json!({})), c1]);
+        append(&[(raw::OpKind::Correction, fix)]);
+        append(&[window_op(r1, r2, "The first wording.", json!({})), a1]);
+        append(&[window_op(r1, r2, "The second wording.", json!({})), a2]);
+        let w1 = append(&[
+            window_op(
+                r3,
+                r3,
+                "It named the corrected claim.",
+                json!({"candidates": [u1]}),
+            ),
+            b1,
+        ]);
+        let w2 = append(&[
+            window_op(
+                r3,
+                r3,
+                "It named the claim of two wordings.",
+                json!({"candidates": [ua]}),
+            ),
+            b2,
+        ]);
+        let n1 = append(&[window_op(
+            r3,
+            r3,
+            "It named the first copy.",
+            json!({"candidates": [ub1]}),
+        )]);
+        let n2 = append(&[window_op(
+            r3,
+            r3,
+            "It named the second copy.",
+            json!({"candidates": [ub2]}),
+        )]);
+        let home = s.home.path().to_owned();
+        s.run();
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        let after = op_bodies(&home);
+        assert_eq!(after[&w1[0]]["copied"], json!([ub1]));
+        assert_eq!(after[&w2[0]]["copied"], json!([ub2]));
+        for seq in [n1[0], n2[0]] {
+            assert!(after[&seq].get("forgotten").is_some(), "{seq}");
+        }
+        assert_eq!(store_hits(&home, corrected.as_bytes()), Vec::<&str>::new());
+        assert_eq!(store_hits(&home, second.as_bytes()), Vec::<&str>::new());
+    }
+
     /// Slice 3d-4: a window op and its claims that only the ops segments and a copy of raw.db
     /// hold (raw.db put back without them) lose their text there by rule (c), with no copy looked
     /// for.

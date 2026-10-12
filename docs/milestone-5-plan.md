@@ -1085,7 +1085,8 @@ claim の本文に写せる。3d-1 は忘れた record を引用する claim を
   連続を繰り返すものの uid を、書き換えた window op に `copied`、その時刻を `copied_at` として残す（どちらも
   window op が残す構造）。見た文は、span と goals の忘れた record の保存された文（`consumer::fts::text`、
   隠す前のもの）、window が名指した（candidates・carried）忘れた record を引用する claim の文（本文・理由・
-  引用。3d-1 が書き換える前に読む）、window が名指した写しの claim の文。判定は aho-corasick（依存に
+  引用と、owner の Correction が与えた本文。3d-1 が書き換える前に読む）、window が名指した写しの claim の
+  文（その uid に window が与えた言い回しのすべて。Codex on #481）。判定は aho-corasick（依存に
   ある）。
 - **(b') 写しをたどる**: `copied` の uid を `candidates` か `carried` に名指し、その `copied_at` の 1 分後
   より前に書かれた window op は、3d-2 の (b) と同じく当てる（job はその uid の window のもの）。ただし、その
@@ -1115,7 +1116,8 @@ claim の本文に写せる。3d-1 は忘れた record を引用する claim を
   引用する claim の文がもう無いので、それを名指した window の batch の claim を `copied` なしに書き換え、
   そこから連鎖を始めない。window の途中で止まった purge も、書き換えた window の claim の文を後の window の
   写しの元にできない。復元で戻った window op を書き直すときは、その batch の claim がもう文を持たない
-  ので `copied` を失う。
+  ので `copied` を失う。(c) で取った claim の uid の Correction op は本文を残す（uid は recuration が作り直し、
+  owner の status と mute はそれに引き継ぐ。写しを残した本文は #482）。
 - 受入テスト: span に R1（32 バイトの canary）と R2 を持つ window。C1 は R1 を、C2 は R2 を引用して本文に
   canary を写し、C3 は R2 を引用して写さない。R1 の forget の後、canary は raw.db・knowledge.db・ops
   segment・コピーのどこにもない。C2 と C3 は文を失い、`copied` は C2 だけ。uid は deny されない。window は

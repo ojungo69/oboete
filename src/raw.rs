@@ -2671,12 +2671,23 @@ impl Raw {
         }
         drop(rows);
         let mut st = self.conn.prepare(
-            "SELECT device, op_seq, json_extract(body, '$.uid') FROM ops WHERE type = 'correction'
-             ORDER BY device, op_seq",
+            "SELECT device, op_seq, json_extract(body, '$.uid'), json_extract(body, '$.body')
+             FROM ops WHERE type = 'correction' ORDER BY device, op_seq",
         )?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
             if let Some(uid) = row.get::<_, Option<String>>(2)? {
+                // Slice 3d-4: the body an owner's correction gave such a claim is what a window
+                // that named it was shown too (Codex on #481).
+                if claims.uids.contains_key(&uid)
+                    && let Ok(text) = row.get_ref(3)?.as_str()
+                {
+                    claims
+                        .texts
+                        .entry(uid.clone())
+                        .or_default()
+                        .push(text.into());
+                }
                 all.entry(uid).or_default().push((row.get(0)?, row.get(1)?));
             }
         }
@@ -2777,14 +2788,15 @@ impl Raw {
         found.at = crate::db::now_ms();
         // Every window op's span, in op order, with when it was written and the job that took its
         // text, already or in this pass: what a turn read (rule b). Again while a pass finds a
-        // claim copied: a window of another device may name one found after it in op order.
+        // claim copied, or another wording of one: a window of another device may name one found
+        // after it in op order.
         let mut said = std::collections::HashMap::new();
         loop {
-            let copied = said.len();
+            let copied: usize = said.values().map(Vec::len).sum();
             (found.windows, found.claims) = Default::default();
             (judge.spans, judge.batches) = Default::default();
             self.window_ops(&mut found, &mut judge, &mut said)?;
-            if said.len() == copied {
+            if said.values().map(Vec::len).sum::<usize>() == copied {
                 break;
             }
         }
@@ -2937,8 +2949,13 @@ impl Raw {
             }
             for (uid, body) in kept {
                 if repeats(&claim_text(&body, false), &shown) {
-                    said.entry(uid.clone())
-                        .or_insert_with(|| claim_text(&body, true));
+                    // Each wording a window gave the uid, not the first one's (Codex on #481).
+                    let texts = said.entry(uid.clone()).or_default();
+                    for text in claim_text(&body, true) {
+                        if !texts.contains(&text) {
+                            texts.push(text);
+                        }
+                    }
                     let at = judge
                         .copied
                         .entry(uid.clone())
