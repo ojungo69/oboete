@@ -8713,6 +8713,45 @@ mod tests {
         assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
     }
 
+    /// Slice 3e-2 (CodeRabbit on #485): an op shaped as `pref add` writes one but quoting only the
+    /// start of its directive has the preference's uid (its first sentence's) and does not stand in
+    /// for it: once a mask takes the directive's whole quote, the preference is written again whole
+    /// from the masked text, and the shorter op loses its text.
+    #[test]
+    fn a_shorter_quote_of_a_directive_does_not_stand_in_for_its_preference() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let said = format!("Use tabs, key {MASKED}, always.");
+        let uid = crate::claims::pref_add(&home, &said).unwrap();
+        let written = op_bodies(&home)
+            .into_values()
+            .find(|b| b["recipe"] == crate::claims::PREF_RECIPE)
+            .unwrap();
+        let mut e: crate::claims::Evidence =
+            serde_json::from_value(written["evidence"][0].clone()).unwrap();
+        e.quote = "Use tabs".into();
+        e.length = 8;
+        assert_eq!(crate::claims::uid("preference", &e), uid);
+        let short = serde_json::to_value(crate::claims::preference_op(e)).unwrap();
+        let short = s.raw.append_ops(&[(raw::OpKind::Claim, short)]).unwrap()[0];
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 1);
+        let body: String = crate::knowledge::open(&home)
+            .unwrap()
+            .query_row("SELECT body FROM active WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(body, said.replace(MASKED, &"*".repeat(MASKED.len())));
+        assert_eq!(
+            op_bodies(&home)[&short],
+            serde_json::json!({"forgotten": crate::raw::MASK_JOB})
+        );
+    }
+
     /// Slice 3e-2 (Codex on #485): more preferences to write again than one append takes go in
     /// appends within its caps.
     #[test]
