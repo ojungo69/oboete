@@ -2643,6 +2643,9 @@ impl Raw {
             };
             let (key, ts): ((String, i64), i64) = ((row.get(0)?, row.get(1)?), row.get(2)?);
             match quoted_entry(forgotten, ts, &body) {
+                // Slice 3e-2: a preference written again from its directive's masked text holds
+                // no byte a mask hides, however soon after the mask it was written.
+                Some((_, job, _)) if job == MASK_JOB && self.reads_now(&body)? => {}
                 // Slice 3e-1: this op alone, its uid not tombstoned.
                 Some((_, job, _)) if job == MASK_JOB => {
                     claims.masked.push(key.clone());
@@ -3073,7 +3076,99 @@ impl Raw {
         };
         let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
+        if masks {
+            judge.now = self.preferences_now()?.into_keys().collect();
+        }
         Ok(judge)
+    }
+
+    /// Slice 3e-2: the preference claim ops (`oboete pref add`) whose body, their one quote, reads
+    /// as their directive reads now, by device and op seq, with their uids: one a purge wrote again
+    /// from a directive's masked text, or one never masked, holds no byte a mask hides.
+    pub(crate) fn preferences_now(
+        &self,
+    ) -> Result<std::collections::HashMap<(String, i64), String>> {
+        let mut now = std::collections::HashMap::new();
+        // `instr`, never a JSON function: a body that does not parse cannot fail the purge.
+        let mut st = self.conn.prepare(
+            "SELECT device, op_seq, body FROM ops WHERE type = 'claim'
+               AND instr(body, '\"oboete pref add\"') > 0",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)
+            else {
+                continue;
+            };
+            if self.reads_now(&body)?
+                && let Some(uid) = crate::claims::op_uid(&body)
+            {
+                now.insert((row.get(0)?, row.get(1)?), uid);
+            }
+        }
+        Ok(now)
+    }
+
+    /// Slice 3e-2: whether claim op `body` is a preference (`oboete pref add`) whose body is its one
+    /// quote, which reads as its directive reads now (`consumer::claims::live`).
+    fn reads_now(&self, body: &serde_json::Value) -> Result<bool> {
+        let Ok(c) = serde_json::from_value::<crate::claims::ClaimOp>(body.clone()) else {
+            return Ok(false);
+        };
+        let [e] = c.evidence.as_slice() else {
+            return Ok(false);
+        };
+        Ok(c.recipe == crate::claims::PREF_RECIPE
+            && c.body == e.quote
+            && crate::consumer::claims::live(self, e)?.is_some())
+    }
+
+    /// Slice 3e-2 (#186): the preference claim ops to append for the directives (`oboete pref
+    /// add`) a rescan masked: each as `pref add` wrote it, from the directive's text as it reads
+    /// now, so with the same uid (MUST-M18: a mask keeps every byte's place, so the quote keeps
+    /// its offset and length), when no op of that uid reads so already and the uid is not
+    /// forgotten. Its derivation makes the preference current again with its masked text, the
+    /// owner's corrections still on it. By state: a purge that stopped after taking the old op's
+    /// text writes it on its next run.
+    pub(crate) fn masked_preferences(
+        &self,
+        forgotten: &Forgotten,
+    ) -> Result<Vec<(OpKind, serde_json::Value)>> {
+        let now: std::collections::HashSet<String> =
+            self.preferences_now()?.into_values().collect();
+        let mut ops = Vec::new();
+        for (device, records) in &forgotten.records {
+            for (seq, ..) in records.iter().filter(|r| r.1 == MASK_JOB) {
+                let read = self
+                    .after(device, seq - 1, 1)?
+                    .into_iter()
+                    .find(|r| r.seq == *seq);
+                let Some(Item::Event(e)) = read.map(|r| r.item) else {
+                    continue;
+                };
+                let Some(quote) = (e.kind == "directive")
+                    .then(|| crate::curate::long_text(&e))
+                    .flatten()
+                else {
+                    continue;
+                };
+                let evidence = crate::claims::Evidence {
+                    device: device.clone(),
+                    seq: *seq,
+                    offset: 0,
+                    length: i64::try_from(quote.len())?,
+                    sentence: 0,
+                    quote,
+                    claim_at: None,
+                };
+                let uid = crate::claims::uid("preference", &evidence);
+                if !now.contains(&uid) && !self.forgotten(&uid)? {
+                    let op = crate::claims::preference_op(evidence);
+                    ops.push((OpKind::Claim, serde_json::to_value(op)?));
+                }
+            }
+        }
+        Ok(ops)
     }
 
     /// Slice 3d-2: the window and turn ops of `ops` rewritten without their text, as
@@ -6177,6 +6272,9 @@ pub(crate) struct Judge {
     batches: std::collections::HashMap<(String, i64), String>,
     /// Slice 3d-4: when each of `copied` was written again (`Raw::remade`).
     remade: std::collections::HashMap<String, i64>,
+    /// Slice 3e-2: the preference claim ops in raw.db that read as their directive reads now
+    /// (`Raw::preferences_now`): their lines keep their text.
+    now: std::collections::HashSet<(String, i64)>,
 }
 
 impl Judge {
@@ -6310,6 +6408,9 @@ impl Judge {
                 Some(body.to_string())
             }
             OpKind::Claim => {
+                if self.now.contains(&(at.0.to_owned(), at.1)) {
+                    return None;
+                }
                 let job = match quoted_entry(&self.forgotten, ts, body) {
                     Some(r) => &r.1,
                     None => self.batches.get(&(at.0.to_owned(), batch?))?,

@@ -945,6 +945,8 @@ pub struct Purged {
     /// Whether it went on with a rescan's masks (slice 3e-1): what `forget --continue` reports
     /// with no job.
     pub masks: bool,
+    /// Preferences written again from the masked text of their directive (slice 3e-2).
+    pub preferences: usize,
     /// Jobs not done this time: readers kept raw.db-wal from truncating, or a restore put the
     /// text back meanwhile.
     pub unfinished: Vec<String>,
@@ -1166,6 +1168,16 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             purged.ops += raw.purge_record_claims(&claims)?;
             purged.ops += raw.purge_record_ops(&made)?;
             purged.ops += raw.purge_masked_claims(&claims.masked)?;
+            // Slice 3e-2 (#186): a directive a rescan masked has its preference written again
+            // from its masked text, as no curator makes one from it.
+            if masks.is_some() {
+                crate::backup::fail_after("masked_claims_purged")?;
+                let again = raw.masked_preferences(&forgotten(&raw)?)?;
+                if !again.is_empty() {
+                    raw.append_ops(&again)?;
+                }
+                purged.preferences = again.len();
+            }
             crate::backup::fail_after("record_claims_purged")?;
             purged.records = raw.purge_records()?;
             if masks.is_some() {
@@ -2085,6 +2097,12 @@ fn say_purged(p: &Purged) -> Result<()> {
         println!(
             "Records a redaction rescan masked, rewritten with the masks in raw.db: {}",
             p.masked
+        );
+    }
+    if p.preferences > 0 {
+        println!(
+            "Preferences written again from their masked text: {}",
+            p.preferences
         );
     }
     if p.ops > 0 {
@@ -8565,6 +8583,112 @@ mod tests {
         purge(&home).unwrap().unwrap();
         assert!(!stored_body(&home, &device, r1).contains(MASKED));
         assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+    }
+
+    /// Slice 3e-2 (#186): a preference whose directive a rescan masks part of is written again by
+    /// the purge from the masked text, with its uid: a current global claim whose body is that
+    /// text, the owner's mute still on it, and no byte of the secret left in the stores. A mask of
+    /// another record leaves it as it is (an op that calls itself a preference but whose body is
+    /// not its quote is taken); a rule that masks more of the directive takes it and writes it
+    /// again from the text masked twice, on the next run when a purge stops after taking its text.
+    #[test]
+    fn a_masked_preference_is_written_again_from_its_masked_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let (home, device) = (s.home.path().to_owned(), s.raw.device().to_owned());
+        let other = s.said("s", "github.com/o/r", 1_000, "Ship zeta-4821 today.");
+        let said = format!("Use tabs, key {MASKED}, always.");
+        let uid = crate::claims::pref_add(&home, &said).unwrap();
+        crate::claims::mute(&home, &uid, true).unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let rules = |extra: &str| {
+            let acme = r#"{ id = "acme", regex = 'acme-[0-9]{6}' }"#;
+            std::fs::write(
+                home.join("config.toml"),
+                format!("[redaction]\nextra_rules = [{acme}{extra}]\n"),
+            )
+            .unwrap();
+            crate::worker::run_once(&home).unwrap();
+        };
+        let shown = |home: &Path| -> (String, bool) {
+            crate::knowledge::open(home)
+                .unwrap()
+                .query_row(
+                    "SELECT body, muted FROM active WHERE uid = ?1 AND scope = 'global'",
+                    [&uid],
+                    |r| Ok((r.get(0)?, r.get::<_, Option<bool>>(1)?.unwrap_or(false))),
+                )
+                .unwrap()
+        };
+        // The preference ops that hold a body.
+        let preferences = |home: &Path| -> Vec<serde_json::Value> {
+            op_bodies(home)
+                .into_values()
+                .filter(|b| b["recipe"] == crate::claims::PREF_RECIPE)
+                .collect()
+        };
+        rules("");
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.preferences, 1);
+        let masked = said.replace(MASKED, &"*".repeat(MASKED.len()));
+        assert_eq!(shown(&home), (masked.clone(), true));
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
+        // Another record's mask: the op written again stays as it is, in raw.db and in the ops
+        // segment it was backed up to. An op that calls itself a preference, its quote the masked
+        // text but its body not its quote, is not one `pref add` wrote: it loses its text.
+        crate::backup::export(&home).unwrap();
+        let mut odd = preferences(&home).remove(0);
+        odd["body"] = format!("Keep {MASKED} handy.").into();
+        let odd = crate::raw::open(&home)
+            .unwrap()
+            .append_ops(&[(raw::OpKind::Claim, odd)])
+            .unwrap()[0];
+        let mut before = op_bodies(&home);
+        rules(r#", { id = "zeta", regex = 'zeta-[0-9]{4}' }"#);
+        assert!(stored_body(&home, &device, other).contains("zeta-4821"));
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 0);
+        assert!(!stored_body(&home, &device, other).contains("zeta-4821"));
+        before.insert(odd, serde_json::json!({"forgotten": crate::raw::MASK_JOB}));
+        assert_eq!(op_bodies(&home), before);
+        assert!(!backup_hits(&home, crate::claims::PREF_RECIPE).is_empty());
+        // A rule that masks more of the directive, and a purge that stops after taking the text.
+        rules(r#", { id = "zeta", regex = 'zeta-[0-9]{4}' }, { id = "tabs", regex = 'tabs' }"#);
+        crate::backup::FAIL_AFTER.set(Some("masked_claims_purged"));
+        assert!(purge(&home).is_err());
+        assert!(preferences(&home).iter().all(|b| b["body"] != masked));
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 1);
+        let twice = masked.replace("tabs", "****");
+        assert_eq!(shown(&home), (twice.clone(), true));
+        // The ops of the uid that held the text lost it: the one written last alone holds a body.
+        let bodies: Vec<serde_json::Value> = preferences(&home)
+            .into_iter()
+            .map(|b| b["body"].clone())
+            .collect();
+        assert_eq!(bodies, [serde_json::json!(twice)]);
+    }
+
+    /// Slice 3e-2: a preference forgotten by its uid is not written again when a rescan masks part
+    /// of its directive.
+    #[test]
+    fn a_forgotten_preference_is_not_written_again() {
+        let s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let uid = crate::claims::pref_add(&home, &format!("Use tabs, key {MASKED}.")).unwrap();
+        s.run();
+        start(&home, &preview(&home, Target::Uid { uid }).unwrap()).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 0);
+        assert!(
+            op_bodies(&home)
+                .values()
+                .all(|b| b["recipe"] != crate::claims::PREF_RECIPE)
+        );
     }
 
     /// CodeRabbit on #480: masks a purge left owed are said as a rescan's, not as a job named
