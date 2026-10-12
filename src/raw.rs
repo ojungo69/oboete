@@ -1082,8 +1082,46 @@ pub(crate) fn work_state_in(
     Ok(writes.into_iter().map(|w| w.3).collect())
 }
 
-/// The same current list for an existing read-only connection: no indexes or schema writes.
+/// The same current list for an existing read-only connection: no indexes or schema writes. What
+/// is never recorded is never sent either (slice 4a, spec 6.1).
 pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
+    let (mut sent, never) = exclusion_sets(conn)?;
+    sent.extend(never.repos);
+    Ok(sent.into_iter().collect())
+}
+
+/// Slice 4a (spec 6.1): what is never recorded now, on an existing connection.
+pub(crate) fn capture_exclusions_in(conn: &Connection) -> Result<CaptureExclusions> {
+    Ok(exclusion_sets(conn)?.1)
+}
+
+/// Slice 4a (spec 6.1): what is never recorded, as every device's exclusion ops of level `capture`
+/// leave it: repositories by their label (`repo`), this device's folders by their `cwd` label.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct CaptureExclusions {
+    pub repos: std::collections::BTreeSet<String>,
+    pub folders: std::collections::BTreeSet<String>,
+}
+
+impl CaptureExclusions {
+    /// Whether an event labelled `repo` and `cwd` is never recorded: its repository listed, or its
+    /// working directory in a listed folder, component by component.
+    pub fn covers(&self, repo: Option<&str>, cwd: Option<&str>) -> bool {
+        repo.is_some_and(|r| self.repos.contains(r))
+            || cwd.is_some_and(|c| {
+                self.folders
+                    .iter()
+                    .any(|f| std::path::Path::new(c).starts_with(f))
+            })
+    }
+}
+
+/// Every device's exclusion ops in time order, each entry set by the last op that names it: the
+/// repositories `oboete exclude` keeps from being sent, and what is never recorded (level
+/// `capture`, slice 4a). An undo takes its entry out of its own set only.
+fn exclusion_sets(
+    conn: &Connection,
+) -> Result<(std::collections::BTreeSet<String>, CaptureExclusions)> {
     // A device's ops in its own order (op_seq), its clock never going back in it, then every
     // device's by that clock: a clock set back never puts a newer op first, and an op
     // `exclude` wrote comes after every op its store held (Codex on #304).
@@ -1103,18 +1141,28 @@ pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
         ops.push((clock, from, i, v));
     }
     ops.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
-    let mut out = std::collections::BTreeSet::new();
+    let (mut sent, mut never) = (
+        std::collections::BTreeSet::new(),
+        CaptureExclusions::default(),
+    );
     for (_, _, _, v) in ops {
-        let Some(repo) = v["repo"].as_str() else {
-            continue;
+        let (set, name) = match (
+            v["level"].as_str(),
+            v["repo"].as_str(),
+            v["folder"].as_str(),
+        ) {
+            (None, Some(repo), _) => (&mut sent, repo),
+            (Some("capture"), Some(repo), _) => (&mut never.repos, repo),
+            (Some("capture"), None, Some(folder)) => (&mut never.folders, folder),
+            _ => continue,
         };
         if v["undo"] == true {
-            out.remove(repo);
+            set.remove(name);
         } else {
-            out.insert(repo.to_owned());
+            set.insert(name.to_owned());
         }
     }
-    Ok(out.into_iter().collect())
+    Ok((sent, never))
 }
 
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s SQLite busy timeout.
@@ -3688,14 +3736,16 @@ impl Raw {
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
-        self.append_with_ledger(e, &[], "")?
-            .context("a record of a forgotten session from before its forget: not recorded")
+        self.append_with_ledger(e, &[], "")?.context(
+            "a record of a forgotten session from before its forget, or of a place never recorded: not recorded",
+        )
     }
 
     /// `append`, with the event's redaction ledger rows in the same transaction; `ruleset` is the
     /// version of the rules that found them (`redact::Rules::version`). None, and nothing recorded,
     /// for a record of a forgotten session from before its forget (slice 3b, D3): a hook call that
-    /// took its time before the registration and waited for this lock behind it.
+    /// took its time before the registration and waited for this lock behind it; and for one of a
+    /// repository or folder never recorded (slice 4a), excluded before this write took the lock.
     pub fn append_with_ledger(
         &mut self,
         e: &Event,
@@ -3711,7 +3761,8 @@ impl Raw {
             &crate::forget::session(&e.agent, &e.session),
             e,
             ledger,
-        )? {
+        )? || capture_exclusions_in(&tx)?.covers(e.repo.as_deref(), e.cwd.as_deref())
+        {
             return Ok(None);
         }
         let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
@@ -3740,10 +3791,14 @@ impl Raw {
         {
             return Ok(false);
         }
+        let never = capture_exclusions_in(&tx)?;
         for c in events {
-            // Slice 3b (D3): a forgotten session's record from before its forget is not recorded.
+            // Slice 3b (D3): a forgotten session's record from before its forget is not recorded,
+            // nor one of a place excluded since (slice 4a).
             let session = crate::forget::session(&c.event.agent, &c.event.session);
-            if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)? {
+            if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)?
+                && !never.covers(c.event.repo.as_deref(), c.event.cwd.as_deref())
+            {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             }
         }
@@ -3811,8 +3866,13 @@ impl Raw {
             );
         }
         let from_seq = next_seq(&tx, &self.device)?;
+        let never = capture_exclusions_in(&tx)?;
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
+            // Slice 4a: a place never recorded; the checkpoint still moves past it.
+            if never.covers(c.event.repo.as_deref(), c.event.cwd.as_deref()) {
+                continue;
+            }
             let identity = origins.get(index);
             let origin = identity.map(|i| i.origin.as_str());
             let session = identity.map_or_else(
@@ -4712,11 +4772,29 @@ impl Raw {
         exclusions_in(&self.conn)
     }
 
+    /// Slice 4a: what is never recorded now (`CaptureExclusions`).
+    pub fn capture_exclusions(&self) -> Result<CaptureExclusions> {
+        capture_exclusions_in(&self.conn)
+    }
+
     /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op
     /// this store holds, as a Lamport clock: it takes effect after each op its device had seen,
     /// whatever the clocks of the devices that wrote them. A copied store keeps its old device's
     /// ops under a new device (Codex on #304).
     pub fn exclude(&mut self, repo: &str, undo: bool) -> Result<i64> {
+        self.exclusion(serde_json::json!({ "repo": repo, "undo": undo }))
+    }
+
+    /// Slice 4a (spec 6.1): an exclusion op of level `capture`, or its undo, as `exclude` appends
+    /// one: `("repo", label)` stops every device recording that repository, and sending it;
+    /// `("folder", cwd label)` stops this device recording under that folder.
+    pub fn exclude_capture(&mut self, (key, value): (&str, &str), undo: bool) -> Result<i64> {
+        let mut op = serde_json::json!({ "undo": undo, "level": "capture" });
+        op[key] = value.into();
+        self.exclusion(op)
+    }
+
+    fn exclusion(&mut self, mut op: serde_json::Value) -> Result<i64> {
         let _dispatch = crate::dispatch::exclusive(&self.home)?;
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
@@ -4724,8 +4802,10 @@ impl Raw {
             [],
             |r| r.get(0),
         )?;
-        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
-        let op = serde_json::json!({ "repo": repo, "undo": undo, "clock": clock });
+        op["clock"] = seen
+            .map_or(i64::MIN, |c| c + 1)
+            .max(crate::db::now_ms())
+            .into();
         Ok(self.append_ops(&[(OpKind::Exclusion, op)])?[0])
     }
 
@@ -8159,6 +8239,107 @@ mod tests {
         let mut other = open(copy.path()).unwrap();
         other.exclude("x", false).unwrap();
         assert_eq!(other.exclusions().unwrap(), ["x"]);
+    }
+
+    /// Slice 4a (spec 6.1): what is never recorded is never sent either, and each undo takes its
+    /// entry out of its own list only: a capture undo leaves `oboete exclude`'s exclusion, and an
+    /// undo of that leaves what is never recorded. A folder is never a repository to send.
+    #[test]
+    fn what_is_never_recorded_and_what_is_not_sent_keep_their_own_undo() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.exclude("a", false).unwrap();
+        raw.exclude_capture(("repo", "a"), false).unwrap();
+        raw.exclude_capture(("repo", "b"), false).unwrap();
+        raw.exclude_capture(("folder", "/x/y"), false).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["a", "b"]);
+        raw.exclude_capture(("repo", "a"), true).unwrap();
+        raw.exclude("b", true).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["a", "b"]);
+        let never = raw.capture_exclusions().unwrap();
+        assert_eq!(
+            (Vec::from_iter(never.repos), Vec::from_iter(never.folders)),
+            (vec!["b".to_owned()], vec!["/x/y".to_owned()])
+        );
+        raw.exclude_capture(("folder", "/x/y"), true).unwrap();
+        raw.exclude_capture(("repo", "b"), true).unwrap();
+        assert_eq!(
+            raw.capture_exclusions().unwrap(),
+            CaptureExclusions::default()
+        );
+        assert_eq!(raw.exclusions().unwrap(), ["a"]);
+    }
+
+    /// Slice 4a: an event of a repository or folder never recorded is refused by every append that
+    /// writes one, once the exclusion is committed: a hook's, a kept call's written back, an
+    /// import's (whose batch records the rest); a folder covers what is in it, component by
+    /// component, and an undo records what comes after it.
+    #[test]
+    fn an_event_never_recorded_is_refused_by_every_append() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let at = |repo: &str, cwd: &str| Event {
+            repo: Some(repo.into()),
+            cwd: Some(cwd.into()),
+            ..test_event("canary-4a")
+        };
+        raw.exclude_capture(("repo", "github.com/o/secret"), false)
+            .unwrap();
+        raw.exclude_capture(("folder", "/x/private"), false)
+            .unwrap();
+        for e in [
+            at("github.com/o/secret", "/w/secret"),
+            at("/x/private", "/x/private"),
+            at("/x/private/sub", "/x/private/sub/dir"),
+        ] {
+            assert_eq!(raw.append_with_ledger(&e, &[], "").unwrap(), None);
+        }
+        assert!(
+            raw.append_with_ledger(&at("/x/privateer", "/x/privateer"), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        let kept = |e: Event| crate::capture::Captured {
+            event: e,
+            ledger: Vec::new(),
+        };
+        assert!(
+            raw.append_kept(&[kept(at("github.com/o/secret", "/w/secret"))], "", None)
+                .unwrap()
+        );
+        let (mut secret, mut open) = (imported("canary-4a"), imported("canary-4a"));
+        secret.event.repo = Some("github.com/o/secret".into());
+        open.event.repo = Some("github.com/o/open".into());
+        assert_eq!(
+            raw.append_imported(&[secret, open], "", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        raw.exclude_capture(("repo", "github.com/o/secret"), true)
+            .unwrap();
+        assert!(
+            raw.append_with_ledger(&at("github.com/o/secret", "/w/secret"), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        let repos: Vec<Option<String>> = raw
+            .after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.item {
+                Item::Event(e) => Some(e.repo),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            repos,
+            [
+                Some("/x/privateer".to_owned()),
+                Some("github.com/o/open".to_owned()),
+                Some("github.com/o/secret".to_owned())
+            ]
+        );
     }
 
     /// docs/work-state.md L4: work state folds in its clock's order: a write on a copied store

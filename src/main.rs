@@ -76,6 +76,24 @@ enum PrefCmd {
 }
 
 #[derive(Subcommand)]
+enum CaptureCmd {
+    /// Never record a repository (on any device, and never send it out) or a folder of this
+    /// device: nothing there is written from now on. The repository in the current directory
+    /// unless one is named
+    Exclude {
+        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path)
+        #[arg(conflicts_with = "folder")]
+        repo: Option<String>,
+        /// A folder of this device instead: nothing in it or below it is recorded
+        #[arg(long)]
+        folder: Option<PathBuf>,
+        /// Record it again from now on (nothing from while it was excluded comes back)
+        #[arg(long)]
+        undo: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Receive one agent hook event on stdin and store it (fail-open, always exit 0)
     Hook {
@@ -295,6 +313,11 @@ enum Cmd {
     Pref {
         #[command(subcommand)]
         action: PrefCmd,
+    },
+    /// What is recorded: `oboete capture exclude` stops recording a repository or a folder
+    Capture {
+        #[command(subcommand)]
+        action: CaptureCmd,
     },
     /// Browse the memory and change the settings in a browser: a page on 127.0.0.1 (prints its URL)
     View {
@@ -723,6 +746,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             )
         }
         Cmd::Doctor => setup::doctor(&home),
+        Cmd::Capture {
+            action: CaptureCmd::Exclude { repo, folder, undo },
+        } => capture_exclude(&home, repo, folder, undo),
         Cmd::Pref {
             action: PrefCmd::Add { text },
         } => {
@@ -817,7 +843,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             raw.exclude(&repo, undo)?;
             let list = raw.exclusions()?;
             if undo {
-                if was {
+                if list.contains(&repo) {
+                    // Slice 4a: what is never recorded is never sent either.
+                    println!(
+                        "{repo} stays excluded: it is never recorded (oboete capture exclude --undo)"
+                    );
+                } else if was {
                     println!("no longer excluded: {repo}");
                 } else {
                     println!("{repo} was not excluded");
@@ -904,6 +935,100 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
 }
 
 /// `oboete claims`: `repo`'s current claims and the global preferences, one a line.
+/// Slice 4a (spec 6.1): `oboete capture exclude`. A repository by its label as capture stores it
+/// (the current checkout's unless named), a folder by its absolute path, each through the gate as
+/// an event's `repo` or `cwd` label; then the list. What is already recorded stays: for a
+/// repository, a terminal is asked whether to forget it too (default: keep).
+fn capture_exclude(
+    home: &std::path::Path,
+    repo: Option<String>,
+    folder: Option<PathBuf>,
+    undo: bool,
+) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+    let settings = capture::Settings::load(home)?;
+    let (key, value) = match folder {
+        Some(folder) => {
+            // As an agent's `cwd` names it: absolute, with no `\\?\` that `canonicalize` gives on
+            // Windows.
+            let folder = std::path::absolute(&folder)?;
+            let label = capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+            ("folder", label)
+        }
+        None => {
+            let repo = match repo {
+                Some(r) => capture::exclusion_label("repo", &r, &settings),
+                None => {
+                    let cwd = std::env::current_dir()?;
+                    let cwd = cwd.to_string_lossy();
+                    capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings).1
+                }
+            };
+            ("repo", repo)
+        }
+    };
+    let mut raw = raw::open(home)?;
+    let was = raw.capture_exclusions()?;
+    let listed = |list: &raw::CaptureExclusions| match key {
+        "folder" => list.folders.contains(&value),
+        _ => list.repos.contains(&value),
+    };
+    let had = listed(&was);
+    raw.exclude_capture((key, &value), undo)?;
+    let list = raw.capture_exclusions()?;
+    drop(raw);
+    match (undo, had) {
+        (true, true) => println!("recorded again from now on: {value}"),
+        (true, false) => println!("{value} was not excluded"),
+        (false, _) => println!("never recorded from now on: {value}"),
+    }
+    let names: Vec<String> = list
+        .repos
+        .iter()
+        .cloned()
+        .chain(list.folders.iter().map(|f| format!("{f} (folder)")))
+        .collect();
+    if names.is_empty() {
+        println!("everything is recorded: nothing is excluded");
+    } else {
+        println!("never recorded: {}", names.join(", "));
+    }
+    if undo {
+        return Ok(());
+    }
+    if key == "folder" {
+        println!("What was recorded there before stays.");
+        return Ok(());
+    }
+    let keep = format!(
+        "What was recorded of {value} before stays; `oboete forget --repo {value}` removes it."
+    );
+    if !std::io::stdin().is_terminal() {
+        println!("{keep}");
+        return Ok(());
+    }
+    print!("Forget what was recorded of {value} before, too? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        println!("{keep}");
+        return Ok(());
+    }
+    forget::run(
+        home,
+        None,
+        None,
+        None,
+        None,
+        Some(&value),
+        None,
+        false,
+        false,
+        false,
+    )
+}
+
 fn claims_listed(home: &std::path::Path, repo: &str) -> Result<String> {
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits).
     let raw = raw::open(home)?;

@@ -665,6 +665,7 @@ The four levels below are owner decision 19.
 - **Never record** (owner decision 16, RD/owner-decisions.md:25). The shape below is decided by Claude under decision 16's delegation. (Claude; overrulable)
   - The hook checks each event's repo key and working directory against the list before writing. An excluded event is not written at all.
   - A repo's own `.oboete.toml` may only restrict (proposal:28). So `capture = false` there is honoured, and nothing there can turn capture on.
+  - The list is raw.db's exclusion ops of level `capture`: a repository by its label, a folder of this device by its path, each as an event's label holds it. Every append refuses an event of a listed repository or with its working directory in a listed folder, and a `.oboete.toml` that cannot be read, or whose `capture` is not true or false, stops recording as `capture = false` does (Claude; overrulable, docs/milestone-5-plan.md slice 4a).
   - Turning exclusion on does nothing to what is already recorded. The command asks whether to forget it too (default: keep). A yes runs `forget --repo` with its preview, the same shape as section 5's withdrawal question.
   - Limit, stated in MUST-M23's "what is stored" doc: content of an excluded repo that a session in another repo reads (a `cat` of its file) is recorded, because the hook cannot see inside tool output.
 

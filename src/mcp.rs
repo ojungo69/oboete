@@ -339,6 +339,15 @@ impl Oboete {
             Err(m) => return failed(m),
         };
         let mut raw = crate::raw::open(&self.home).map_err(internal)?;
+        // Slice 4a: a place never recorded keeps no work state either.
+        let excluded = raw.capture_exclusions().map_err(internal)?;
+        if let Some(why) =
+            crate::capture::not_recorded_why(&self.cwd.to_string_lossy(), &excluded, &settings)
+        {
+            return failed(format!(
+                "nothing is recorded here, so no work state is kept: {why}"
+            ));
+        }
         raw.work_state(&repo, &list, &fields).map_err(internal)?;
         let entries = raw.work_state_entries(&repo).map_err(internal)?;
         text(crate::work_state::written(
@@ -1656,6 +1665,26 @@ mod tests {
                 .work_state_read(Parameters(serde_json::from_value(args).unwrap()))
                 .unwrap(),
         )
+    }
+
+    /// Slice 4a: a checkout never recorded keeps no work state either: the write is refused with
+    /// the reason, and nothing is appended.
+    #[test]
+    fn a_checkout_never_recorded_keeps_no_work_state() {
+        let s = Store::new();
+        let dir = checkout(&s, "r");
+        let server = Oboete::new(s.home.path(), &dir);
+        let settings = crate::capture::Settings::load(s.home.path()).unwrap();
+        let repo = crate::capture::checkout(&json!({"cwd": dir}), &settings).1;
+        crate::raw::open(s.home.path())
+            .unwrap()
+            .exclude_capture(("repo", &repo), false)
+            .unwrap();
+        let answer = write_state(&server, "release", json!({"phase": "design"}));
+        assert_eq!(answer.is_error, Some(true));
+        assert!(body(answer).contains("oboete capture exclude"));
+        let raw = crate::raw::open(s.home.path()).unwrap();
+        assert!(raw.work_state_entries(&repo).unwrap().is_empty());
     }
 
     /// docs/work-state.md L1-L6: a write answers what is still open in its list, a read every

@@ -1308,6 +1308,62 @@ egress の gate が今の規則で伏せる）。
   raw.db のコピーだけが持つ op（raw.db には無い）も、規則を足した後の purge が伏せ、worker はそれまで
   走査を記録しない（Codex on #487）。
 
+### Slice 4 の決定（2026-10-13）
+
+Slice 3 の残り（3e-3 の保存期間）より先に、owner が切替前に挙げた「記録しない」を作る（spec 7.5、owner
+decision 27・34。保存期間は既定が無期限で、切替の前提にない）。設定画面の行（settings-coverage.md の
+「Stop recording a repository or folder」、W3）と setup の質問は 4b、mute のボタンと訂正の残り（#157・
+#160・#162）はその後。
+
+#### 4a: 記録しない（capture exclusion）
+
+spec 6.1 の「記録しない」（owner decision 16・19、A28）。
+
+- **一覧は raw.db の op**: repo は section 5 の exclusion op に `level: "capture"` を付けたもの
+  （`{repo, undo, clock, level}`。M6 で他の端末にも届く）。folder は `{folder, undo, clock, level:
+  "capture"}`（この端末のパス。M6 は送らない）。どちらも `oboete exclude` の op と同じ順序（端末の op
+  順、その後に時計）で最新が勝ち、backup から restore しても戻る。
+- **送信の除外も兼ねる**（spec 6.1）: level のない op と capture の op を別の集合として計算し、送信の一覧
+  （`exclusions_in`）はその和。capture の undo は capture の集合からだけ外し、`oboete exclude` で別に除外
+  した repo は送らないまま。逆に `oboete exclude --undo` は capture の repo を送信に戻さず、そう表示する。
+  設定画面の送信の除外の undo も capture の repo には効かない（4b で行を分ける）。
+- **判定は gate を通した値どうし**: repo は `oboete exclude` と同じ label、folder は event の cwd と同じ
+  `cwd` の label にして保存する。event の repo の label が一覧の repo と等しいか、event の cwd の label が
+  一覧の folder の中（path の component 単位）なら記録しない。hook は一覧の値を今の規則で gate し直して
+  から比べる（後から足した規則が path の一部を伏せても、event の label と同じに伏せる）。`folder` は
+  `repo` と同じく op の名前で、#487 の `OP_NAMES` に入れる（後からマージする方が足す）。
+- **`.oboete.toml`**: checkout の top（`repo::key` が `.git` を探す一度の歩きで分かる、worktree なら
+  その worktree の top）の `.oboete.toml` の `capture` の鍵だけを読む（他の鍵は見ない）。`capture =
+  false` なら記録しない。`capture = true` は一覧を外さない。ファイルが読めない、TOML として読めない、
+  `capture` が真偽値でないときも記録しない（repo の設定は制限しかできないので閉じる側に倒す。Claude;
+  overrulable）。そのとき hook は stderr に一行、doctor はその checkout で一行出す。読むのは hook の経路
+  だけ（取り込みは checkout が動いた後なので op の一覧だけを見る）。
+- **どこで断るか**: `Raw::append_with_ledger` と `append_imported_origins` の書込み transaction の中で一覧
+  を読み（保存した値のまま比べる）、除外なら書かない（slice 3b の忘れた session と同じ `Ok(None)`）。除外
+  の op が commit された後に書く append は必ず断られる。hook は raw.db を開けたら一覧を呼び出しごとに一度
+  読んで `built` で先に外し、unwritten の spool にも入れない。開けないとき（docs/unwritten.md U2）は
+  spool に置き、書き戻しの append が断る（制限: それまで spool のファイルに残る）。
+- **hook の時間**: `oboete replay` の hook の p95 を前後で測り、PR に書く（Windows は 25.5 ms の線の上）。
+- **work state**: 除外された repo か folder の checkout からの書込み（MCP、docs/work-state.md）は断る。
+- **CLI**: `oboete capture exclude [<repo>] [--folder <path>] [--undo]`。repo を省くと今の checkout の
+  repo（`oboete exclude` と同じ label）。folder は絶対パスにして保存する。結果の一覧を表示する。repo を
+  除外したとき、端末なら「すでに記録した分も忘れますか（既定: 残す）」と聞き、はいなら `forget --repo`
+  の preview と確認に進む。端末でなければ `oboete forget --repo <repo>` で消せると表示する。folder は
+  forget の target にないので、記録済みは残ると表示する。
+- **見ないもの・制限**: claude-mem の取り込み文書（import op。`claude-mem:<name>` との対応は送信の除外の
+  D13 の話）。他の repo の session が除外した repo のファイルを読んだ tool の出力は記録される（spec 6.1 の
+  制限）。除外していた間に取り込みが飛ばした event は checkpoint の後ろにあるので、undo しても戻らない
+  （除外していた間の記録が戻らないのと同じ）。
+
+受入:
+- 除外した repo と folder の canary の event（hook 経由）は raw.db にも spool にも 0 件。undo の後の event
+  は記録され、除外していた間の event は戻らない。
+- `.oboete.toml` の `capture = false` と壊れた `.oboete.toml` で 0 件（doctor が言う）。`capture = true` は除外を外さない。
+- 後から足した規則が除外した folder の path の一部を伏せても、その folder の event は 0 件。
+- capture の除外は送信の一覧に入り、その undo は `oboete exclude` の除外を残す。
+- 除外の op の commit の後に書く append（書込みを待っていた hook、spool の書き戻し）は断られる。
+- transcript の取り込み（一覧だけ）と work state の書込みも除外を見る。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |

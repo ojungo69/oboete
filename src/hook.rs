@@ -1035,6 +1035,11 @@ fn built(
 ) -> Result<(Vec<Built>, Option<String>)> {
     let mut built = Vec::new();
     let mut prompt = None;
+    // Slice 4a: what is never recorded, read once a call and labelled as this call's events are.
+    // Without a store (U2) the append refuses such events as it writes them back.
+    let never = raw
+        .and_then(|raw| raw.capture_exclusions().ok())
+        .map(|list| crate::capture::never_recorded(&list, settings));
     for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
         if event == "UserPromptSubmit" {
             prompt = str_field(&payload, &["prompt"]).map(str::to_owned);
@@ -1047,6 +1052,12 @@ fn built(
                 (session.to_owned(), step)
             });
         for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
+            if never
+                .as_ref()
+                .is_some_and(|n| n.covers(c.event.repo.as_deref(), c.event.cwd.as_deref()))
+            {
+                continue;
+            }
             if let Some(raw) = raw {
                 c.event.session = own_session(std::mem::take(&mut c.event.session), raw);
             }
@@ -2745,6 +2756,127 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Bytes of `needle` in any file of `home`: its stores, the kept calls, the hooks' state
+    /// (slice 4a).
+    fn stored_bytes(home: &Path, needle: &str) -> usize {
+        let mut files = Vec::new();
+        let mut dirs = vec![home.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    dirs.push(e.path());
+                } else {
+                    files.push(e.path());
+                }
+            }
+        }
+        files
+            .iter()
+            .filter_map(|f| std::fs::read(f).ok())
+            .map(|b| {
+                b.windows(needle.len())
+                    .filter(|w| *w == needle.as_bytes())
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Slice 4a (spec 6.1, the capture exclusion canary): a prompt in an excluded repository and
+    /// one in a folder below an excluded folder leave no byte in raw.db or among the kept calls,
+    /// nor does a call kept before the exclusion and written back after it. After an undo the
+    /// repository's next prompt is recorded, and nothing from while it was excluded comes back.
+    #[test]
+    fn a_canary_where_nothing_is_recorded_leaves_no_byte() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let checkout = home.join("secret");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::write(
+            checkout.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:o/secret.git\n",
+        )
+        .unwrap();
+        let folder = home.join("private");
+        std::fs::create_dir_all(folder.join("deep")).unwrap();
+        let settings = crate::capture::Settings::load(home).unwrap();
+        let said = |cwd: &Path, text: &str| json!({"session_id": "s", "cwd": cwd, "prompt": text});
+        let kept = crate::capture::events(
+            "claude",
+            "UserPromptSubmit",
+            &said(&checkout, "canary-kept"),
+            1,
+            &settings,
+        );
+        crate::unwritten::keep(home, &kept, settings.rules.version()).unwrap();
+        let repo = crate::capture::checkout(&json!({"cwd": checkout}), &settings).1;
+        let mut raw = crate::raw::open(home).unwrap();
+        raw.exclude_capture(("repo", &repo), false).unwrap();
+        let label = crate::capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+        raw.exclude_capture(("folder", &label), false).unwrap();
+        drop(raw);
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(&checkout, "canary-repo"),
+        );
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(&folder.join("deep"), "canary-folder"),
+        );
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(home, "open-prompt"),
+        );
+        assert_eq!(stored_bytes(home, "canary-"), 0);
+        assert_eq!(recorded(home, "claude", "s").len(), 1);
+        crate::raw::open(home)
+            .unwrap()
+            .exclude_capture(("repo", &repo), true)
+            .unwrap();
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(&checkout, "after-undo"),
+        );
+        let bodies: Vec<String> = recorded(home, "claude", "s")
+            .into_iter()
+            .map(|e| e.body)
+            .collect();
+        assert!(bodies[1].contains("after-undo"), "{bodies:?}");
+        assert_eq!((bodies.len(), stored_bytes(home, "canary-")), (2, 0));
+    }
+
+    /// Slice 4a: a rule added after a folder was excluded masks its path in an event's cwd as in
+    /// the exclusion read now: the folder still records nothing.
+    #[test]
+    fn a_rule_added_after_a_folder_was_excluded_still_records_nothing_there() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let folder = home.join("acme-482915");
+        std::fs::create_dir_all(&folder).unwrap();
+        let settings = crate::capture::Settings::load(home).unwrap();
+        let label = crate::capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+        crate::raw::open(home)
+            .unwrap()
+            .exclude_capture(("folder", &label), false)
+            .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let said = json!({"session_id": "s", "cwd": folder, "prompt": "canary-rule"});
+        hook(home, "claude", "UserPromptSubmit", &said);
+        assert_eq!(stored_bytes(home, "canary-"), 0);
+        assert!(recorded(home, "claude", "s").is_empty());
     }
 
     fn built_manifest(home: &Path, cwd: &Path, prompt: &str) -> String {
