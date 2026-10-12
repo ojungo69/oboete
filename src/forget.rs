@@ -7690,6 +7690,93 @@ mod tests {
         assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
     }
 
+    /// Codex on #480: a restore from segments brings a mask's time back with its range, and one a
+    /// segment written before tombstone lines kept their time brings back without it counts as
+    /// late as can be: a claim made from the record before the mask, and a window that named it,
+    /// lose their text either way.
+    #[test]
+    fn a_restore_keeps_the_time_of_a_mask() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let plain = "We deploy on Fridays.";
+        let r0 = s.said("s", "github.com/o/r", 500, plain);
+        let (r1, said) = masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        let claim = claim_op(&device, &[(r1, &said)], "Deploys on Fridays.");
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        let seq = s.raw.append_ops(&[claim]).unwrap()[0];
+        let shown = window_op(r0, r0, plain, serde_json::json!({"candidates": [uid]}));
+        let window = s.raw.append_ops(&[shown]).unwrap()[0];
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let masked_at = |home: &Path| -> i64 {
+            rusqlite::Connection::open(home.join("raw.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT ts FROM records WHERE type = 'tombstone' AND target_seq = ?1",
+                    [r1],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let at = masked_at(&home);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        crate::worker::run_once(&home).unwrap();
+        assert_eq!(masked_at(&home), at);
+        // As an older segment brings it back.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("UPDATE records SET ts = 0 WHERE type = 'tombstone'", [])
+            .unwrap();
+        purge(&home).unwrap().unwrap();
+        let after = op_bodies(&home);
+        assert_eq!(
+            after[&seq],
+            serde_json::json!({"forgotten": crate::raw::MASK_JOB})
+        );
+        assert_eq!(after[&window]["forgotten"], crate::raw::MASK_JOB);
+    }
+
+    /// Codex on #480: a forget's tombstone an older segment brought back without its time counts as
+    /// late as can be: a window that showed the record loses its text.
+    #[test]
+    fn a_forget_whose_time_a_restore_lost_takes_what_was_shown() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Parsers stay in {WINDOW_CANARY} mode."),
+        );
+        let said = format!("Its span: {WINDOW_CANARY}.");
+        let seq = s
+            .raw
+            .append_ops(&[window_op(r1, r1, &said, serde_json::json!({}))])
+            .unwrap()[0];
+        let home = s.home.path().to_owned();
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("UPDATE records SET ts = 0 WHERE type = 'tombstone'", [])
+            .unwrap();
+        purge(&home).unwrap().unwrap();
+        assert!(op_bodies(&home)[&seq]["forgotten"].is_string());
+        assert_eq!(
+            store_hits(&home, WINDOW_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+    }
+
     /// Slice 3e-1: ranges a rescan masked before this version, which marked nothing, are owed as a
     /// later one is: a store upgraded with them has paid none.
     #[test]

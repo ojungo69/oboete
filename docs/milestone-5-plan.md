@@ -1111,6 +1111,11 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
 - **呼び出しの途中の伏せ字**: curator・turn の呼び出しの間に範囲 tombstone が書かれたら、forget の deny と
   同じく書く前に切り直す（`Reading` と `append_ops_fenced` が比べる数に範囲 tombstone の数を足す）。だから
   tombstone の後に書かれた op は伏せた文を読んでいる（上の時刻の判定が成り立つ）。
+- **復元と時刻**（Codex on #480）: record segment の tombstone の行は時刻（`ts`）を持ち、segment からの
+  restore はそれを戻す（今までは持たず、restore で 0 になり、伏せる前や forget の前に作った op を後に
+  作ったと誤って判定した）。この版より前の segment から戻った tombstone は時刻を持たないので、purge は
+  それを最も遅い時刻とみなす: その record の文から作った op はすべてその前に作ったとして文を失う（多めに
+  取る側。forget の tombstone も同じ）。
 - **knowledge.db**: 払う伏せ字がある回は rebuild する（3c-1 と同じ: FTS の三文字組、空きページ）。vector の carry は
   伏せた record の鍵を忘れた record の鍵と同じく外す（伏せる前の文の vector を戻さない）。set aside の
   knowledge.db は今と同じく carry してから消す。

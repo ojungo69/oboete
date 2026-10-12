@@ -2641,11 +2641,11 @@ impl Raw {
             let key: (String, i64) = (row.get(0)?, row.get(1)?);
             match quoted_entry(forgotten, row.get(2)?, &body) {
                 // Slice 3e-1: this op alone, its uid not tombstoned.
-                Some((_, job, Some(at))) if job == MASK_JOB => {
+                Some((_, job, at)) if job == MASK_JOB => {
                     claims.masked.push(key.clone());
                     // Its latest mask: a window that showed it before then showed its text
                     // (Codex on #480).
-                    later(&mut claims.masked_uids, &uid, *at);
+                    later(&mut claims.masked_uids, &uid, at.unwrap_or(i64::MAX));
                 }
                 Some((_, job, _)) => {
                     claims
@@ -2677,16 +2677,18 @@ impl Raw {
     }
 
     /// Slice 3d: what forget took, read once for the purges of what was made from it: each
-    /// forgotten record with its denial's job and when its forget tombstone was written, and the
-    /// uids the record jobs' forget ops tombstone (`record_derived_uids`).
+    /// forgotten record with its denial's job and when its forget tombstone was written (none
+    /// when a restore from a segment written before tombstone lines kept their time lost it: then
+    /// every op counts as made before it, Codex on #480), and the uids the record jobs' forget ops
+    /// tombstone (`record_derived_uids`).
     pub(crate) fn forgotten_records(&self) -> Result<Forgotten> {
         let mut records: std::collections::HashMap<String, Vec<(i64, String, Option<i64>)>> =
             std::collections::HashMap::new();
         let mut st = self.conn.prepare(
             "SELECT o.device, o.seq, d.job,
-               (SELECT MIN(t.ts) FROM records t WHERE t.type = 'tombstone'
+               NULLIF((SELECT MIN(t.ts) FROM records t WHERE t.type = 'tombstone'
                   AND t.target_device = o.device AND t.target_seq = o.seq
-                  AND t.source = 'forget' AND t.target_offset IS NULL)
+                  AND t.source = 'forget' AND t.target_offset IS NULL), 0)
              FROM denied_records d JOIN import_origins o ON o.origin = d.origin",
         )?;
         let mut rows = st.query([])?;
@@ -2714,7 +2716,7 @@ impl Raw {
         let masks = self
             .conn
             .prepare(
-                "SELECT target_device, target_seq, MAX(ts) FROM records
+                "SELECT target_device, target_seq, NULLIF(MAX(ts), 0) FROM records
                  WHERE type = 'tombstone' AND target_offset IS NOT NULL
                  GROUP BY target_device, target_seq",
             )?
@@ -4034,6 +4036,15 @@ impl Raw {
                     v["kind"] = serde_json::json!(kind);
                     v["ts"] = serde_json::json!(ts);
                 }
+                // A tombstone's time, by which a purge judges what was made before it (Codex on
+                // #480): a restore keeps it.
+                if matches!(r.item, Item::Tombstone(_)) {
+                    v["ts"] = self
+                        .conn
+                        .prepare_cached("SELECT ts FROM records WHERE device = ?1 AND seq = ?2")?
+                        .query_row(params![r.device, r.seq], |x| x.get::<_, i64>(0))?
+                        .into();
+                }
                 // The home lineage, unlike the appending device, survives a copied file. Its
                 // record backups keep it too, so a lost raw.db still recognizes its logs.
                 v["home_id"] = serde_json::json!(self.home_id);
@@ -5055,10 +5066,11 @@ impl Rebuild {
                 self.conn.execute(
                     "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
                        target_offset, target_length, deny_origin)
-                     VALUES(?1, ?2, 'tombstone', 0, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     VALUES(?1, ?2, 'tombstone', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         device,
                         seq,
+                        i("ts").unwrap_or(0),
                         source,
                         target_device,
                         target_seq,
@@ -5701,9 +5713,10 @@ impl Forgotten {
         self.records.is_empty() && self.uids.is_empty()
     }
 
-    /// Slice 3e-1: `masks` (device, seq and the time of the record's latest mask) as `MASK_JOB`'s,
-    /// each record a forget took aside: it is forgotten whole.
-    fn with_masks(mut self, masks: Vec<(String, i64, i64)>) -> Self {
+    /// Slice 3e-1: `masks` (device, seq and the time of the record's latest mask, none when a
+    /// restore lost it, as `forgotten_records` reads one) as `MASK_JOB`'s, each record a forget
+    /// took aside: it is forgotten whole.
+    fn with_masks(mut self, masks: Vec<(String, i64, Option<i64>)>) -> Self {
         let masks: Vec<_> = masks
             .into_iter()
             .filter(|(device, seq, _)| self.entry(device, *seq).is_none())
@@ -5712,7 +5725,7 @@ impl Forgotten {
             self.records
                 .entry(device)
                 .or_default()
-                .push((seq, MASK_JOB.to_owned(), Some(at)));
+                .push((seq, MASK_JOB.to_owned(), at));
         }
         for seqs in self.records.values_mut() {
             seqs.sort_by_key(|r| r.0);
@@ -5913,8 +5926,8 @@ impl Judge {
             {
                 // Slice 3e-1: a masked record's claim is not forgotten by its uid.
                 match r {
-                    (_, job, Some(at)) if job == MASK_JOB => {
-                        later(&mut masked, &uid, *at);
+                    (_, job, at) if job == MASK_JOB => {
+                        later(&mut masked, &uid, at.unwrap_or(i64::MAX));
                     }
                     (_, job, _) => {
                         uids.entry(uid).or_insert_with(|| job.clone());
