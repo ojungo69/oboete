@@ -1881,11 +1881,19 @@ impl Raw {
             }
             crate::forget::Target::Repo { repo, .. } => {
                 scope.keys = self.repo_labels(repo)?;
+                // Where the records it takes were recorded: no forgotten record's, nor one whose
+                // repository label is masked (Codex on #468).
                 scope.paths = self
                     .conn
                     .prepare(
-                        "SELECT DISTINCT cwd FROM records WHERE type = 'event' AND cwd IS NOT NULL
-                           AND repo IN (SELECT value FROM json_each(?1)) ORDER BY cwd LIMIT 5",
+                        "SELECT DISTINCT r.cwd FROM records r WHERE r.type = 'event'
+                           AND r.cwd IS NOT NULL AND r.repo IN (SELECT value FROM json_each(?1))
+                           AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.device = r.device
+                             AND l.seq = r.seq AND l.field = 'repo')
+                           AND NOT EXISTS (SELECT 1 FROM import_origins o
+                             JOIN denied_records d ON d.origin = o.origin
+                             WHERE o.device = r.device AND o.seq = r.seq)
+                         ORDER BY r.cwd LIMIT 5",
                     )?
                     .query_map([serde_json::to_string(&scope.keys)?], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;

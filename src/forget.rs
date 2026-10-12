@@ -4868,6 +4868,7 @@ mod tests {
         let mut raw = raw::open(h).unwrap();
         let mut e = raw::test_event(r#"{"prompt":"masked"}"#);
         e.repo = Some("[REDACTED]".into());
+        e.cwd = Some("/masked-dir".into());
         let masked = raw.append(&e).unwrap();
         rusqlite::Connection::open(h.join("raw.db"))
             .unwrap()
@@ -4879,9 +4880,22 @@ mod tests {
             .unwrap();
         let mut plain = raw::test_event(r#"{"prompt":"plain"}"#);
         plain.repo = Some("[REDACTED]".into());
+        plain.cwd = Some("/kept-dir".into());
         let kept = raw.append(&plain).unwrap();
+        // A record of it forgotten alone before: neither taken nor shown where it was recorded.
+        let mut earlier = plain.clone();
+        earlier.cwd = Some("/forgotten-dir".into());
+        let gone = raw.append(&earlier).unwrap();
+        let alone = Target::Record {
+            device: raw.device().to_owned(),
+            seq: gone,
+        };
+        start(h, &preview(h, alone).unwrap()).unwrap();
         let target = repo_target(h, "[REDACTED]").unwrap();
-        assert_eq!(seqs(&preview(h, target).unwrap().records), [kept]);
+        let p = preview(h, target).unwrap();
+        assert_eq!(seqs(&p.records), [kept]);
+        // Where the records it takes were recorded, and no other (Codex on #468).
+        assert_eq!(p.scope.map(|s| s.paths), Some(vec!["/kept-dir".to_owned()]));
         let other = "0".repeat(32);
         for target in [
             Target::Repo {
