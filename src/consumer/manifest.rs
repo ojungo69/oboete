@@ -2031,6 +2031,7 @@ extra_rules = [
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         let op = (crate::raw::OpKind::Claim, serde_json::to_value(op).unwrap());
         (op, uid)

@@ -164,6 +164,7 @@ impl Consumer for Claims {
             "derivations",
             "evidence",
             "edges",
+            "support",
             "claim_skips",
             "recurate",
             "corrections",
@@ -317,6 +318,13 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
     };
     let (kind, status) = normalize(&c.kind, &c.status);
     let uid = uid(kind, first);
+    // #167: a status another record raised stands while one of them is left, or the owner set it
+    // before they went; else it is a proposal, as the gates would have made it, which supersedes
+    // nothing (`Anchors` does the same when the last one goes later).
+    let records = || c.support.iter().map(|s| (&s.device, s.seq));
+    let stands =
+        c.support.is_empty() || supported(raw, records())? || owner_set(raw, &uid, records())?;
+    let status = if stands { status } else { "proposed" };
     k.execute(
         "INSERT INTO derivations(op_device, op_seq, uid, ts, tier, recipe, kind, status, speaker,
            scope, repo, body, valid_from, anchor_device, anchor_seq)
@@ -350,12 +358,18 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
             ],
         )?;
     }
+    for s in &c.support {
+        k.execute(
+            "INSERT OR IGNORE INTO support(op_device, op_seq, device, seq) VALUES(?1, ?2, ?3, ?4)",
+            params![op.device, op.op_seq, s.device, s.seq],
+        )?;
+    }
     Ok(Some(Derived {
         op_seq: op.op_seq,
         batch: op.batch,
         id: c.id,
         uid,
-        supersedes: c.supersedes,
+        supersedes: if stands { c.supersedes } else { Vec::new() },
     }))
 }
 
@@ -380,6 +394,46 @@ pub(crate) fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>>
         })
         .unwrap_or(false);
     Ok(reads.then_some(*event))
+}
+
+/// Whether one of `records` is still there, a mask over part of it or not (#167): a status stands
+/// on what a record was (an acceptance, a passing run), which a masked token does not change; a
+/// record removed whole reads as `Removed` or not at all.
+pub(crate) fn supported<'a>(
+    raw: &Raw,
+    records: impl IntoIterator<Item = (&'a String, i64)>,
+) -> Result<bool> {
+    for (device, seq) in records {
+        let record = raw
+            .after(device, seq - 1, 1)?
+            .into_iter()
+            .find(|r| r.seq == seq);
+        if record.is_some_and(|r| matches!(r.item, Item::Event(_))) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// #167 (Codex on #473): whether the owner set `uid`'s status (a correction `correction` applies,
+/// which `active` shows over any derivation's) before the last of `records`, those its
+/// derivation's status stood on, went: then it stands, and supersedes what it did. In the same
+/// millisecond counts as before: the clock cannot order them, and the owner's word stands (Codex
+/// on #473). One set after them, or with one of them never here, does not raise it again, in the
+/// live consumer and in a rebuild alike.
+pub(crate) fn owner_set<'a>(
+    raw: &Raw,
+    uid: &str,
+    records: impl IntoIterator<Item = (&'a String, i64)>,
+) -> Result<bool> {
+    let Some(gone) = raw.gone_at(records)? else {
+        return Ok(false);
+    };
+    Ok(raw.corrections_naming(uid)?.into_iter().any(|(ts, body)| {
+        ts <= gone
+            && serde_json::from_value::<crate::claims::CorrectionOp>(body)
+                .is_ok_and(|c| c.uid == uid && c.status.is_some() && c.fault().is_none())
+    }))
 }
 
 /// The window the claim op `op_seq` of `op_device` came with, for Task 11 to send again: its
@@ -458,7 +512,7 @@ impl Consumer for Anchors {
                     params![op_device, op_seq],
                     |r| r.get(0),
                 )?;
-                for table in ["derivations", "evidence", "edges"] {
+                for table in ["derivations", "evidence", "edges", "support"] {
                     k.execute(
                         &format!("DELETE FROM {table} WHERE op_device = ?1 AND op_seq = ?2"),
                         params![op_device, op_seq],
@@ -470,6 +524,39 @@ impl Consumer for Anchors {
                     params![op_device, op_seq],
                 )?;
                 activate(k, &uid)?;
+            }
+            // #167: a derivation whose status stood on the record, with none of its records left,
+            // is a proposal, which supersedes nothing, as `derive` makes it in a rebuild.
+            let supported_by: Vec<(String, i64)> = k
+                .prepare(
+                    "SELECT DISTINCT op_device, op_seq FROM support WHERE device = ?1 AND seq = ?2",
+                )?
+                .query_map(params![target, seq], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (op_device, op_seq) in supported_by {
+                let records: Vec<(String, i64)> = k
+                    .prepare(
+                        "SELECT device, seq FROM support WHERE op_device = ?1 AND op_seq = ?2",
+                    )?
+                    .query_map(params![op_device, op_seq], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let uid: String = k.query_row(
+                    "SELECT uid FROM derivations WHERE op_device = ?1 AND op_seq = ?2",
+                    params![op_device, op_seq],
+                    |r| r.get(0),
+                )?;
+                let records = || records.iter().map(|(d, s)| (d, *s));
+                if supported(raw, records())? || owner_set(raw, &uid, records())? {
+                    continue;
+                }
+                k.execute(
+                    "UPDATE derivations SET status = 'proposed' WHERE op_device = ?1 AND op_seq = ?2",
+                    params![op_device, op_seq],
+                )?;
+                k.execute(
+                    "DELETE FROM edges WHERE op_device = ?1 AND op_seq = ?2",
+                    params![op_device, op_seq],
+                )?;
             }
         }
         Ok(top)
@@ -571,6 +658,7 @@ mod tests {
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         }
     }
 
@@ -1362,6 +1450,335 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found, 0);
+    }
+
+    /// #167: a derivation whose status stood on records besides its quotes is a proposal once none
+    /// of them is left, in the live consumer and after a rebuild, and then supersedes nothing: the
+    /// claim it superseded is current again. The claim stays. With one of two records left, or a
+    /// record masked in part, it stands; an owner correction's status is kept over it.
+    #[test]
+    fn a_status_whose_records_are_removed_is_a_proposal_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let at = |raw: &mut Raw, text: &str, ts| raw.append(&event(text, ts)).unwrap();
+        let (old, proposal, done) = ("We store it in JSON files.", "Let's use SQLite.", "Fixed.");
+        let s_old = at(&mut raw, old, 1);
+        let s_proposal = at(&mut raw, proposal, 2);
+        let s_yes = at(&mut raw, "Yes, go ahead.", 3);
+        let run1 = at(&mut raw, "test result: ok. 4 passed", 4);
+        let run2 = at(&mut raw, "test result: ok. 5 passed", 5);
+        let s_done = at(&mut raw, done, 6);
+        let support = |seqs: &[i64]| -> Vec<crate::claims::Support> {
+            seqs.iter()
+                .map(|&seq| crate::claims::Support {
+                    device: dev.clone(),
+                    seq,
+                })
+                .collect()
+        };
+        let earlier = claim("x", "decision", old, vec![quote(&dev, s_old, old, old, 0)]);
+        let x = uid("decision", &earlier.evidence[0]);
+        let accepted = ClaimOp {
+            speaker: "assistant proposal".into(),
+            supersedes: vec![x.clone()],
+            support: support(&[s_yes]),
+            ..claim(
+                "a",
+                "decision",
+                "Use SQLite.",
+                vec![quote(&dev, s_proposal, proposal, "use SQLite", 0)],
+            )
+        };
+        let fixed = ClaimOp {
+            status: "done".into(),
+            support: support(&[run1, run2]),
+            ..claim(
+                "d",
+                "fix",
+                done,
+                vec![quote(&dev, s_done, done, "Fixed", 0)],
+            )
+        };
+        let a = uid("decision", &accepted.evidence[0]);
+        let d = uid("fix", &fixed.evidence[0]);
+        raw.append_ops(&[op(&earlier)]).unwrap();
+        let ops = raw.append_ops(&[op(&accepted), op(&fixed)]).unwrap();
+        let statuses = |k: &Connection| -> Vec<(String, String)> {
+            let mut got: Vec<(String, String)> = current(k, "r")
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.body, c.status))
+                .collect();
+            got.sort();
+            got
+        };
+        let pair = |b: &str, st: &str| (b.to_owned(), st.to_owned());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        let standing = [pair(done, "done"), pair("Use SQLite.", "decided")];
+        assert_eq!(statuses(&k), standing);
+        let pending = |raw: &Raw, k: &Connection| {
+            let p = crate::claims::Pending::read(raw, k).unwrap();
+            [
+                p.touches(k, &a).unwrap(),
+                p.touches(k, &d).unwrap(),
+                p.touches_op(k, &dev, ops[0]).unwrap(),
+                p.touches_op(k, &dev, ops[1]).unwrap(),
+            ]
+        };
+        // One run of two removed, and the acceptance masked in part: both stand, and a reader
+        // keeps them while Anchors has not reached the tombstones (Codex on #473).
+        raw.append_tombstone(Target::Record {
+            device: dev.clone(),
+            seq: run1,
+        })
+        .unwrap();
+        raw.append_tombstone(Target::Range {
+            device: dev.clone(),
+            seq: s_yes,
+            offset: 0,
+            length: 3,
+        })
+        .unwrap();
+        assert_eq!(pending(&raw, &k), [false; 4]);
+        run(&raw, &mut k);
+        assert_eq!(statuses(&k), standing);
+        // The acceptance and the other run removed: proposals, and the decision the proposal
+        // superseded is current again.
+        assert_eq!(pending(&raw, &k), [false; 4]);
+        for seq in [s_yes, run2] {
+            raw.append_tombstone(Target::Record {
+                device: dev.clone(),
+                seq,
+            })
+            .unwrap();
+        }
+        // Until Anchors lowers them, a reader leaves them out (Codex on #473).
+        assert_eq!(pending(&raw, &k), [true; 4]);
+        run(&raw, &mut k);
+        let lowered = [
+            pair(done, "proposed"),
+            pair("Use SQLite.", "proposed"),
+            pair(old, "decided"),
+        ];
+        assert_eq!(statuses(&k), lowered);
+        assert_eq!(count(&k, "edges"), 0);
+        // A record tombstoned again after Anchors lowered them: nothing left to wait for (Codex on
+        // #473).
+        raw.append_tombstone(Target::Record {
+            device: dev.clone(),
+            seq: s_yes,
+        })
+        .unwrap();
+        assert_eq!(pending(&raw, &k), [false; 4]);
+        run(&raw, &mut k);
+        assert_eq!(statuses(&k), lowered);
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(statuses(&k), lowered);
+        assert_eq!(count(&k, "edges"), 0);
+        // An op that comes after its record's removal was read: a proposal from the start, which
+        // supersedes nothing.
+        let postgres = "Let's use Postgres.";
+        let s_late = at(&mut raw, postgres, 7);
+        let late = ClaimOp {
+            speaker: "assistant proposal".into(),
+            supersedes: vec![x.clone()],
+            support: support(&[s_yes]),
+            ..claim(
+                "l",
+                "decision",
+                "Use Postgres.",
+                vec![quote(&dev, s_late, postgres, "use Postgres", 0)],
+            )
+        };
+        raw.append_ops(&[op(&late)]).unwrap();
+        run(&raw, &mut k);
+        let mut later = lowered.to_vec();
+        later.push(pair("Use Postgres.", "proposed"));
+        later.sort();
+        assert_eq!(statuses(&k), later);
+        assert_eq!(count(&k, "edges"), 0);
+        // The owner's correction is kept over it; written after the record went, it does not raise
+        // the derivation again, which supersedes nothing, in a rebuild either (Codex on #473).
+        let correction =
+            json!({"uid": a, "anchor": {"device": dev, "seq": s_proposal}, "status": "decided"});
+        raw.append_ops(&[(OpKind::Correction, correction)]).unwrap();
+        run(&raw, &mut k);
+        assert!(statuses(&k).contains(&pair("Use SQLite.", "decided")));
+        assert_eq!(count(&k, "edges"), 0);
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert!(statuses(&k).contains(&pair("Use SQLite.", "decided")));
+        assert_eq!(count(&k, "edges"), 0);
+    }
+
+    /// #167 (Codex on #473): a status the owner set before the record it stood on went stands over
+    /// its removal, and still supersedes, in the live consumer and after a rebuild; a reader keeps
+    /// the claim while Anchors has not reached the tombstone, as the status it shows cannot change.
+    #[test]
+    fn a_status_the_owner_set_before_its_record_went_stands() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let at = |raw: &mut Raw, text: &str, ts| raw.append(&event(text, ts)).unwrap();
+        let (old, proposal) = ("We store it in JSON files.", "Let's use SQLite.");
+        let s_old = at(&mut raw, old, 1);
+        let s_proposal = at(&mut raw, proposal, 2);
+        let s_yes = at(&mut raw, "Yes, go ahead.", 3);
+        let earlier = claim("x", "decision", old, vec![quote(&dev, s_old, old, old, 0)]);
+        let accepted = ClaimOp {
+            speaker: "assistant proposal".into(),
+            supersedes: vec![uid("decision", &earlier.evidence[0])],
+            support: vec![crate::claims::Support {
+                device: dev.clone(),
+                seq: s_yes,
+            }],
+            ..claim(
+                "a",
+                "decision",
+                "Use SQLite.",
+                vec![quote(&dev, s_proposal, proposal, "use SQLite", 0)],
+            )
+        };
+        let a = uid("decision", &accepted.evidence[0]);
+        raw.append_ops(&[op(&earlier)]).unwrap();
+        raw.append_ops(&[op(&accepted)]).unwrap();
+        let correction =
+            json!({"uid": a, "anchor": {"device": dev, "seq": s_proposal}, "status": "decided"});
+        raw.append_ops(&[(OpKind::Correction, correction)]).unwrap();
+        // Written a minute before the record went.
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET ts = ts - 60000 WHERE type = 'correction'",
+                [],
+            )
+            .unwrap();
+        let bodies = |k: &Connection| -> Vec<String> {
+            current(k, "r")
+                .unwrap()
+                .into_iter()
+                .map(|c| c.body)
+                .collect()
+        };
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(bodies(&k), ["Use SQLite."]);
+        raw.append_tombstone(Target::Record {
+            device: dev.clone(),
+            seq: s_yes,
+        })
+        .unwrap();
+        let pending = crate::claims::Pending::read(&raw, &k).unwrap();
+        assert!(!pending.touches(&k, &a).unwrap());
+        run(&raw, &mut k);
+        assert_eq!(
+            (bodies(&k), count(&k, "edges")),
+            (vec!["Use SQLite.".to_owned()], 1)
+        );
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(
+            (bodies(&k), count(&k, "edges")),
+            (vec!["Use SQLite.".to_owned()], 1)
+        );
+        // A tombstone a restore from segments brought back without its time: it went as late as
+        // can be, so the owner's status still came first (Codex on #473).
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("UPDATE records SET ts = 0 WHERE type = 'tombstone'", [])
+            .unwrap();
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(
+            (bodies(&k), count(&k, "edges")),
+            (vec!["Use SQLite.".to_owned()], 1)
+        );
+        // A correction in the same millisecond as the removal: the clock cannot order them, and
+        // the owner's status stands (Codex on #473).
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute_batch(
+                "UPDATE records SET ts = 5000 WHERE type = 'tombstone';
+                 UPDATE ops SET ts = 5000 WHERE type = 'correction';",
+            )
+            .unwrap();
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(
+            (bodies(&k), count(&k, "edges")),
+            (vec!["Use SQLite.".to_owned()], 1)
+        );
+    }
+
+    /// #167 (Codex on #473): a status the owner set after the record it stood on went does not keep
+    /// a reader from leaving the claim out while Anchors has not reached the tombstone, though the
+    /// claims consumer applied it: Anchors lowers the derivation and takes its supersedes edge.
+    #[test]
+    fn a_status_the_owner_set_after_its_record_went_waits_for_anchors() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let at = |raw: &mut Raw, text: &str, ts| raw.append(&event(text, ts)).unwrap();
+        let (old, proposal) = ("We store it in JSON files.", "Let's use SQLite.");
+        let s_old = at(&mut raw, old, 1);
+        let s_proposal = at(&mut raw, proposal, 2);
+        let s_yes = at(&mut raw, "Yes, go ahead.", 3);
+        let earlier = claim("x", "decision", old, vec![quote(&dev, s_old, old, old, 0)]);
+        let accepted = ClaimOp {
+            speaker: "assistant proposal".into(),
+            supersedes: vec![uid("decision", &earlier.evidence[0])],
+            support: vec![crate::claims::Support {
+                device: dev.clone(),
+                seq: s_yes,
+            }],
+            ..claim(
+                "a",
+                "decision",
+                "Use SQLite.",
+                vec![quote(&dev, s_proposal, proposal, "use SQLite", 0)],
+            )
+        };
+        let a = uid("decision", &accepted.evidence[0]);
+        raw.append_ops(&[op(&earlier)]).unwrap();
+        raw.append_ops(&[op(&accepted)]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        raw.append_tombstone(Target::Record {
+            device: dev.clone(),
+            seq: s_yes,
+        })
+        .unwrap();
+        // The record went a minute before the owner set the status.
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE records SET ts = ts - 60000 WHERE type = 'tombstone'",
+                [],
+            )
+            .unwrap();
+        let correction =
+            json!({"uid": a, "anchor": {"device": dev, "seq": s_proposal}, "status": "decided"});
+        raw.append_ops(&[(OpKind::Correction, correction)]).unwrap();
+        let mut claims: Vec<Box<dyn Consumer>> = vec![Box::new(Claims)];
+        drain(&raw, &mut k, &mut claims).unwrap();
+        let pending = crate::claims::Pending::read(&raw, &k).unwrap();
+        assert!(pending.touches(&k, &a).unwrap());
+        run(&raw, &mut k);
+        assert_eq!(count(&k, "edges"), 0);
+        assert!(bodies(&k).contains(&"Use SQLite.".to_owned()));
     }
 
     /// #144: same-tier derivations from two devices: the newer op is active, not the device

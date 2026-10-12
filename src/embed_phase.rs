@@ -2495,6 +2495,7 @@ mod tests {
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         let op = serde_json::to_value(op).unwrap();
         let ops = [(crate::raw::OpKind::Claim, op)];

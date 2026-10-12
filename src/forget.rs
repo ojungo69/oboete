@@ -1726,7 +1726,9 @@ fn limits(sources: &[String]) -> String {
          cards and session summaries of what a curator was shown of it, or of those claims, lose \
          their text, and those windows are listed for `oboete recurate`; a window curated before \
          this version did not record the claims it carried in, so its cards stay when only such a \
-         claim was forgotten.\n\
+         claim was forgotten. A claim whose status stood on it (its acceptance, a passing run) \
+         holds none of its text and stays; once none of the records its status stood on is left, \
+         it is a proposal.\n\
          A packet already handed to an agent and a curation call already sent are not taken \
          back.\n\
          If raw.db, both request logs and the backups made since the request are lost (an \
@@ -2839,6 +2841,7 @@ mod tests {
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         (raw::OpKind::Claim, serde_json::to_value(op).unwrap())
     }
@@ -3124,6 +3127,55 @@ mod tests {
             Vec::<&str>::new()
         );
         assert!(status(&home).unwrap().iter().all(|j| j.local == DONE));
+    }
+
+    /// #167, slice 3d-3: the forget of the record a claim's status stood on (the user's acceptance
+    /// of the proposal it quotes) leaves the claim a proposal: it holds none of the record's text,
+    /// so it is not forgotten with it, and its op stays as it was.
+    #[test]
+    fn a_claim_whose_acceptance_is_forgotten_is_a_proposal_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let proposal = "Let's keep the parsed files in a cache.";
+        let r1 = s.said("s", "github.com/o/r", 1_000, proposal);
+        let yes = s.said("s", "github.com/o/r", 2_000, "Yes, go ahead.");
+        let mut op = claim_op(&device, &[(r1, proposal)], "Cache the parsed files.");
+        op.1["speaker"] = "assistant proposal".into();
+        op.1["support"] = serde_json::json!([{"device": device, "seq": yes}]);
+        s.raw.append_ops(&[op]).unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        let status = || {
+            let k = crate::knowledge::open(&home).unwrap();
+            let got: Vec<String> = crate::claims::current(&k, "github.com/o/r")
+                .unwrap()
+                .into_iter()
+                .map(|c| c.status)
+                .collect();
+            got
+        };
+        assert_eq!(status(), ["decided"]);
+        let before = op_bodies(&home);
+        let p = preview(&home, Target::Record { device, seq: yes }).unwrap();
+        assert_eq!(p.claims, 0);
+        start(&home, &p).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert_eq!(status(), ["proposed"]);
+        let after = op_bodies(&home);
+        assert!(
+            before
+                .iter()
+                .all(|(seq, body)| after.get(seq) == Some(body))
+        );
+        assert!(
+            crate::raw::open(&home)
+                .unwrap()
+                .record_derived_uids()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A text only what curators were shown of a forgotten record holds (slice 3d-2).
@@ -3560,6 +3612,7 @@ mod tests {
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         s.raw
             .append_ops(&[(raw::OpKind::Claim, serde_json::to_value(op).unwrap())])

@@ -2756,6 +2756,7 @@ pub(crate) mod fixture {
                 tier: 1,
                 why: String::new(),
                 tainted: false,
+                support: Vec::new(),
             };
             let op = serde_json::to_value(op).unwrap();
             self.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
@@ -5238,6 +5239,7 @@ mod tests {
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         let op = serde_json::to_value(op).unwrap();
         s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
@@ -5341,6 +5343,7 @@ mod tests {
                 tier: 1,
                 why: String::new(),
                 tainted: false,
+                support: Vec::new(),
             };
             let op = serde_json::to_value(op).unwrap();
             s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
@@ -5405,6 +5408,7 @@ mod tests {
             tier,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         // One claim (its uid is the first quote's), two derivations: the paid one is active.
         let older = derivation(

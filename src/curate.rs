@@ -1669,6 +1669,7 @@ fn answered(
                         tier: r.tier,
                         why: d.why,
                         tainted: d.tainted,
+                        support: d.support,
                     };
                     let op = serde_json::to_value(op)?;
                     // An op the record cannot hold: kept, its append would stop the window.
@@ -3523,6 +3524,7 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
                     tier: r.get(7)?,
                     why: String::new(),
                     tainted: false,
+                    support: Vec::new(),
                 },
             ))
         })?
@@ -3779,6 +3781,10 @@ pub struct Draft {
     /// Set by the gates, never by the curator: a proposal whose words came from tool content.
     #[serde(skip)]
     pub tainted: bool,
+    /// Set by the gates, never by the curator: the records its status stands on besides its
+    /// quote (#167).
+    #[serde(skip)]
+    pub support: Vec<crate::claims::Support>,
 }
 
 fn line_id<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
@@ -6978,6 +6984,7 @@ mod tests {
             tier: 1,
             why: String::new(),
             tainted: false,
+            support: Vec::new(),
         };
         (OpKind::Claim, serde_json::to_value(op).unwrap())
     }
@@ -9453,6 +9460,34 @@ curate = false
         );
         assert!(at("decided before ") < at("open item "), "{}", sent[1]);
         assert!(at("open item ") < usize::MAX, "{}", sent[1]);
+    }
+
+    /// #167: the claim op of a proposal an acceptance promoted names the acceptance's record, so
+    /// its status drops when that record goes; one in the user's own words names none.
+    #[test]
+    fn a_claim_op_names_the_acceptance_its_status_stands_on() {
+        let first = [
+            event(
+                "reply",
+                json!({"assistant": "Let's cache the parsed files."}),
+            ),
+            prompt("Yes, go ahead. Logs go to stderr."),
+        ];
+        let mut accepted = claim("c1", "decided", "L1", "cache the parsed files", json!([]));
+        accepted["speaker"] = "assistant proposal".into();
+        let own = claim("c2", "decided", "L2", "Logs go to stderr", json!([]));
+        let answer = json!({"claims": [accepted, own], "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (_, ops) = two_windows(&first, answer, &[], none);
+        let claim_op = |id: &str| {
+            ops.iter()
+                .find(|o| o.kind == OpKind::Claim && o.body["id"] == id)
+                .unwrap()
+        };
+        let c1 = claim_op("c1");
+        assert_eq!(c1.body["status"], "decided");
+        assert_eq!(c1.body["support"], json!([{"device": c1.device, "seq": 2}]));
+        assert!(claim_op("c2").body.get("support").is_none());
     }
 
     /// A draft whose claim op the record cannot hold is no claim: the window is still covered.
