@@ -244,6 +244,8 @@ pub struct Preview {
     pub uid: Option<UidPreview>,
     /// A session's, a repository's or a time range's target (slice 3b).
     pub scope: Option<ScopePreview>,
+    /// Slice 3d-1: the claims that quote one of the records, forgotten by uid with them.
+    pub claims: usize,
 }
 
 /// What a session, repository or time range target resolved to (slice 3b, spec 6.2's preview):
@@ -523,6 +525,14 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
             }
             let mut preview = raw.forget_preview(target)?;
             raw.scope_summary(&mut preview)?;
+            // Read from raw's op log, as the purge reads them: knowledge.db may not hold them yet,
+            // or not be there (CodeRabbit on #471).
+            let keys = preview.records.iter().chain(&preview.copies);
+            let quoting = raw.record_claims(&crate::raw::Forgotten::of(
+                keys.map(|r| (r.device.clone(), r.seq)),
+                std::iter::empty(),
+            ))?;
+            preview.claims = quoting.uids.len();
             Ok(preview)
         }
     }
@@ -714,6 +724,7 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
         sample: sample.map(|s| line(&s)),
         uid: Some(uid_preview),
         scope: None,
+        claims: 0,
     })
 }
 
@@ -787,12 +798,12 @@ const BACKUPS_PURGED: &str = "purged here and in the backups; its last check pen
 const DONE: &str = "done";
 /// Slice 3c: a record job past its rebuild with no row holding its text; what was made from it
 /// (slice 3d) and its backups are to come (D4: no more than is true).
-const RAW_PURGED: &str = "purged from raw and its index here; the claims, cards and summaries made \
-                          from it, and the backups, pending";
+const RAW_PURGED: &str = "purged from raw and its index here, with the claims made from it; the \
+                          cards and summaries made from it, and the backups, pending";
 /// Slice 3c-2: past step 4 too, no backup segment or copy of raw.db holds its text; what was made
 /// from it is to come (slice 3d).
-const RECORD_BACKUPS_PURGED: &str =
-    "purged here and in the backups; the claims, cards and summaries made from it pending";
+const RECORD_BACKUPS_PURGED: &str = "purged here and in the backups, with the claims made from it; \
+                                     the cards and summaries made from it pending";
 
 /// Each job, its local state read from the stores (D5 item 9): a uid job past step 3 whose ops
 /// hold no text is purged here, or stopped while knowledge.db still holds its uid.
@@ -801,7 +812,7 @@ pub fn status(home: &Path) -> Result<Vec<Status>> {
         return Ok(Vec::new());
     }
     let raw = crate::raw::open(home)?;
-    let records = raw.record_jobs_holding()?;
+    let records = record_jobs_with_text(&raw)?;
     let mut past = Vec::new();
     for (request, step) in raw.forget_jobs()? {
         let purged = match &request.target {
@@ -892,6 +903,8 @@ pub struct Purged {
     /// The jobs it went on with: a uid job not past step 5 or whose ops hold their text again, a
     /// record job not past step 3 or whose rows hold it again (slice 3c).
     pub jobs: usize,
+    /// Ops rewritten without their text: a forgotten uid's, and those of the claims quoting a
+    /// forgotten record (slice 3d-1).
     pub ops: usize,
     /// Rows of forgotten records rewritten without their text (slice 3c).
     pub records: usize,
@@ -936,18 +949,31 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
     Ok(due)
 }
 
-/// Each record job a purge goes on with (slice 3c), by state as a uid job: one not past step 4,
-/// or a forgotten record of which holds its text again: its job and step, and whether one does.
+/// The record jobs a forgotten record of which still has its body (slice 3c), or a claim made from
+/// one whose ops still hold text (slice 3d-1), in one read of each.
+fn record_jobs_with_text(raw: &crate::raw::Raw) -> Result<HashSet<String>> {
+    let mut jobs = raw.record_jobs_holding()?;
+    jobs.extend(
+        raw.record_claims(&raw.forgotten_records()?)?
+            .uids
+            .into_values(),
+    );
+    Ok(jobs)
+}
+
+/// Each record job a purge goes on with (slice 3c), by state as a uid job: one not past step 5,
+/// or a forgotten record of which, or a claim made from one, holds its text again: its job and
+/// step, and whether one does.
 /// A denial whose record holds its text with no job row (a restore from segments alone brings
 /// back the denial, not the job: spec 6.3) is its job's, at step 0: the purge goes on with it by
 /// the state, with no step to record (Codex on #469).
 fn records_due(raw: &crate::raw::Raw) -> Result<Vec<(String, i64, bool)>> {
-    let mut holding = raw.record_jobs_holding()?;
+    let mut holding = record_jobs_with_text(raw)?;
     let mut due = Vec::new();
     for (request, step) in raw.forget_jobs()? {
         if !matches!(request.target, Target::Uid { .. }) {
             let held = holding.remove(&request.job);
-            if held || step < 4 {
+            if held || step < 5 {
                 due.push((request.job, step, held));
             }
         }
@@ -1062,10 +1088,15 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
         if records_step_2 {
             raw.owe_record_backups(true)?;
+            // The claims first: a claim the anchors consumer keeps (its active derivation quotes
+            // another record) is shown until its uid is tombstoned, and the rows can take minutes.
+            purged.ops +=
+                raw.purge_record_claims(&raw.record_claims(&raw.forgotten_records()?)?)?;
+            crate::backup::fail_after("record_claims_purged")?;
             purged.records = raw.purge_records()?;
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
-        let holding = raw.record_jobs_holding()?;
+        let holding = record_jobs_with_text(&raw)?;
         for (job, step, held) in records_due {
             if !step_2(step, held) {
                 if step == 2 {
@@ -1114,9 +1145,16 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // continuation's rebuild finished (Codex on #444).
         crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
         purged.rebuilt = true;
-        if !uids.is_empty() {
+        // And the claims made from the forgotten records, as soon as knowledge.db is without them:
+        // a step 4 that cannot finish leaves them in no session's shown value (CodeRabbit on
+        // #471). Step 5 takes them out once more.
+        let mut swept = uids.clone();
+        if !record_rebuild.is_empty() {
+            swept.extend(crate::raw::open(home)?.record_derived_uids()?.into_keys());
+        }
+        if !swept.is_empty() {
             purged.shown = crate::hookstate::update_all(home, "shown", |v| {
-                crate::hook::without_uids(v, &uids)
+                crate::hook::without_uids(v, &swept)
             })?;
         }
     }
@@ -1152,7 +1190,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
         // Slice 3c: a record job whose rows a restore gave their text back since step 2 waits for
         // the next continuation, as a uid job does.
-        let held = raw.record_jobs_holding()?;
+        let held = record_jobs_with_text(&raw)?;
         for job in record_rebuild {
             if held.contains(&job) {
                 purged.unfinished.push(job);
@@ -1171,7 +1209,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // Rows a purge rewrote may be in them, a denial's with no job row too (a restore from segments
     // alone, Codex on #469 and #470), which has no step to owe them by.
     let mut records_owed = raw.record_backups_owed()?;
-    let held = raw.record_jobs_holding()?;
+    let held = record_jobs_with_text(&raw)?;
     for (request, step) in raw.forget_jobs()? {
         match request.target {
             Target::Uid { uid } => {
@@ -1183,10 +1221,18 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                 }
             }
             _ if step >= 3 && !held.contains(&request.job) => {
-                records_owed |= step == 3;
+                // Steps 4 and 5 to do (a job 3c-2 took to step 4 had no step 5).
+                records_owed |= step < 5;
                 records_past.push(request.job);
             }
             _ => {}
+        }
+    }
+    // Slice 3d-1: the claims made from the forgotten records, by their uids: their ops in the
+    // backup's ops segments and the copies of raw.db, and in each session's shown value.
+    if records_owed {
+        for (uid, job) in raw.record_derived_uids()? {
+            jobs.entry(uid).or_insert(job);
         }
     }
     if !jobs.is_empty() || records_owed {
@@ -1208,20 +1254,23 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 4)?;
         }
-        if records_owed {
-            raw.owe_record_backups(false)?;
-        }
-        if !jobs.is_empty() {
-            // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A
-            // hook that read before the registration wrote it before the registration committed
-            // (#439's fence), so this finds nothing as a rule.
-            let forgotten: HashSet<String> = jobs.keys().cloned().collect();
+        crate::backup::fail_after("backups_purged")?;
+        // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A hook
+        // that read before the registration wrote it before the registration committed (#439's
+        // fence), so this finds nothing as a rule.
+        let forgotten: HashSet<String> = jobs.keys().cloned().collect();
+        if !forgotten.is_empty() {
             purged.shown += crate::hookstate::update_all(home, "shown", |v| {
                 crate::hook::without_uids(v, &forgotten)
             })?;
-            for job in &past {
-                raw.finish_forget_step(job, 5)?;
-            }
+        }
+        // Owed until step 5 is done too: a denial with no job row has no step to record it by
+        // (Codex on #471).
+        if records_owed {
+            raw.owe_record_backups(false)?;
+        }
+        for job in past.iter().chain(&records_past) {
+            raw.finish_forget_step(job, 5)?;
         }
     }
     Ok(Some(purged))
@@ -1639,7 +1688,8 @@ fn limits(sources: &[String]) -> String {
          time stay), then knowledge.db is rebuilt from raw.db without it: minutes on a large \
          store, and a session that starts meanwhile gets part of its memory or none. Then the \
          backup's segments and the copies of raw.db set aside are rewritten without it too; one \
-         that cannot be read or rewritten, which no reader of oboete uses, is removed. The claims, \
+         that cannot be read or rewritten, which no reader of oboete uses, is removed. The claims \
+         quoting it are forgotten with it, by uid: a recuration does not make them again. The \
          cards and session summaries made from it stay until a later version purges them.\n\
          A packet already handed to an agent and a curation call already sent are not taken \
          back.\n\
@@ -1810,6 +1860,12 @@ pub fn run(
         println!(
             "Records with no text left and no identity, passed over: {}",
             p.passed
+        );
+    }
+    if p.claims > 0 {
+        println!(
+            "Claims quoting them, forgotten by uid with them: {}",
+            p.claims
         );
     }
     if let Some(s) = &p.scope {
@@ -2710,6 +2766,343 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// A text only the claims made from a forgotten record hold (slice 3d-1).
+    const CLAIM_CANARY: &str = "ccanary-3f19";
+
+    /// A decided decision op quoting each of `quotes` (record seq and its text, whole), in order,
+    /// with `body`: its uid is its kind and its first quote's sentence.
+    fn claim_op(
+        device: &str,
+        quotes: &[(i64, &str)],
+        body: &str,
+    ) -> (raw::OpKind, serde_json::Value) {
+        let evidence: Vec<crate::claims::Evidence> = quotes
+            .iter()
+            .map(|(seq, text)| crate::claims::Evidence {
+                device: device.into(),
+                seq: *seq,
+                offset: 0,
+                length: text.len() as i64,
+                sentence: 0,
+                quote: (*text).into(),
+                claim_at: None,
+            })
+            .collect();
+        let op = crate::claims::ClaimOp {
+            id: "c".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: body.into(),
+            evidence,
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+        };
+        (raw::OpKind::Claim, serde_json::to_value(op).unwrap())
+    }
+
+    /// Slice 3d-1: step 2 forgets the claims made from a forgotten record before it rewrites the
+    /// record's row: a purge stopped between them has tombstoned their uids already.
+    #[test]
+    fn a_record_purge_forgets_its_claims_before_its_rows() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {CLAIM_CANARY} mode.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let op = claim_op(&device, &[(r1, &gone)], &gone);
+        let uid = crate::claims::op_uid(&op.1).unwrap();
+        s.raw.append_ops(&[op]).unwrap();
+        let home = s.home.path().to_owned();
+        // Counted from raw's op log, before a worker read the op (CodeRabbit on #471).
+        let shown = preview(&home, Target::Record { device, seq: r1 }).unwrap();
+        assert_eq!(shown.claims, 1);
+        s.run();
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::FAIL_AFTER.set(Some("record_claims_purged"));
+        assert!(purge(&home).is_err());
+        let raw = crate::raw::open(&home).unwrap();
+        assert!(raw.forgotten(&uid).unwrap() && !raw.uid_has_ops(&uid).unwrap());
+        assert!(!raw.record_jobs_holding().unwrap().is_empty());
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert_eq!(
+            store_hits(&home, CLAIM_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        // A job 3c-2 left at step 4, with nothing held, goes on to step 5 and is done.
+        let raw = crate::raw::open(&home).unwrap();
+        let job = raw.forget_jobs().unwrap()[0].0.job.clone();
+        raw.restart_forget_step(&job, 4).unwrap();
+        assert_eq!(records_due(&raw).unwrap().len(), 1);
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert!(
+            records_due(&crate::raw::open(&home).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A claim of a forgotten record, its record's text holding `CLAIM_CANARY`, consumed and
+    /// backed up, a session shown it, and the record's forget registered: its home, its uid and
+    /// the shown value.
+    fn claim_shown_and_forgotten() -> (tempfile::TempDir, PathBuf, String, String) {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {CLAIM_CANARY} mode.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let op = claim_op(&device, &[(r1, &gone)], &gone);
+        let uid = crate::claims::op_uid(&op.1).unwrap();
+        s.raw.append_ops(&[op]).unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        let shown = format!(r#"{{"{uid}":{{"fp":"f","body":true}}}}"#);
+        let value = shown.clone();
+        crate::hookstate::update(&home, "claude", "s", "shown", |_| Some(value)).unwrap();
+        start(
+            &home,
+            &preview(&home, Target::Record { device, seq: r1 }).unwrap(),
+        )
+        .unwrap();
+        let crate::search::b::fixture::Store { home: kept, raw } = s;
+        drop(raw);
+        (kept, home, uid, shown)
+    }
+
+    /// CodeRabbit on #471: a purge whose step 4 stops (a backup segment not rewritten) has taken
+    /// the claims made from the forgotten record out of every session's shown value already,
+    /// after its rebuild; the next purge finishes.
+    #[test]
+    fn a_purge_stopped_in_its_backups_has_taken_the_claims_out_of_shown() {
+        let (_kept, home, uid, _) = claim_shown_and_forgotten();
+        crate::backup::FAIL_AFTER.set(Some("purge_segment_written"));
+        assert!(purge(&home).is_err());
+        let left = crate::hookstate::value(&home, "claude", "s", "shown").unwrap();
+        assert!(!left.contains(&uid), "{left}");
+        purge(&home).unwrap().unwrap();
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
+    }
+
+    /// Codex on #471: after a restore from segments alone (its denials, no job row), a purge
+    /// stopped before step 5 leaves the backups owed in raw.db, so the next purge, with no job,
+    /// still takes the claim made from the forgotten record out of a shown value a hook wrote
+    /// after the rebuild; the one after has nothing to do.
+    #[test]
+    fn a_purge_of_denials_with_no_job_owes_step_5_until_it_is_done() {
+        let (_kept, home, uid, shown) = claim_shown_and_forgotten();
+        crate::backup::export(&home).unwrap();
+        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forget_jobs().unwrap().is_empty());
+        drop(raw);
+        let at = home.clone();
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                crate::hookstate::update(&at, "claude", "s", "shown", |_| Some(shown)).unwrap();
+            }));
+        });
+        crate::backup::FAIL_AFTER.set(Some("backups_purged"));
+        assert!(purge(&home).is_err());
+        assert!(
+            crate::raw::open(&home)
+                .unwrap()
+                .record_backups_owed()
+                .unwrap()
+        );
+        let value = || crate::hookstate::value(&home, "claude", "s", "shown").unwrap();
+        assert!(value().contains(&uid));
+        purge(&home).unwrap().unwrap();
+        assert!(!value().contains(&uid), "{}", value());
+        assert!(
+            !crate::raw::open(&home)
+                .unwrap()
+                .record_backups_owed()
+                .unwrap()
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Codex on #471: after a restore from segments alone, a claim made from the forgotten record
+    /// whose uid a uid job's forget op tombstones already (its job row gone with the restore, the
+    /// claim's text back) is bound to the record's job by a forget op of its own, so step 4
+    /// rewrites its ops in the backup's segments, and the purges after it know the uid.
+    #[test]
+    fn a_claim_a_uid_job_forgot_is_bound_to_the_record_job_too() {
+        let (_kept, home, uid, _) = claim_shown_and_forgotten();
+        forget(&home, &uid);
+        crate::backup::export(&home).unwrap();
+        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forget_jobs().unwrap().is_empty());
+        assert!(raw.forgotten_set().unwrap().contains(&uid));
+        assert!(raw.record_derived_uids().unwrap().is_empty());
+        let job: String = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT job FROM denied_records", [], |r| r.get(0))
+            .unwrap();
+        drop(raw);
+        assert!(!backup_hits(&home, CLAIM_CANARY).is_empty());
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, CLAIM_CANARY), Vec::<String>::new());
+        assert_eq!(
+            crate::raw::open(&home)
+                .unwrap()
+                .record_derived_uids()
+                .unwrap(),
+            std::collections::HashMap::from([(uid, job)])
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Slice 3d-1: the claims quoting a forgotten record, alone or beside a kept one, are forgotten
+    /// by their uids with it, every op of theirs (another derivation, one quoting the kept record
+    /// only, a correction) without its text, in raw.db, knowledge.db, the ops segments, a copy of
+    /// raw.db and the sessions' shown values; a claim of the kept record alone stays. The preview
+    /// counts them, the status says so, a second purge has nothing to do, a claim of a forgotten
+    /// uid is refused, and an op of theirs whose text a restore brought back is purged again.
+    #[test]
+    fn a_forgotten_records_claims_are_forgotten_by_uid_with_it() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {CLAIM_CANARY} mode.");
+        let kept = "Deploys run on Fridays.";
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, kept);
+        let alone = claim_op(&device, &[(r1, &gone)], &gone);
+        let again = claim_op(&device, &[(r1, &gone)], &format!("Again: {gone}"));
+        let partial = claim_op(
+            &device,
+            &[(r2, kept), (r1, &gone)],
+            &format!("Fridays, in {CLAIM_CANARY} mode."),
+        );
+        // The partial claim's uid derived again from the kept record alone: its active derivation,
+        // which the anchors consumer keeps.
+        let later = claim_op(&device, &[(r2, kept)], &format!("Fridays, {CLAIM_CANARY}."));
+        // Another kind: its uid is not the partial claim's, whose first quote is the same.
+        let mut other = claim_op(&device, &[(r2, kept)], kept);
+        other.1["kind"] = "preference".into();
+        let uid = |op: &(raw::OpKind, serde_json::Value)| crate::claims::op_uid(&op.1).unwrap();
+        let (a, b, c) = (uid(&alone), uid(&partial), uid(&other));
+        assert_eq!(uid(&later), b);
+        s.raw
+            .append_ops(&[alone.clone(), again, partial, later, other])
+            .unwrap();
+        s.run();
+        s.correct(&a, None, Some(&format!("Corrected: {CLAIM_CANARY}.")));
+        s.run();
+        crate::backup::export(s.home.path()).unwrap();
+        let home = s.home.path().to_owned();
+        let correction: String = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT body FROM ops WHERE type = 'correction'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let entry = format!(r#"{{"fp":"f","body":"{gone}"}}"#);
+        let shown_value = format!(r#"{{"{a}":{entry},"{c}":{{"fp":"g","body":"Kept."}}}}"#);
+        crate::hookstate::update(&home, "claude", "s", "shown", |_| Some(shown_value)).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        let shown = preview(&home, target).unwrap();
+        assert_eq!(shown.claims, 2);
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert!(!store_hits(&home, CLAIM_CANARY.as_bytes()).is_empty());
+        let purged = purge(&home).unwrap().unwrap();
+        // Four claim ops and the correction; the session shown the first claim.
+        assert_eq!((purged.records, purged.ops, purged.shown), (1, 5, 1));
+        let left = crate::hookstate::value(&home, "claude", "s", "shown").unwrap();
+        assert!(!left.contains(&a) && left.contains(&c));
+        assert_eq!(
+            store_hits(&home, CLAIM_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        assert_eq!(backup_hits(&home, CLAIM_CANARY), Vec::<String>::new());
+        assert!(!holds_text(&copy, CLAIM_CANARY));
+        let job = crate::raw::open(&home).unwrap().forget_jobs().unwrap()[0]
+            .0
+            .job
+            .clone();
+        let raw = crate::raw::open(&home).unwrap();
+        assert_eq!(
+            raw.record_derived_uids().unwrap(),
+            std::collections::HashMap::from([(a.clone(), job.clone()), (b.clone(), job.clone())])
+        );
+        assert!(raw.forgotten(&a).unwrap() && raw.forgotten(&b).unwrap());
+        assert!(!raw.forgotten(&c).unwrap() && raw.uid_has_ops(&c).unwrap());
+        assert!(!raw.uid_has_ops(&a).unwrap() && !raw.uid_has_ops(&b).unwrap());
+        drop(raw);
+        assert!(
+            knowledge_holding(&home, &HashSet::from([a.clone(), b.clone()]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        let mut raw = crate::raw::open(&home).unwrap();
+        assert!(raw.append_ops(std::slice::from_ref(&alone)).is_err());
+        // Nor is the partial claim's uid derived again from the record kept.
+        assert!(
+            raw.append_ops(&[claim_op(&device, &[(r2, kept)], kept)])
+                .is_err()
+        );
+        // A restore from older ops segments gives the correction its text back: found by its uid's
+        // forget op, as no claim op quotes the record any longer, and purged again.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET body = ?1 WHERE type = 'correction'",
+                [correction],
+            )
+            .unwrap();
+        drop(raw);
+        assert!(status(&home).unwrap().iter().any(|j| j.local == PENDING));
+        let back = purge(&home).unwrap().unwrap();
+        assert_eq!(back.ops, 1);
+        assert_eq!(
+            store_hits(&home, CLAIM_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
     }
 
     /// Slice 3c, test 2 (rule 10): a session whose live records are all purged keeps its transcript

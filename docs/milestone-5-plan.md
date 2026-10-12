@@ -603,7 +603,7 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
 
 ### Slice 3 の決定（2026-10-11。D1・D2 の第一 slice の制限を改める）
 
-Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3b-1 と 3b-2 に分けた）。後の PR はこの節に「3x の決定」を足す。
+Slice 3 は PR に分け、この順に作る（2026-10-12 に 3b・3c を 2 つずつ、3d を 3 つに分けた）。後の PR はこの節に「3x の決定」を足す。
 
 | 分割 | 対象 | 完了条件 |
 |---|---|---|
@@ -612,8 +612,10 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
 | 3b-2 repo と時間範囲 | repo・時間範囲の target、遅れて届く record、3a の拒否の改訂 | 第一 slice の 500 件制限の解消、D3 の端末ごとの上限 |
 | 3c-1 raw の行 | raw.db の record の行、knowledge.db の作り直し、transcript の切れ目 | 下記 3c-1 |
 | 3c-2 backup | backup の record segment、raw.db のコピー | 管理対象の物理 byte に 0 hit |
-| 3d 派生物 | 証拠を持つ claim、重なる window の recurate、card・summary、#167、#186、#366 | 表の Slice 3 の完了条件の残り |
-| 3e rescan と retention | rescan の範囲 target、保存期間の失効 | 3c の書換えの再利用（spec 6.2） |
+| 3d-1 claim | 忘れた record を引用する claim の uid の tombstone と op の書換え | 下記 3d-1 |
+| 3d-2 window と turn | window op と turn op の文、重なる window の recurate、#366 | 表の Slice 3 の完了条件の残り |
+| 3d-3 status の支え | #167 | #167 の受入テスト |
+| 3e rescan と retention | rescan の範囲 target、保存期間の失効、#186 | 3c の書換えの再利用（spec 6.2） |
 
 #### 3a: live record の identity と出所の橋
 
@@ -888,16 +890,73 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
   コピーでも byte 単位でそのままで、それだけの segment もコピーも消えない。置換の停止点で止めても続きで終わる。
   status は step 4 で上の文。F3 の CLI テストは forget の前の backup 先を戻して本文が戻ることを確かめる。
 
-#### 3d〜3e（各 PR で詳細を決める）
-- **3d**: 忘れた record に証拠を持つ claim を uid で forget する（Slice 2 の pipeline。部分的な anchor も
-  信用しない、spec 6.2 step 3）。重なる window を残りの record から recurate する（`Span::minus`、
-  recurate queue。AI の tier がなければ待ち）。card と summary は K4・T7 で隠れる。#167（status の
-  支えの anchor）、#186（伏せ字になった directive の再導出）、#366（claim を言い換えた派生文、restore で
-  失われた tombstone）。実行中の curator・digest・embed の答えは既存の fence（`denied_records` の件数）で
-  commit しない。
+#### 3d-1: 証拠を持つ claim
+
+3d は 3 つの PR に分けた（2026-10-12）。3d-1 は claim、3d-2 は window と turn の op の文と recuration、
+3d-3 は #167。knowledge.db の側はすでに済んでいる: Anchors は tombstone や Removed の行で読めなくなった引用の
+derivation を落とし、その window を recurate の列に入れ、読み手は `claims::Pending` で消化前の tombstone の
+claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db のコピー。
+
+- **対象**: 忘れた record（denial の origin が `import_origins` で指す (device, seq)。行が Removed でも）を一つでも
+  引用する claim op（部分的な anchor も信用しない、spec 6.2 step 3）。その uid の全部の op（その record を
+  引用しない derivation と Correction op も、2b と同じ）。
+- **uid の tombstone**: spec の「tombstoned by uid」のとおり、その uid に forget op（`{uid, job}`、job は
+  その record の job。最初に見つけた忘れた引用の denial の job）を足す。別の job の行は作らない: record の
+  job が運び、forget op が派生した uid の一覧の権威（D5 の「op が権威」）。読み手・送り手・再導出の拒否・
+  `append_ops` の拒否は D5 の仕組みのまま。残りの record から recurate しても同じ uid（最初の引用が別の
+  record にある claim）は作れない（spec どおり）。その uid を tombstone する forget op が uid の job のもの
+  （または deny が restore で戻らなかった record の job のもの）しかないときも足す: op を書き換えた後、step 4
+  と後の purge がその uid を見つける道は record の job の forget op だけ（segment だけからの restore は job の
+  行を戻さない、Codex on #471）。
+- **見つけ方**: preview も purge も raw.db の状態から探す（knowledge.db は Anchors がもう行を落としている
+  か、consumer がまだ読んでいないかもしれない）: claim op を 1 回だけ読み（本文を持つものだけ）、引用が忘れた record の鍵にあるもの、または
+  record の job の forget op がその uid を tombstone しているものを、uid ごとに集める。Correction op は
+  `json_extract(body, '$.uid')`。評価用 home の写しで claim op は 5,314 件（Python で 0.03 秒）、uid ごとの
+  `uid_has_ops`（毎回 claim op を全部読む）は使わない。
+- **本文を持つ job（`records_due`）**: 行が本文を持つか、その job の派生した uid の op が本文を持つ（上の 1 回の
+  走査）。古い ops segment からの restore で claim op の本文が戻った job は step 2 からやり直す（2b の「状態で
+  決める」）。
+- **step**: step 2 で派生した claim の op を書き換え forget op を足してから（dispatch の下で batch ごと）行を
+  書き換える（下の「登録から purge までの間」）、step 3 の rebuild はそのまま、step 4 は record segment とコピーに加え ops segment を派生した uid で書き換える
+  （2c の `purge_ops`、uid から record の job へ）、step 5 は派生した uid を各 session の shown から除く
+  （2c の決定 7）。step 5 を record の job も持つ。派生した uid は rebuild の直後にも shown から除く（step 4
+  が backup を読めずに終わらなくても残さない、CodeRabbit on #471）。raw.db の印（`record_backups_owed`）は
+  step 5 の掃除まで残す（job の行のない deny は step を持たない、Codex on #471）。
+- **status（D4）**: step 3「purged from raw and its index here, with the claims made from it; the cards and
+  summaries made from it, and the backups, pending」、step 4 以降「purged here and in the backups, with the
+  claims made from it; the cards and summaries made from it pending」。done は 3d-2 で（card と summary の文が
+  まだ残る）。
+- **preview**: 消える claim の数（選んだ record を引用する uid の数）。purge と同じく raw.db の op log から
+  数える（knowledge.db は consumer がまだ読んでいない claim を持たず、ないこともある、CodeRabbit on #471）。limits の文: 引用する claim は uid ごと忘れ、recuration でも同じ claim は作られない。card と
+  session summary は後の版まで残る。
+- **登録から purge までの間**: 有効な derivation が忘れた record を引用する claim は、読み手では Pending で、
+  window・turn・embedding の phase では lag の gate（knowledge.db が tombstone に追いつくまで送らない）で
+  隠れ、Anchors がその derivation を落とす（D1 規則 12 の fence が登録の deny で走っている curation の答えを
+  切る。step 2 の forget op でもう一度）。同じ uid の別の derivation だけが引用していた claim（有効な
+  derivation は別の record を引用する）は Anchors が残すので、forget op が書かれるまで見えうる。そのため
+  step 2 は行（大きな forget では数十秒）より先に claim を書き換える。CLI の forget は登録の直後に purge を
+  始めるので、隙間はふつう数秒で、別の purge が走っていたときや purge が止まったときは続きが走るまで。
+- 受入テスト: 忘れた record を引用する claim（引用 1 つ、別の record も引用する claim、その uid の別の
+  derivation と Correction op）が step 2 で本文を失い、forget op が record の job で足され、raw.db・knowledge.db・
+  ops segment・コピーに claim の本文と引用の byte が残らない。引用しない claim は残る。同じ window を
+  recurate して同じ uid を導いても op は書かれない。ops segment からの restore で claim op の本文が戻ると
+  purge し直す。登録の後 purge の前に作った curation の request は claim の本文も引用も持たない。status と
+  preview の数。
+
+#### 3d-2〜3e（各 PR で詳細を決める）
+- **3d-2**: 忘れた record（と 3d-1 で tombstone した claim、window op の `candidates`。#366 の 1）を curator に
+  見せた window op（自分の span と goals、K4 の集合）を構造だけにする（from/to と offset・outcome・goals・
+  removed・elided を残し、summary・observations・落とした下書き・candidates を捨てて `forgotten` を付ける）。
+  その turn op（T7 の集合: turn の record、読んだ window、その goals）の fields も空にする（turn の summary は
+  作り直さない）。window の span 全体を recurate の列に入れる（Removed の行は window の文に入らず、新しい
+  window op の `removed` に載るので、`Span::minus` で切らない。consumer が op から入れるので rebuild でも
+  入る）。#366 の 2（restore が tombstone を失う）は deny から状態で purge するので覆う。done はここで。
+- **3d-3**: #167（claim op に status の支えの anchor を持たせ、その record が消えたら proposed に戻す。op の
+  形の変更）。
 - **3e**: rescan の hit を範囲 target（device、seq、offset、length）として 3c の書換えに通す（preview
   なし）。retention は同じ書換えで tombstone を作らず、未 curate の raw は残し、claim は `raw expired`
-  と表示する（spec 6.2）。
+  と表示する（spec 6.2）。#186（rescan が一部を伏せた directive を event から決定的に作り直す）も 3e:
+  forget ではなく rescan の mask の話。
 
 ## 実装順序と完了条件
 
