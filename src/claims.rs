@@ -1112,19 +1112,20 @@ impl Pending {
         }
         // As Anchors finds them: raw already reads each record as those tombstones leave it.
         let mut ops = std::collections::HashSet::new();
-        // One Anchors lowered already (a record tombstoned twice) is a proposal: nothing to wait for;
-        // nor for one whose status the owner set, which `active` shows whatever Anchors does (Codex
-        // on #473).
+        // One Anchors lowered already (a record tombstoned twice) is a proposal: nothing to wait for
+        // (Codex on #473).
         let mut st = k.prepare_cached(
-            "SELECT DISTINCT s.op_device, s.op_seq FROM support s
+            "SELECT DISTINCT s.op_device, s.op_seq, d.uid FROM support s
              JOIN derivations d ON d.op_device = s.op_device AND d.op_seq = s.op_seq
-             WHERE s.device = ?1 AND s.seq = ?2 AND d.status <> 'proposed'
-               AND NOT EXISTS (SELECT 1 FROM corrections x WHERE x.uid = d.uid
-                               AND x.status IS NOT NULL)",
+             WHERE s.device = ?1 AND s.seq = ?2 AND d.status <> 'proposed'",
         )?;
         for (device, seq) in &p.records {
             for op in st.query_map(rusqlite::params![device, seq], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })? {
                 ops.insert(op?);
             }
@@ -1132,14 +1133,18 @@ impl Pending {
         let mut st = k.prepare_cached(
             "SELECT device, seq FROM support WHERE op_device = ?1 AND op_seq = ?2",
         )?;
-        for op in ops {
+        for (op_device, op_seq, uid) in ops {
             let records: Vec<(String, i64)> = st
-                .query_map(rusqlite::params![op.0, op.1], |r| {
+                .query_map(rusqlite::params![op_device, op_seq], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            if !crate::consumer::claims::supported(raw, records.iter().map(|(d, s)| (d, *s)))? {
-                p.lowering.insert(op);
+            let records = || records.iter().map(|(d, s)| (d, *s));
+            // Nor one whose status the owner set before then, which Anchors keeps (Codex on #473).
+            if !crate::consumer::claims::supported(raw, records())?
+                && !crate::consumer::claims::owner_set(raw, &uid, records())?
+            {
+                p.lowering.insert((op_device, op_seq));
             }
         }
         Ok(p)

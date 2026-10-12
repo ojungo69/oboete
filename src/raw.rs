@@ -4083,22 +4083,24 @@ impl Raw {
     /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
     /// that the worker has not applied yet (`claims::Pending`).
     /// #167 (Codex on #473): when the last of `records` went, the latest of their first
-    /// whole-record tombstones; none when one of them has none (it was never here).
+    /// whole-record tombstones; none when one of them has none (it was never here). A tombstone a
+    /// restore from segments brought back without its time (0) went as late as can be.
     pub(crate) fn gone_at<'a>(
         &self,
         records: impl IntoIterator<Item = (&'a String, i64)>,
     ) -> Result<Option<i64>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT MIN(ts) FROM records WHERE type = 'tombstone' AND target_device = ?1
-               AND target_seq = ?2 AND target_offset IS NULL",
+            "SELECT COUNT(*), MIN(NULLIF(ts, 0)) FROM records WHERE type = 'tombstone'
+               AND target_device = ?1 AND target_seq = ?2 AND target_offset IS NULL",
         )?;
         let mut last = None;
         for (device, seq) in records {
-            let Some(at) = st.query_row(params![device, seq], |r| r.get::<_, Option<i64>>(0))?
-            else {
+            let (n, at): (i64, Option<i64>) =
+                st.query_row(params![device, seq], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if n == 0 {
                 return Ok(None);
-            };
-            last = last.max(Some(at));
+            }
+            last = last.max(Some(at.unwrap_or(i64::MAX)));
         }
         Ok(last)
     }
