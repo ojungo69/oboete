@@ -3937,6 +3937,201 @@ mod tests {
         assert_eq!(store_hits(&home, second.as_bytes()), Vec::<&str>::new());
     }
 
+    /// Slice 3d-4 (Codex on #481): what a window was shown of a claim it named is the wordings of
+    /// it written by then. A correction the owner wrote after it, or a later window's wording of a
+    /// copied claim, that one of its claims repeats makes that claim no copy, and a window that
+    /// named that claim stays.
+    #[test]
+    fn a_wording_written_after_a_window_is_not_what_it_showed() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (second, later) = (
+            "scanary-9d3b5e7f1a2c4e6b8d0f1a3c",
+            "lcanary-7a9c1e3b5d7f9a1c3e5b7d9f",
+        );
+        let gone = format!("Parsers stay in {BATCH_CANARY} mode and {second} too.");
+        let (deploys, tests) = ("Deploys run on Fridays.", "Tests run on CI.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, deploys);
+        let r3 = s.said("s", "github.com/o/r", 3_000, tests);
+        let claim = |seq: i64, quote: &str, sentence: i64, body: &str| {
+            let mut op = claim_op(&device, &[(seq, quote)], body);
+            op.1["evidence"][0]["sentence"] = sentence.into();
+            op
+        };
+        let uid = |op: &(raw::OpKind, serde_json::Value)| raw::op_uid(op.0, &op.1).unwrap();
+        let c1 = claim(r1, &gone, 0, "Parsers stay strict.");
+        let u1 = uid(&c1);
+        // A claim of R2 whose first wording copies R1, and its second wording, which does too and
+        // repeats what the claims of the windows below repeat.
+        let a1 = claim(r2, deploys, 0, &format!("Deploys follow {BATCH_CANARY}."));
+        let a2 = claim(
+            r2,
+            deploys,
+            0,
+            &format!("Deploys keep {second} on, as {later} says."),
+        );
+        let ua = uid(&a1);
+        let b1 = claim(r3, tests, 0, &format!("Tests check {later} first."));
+        let b2 = claim(r3, tests, 1, &format!("Tests check {later} last."));
+        let (ub1, ub2) = (uid(&b1), uid(&b2));
+        let fix = json!({"uid": u1, "anchor": {"device": device, "seq": r1},
+            "body": format!("Parsers keep {later} on.")});
+        let mut append = |ops: &[(raw::OpKind, serde_json::Value)]| s.raw.append_ops(ops).unwrap();
+        append(&[window_op(r1, r1, "Its span.", json!({})), c1]);
+        append(&[window_op(r1, r2, "The first wording.", json!({})), a1]);
+        let w1 = append(&[
+            window_op(
+                r3,
+                r3,
+                "It named the claim quoting R1.",
+                json!({"candidates": [u1]}),
+            ),
+            b1,
+        ]);
+        let w2 = append(&[
+            window_op(
+                r3,
+                r3,
+                "It named the copied claim.",
+                json!({"candidates": [ua]}),
+            ),
+            b2,
+        ]);
+        // A second after them: the owner's correction, and the second wording.
+        let mut after = append(&[(raw::OpKind::Correction, fix)]);
+        after.extend(append(&[
+            window_op(r1, r2, "The second wording.", json!({})),
+            a2,
+        ]));
+        let n1 = append(&[window_op(
+            r3,
+            r3,
+            "Kept: it named the first claim.",
+            json!({"candidates": [ub1]}),
+        )]);
+        let n2 = append(&[window_op(
+            r3,
+            r3,
+            "Kept: it named the second claim.",
+            json!({"candidates": [ub2]}),
+        )]);
+        let home = s.home.path().to_owned();
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let ts = |seq: i64| -> i64 {
+            conn.query_row("SELECT ts FROM ops WHERE op_seq = ?1", [seq], |r| r.get(0))
+                .unwrap()
+        };
+        let then = ts(w2[0]) + 1_000;
+        for seq in after {
+            conn.execute(
+                "UPDATE ops SET ts = ?1 WHERE op_seq = ?2",
+                rusqlite::params![then, seq],
+            )
+            .unwrap();
+        }
+        s.run();
+        let before = op_bodies(&home);
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        let after = op_bodies(&home);
+        for seq in [w1[0], w2[0]] {
+            assert!(after[&seq].get("forgotten").is_some(), "{seq}");
+            assert!(after[&seq].get("copied").is_none(), "{seq}");
+        }
+        for seq in [n1[0], n2[0]] {
+            assert_eq!(after[&seq], before[&seq], "{seq}");
+        }
+        assert_eq!(store_hits(&home, second.as_bytes()), Vec::<&str>::new());
+    }
+
+    /// Slice 3d-4 (Codex's security review on #481): a claim a purge took as a copy, written again
+    /// by a recuration from its record, then copied again by a window over another record a later
+    /// forget takes, is a copy again: a window that named it after the recuration and before that
+    /// purge is taken with it.
+    #[test]
+    fn a_claim_copied_again_after_its_recuration_is_followed_again() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let again = "acanary-3c5e7a9b1d3f5a7c9e1b3d5f";
+        let gone = format!("Parsers stay in {BATCH_CANARY} mode.");
+        let builds = format!("Builds keep {again} on.");
+        let (deploys, tests) = ("Deploys run on Fridays.", "Tests run on CI.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, deploys);
+        let r3 = s.said("s", "github.com/o/r", 3_000, &builds);
+        let r4 = s.said("s", "github.com/o/r", 4_000, tests);
+        let claim = |body: &str| claim_op(&device, &[(r2, deploys)], body);
+        let c = claim(&format!("Deploys follow {BATCH_CANARY}."));
+        let u = raw::op_uid(c.0, &c.1).unwrap();
+        let w1 = s
+            .raw
+            .append_ops(&[window_op(r1, r2, "Its span.", json!({})), c])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        let forget_record = |seq: i64| {
+            let target = Target::Record {
+                device: device.clone(),
+                seq,
+            };
+            start(&home, &preview(&home, target).unwrap()).unwrap();
+            purge(&home).unwrap().unwrap();
+        };
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        forget_record(r1);
+        let at = op_bodies(&home)[&w1[0]]["copied_at"].as_i64().unwrap();
+        // Ten seconds after the purge a recuration writes the claim again from its record; then a
+        // window over R3 writes it again, copying R3, and a window names it.
+        let mut store = crate::raw::open(&home).unwrap();
+        let mut seqs = store
+            .append_ops(&[
+                window_op(r2, r2, "The recuration.", json!({"recurate": true})),
+                claim("Deploys run on Fridays only."),
+            ])
+            .unwrap();
+        let w2 = store
+            .append_ops(&[
+                window_op(r2, r3, "It showed R3.", json!({})),
+                claim(&format!("Deploys keep {again} on.")),
+            ])
+            .unwrap();
+        let w3 = store
+            .append_ops(&[window_op(
+                r4,
+                r4,
+                "It named the second copy.",
+                json!({"candidates": [u]}),
+            )])
+            .unwrap();
+        drop(store);
+        seqs.extend(&w2);
+        seqs.extend(&w3);
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for (seq, after) in seqs.iter().zip([10_000, 10_000, 15_000, 15_000, 20_000]) {
+            conn.execute(
+                "UPDATE ops SET ts = ?1 WHERE op_seq = ?2",
+                rusqlite::params![at + after, seq],
+            )
+            .unwrap();
+        }
+        crate::worker::run_once(&home).unwrap();
+        forget_record(r3);
+        let after = op_bodies(&home);
+        assert!(after[&w2[0]].get("forgotten").is_some());
+        assert!(after[&w3[0]].get("forgotten").is_some());
+        assert_eq!(store_hits(&home, again.as_bytes()), Vec::<&str>::new());
+    }
+
     /// Slice 3d-4: a window op and its claims that only the ops segments and a copy of raw.db
     /// hold (raw.db put back without them) lose their text there by rule (c), with no copy looked
     /// for.

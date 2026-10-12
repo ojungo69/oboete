@@ -2659,11 +2659,10 @@ impl Raw {
                         .uids
                         .entry(uid.clone())
                         .or_insert_with(|| job.clone());
-                    claims
-                        .texts
-                        .entry(uid.clone())
-                        .or_default()
-                        .extend(claim_text(&body, true));
+                    let texts = claims.texts.entry(uid.clone()).or_default();
+                    for text in claim_text(&body, true) {
+                        word(texts, ts, text);
+                    }
                 }
                 None => {}
             }
@@ -2671,7 +2670,7 @@ impl Raw {
         }
         drop(rows);
         let mut st = self.conn.prepare(
-            "SELECT device, op_seq, json_extract(body, '$.uid'), json_extract(body, '$.body')
+            "SELECT device, op_seq, json_extract(body, '$.uid'), json_extract(body, '$.body'), ts
              FROM ops WHERE type = 'correction' ORDER BY device, op_seq",
         )?;
         let mut rows = st.query([])?;
@@ -2682,11 +2681,8 @@ impl Raw {
                 if claims.uids.contains_key(&uid)
                     && let Ok(text) = row.get_ref(3)?.as_str()
                 {
-                    claims
-                        .texts
-                        .entry(uid.clone())
-                        .or_default()
-                        .push(text.into());
+                    let texts = claims.texts.entry(uid.clone()).or_default();
+                    word(texts, row.get(4)?, text.into());
                 }
                 all.entry(uid).or_default().push((row.get(0)?, row.get(1)?));
             }
@@ -2790,13 +2786,13 @@ impl Raw {
         // text, already or in this pass: what a turn read (rule b). Again while a pass finds a
         // claim copied, or another wording of one: a window of another device may name one found
         // after it in op order.
-        let mut said = std::collections::HashMap::new();
+        let mut said = Wordings::new();
         loop {
-            let copied: usize = said.values().map(Vec::len).sum();
+            let before = said.clone();
             (found.windows, found.claims) = Default::default();
             (judge.spans, judge.batches) = Default::default();
             self.window_ops(&mut found, &mut judge, &mut said)?;
-            if said.values().map(Vec::len).sum::<usize>() == copied {
+            if said == before {
                 break;
             }
         }
@@ -2826,7 +2822,7 @@ impl Raw {
         &self,
         found: &mut RecordOps,
         judge: &mut Judge,
-        said: &mut std::collections::HashMap<String, Vec<String>>,
+        said: &mut Wordings,
     ) -> Result<()> {
         let mut st = self.conn.prepare(
             "SELECT device, op_seq, type, ts, batch, body FROM ops WHERE type IN ('window', 'claim')
@@ -2894,7 +2890,7 @@ impl Raw {
         w: Judged,
         found: &mut RecordOps,
         judge: &mut Judge,
-        said: &mut std::collections::HashMap<String, Vec<String>>,
+        said: &mut Wordings,
     ) -> Result<()> {
         if w.fresh {
             found
@@ -2925,7 +2921,7 @@ impl Raw {
             }
             ops.push(op_seq);
             if let Some(uid) = uid.filter(|_| w.fresh) {
-                kept.push((uid, body));
+                kept.push((uid, ts, body));
             }
         }
         if ops.is_empty() {
@@ -2945,22 +2941,32 @@ impl Raw {
                     .get(uid)
                     .into_iter()
                     .chain(said.get(uid));
-                shown.extend(texts.flatten().cloned());
+                // Those written by then (Codex on #481).
+                shown.extend(
+                    texts
+                        .flatten()
+                        .filter(|(ts, _)| *ts <= w.ts)
+                        .map(|(_, t)| t.clone()),
+                );
             }
-            for (uid, body) in kept {
+            for (uid, ts, body) in kept {
                 if repeats(&claim_text(&body, false), &shown) {
                     // Each wording a window gave the uid, not the first one's (Codex on #481).
                     let texts = said.entry(uid.clone()).or_default();
                     for text in claim_text(&body, true) {
-                        if !texts.contains(&text) {
-                            texts.push(text);
-                        }
+                        word(texts, ts, text);
                     }
                     let at = judge
                         .copied
                         .entry(uid.clone())
                         .or_insert_with(|| (w.job.clone(), found.at));
-                    at.1 = at.1.max(found.at);
+                    if at.1 < found.at {
+                        // Copied again since an earlier purge took a copy, after a recuration wrote
+                        // it again, maybe: a new copy no recuration has written again yet, by this
+                        // job (Codex's security review on #481).
+                        *at = (w.job.clone(), found.at);
+                        judge.remade.remove(&uid);
+                    }
                     copied.push(uid);
                 }
             }
@@ -5975,7 +5981,7 @@ pub(crate) struct Forgotten {
     /// the time of the mask: a window that showed one before then showed its text.
     pub(crate) masked: std::collections::HashMap<String, i64>,
     /// Slice 3d-4: the text of the claims that quote a forgotten record (`RecordClaims::texts`).
-    pub(crate) texts: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) texts: Wordings,
 }
 
 /// Slice 3e-1: the job a masked record is `Forgotten`'s by, and that takes the text of what was
@@ -6526,7 +6532,18 @@ pub(crate) struct RecordClaims {
     pub(crate) masked_uids: std::collections::HashMap<String, i64>,
     /// Slice 3d-4: the text of each claim that quotes a forgotten record, by uid (`claim_text`):
     /// what a window that named it showed its curator, read before its purge takes it.
-    pub(crate) texts: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) texts: Wordings,
+}
+
+/// Slice 3d-4: each wording of a claim, by uid, with when it was written: a window was shown those
+/// written before it, not a later correction or derivation (Codex on #481).
+pub(crate) type Wordings = std::collections::HashMap<String, Vec<(i64, String)>>;
+
+/// Adds `text`, written at `ts`, to `wordings` once.
+fn word(wordings: &mut Vec<(i64, String)>, ts: i64, text: String) {
+    if !wordings.iter().any(|(t, w)| *t == ts && *w == text) {
+        wordings.push((ts, text));
+    }
 }
 
 /// The entry of the first forgotten record claim op `body` quotes, else of the first masked one
