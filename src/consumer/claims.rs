@@ -1536,6 +1536,16 @@ mod tests {
         ];
         assert_eq!(statuses(&k), lowered);
         assert_eq!(count(&k, "edges"), 0);
+        // A record tombstoned again after Anchors lowered them: nothing left to wait for (Codex on
+        // #473).
+        raw.append_tombstone(Target::Record {
+            device: dev.clone(),
+            seq: s_yes,
+        })
+        .unwrap();
+        assert_eq!(pending(&raw, &k), [false; 4]);
+        run(&raw, &mut k);
+        assert_eq!(statuses(&k), lowered);
         drop(k);
         std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
