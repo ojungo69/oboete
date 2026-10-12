@@ -6920,7 +6920,8 @@ pub(crate) type OpText = (String, i64, String, String);
 /// covers): no rule masks them in an op. A user's rule for 64 hex digits would otherwise change the
 /// uid a correction, a forget or an import names (as `view::gated_with_ids` keeps them), and one
 /// for a repository which op is whose. Inside `fields` (a work state's, a turn's) every value is
-/// text.
+/// text. A key is matched at any depth outside `fields`: an op field added later under one of these
+/// names keeps its value unmasked, so a new field is checked against this list (CodeRabbit on #487).
 const OP_NAMES: &[&str] = &[
     "agent",
     "candidates",
@@ -6928,10 +6929,14 @@ const OP_NAMES: &[&str] = &[
     "copied",
     "device",
     "dropped",
+    // A folder never recorded, by its path as an event's `cwd` label holds it (slice 4a, #489).
+    "folder",
     "forgotten",
     "id",
     "job",
     "kind",
+    // An exclusion op's level (slice 4a, #489).
+    "level",
     "list",
     "lowered",
     "outcome",
@@ -6976,6 +6981,7 @@ pub(crate) fn masked_op_text(
                 .iter_mut()
                 .fold(false, |changed, item| walk(item, rules, names) | changed),
             serde_json::Value::Object(map) => map.iter_mut().fold(false, |changed, (key, item)| {
+                // Any depth: see `OP_NAMES` before naming a new op field.
                 if names && OP_NAMES.contains(&key.as_str()) {
                     changed
                 } else {
@@ -8001,6 +8007,28 @@ mod tests {
 
     /// Codex on #304: the list folds a device's ops in their own order, so a clock set back
     /// between two of them never puts the newer one first.
+    /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, are
+    /// names no rule masks, so an excluded folder keeps matching its events' `cwd` labels.
+    #[test]
+    fn an_exclusion_ops_folder_and_level_are_names() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'acme-[0-9]{6}|capture' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let body = serde_json::json!({
+            "folder": "/w/acme-482915", "level": "capture", "undo": false, "clock": 1,
+        });
+        assert_eq!(
+            masked_op_text(OpKind::Exclusion, &body.to_string(), &rules),
+            None
+        );
+        let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
+        assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
     #[test]
     fn a_clock_set_back_never_puts_a_newer_exclusion_first() {
         let home = tempfile::tempdir().unwrap();
