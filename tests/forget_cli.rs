@@ -79,7 +79,7 @@ fn a_hook_record_is_forgotten_by_where_and_when_it_was_recorded() {
     assert!(!out.contains("check a guess"), "{out}");
     assert!(out.contains("the agent's own transcript files"), "{out}");
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged here and in the backups"));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains(r#""local":"done""#));
     let log = std::fs::read_to_string(home.join("forget.log")).unwrap();
     assert!(!log.contains(CANARY), "{log}");
 }
@@ -762,7 +762,7 @@ fn forgetting_a_record_hides_it_logs_it_without_text_and_says_what_it_cannot_rea
         }
     }
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged here and in the backups"));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains(r#""local":"done""#));
     for log in [home.join("forget.log"), home.join("backups/forget.log")] {
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(text.lines().count(), 1, "{}", log.display());

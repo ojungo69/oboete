@@ -992,11 +992,12 @@ pub(crate) struct OpsPurge {
 pub(crate) fn purge_ops(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
+    judge: &raw::Judge,
 ) -> Result<OpsPurge> {
     walk(
         home,
         Kind::Ops,
-        &|text| purge_lines(text, |l| purged_line(l, jobs)),
+        &|text| purge_lines(text, |l| purged_line(l, jobs, judge)),
         true,
     )
 }
@@ -1009,7 +1010,7 @@ pub(crate) fn ops_to_purge(
     walk(
         home,
         Kind::Ops,
-        &|text| purge_lines(text, |l| purged_line(l, jobs)),
+        &|text| purge_lines(text, |l| purged_line(l, jobs, &raw::Judge::default())),
         false,
     )
 }
@@ -1259,21 +1260,67 @@ enum Line {
     Unknown,
 }
 
+/// An ops segment's line: its fields, its op's kind and its op's body.
+fn op_line(line: &str) -> Option<(serde_json::Value, raw::OpKind, serde_json::Value)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
+    let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
+    Some((v, kind, body))
+}
+
+/// Each op of every ops segment, live or set aside, as `purge_ops` reads it, with no file
+/// changed: a segment or a line that cannot be read is passed over (`purge_ops` removes it when it
+/// cannot judge it).
+pub(crate) fn each_op(home: &Path, f: &mut raw::EachOp) -> Result<()> {
+    let f = std::cell::RefCell::new(f);
+    walk(
+        home,
+        Kind::Ops,
+        &|text| {
+            for (v, kind, body) in text.lines().filter_map(op_line) {
+                let at = (
+                    v["device"].as_str().unwrap_or(""),
+                    v["op_seq"].as_i64().unwrap_or(0),
+                );
+                (f.borrow_mut())(kind, at, v["ts"].as_i64().unwrap_or(0), &body);
+            }
+            (None, false)
+        },
+        false,
+    )?;
+    Ok(())
+}
+
 /// One backup line, judged as raw.db's purge judges its op (`raw::op_uid`); a line rewritten keeps
 /// its other fields' values, in serde_json's key order: every reader parses the line.
-fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> Line {
+fn purged_line(
+    line: &str,
+    jobs: &std::collections::HashMap<String, String>,
+    judge: &raw::Judge,
+) -> Line {
     if line.trim().is_empty() {
         return Line::Kept;
     }
-    let parsed = || -> Option<_> {
-        let v: serde_json::Value = serde_json::from_str(line).ok()?;
-        let kind = raw::OpKind::from_name(v["type"].as_str()?)?;
-        let body: serde_json::Value = serde_json::from_str(v["body"].as_str()?).ok()?;
-        Some((v, kind, body))
-    };
-    let Some((mut v, kind, body)) = parsed() else {
+    let Some((mut v, kind, body)) = op_line(line) else {
         return Line::Unknown;
     };
+    // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does not hold
+    // (a segment set aside) judged by its own (Codex and CodeRabbit on #472). A line with no time
+    // is judged as written at once.
+    let at = (
+        v["device"].as_str().unwrap_or(""),
+        v["op_seq"].as_i64().unwrap_or(0),
+    );
+    let ts = v["ts"].as_i64().unwrap_or(0);
+    if matches!(kind, raw::OpKind::Window | raw::OpKind::Turn) {
+        return match judge.purged(kind, at, ts, &body) {
+            Some(now) if v["body"].as_str() != Some(now.as_str()) => {
+                v["body"] = now.into();
+                Line::Purged(v.to_string())
+            }
+            _ => Line::Kept,
+        };
+    }
     let Some(uid) = raw::op_uid(kind, &body) else {
         // A body a purge wrote, exactly (Codex on #453), or an op of a kind whose ops hold no
         // uid's text.
@@ -1284,9 +1331,14 @@ fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> 
             );
         return if none { Line::Kept } else { Line::Unknown };
     };
-    match jobs.get(&uid) {
-        Some(job) => {
-            v["body"] = serde_json::json!({ "forgotten": job }).to_string().into();
+    let now = match jobs.get(&uid) {
+        Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
+        // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2).
+        None => judge.purged(kind, at, ts, &body),
+    };
+    match now {
+        Some(now) => {
+            v["body"] = now.into();
             Line::Purged(v.to_string())
         }
         None => Line::Kept,
@@ -2092,7 +2144,7 @@ pub(crate) mod tests {
             "correction",
             serde_json::json!({"uid": "u1", "body": "secret"}),
         );
-        let Line::Purged(new) = purged_line(&secret, &jobs) else {
+        let Line::Purged(new) = purged_line(&secret, &jobs, &raw::Judge::default()) else {
             panic!("{secret}");
         };
         assert_eq!(
@@ -2108,7 +2160,13 @@ pub(crate) mod tests {
             line("window", serde_json::json!({"note": "u1"})),
             " ".to_owned(),
         ] {
-            assert!(matches!(purged_line(&kept, &jobs), Line::Kept), "{kept}");
+            assert!(
+                matches!(
+                    purged_line(&kept, &jobs, &raw::Judge::default()),
+                    Line::Kept
+                ),
+                "{kept}"
+            );
         }
         for unknown in [
             line("claim", serde_json::json!({"quote": "secret"})),
@@ -2124,7 +2182,10 @@ pub(crate) mod tests {
             secret[..40].to_owned(),
         ] {
             assert!(
-                matches!(purged_line(&unknown, &jobs), Line::Unknown),
+                matches!(
+                    purged_line(&unknown, &jobs, &raw::Judge::default()),
+                    Line::Unknown
+                ),
                 "{unknown}"
             );
         }
