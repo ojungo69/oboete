@@ -2715,13 +2715,14 @@ impl Raw {
     }
 
     /// Slice 3e-1: `forgotten_records`, with every record a rescan masked (`Forgotten::with_masks`),
-    /// by the time of its latest mask.
+    /// by the time of its latest mask: none when a restore lost the time of one of them, which
+    /// went as late as can be, whatever the others' (Codex on #480).
     pub(crate) fn forgotten_and_masked(&self) -> Result<Forgotten> {
         let masks = self
             .conn
             .prepare(
-                "SELECT target_device, target_seq, NULLIF(MAX(ts), 0) FROM records
-                 WHERE type = 'tombstone' AND target_offset IS NOT NULL
+                "SELECT target_device, target_seq, CASE WHEN MIN(ts) = 0 THEN NULL ELSE MAX(ts) END
+                 FROM records WHERE type = 'tombstone' AND target_offset IS NOT NULL
                  GROUP BY target_device, target_seq",
             )?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?

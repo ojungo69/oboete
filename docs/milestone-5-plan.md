@@ -1116,7 +1116,8 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
   restore はそれを戻す（今までは持たず、restore で 0 になり、伏せる前や forget の前に作った op を後に
   作ったと誤って判定した）。この版より前の segment から戻った tombstone は時刻を持たないので、purge は
   それを最も遅い時刻とみなす: その record の文から作った op はすべてその前に作ったとして文を失う（多めに
-  取る側。forget の tombstone も同じ）。
+  取る側。forget の tombstone も同じ）。同じ record の伏せ字に時刻の分かるものがあっても同じ（最も遅い伏せ字が
+  record の伏せ字の時刻なので、時刻のないものが 1 つでもあればそれ。Codex on #480）。
 - **knowledge.db**: 払う伏せ字がある回は rebuild する（3c-1 と同じ: FTS の三文字組、空きページ）。vector の carry は
   伏せた record の鍵を忘れた record の鍵と同じく外す（伏せる前の文の vector を戻さない）。set aside の
   knowledge.db は今と同じく carry してから消す。
@@ -1130,7 +1131,8 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
   もの（同じ batch の claim）と、その claim を見せた後の window は #478（forget は #476）。secure_delete
   （2b）より前に作った raw.db の空きページと page の中の空き領域には、その前に消した byte が残りうる（#477）。
   伏せた record から作ったと辿れない op の文（伏せた uid の Correction の body、work state、import、curator が
-  自分で書いた一致）には後から足した規則が届かない（#478）。
+  自分で書いた一致）には後から足した規則が届かない（#478）。step 4 が segment の途中で止まると、伏せた claim
+  の行を書き換えた後は、その uid を名指した別の segment の window の行を次の purge が辿れない（#483）。
 - 受入テスト（6.7 の Rescan range）: 古い規則の下で秘密を含む prompt を記録し、それを引用する claim、
   その window op（summary にも秘密）、それを読んだ turn op を書き、backup を書き、raw.db のコピーを set
   aside し、規則を足して rescan、purge。raw.db（展開した本文も）・WAL・knowledge.db・すべての segment

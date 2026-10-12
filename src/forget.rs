@@ -7692,8 +7692,8 @@ mod tests {
 
     /// Codex on #480: a restore from segments brings a mask's time back with its range, and one a
     /// segment written before tombstone lines kept their time brings back without it counts as
-    /// late as can be: a claim made from the record before the mask, and a window that named it,
-    /// lose their text either way.
+    /// late as can be, beside another mask of the record whose time is known too: a claim made
+    /// from the record before the mask, and a window that named it, lose their text either way.
     #[test]
     fn a_restore_keeps_the_time_of_a_mask() {
         let mut s = crate::search::b::fixture::Store::new();
@@ -7729,10 +7729,27 @@ mod tests {
         }
         crate::worker::run_once(&home).unwrap();
         assert_eq!(masked_at(&home), at);
-        // As an older segment brings it back.
+        // As an older segment brings it back, beside a mask of the record whose time is known and
+        // older than the claim.
         rusqlite::Connection::open(home.join("raw.db"))
             .unwrap()
             .execute("UPDATE records SET ts = 0 WHERE type = 'tombstone'", [])
+            .unwrap();
+        crate::raw::open(&home)
+            .unwrap()
+            .append_tombstone(raw::Target::Range {
+                device,
+                seq: r1,
+                offset: 0,
+                length: 2,
+            })
+            .unwrap();
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE records SET ts = 1 WHERE type = 'tombstone' AND ts <> 0",
+                [],
+            )
             .unwrap();
         purge(&home).unwrap().unwrap();
         let after = op_bodies(&home);
