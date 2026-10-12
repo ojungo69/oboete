@@ -1083,6 +1083,8 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
   `rescan_masks_paid` に書く。範囲 tombstone がそれより多い間は伏せ字を払う義務がある（purge の間に増えた
   tombstone は次の回。この版より前の store と、segment から作り直した store（meta が新しい）は何も払って
   いない）。範囲 tombstone を書く transaction は何も書き足さない（数えるのは部分索引 `tombstone_targets`）。
+  払う前に、開き直した raw.db の伏せた行が伏せ字の下に byte を持たないことを確かめる（purge の途中の restore が
+  segment のとおりの行に戻したら払わない、Codex on #480）。
   worker の `forget --continue` もこれを見る。spec 6.2 の「進みは `forget_jobs` の行に」からの逸脱で、再開、
   doctor の表示、done の条件は数が担う（Claude; overrulable）。
 - **raw.db の行**: 範囲 tombstone の対象の event 行の本文（zstd は展開して）に、その行の範囲をすべて当て、
@@ -1092,7 +1094,8 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
 - **伏せる前の文から作った op**: 3d-1・3d-2 の `Judge` に「伏せた record」を足す（record、tombstone の
   時刻）。window op と turn op は 3d-2 の規則 (a) と同じ（span・goals・読んだ span にその record があり、
   tombstone の時刻と `SHOWN_MARGIN_MS` より前に書かれた）。claim op はその record を引用し、同じ時刻より
-  前に書かれたもの（引用が範囲に重ならない claim も: window ごと recurate されるので、同じ文から作り直される）。
+  前に書かれたもの（引用が範囲に重ならない claim も: window ごと recurate されるので、同じ文から作り直される。
+  伏せた record を複数引用する op はそれぞれの伏せ字の時刻で見て、uid の時刻は最も遅い伏せ字、Codex on #480）。
   その claim を candidates・carried に名指し、同じ時刻より前に書かれた window op も（curator が claim の文を
   見た）。claim op の本文は window と turn の後に書き換える（uid の forget op がないので、それまでは op が
   名指しの手がかり。途中で止まっても次の purge が同じ順で続ける）。
@@ -1118,7 +1121,7 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
 - **限界**: 他の端末の record と op（M6 の同期）は伏せ字の tombstone が届いたときその端末で同じことをする。
   今は自分の端末の rescan だけ。伏せる前に curator・埋め込みの provider に送った文は provider の条件の
   下（6.3）。curator が window の中の伏せた record の文を、別の record を引用する claim の body に写した
-  もの（同じ batch の claim）と、その claim を見せた後の window は #476（forget も同じ）。secure_delete
+  もの（同じ batch の claim）と、その claim を見せた後の window は #478（forget は #476）。secure_delete
   （2b）より前に作った raw.db の空きページと page の中の空き領域には、その前に消した byte が残りうる（#477）。
   伏せた record から作ったと辿れない op の文（伏せた uid の Correction の body、work state、import、curator が
   自分で書いた一致）には後から足した規則が届かない（#478）。

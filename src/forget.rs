@@ -1350,7 +1350,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
     }
     match masks.as_deref() {
-        Some(seen) if masked => raw.masks_paid(seen)?,
+        // A restore since step 2 may have put a row back as it was (Codex on #480).
+        Some(seen) if masked && !raw.rows_hold_masks()? => raw.masks_paid(seen)?,
         Some(_) => purged.unfinished.push(crate::raw::MASK_JOB.to_owned()),
         None => {}
     }
@@ -7707,6 +7708,138 @@ mod tests {
         drop(raw);
         assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
         assert_eq!(purge(&home).unwrap().unwrap().masked, 1);
+        assert!(!stored_body(&home, &device, r1).contains(MASKED));
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+    }
+
+    /// Slice 3e-1: a claim quoting two masked records is judged by each one's mask, not by the
+    /// first one's only: masked long before the claim was written, the first does not take its
+    /// text; the second, masked after, does (Codex on #480).
+    #[test]
+    fn each_masked_record_a_claim_quotes_is_judged_by_its_own_mask() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, said) = masked_prompt(&mut s);
+        let other = "Rotate acme-731904 on Mondays.";
+        let r2 = s.said("s", "github.com/o/r", 2_000, other);
+        let home = s.home.path().to_owned();
+        let quotes = [(r1, said.as_str()), (r2, other)];
+        let seq = s
+            .raw
+            .append_ops(&[claim_op(&device, &quotes, "Deploys and rotations.")])
+            .unwrap()[0];
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        // The first record masked ten minutes before the claim was written.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let ts: i64 = conn
+            .query_row("SELECT ts FROM ops WHERE op_seq = ?1", [seq], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "UPDATE records SET ts = ?1 WHERE type = 'tombstone' AND target_seq = ?2",
+            rusqlite::params![ts - 600_000, r1],
+        )
+        .unwrap();
+        drop(conn);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert_eq!(
+            op_bodies(&home)[&seq],
+            serde_json::json!({"forgotten": crate::raw::MASK_JOB})
+        );
+    }
+
+    /// Slice 3e-1: a claim uid two derivations give, each quoting another masked record, holds its
+    /// latest mask: a window that named it before then, and after the older mask, saw the text the
+    /// later one hides (Codex on #480).
+    #[test]
+    fn a_window_that_named_a_claim_before_its_latest_mask_loses_its_text() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let plain = "We deploy on Fridays.";
+        let r0 = s.said("s", "github.com/o/r", 500, plain);
+        let (r1, said) = masked_prompt(&mut s);
+        let other = "Rotate acme-731904 on Mondays.";
+        let r2 = s.said("s", "github.com/o/r", 2_000, other);
+        let home = s.home.path().to_owned();
+        let a = claim_op(&device, &[(r0, plain), (r1, &said)], "Deploys on Fridays.");
+        let b = claim_op(
+            &device,
+            &[(r0, plain), (r2, other)],
+            "And rotations on Mondays.",
+        );
+        let uid = raw::op_uid(a.0, &a.1).unwrap();
+        assert_eq!(raw::op_uid(b.0, &b.1).unwrap(), uid);
+        let shown = window_op(
+            r0,
+            r0,
+            "They rotate acme-731904.",
+            json!({"candidates": [uid]}),
+        );
+        let seqs = s.raw.append_ops(&[a, b, shown]).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        // The first derivation at t0, its record masked a second later, the second derivation at
+        // t0 + 2 s, the window at t0 + 5 min, the second record masked at t0 + 10 min.
+        let t0 = crate::db::now_ms() - 3_600_000;
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for (seq, ts) in [
+            (seqs[0], t0),
+            (seqs[1], t0 + 2_000),
+            (seqs[2], t0 + 300_000),
+        ] {
+            conn.execute(
+                "UPDATE ops SET ts = ?1 WHERE op_seq = ?2",
+                rusqlite::params![ts, seq],
+            )
+            .unwrap();
+        }
+        for (seq, ts) in [(r1, t0 + 1_000), (r2, t0 + 600_000)] {
+            conn.execute(
+                "UPDATE records SET ts = ?1 WHERE type = 'tombstone' AND target_seq = ?2",
+                rusqlite::params![ts, seq],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert!(op_bodies(&home)[&seqs[2]].get("forgotten").is_some());
+    }
+
+    /// Slice 3e-1: a restore between the purge's rebuild and its last steps, which put a row back
+    /// as the segments held it, leaves the masks owed: the count is not paid over a row that holds
+    /// a masked byte again (Codex on #480).
+    #[test]
+    fn a_restore_during_the_purge_leaves_the_masks_owed() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, _) = masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        s.run();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let at = home.clone();
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(at.join("raw.db"), b"not a database at all").unwrap();
+                for f in ["raw.db-wal", "raw.db-shm"] {
+                    let _ = std::fs::remove_file(at.join(f));
+                }
+                crate::worker::run_once(&at).unwrap();
+            }));
+        });
+        let purged = purge(&home).unwrap().unwrap();
+        assert!(purged.unfinished.iter().any(|j| j == crate::raw::MASK_JOB));
+        assert!(stored_body(&home, &device, r1).contains(MASKED));
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
+        purge(&home).unwrap().unwrap();
         assert!(!stored_body(&home, &device, r1).contains(MASKED));
         assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
     }

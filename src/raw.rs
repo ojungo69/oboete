@@ -2643,7 +2643,9 @@ impl Raw {
                 // Slice 3e-1: this op alone, its uid not tombstoned.
                 Some((_, job, Some(at))) if job == MASK_JOB => {
                     claims.masked.push(key.clone());
-                    claims.masked_uids.entry(uid.clone()).or_insert(*at);
+                    // Its latest mask: a window that showed it before then showed its text
+                    // (Codex on #480).
+                    later(&mut claims.masked_uids, &uid, *at);
                 }
                 Some((_, job, _)) => {
                     claims
@@ -2976,6 +2978,26 @@ impl Raw {
             tx.commit()?;
         }
         Ok(rewritten)
+    }
+
+    /// Slice 3e-1: whether a row a rescan masked still holds a byte under one of its masks: a
+    /// restore since the purge masked them put it back (Codex on #480).
+    pub(crate) fn rows_hold_masks(&self) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let mut st = self.conn.prepare_cached(
+            "SELECT body, enc FROM records WHERE device = ?1 AND seq = ?2 AND type = 'event'",
+        )?;
+        for ((device, seq), (_, ranges)) in self.masks()? {
+            let row: Option<(Vec<u8>, String)> = st
+                .query_row(params![device, seq], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            if let Some((body, enc)) = row
+                && masked_row(body, &enc, &ranges)?.is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The jobs a forgotten record of which still has its body (slice 3c: their step 2 is not
@@ -5892,7 +5914,7 @@ impl Judge {
                 // Slice 3e-1: a masked record's claim is not forgotten by its uid.
                 match r {
                     (_, job, Some(at)) if job == MASK_JOB => {
-                        masked.entry(uid).or_insert(*at);
+                        later(&mut masked, &uid, *at);
                     }
                     (_, job, _) => {
                         uids.entry(uid).or_insert_with(|| job.clone());
@@ -5906,7 +5928,7 @@ impl Judge {
             self.forgotten.uids.entry(uid).or_insert(job);
         }
         for (uid, at) in masked {
-            self.forgotten.masked.entry(uid).or_insert(at);
+            later(&mut self.forgotten.masked, &uid, at);
         }
         let held: std::collections::HashSet<(String, i64)> = self
             .spans
@@ -6072,25 +6094,34 @@ pub(crate) struct RecordClaims {
 }
 
 /// The entry of the first forgotten record claim op `body` quotes, else of the first masked one
-/// (slice 3e-1) when the op, written at `ts`, came before that mask (`SHOWN_MARGIN_MS`): what
-/// takes its text. A forget comes first: it tombstones the uid.
+/// (slice 3e-1) the op, written at `ts`, came before the mask of (`SHOWN_MARGIN_MS`): what takes
+/// its text. A forget comes first: it tombstones the uid.
 fn quoted_entry<'a>(
     forgotten: &'a Forgotten,
     ts: i64,
     body: &serde_json::Value,
 ) -> Option<&'a (i64, String, Option<i64>)> {
-    let quoted = |mask: bool| {
+    // Each masked record it quotes by its own mask, not the first one's (Codex on #480).
+    let quoted = |masked: bool| {
         items(&body["evidence"]).iter().find_map(|e| {
-            forgotten
-                .entry(e["device"].as_str()?, e["seq"].as_i64()?)
-                .filter(|r| (r.1 == MASK_JOB) == mask)
+            let r = forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?)?;
+            let takes = if masked {
+                r.1 == MASK_JOB
+                    && r.2
+                        .is_none_or(|at| ts <= at.saturating_add(SHOWN_MARGIN_MS))
+            } else {
+                r.1 != MASK_JOB
+            };
+            takes.then_some(r)
         })
     };
-    quoted(false).or_else(|| {
-        quoted(true).filter(|r| {
-            r.2.is_none_or(|at| ts <= at.saturating_add(SHOWN_MARGIN_MS))
-        })
-    })
+    quoted(false).or_else(|| quoted(true))
+}
+
+/// Slice 3e-1: `uid`'s mask time in `masked`, the later of the one it has and `at`.
+fn later(masked: &mut std::collections::HashMap<String, i64>, uid: &str, at: i64) {
+    let t = masked.entry(uid.to_owned()).or_insert(at);
+    *t = (*t).max(at);
 }
 
 /// Each forgotten record's identity (slice 3c-2), with the native session and ambiguity its
