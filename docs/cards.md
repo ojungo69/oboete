@@ -79,9 +79,11 @@ again is still listed, and a restore that lost records and uses their seqs again
 An op that lists none (every op before this slice, and one with more than 500 removals) has no
 card shown once anything is removed from its records. A recuration gives the span new cards
 (K3), with the removals it found.
-Not covered, and left to the forget unit's fence for derived text (#366): what a card restates
-of a claim its curator was shown, and a removal whose tombstone a restore lost with a damaged
-segment.
+What a card restates of a claim its curator was shown is not hidden by this rule: a forget of a
+record the claim quotes takes the window's text and queues its span for recuration (milestone 5,
+slice 3d-2: by the window op's `candidates` and `carried`; a window curated before 3d-2 did not
+record the claims it carried in). Nor is a removal whose tombstone a restore lost with a damaged
+segment; a forget's purge finds its record again by the denial (#366).
 `ponytail:` a new redaction rule tombstones old records, so the cards over them are hidden until
 `oboete recurate` reads them again, though K6 would have masked the value; a narrower rule comes
 with the forget unit.

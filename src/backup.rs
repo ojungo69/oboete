@@ -992,11 +992,12 @@ pub(crate) struct OpsPurge {
 pub(crate) fn purge_ops(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
+    rewritten: &raw::ForgottenOps,
 ) -> Result<OpsPurge> {
     walk(
         home,
         Kind::Ops,
-        &|text| purge_lines(text, |l| purged_line(l, jobs)),
+        &|text| purge_lines(text, |l| purged_line(l, jobs, rewritten)),
         true,
     )
 }
@@ -1009,7 +1010,7 @@ pub(crate) fn ops_to_purge(
     walk(
         home,
         Kind::Ops,
-        &|text| purge_lines(text, |l| purged_line(l, jobs)),
+        &|text| purge_lines(text, |l| purged_line(l, jobs, &raw::ForgottenOps::new())),
         false,
     )
 }
@@ -1261,7 +1262,11 @@ enum Line {
 
 /// One backup line, judged as raw.db's purge judges its op (`raw::op_uid`); a line rewritten keeps
 /// its other fields' values, in serde_json's key order: every reader parses the line.
-fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> Line {
+fn purged_line(
+    line: &str,
+    jobs: &std::collections::HashMap<String, String>,
+    rewritten: &raw::ForgottenOps,
+) -> Line {
     if line.trim().is_empty() {
         return Line::Kept;
     }
@@ -1274,6 +1279,20 @@ fn purged_line(line: &str, jobs: &std::collections::HashMap<String, String>) -> 
     let Some((mut v, kind, body)) = parsed() else {
         return Line::Unknown;
     };
+    // Slice 3d-2: a window or turn op a purge rewrote, made the body raw.db holds now.
+    if matches!(kind, raw::OpKind::Window | raw::OpKind::Turn) {
+        let key = (
+            v["device"].as_str().unwrap_or("").to_owned(),
+            v["op_seq"].as_i64().unwrap_or(0),
+        );
+        return match rewritten.get(&key) {
+            Some(now) if v["body"].as_str() != Some(now.as_str()) => {
+                v["body"] = now.as_str().into();
+                Line::Purged(v.to_string())
+            }
+            _ => Line::Kept,
+        };
+    }
     let Some(uid) = raw::op_uid(kind, &body) else {
         // A body a purge wrote, exactly (Codex on #453), or an op of a kind whose ops hold no
         // uid's text.
@@ -2092,7 +2111,7 @@ pub(crate) mod tests {
             "correction",
             serde_json::json!({"uid": "u1", "body": "secret"}),
         );
-        let Line::Purged(new) = purged_line(&secret, &jobs) else {
+        let Line::Purged(new) = purged_line(&secret, &jobs, &raw::ForgottenOps::new()) else {
             panic!("{secret}");
         };
         assert_eq!(
@@ -2108,7 +2127,13 @@ pub(crate) mod tests {
             line("window", serde_json::json!({"note": "u1"})),
             " ".to_owned(),
         ] {
-            assert!(matches!(purged_line(&kept, &jobs), Line::Kept), "{kept}");
+            assert!(
+                matches!(
+                    purged_line(&kept, &jobs, &raw::ForgottenOps::new()),
+                    Line::Kept
+                ),
+                "{kept}"
+            );
         }
         for unknown in [
             line("claim", serde_json::json!({"quote": "secret"})),
@@ -2124,7 +2149,10 @@ pub(crate) mod tests {
             secret[..40].to_owned(),
         ] {
             assert!(
-                matches!(purged_line(&unknown, &jobs), Line::Unknown),
+                matches!(
+                    purged_line(&unknown, &jobs, &raw::ForgottenOps::new()),
+                    Line::Unknown
+                ),
                 "{unknown}"
             );
         }

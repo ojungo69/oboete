@@ -1729,7 +1729,17 @@ fn curated_op(
     output: &Value,
 ) -> Result<Value> {
     let shown: Vec<&str> = req.shown_in.iter().map(|(_, c)| c.uid.as_str()).collect();
+    // And the claims carried in: a forget of a record one quotes takes the window's text (3d-2).
+    let mut carried: Vec<&str> = Vec::new();
+    for (_, _, c) in &req.carried_uids {
+        if !carried.contains(&c.uid.as_str()) {
+            carried.push(&c.uid);
+        }
+    }
     let mut op = json!({"outcome": "curated", "candidates": shown});
+    if !carried.is_empty() {
+        op["carried"] = carried.into();
+    }
     if let (Some(op), Value::Object(fields)) = (op.as_object_mut(), fields) {
         op.extend(fields);
     }
@@ -3871,24 +3881,27 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 /// last entry until the op fits, and `cut` says how many went, so the append never fails.
 fn within_op_cap(mut op: Value) -> Value {
     let len = |op: &Value, list: &str| op[list].as_array().map_or(0, Vec::len);
-    // The shown candidates go first, from the end of the list: an audit, where the gates' lists
-    // say what the window's claims were held to. Counted, not serialized per uid: a window over
-    // many repositories can show thousands.
-    let mut size = op.to_string().len();
-    if size > crate::raw::MAX_OP_BYTES
-        && let Some(shown) = op.get_mut("candidates").and_then(Value::as_array_mut)
-    {
-        // A uid leaves with its comma (the last one has none); the count adds its key and digits.
-        let count = |cut: u64| r#","candidates_cut":"#.len() + cut.to_string().len();
-        let mut cut = 0u64;
-        while size + count(cut) > crate::raw::MAX_OP_BYTES
-            && let Some(uid) = shown.pop()
+    // The shown candidates go first, from the end of the list, then the claims carried in: an
+    // audit, where the gates' lists say what the window's claims were held to. Counted, not
+    // serialized per uid: a window over many repositories can show thousands.
+    for (list, key) in [("candidates", "candidates_cut"), ("carried", "carried_cut")] {
+        let mut size = op.to_string().len();
+        if size > crate::raw::MAX_OP_BYTES
+            && let Some(shown) = op.get_mut(list).and_then(Value::as_array_mut)
         {
-            size -= uid.to_string().len() + usize::from(!shown.is_empty());
-            cut += 1;
-        }
-        if cut > 0 {
-            op["candidates_cut"] = cut.into();
+            // A uid leaves with its comma (the last one has none); the count adds its key and
+            // digits.
+            let count = |cut: u64| format!(r#","{key}":"#).len() + cut.to_string().len();
+            let mut cut = 0u64;
+            while size + count(cut) > crate::raw::MAX_OP_BYTES
+                && let Some(uid) = shown.pop()
+            {
+                size -= uid.to_string().len() + usize::from(!shown.is_empty());
+                cut += 1;
+            }
+            if cut > 0 {
+                op[key] = cut.into();
+            }
         }
     }
     let mut cut = 0u64;
@@ -10140,6 +10153,24 @@ curate = false
         // An op over the cap with none of the lists is given none of them.
         let op = json!({"outcome": "skipped", "summary": "x".repeat(crate::raw::MAX_OP_BYTES)});
         assert_eq!(within_op_cap(op.clone()), op);
+        // The claims carried in go next, once no candidate is left (slice 3d-2).
+        let carried: Vec<String> = (0..2000).map(|i| format!("{i:064}")).collect();
+        let op = json!({"outcome": "curated", "candidates": ["u"], "carried": carried});
+        let op = within_op_cap(op);
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        assert_eq!(
+            (
+                op["candidates"].as_array().unwrap().len(),
+                &op["candidates_cut"]
+            ),
+            (0, &json!(1))
+        );
+        let kept = op["carried"].as_array().unwrap();
+        assert_eq!(kept[0], json!(format!("{:064}", 0)));
+        assert_eq!(
+            kept.len() as u64 + op["carried_cut"].as_u64().unwrap(),
+            2000
+        );
     }
 
     /// The cap holds for the op as appended: an op that fits only before its range is added is
@@ -11064,6 +11095,30 @@ curate = false
                 first.kind
             );
         }
+    }
+
+    /// Slice 3d-2: a curated window op lists the claims carried into its prompt, by uid, as it lists
+    /// its candidates: a forget of a record one of them quotes takes the window's text.
+    #[test]
+    fn a_curated_window_lists_the_claims_carried_in() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let decided = kept(&mut raw, "s", "r", "We use tabs.");
+        raw.append_ops(std::slice::from_ref(&decided)).unwrap();
+        curated_so_far(&mut raw);
+        raw.append(&Event {
+            session: "s".into(),
+            repo: Some("r".into()),
+            ..prompt("Unrelated words here.")
+        })
+        .unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| Ok(answered("fake"));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        let uid = crate::claims::op_uid(&decided.1).unwrap();
+        assert_eq!(windows(&raw).last().unwrap()["carried"], json!([uid]));
     }
 
     /// Milestone 5 D5: a forgotten uid is neither carried into a later window's prompt nor derived

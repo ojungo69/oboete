@@ -25,6 +25,51 @@ struct Derived {
     supersedes: Vec<String>,
 }
 
+/// The spans a recuration window `op` covered, out of the recuration queue (Task 11).
+fn uncover(k: &Connection, op: &crate::raw::Op) -> Result<()> {
+    // What this window curated, and the part of its span curated through it (`covers`,
+    // when the span took several): each queued span keeps what is left of it on either
+    // side (#192), a record it curated only part of whole, and the records of an excluded
+    // session it kept back (Codex on #304).
+    let ranges = [&op.body, &op.body["covers"]];
+    for c in ranges
+        .into_iter()
+        .flat_map(|range| crate::curate::curated_parts(&op.body, range))
+    {
+        let whole = Span::records(
+            c.from + i64::from(c.from_offset.is_some()),
+            c.to - i64::from(c.to_offset.is_some()),
+        );
+        if whole.from > whole.to {
+            continue;
+        }
+        let rows: Vec<(i64, i64, String, i64)> = k
+            .prepare(
+                "SELECT from_seq, to_seq, op_device, op_seq FROM recurate
+                     WHERE device = ?1 AND from_seq <= ?3 AND to_seq >= ?2",
+            )?
+            .query_map(params![op.device, whole.from, whole.to], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for (from, to, of, at) in rows {
+            k.execute(
+                "DELETE FROM recurate WHERE op_device = ?1 AND op_seq = ?2
+                       AND from_seq = ?3",
+                params![of, at, from],
+            )?;
+            for part in Span::records(from, to).minus(&whole) {
+                k.execute(
+                    "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq, op_device,
+                           op_seq) VALUES(?1, ?2, ?3, ?4, ?5)",
+                    params![op.device, part.from, part.to, of, at],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Consumer for Claims {
     fn name(&self) -> &'static str {
         "claims"
@@ -42,50 +87,24 @@ impl Consumer for Claims {
             return Ok(after);
         };
         // A span a recuration covered leaves the queue (Task 11), before its claims are derived:
-        // a quote of its own that no longer reads queues it again.
-        for op in ops
-            .iter()
-            .filter(|o| o.kind == OpKind::Window && o.body["recurate"] == true)
-        {
-            // What this window curated, and the part of its span curated through it (`covers`,
-            // when the span took several): each queued span keeps what is left of it on either
-            // side (#192), a record it curated only part of whole, and the records of an excluded
-            // session it kept back (Codex on #304).
-            let ranges = [&op.body, &op.body["covers"]];
-            for c in ranges
-                .into_iter()
-                .flat_map(|range| crate::curate::curated_parts(&op.body, range))
+        // a quote of its own that no longer reads queues it again. A curated window a forget took
+        // the text of (slice 3d-2) joins it whole, in op order with the recurations: its op is
+        // the authority, so a rebuild queues it again. Its Removed rows are in no later window's
+        // text and in that window's `removed`, so no part of the span is cut out.
+        for op in ops.iter().filter(|o| o.kind == OpKind::Window) {
+            if op.body["recurate"] == true {
+                uncover(k, op)?;
+            }
+            if op.body["forgotten"].is_string()
+                && op.body["outcome"] == "curated"
+                && let Some(span) = crate::curate::op_span(&op.body)
             {
-                let whole = Span::records(
-                    c.from + i64::from(c.from_offset.is_some()),
-                    c.to - i64::from(c.to_offset.is_some()),
-                );
-                if whole.from > whole.to {
-                    continue;
-                }
-                let rows: Vec<(i64, i64, String, i64)> = k
-                    .prepare(
-                        "SELECT from_seq, to_seq, op_device, op_seq FROM recurate
-                         WHERE device = ?1 AND from_seq <= ?3 AND to_seq >= ?2",
-                    )?
-                    .query_map(params![op.device, whole.from, whole.to], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                    })?
-                    .collect::<rusqlite::Result<_>>()?;
-                for (from, to, of, at) in rows {
-                    k.execute(
-                        "DELETE FROM recurate WHERE op_device = ?1 AND op_seq = ?2
-                           AND from_seq = ?3",
-                        params![of, at, from],
-                    )?;
-                    for part in Span::records(from, to).minus(&whole) {
-                        k.execute(
-                            "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq, op_device,
-                               op_seq) VALUES(?1, ?2, ?3, ?4, ?5)",
-                            params![op.device, part.from, part.to, of, at],
-                        )?;
-                    }
-                }
+                k.execute(
+                    "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+                     SELECT ?1, ?2, ?3, ?1, ?4
+                     WHERE NOT EXISTS (SELECT 1 FROM recurate WHERE op_device = ?1 AND op_seq = ?4)",
+                    params![op.device, span.from, span.to, op.op_seq],
+                )?;
             }
         }
         let mut derived = Vec::new();

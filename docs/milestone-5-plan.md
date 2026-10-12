@@ -943,14 +943,74 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   purge し直す。登録の後 purge の前に作った curation の request は claim の本文も引用も持たない。status と
   preview の数。
 
-#### 3d-2〜3e（各 PR で詳細を決める）
-- **3d-2**: 忘れた record（と 3d-1 で tombstone した claim、window op の `candidates`。#366 の 1）を curator に
-  見せた window op（自分の span と goals、K4 の集合）を構造だけにする（from/to と offset・outcome・goals・
-  removed・elided を残し、summary・observations・落とした下書き・candidates を捨てて `forgotten` を付ける）。
-  その turn op（T7 の集合: turn の record、読んだ window、その goals）の fields も空にする（turn の summary は
-  作り直さない）。window の span 全体を recurate の列に入れる（Removed の行は window の文に入らず、新しい
-  window op の `removed` に載るので、`Span::minus` で切らない。consumer が op から入れるので rebuild でも
-  入る）。#366 の 2（restore が tombstone を失う）は deny から状態で purge するので覆う。done はここで。
+#### 3d-2: window と turn の op
+
+- **忘れた record の時刻**: 各忘れた record の forget の tombstone の ts（登録の時刻。tombstone は消えず、
+  segment からの restore でも戻る）。下の「見せた」はこれと K4 の `removed` で決める。
+- **対象の window op**: curated の window op（`refused`・`recurate` のものも）で `forgotten` をまだ持たない
+  もののうち、curator に忘れた record か忘れた claim を見せたもの: (a) 自分の device の span（from_seq〜
+  to_seq、端で切った record も）か `goals` に忘れた record があり、op の `removed` がそれを丸ごと（offset
+  なし）載せておらず、op が tombstone の 1 分後より前に書かれた（K4 の定義: `removed` に載る record は
+  window を切った時に消えていたので見せていない。`removed` は 500 件を超えると何も載せないので、その時は
+  時刻で決める。登録より後に切った window は fence と `removed` で見せていないと分かる。1 分の余裕は登録の
+  request の時刻と transaction の間に書かれた op のため）。これがないと、purge の後に `oboete recurate` が
+  同じ span を curate した op がまた当たり、書き換え・再投入・再送を繰り返す。(b) `candidates` か
+  `carried` に 3d-1 で tombstone した uid（record の job の forget op の uid）がある（#366 の 1、
+  docs/cards.md K4 の「Not covered」）。uid の forget（2b）の claim は元の span が残るので (b) に入れない。
+- **`carried`**: curation が prompt に持ち込んだ claim（決定済みと open item、`Request::carried_uids`）は
+  今は op に残らない。新しい window op は `candidates` と同じく uid だけの `carried` を持つ（op の上限では
+  candidates の後に削る）。この版より前の op は持ち込んだ claim が分からない（限界として書く）。
+- **window op の書換え**: 構造だけを残す: `outcome`・`reason`、`from_seq`・`from_offset`・`to_seq`・
+  `to_offset`・`covers`、`elided`・`shortened`・`excluded`（record の seq）、`goals`・`removed`、
+  `refused`・`recurate`。summary・observations・cards_dropped・dropped・lowered・cut・candidates・
+  candidates_cut・carried・provider は捨て、`forgotten: <job>`（最初に当たった忘れた record の denial の
+  job、または uid の forget op の job）を足す。cards consumer は summary も observations も持たない op から
+  card を作らない（今のまま）。
+- **対象の turn op**: `forgotten` をまだ持たない turn op（skip も、ラベルを持つので）のうち、(a) T7 の集合
+  （自分の device の from〜through、`read` の span、`goals`）に忘れた record があり、window と同じく op の
+  `removed` が丸ごと載せておらず tombstone の 1 分後より前に書かれたもの（from〜through は、T7 の reader と
+  同じく session を問わない: ラベルを失った Removed の行は session が分からない）。(b) `read` の span が
+  `forgotten` を持つ window op の span と同じで、その span の次の `forgotten` を持たない window op より前に
+  書かれたもの（読んだ card が忘れた claim を言い直しうる。その後の turn は recuration の新しい card を
+  読んでいる）。状態で決めるので、後の purge でも同じ op が当たる。
+- **turn op の書換え**: `fitted` が上限を超えた op にするのと同じ「fields のない skip」（`fields` 空、
+  `skipped: true`）にし、ラベルを消し（agent と session を空、repo を null。3c の Removed 行がラベルを
+  持たないのと同じ）、`forgotten: <job>` を足す。from・through・ts・read・goals・removed・excluded は残す:
+  phase は through で「問い済み」を数えるので、summary は作り直さない。読み手は skip を出さない（今のまま）。
+- **見つけ方**: 忘れた record の鍵（`denied_records` ⋈ `import_origins`、device ごとに seq で並べ、job と
+  tombstone の ts を付ける）と、record の job の forget op の uid を 1 回だけ読み、claim・window・turn の
+  判定で共有する（`record_jobs_with_text` は purge ごとに 5 回と、worker で 10 分ごとに走る）。window と turn
+  の op は SQL の `json_extract` で必要な欄だけを読み、範囲の判定は Rust で二分探索。deny がない store は
+  読まない（3d-1 と同じ）。
+- **step**: step 2 は claim（(b) が読む forget op を書く）→ window と turn → 行の順（dispatch の下で batch
+  ごと）。step 3 の rebuild はそのまま。step 4 は ops segment とコピーの window・turn op を、(device, op_seq)
+  で raw.db の書き換えた本文にする（2c の uid の判定に、鍵から本文への表を足す）。step 5 はそのまま（shown
+  は claim の uid だけを持つ）。
+- **recurate**: claims consumer が `forgotten` を持つ curated の window op を読んだとき、その span 全体を
+  recurate の列に入れる（op は自分。Removed の行は次の window の文に入らず、その op の `removed` に載るので
+  `Span::minus` で切らない）。今は Anchors が、消えた引用を持つ claim op の window を入れるが、3d-1 の書換えの
+  後の rebuild では claim op がもう派生しないので入らない。op から入れるので rebuild でも入り、後の
+  recuration が覆うと列から出る（今のまま）。列は `oboete recurate`（見積もりを見せてから送る）でだけ送る。
+- **状態で決める**: 対象の op がまだ本文を持つ job（restore で戻ったものも）は step 2 から（3d-1 と同じ）。
+  #366 の 2（restore が tombstone を失う）は deny から状態で見つけ直すので覆う。
+- **status（D4）**: step 3 は「purged from raw and its index here, with what was made from it; the backups
+  pending」、step 4 は uid の job と同じ「purged here and in the backups; its last check pending」、step 5 で
+  `done`。3d-3（#167）は claim の status の意味の話で、本文は残さないので done を待たせない。
+- **preview**: 空にする card（window op）の数、session summary（turn op）の数（spec 6.2 の preview の種類。
+  recurate に入る window の数は card の数と同じ）。登録の前なので deny ではなく preview の record の鍵（時刻
+  なし）と、preview が数えた claim の uid で、同じ判定で数える。
+- **limits と help**: card と session summary も空になり、その window は `oboete recurate` の一覧に入る。
+  この版より前の window が持ち込んだ claim は分からないので、そこから作った card は残る。`forget --help`
+  から「後の版」を消す。
+- 受入テスト: 忘れた record を span に持つ window、goals に持つ window、忘れた claim を candidates に持つ
+  window と carried に持つ window（record は残る）、どれにも当たらない window、忘れた record を `removed` に
+  丸ごと載せる window、登録の 1 分後より後の window。その turn op（from〜through に持つ、read に持つ、
+  candidates の window を読んだ、その span の recuration の後に読んだ、当たらない）。purge の後、当たる op は
+  構造だけで本文の byte が raw.db・knowledge.db・ops segment・コピーに残らず、当たらない op はそのまま。
+  recurate の列に当たった window の span が入り、rebuild の後も入っている。その span を recuration した op は
+  当たらない。restore で window op の本文が戻ると purge し直す。status は done、preview の数。
+
+#### 3d-3〜3e（各 PR で詳細を決める）
 - **3d-3**: #167（claim op に status の支えの anchor を持たせ、その record が消えたら proposed に戻す。op の
   形の変更）。
 - **3e**: rescan の hit を範囲 target（device、seq、offset、length）として 3c の書換えに通す（preview
