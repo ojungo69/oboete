@@ -8710,6 +8710,57 @@ mod tests {
         assert_eq!(purge(&home).unwrap().unwrap().preferences, n);
     }
 
+    /// Slice 3e-2 (Codex on #485): a copy of raw.db that holds another op at the op seq of a
+    /// preference written again (a restore gives a dropped op's seq to a new op) is judged by its
+    /// own body: the older claim there, which quotes the directive as it was, loses its text.
+    #[test]
+    fn another_op_at_a_preferences_op_seq_is_judged_by_its_body() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        s.said("s", "github.com/o/r", 1_000, "Ship zeta-4821 today.");
+        let said = format!("Use tabs, key {MASKED}, always.");
+        crate::claims::pref_add(&home, &said).unwrap();
+        s.run();
+        let preference = |home: &Path| -> (i64, serde_json::Value) {
+            op_bodies(home)
+                .into_iter()
+                .find(|(_, b)| b["recipe"] == crate::claims::PREF_RECIPE && b.get("body").is_some())
+                .unwrap()
+        };
+        let (_, old) = preference(&home);
+        let acme = r#"{ id = "acme", regex = 'acme-[0-9]{6}' }"#;
+        let rules = |extra: &str| {
+            std::fs::write(
+                home.join("config.toml"),
+                format!("[redaction]\nextra_rules = [{acme}{extra}]\n"),
+            )
+            .unwrap();
+            crate::worker::run_once(&home).unwrap();
+        };
+        rules("");
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 1);
+        let (seq, _) = preference(&home);
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        rusqlite::Connection::open(&copy)
+            .unwrap()
+            .execute(
+                "UPDATE ops SET body = ?1 WHERE op_seq = ?2",
+                rusqlite::params![old.to_string(), seq],
+            )
+            .unwrap();
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        assert!(holds_text(&copy, MASKED) || holds_text(&wal, MASKED));
+        // Another record's mask: a purge runs, and the preference at that op seq reads now.
+        rules(r#", { id = "zeta", regex = 'zeta-[0-9]{4}' }"#);
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 0);
+        assert!(!holds_text(&copy, MASKED) && !holds_text(&wal, MASKED));
+    }
+
     /// Slice 3e-2: a preference forgotten by its uid is not written again when a rescan masks part
     /// of its directive.
     #[test]

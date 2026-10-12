@@ -3077,17 +3077,21 @@ impl Raw {
         let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
         if masks {
-            judge.now = self.preferences_now()?.into_keys().collect();
+            judge.now = self
+                .preferences_now()?
+                .into_iter()
+                .map(|(at, (_, body))| (at, body))
+                .collect();
         }
         Ok(judge)
     }
 
     /// Slice 3e-2: the preference claim ops (`oboete pref add`) whose body, their one quote, reads
-    /// as their directive reads now, by device and op seq, with their uids: one a purge wrote again
-    /// from a directive's masked text, or one never masked, holds no byte a mask hides.
+    /// as their directive reads now, by device and op seq, with their uids and bodies: one a purge
+    /// wrote again from a directive's masked text, or one never masked, holds no byte a mask hides.
     pub(crate) fn preferences_now(
         &self,
-    ) -> Result<std::collections::HashMap<(String, i64), String>> {
+    ) -> Result<std::collections::HashMap<(String, i64), (String, serde_json::Value)>> {
         let mut now = std::collections::HashMap::new();
         // `instr`, never a JSON function: a body that does not parse cannot fail the purge.
         let mut st = self.conn.prepare(
@@ -3103,7 +3107,7 @@ impl Raw {
             if self.reads_now(&body)?
                 && let Some(uid) = crate::claims::op_uid(&body)
             {
-                now.insert((row.get(0)?, row.get(1)?), uid);
+                now.insert((row.get(0)?, row.get(1)?), (uid, body));
             }
         }
         Ok(now)
@@ -3134,8 +3138,11 @@ impl Raw {
         &self,
         forgotten: &Forgotten,
     ) -> Result<Vec<(OpKind, serde_json::Value)>> {
-        let now: std::collections::HashSet<String> =
-            self.preferences_now()?.into_values().collect();
+        let now: std::collections::HashSet<String> = self
+            .preferences_now()?
+            .into_values()
+            .map(|(uid, _)| uid)
+            .collect();
         let mut ops = Vec::new();
         for (device, records) in &forgotten.records {
             for (seq, ..) in records.iter().filter(|r| r.1 == MASK_JOB) {
@@ -6273,8 +6280,10 @@ pub(crate) struct Judge {
     /// Slice 3d-4: when each of `copied` was written again (`Raw::remade`).
     remade: std::collections::HashMap<String, i64>,
     /// Slice 3e-2: the preference claim ops in raw.db that read as their directive reads now
-    /// (`Raw::preferences_now`): their lines keep their text.
-    now: std::collections::HashSet<(String, i64)>,
+    /// (`Raw::preferences_now`), with their bodies: a line or a copy's op at the same key keeps its
+    /// text when it holds the same body, not another op a restore gave that op seq to (Codex on
+    /// #485).
+    now: std::collections::HashMap<(String, i64), serde_json::Value>,
 }
 
 impl Judge {
@@ -6408,7 +6417,11 @@ impl Judge {
                 Some(body.to_string())
             }
             OpKind::Claim => {
-                if self.now.contains(&(at.0.to_owned(), at.1)) {
+                if self
+                    .now
+                    .get(&(at.0.to_owned(), at.1))
+                    .is_some_and(|now| now == body)
+                {
                     return None;
                 }
                 let job = match quoted_entry(&self.forgotten, ts, body) {
