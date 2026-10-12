@@ -3878,11 +3878,39 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 
 /// A window op within the op cap. Its lists name the curator's own ids, up to `MAX_CLAIMS` of them
 /// with several reasons each, and an id escapes to six times its bytes: the longer list loses its
-/// last entry until the op fits, and `cut` says how many went, so the append never fails.
+/// last entry until the op fits, and `cut` says how many went, so the append never fails. Then its
+/// cards, and last the claims it was shown and carried in.
 fn within_op_cap(mut op: Value) -> Value {
     let len = |op: &Value, list: &str| op[list].as_array().map_or(0, Vec::len);
-    // The shown candidates go first, from the end of the list, then the claims carried in: an
-    // audit, where the gates' lists say what the window's claims were held to. Counted, not
+    let mut cut = 0u64;
+    while op.to_string().len() > crate::raw::MAX_OP_BYTES {
+        let list = if len(&op, "lowered") >= len(&op, "dropped") {
+            "lowered"
+        } else {
+            "dropped"
+        };
+        // `get_mut`: an op without the list is not given one.
+        if op
+            .get_mut(list)
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop)
+            .is_none()
+        {
+            break;
+        }
+        cut += 1;
+        op["cut"] = cut.into();
+    }
+    // Its cards next, from the end: each is within its own caps, three can still be too many.
+    while op.to_string().len() > crate::raw::MAX_OP_BYTES
+        && let Some(cards) = op.get_mut("observations").and_then(Value::as_array_mut)
+        && cards.pop().is_some()
+    {
+        op["cards_dropped"] = (op["cards_dropped"].as_u64().unwrap_or(0) + 1).into();
+    }
+    // The claims it was shown, then those carried in, last, each list from its end: a forget of a
+    // record one of them quotes finds the window by them (slice 3d-2, CodeRabbit on #472), and
+    // each is capped, so only an op over the cap with no card left loses one. Counted, not
     // serialized per uid: a window over many repositories can show thousands.
     for (list, key) in [("candidates", "candidates_cut"), ("carried", "carried_cut")] {
         let mut size = op.to_string().len();
@@ -3903,32 +3931,6 @@ fn within_op_cap(mut op: Value) -> Value {
                 op[key] = cut.into();
             }
         }
-    }
-    let mut cut = 0u64;
-    while op.to_string().len() > crate::raw::MAX_OP_BYTES {
-        let list = if len(&op, "lowered") >= len(&op, "dropped") {
-            "lowered"
-        } else {
-            "dropped"
-        };
-        // `get_mut`: an op without the list is not given one.
-        if op
-            .get_mut(list)
-            .and_then(Value::as_array_mut)
-            .and_then(Vec::pop)
-            .is_none()
-        {
-            break;
-        }
-        cut += 1;
-        op["cut"] = cut.into();
-    }
-    // Its cards last, from the end: each is within its own caps, three can still be too many.
-    while op.to_string().len() > crate::raw::MAX_OP_BYTES
-        && let Some(cards) = op.get_mut("observations").and_then(Value::as_array_mut)
-        && cards.pop().is_some()
-    {
-        op["cards_dropped"] = (op["cards_dropped"].as_u64().unwrap_or(0) + 1).into();
     }
     op
 }
@@ -10121,14 +10123,26 @@ curate = false
         );
     }
 
-    /// Candidates over the op cap are cut from the end of their list, before the gates' lists.
+    /// The claims a window was shown, then those carried in, are cut last to the op cap, each list
+    /// from its end, after the gates' lists and the cards: a forget of a record one of them quotes
+    /// finds the window by them (slice 3d-2, CodeRabbit on #472).
     #[test]
-    fn the_candidates_list_is_cut_first_to_the_op_cap() {
+    fn the_claims_shown_and_carried_in_are_cut_last_to_the_op_cap() {
         let uids: Vec<String> = (0..2000).map(|i| format!("{i:064}")).collect();
+        let card = json!({"type": "decision", "title": "t", "narrative": "n"});
         let op = json!({"outcome": "curated", "dropped": [["c1", "r"]], "lowered": [],
-            "candidates": uids});
+            "observations": [card, card], "candidates": uids});
         let op = within_op_cap(op);
         assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        assert_eq!(
+            [
+                &op["dropped"],
+                &op["cut"],
+                &op["observations"],
+                &op["cards_dropped"]
+            ],
+            [&json!([]), &json!(1), &json!([]), &json!(2)]
+        );
         let kept = op["candidates"].as_array().unwrap();
         assert_eq!(
             kept.len() as u64 + op["candidates_cut"].as_u64().unwrap(),
@@ -10143,8 +10157,6 @@ curate = false
             .push(json!(format!("{:064}", kept.len())));
         more["candidates_cut"] = (2000 - kept.len() as u64 - 1).into();
         assert!(more.to_string().len() > crate::raw::MAX_OP_BYTES);
-        assert_eq!(op["dropped"], json!([["c1", "r"]]));
-        assert!(op.get("cut").is_none());
         // An op at the cap keeps every candidate.
         let base = json!({"outcome": "curated", "dropped": [["c1", ""]], "candidates": ["u"]});
         let reason = "r".repeat(crate::raw::MAX_OP_BYTES - base.to_string().len());
@@ -10153,7 +10165,16 @@ curate = false
         // An op over the cap with none of the lists is given none of them.
         let op = json!({"outcome": "skipped", "summary": "x".repeat(crate::raw::MAX_OP_BYTES)});
         assert_eq!(within_op_cap(op.clone()), op);
-        // The claims carried in go next, once no candidate is left (slice 3d-2).
+        // An op over the cap by its cards keeps its claims.
+        let big = json!({"narrative": "x".repeat(crate::raw::MAX_OP_BYTES / 2)});
+        let op = json!({"outcome": "curated", "candidates": ["u"], "carried": ["v"],
+            "observations": [big, big]});
+        let op = within_op_cap(op);
+        assert_eq!(
+            [&op["candidates"], &op["carried"], &op["cards_dropped"]],
+            [&json!(["u"]), &json!(["v"]), &json!(1)]
+        );
+        // The claims carried in go after the candidates.
         let carried: Vec<String> = (0..2000).map(|i| format!("{i:064}")).collect();
         let op = json!({"outcome": "curated", "candidates": ["u"], "carried": carried});
         let op = within_op_cap(op);

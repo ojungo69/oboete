@@ -542,8 +542,9 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
                 std::iter::empty(),
             ))?;
             preview.claims = quoting.uids.len();
-            let made =
-                raw.record_ops(&crate::raw::Forgotten::of(keys, quoting.uids.into_keys()))?;
+            let made = raw
+                .record_ops(crate::raw::Forgotten::of(keys, quoting.uids.into_keys()))?
+                .0;
             (preview.cards, preview.summaries) = (made.windows.len(), made.turns.len());
             Ok(preview)
         }
@@ -971,7 +972,7 @@ fn record_jobs_with_text(raw: &crate::raw::Raw) -> Result<HashSet<String>> {
     jobs.extend(claims.uids.values().cloned());
     // A claim its purge has not tombstoned yet is one a window may have shown too.
     forgotten.uids.extend(claims.uids);
-    let ops = raw.record_ops(&forgotten)?;
+    let (ops, _) = raw.record_ops(forgotten)?;
     jobs.extend(
         ops.windows
             .into_iter()
@@ -1114,7 +1115,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             // one is found by its forget op (3d-2).
             purged.ops +=
                 raw.purge_record_claims(&raw.record_claims(&raw.forgotten_records()?)?)?;
-            purged.ops += raw.purge_record_ops(&raw.record_ops(&raw.forgotten_records()?)?)?;
+            purged.ops += raw.purge_record_ops(&raw.record_ops(raw.forgotten_records()?)?.0)?;
             crate::backup::fail_after("record_claims_purged")?;
             purged.records = raw.purge_records()?;
         }
@@ -1259,23 +1260,23 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
     }
     if !jobs.is_empty() || records_owed {
-        // And the window and turn ops 3d-2 rewrote, by key, to the bodies raw.db holds now.
-        let (origins, rewritten) = if records_owed {
-            (raw.forgotten_origins()?, raw.forgotten_op_bodies()?)
+        // And the window and turn ops 3d-2 rewrote, to the bodies raw.db holds now, and those it
+        // does not hold judged by the same rules: every ops segment, as one set aside may hold
+        // such an op (Codex and CodeRabbit on #472).
+        let (origins, judge) = if records_owed {
+            (raw.forgotten_origins()?, raw.judge()?)
         } else {
             Default::default()
         };
-        if !jobs.is_empty() || !rewritten.is_empty() {
-            let ops = crate::backup::purge_ops(home, &jobs, &rewritten)?;
-            (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
-        }
+        let ops = crate::backup::purge_ops(home, &jobs, &judge)?;
+        (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
         if records_owed {
             let lines = crate::backup::purge_record_segments(home, &origins)?;
             purged.segments += lines.live + lines.aside;
             purged.segments_removed += lines.removed;
         }
         (purged.copies, purged.copies_removed) =
-            crate::raw::purge_copies(home, &jobs, &origins, &rewritten)?;
+            crate::raw::purge_copies(home, &jobs, &origins, &judge)?;
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 4)?;
         }
@@ -3365,6 +3366,58 @@ mod tests {
             store_hits(&home, WINDOW_CANARY.as_bytes()),
             Vec::<&str>::new()
         );
+    }
+
+    /// Codex and CodeRabbit on #472: the window, turn and claim ops raw.db does not hold (raw.db put
+    /// back without them: their ops segment is set aside, and a copy of raw.db holds them) are
+    /// judged by their own bodies as raw.db's are, and lose their text in both; another record's
+    /// window stays.
+    #[test]
+    fn what_raw_does_not_hold_is_judged_by_its_own_body() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {WINDOW_CANARY} mode.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let said = |what: &str| format!("{what}: {WINDOW_CANARY}.");
+        let kept = "Kept: another record's window.";
+        let seqs = s
+            .raw
+            .append_ops(&[
+                window_op(r1, r1, &said("its span"), json!({})),
+                turn_op(r1, r1, &[], &said("its turn")),
+                claim_op(&device, &[(r1, &gone)], &said("its claim")),
+                window_op(r2, r2, kept, json!({})),
+            ])
+            .unwrap();
+        let home = s.home.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq >= ?1", [seqs[0]])
+            .unwrap();
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let held = |text: &str| {
+            copy_ops(&copy)
+                .iter()
+                .filter(|(.., b)| b.contains(text))
+                .count()
+        };
+        assert_eq!((held(WINDOW_CANARY), held(kept)), (3, 1));
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, WINDOW_CANARY), Vec::<String>::new());
+        assert_eq!((held(WINDOW_CANARY), held(kept)), (0, 1));
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        assert!(!holds_text(&copy, WINDOW_CANARY) && !holds_text(&wal, WINDOW_CANARY));
+        assert!(!backup_hits(&home, kept).is_empty());
     }
 
     /// Slice 3c, test 2 (rule 10): a session whose live records are all purged keeps its transcript

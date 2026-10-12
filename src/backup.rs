@@ -992,12 +992,12 @@ pub(crate) struct OpsPurge {
 pub(crate) fn purge_ops(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
-    rewritten: &raw::ForgottenOps,
+    judge: &raw::Judge,
 ) -> Result<OpsPurge> {
     walk(
         home,
         Kind::Ops,
-        &|text| purge_lines(text, |l| purged_line(l, jobs, rewritten)),
+        &|text| purge_lines(text, |l| purged_line(l, jobs, judge)),
         true,
     )
 }
@@ -1010,7 +1010,7 @@ pub(crate) fn ops_to_purge(
     walk(
         home,
         Kind::Ops,
-        &|text| purge_lines(text, |l| purged_line(l, jobs, &raw::ForgottenOps::new())),
+        &|text| purge_lines(text, |l| purged_line(l, jobs, &raw::Judge::default())),
         false,
     )
 }
@@ -1265,7 +1265,7 @@ enum Line {
 fn purged_line(
     line: &str,
     jobs: &std::collections::HashMap<String, String>,
-    rewritten: &raw::ForgottenOps,
+    judge: &raw::Judge,
 ) -> Line {
     if line.trim().is_empty() {
         return Line::Kept;
@@ -1279,15 +1279,18 @@ fn purged_line(
     let Some((mut v, kind, body)) = parsed() else {
         return Line::Unknown;
     };
-    // Slice 3d-2: a window or turn op a purge rewrote, made the body raw.db holds now.
+    // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does not hold
+    // (a segment set aside) judged by its own (Codex and CodeRabbit on #472). A line with no time
+    // is judged as written at once.
+    let at = (
+        v["device"].as_str().unwrap_or(""),
+        v["op_seq"].as_i64().unwrap_or(0),
+    );
+    let ts = v["ts"].as_i64().unwrap_or(0);
     if matches!(kind, raw::OpKind::Window | raw::OpKind::Turn) {
-        let key = (
-            v["device"].as_str().unwrap_or("").to_owned(),
-            v["op_seq"].as_i64().unwrap_or(0),
-        );
-        return match rewritten.get(&key) {
+        return match judge.purged(kind, at, ts, &body) {
             Some(now) if v["body"].as_str() != Some(now.as_str()) => {
-                v["body"] = now.as_str().into();
+                v["body"] = now.into();
                 Line::Purged(v.to_string())
             }
             _ => Line::Kept,
@@ -1303,9 +1306,14 @@ fn purged_line(
             );
         return if none { Line::Kept } else { Line::Unknown };
     };
-    match jobs.get(&uid) {
-        Some(job) => {
-            v["body"] = serde_json::json!({ "forgotten": job }).to_string().into();
+    let now = match jobs.get(&uid) {
+        Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
+        // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2).
+        None => judge.purged(kind, at, ts, &body),
+    };
+    match now {
+        Some(now) => {
+            v["body"] = now.into();
             Line::Purged(v.to_string())
         }
         None => Line::Kept,
@@ -2111,7 +2119,7 @@ pub(crate) mod tests {
             "correction",
             serde_json::json!({"uid": "u1", "body": "secret"}),
         );
-        let Line::Purged(new) = purged_line(&secret, &jobs, &raw::ForgottenOps::new()) else {
+        let Line::Purged(new) = purged_line(&secret, &jobs, &raw::Judge::default()) else {
             panic!("{secret}");
         };
         assert_eq!(
@@ -2129,7 +2137,7 @@ pub(crate) mod tests {
         ] {
             assert!(
                 matches!(
-                    purged_line(&kept, &jobs, &raw::ForgottenOps::new()),
+                    purged_line(&kept, &jobs, &raw::Judge::default()),
                     Line::Kept
                 ),
                 "{kept}"
@@ -2150,7 +2158,7 @@ pub(crate) mod tests {
         ] {
             assert!(
                 matches!(
-                    purged_line(&unknown, &jobs, &raw::ForgottenOps::new()),
+                    purged_line(&unknown, &jobs, &raw::Judge::default()),
                     Line::Unknown
                 ),
                 "{unknown}"

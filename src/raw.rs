@@ -2658,124 +2658,69 @@ impl Raw {
 
     /// Slice 3d-2: the window and turn ops that showed the curator a forgotten record or a claim
     /// made from one (`forgotten.uids`) and still hold their text, each with the job that takes
-    /// it, read in one pass over each kind (docs/milestone-5-plan.md, 3d-2).
-    pub(crate) fn record_ops(&self, forgotten: &Forgotten) -> Result<RecordOps> {
+    /// it, read in one pass over each kind (docs/milestone-5-plan.md, 3d-2); and the `Judge` that
+    /// read them, which judges an op raw.db does not hold by the same rules.
+    pub(crate) fn record_ops(&self, forgotten: Forgotten) -> Result<(RecordOps, Judge)> {
         let mut found = RecordOps::default();
-        if forgotten.is_empty() {
-            return Ok(found);
-        }
-        let list = |text: Option<String>| -> Vec<serde_json::Value> {
-            text.and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_default()
+        let mut judge = Judge {
+            forgotten,
+            ..Judge::default()
         };
-        // Every window op's span, in op order, with when it was written and whether it is
-        // forgotten (already, or in this pass): what a turn read (rule b).
-        let mut spans = Spans::new();
+        if judge.forgotten.is_empty() {
+            return Ok((found, judge));
+        }
+        // Every window op's span, in op order, with when it was written and the job that took its
+        // text, already or in this pass: what a turn read (rule b).
         let mut st = self.conn.prepare(
-            "SELECT device, op_seq, ts, json_extract(body, '$.forgotten'),
-               json_extract(body, '$.outcome'), json_extract(body, '$.from_seq'),
-               json_extract(body, '$.to_seq'), json_extract(body, '$.goals'),
-               json_extract(body, '$.removed'), json_extract(body, '$.candidates'),
-               json_extract(body, '$.carried')
-             FROM ops WHERE type = 'window' ORDER BY device, op_seq",
+            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'window' ORDER BY device, op_seq",
         )?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
             let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
-            let mut job: Option<String> = row.get(3)?;
-            let (Some(from), Some(to)) =
-                (row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?)
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
             else {
                 continue;
             };
-            if job.is_none() && row.get::<_, Option<String>>(4)?.as_deref() == Some("curated") {
-                let removed = list(row.get(8)?);
-                let goals: Vec<i64> = list(row.get(7)?)
-                    .iter()
-                    .filter_map(|g| g.as_i64())
-                    .collect();
-                let claims = [list(row.get(9)?), list(row.get(10)?)];
-                let shown = |r: &&(i64, String, Option<i64>)| shown_then(&removed, ts, r);
-                job = forgotten
-                    .between(&device, from, to)
-                    .iter()
-                    .chain(goals.iter().filter_map(|&g| forgotten.entry(&device, g)))
-                    .find(shown)
-                    .map(|r| r.1.clone())
-                    .or_else(|| {
-                        claims
-                            .iter()
-                            .flatten()
-                            .find_map(|u| forgotten.uids.get(u.as_str()?))
-                            .cloned()
-                    });
+            let mut job = body["forgotten"].as_str().map(str::to_owned);
+            if job.is_none() {
+                job = judge.window(&device, ts, &body);
                 if let Some(job) = &job {
                     found.windows.push((device.clone(), op_seq, job.clone()));
                 }
             }
-            spans
-                .entry((device, from, to))
-                .or_default()
-                .push((op_seq, ts, job));
+            if let (Some(from), Some(to)) = (body["from_seq"].as_i64(), body["to_seq"].as_i64()) {
+                judge
+                    .spans
+                    .entry((device, from, to))
+                    .or_default()
+                    .push((op_seq, ts, job));
+            }
         }
         drop(rows);
         let mut st = self.conn.prepare(
-            "SELECT device, op_seq, ts, json_extract(body, '$.forgotten'),
-               json_extract(body, '$.from'), json_extract(body, '$.through'),
-               json_extract(body, '$.read'), json_extract(body, '$.goals'),
-               json_extract(body, '$.removed')
-             FROM ops WHERE type = 'turn' ORDER BY device, op_seq",
+            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'turn' ORDER BY device, op_seq",
         )?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
-            if row.get::<_, Option<String>>(3)?.is_some() {
-                continue;
-            }
             let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
-            let (Some(from), Some(through)) =
-                (row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?)
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
             else {
                 continue;
             };
-            let read: Vec<(i64, i64)> = list(row.get(6)?)
-                .iter()
-                .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
-                .collect();
-            let goals: Vec<i64> = list(row.get(7)?)
-                .iter()
-                .filter_map(|g| g.as_i64())
-                .collect();
-            let removed = list(row.get(8)?);
-            let shown = |r: &&(i64, String, Option<i64>)| shown_then(&removed, ts, r);
-            // (a) T7's set: its own records (of any session: a Removed row has no labels), the
-            // spans it read and their goals.
-            let mut job = std::iter::once((from, through))
-                .chain(read.iter().copied())
-                .flat_map(|(a, b)| forgotten.between(&device, a, b))
-                .chain(goals.iter().filter_map(|&g| forgotten.entry(&device, g)))
-                .find(shown)
-                .map(|r| r.1.clone());
-            // (b) A card it read of a forgotten window: one written before it, whose span's next
-            // window that is not forgotten came after its read (`READ_MARGIN_MS` before it).
-            for &(a, b) in &read {
-                if job.is_some() {
-                    break;
-                }
-                let Some(ops) = spans.get(&(device.clone(), a, b)) else {
-                    continue;
-                };
-                job = ops.iter().enumerate().find_map(|(n, (_, at, gone))| {
-                    let gone = gone.as_ref().filter(|_| *at <= ts)?;
-                    let next = ops[n + 1..].iter().find(|(_, _, j)| j.is_none());
-                    next.is_none_or(|(_, then, _)| *then > ts - READ_MARGIN_MS)
-                        .then(|| gone.clone())
-                });
-            }
-            if let Some(job) = job {
+            if let Some(job) = judge.turn(&device, ts, &body) {
                 found.turns.push((device, op_seq, job));
             }
         }
-        Ok(found)
+        drop(rows);
+        Ok((found, judge))
+    }
+
+    /// Slice 3d-2: how step 4 judges the backup's ops and the copies' (`Judge`), with the bodies
+    /// of the window and turn ops a purge rewrote in raw.db.
+    pub(crate) fn judge(&self) -> Result<Judge> {
+        let (_, mut judge) = self.record_ops(self.forgotten_records()?)?;
+        judge.rewritten = self.forgotten_op_bodies()?;
+        Ok(judge)
     }
 
     /// Slice 3d-2: the window and turn ops of `ops` rewritten without their text, as
@@ -5208,7 +5153,7 @@ pub(crate) fn purge_copies(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
     origins: &ForgottenOrigins,
-    forgotten_ops: &ForgottenOps,
+    judge: &Judge,
 ) -> Result<(usize, usize)> {
     let (mut rewritten, mut removed) = (0, 0);
     for copy in copies_set_aside(home)? {
@@ -5216,7 +5161,7 @@ pub(crate) fn purge_copies(
         let done = if copy.ends_with("raw.db.restoring") {
             None
         } else {
-            rewrite_copy(&copy, jobs, origins, forgotten_ops).ok()
+            rewrite_copy(&copy, jobs, origins, judge).ok()
         };
         match done {
             Some(0) => {}
@@ -5306,7 +5251,7 @@ fn rewrite_copy(
     copy: &Path,
     jobs: &std::collections::HashMap<String, String>,
     origins: &ForgottenOrigins,
-    forgotten_ops: &ForgottenOps,
+    judge: &Judge,
 ) -> Result<usize> {
     let mut conn = Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     // No one reads a copy: one in use is removed rather than waited for.
@@ -5371,30 +5316,37 @@ fn rewrite_copy(
     }
     // A copy from before the op log holds no uid's op (CodeRabbit on #458).
     let mut keys: Vec<(String, i64, String)> = Vec::new();
-    if (!jobs.is_empty() || !forgotten_ops.is_empty()) && has("ops")? {
-        let mut st = tx.prepare("SELECT device, op_seq, type, body FROM ops")?;
+    if (!jobs.is_empty() || !judge.forgotten.is_empty()) && has("ops")? {
+        let mut st = tx.prepare("SELECT device, op_seq, type, ts, body FROM ops")?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
             let kind = OpKind::from_name(&row.get::<_, String>(2)?)
                 .context("an op of a kind that cannot be named")?;
             let key: (String, i64) = (row.get(0)?, row.get(1)?);
-            // Slice 3d-2: a window or turn op a purge rewrote, made the body raw.db holds now.
+            let ts: i64 = row.get(3)?;
+            // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does
+            // not hold judged by its own (Codex and CodeRabbit on #472).
             if matches!(kind, OpKind::Window | OpKind::Turn) {
-                if let Some(now) = forgotten_ops.get(&key) {
-                    keys.push((key.0, key.1, now.clone()));
+                let body = serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default();
+                if let Some(now) = judge.purged(kind, (&key.0, key.1), ts, &body) {
+                    keys.push((key.0, key.1, now));
                 }
                 continue;
             }
             if !matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
                 continue;
             }
-            let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(3)?)
+            let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(4)?)
                 .context("an op whose body does not parse")?;
             match op_uid(kind, &body) {
                 Some(uid) => {
-                    if let Some(job) = jobs.get(&uid) {
-                        let body = serde_json::json!({ "forgotten": job }).to_string();
-                        keys.push((key.0, key.1, body));
+                    let now = match jobs.get(&uid) {
+                        Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
+                        // A claim op raw.db does not hold that quotes a forgotten record.
+                        None => judge.purged(kind, (&key.0, key.1), ts, &body),
+                    };
+                    if let Some(now) = now {
+                        keys.push((key.0, key.1, now));
                     }
                 }
                 None => anyhow::ensure!(forgotten_body(&body), "an op that names no uid"),
@@ -5527,6 +5479,119 @@ pub(crate) type ForgottenOps = std::collections::HashMap<(String, i64), String>;
 /// Slice 3d-2: each window op's span (device, first and last seq) with its ops in op order: op seq,
 /// when it was written, and the job that took its text.
 type Spans = std::collections::HashMap<(String, i64, i64), Vec<(i64, i64, Option<String>)>>;
+
+/// The items of a list field of an op's body; none when it is not a list.
+fn items(v: &serde_json::Value) -> &[serde_json::Value] {
+    v.as_array().map_or(&[], Vec::as_slice)
+}
+
+/// Slice 3d-2: how a purge judges a window, turn or claim op by its own body, as
+/// `Raw::record_ops` judges raw.db's: by what forget took, and by every window op's span raw.db
+/// holds (a turn's rule b). With the bodies of the window and turn ops a purge rewrote in raw.db,
+/// it is what step 4 makes the backup's ops segments and the copies of raw.db hold: an op raw.db
+/// does not hold (a segment set aside, a copy older or newer than raw.db) is judged by the same
+/// rules (Codex and CodeRabbit on #472).
+#[derive(Debug, Default)]
+pub(crate) struct Judge {
+    rewritten: ForgottenOps,
+    forgotten: Forgotten,
+    spans: Spans,
+}
+
+impl Judge {
+    /// Rules (a) and (b) for a curated window op of `device` written at `ts` that holds its text:
+    /// the job of the first forgotten record or claim it showed its curator.
+    fn window(&self, device: &str, ts: i64, body: &serde_json::Value) -> Option<String> {
+        if body["outcome"] != "curated" || body.get("forgotten").is_some() {
+            return None;
+        }
+        let (from, to) = (body["from_seq"].as_i64()?, body["to_seq"].as_i64()?);
+        let removed = items(&body["removed"]);
+        let shown = |r: &&(i64, String, Option<i64>)| shown_then(removed, ts, r);
+        let goals = items(&body["goals"]).iter().filter_map(|g| g.as_i64());
+        self.forgotten
+            .between(device, from, to)
+            .iter()
+            .chain(goals.filter_map(|g| self.forgotten.entry(device, g)))
+            .find(shown)
+            .map(|r| r.1.clone())
+            .or_else(|| {
+                items(&body["candidates"])
+                    .iter()
+                    .chain(items(&body["carried"]))
+                    .find_map(|u| self.forgotten.uids.get(u.as_str()?))
+                    .cloned()
+            })
+    }
+
+    /// Rules (a) and (b) for a turn op of `device` written at `ts` that holds its text.
+    fn turn(&self, device: &str, ts: i64, body: &serde_json::Value) -> Option<String> {
+        if body.get("forgotten").is_some() {
+            return None;
+        }
+        let (from, through) = (body["from"].as_i64()?, body["through"].as_i64()?);
+        let read: Vec<(i64, i64)> = items(&body["read"])
+            .iter()
+            .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
+            .collect();
+        let removed = items(&body["removed"]);
+        let shown = |r: &&(i64, String, Option<i64>)| shown_then(removed, ts, r);
+        let goals = items(&body["goals"]).iter().filter_map(|g| g.as_i64());
+        // (a) T7's set: its own records (of any session: a Removed row has no labels), the spans it
+        // read and their goals.
+        std::iter::once((from, through))
+            .chain(read.iter().copied())
+            .flat_map(|(a, b)| self.forgotten.between(device, a, b))
+            .chain(goals.filter_map(|g| self.forgotten.entry(device, g)))
+            .find(shown)
+            .map(|r| r.1.clone())
+            // (b) A card it read of a forgotten window: one written before it, whose span's next
+            // window that is not forgotten came after its read (`READ_MARGIN_MS` before it).
+            .or_else(|| {
+                read.iter().find_map(|&(a, b)| {
+                    let ops = self.spans.get(&(device.to_owned(), a, b))?;
+                    ops.iter().enumerate().find_map(|(n, (_, at, gone))| {
+                        let gone = gone.as_ref().filter(|_| *at <= ts)?;
+                        let next = ops[n + 1..].iter().find(|(_, _, j)| j.is_none());
+                        next.is_none_or(|(_, then, _)| *then > ts - READ_MARGIN_MS)
+                            .then(|| gone.clone())
+                    })
+                })
+            })
+    }
+
+    /// The body an op of `kind` at `at` (device, op seq), written at `ts`, is to hold once a purge
+    /// takes its text: a window or turn op's as raw.db holds it rewritten, else by the rules; a
+    /// claim op's that quotes a forgotten record, the job of the first such record's denial.
+    pub(crate) fn purged(
+        &self,
+        kind: OpKind,
+        at: (&str, i64),
+        ts: i64,
+        body: &serde_json::Value,
+    ) -> Option<String> {
+        match kind {
+            OpKind::Window | OpKind::Turn => {
+                if let Some(now) = self.rewritten.get(&(at.0.to_owned(), at.1)) {
+                    return Some(now.clone());
+                }
+                let body = match kind {
+                    OpKind::Window => forgotten_window_body(body, &self.window(at.0, ts, body)?),
+                    _ => forgotten_turn_body(body, &self.turn(at.0, ts, body)?),
+                };
+                Some(body.to_string())
+            }
+            OpKind::Claim => {
+                let job = items(&body["evidence"]).iter().find_map(|e| {
+                    self.forgotten
+                        .entry(e["device"].as_str()?, e["seq"].as_i64()?)
+                })?;
+                Some(serde_json::json!({ "forgotten": job.1 }).to_string())
+            }
+            _ => None,
+        }
+    }
+}
 
 /// What a window op keeps when a purge takes its text (slice 3d-2): its span and what the
 /// consumers read of it as a span, never what the curator wrote or was shown.

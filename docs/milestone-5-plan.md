@@ -958,8 +958,10 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   `carried` に 3d-1 で tombstone した uid（record の job の forget op の uid）がある（#366 の 1、
   docs/cards.md K4 の「Not covered」）。uid の forget（2b）の claim は元の span が残るので (b) に入れない。
 - **`carried`**: curation が prompt に持ち込んだ claim（決定済みと open item、`Request::carried_uids`）は
-  今は op に残らない。新しい window op は `candidates` と同じく uid だけの `carried` を持つ（op の上限では
-  candidates の後に削る）。この版より前の op は持ち込んだ claim が分からない（限界として書く）。
+  今は op に残らない。新しい window op は `candidates` と同じく uid だけの `carried` を持つ。この版より前の
+  op は持ち込んだ claim が分からない（限界として書く）。op の上限では gates の一覧と card を先に削り、
+  candidates と carried は最後に削る（forget がそれで window を見つける。どちらも上限があるので、card を
+  全部削っても上限を超える op だけが失う、CodeRabbit on #472）。
 - **window op の書換え**: 構造だけを残す: `outcome`・`reason`、`from_seq`・`from_offset`・`to_seq`・
   `to_offset`・`covers`、`elided`・`shortened`・`excluded`（record の seq）、`goals`・`removed`、
   `refused`・`recurate`。summary・observations・cards_dropped・dropped・lowered・cut・candidates・
@@ -980,12 +982,15 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
 - **見つけ方**: 忘れた record の鍵（`denied_records` ⋈ `import_origins`、device ごとに seq で並べ、job と
   tombstone の ts を付ける）と、record の job の forget op の uid を 1 回だけ読み、claim・window・turn の
   判定で共有する（`record_jobs_with_text` は purge ごとに 5 回と、worker で 10 分ごとに走る）。window と turn
-  の op は SQL の `json_extract` で必要な欄だけを読み、範囲の判定は Rust で二分探索。deny がない store は
-  読まない（3d-1 と同じ）。
+  の op は本文を 1 回 parse して（9 欄の `json_extract` より安い）`Judge` の規則にかけ、範囲の判定は Rust で
+  二分探索。deny がない store は読まない（3d-1 と同じ）。
 - **step**: step 2 は claim（(b) が読む forget op を書く）→ window と turn → 行の順（dispatch の下で batch
   ごと）。step 3 の rebuild はそのまま。step 4 は ops segment とコピーの window・turn op を、(device, op_seq)
-  で raw.db の書き換えた本文にする（2c の uid の判定に、鍵から本文への表を足す）。step 5 はそのまま（shown
-  は claim の uid だけを持つ）。
+  で raw.db の書き換えた本文にする（2c の uid の判定に、鍵から本文への表を足す）。raw.db が持たない op
+  （古い写しに戻した raw.db の先の、set aside された segment やコピーにだけある op）は、その op 自身の本文で
+  同じ規則（`Judge`）にかける: window・turn op と、忘れた record を引用する claim op（Codex と CodeRabbit on
+  #472）。そのため record の job が step 4 を負う間は、uid の job がなくても ops segment を全部読む。turn の
+  (b) は raw.db の window op の span で判定する。step 5 はそのまま（shown は claim の uid だけを持つ）。
 - **recurate**: claims consumer が `forgotten` を持つ curated の window op を読んだとき、その span 全体を
   recurate の列に入れる（op は自分。Removed の行は次の window の文に入らず、その op の `removed` に載るので
   `Span::minus` で切らない）。今は Anchors が、消えた引用を持つ claim op の window を入れるが、3d-1 の書換えの
