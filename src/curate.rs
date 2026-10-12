@@ -11190,9 +11190,16 @@ curate = false
     }
 
     /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a forgotten claim is no later
-    /// window's candidate, though knowledge.db still holds it and the window's words find it.
+    /// window's candidate, though knowledge.db still holds it and the window's words find it; nor,
+    /// before the purge, is a claim quoting a record whose forget is registered (slice 3d-1).
     #[test]
     fn a_forgotten_claim_is_no_candidate() {
+        for by_record in [false, true] {
+            forgotten_claim_is_no_candidate(by_record);
+        }
+    }
+
+    fn forgotten_claim_is_no_candidate(by_record: bool) {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, _) = open(home.path());
         let earlier = "Deploy the review bot on Workers.";
@@ -11209,19 +11216,37 @@ curate = false
         consume(&raw, &mut k);
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let dev = raw.device().to_owned();
-        let asked = |raw: &Raw| {
+        let asked = |raw: &Raw, k: &Connection| {
             let w = next_window(raw, &dev, WINDOW_TOKENS, &rules)
                 .unwrap()
                 .unwrap();
-            let req = request(raw, &k, &rules, &summary, &w).unwrap();
+            let req = request(raw, k, &rules, &summary, &w).unwrap();
             (req.prompt.contains(earlier), req.shown_in.len())
         };
-        assert_eq!(asked(&raw), (true, 1));
-        let uid = crate::claims::op_uid(&decided.1).unwrap();
-        let target = crate::forget::Target::parse_uid(&uid).unwrap();
+        assert_eq!(asked(&raw, &k), (true, 1));
+        let target = if by_record {
+            crate::forget::Target::Record {
+                device: dev.clone(),
+                seq: decided.1["evidence"][0]["seq"].as_i64().unwrap(),
+            }
+        } else {
+            let uid = crate::claims::op_uid(&decided.1).unwrap();
+            crate::forget::Target::parse_uid(&uid).unwrap()
+        };
         let p = crate::forget::preview(home.path(), target).unwrap();
         crate::forget::start(home.path(), &p).unwrap();
-        assert_eq!(asked(&raw), (false, 0));
+        if by_record {
+            // No window is sent until the consumers reach the record's tombstone (D1 rule 12),
+            // and the anchors consumer drops the derivation quoting it.
+            assert!(lagging(&raw, &k).unwrap());
+            let mut both: Vec<Box<dyn crate::worker::Consumer>> = vec![
+                Box::new(crate::consumer::claims::Claims),
+                Box::new(crate::consumer::claims::Anchors),
+            ];
+            crate::worker::drain(&raw, &mut k, &mut both).unwrap();
+            assert!(!lagging(&raw, &k).unwrap());
+        }
+        assert_eq!(asked(&raw, &k), (false, 0));
     }
 
     /// Milestone 5 D1 rule 12: a forget while a recuration's call is out (here a deny row, or a
