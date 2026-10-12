@@ -2940,6 +2940,42 @@ mod tests {
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
+    /// Codex on #471: after a restore from segments alone, a claim made from the forgotten record
+    /// whose uid a uid job's forget op tombstones already (its job row gone with the restore, the
+    /// claim's text back) is bound to the record's job by a forget op of its own, so step 4
+    /// rewrites its ops in the backup's segments, and the purges after it know the uid.
+    #[test]
+    fn a_claim_a_uid_job_forgot_is_bound_to_the_record_job_too() {
+        let (_kept, home, uid, _) = claim_shown_and_forgotten();
+        forget(&home, &uid);
+        crate::backup::export(&home).unwrap();
+        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forget_jobs().unwrap().is_empty());
+        assert!(raw.forgotten_set().unwrap().contains(&uid));
+        assert!(raw.record_derived_uids().unwrap().is_empty());
+        let job: String = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT job FROM denied_records", [], |r| r.get(0))
+            .unwrap();
+        drop(raw);
+        assert!(!backup_hits(&home, CLAIM_CANARY).is_empty());
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, CLAIM_CANARY), Vec::<String>::new());
+        assert_eq!(
+            crate::raw::open(&home)
+                .unwrap()
+                .record_derived_uids()
+                .unwrap(),
+            std::collections::HashMap::from([(uid, job)])
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
     /// Slice 3d-1: the claims quoting a forgotten record, alone or beside a kept one, are forgotten
     /// by their uids with it, every op of theirs (another derivation, one quoting the kept record
     /// only, a correction) without its text, in raw.db, knowledge.db, the ops segments, a copy of

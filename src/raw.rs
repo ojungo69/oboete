@@ -404,6 +404,18 @@ fn forgotten_set(conn: &Connection) -> Result<std::collections::HashSet<String>>
     Ok(uids)
 }
 
+/// Every uid a record job's forget op tombstones, with that job (`Raw::record_derived_uids`).
+fn record_derived_uids(conn: &Connection) -> Result<std::collections::HashMap<String, String>> {
+    Ok(conn
+        .prepare(
+            "SELECT json_extract(body, '$.uid'), json_extract(body, '$.job') FROM ops
+             WHERE type = 'forget'
+               AND json_extract(body, '$.job') IN (SELECT job FROM denied_records)",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// Each forgotten record's vector key (`<device>:<seq>`, kind 'r'): a carry takes no vector of
 /// one (slice 3c). None in a store a writer of forget never opened.
 fn forgotten_record_keys(conn: &Connection) -> Result<std::collections::HashSet<String>> {
@@ -2635,21 +2647,13 @@ impl Raw {
     /// Slice 3d-1: every uid a record job's forget op tombstones (its job a denial's: a restore
     /// from segments alone brings the denials back without the job rows), with that job.
     pub(crate) fn record_derived_uids(&self) -> Result<std::collections::HashMap<String, String>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT json_extract(body, '$.uid'), json_extract(body, '$.job') FROM ops
-                 WHERE type = 'forget'
-                   AND json_extract(body, '$.job') IN (SELECT job FROM denied_records)",
-            )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?)
+        record_derived_uids(&self.conn)
     }
 
-    /// Slice 3d-1: each uid of `claims` tombstoned by a forget op of its job, unless one is there
-    /// already, and every op of it that holds text given the body `{"forgotten": "<job>"}`, as a
-    /// uid's purge rewrites them (2b), in transactions of `RECORD_PURGE_BATCH` uids under
-    /// dispatch. How many ops it rewrote.
+    /// Slice 3d-1: each uid of `claims` tombstoned by a forget op of its job, unless a record
+    /// job's is there already, and every op of it that holds text given the body
+    /// `{"forgotten": "<job>"}`, as a uid's purge rewrites them (2b), in transactions of
+    /// `RECORD_PURGE_BATCH` uids under dispatch. How many ops it rewrote.
     pub(crate) fn purge_record_claims(&mut self, claims: &RecordClaims) -> Result<usize> {
         let uids: Vec<(&String, &String)> = claims.uids.iter().collect();
         let mut rewritten = 0;
@@ -2658,9 +2662,12 @@ impl Raw {
                 .context("the claims made from the forgotten records were not purged")?;
             self.current()?;
             let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-            let forgotten = forgotten_set(&tx)?;
+            // A uid job's forget op, or a record job's whose denial a restore from segments alone
+            // did not bring back, does not do: once its ops are rewritten, `record_derived_uids`
+            // is how step 4 and a later purge find the uid (Codex on #471).
+            let derived = record_derived_uids(&tx)?;
             for (uid, job) in batch {
-                if !forgotten.contains(*uid) {
+                if !derived.contains_key(*uid) {
                     let body = serde_json::json!({ "uid": uid, "job": job }).to_string();
                     insert_ops(&tx, &self.device, &[(OpKind::Forget.name(), body)])?;
                 }

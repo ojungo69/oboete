@@ -904,7 +904,10 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   その record の job。最初に見つけた忘れた引用の denial の job）を足す。別の job の行は作らない: record の
   job が運び、forget op が派生した uid の一覧の権威（D5 の「op が権威」）。読み手・送り手・再導出の拒否・
   `append_ops` の拒否は D5 の仕組みのまま。残りの record から recurate しても同じ uid（最初の引用が別の
-  record にある claim）は作れない（spec どおり）。
+  record にある claim）は作れない（spec どおり）。その uid を tombstone する forget op が uid の job のもの
+  （または deny が restore で戻らなかった record の job のもの）しかないときも足す: op を書き換えた後、step 4
+  と後の purge がその uid を見つける道は record の job の forget op だけ（segment だけからの restore は job の
+  行を戻さない、Codex on #471）。
 - **見つけ方**: preview も purge も raw.db の状態から探す（knowledge.db は Anchors がもう行を落としている
   か、consumer がまだ読んでいないかもしれない）: claim op を 1 回だけ読み（本文を持つものだけ）、引用が忘れた record の鍵にあるもの、または
   record の job の forget op がその uid を tombstone しているものを、uid ごとに集める。Correction op は
