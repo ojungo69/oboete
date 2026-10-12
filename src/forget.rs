@@ -2099,11 +2099,24 @@ fn say_purged(p: &Purged) -> Result<()> {
             p.copies_removed
         );
     }
+    // A rescan's masks are owed by a count, not a job `--status` lists (CodeRabbit on #480).
+    let (masks, jobs): (Vec<&String>, Vec<&String>) = p
+        .unfinished
+        .iter()
+        .partition(|j| *j == crate::raw::MASK_JOB);
     anyhow::ensure!(
-        p.unfinished.is_empty(),
+        jobs.is_empty(),
         "jobs {} are not done (readers kept raw.db-wal from truncating, or a restore put the text \
          back): `oboete forget --continue` finishes them",
-        p.unfinished.join(", ")
+        jobs.iter()
+            .map(|j| j.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    anyhow::ensure!(
+        masks.is_empty(),
+        "a redaction rescan's masks are not in every stored byte yet (readers kept raw.db-wal from \
+         truncating, or a restore put a row back): `oboete forget --continue` finishes them"
     );
     anyhow::ensure!(
         p.stopped.is_empty(),
@@ -7842,6 +7855,27 @@ mod tests {
         purge(&home).unwrap().unwrap();
         assert!(!stored_body(&home, &device, r1).contains(MASKED));
         assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+    }
+
+    /// CodeRabbit on #480: masks a purge left owed are said as a rescan's, not as a job named
+    /// `rescan`, which `--status` does not list.
+    #[test]
+    fn masks_left_owed_are_not_said_as_a_job() {
+        let masks = Purged {
+            unfinished: vec![crate::raw::MASK_JOB.to_owned()],
+            ..Purged::default()
+        };
+        let said = say_purged(&masks).unwrap_err().to_string();
+        assert!(
+            said.contains("rescan's masks") && !said.contains("jobs"),
+            "{said}"
+        );
+        let both = Purged {
+            unfinished: vec!["j1".to_owned(), crate::raw::MASK_JOB.to_owned()],
+            ..Purged::default()
+        };
+        let said = say_purged(&both).unwrap_err().to_string();
+        assert!(said.starts_with("jobs j1 are not done"), "{said}");
     }
 
     /// Slice 3e-1: a mask a rescan writes while a purge runs is not taken for done: it is owed
