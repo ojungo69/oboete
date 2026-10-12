@@ -525,43 +525,17 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
             }
             let mut preview = raw.forget_preview(target)?;
             raw.scope_summary(&mut preview)?;
-            preview.claims = claims_quoting(home, &preview)?;
+            // Read from raw's op log, as the purge reads them: knowledge.db may not hold them yet,
+            // or not be there (CodeRabbit on #471).
+            let keys = preview.records.iter().chain(&preview.copies);
+            let quoting = raw.record_claims(&crate::raw::Forgotten::of(
+                keys.map(|r| (r.device.clone(), r.seq)),
+                std::iter::empty(),
+            ))?;
+            preview.claims = quoting.uids.len();
             Ok(preview)
         }
     }
-}
-
-/// Slice 3d-1: how many claims quote a record `p` takes (its records and their copies), read from
-/// knowledge.db's quotes before the forget (none before a worker built it): their uids are
-/// forgotten with them.
-fn claims_quoting(home: &Path, p: &Preview) -> Result<usize> {
-    let path = home.join("knowledge.db");
-    if !path.try_exists()? {
-        return Ok(0);
-    }
-    let k =
-        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let made: bool = k.query_row(
-        "SELECT COUNT(*) = 2 FROM sqlite_master
-         WHERE type = 'table' AND name IN ('evidence', 'derivations')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !made {
-        return Ok(0);
-    }
-    let mut st = k.prepare(
-        "SELECT d.uid FROM evidence e
-         JOIN derivations d ON d.op_device = e.op_device AND d.op_seq = e.op_seq
-         WHERE e.device = ?1 AND e.seq = ?2",
-    )?;
-    let mut uids: HashSet<String> = HashSet::new();
-    for r in p.records.iter().chain(&p.copies) {
-        for uid in st.query_map(rusqlite::params![r.device, r.seq], |row| row.get(0))? {
-            uids.insert(uid?);
-        }
-    }
-    Ok(uids.len())
 }
 
 /// Slice 3b: the session the record `handle` (`<device>:<seq>`) was recorded in, by its agent and
@@ -979,7 +953,11 @@ fn due(raw: &crate::raw::Raw) -> Result<Vec<(String, String, i64, bool)>> {
 /// one whose ops still hold text (slice 3d-1), in one read of each.
 fn record_jobs_with_text(raw: &crate::raw::Raw) -> Result<HashSet<String>> {
     let mut jobs = raw.record_jobs_holding()?;
-    jobs.extend(raw.record_claims()?.uids.into_values());
+    jobs.extend(
+        raw.record_claims(&raw.forgotten_records()?)?
+            .uids
+            .into_values(),
+    );
     Ok(jobs)
 }
 
@@ -1112,7 +1090,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             raw.owe_record_backups(true)?;
             // The claims first: a claim the anchors consumer keeps (its active derivation quotes
             // another record) is shown until its uid is tombstoned, and the rows can take minutes.
-            purged.ops += raw.purge_record_claims(&raw.record_claims()?)?;
+            purged.ops +=
+                raw.purge_record_claims(&raw.record_claims(&raw.forgotten_records()?)?)?;
             crate::backup::fail_after("record_claims_purged")?;
             purged.records = raw.purge_records()?;
         }
@@ -1166,9 +1145,16 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // continuation's rebuild finished (Codex on #444).
         crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
         purged.rebuilt = true;
-        if !uids.is_empty() {
+        // And the claims made from the forgotten records, as soon as knowledge.db is without them:
+        // a step 4 that cannot finish leaves them in no session's shown value (CodeRabbit on
+        // #471). Step 5 takes them out once more.
+        let mut swept = uids.clone();
+        if !record_rebuild.is_empty() {
+            swept.extend(crate::raw::open(home)?.record_derived_uids()?.into_keys());
+        }
+        if !swept.is_empty() {
             purged.shown = crate::hookstate::update_all(home, "shown", |v| {
-                crate::hook::without_uids(v, &uids)
+                crate::hook::without_uids(v, &swept)
             })?;
         }
     }
@@ -1268,9 +1254,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 4)?;
         }
-        if records_owed {
-            raw.owe_record_backups(false)?;
-        }
+        crate::backup::fail_after("backups_purged")?;
         // Step 5 (2c, decision 7): every session's shown value loses the uids once more. A hook
         // that read before the registration wrote it before the registration committed (#439's
         // fence), so this finds nothing as a rule.
@@ -1279,6 +1263,11 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             purged.shown += crate::hookstate::update_all(home, "shown", |v| {
                 crate::hook::without_uids(v, &forgotten)
             })?;
+        }
+        // Owed until step 5 is done too: a denial with no job row has no step to record it by
+        // (Codex on #471).
+        if records_owed {
+            raw.owe_record_backups(false)?;
         }
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 5)?;
@@ -2829,9 +2818,11 @@ mod tests {
         let op = claim_op(&device, &[(r1, &gone)], &gone);
         let uid = crate::claims::op_uid(&op.1).unwrap();
         s.raw.append_ops(&[op]).unwrap();
-        s.run();
         let home = s.home.path().to_owned();
+        // Counted from raw's op log, before a worker read the op (CodeRabbit on #471).
         let shown = preview(&home, Target::Record { device, seq: r1 }).unwrap();
+        assert_eq!(shown.claims, 1);
+        s.run();
         start(&home, &shown).unwrap();
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
@@ -2858,6 +2849,95 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A claim of a forgotten record, its record's text holding `CLAIM_CANARY`, consumed and
+    /// backed up, a session shown it, and the record's forget registered: its home, its uid and
+    /// the shown value.
+    fn claim_shown_and_forgotten() -> (tempfile::TempDir, PathBuf, String, String) {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {CLAIM_CANARY} mode.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let op = claim_op(&device, &[(r1, &gone)], &gone);
+        let uid = crate::claims::op_uid(&op.1).unwrap();
+        s.raw.append_ops(&[op]).unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        let shown = format!(r#"{{"{uid}":{{"fp":"f","body":true}}}}"#);
+        let value = shown.clone();
+        crate::hookstate::update(&home, "claude", "s", "shown", |_| Some(value)).unwrap();
+        start(
+            &home,
+            &preview(&home, Target::Record { device, seq: r1 }).unwrap(),
+        )
+        .unwrap();
+        let crate::search::b::fixture::Store { home: kept, raw } = s;
+        drop(raw);
+        (kept, home, uid, shown)
+    }
+
+    /// CodeRabbit on #471: a purge whose step 4 stops (a backup segment not rewritten) has taken
+    /// the claims made from the forgotten record out of every session's shown value already,
+    /// after its rebuild; the next purge finishes.
+    #[test]
+    fn a_purge_stopped_in_its_backups_has_taken_the_claims_out_of_shown() {
+        let (_kept, home, uid, _) = claim_shown_and_forgotten();
+        crate::backup::FAIL_AFTER.set(Some("purge_segment_written"));
+        assert!(purge(&home).is_err());
+        let left = crate::hookstate::value(&home, "claude", "s", "shown").unwrap();
+        assert!(!left.contains(&uid), "{left}");
+        purge(&home).unwrap().unwrap();
+        assert!(
+            status(&home)
+                .unwrap()
+                .iter()
+                .all(|j| j.local == RECORD_BACKUPS_PURGED)
+        );
+    }
+
+    /// Codex on #471: after a restore from segments alone (its denials, no job row), a purge
+    /// stopped before step 5 leaves the backups owed in raw.db, so the next purge, with no job,
+    /// still takes the claim made from the forgotten record out of a shown value a hook wrote
+    /// after the rebuild; the one after has nothing to do.
+    #[test]
+    fn a_purge_of_denials_with_no_job_owes_step_5_until_it_is_done() {
+        let (_kept, home, uid, shown) = claim_shown_and_forgotten();
+        crate::backup::export(&home).unwrap();
+        for f in ["forget.log", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::remove_file(crate::backup::dir(&home).unwrap().join(LOG)).unwrap();
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let raw = crate::backup::open_raw(&home).unwrap();
+        assert!(raw.forget_jobs().unwrap().is_empty());
+        drop(raw);
+        let at = home.clone();
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                crate::hookstate::update(&at, "claude", "s", "shown", |_| Some(shown)).unwrap();
+            }));
+        });
+        crate::backup::FAIL_AFTER.set(Some("backups_purged"));
+        assert!(purge(&home).is_err());
+        assert!(
+            crate::raw::open(&home)
+                .unwrap()
+                .record_backups_owed()
+                .unwrap()
+        );
+        let value = || crate::hookstate::value(&home, "claude", "s", "shown").unwrap();
+        assert!(value().contains(&uid));
+        purge(&home).unwrap().unwrap();
+        assert!(!value().contains(&uid), "{}", value());
+        assert!(
+            !crate::raw::open(&home)
+                .unwrap()
+                .record_backups_owed()
+                .unwrap()
+        );
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
     }
 
     /// Slice 3d-1: the claims quoting a forgotten record, alone or beside a kept one, are forgotten

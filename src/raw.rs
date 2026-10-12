@@ -2547,21 +2547,13 @@ impl Raw {
     /// denial, and an op of a uid a record job's forget op tombstones (a restore from older ops
     /// segments gives one its text back). With the keys of every op of those uids that holds text:
     /// all their claim ops, and their Correction ops.
-    pub(crate) fn record_claims(&self) -> Result<RecordClaims> {
-        let quoted: std::collections::HashMap<(String, i64), String> = self
-            .conn
-            .prepare(
-                "SELECT o.device, o.seq, d.job FROM denied_records d
-                 JOIN import_origins o ON o.origin = d.origin",
-            )?
-            .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
+    pub(crate) fn record_claims(&self, forgotten: &Forgotten) -> Result<RecordClaims> {
         let mut claims = RecordClaims {
-            uids: self.record_derived_uids()?,
+            uids: forgotten.uids.clone(),
             keys: std::collections::HashMap::new(),
         };
         // A store that never forgot a record, as most: its claim ops are not read.
-        if quoted.is_empty() && claims.uids.is_empty() {
+        if forgotten.is_empty() {
             return Ok(claims);
         }
         let mut all: std::collections::HashMap<String, Vec<(String, i64)>> =
@@ -2582,11 +2574,8 @@ impl Raw {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find_map(|e| {
-                    let key = (e["device"].as_str()?.to_owned(), e["seq"].as_i64()?);
-                    quoted.get(&key)
-                });
-            if let Some(job) = first {
+                .find_map(|e| forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?));
+            if let Some((_, job, _)) = first {
                 claims
                     .uids
                     .entry(uid.clone())
@@ -2610,6 +2599,37 @@ impl Raw {
             .collect();
         claims.uids.retain(|uid, _| claims.keys.contains_key(uid));
         Ok(claims)
+    }
+
+    /// Slice 3d: what forget took, read once for the purges of what was made from it: each
+    /// forgotten record with its denial's job and when its forget tombstone was written, and the
+    /// uids the record jobs' forget ops tombstone (`record_derived_uids`).
+    pub(crate) fn forgotten_records(&self) -> Result<Forgotten> {
+        let mut records: std::collections::HashMap<String, Vec<(i64, String, Option<i64>)>> =
+            std::collections::HashMap::new();
+        let mut st = self.conn.prepare(
+            "SELECT o.device, o.seq, d.job,
+               (SELECT MIN(t.ts) FROM records t WHERE t.type = 'tombstone'
+                  AND t.target_device = o.device AND t.target_seq = o.seq
+                  AND t.source = 'forget' AND t.target_offset IS NULL)
+             FROM denied_records d JOIN import_origins o ON o.origin = d.origin",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            records
+                .entry(row.get(0)?)
+                .or_default()
+                .push((row.get(1)?, row.get(2)?, row.get(3)?));
+        }
+        drop(rows);
+        for seqs in records.values_mut() {
+            seqs.sort();
+            seqs.dedup_by_key(|r| r.0);
+        }
+        Ok(Forgotten {
+            records,
+            uids: self.record_derived_uids()?,
+        })
     }
 
     /// Slice 3d-1: every uid a record job's forget op tombstones (its job a denial's: a restore
@@ -2671,9 +2691,10 @@ impl Raw {
     }
 
     /// Slice 3c-2: whether rows of forgotten records were rewritten and the backup's segments and
-    /// the copies of raw.db set aside may still hold their text. Kept in raw.db, so a purge that
-    /// stops before step 4 is done owes it after a denial with no job row too (a restore from
-    /// segments alone, Codex on #470), which has no step to owe it by.
+    /// the copies of raw.db set aside may still hold their text, or the sessions' shown values the
+    /// uids of the claims made from them (3d-1). Kept in raw.db, so a purge that stops before steps
+    /// 4 and 5 are done owes them after a denial with no job row too (a restore from segments
+    /// alone, Codex on #470 and #471), which has no step to owe them by.
     pub(crate) fn record_backups_owed(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'record_backups_owed')",
@@ -2682,7 +2703,7 @@ impl Raw {
         )?)
     }
 
-    /// `record_backups_owed` set (before the rows are rewritten) or cleared (once step 4 is done).
+    /// `record_backups_owed` set (before the rows are rewritten) or cleared (once step 5 is done).
     pub(crate) fn owe_record_backups(&self, owed: bool) -> Result<()> {
         if owed {
             self.conn.execute(
@@ -5206,6 +5227,49 @@ fn remove_with_sidecars(db: &Path) -> Result<()> {
 const FORGOTTEN_RECORDS: &str = "denied_records d
     JOIN import_origins o ON o.origin = d.origin
     JOIN records r ON r.device = o.device AND r.seq = o.seq";
+
+/// Slice 3d: what forget took (`Raw::forgotten_records`): each forgotten record by device, in seq
+/// order, with its denial's job and when its forget tombstone was written (none for a preview's
+/// records, not yet forgotten), and the uids of the claims made from them, with their jobs.
+#[derive(Debug, Default)]
+pub(crate) struct Forgotten {
+    records: std::collections::HashMap<String, Vec<(i64, String, Option<i64>)>>,
+    pub(crate) uids: std::collections::HashMap<String, String>,
+}
+
+impl Forgotten {
+    /// A preview's: `records` as they would be forgotten, and the claims that quote them.
+    pub(crate) fn of(
+        records: impl IntoIterator<Item = (String, i64)>,
+        uids: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut f = Self::default();
+        for (device, seq) in records {
+            f.records
+                .entry(device)
+                .or_default()
+                .push((seq, String::new(), None));
+        }
+        for seqs in f.records.values_mut() {
+            seqs.sort();
+            seqs.dedup_by_key(|r| r.0);
+        }
+        f.uids = uids.into_iter().map(|u| (u, String::new())).collect();
+        f
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.records.is_empty() && self.uids.is_empty()
+    }
+
+    /// The forgotten record `seq` of `device`.
+    pub(crate) fn entry(&self, device: &str, seq: i64) -> Option<&(i64, String, Option<i64>)> {
+        let seqs = self.records.get(device)?;
+        seqs.binary_search_by_key(&seq, |r| r.0)
+            .ok()
+            .map(|i| &seqs[i])
+    }
+}
 
 /// Slice 3d-1: the claims made from forgotten records whose ops hold text (`Raw::record_claims`).
 #[derive(Debug, Default)]

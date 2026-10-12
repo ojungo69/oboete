@@ -905,9 +905,8 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   job が運び、forget op が派生した uid の一覧の権威（D5 の「op が権威」）。読み手・送り手・再導出の拒否・
   `append_ops` の拒否は D5 の仕組みのまま。残りの record から recurate しても同じ uid（最初の引用が別の
   record にある claim）は作れない（spec どおり）。
-- **見つけ方（2 つの段階）**: preview は登録の前なので knowledge.db の `evidence (device, seq)` が正確で安い
-  索引（D5 と同じ使い方）。purge の step 2 は Anchors がもう行を落としているかもしれないので、raw.db の状態
-  から探す: claim op を 1 回だけ読み（本文を持つものだけ）、引用が忘れた record の鍵にあるもの、または
+- **見つけ方**: preview も purge も raw.db の状態から探す（knowledge.db は Anchors がもう行を落としている
+  か、consumer がまだ読んでいないかもしれない）: claim op を 1 回だけ読み（本文を持つものだけ）、引用が忘れた record の鍵にあるもの、または
   record の job の forget op がその uid を tombstone しているものを、uid ごとに集める。Correction op は
   `json_extract(body, '$.uid')`。評価用 home の写しで claim op は 5,314 件（Python で 0.03 秒）、uid ごとの
   `uid_has_ops`（毎回 claim op を全部読む）は使わない。
@@ -917,13 +916,15 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
 - **step**: step 2 で派生した claim の op を書き換え forget op を足してから（dispatch の下で batch ごと）行を
   書き換える（下の「登録から purge までの間」）、step 3 の rebuild はそのまま、step 4 は record segment とコピーに加え ops segment を派生した uid で書き換える
   （2c の `purge_ops`、uid から record の job へ）、step 5 は派生した uid を各 session の shown から除く
-  （2c の決定 7）。step 5 を record の job も持つ。
+  （2c の決定 7）。step 5 を record の job も持つ。派生した uid は rebuild の直後にも shown から除く（step 4
+  が backup を読めずに終わらなくても残さない、CodeRabbit on #471）。raw.db の印（`record_backups_owed`）は
+  step 5 の掃除まで残す（job の行のない deny は step を持たない、Codex on #471）。
 - **status（D4）**: step 3「purged from raw and its index here, with the claims made from it; the cards and
   summaries made from it, and the backups, pending」、step 4 以降「purged here and in the backups, with the
   claims made from it; the cards and summaries made from it pending」。done は 3d-2 で（card と summary の文が
   まだ残る）。
-- **preview**: 消える claim の数（knowledge.db の `evidence` と `derivations` から、選んだ record を引用する
-  uid の数）。limits の文: 引用する claim は uid ごと忘れ、recuration でも同じ claim は作られない。card と
+- **preview**: 消える claim の数（選んだ record を引用する uid の数）。purge と同じく raw.db の op log から
+  数える（knowledge.db は consumer がまだ読んでいない claim を持たず、ないこともある、CodeRabbit on #471）。limits の文: 引用する claim は uid ごと忘れ、recuration でも同じ claim は作られない。card と
   session summary は後の版まで残る。
 - **登録から purge までの間**: 有効な derivation が忘れた record を引用する claim は、読み手では Pending で、
   window・turn・embedding の phase では lag の gate（knowledge.db が tombstone に追いつくまで送らない）で
