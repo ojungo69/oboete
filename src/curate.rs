@@ -321,22 +321,22 @@ pub struct Reading {
     /// Each as `agent` NUL `session`, a window line's key.
     pub excluded: std::sync::Arc<std::collections::HashSet<String>>,
     pub reads: Reads,
-    /// How many records forget denied, read before the window's inputs (milestone 5 D1 rule
-    /// 12): every derived writer compares it inside its write.
-    pub denied: i64,
+    /// What forget denied and the ranges a rescan masked, counted before the window's inputs were
+    /// read (milestone 5 D1 rule 12, slice 3e-1): every derived writer compares it inside its write.
+    pub fence: i64,
 }
 
 impl Reading {
     /// With the exclusion list and the deny-list as raw holds them now.
     pub fn now(raw: &Raw, reads: Reads) -> Result<Self> {
-        let denied = raw.denied_count()?;
+        let fence = raw.fence_count()?;
         let exclusions = raw.exclusions()?;
         let excluded = raw.sessions_in(&exclusions)?;
         Ok(Self {
             exclusions: exclusions.into(),
             excluded: excluded.into(),
             reads,
-            denied,
+            fence,
         })
     }
 
@@ -3368,7 +3368,7 @@ fn recurate_window_checked(
     );
     // Milestone 5 D1 rule 12: `ListChanged` after a forget since the window was cut.
     validate()?;
-    raw.append_ops_fenced(&ops, w.reading.denied)?;
+    raw.append_ops_fenced(&ops, w.reading.fence)?;
     Ok(Ok(counts))
 }
 
@@ -3745,7 +3745,7 @@ fn cover(
     if STOP_BEFORE_APPEND.with(std::cell::Cell::get) {
         anyhow::bail!("stopped before the append (test seam)");
     }
-    match raw.append_ops_fenced(&ops, w.reading.denied) {
+    match raw.append_ops_fenced(&ops, w.reading.fence) {
         // A forget since the window was cut: nothing of it is kept, and the next pass cuts it
         // again (milestone 5 D1 rule 12).
         Err(e) if e.is::<ListChanged>() => {
@@ -6201,24 +6201,33 @@ mod tests {
             length: 5,
         };
         raw.append_tombstone(part(11)).unwrap();
+        // A rescan masks another word while the first call is out: what that call read is not
+        // written (rule 12's fence, slice 3e-1), and the window is cut again with both removed.
+        let masked = std::cell::Cell::new(false);
         let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
-            let mut other = crate::raw::open(home.path()).unwrap();
-            other.append_tombstone(part(17)).unwrap();
+            if !masked.replace(true) {
+                let mut other = crate::raw::open(home.path()).unwrap();
+                other.append_tombstone(part(17)).unwrap();
+            }
             Ok(answered("fake"))
         };
         let (rules, summary) = (Rules::default(), curating(30));
         let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        assert!(windows(&raw).is_empty());
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
         assert_eq!(phase, Phase::Covered);
         let ws = windows(&raw);
+        assert_eq!(ws.len(), 1);
         assert_eq!(
             (&ws[0]["to_seq"], &ws[0]["removed"]),
-            (&json!(1), &json!([[1, 11, 5]]))
+            (&json!(1), &json!([[1, 11, 5], [1, 17, 5]]))
         );
         // Its session's goal is the first prompt, inside its span: no record besides its own.
         assert!(ws[0].get("goals").is_none(), "{}", ws[0]);
         // A window over the second prompt carries the first in as its goal: its op names that
-        // record and lists what was removed from it before this window was cut, which is now
-        // the part removed during the first call too. The rest of the first prompt as before;
+        // record and lists what was removed from it before this window was cut. The rest of the
+        // first prompt as before;
         // then room for the goal in the prompt (one `fit` cuts is not named) and no wait for the
         // owner to stop.
         let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {

@@ -219,7 +219,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 - The cost of this scan over 256 KB per tool call is measured in M14, together with the write. If it breaks the hook target, outputs above the measured size keep head and tail with an explicit marker, redacted in full, instead of being kept whole.
 - This is a security-relevant change and is reviewed under rules/security.md.
 - A redaction ledger records rule id, offset, length, time and ruleset version. It never records the value.
-- When the ruleset gains a pattern, old raw is rescanned. New hits become range tombstones, masked at compaction (RD/constraints-synthesis.md S2-2).
+- When the ruleset gains a pattern, old raw is rescanned. New hits become range tombstones, masked at compaction (RD/constraints-synthesis.md S2-2): forget's purge masks them in raw.db's rows, what was made from the text before the mask, knowledge.db, the backups and the copies of raw.db (6.2).
 
 ### 2.3 Capture sources and content
 
@@ -673,6 +673,8 @@ The four levels below are owner decision 19.
 - **Targets**: a claim or document uid, a session, a repo, a device span (device, seq range), or a time range on this device.
   - A target is a scope kind plus an id, never a free-text pattern, so a tombstone cannot match text its sender never saw.
   - The worker also creates one internal kind: a redaction-rescan hit becomes a range target (device, seq, byte offset, length) with no preview (§2.2, RD/sections-1-4.md:21; RD/constraints-synthesis.md:150-153). It runs the same pipeline below.
+    - Its progress is a count in raw.db, not a `forget_jobs` row per hit: one new rule can hit thousands of records. A purge that has done every step records how many range tombstones it read; while raw.db holds more (a later rescan, a store from before this rule, one rebuilt from segments), the masks are owed, and doctor shows it (Claude; overrulable).
+    - The record stays: its bytes in the range become `*`, as many as there were, so every offset into it still holds. A claim quoting the record from before the mask loses its op's text but its uid is not tombstoned, because a recuration of the masked text derives the same uid (MUST-M18), as RD/constraints-synthesis.md:153 has it ("curated again") (Claude; overrulable).
 - **Claim-uid targets**: forgetting a claim or document uid deletes that row and denies its uid. It does not remove the raw span the claim came from, which stays searchable. (Claude; overrulable)
   - The preview says "raw records: 0" and names the span to forget when the text itself must go.
   - Claim forget does not cascade to raw (that would delete far more than the user picked).

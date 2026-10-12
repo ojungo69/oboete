@@ -603,7 +603,7 @@ preview。下の試験は 1（segment の分）・2・3・5・6 が 2c-1、1（r
 
 ### Slice 3 の決定（2026-10-11。D1・D2 の第一 slice の制限を改める）
 
-Slice 3 は PR に分け、この順に作る（2026-10-12 に 3b・3c を 2 つずつ、3d を 3 つに分けた）。後の PR はこの節に「3x の決定」を足す。
+Slice 3 は PR に分け、この順に作る（2026-10-12 に 3b・3c を 2 つずつ、3d と 3e を 3 つずつに分けた）。後の PR はこの節に「3x の決定」を足す。
 
 | 分割 | 対象 | 完了条件 |
 |---|---|---|
@@ -615,7 +615,9 @@ Slice 3 は PR に分け、この順に作る（2026-10-12 に 3b・3c を 2 つ
 | 3d-1 claim | 忘れた record を引用する claim の uid の tombstone と op の書換え | 下記 3d-1 |
 | 3d-2 window と turn | window op と turn op の文、重なる window の recurate、#366 | 表の Slice 3 の完了条件の残り |
 | 3d-3 status の支え | #167 | #167 の受入テスト |
-| 3e rescan と retention | rescan の範囲 target、保存期間の失効、#186 | 3c の書換えの再利用（spec 6.2） |
+| 3e-1 rescan の伏せ字 | rescan の範囲 tombstone を、保存された byte と、伏せる前の文から作った op に及ぼす | 下記 3e-1 |
+| 3e-2 directive | #186（伏せた directive の claim を event から決定的に作り直す） | #186 の受入テスト |
+| 3e-3 retention | 保存期間の設定と失効 | spec 6.7 の Retention、A31 |
 
 #### 3a: live record の identity と出所の橋
 
@@ -1063,12 +1065,96 @@ forget、後の withdraw）claim は decided や done のまま残り、rebuild 
   書き換わらない。support の record が消える前に owner が status を決めた claim は下がらず supersedes を保ち、
   消えた後に決めた claim は下がったまま（rebuild でも同じ）。
 
-#### 3e（PR で詳細を決める）
+#### 3e-1: rescan の伏せ字を保存された byte に及ぼす
 
-- **3e**: rescan の hit を範囲 target（device、seq、offset、length）として 3c の書換えに通す（preview
-  なし）。retention は同じ書換えで tombstone を作らず、未 curate の raw は残し、claim は `raw expired`
-  と表示する（spec 6.2）。#186（rescan が一部を伏せた directive を event から決定的に作り直す）も 3e:
-  forget ではなく rescan の mask の話。
+rescan（spec 2.2）は、規則が増えたとき古い record を読み直し、新しい hit を範囲 tombstone（device、seq、
+byte の offset と length）にする。今は読むたびに `hide` が `*` にするだけで、raw.db の行、ledger、backup
+の segment、raw.db のコピー、knowledge.db（FTS の三文字組、vector）には本文が残り、伏せる前に curator が
+読んで書いた claim・window・turn の op にも残る。spec 6.2 はこの hit を preview のない内部の範囲 target と
+して同じ pipeline に通すと決めている（6.7 の「Rescan range」も同じ 0 hit）。
+
+- **伏せ方は byte 数を変えない**: 範囲の byte を文字の境界まで広げて 1 byte ずつ `*` にする（`masked`。
+  `hide` と同じ）。offset、ledger の位置、evidence の位置、window の `from_offset`・`to_offset` はそのまま
+  使える。だから行・segment の行・コピーの行をその場で書き換えてよく、何度走っても同じ（「本文を持つ」は
+  `masked(本文, offset, length) != 本文`）。
+- **job の行を作らない**: 規則 1 つで数百〜数千の record に当たりうる。hit ごとに `forget_jobs` の行と要求
+  ログを作ると status とログが膨らむ。record の job と同じく状態で進める（D5 item 7）: raw.db の meta に
+  数で進める: purge は全部の段を終えたとき、読んだときの範囲 tombstone の数を raw.db の meta
+  `rescan_masks_paid` に書く。範囲 tombstone がそれより多い間は伏せ字を払う義務がある（purge の間に増えた
+  tombstone は次の回。この版より前の store と、segment から作り直した store（meta が新しい）は何も払って
+  いない）。範囲 tombstone を書く transaction は何も書き足さない（数えるのは部分索引 `tombstone_targets`）。
+  払う前に、開き直した raw.db の伏せた行が伏せ字の下に byte を持たないことを確かめる（purge の途中の restore が
+  segment のとおりの行に戻したら払わない、Codex on #480）。
+  worker の `forget --continue` もこれを見る。spec 6.2 の「進みは `forget_jobs` の行に」からの逸脱で、再開、
+  doctor の表示、done の条件は数が担う（Claude; overrulable）。
+- **raw.db の行**: 範囲 tombstone の対象の event 行の本文（zstd は展開して）に、その行の範囲をすべて当て、
+  変わった行だけ書く（zstd の行は圧縮し直す）。その行の ledger の field を `~tombstoned` にする（export が
+  segment に書くのと同じ: JSON pointer は本文の key を名指すので、伏せた key を残さない）。Removed の行は
+  何もしない。
+- **伏せる前の文から作った op**: 3d-1・3d-2 の `Judge` に「伏せた record」を足す（record、tombstone の
+  時刻）。window op と turn op は 3d-2 の規則 (a) と同じ（span・goals・読んだ span にその record があり、
+  tombstone の時刻と `SHOWN_MARGIN_MS` より前に書かれた）。claim op はその record を引用し、同じ時刻より
+  前に書かれたもの（引用が範囲に重ならない claim も: window ごと recurate されるので、同じ文から作り直される。
+  伏せた record を複数引用する op はそれぞれの伏せ字の時刻で見て、uid の時刻は op が先に来たすべての伏せ字のうち
+  最も遅いもの、Codex on #480）。
+  その claim を candidates・carried に名指し、同じ時刻より前に書かれた window op も（curator が claim の文を
+  見た）。claim op の本文は window と turn の後に書き換える（uid の forget op がないので、それまでは op が
+  名指しの手がかり。途中で止まっても次の purge が同じ順で続ける）。
+  忘れた record との違いは 2 つ:
+  - **uid を tombstone しない**: forget の step 3 の「tombstoned by uid」は record が消えるから。伏せ字では
+    record が残り、recurate や #186 が同じ文から同じ uid（MUST-M18）を作る。uid を拒否すると、作り直した
+    claim が書かれない（#186 の受入「伏せた文で current のまま」が成り立たない）。RD/constraints-synthesis.md:153
+    の「Claims whose quote overlaps the range are curated again」に従う。claim op は op ごとに
+    `{"forgotten": "rescan"}` にし、その uid の他の op（伏せた後の recurate の op、owner の Correction）は残す。
+  - **record の行は Removed にしない**（上の伏せ方）。
+  window op の span は 3d-2 と同じく recurate の列に入る（consumer が op から入れるので rebuild でも入る）。
+  recurate は伏せた後の文を読む。
+- **呼び出しの途中の伏せ字**: curator・turn の呼び出しの間に範囲 tombstone が書かれたら、forget の deny と
+  同じく書く前に切り直す（`Reading` と `append_ops_fenced` が比べる数に範囲 tombstone の数を足す）。だから
+  tombstone の後に書かれた op は伏せた文を読んでいる（上の時刻の判定が成り立つ）。
+- **復元と時刻**（Codex on #480）: record segment の tombstone の行は時刻（`ts`）を持ち、segment からの
+  restore はそれを戻す（今までは持たず、restore で 0 になり、伏せる前や forget の前に作った op を後に
+  作ったと誤って判定した）。この版より前の segment から戻った tombstone は時刻を持たないので、purge は
+  それを最も遅い時刻とみなす: その record の文から作った op はすべてその前に作ったとして文を失う（多めに
+  取る側。forget の tombstone も同じ）。同じ record の伏せ字に時刻の分かるものがあっても同じ（最も遅い伏せ字が
+  record の伏せ字の時刻なので、時刻のないものが 1 つでもあればそれ。Codex on #480）。
+- **knowledge.db**: 払う伏せ字がある回は rebuild する（3c-1 と同じ: FTS の三文字組、空きページ）。vector の carry は
+  伏せた record の鍵を忘れた record の鍵と同じく外す（伏せる前の文の vector を戻さない）。set aside の
+  knowledge.db は今と同じく carry してから消す。
+- **backup とコピー**: record segment の event 行で (device, seq, ts) が raw.db の伏せた行と同じものに同じ
+  範囲を当て、ledger の field を `~tombstoned` にする（export が今書く行と同じ）。ops segment とコピーの op は
+  `Judge` で（3d-2 と同じ）。raw.db のコピーの行も同じ（3c-2 の経路）。
+- **status**: 払う伏せ字がある間、doctor に 1 行（止まった job ではない。`forget --status` の JSON 行は job だけ）。
+- **限界**: 他の端末の record と op（M6 の同期）は伏せ字の tombstone が届いたときその端末で同じことをする。
+  今は自分の端末の rescan だけ。伏せる前に curator・埋め込みの provider に送った文は provider の条件の
+  下（6.3）。curator が window の中の伏せた record の文を、別の record を引用する claim の body に写した
+  もの（同じ batch の claim）と、その claim を見せた後の window は #478（forget は #476）。secure_delete
+  （2b）より前に作った raw.db の空きページと page の中の空き領域には、その前に消した byte が残りうる（#477）。
+  伏せた record から作ったと辿れない op の文（伏せた uid の Correction の body、work state、import、curator が
+  自分で書いた一致）には後から足した規則が届かない（#478）。step 4 が segment の途中で止まると、伏せた claim
+  の行を書き換えた後は、その uid を名指した別の segment の window の行を次の purge が辿れない（#483）。
+- 受入テスト（6.7 の Rescan range）: 古い規則の下で秘密を含む prompt を記録し、それを引用する claim、
+  その window op（summary にも秘密）、それを読んだ turn op を書き、backup を書き、raw.db のコピーを set
+  aside し、規則を足して rescan、purge。raw.db（展開した本文も）・WAL・knowledge.db・すべての segment
+  （展開して）・コピーに秘密の byte が 0 件。record の他の文は検索に出る。claim の window は recurate の列に
+  ある。呼び出しの途中に伏せ字が入った window は書かれない。2 回目の purge は何も書かない。restore の後に
+  伏せ字はまた払う義務になる。この版より前に書かれた範囲 tombstone も払う義務になる。伏せた後に伏せた文
+  から作った claim op は残り、その uid は拒否されない。purge の途中に書かれた伏せ字は義務に残る。
+
+#### 3e-2: 伏せた directive（#186）
+
+`oboete pref add` の directive は window を持たないので、3e-1 で claim op が本文を失うと recurate では
+作り直されない。伏せ字の後、directive の event から `pref_add` と同じ経路で claim op を作り直す（伏せた文の
+引用、同じ uid）。受入は #186 のとおり。
+
+#### 3e-3: 保存期間（retention）
+
+spec 6.2 の Retention（owner decision 16、既定は無期限）: 設定の鍵（`config.toml` と設定画面）、期限を
+過ぎた自分の端末の raw の行・その backup segment を 3e-1 と同じ書換えで消す（tombstone を作らない）、未
+curate の raw（checkpoint の上、pending の window、v1 の取り込み）は残す、claim の証拠は `raw expired`、
+期限切れの span の `oboete recurate` は拒否。PR で決めること:
+- 証拠の record が期限切れの claim の status（3d-3 の support が期限切れのとき proposed に戻すか）。
+- 期限切れを読み手がどう見分けるか（tombstone も deny もない Removed の行で推すか、専用の行の種類か）。
 
 ## 実装順序と完了条件
 
