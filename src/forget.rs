@@ -4899,6 +4899,33 @@ mod tests {
         }
     }
 
+    /// A live record whose session label the ledger masks is no copy of a record whose session
+    /// reads the same (Greptile on #468): its label is a rule's marker, not its session's id.
+    #[test]
+    fn a_masked_live_label_is_no_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let v = imported(
+            &mut raw,
+            "oboete-v1",
+            "[REDACTED]",
+            "v-masked",
+            false,
+            r#"{"prompt":"a v1 record"}"#,
+        );
+        let masked = live(&mut raw, "[REDACTED]", 5_000, r#"{"prompt":"another"}"#);
+        mask_session(h, &raw, masked);
+        let target = Target::Range {
+            device: raw.device().to_owned(),
+            since: 0,
+            until: 1_000,
+        };
+        let p = preview(h, target).unwrap();
+        assert_eq!(seqs(&p.records), [v]);
+        assert!(p.copies.is_empty(), "{:?}", seqs(&p.copies));
+    }
+
     /// Slice 3b: a registration's pages are one status line while they are in one state, and apart
     /// once their states differ; another registration's job is its own line.
     #[test]
@@ -5139,6 +5166,25 @@ mod tests {
             ],
         )
         .unwrap();
+        // A restored v1 touch: in the range by its row's time, which is no session's (rule 10).
+        let touch = next(&conn);
+        conn.execute(
+            "INSERT INTO records(device, seq, type, ts, source, kind)
+             VALUES(?1, ?2, 'removed', 1600, 'oboete-v1', 'touch')",
+            rusqlite::params![now, touch],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO import_origins(origin, device, seq, native_session, ambiguous)
+             VALUES(?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![
+                origin("synthetic", "restored-touch"),
+                now,
+                touch,
+                super::session("claude", "s9")
+            ],
+        )
+        .unwrap();
         let bare = next(&conn);
         conn.execute(
             "INSERT INTO records(device, seq, type, ts, source, kind)
@@ -5159,8 +5205,10 @@ mod tests {
             }
         );
         let p = preview(home, target).unwrap();
-        assert_eq!(seqs(&p.records), [l1, idless, masked, restored]);
+        assert_eq!(seqs(&p.records), [l1, idless, masked, restored, touch]);
         assert_eq!(p.passed, 1);
+        // The first time is a record's in the range: not a restored row's absent one, nor a touch's.
+        assert_eq!(p.scope.as_ref().and_then(|s| s.first), Some(2_500));
         assert!(p.records.iter().all(|r| r.device == now));
         let copies: Vec<(String, i64)> =
             p.copies.iter().map(|r| (r.device.clone(), r.seq)).collect();

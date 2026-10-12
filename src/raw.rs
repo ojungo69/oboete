@@ -1756,15 +1756,17 @@ impl Raw {
             until,
         } = target
         {
-            let removed: Vec<i64> = self
+            let removed: Vec<(i64, i64, Option<String>)> = self
                 .conn
                 .prepare(
-                    "SELECT seq FROM records WHERE type = 'removed' AND device = ?1 AND ts >= ?2
-                       AND ts < ?3",
+                    "SELECT seq, ts, kind FROM records WHERE type = 'removed' AND device = ?1
+                       AND ts >= ?2 AND ts < ?3",
                 )?
-                .query_map(params![device, since, until], |r| r.get(0))?
+                .query_map(params![device, since, until], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
                 .collect::<rusqlite::Result<_>>()?;
-            for seq in removed {
+            for (seq, ts, kind) in removed {
                 let Some(r) = self
                     .after(device, seq - 1, 1)?
                     .into_iter()
@@ -1774,8 +1776,14 @@ impl Raw {
                 };
                 match self.named(device, &r)? {
                     Some(n) if !denied(&self.conn, Some(&n.origin), "")? => {
-                        let ts = n.ts.unwrap_or_default();
-                        found.push((n, ts, "removed".into()));
+                        // The summary's time is the row's own, which put it in the range, and a v1
+                        // touch stays one (rule 10; Codex on #468).
+                        let kind = if kind.as_deref() == Some("touch") {
+                            "touch"
+                        } else {
+                            "removed"
+                        };
+                        found.push((n, ts, kind.into()));
                     }
                     Some(_) => {}
                     None => passed += 1,
@@ -2119,8 +2127,9 @@ impl Raw {
                 });
             }
         }
-        // Live records, by their labels' hash: a label equal to the agent's own id is unmasked.
-        // Both reads go through `records_sessions` (`session_indexes`).
+        // Live records, by their labels' hash: a label equal to the agent's own id is unmasked,
+        // and one the ledger masks is a rule's marker, no session's (Greptile on #468). Both reads
+        // go through `records_sessions` (`session_indexes`).
         let live = LIVE.map(|s| format!("'{s}'")).join(",");
         let labels: Vec<(String, String)> = self
             .conn
@@ -2132,7 +2141,9 @@ impl Raw {
             .collect::<rusqlite::Result<_>>()?;
         let mut st = self.conn.prepare(&format!(
             "SELECT device, seq, ts, source FROM records WHERE type = 'event' AND agent = ?1
-               AND session = ?2 AND source IN ({live})"
+               AND session = ?2 AND source IN ({live})
+               AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.device = records.device
+                 AND l.seq = records.seq AND l.field = 'session')"
         ))?;
         for (agent, label) in labels {
             let session = crate::forget::session(&agent, &label);
