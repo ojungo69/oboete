@@ -1052,7 +1052,8 @@ forget、後の withdraw）claim は decided や done のまま残り、rebuild 
   だけを決め、下がった derivation を上げ直さない。どちらも時刻で決まるので、live の consumer と rebuild が
   同じになる。Pending も同じ規則で決める: 消える前に決めた claim は読みから外さず（見える status も edge も
   変わらない）、消えた後に決めた claim は Anchors が edge を消すまで外す。segment からの restore で時刻を
-  失った（0 の）tombstone は最も遅い時刻とみなす（owner の status が先）。
+  失った（0 の）tombstone は最も遅い時刻とみなす（owner の status が先）。同じミリ秒の Correction は消える
+  前とみなす（時計で順が決まらないときは owner の status が先。Codex on #473）。
 - **forget**: support の record を忘れると、その claim は残って proposed になる（spec 6.3 の limits に 1 行）。
   window op の文は 3d-2 の規則（span にある）で消える。
 - 受入テスト: 受け入れ・答え・通った実行で立つ claim の op が support を持ち、user 自身の言葉で立つ claim は

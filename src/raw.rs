@@ -4080,8 +4080,6 @@ impl Raw {
         imported_counts_in(&self.conn, device, ranges)
     }
 
-    /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
-    /// that the worker has not applied yet (`claims::Pending`).
     /// #167 (Codex on #473): when the last of `records` went, the latest of their first
     /// whole-record tombstones; none when one of them has none (it was never here). A tombstone a
     /// restore from segments brought back without its time (0) went as late as can be.
@@ -4121,6 +4119,8 @@ impl Raw {
         Ok(found)
     }
 
+    /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
+    /// that the worker has not applied yet (`claims::Pending`).
     pub fn ops_of(
         &self,
         kind: OpKind,

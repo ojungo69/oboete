@@ -417,9 +417,10 @@ pub(crate) fn supported<'a>(
 
 /// #167 (Codex on #473): whether the owner set `uid`'s status (a correction `correction` applies,
 /// which `active` shows over any derivation's) before the last of `records`, those its
-/// derivation's status stood on, went: then it stands, and supersedes what it did. One set after
-/// them, or with one of them never here, does not raise it again, in the live consumer and in a
-/// rebuild alike.
+/// derivation's status stood on, went: then it stands, and supersedes what it did. In the same
+/// millisecond counts as before: the clock cannot order them, and the owner's word stands (Codex
+/// on #473). One set after them, or with one of them never here, does not raise it again, in the
+/// live consumer and in a rebuild alike.
 pub(crate) fn owner_set<'a>(
     raw: &Raw,
     uid: &str,
@@ -429,7 +430,7 @@ pub(crate) fn owner_set<'a>(
         return Ok(false);
     };
     Ok(raw.corrections_naming(uid)?.into_iter().any(|(ts, body)| {
-        ts < gone
+        ts <= gone
             && serde_json::from_value::<crate::claims::CorrectionOp>(body)
                 .is_ok_and(|c| c.uid == uid && c.status.is_some() && c.fault().is_none())
     }))
@@ -1694,6 +1695,23 @@ mod tests {
         rusqlite::Connection::open(home.path().join("raw.db"))
             .unwrap()
             .execute("UPDATE records SET ts = 0 WHERE type = 'tombstone'", [])
+            .unwrap();
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(
+            (bodies(&k), count(&k, "edges")),
+            (vec!["Use SQLite.".to_owned()], 1)
+        );
+        // A correction in the same millisecond as the removal: the clock cannot order them, and
+        // the owner's status stands (Codex on #473).
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute_batch(
+                "UPDATE records SET ts = 5000 WHERE type = 'tombstone';
+                 UPDATE ops SET ts = 5000 WHERE type = 'correction';",
+            )
             .unwrap();
         drop(k);
         std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
