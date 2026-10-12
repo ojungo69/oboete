@@ -44,6 +44,20 @@ pub enum Target {
         agent: String,
         session: String,
     },
+    /// Slice 3b-2: a repository's records on every device, by its key's hash (`repo`), never the
+    /// key. `device` registered it: its records from before the registration that arrive later are
+    /// refused (D3); another device's, past what the preview confirmed of it, are not.
+    Repo {
+        repo: String,
+        device: String,
+    },
+    /// Slice 3b-2: this device's records with a time in `since..until` (ms, `until` not in it, as
+    /// search reads them), and its records of that time that arrive later (D3).
+    Range {
+        device: String,
+        since: i64,
+        until: i64,
+    },
 }
 
 impl Target {
@@ -53,6 +67,8 @@ impl Target {
             Self::Span { device, from, to } => (device.as_str(), *from, *to),
             Self::Uid { .. } => anyhow::bail!("a uid names no record span"),
             Self::Session { .. } => anyhow::bail!("a session names no record span"),
+            Self::Repo { .. } => anyhow::bail!("a repository names no record span"),
+            Self::Range { .. } => anyhow::bail!("a time range names no record span"),
         };
         anyhow::ensure!(device_like(device), "invalid device identity");
         anyhow::ensure!(
@@ -120,6 +136,35 @@ impl Target {
         anyhow::ensure!(seq > 0, "invalid record span");
         Ok((device.into(), seq))
     }
+
+    /// Slice 3b-2: a repository's or a time range's target as a request holds it.
+    fn check_scope(&self) -> Result<()> {
+        match self {
+            Self::Repo { repo, device } => {
+                check_identity(repo)?;
+                anyhow::ensure!(device_like(device), "invalid device identity");
+            }
+            Self::Range {
+                device,
+                since,
+                until,
+            } => {
+                anyhow::ensure!(device_like(device), "invalid device identity");
+                anyhow::ensure!(since < until, "invalid time range");
+            }
+            _ => anyhow::bail!("not a repository or a time range"),
+        }
+        Ok(())
+    }
+}
+
+/// Slice 3b-2: a record's session as a repository's or a time range's page holds it: a hash, or
+/// none for a record that names no session of its agent's own.
+fn check_named_session(session: &str) -> Result<()> {
+    if session.is_empty() {
+        return Ok(());
+    }
+    check_identity(session)
 }
 
 /// An agent's name as a session target holds it: the hook's own argument, ASCII, bounded.
@@ -197,20 +242,26 @@ pub struct Preview {
     pub sample: Option<String>,
     /// A uid target's (D5).
     pub uid: Option<UidPreview>,
-    /// A session target's (slice 3b).
-    pub session: Option<SessionPreview>,
+    /// A session's, a repository's or a time range's target (slice 3b).
+    pub scope: Option<ScopePreview>,
 }
 
-/// What a session target resolved to (slice 3b, spec 6.2's preview): its agent, when its first
-/// record was recorded, its records by source and how many devices', and how many records of its
-/// agent name no session (a copy of one of its records among them would stay).
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionPreview {
-    pub agent: String,
+/// What a session, repository or time range target resolved to (slice 3b, spec 6.2's preview):
+/// when its first record was recorded, its records by source and how many devices', and how many
+/// records that name no session would stay holding a copy (a session's: its agent's; a
+/// repository's or a time range's: its own, whose copies cannot be found); a session's agent; a
+/// repository's keys as its records name it, the paths they were recorded at, and how many
+/// records' repository is masked (not taken: whether they are its cannot be told).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScopePreview {
+    pub agent: Option<String>,
     pub first: Option<i64>,
     pub sources: Vec<(String, usize)>,
     pub devices: usize,
     pub idless: usize,
+    pub keys: Vec<String>,
+    pub paths: Vec<String>,
+    pub masked: usize,
 }
 
 impl Preview {
@@ -237,6 +288,19 @@ impl Preview {
             for r in &self.records {
                 anyhow::ensure!(device_like(&r.device), "invalid device identity");
                 check_identity(&r.origin)?;
+            }
+            return Ok(());
+        }
+        if let Target::Repo { .. } | Target::Range { .. } = &self.target {
+            self.target.check_scope()?;
+            anyhow::ensure!(
+                !self.records.is_empty(),
+                "no raw records matched; nothing was registered"
+            );
+            for r in self.records.iter().chain(&self.copies) {
+                anyhow::ensure!(device_like(&r.device), "invalid device identity");
+                check_identity(&r.origin)?;
+                check_named_session(&r.session)?;
             }
             return Ok(());
         }
@@ -356,6 +420,21 @@ impl Request {
                 }
                 return Ok(());
             }
+            // Version 5 is one page of a repository's or a time range's records with their copies
+            // (slice 3b-2), of any device; a record that names no session has none.
+            (Target::Repo { .. } | Target::Range { .. }, 5) => {
+                self.target.check_scope()?;
+                anyhow::ensure!(
+                    !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
+                    "invalid record count"
+                );
+                for r in &self.records {
+                    anyhow::ensure!(device_like(&r.device), "invalid device identity");
+                    check_identity(&r.origin)?;
+                    check_named_session(&r.session)?;
+                }
+                return Ok(());
+            }
             _ => anyhow::bail!("unknown request version {}", self.v),
         };
         let (device, from, to) = self.target.bounds()?;
@@ -439,8 +518,11 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
         Target::Uid { uid } => uid_preview(home, &raw, uid),
         target => {
             raw.session_indexes()?;
+            if let Target::Repo { .. } = target {
+                raw.repo_index()?;
+            }
             let mut preview = raw.forget_preview(target)?;
-            raw.session_summary(&mut preview)?;
+            raw.scope_summary(&mut preview)?;
             Ok(preview)
         }
     }
@@ -453,6 +535,38 @@ pub fn session_target(home: &Path, handle: &str) -> Result<Target> {
     let (device, seq) = Target::parse_handle(handle)?;
     let (agent, session) = crate::raw::open(home)?.session_of(&device, seq)?;
     Ok(Target::Session { agent, session })
+}
+
+/// Slice 3b-2: `--repo` takes a directory, read as capture reads one (`repo::key`), or a key as
+/// records name it; the request keeps its hash, registered by this device.
+pub fn repo_target(home: &Path, text: &str) -> Result<Target> {
+    anyhow::ensure!(crate::raw::exists(home), "no raw store to forget from");
+    let dir = Path::new(text);
+    let key = if dir.is_dir() {
+        crate::repo::key(dir)
+    } else {
+        text.to_owned()
+    };
+    anyhow::ensure!(!key.trim().is_empty(), "a repository's key is empty");
+    Ok(Target::Repo {
+        repo: repo(&key),
+        device: crate::raw::open(home)?.device().to_owned(),
+    })
+}
+
+/// Slice 3b-2: `--since` and `--until` as search reads them (`search::b::time`), this device's.
+pub fn range_target(home: &Path, since: &str, until: &str) -> Result<Target> {
+    anyhow::ensure!(crate::raw::exists(home), "no raw store to forget from");
+    let (since, until) = (
+        crate::search::b::time(since, false)?,
+        crate::search::b::time(until, true)?,
+    );
+    anyhow::ensure!(since < until, "--since is not before --until");
+    Ok(Target::Range {
+        device: crate::raw::open(home)?.device().to_owned(),
+        since,
+        until,
+    })
 }
 
 /// D5: what forgetting `uid` takes. knowledge.db is its index: a claim's derivations and
@@ -599,7 +713,7 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
         sources: Vec::new(),
         sample: sample.map(|s| line(&s)),
         uid: Some(uid_preview),
-        session: None,
+        scope: None,
     })
 }
 
@@ -1434,6 +1548,78 @@ fn limits(sources: &[String]) -> String {
     out
 }
 
+/// Slice 3b: what a session, a repository or a time range resolved to (spec 6.2's preview).
+fn say_scope(target: &Target, s: &ScopePreview) {
+    use chrono::TimeZone;
+    let local = |ms: i64| {
+        chrono::Local.timestamp_millis_opt(ms).single().map_or_else(
+            || ms.to_string(),
+            |t| t.format("%Y-%m-%d %H:%M (%:z)").to_string(),
+        )
+    };
+    let first = s
+        .first
+        .map_or_else(|| "at a time no record keeps".into(), local);
+    let sources: Vec<String> = s.sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    let by = format!(
+        "its records by source: {}; on {} device(s)",
+        sources.join(", "),
+        s.devices
+    );
+    match target {
+        Target::Session { agent, .. } => {
+            println!("A session of {agent}, first recorded {first}: {by}");
+            if s.idless > 0 {
+                println!(
+                    "Records of {agent} that name no session, a copy of this session's among them \
+                     staying: {}",
+                    s.idless
+                );
+            }
+        }
+        Target::Repo { .. } => {
+            let paths = s
+                .paths
+                .iter()
+                .map(|p| crate::redact::outbound(p))
+                .collect::<Vec<_>>();
+            println!(
+                "A repository, {}, first recorded {first}: {by}",
+                s.keys
+                    .iter()
+                    .map(|k| crate::redact::outbound(k))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if !paths.is_empty() {
+                println!("Recorded at: {}", paths.join(", "));
+            }
+            if s.masked > 0 {
+                println!(
+                    "Records whose repository is masked, not taken (whether they are this one's \
+                     cannot be told): {}",
+                    s.masked
+                );
+            }
+        }
+        Target::Range { since, until, .. } => println!(
+            "This device's records from {} ({}) until {} ({}), not that time itself: {by}",
+            local(*since),
+            crate::db::utc(*since),
+            local(*until),
+            crate::db::utc(*until)
+        ),
+        _ => {}
+    }
+    if !matches!(target, Target::Session { .. }) && s.idless > 0 {
+        println!(
+            "Records that name no session, whose copies from another source cannot be found and \
+             stay: {}",
+            s.idless
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     home: &Path,
@@ -1441,6 +1627,8 @@ pub fn run(
     span: Option<&str>,
     uid: Option<&str>,
     session: Option<&str>,
+    repo: Option<&str>,
+    range: Option<(&str, &str)>,
     yes: bool,
     show: bool,
     resume: bool,
@@ -1461,12 +1649,17 @@ pub fn run(
         }
         return Ok(());
     }
-    let target = match (record, span, uid, session) {
-        (Some(r), None, None, None) => Target::parse(r, false)?,
-        (None, Some(s), None, None) => Target::parse(s, true)?,
-        (None, None, Some(u), None) => Target::parse_uid(u)?,
-        (None, None, None, Some(h)) => session_target(home, h)?,
-        _ => anyhow::bail!("choose --record, --span, --uid, --session, --status or --continue"),
+    let target = match (record, span, uid, session, repo, range) {
+        (Some(r), None, None, None, None, None) => Target::parse(r, false)?,
+        (None, Some(s), None, None, None, None) => Target::parse(s, true)?,
+        (None, None, Some(u), None, None, None) => Target::parse_uid(u)?,
+        (None, None, None, Some(h), None, None) => session_target(home, h)?,
+        (None, None, None, None, Some(k), None) => repo_target(home, k)?,
+        (None, None, None, None, None, Some((since, until))) => range_target(home, since, until)?,
+        _ => anyhow::bail!(
+            "choose --record, --span, --uid, --session, --repo, --since with --until, --status or \
+             --continue"
+        ),
     };
     let p = preview(home, target)?;
     println!("Target: {}", serde_json::to_string(&p.target)?);
@@ -1484,28 +1677,8 @@ pub fn run(
             p.passed
         );
     }
-    if let Some(s) = &p.session {
-        use chrono::TimeZone;
-        let first = s
-            .first
-            .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
-            .map_or_else(
-                || "at a time no record keeps".into(),
-                |t| t.format("%Y-%m-%d %H:%M (%:z)").to_string(),
-            );
-        let sources: Vec<String> = s.sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
-        println!(
-            "A session of {}, first recorded {first}: its records by source: {}; on {} device(s)",
-            s.agent,
-            sources.join(", "),
-            s.devices
-        );
-        if s.idless > 0 {
-            println!(
-                "Records of {} that name no session, a copy of this session's among them staying: {}",
-                s.agent, s.idless
-            );
-        }
+    if let Some(s) = &p.scope {
+        say_scope(&p.target, s);
     }
     if let Some(sample) = &p.sample {
         println!("Sample: {}", crate::redact::outbound(sample));
@@ -1658,6 +1831,11 @@ pub(crate) fn origin(source: &str, id: &str) -> String {
 /// A session's labels as a log line keeps them, hashed.
 pub(crate) fn session(agent: &str, session: &str) -> String {
     origin(agent, session)
+}
+
+/// Slice 3b-2: a repository's key as a log line keeps it, hashed.
+pub(crate) fn repo(key: &str) -> String {
+    origin("repo", key)
 }
 
 /// Slice 3a: a live record's identity, from where and when it was recorded and never its text: a
@@ -3874,7 +4052,7 @@ mod tests {
                 std::fs::remove_dir(&config).unwrap();
             }
             std::fs::write(&config, "[backup]\ndir = 'repaired-backups'\n").unwrap();
-            run(h, None, None, None, None, false, true, false).unwrap();
+            run(h, None, None, None, None, None, None, false, true, false).unwrap();
             let second = h.join("repaired-backups").join(LOG);
             assert_eq!(std::fs::read_to_string(second).unwrap(), log);
             assert_eq!(std::fs::read_to_string(primary).unwrap(), log);
@@ -4153,6 +4331,11 @@ mod tests {
         );
         let v = imported(&mut raw, "oboete-v1", "s", "v1", false, r#"{"prompt":"v"}"#);
         let touch = v1_touch(&mut raw, "s", "v-touch");
+        // A touch older than every record of the session is not its first record's time.
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("UPDATE records SET ts = -1 WHERE seq = ?1", [touch])
+            .unwrap();
         let other = imported(
             &mut raw,
             "transcript",
@@ -4187,9 +4370,9 @@ mod tests {
         assert_eq!(p.records[3].ts, None);
         assert!(p.copies.is_empty());
         assert_eq!(
-            p.session,
-            Some(SessionPreview {
-                agent: "claude".into(),
+            p.scope,
+            Some(ScopePreview {
+                agent: Some("claude".into()),
                 first: Some(0),
                 sources: vec![
                     ("hook".into(), 2),
@@ -4198,6 +4381,7 @@ mod tests {
                 ],
                 devices: 1,
                 idless: 2,
+                ..Default::default()
             })
         );
         assert_eq!(p.sample.as_deref(), Some(r#"{"prompt":"one"}"#));
@@ -4269,7 +4453,7 @@ mod tests {
         let mut expected = vec![(before.clone(), t), (before.clone(), l1), (now.clone(), l2)];
         expected.sort();
         assert_eq!(picked, expected);
-        assert_eq!(p.session.as_ref().map(|s| s.devices), Some(2));
+        assert_eq!(p.scope.as_ref().map(|s| s.devices), Some(2));
         start(second.path(), &p).unwrap();
         for (device, seq) in [(&before, t), (&before, l1), (&now, l2)] {
             let row = raw.after(device, seq - 1, 1).unwrap();
@@ -4674,6 +4858,88 @@ mod tests {
         }
     }
 
+    /// Slice 3b-2 (Codex on #468): a repository's or a time range's target read with another device
+    /// than the store's (a raw.db restored or put back since) is refused, and so are masked
+    /// repository labels that read as the repository's key.
+    #[test]
+    fn a_scope_target_of_another_device_or_a_masked_repository_label_is_not_taken() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let mut e = raw::test_event(r#"{"prompt":"masked"}"#);
+        e.repo = Some("[REDACTED]".into());
+        e.cwd = Some("/masked-dir".into());
+        let masked = raw.append(&e).unwrap();
+        rusqlite::Connection::open(h.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'repo', 'r', 0, 9, 0, 'v')",
+                rusqlite::params![raw.device(), masked],
+            )
+            .unwrap();
+        let mut plain = raw::test_event(r#"{"prompt":"plain"}"#);
+        plain.repo = Some("[REDACTED]".into());
+        plain.cwd = Some("/kept-dir".into());
+        let kept = raw.append(&plain).unwrap();
+        // A record of it forgotten alone before: neither taken nor shown where it was recorded.
+        let mut earlier = plain.clone();
+        earlier.cwd = Some("/forgotten-dir".into());
+        let gone = raw.append(&earlier).unwrap();
+        let alone = Target::Record {
+            device: raw.device().to_owned(),
+            seq: gone,
+        };
+        start(h, &preview(h, alone).unwrap()).unwrap();
+        let target = repo_target(h, "[REDACTED]").unwrap();
+        let p = preview(h, target).unwrap();
+        assert_eq!(seqs(&p.records), [kept]);
+        // Where the records it takes were recorded, and no other (Codex on #468).
+        assert_eq!(p.scope.map(|s| s.paths), Some(vec!["/kept-dir".to_owned()]));
+        let other = "0".repeat(32);
+        for target in [
+            Target::Repo {
+                repo: repo("[REDACTED]"),
+                device: other.clone(),
+            },
+            Target::Range {
+                device: other.clone(),
+                since: 0,
+                until: i64::MAX,
+            },
+        ] {
+            let e = preview(h, target).unwrap_err();
+            assert!(e.to_string().contains("raw.db changed"), "{e:#}");
+        }
+    }
+
+    /// A live record whose session label the ledger masks is no copy of a record whose session
+    /// reads the same (Greptile on #468): its label is a rule's marker, not its session's id.
+    #[test]
+    fn a_masked_live_label_is_no_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut raw = raw::open(h).unwrap();
+        let v = imported(
+            &mut raw,
+            "oboete-v1",
+            "[REDACTED]",
+            "v-masked",
+            false,
+            r#"{"prompt":"a v1 record"}"#,
+        );
+        let masked = live(&mut raw, "[REDACTED]", 5_000, r#"{"prompt":"another"}"#);
+        mask_session(h, &raw, masked);
+        let target = Target::Range {
+            device: raw.device().to_owned(),
+            since: 0,
+            until: 1_000,
+        };
+        let p = preview(h, target).unwrap();
+        assert_eq!(seqs(&p.records), [v]);
+        assert!(p.copies.is_empty(), "{:?}", seqs(&p.copies));
+    }
+
     /// Slice 3b: a registration's pages are one status line while they are in one state, and apart
     /// once their states differ; another registration's job is its own line.
     #[test]
@@ -4701,6 +4967,498 @@ mod tests {
             .map(|s| (s.job.as_str(), s.records, s.pages))
             .collect();
         assert_eq!(lines, [("a", 1_000, 2), ("c", 500, 1), ("d", 500, 1)]);
+    }
+
+    /// A live record of `session` in the repository `repo` (its cwd under it), recorded at `ts`.
+    fn live_in(raw: &mut raw::Raw, session: &str, repo: &str, ts: i64, body: &str) -> i64 {
+        let mut event = raw::test_event(body);
+        event.session = session.into();
+        event.repo = Some(repo.into());
+        event.cwd = Some(format!("/work/{repo}"));
+        event.ts = ts;
+        raw.append(&event).unwrap()
+    }
+
+    /// A transcript record of `session` in the repository `repo`, with origin `id`, at `ts`.
+    fn transcript_in(raw: &mut raw::Raw, session: &str, repo: &str, id: &str, ts: i64) -> i64 {
+        let mut event = raw::test_event(r#"{"prompt":"from a transcript"}"#);
+        event.source = "transcript".into();
+        event.session = session.into();
+        event.repo = Some(repo.into());
+        event.ts = ts;
+        let identity = raw::ImportIdentity {
+            origin: origin("synthetic", id),
+            session: super::session(&event.agent, session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let captured = crate::capture::Captured {
+            event,
+            ledger: Vec::new(),
+        };
+        raw.append_imported_origins(&[captured], &[identity], "", None)
+            .unwrap()[0]
+    }
+
+    /// A raw.db copied into a new home, where later records get a new device.
+    fn copied_home(from: &Path) -> tempfile::TempDir {
+        let to = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal"] {
+            if from.join(f).exists() {
+                std::fs::copy(from.join(f), to.path().join(f)).unwrap();
+            }
+        }
+        to
+    }
+
+    /// Slice 3b-2, test 1: a repository target takes its records on every device, whichever
+    /// source's, and their sessions' records from another source as copies (in another repository
+    /// too); not another repository's records, nor one whose repository label is masked (counted).
+    /// A directory names the key capture gives it. The request pages are version 5, and every
+    /// record taken goes.
+    #[test]
+    fn a_repository_target_takes_every_devices_records_of_it_and_their_copies() {
+        const R: &str = "github.com/o/r";
+        let first = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(first.path()).unwrap();
+        let l1 = live_in(&mut raw, "s1", R, 1_000, r#"{"prompt":"first in r"}"#);
+        let t1 = transcript_in(&mut raw, "s1", R, "t1", 1_500);
+        let copy = transcript_in(&mut raw, "s1", "github.com/o/other", "t2", 1_600);
+        let other = live_in(
+            &mut raw,
+            "s2",
+            "github.com/o/other",
+            2_000,
+            r#"{"prompt":"x"}"#,
+        );
+        let masked = live_in(&mut raw, "s3", "[redacted]", 3_000, r#"{"prompt":"m"}"#);
+        rusqlite::Connection::open(first.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'repo', 'r', 0, 10, 0, 'v')",
+                rusqlite::params![raw.device(), masked],
+            )
+            .unwrap();
+        let before = raw.device().to_owned();
+        drop(raw);
+        let second = copied_home(first.path());
+        let home = second.path();
+        let mut raw = raw::open(home).unwrap();
+        let now = raw.device().to_owned();
+        let l2 = live_in(&mut raw, "s4", R, 4_000, r#"{"prompt":"second device"}"#);
+        let target = repo_target(home, R).unwrap();
+        assert_eq!(
+            target,
+            Target::Repo {
+                repo: super::repo(R),
+                device: now.clone()
+            }
+        );
+        let p = preview(home, target).unwrap();
+        let named = |records: &[Record]| -> Vec<(String, i64)> {
+            records.iter().map(|r| (r.device.clone(), r.seq)).collect()
+        };
+        let mut picked = vec![
+            (before.clone(), l1),
+            (before.clone(), t1),
+            (now.clone(), l2),
+        ];
+        picked.sort();
+        assert_eq!(named(&p.records), picked);
+        assert_eq!(named(&p.copies), [(before.clone(), copy)]);
+        let s = p.scope.clone().unwrap();
+        assert_eq!(
+            (
+                s.keys.clone(),
+                s.paths.clone(),
+                s.masked,
+                s.devices,
+                s.idless
+            ),
+            (vec![R.to_owned()], vec![format!("/work/{R}")], 1, 2, 0)
+        );
+        start(home, &p).unwrap();
+        let requests = raw.forget_requests().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| (r.v, r.records.len()))
+                .collect::<Vec<_>>(),
+            [(5, 4)]
+        );
+        for (device, seq, kept) in [
+            (&before, l1, false),
+            (&before, t1, false),
+            (&before, copy, false),
+            (&now, l2, false),
+            (&before, other, true),
+            (&before, masked, true),
+        ] {
+            let row = raw.after(device, seq - 1, 1).unwrap();
+            let gone = matches!(row[0].item, Item::Removed) || !shown_at(&raw, device, seq);
+            assert_eq!(!gone, kept, "{device}:{seq}");
+        }
+        // A second preview of it has none left to register.
+        assert!(
+            preview(home, repo_target(home, R).unwrap())
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        // A directory is read as capture reads it.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            repo_target(home, &dir.path().to_string_lossy()).unwrap(),
+            Target::Repo {
+                repo: super::repo(&crate::repo::key(dir.path())),
+                device: now
+            }
+        );
+    }
+
+    /// Whether `device`:`seq` is shown to a reader.
+    fn shown_at(raw: &raw::Raw, device: &str, seq: i64) -> bool {
+        raw.after(device, seq - 1, 1)
+            .unwrap()
+            .into_iter()
+            .any(|r| r.seq == seq && matches!(r.item, Item::Event(_)))
+    }
+
+    /// Slice 3b-2, tests 2 and 3: a time range target takes this device's records in it (`until`
+    /// itself not), and their sessions' records from another source as copies, outside the range
+    /// and on another device too; not another device's records in it. A record that names no
+    /// session is taken and counted, not refused as a record target refuses it.
+    #[test]
+    fn a_time_range_target_takes_this_devices_records_in_it_and_their_copies() {
+        let first = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(first.path()).unwrap();
+        let t = transcript_in(&mut raw, "s1", "github.com/o/r", "t1", 100);
+        let early = live(&mut raw, "s1", 1_000, r#"{"prompt":"before it"}"#);
+        let theirs = live(&mut raw, "s2", 2_000, r#"{"prompt":"the first device's"}"#);
+        let before = raw.device().to_owned();
+        drop(raw);
+        let second = copied_home(first.path());
+        let home = second.path();
+        let mut raw = raw::open(home).unwrap();
+        let now = raw.device().to_owned();
+        let l1 = live(&mut raw, "s1", 2_500, r#"{"prompt":"in it"}"#);
+        let idless = live(&mut raw, "unknown-d", 2_600, r#"{"prompt":"no session"}"#);
+        let masked = live(
+            &mut raw,
+            "sk-masked",
+            2_700,
+            r#"{"prompt":"masked session"}"#,
+        );
+        mask_session(home, &raw, masked);
+        // Rows a restore kept no body of: one an import's identity names, one nothing names.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let (named, unnamed) = (2_800_i64, 2_900_i64);
+        let next = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE device = ?1",
+                [&now],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let restored = next(&conn);
+        conn.execute(
+            "INSERT INTO records(device, seq, type, ts, source, kind)
+             VALUES(?1, ?2, 'removed', ?3, 'transcript', 'prompt')",
+            rusqlite::params![now, restored, named],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO import_origins(origin, device, seq, native_session, ambiguous)
+             VALUES(?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![
+                origin("synthetic", "restored"),
+                now,
+                restored,
+                super::session("claude", "s9")
+            ],
+        )
+        .unwrap();
+        // A restored v1 touch: in the range by its row's time, which is no session's (rule 10).
+        let touch = next(&conn);
+        conn.execute(
+            "INSERT INTO records(device, seq, type, ts, source, kind)
+             VALUES(?1, ?2, 'removed', 1600, 'oboete-v1', 'touch')",
+            rusqlite::params![now, touch],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO import_origins(origin, device, seq, native_session, ambiguous)
+             VALUES(?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![
+                origin("synthetic", "restored-touch"),
+                now,
+                touch,
+                super::session("claude", "s9")
+            ],
+        )
+        .unwrap();
+        let bare = next(&conn);
+        conn.execute(
+            "INSERT INTO records(device, seq, type, ts, source, kind)
+             VALUES(?1, ?2, 'removed', ?3, 'hook', 'prompt')",
+            rusqlite::params![now, bare, unnamed],
+        )
+        .unwrap();
+        let edge = live(&mut raw, "s1", 3_000, r#"{"prompt":"at until"}"#);
+        // As search reads them: an ISO time, UTC without an offset; `until` itself is not in it.
+        let target =
+            range_target(home, "1970-01-01T00:00:01.500Z", "1970-01-01T00:00:03Z").unwrap();
+        assert_eq!(
+            target,
+            Target::Range {
+                device: now.clone(),
+                since: 1_500,
+                until: 3_000
+            }
+        );
+        let p = preview(home, target).unwrap();
+        assert_eq!(seqs(&p.records), [l1, idless, masked, restored, touch]);
+        assert_eq!(p.passed, 1);
+        // The first time is a record's in the range: not a restored row's absent one, nor a touch's.
+        assert_eq!(p.scope.as_ref().and_then(|s| s.first), Some(2_500));
+        assert!(p.records.iter().all(|r| r.device == now));
+        let copies: Vec<(String, i64)> =
+            p.copies.iter().map(|r| (r.device.clone(), r.seq)).collect();
+        assert_eq!(copies, [(before.clone(), t)]);
+        assert_eq!(p.scope.as_ref().map(|s| s.idless), Some(2));
+        start(home, &p).unwrap();
+        for (device, seq, kept) in [
+            (&now, l1, false),
+            (&now, idless, false),
+            (&before, t, false),
+            (&now, edge, true),
+            (&before, early, true),
+            (&before, theirs, true),
+        ] {
+            assert_eq!(shown_at(&raw, device, seq), kept, "{device}:{seq}");
+        }
+        assert!(range_target(home, "1970-01-01T00:00:03Z", "1970-01-01T00:00:01Z").is_err());
+        // A date as --until runs to the end of its day, as search reads it.
+        assert!(matches!(
+            range_target(home, "1970-01-01", "1970-01-01").unwrap(),
+            Target::Range {
+                since: 0,
+                until: 86_400_000,
+                ..
+            }
+        ));
+    }
+
+    /// Slice 3b-2, test 4 (D3): after a repository's and a time range's forget, a record of the
+    /// scope from before the registration that arrives later (a hook's append, a kept call
+    /// written back, an import) is not recorded on the device that registered it; one of another
+    /// repository, outside the range, or from after the registration is, and so is another
+    /// device's record of the repository (past what the preview confirmed of it). The denials come
+    /// back with the requests from the log.
+    #[test]
+    fn late_records_of_a_repository_or_a_time_range_from_before_it_are_not_recorded() {
+        const R: &str = "github.com/o/r";
+        let dir = tempfile::tempdir().unwrap();
+        let h = dir.path();
+        let mut raw = raw::open(h).unwrap();
+        live_in(&mut raw, "s1", R, 1_000, r#"{"prompt":"in r"}"#);
+        live(&mut raw, "s2", 10_000, r#"{"prompt":"in the range"}"#);
+        start(h, &preview(h, repo_target(h, R).unwrap()).unwrap()).unwrap();
+        let range = Target::Range {
+            device: raw.device().to_owned(),
+            since: 9_000,
+            until: crate::db::now_ms() + 3_600_000,
+        };
+        start(h, &preview(h, range).unwrap()).unwrap();
+        let times: Vec<i64> = raw
+            .forget_requests()
+            .unwrap()
+            .iter()
+            .map(|r| r.started)
+            .collect();
+        let (started, last) = (times[0], times[times.len() - 1]);
+        let event = |repo: Option<&str>, ts: i64| {
+            let mut e = raw::test_event(r#"{"prompt":"late"}"#);
+            e.session = "late".into();
+            e.repo = repo.map(str::to_owned);
+            e.ts = ts;
+            e
+        };
+        // The repository's, from before it: not recorded, by an append or a write-back.
+        assert_eq!(
+            raw.append_with_ledger(&event(Some(R), 5_000), &[], "")
+                .unwrap(),
+            None
+        );
+        crate::unwritten::keep(
+            h,
+            &[crate::capture::Captured {
+                event: event(Some(R), 5_000),
+                ledger: Vec::new(),
+            }],
+            "r",
+        )
+        .unwrap();
+        crate::unwritten::write_back(h, &mut raw).1.unwrap();
+        // In the range, from before it: not recorded, nor imported.
+        assert_eq!(
+            raw.append_with_ledger(&event(None, 9_500), &[], "")
+                .unwrap(),
+            None
+        );
+        let mut turn = event(None, 9_500);
+        turn.source = "transcript".into();
+        let identity = raw::ImportIdentity {
+            origin: origin("synthetic", "late-turn"),
+            session: super::session("claude", "late"),
+            ambiguous: None,
+            unverified: false,
+        };
+        let captured = crate::capture::Captured {
+            event: turn,
+            ledger: Vec::new(),
+        };
+        assert!(
+            raw.append_imported_origins(&[captured], &[identity], "", None)
+                .unwrap()
+                .is_empty()
+        );
+        // A repository label its ledger masks is no repository's, whatever it reads as.
+        let masked = [(
+            "repo".to_owned(),
+            crate::redact::Finding {
+                rule: "r".into(),
+                offset: 0,
+                length: 4,
+            },
+        )];
+        assert!(
+            raw.append_with_ledger(&event(Some(R), 5_000), &masked, "")
+                .unwrap()
+                .is_some()
+        );
+        // Another repository, outside the range, or after the registration: recorded.
+        for e in [
+            event(Some("github.com/o/other"), 5_000),
+            event(None, 5_000),
+            event(Some(R), last + 1),
+            event(None, last + 1),
+        ] {
+            assert!(
+                raw.append_with_ledger(&e, &[], "").unwrap().is_some(),
+                "{e:?}"
+            );
+        }
+        assert!(started <= last);
+        // Another device's record of the repository: past what the preview confirmed of it.
+        drop(raw);
+        let copy = copied_home(h);
+        let mut elsewhere = raw::open(copy.path()).unwrap();
+        assert!(
+            elsewhere
+                .append_with_ledger(&event(Some(R), 5_000), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        // The denials come back with the requests from the log.
+        let mut raw = raw::open(h).unwrap();
+        let conn = rusqlite::Connection::open(h.join("raw.db")).unwrap();
+        conn.execute_batch("DELETE FROM denied_scopes").unwrap();
+        let requests = raw.forget_requests().unwrap();
+        conn.execute_batch("DELETE FROM forget_jobs").unwrap();
+        raw.forget_apply(&requests).unwrap();
+        assert_eq!(
+            raw.append_with_ledger(&event(Some(R), 5_000), &[], "")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            raw.append_with_ledger(&event(None, 9_600), &[], "")
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Slice 3b-2 (rule 9): a repository's or a time range's page read from a log holds records of
+    /// any device, and one that names no session; one to MAX_RECORDS of them; at version 5 only.
+    #[test]
+    fn a_repository_or_time_range_page_is_checked_as_one() {
+        let record = |device: &str, seq: i64, session: &str| Record {
+            device: device.into(),
+            seq,
+            origin: origin("synthetic", &seq.to_string()),
+            session: session.into(),
+            ts: Some(seq),
+        };
+        let page = |v: u32, target: Target, records: Vec<Record>| Request {
+            v,
+            home: "h".into(),
+            job: "0".repeat(32),
+            started: 1,
+            target,
+            records,
+        };
+        let repo = Target::Repo {
+            repo: super::repo("github.com/o/r"),
+            device: "d1".into(),
+        };
+        let range = Target::Range {
+            device: "d1".into(),
+            since: 1,
+            until: 2,
+        };
+        let s = super::session("claude", "s");
+        for target in [repo.clone(), range.clone()] {
+            page(5, target, vec![record("d1", 1, &s), record("d2", 7, "")])
+                .check()
+                .unwrap();
+        }
+        let full: Vec<Record> = (0..=MAX_RECORDS as i64)
+            .map(|i| record("d1", i, &s))
+            .collect();
+        let backwards = Target::Range {
+            device: "d1".into(),
+            since: 2,
+            until: 2,
+        };
+        let unhashed = Target::Repo {
+            repo: "github.com/o/r".into(),
+            device: "d1".into(),
+        };
+        let no_device = Target::Repo {
+            repo: super::repo("github.com/o/r"),
+            device: "not a device".into(),
+        };
+        for (request, why) in [
+            (page(5, repo.clone(), Vec::new()), "record count"),
+            (page(5, range.clone(), full), "record count"),
+            (
+                page(5, repo.clone(), vec![record("d1", 1, "s")]),
+                "identity",
+            ),
+            (
+                page(5, backwards, vec![record("d1", 1, &s)]),
+                "invalid time range",
+            ),
+            (page(5, unhashed, vec![record("d1", 1, &s)]), "identity"),
+            (
+                page(5, no_device, vec![record("d1", 1, &s)]),
+                "invalid device identity",
+            ),
+            (
+                page(4, repo, vec![record("d1", 1, &s)]),
+                "unknown request version",
+            ),
+            (
+                page(3, range, vec![record("d1", 1, &s)]),
+                "unknown request version",
+            ),
+        ] {
+            let e = request.check().unwrap_err();
+            assert!(e.to_string().contains(why), "{why}: {e:#}");
+        }
     }
 
     /// Slice 3b (rule 9): a session's page read from a log names only that session's records, of

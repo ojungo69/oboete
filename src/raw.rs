@@ -112,12 +112,14 @@ CREATE TABLE IF NOT EXISTS forget_jobs(
 -- transaction that wrote its events: a file a call left behind after that commit is removed, never
 -- written again. Not a name: they start again from 0 once the directory is empty.
 CREATE TABLE IF NOT EXISTS unwritten_written(hash TEXT PRIMARY KEY, at INTEGER NOT NULL);
--- Milestone 5 slice 3b (D3): each page of a scope's forget, by its kind (`session`), its key (the
--- session's hash) and when it was registered: a record of that scope from before then, arriving
--- later, is not recorded. A row a page, so read whole: no index on the key (spec 1.6, a label is
--- no index root).
+-- Milestone 5 slice 3b (D3): each page of a scope's forget, by its kind (`session`, `repo`,
+-- `range`), its key (a session's or a repository's hash), the device a repository's or a time
+-- range's forget is bound to, a time range's times, and when it was registered: a record of that
+-- scope from before then, arriving later, is not recorded. A row a page, so read whole: no index
+-- on the key (spec 1.6, a label is no index root).
 CREATE TABLE IF NOT EXISTS denied_scopes(
-  job TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, before INTEGER NOT NULL
+  job TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, before INTEGER NOT NULL,
+  device TEXT, since INTEGER, until INTEGER
 );
 ";
 
@@ -535,6 +537,9 @@ impl Family {
         }
     }
 }
+
+/// Slice 3b: a scope's records as forget names them, each with its time and its kind.
+type Found = Vec<(Named, i64, String)>;
 
 /// A record as forget names it (D1 rule 5, slice 3a): its identity, its session's hash when its
 /// labels prove it, its source, whether an import's identity is ambiguous, its time when the
@@ -1168,6 +1173,18 @@ fn open_within_report(
     {
         committed("stores_changed")?;
     }
+    // Slice 3b-2: a table slice 3b-1 made has no repository's or time range's columns.
+    for (column, decl) in [
+        ("device", "TEXT"),
+        ("since", "INTEGER"),
+        ("until", "INTEGER"),
+    ] {
+        if crate::db::ensure_column_until(&mut conn, "denied_scopes", column, decl, deadline)
+            .context("migrate forget scopes")?
+        {
+            committed("stores_changed")?;
+        }
+    }
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -1339,8 +1356,21 @@ impl Raw {
         &self,
         target: crate::forget::Target,
     ) -> Result<crate::forget::Preview> {
-        if let crate::forget::Target::Session { agent, session } = &target {
-            return self.session_preview(agent, session);
+        match &target {
+            crate::forget::Target::Session { agent, session } => {
+                return self.session_preview(agent, session);
+            }
+            crate::forget::Target::Repo { device, .. }
+            | crate::forget::Target::Range { device, .. } => {
+                // The device the target was read with is this store's: a raw.db restored or put
+                // back since would bind its tombstone to another device (Codex on #468).
+                anyhow::ensure!(
+                    *device == self.device,
+                    "raw.db changed since this forget's target was read: run the forget again"
+                );
+                return self.scope_preview(target);
+            }
+            _ => {}
         }
         let (device, from, to) = target.bounds()?;
         let device = device.to_owned();
@@ -1411,7 +1441,7 @@ impl Raw {
             denied: self.denied_count()?,
             sources,
             uid: None,
-            session: None,
+            scope: None,
         })
     }
 
@@ -1456,13 +1486,13 @@ impl Raw {
             sources,
             sample: None,
             uid: None,
-            session: None,
+            scope: None,
         })
     }
 
     /// The session's records `session_preview` takes, each with its time and kind, in (device,
     /// seq) order.
-    fn session_records(&self, agent: &str, session: &str) -> Result<Vec<(Named, i64, String)>> {
+    fn session_records(&self, agent: &str, session: &str) -> Result<Found> {
         let mut found: Vec<(Named, i64, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut st = self.conn.prepare(
@@ -1569,14 +1599,239 @@ impl Raw {
         Ok(found)
     }
 
-    /// Slice 3b: a session preview's lines (spec 6.2): its agent, its first record's time, its
-    /// records by source and device, its first prompt's first characters, and how many live records
-    /// of its agent name no session (no copy among them can be found).
-    pub(crate) fn session_summary(&self, preview: &mut crate::forget::Preview) -> Result<()> {
-        let crate::forget::Target::Session { agent, session } = &preview.target else {
-            return Ok(());
+    /// Slice 3b-2: what forgetting a repository or a time range would register: its records with
+    /// text (a repository's on every device, a time range's on its device, with those a restore
+    /// kept no body of), each named as a record's is, a forgotten one left out, and their sessions'
+    /// records from another source as copies (slice 3a). A record that names no session is taken,
+    /// with no copies to find (the preview counts it), and so is an ambiguous transcript identity:
+    /// the scope's denial refuses its records from before it that arrive later (D3), so a re-import
+    /// cannot bring one back under another identity.
+    fn scope_preview(&self, target: crate::forget::Target) -> Result<crate::forget::Preview> {
+        anyhow::ensure!(
+            self.home_id_proven()?,
+            "this store has no verified home identity: forget was not registered"
+        );
+        let (found, passed) = self.scope_records(&target)?;
+        let picked: Vec<Named> = found.into_iter().map(|(n, _, _)| n).collect();
+        let copies = self.copies(&picked)?;
+        let mut sources = Vec::<String>::new();
+        for n in picked.iter().chain(&copies) {
+            if !sources.contains(&n.source) {
+                sources.push(n.source.clone());
+            }
+        }
+        let record = |n: &Named| crate::forget::Record {
+            device: n.device.clone(),
+            seq: n.seq,
+            origin: n.origin.clone(),
+            session: n.session.clone().unwrap_or_default(),
+            ts: n.ts,
         };
-        let found = self.session_records(agent, session)?;
+        Ok(crate::forget::Preview {
+            target,
+            sample: None,
+            records: picked.iter().map(record).collect(),
+            copies: copies.iter().map(record).collect(),
+            passed,
+            denied: self.denied_count()?,
+            sources,
+            uid: None,
+            scope: None,
+        })
+    }
+
+    /// Slice 3b-2: a repository's or a time range's records with text, each with its time and
+    /// kind, in (device, seq) order, named in one read (a repository may hold most of a store) as
+    /// `named` names a record, a forgotten one left out; a time range's records a restore kept no
+    /// body of are named one by one, and those with no identity left are passed over (how many).
+    fn scope_records(&self, target: &crate::forget::Target) -> Result<(Found, usize)> {
+        use rusqlite::types::Value;
+        let (clause, args): (&str, Vec<Value>) = match target {
+            // A label the ledger masks is not the repository's, whatever it reads as: the preview
+            // counts such records, not taken (Greptile, Codex on #468).
+            crate::forget::Target::Repo { repo, .. } => (
+                "r.repo IN (SELECT value FROM json_each(?1)) AND NOT EXISTS (SELECT 1 FROM ledger l
+                   WHERE l.device = r.device AND l.seq = r.seq AND l.field = 'repo')",
+                vec![serde_json::to_string(&self.repo_labels(repo)?)?.into()],
+            ),
+            crate::forget::Target::Range {
+                device,
+                since,
+                until,
+            } => (
+                "r.device = ?1 AND r.ts >= ?2 AND r.ts < ?3",
+                vec![device.clone().into(), (*since).into(), (*until).into()],
+            ),
+            _ => anyhow::bail!("not a repository or a time range"),
+        };
+        type Row = (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<bool>,
+            bool,
+        );
+        let rows: Vec<Row> = self
+            .conn
+            .prepare(&format!(
+                "SELECT r.device, r.seq, r.ts, r.source, r.kind, r.agent, r.session, o.origin,
+                        o.native_session, o.ambiguous,
+                        EXISTS(SELECT 1 FROM ledger l WHERE l.device = r.device AND l.seq = r.seq
+                          AND l.field = 'session')
+                 FROM records r LEFT JOIN import_origins o ON o.device = r.device AND o.seq = r.seq
+                 WHERE r.type = 'event' AND {clause}"
+            ))?
+            .query_map(rusqlite::params_from_iter(args), |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut found = Vec::with_capacity(rows.len());
+        for (device, seq, ts, source, kind, agent, label, origin, native, ambiguous, masked) in rows
+        {
+            let family = Family::of(&source).with_context(|| {
+                format!("record {device}:{seq} has an unknown source: nothing was registered")
+            })?;
+            let (origin, session, ambiguous) = if family == Family::Live {
+                // Its session is its label when that is its agent's own id (slice 3a): unmasked,
+                // and not the `unknown` a hook writes for an event that sent none.
+                let session = agent.as_deref().zip(label.as_deref()).and_then(|(a, l)| {
+                    (!masked && l != "unknown" && !l.starts_with("unknown-"))
+                        .then(|| crate::forget::session(a, l))
+                });
+                (crate::forget::live_origin(&device, seq, ts), session, false)
+            } else {
+                let origin = origin.with_context(|| {
+                    format!("record {device}:{seq} has no import identity: nothing was registered")
+                })?;
+                let session = native.with_context(|| {
+                    format!(
+                        "record {device}:{seq} has no native session identity: nothing was registered"
+                    )
+                })?;
+                (origin, Some(session), ambiguous.unwrap_or(true))
+            };
+            if denied(&self.conn, Some(&origin), "")? {
+                continue;
+            }
+            found.push((
+                Named {
+                    // Rule 10: only a record the transcript cut counts keeps its time.
+                    ts: (family != Family::Transcript && kind != "touch").then_some(ts),
+                    device,
+                    seq,
+                    origin,
+                    session,
+                    family,
+                    agent,
+                    ambiguous,
+                    source,
+                    sample: None,
+                },
+                ts,
+                kind,
+            ));
+        }
+        let mut passed = 0;
+        if let crate::forget::Target::Range {
+            device,
+            since,
+            until,
+        } = target
+        {
+            let removed: Vec<(i64, i64, Option<String>)> = self
+                .conn
+                .prepare(
+                    "SELECT seq, ts, kind FROM records WHERE type = 'removed' AND device = ?1
+                       AND ts >= ?2 AND ts < ?3",
+                )?
+                .query_map(params![device, since, until], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            for (seq, ts, kind) in removed {
+                let Some(r) = self
+                    .after(device, seq - 1, 1)?
+                    .into_iter()
+                    .find(|r| r.seq == seq)
+                else {
+                    continue;
+                };
+                match self.named(device, &r)? {
+                    Some(n) if !denied(&self.conn, Some(&n.origin), "")? => {
+                        // The summary's time is the row's own, which put it in the range, and a v1
+                        // touch stays one (rule 10; Codex on #468).
+                        let kind = if kind.as_deref() == Some("touch") {
+                            "touch"
+                        } else {
+                            "removed"
+                        };
+                        found.push((n, ts, kind.into()));
+                    }
+                    Some(_) => {}
+                    None => passed += 1,
+                }
+            }
+        }
+        found.sort_by(|a, b| (&a.0.device, a.0.seq).cmp(&(&b.0.device, b.0.seq)));
+        Ok((found, passed))
+    }
+
+    /// Slice 3b-2: the repository labels records hold whose hash is `repo`: its key, as every
+    /// source's records name it. Through `records_repo` (`repo_index`).
+    fn repo_labels(&self, repo: &str) -> Result<Vec<String>> {
+        let labels: Vec<String> = self
+            .conn
+            .prepare("SELECT DISTINCT repo FROM records WHERE type = 'event' AND repo IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(labels
+            .into_iter()
+            .filter(|l| crate::forget::repo(l) == repo)
+            .collect())
+    }
+
+    /// The index of the events' repositories, built the first time something reads them by
+    /// repository: an exclusion (`sessions_in`) or a forget's preview; never by `open` or a hook.
+    pub(crate) fn repo_index(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
+        )?;
+        Ok(())
+    }
+
+    /// Slice 3b: a session's, a repository's or a time range's preview lines (spec 6.2): its first
+    /// record's time, its records by source and device, its first prompt's first characters, and
+    /// how many records that name no session would keep a copy (a session's: its agent's live
+    /// records; a repository's or a time range's: its own); a repository's keys, the paths its
+    /// records were recorded at, and how many records' repository is masked.
+    pub(crate) fn scope_summary(&self, preview: &mut crate::forget::Preview) -> Result<()> {
+        let found = match &preview.target {
+            crate::forget::Target::Session { agent, session } => {
+                self.session_records(agent, session)?
+            }
+            crate::forget::Target::Repo { .. } | crate::forget::Target::Range { .. } => {
+                self.scope_records(&preview.target)?.0
+            }
+            _ => return Ok(()),
+        };
         let mut sources = std::collections::BTreeMap::<String, usize>::new();
         let mut devices = std::collections::HashSet::new();
         for (n, _, _) in &found {
@@ -1596,24 +1851,63 @@ impl Raw {
                     _ => None,
                 });
         }
-        let live = LIVE.map(|s| format!("'{s}'")).join(",");
-        let idless: i64 = self.conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM records r WHERE r.type = 'event' AND r.agent = ?1
-                   AND r.source IN ({live}) AND (r.session IS NULL OR r.session = 'unknown'
-                   OR r.session LIKE 'unknown-%' OR EXISTS(SELECT 1 FROM ledger l
-                     WHERE l.device = r.device AND l.seq = r.seq AND l.field = 'session'))"
-            ),
-            [agent],
-            |r| r.get(0),
-        )?;
-        preview.session = Some(crate::forget::SessionPreview {
-            agent: agent.clone(),
-            first: found.iter().map(|(_, ts, _)| *ts).min(),
+        let mut scope = crate::forget::ScopePreview {
+            // Rule 10: a v1 touch keeps no time of the session (CodeRabbit on #465).
+            first: found
+                .iter()
+                .filter(|(_, _, kind)| kind != "touch")
+                .map(|(_, ts, _)| *ts)
+                .min(),
             sources: sources.into_iter().collect(),
             devices: devices.len(),
-            idless: usize::try_from(idless).unwrap_or(0),
-        });
+            idless: found.iter().filter(|(n, _, _)| n.session.is_none()).count(),
+            ..Default::default()
+        };
+        match &preview.target {
+            crate::forget::Target::Session { agent, .. } => {
+                let live = LIVE.map(|s| format!("'{s}'")).join(",");
+                let idless: i64 = self.conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM records r WHERE r.type = 'event' AND r.agent = ?1
+                           AND r.source IN ({live}) AND (r.session IS NULL OR r.session = 'unknown'
+                           OR r.session LIKE 'unknown-%' OR EXISTS(SELECT 1 FROM ledger l
+                             WHERE l.device = r.device AND l.seq = r.seq AND l.field = 'session'))"
+                    ),
+                    [agent],
+                    |r| r.get(0),
+                )?;
+                scope.agent = Some(agent.clone());
+                scope.idless = usize::try_from(idless).unwrap_or(0);
+            }
+            crate::forget::Target::Repo { repo, .. } => {
+                scope.keys = self.repo_labels(repo)?;
+                // Where the records it takes were recorded: no forgotten record's, nor one whose
+                // repository label is masked (Codex on #468).
+                scope.paths = self
+                    .conn
+                    .prepare(
+                        "SELECT DISTINCT r.cwd FROM records r WHERE r.type = 'event'
+                           AND r.cwd IS NOT NULL AND r.repo IN (SELECT value FROM json_each(?1))
+                           AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.device = r.device
+                             AND l.seq = r.seq AND l.field = 'repo')
+                           AND NOT EXISTS (SELECT 1 FROM import_origins o
+                             JOIN denied_records d ON d.origin = o.origin
+                             WHERE o.device = r.device AND o.seq = r.seq)
+                         ORDER BY r.cwd LIMIT 5",
+                    )?
+                    .query_map([serde_json::to_string(&scope.keys)?], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let masked: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT device, seq FROM ledger
+                       WHERE field = 'repo')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                scope.masked = usize::try_from(masked).unwrap_or(0);
+            }
+            _ => {}
+        }
+        preview.scope = Some(scope);
         Ok(())
     }
 
@@ -1841,8 +2135,9 @@ impl Raw {
                 });
             }
         }
-        // Live records, by their labels' hash: a label equal to the agent's own id is unmasked.
-        // Both reads go through `records_sessions` (`session_indexes`).
+        // Live records, by their labels' hash: a label equal to the agent's own id is unmasked,
+        // and one the ledger masks is a rule's marker, no session's (Greptile on #468). Both reads
+        // go through `records_sessions` (`session_indexes`).
         let live = LIVE.map(|s| format!("'{s}'")).join(",");
         let labels: Vec<(String, String)> = self
             .conn
@@ -1854,7 +2149,9 @@ impl Raw {
             .collect::<rusqlite::Result<_>>()?;
         let mut st = self.conn.prepare(&format!(
             "SELECT device, seq, ts, source FROM records WHERE type = 'event' AND agent = ?1
-               AND session = ?2 AND source IN ({live})"
+               AND session = ?2 AND source IN ({live})
+               AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.device = records.device
+                 AND l.seq = records.seq AND l.field = 'session')"
         ))?;
         for (agent, label) in labels {
             let session = crate::forget::session(&agent, &label);
@@ -2001,6 +2298,15 @@ impl Raw {
                 4,
                 preview
                     .records
+                    .chunks(crate::forget::MAX_RECORDS)
+                    .map(<[_]>::to_vec)
+                    .collect(),
+            ),
+            // Slice 3b-2: a repository's or a time range's records and their copies, likewise.
+            crate::forget::Target::Repo { .. } | crate::forget::Target::Range { .. } => (
+                5,
+                [preview.records.as_slice(), &preview.copies]
+                    .concat()
                     .chunks(crate::forget::MAX_RECORDS)
                     .map(<[_]>::to_vec)
                     .collect(),
@@ -2290,7 +2596,13 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if session_tombstoned(&tx, &crate::forget::session(&e.agent, &e.session), e.ts)? {
+        if scope_tombstoned(
+            &tx,
+            &self.device,
+            &crate::forget::session(&e.agent, &e.session),
+            e,
+            ledger,
+        )? {
             return Ok(None);
         }
         let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
@@ -2322,7 +2634,7 @@ impl Raw {
         for c in events {
             // Slice 3b (D3): a forgotten session's record from before its forget is not recorded.
             let session = crate::forget::session(&c.event.agent, &c.event.session);
-            if !session_tombstoned(&tx, &session, c.event.ts)? {
+            if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)? {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             }
         }
@@ -2398,10 +2710,10 @@ impl Raw {
                 || crate::forget::session(&c.event.agent, &c.event.session),
                 |i| i.session.clone(),
             );
-            // Slice 3b (D3): a forgotten session's record from before its forget is not imported,
+            // Slice 3b (D3): a record of a forgotten scope from before its forget is not imported,
             // before an ambiguous group or a denial can refuse the batch for it: a later turn of the
             // session in the same batch is still recorded (Greptile on #465).
-            if session_tombstoned(&tx, &session, c.event.ts)? {
+            if scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)? {
                 continue;
             }
             if let Some(group) = identity.and_then(|i| i.ambiguous.as_ref()) {
@@ -3335,9 +3647,7 @@ impl Raw {
         if repos.is_empty() {
             return Ok(Default::default());
         }
-        self.conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
-        )?;
+        self.repo_index()?;
         let mut st = self.conn.prepare(
             "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
              WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
@@ -4245,13 +4555,34 @@ pub(crate) fn apply_request(
         let body = serde_json::json!({"uid": uid, "job": r.job}).to_string();
         insert_ops(conn, device, &[(OpKind::Forget.name(), body)])?;
     }
-    // Slice 3b (D3): the session's records from before the registration that arrive later are
-    // refused, by every request and log line that brings a page of it.
-    if let crate::forget::Target::Session { session, .. } = &r.target {
+    // Slice 3b (D3): the scope's records from before the registration that arrive later are
+    // refused, by every request and log line that brings a page of it: a session's on any device,
+    // a repository's on the device that registered it, a time range's on its device.
+    let scope = match &r.target {
+        crate::forget::Target::Session { session, .. } => {
+            Some(("session", session.as_str(), None, None, None))
+        }
+        crate::forget::Target::Repo { repo, device } => {
+            Some(("repo", repo.as_str(), Some(device.as_str()), None, None))
+        }
+        crate::forget::Target::Range {
+            device,
+            since,
+            until,
+        } => Some((
+            "range",
+            "",
+            Some(device.as_str()),
+            Some(*since),
+            Some(*until),
+        )),
+        _ => None,
+    };
+    if let Some((kind, key, device, since, until)) = scope {
         conn.execute(
-            "INSERT OR IGNORE INTO denied_scopes(job, kind, key, before)
-             VALUES(?1, 'session', ?2, ?3)",
-            params![r.job, session, r.started],
+            "INSERT OR IGNORE INTO denied_scopes(job, kind, key, before, device, since, until)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![r.job, kind, key, r.started, device, since, until],
         )?;
     }
     for rec in &r.records {
@@ -4323,13 +4654,29 @@ fn readable_request(request: &str) -> Option<crate::forget::Request> {
     Some(r)
 }
 
-/// Slice 3b (D3): whether a record of `session` (its agent's hash of the session's id) recorded at
-/// `ts` comes from before a registered forget of that session.
-fn session_tombstoned(conn: &Connection, session: &str, ts: i64) -> Result<bool> {
+/// Slice 3b (D3): whether `e`, recorded on `device`, comes from before a registered forget of its
+/// scope: its session (`session`, its agent's hash of the session's id), its repository on the
+/// device that registered that forget, or a time range of its device it falls in. A repository
+/// label its `ledger` masks is no repository's, as the preview takes none (Greptile on #468).
+fn scope_tombstoned(
+    conn: &Connection,
+    device: &str,
+    session: &str,
+    e: &Event,
+    ledger: &[(String, crate::redact::Finding)],
+) -> Result<bool> {
+    let masked = ledger.iter().any(|(field, _)| field == "repo");
+    let repo = e
+        .repo
+        .as_deref()
+        .filter(|_| !masked)
+        .map(crate::forget::repo);
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM denied_scopes
-           WHERE kind = 'session' AND key = ?1 AND before >= ?2)",
-        params![session, ts],
+        "SELECT EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?1 AND (
+           (kind = 'session' AND key = ?2)
+           OR (kind = 'repo' AND key = ?3 AND device = ?4)
+           OR (kind = 'range' AND device = ?4 AND since <= ?1 AND ?1 < until)))",
+        params![e.ts, session, repo, device],
         |r| r.get(0),
     )?)
 }

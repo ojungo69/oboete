@@ -757,12 +757,54 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
      transcript の取込みは登録以前の turn を書かず、後の turn を書く。ログから適用し直しても同じ。
   5. 評価用 home の写しで、最大の session と 139,417 件（最大の repo 相当）の登録の所要時間を測る。
 
-#### 3b-2〜3e（各 PR で詳細を決める）
+#### 3b-2: repo と時間範囲の target
 
-- **3b-2**: repo と時間範囲。選択は 3b-1 と同じく record の集合に解決してページに分ける。D3 のとおり
-  確認した端末ごとの上限まで。遅れて届く、登録時刻以前の ts の record の扱い（repo の label、この端末の
-  範囲）と、3a の拒否の改訂（record と span は拒否のまま。repo と時間は session id のない record の件数を
-  preview と limits に示して登録する）。
+- **target の形。**
+  - `--repo <dir|key>`: 既存の directory なら capture と同じ key（`repo::key`）、そうでなければ文字列を key と
+    して使う（search が示す key）。要求に残すのは key の hash と登録した端末（`Target::Repo`）で、key は
+    残さない（session と同じ。推測した repo 名はログで確かめられる: spec 6.3）。preview は record が名乗る
+    key、その record の cwd（5 つまで）、出所ごとの件数と端末の数、最初の prompt の先頭を示す（どれも
+    outbound の伏せ字）。
+  - `--since <time> --until <time>`: この端末の record の ts が `since` 以上 `until` 未満のもの。search の
+    `--since`・`--until` と同じ読み方（`search::b::time`: ISO の日付か時刻、offset のない時刻は UTC、
+    `--until` の日付はその日の終わりまで）。preview は local と UTC の両方で示す。要求には端末と 2 つの
+    時刻（ms）を残す（`Target::Range`）。
+- **解決。** repo: key の hash に一致する `repo` label を持つ、本文のある event。store の全端末の、preview の
+  時点のもの（要求は record を 1 件ずつ名指すので、D3 の「確認した端末ごとの上限」は preview の集合
+  そのもの）。label が伏せ字の record（ledger に `repo` の行）は一致を判定できないので選ばず、件数を示す。
+  時間: この端末の、範囲内の本文のある event と、範囲内の Removed 行（restore で本文がない。identity が
+  あれば名指す。なければ passed に数える）。読みは record ごとではなく 1 回の join（repo は最大で store の
+  大半を占める）、repo の label は `records_repo`（除外の索引と同じ。preview が初めて作る）。どちらにも
+  3a の写し（同じ session の別の出所。どの端末でも、範囲や repo の外でも）を足す。v1 の touch も選ぶ
+  （ts は持たない、rule 10）。
+- **3a の拒否を改める（broad target）。** session の分からない live record（`unknown-<device>`、伏せ字の
+  session label）は、record と span の target では拒否のまま。repo と時間の target では選んで登録し、
+  preview に「session を名乗らない record N 件: 別の出所の写しは見つけられず残る」と示す（spec 6.3）。
+  そのような record がある agent の transcript・v1 の record も拒否しない。曖昧な transcript の identity も
+  選ぶ（下の tombstone が同じ turn の再取込みを止める: 同じ repo label、範囲内の同じ ts）。
+- **ページと版。** 選んだ record と写しを (device, seq) 順に 500 件ずつの要求にし、1 つの transaction で
+  登録する（3b-1 と同じ）。版 5（版 4 は session のページのまま）。3b-1 までの binary は未知の target の行を
+  "not a request line" として飛ばして報告する（未知の版と同じく reconcile のたびに problems に出る）。
+  session を名乗らない record の要求の session は空。
+- **tombstone（D3）。** `denied_scopes` に端末と範囲の列を足す（3b-1 の表は open が列を足す）。repo:
+  kind `repo`、key は repo の hash、端末は登録した端末。時間: kind `range`、端末と 2 つの時刻。登録の後に
+  届く、自身の ts が登録時刻以前で scope に当たる record は書かない: hook の記録・書き戻し・transcript と
+  v1 の取込み（3b-1 と同じ経路）。repo と時間の scope は登録した端末の record にだけ当たる: 他の端末の
+  record が後から（M6 の同期で）来ても、その端末の上限の後なので D3 どおり記録する（session だけが端末を
+  またぐ）。live の event は伏せ字の後の label で照らすので、伏せ字の repo label の event は当たらない。
+- 受入テスト:
+  1. repo の target は全端末のその repo の record と写し（別の repo にあるものも）を選び、他の repo の
+     record と伏せ字の repo label の record を選ばない（後者は件数を示す）。directory は capture と同じ key。
+  2. 時間の target はこの端末の範囲内の record と、範囲外・他の端末の写しを選ぶ。`until` の時刻の record と
+     他の端末の範囲内の record は選ばない。
+  3. session を名乗らない live record を含む repo・時間の選択は登録され、件数が preview に出る。record と
+     span の target は従来どおり拒否する。
+  4. 登録をまたいだ hook の記録・書き戻し・取込みのうち、scope に当たり ts が登録以前のものは書かれず、
+     他の repo・範囲外・登録後の ts のもの、他の端末の repo の record は書かれる。ログから適用し直しても同じ。
+  5. 版 5 のページは端末の違う record と session のない record を持てる。版 4 と 3 の repo・時間の target は
+     未知の版。
+
+#### 3c〜3e（各 PR で詳細を決める）
 - **3c**: 忘れた record の行を Removed に書き換える（device・seq・ts・source・kind は identity と切れ目の
   ために残す）。`raw_fts` の optimize と VACUUM、backup の record segment の書換え（2c-1 の ops と同じ
   手順と停止点）、raw.db のコピー（2c-2）。transcript の切れ目（`earliest_by_session`）は
