@@ -398,7 +398,10 @@ pub(crate) fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>>
 /// Whether one of `records` is still there, a mask over part of it or not (#167): a status stands
 /// on what a record was (an acceptance, a passing run), which a masked token does not change; a
 /// record removed whole reads as `Removed` or not at all.
-fn supported<'a>(raw: &Raw, records: impl IntoIterator<Item = (&'a String, i64)>) -> Result<bool> {
+pub(crate) fn supported<'a>(
+    raw: &Raw,
+    records: impl IntoIterator<Item = (&'a String, i64)>,
+) -> Result<bool> {
     for (device, seq) in records {
         let record = raw
             .after(device, seq - 1, 1)?
@@ -1487,7 +1490,17 @@ mod tests {
         run(&raw, &mut k);
         let standing = [pair(done, "done"), pair("Use SQLite.", "decided")];
         assert_eq!(statuses(&k), standing);
-        // One run of two removed, and the acceptance masked in part: both stand.
+        let pending = |raw: &Raw, k: &Connection| {
+            let p = crate::claims::Pending::read(raw, k).unwrap();
+            [
+                p.touches(k, &a).unwrap(),
+                p.touches(k, &d).unwrap(),
+                p.touches_op(k, &dev, ops[0]).unwrap(),
+                p.touches_op(k, &dev, ops[1]).unwrap(),
+            ]
+        };
+        // One run of two removed, and the acceptance masked in part: both stand, and a reader
+        // keeps them while Anchors has not reached the tombstones (Codex on #473).
         raw.append_tombstone(Target::Record {
             device: dev.clone(),
             seq: run1,
@@ -1500,19 +1513,11 @@ mod tests {
             length: 3,
         })
         .unwrap();
+        assert_eq!(pending(&raw, &k), [false; 4]);
         run(&raw, &mut k);
         assert_eq!(statuses(&k), standing);
         // The acceptance and the other run removed: proposals, and the decision the proposal
         // superseded is current again.
-        let pending = |raw: &Raw, k: &Connection| {
-            let p = crate::claims::Pending::read(raw, k).unwrap();
-            [
-                p.touches(k, &a).unwrap(),
-                p.touches(k, &d).unwrap(),
-                p.touches_op(k, &dev, ops[0]).unwrap(),
-                p.touches_op(k, &dev, ops[1]).unwrap(),
-            ]
-        };
         assert_eq!(pending(&raw, &k), [false; 4]);
         for seq in [s_yes, run2] {
             raw.append_tombstone(Target::Record {

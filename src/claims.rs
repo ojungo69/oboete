@@ -1076,9 +1076,10 @@ pub fn place(units: Vec<Vec<Claim>>, places: usize) -> (Vec<Vec<Claim>>, Vec<Vec
 pub struct Pending {
     uids: std::collections::HashSet<String>,
     records: std::collections::HashSet<(String, i64)>,
-    /// Whether knowledge.db holds the records a status stands on (#167): one the worker has not
-    /// run on since has none.
-    support: bool,
+    /// The derivations (op device, op seq) whose raised status those tombstones take, none of the
+    /// records it stands on left (#167): Anchors lowers them. One with a record left, a mask over
+    /// part of one or not, stands (Codex on #473).
+    lowering: std::collections::HashSet<(String, i64)>,
 }
 
 impl Pending {
@@ -1105,7 +1106,35 @@ impl Pending {
             let at = checkpoint::get_in(k, Anchors.checkpoints(), Anchors.name(), &device)?;
             p.records.extend(raw.tombstones_after(&device, at)?);
         }
-        p.support = crate::consumer::manifest::exists(k, "table", "support")?;
+        // A knowledge.db the worker has not run on since #167 has no records a status stands on.
+        if p.records.is_empty() || !crate::consumer::manifest::exists(k, "table", "support")? {
+            return Ok(p);
+        }
+        // As Anchors finds them: raw already reads each record as those tombstones leave it.
+        let mut ops = std::collections::HashSet::new();
+        let mut st = k.prepare_cached(
+            "SELECT DISTINCT op_device, op_seq FROM support WHERE device = ?1 AND seq = ?2",
+        )?;
+        for (device, seq) in &p.records {
+            for op in st.query_map(rusqlite::params![device, seq], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })? {
+                ops.insert(op?);
+            }
+        }
+        let mut st = k.prepare_cached(
+            "SELECT device, seq FROM support WHERE op_device = ?1 AND op_seq = ?2",
+        )?;
+        for op in ops {
+            let records: Vec<(String, i64)> = st
+                .query_map(rusqlite::params![op.0, op.1], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            if !crate::consumer::claims::supported(raw, records.iter().map(|(d, s)| (d, *s)))? {
+                p.lowering.insert(op);
+            }
+        }
         Ok(p)
     }
 
@@ -1115,8 +1144,8 @@ impl Pending {
         !self.records.is_empty()
     }
 
-    /// Whether they touch the claim `uid`: its uid, a quote of its active derivation, or a record
-    /// its status stands on, which Anchors may lower it for (#167, Codex on #473).
+    /// Whether they touch the claim `uid`: its uid, a quote of its active derivation, or the
+    /// status of that derivation, which Anchors lowers for them (#167, Codex on #473).
     pub fn touches(&self, k: &Connection, uid: &str) -> Result<bool> {
         Ok(self.uids.contains(uid)
             || self.quoted(
@@ -1126,31 +1155,24 @@ impl Pending {
                  WHERE c.uid = ?1",
                 [uid],
             )?
-            || self.support
-                && self.quoted(
-                    k,
-                    "SELECT s.device, s.seq FROM claims c
-                     JOIN support s ON s.op_device = c.op_device AND s.op_seq = c.op_seq
-                     WHERE c.uid = ?1",
-                    [uid],
-                )?)
+            || !self.lowering.is_empty()
+                && k.prepare_cached("SELECT op_device, op_seq FROM claims WHERE uid = ?1")?
+                    .query_map([uid], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, i64)>>>()?
+                    .iter()
+                    .any(|op| self.lowering.contains(op)))
     }
 
-    /// Whether they touch a quote of the derivation op `op_seq` of `op_device`, or a record its
-    /// status stands on, active or not: a claim's history leaves such a derivation out, as Anchors
-    /// will drop it or lower it.
+    /// Whether they touch a quote of the derivation op `op_seq` of `op_device`, or its status,
+    /// active or not: a claim's history leaves such a derivation out, as Anchors will drop it or
+    /// lower it.
     pub fn touches_op(&self, k: &Connection, op_device: &str, op_seq: i64) -> Result<bool> {
         let at = (op_device, op_seq);
         Ok(self.quoted(
             k,
             "SELECT device, seq FROM evidence WHERE op_device = ?1 AND op_seq = ?2",
             at,
-        )? || self.support
-            && self.quoted(
-                k,
-                "SELECT device, seq FROM support WHERE op_device = ?1 AND op_seq = ?2",
-                at,
-            )?)
+        )? || self.lowering.contains(&(op_device.to_owned(), op_seq)))
     }
 
     /// Whether a record `sql` names (device, seq) is one a pending tombstone touches.

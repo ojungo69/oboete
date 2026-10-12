@@ -1054,6 +1054,7 @@ forget、後の withdraw）claim は decided や done のまま残り、rebuild 
   書き換わらない。
 
 #### 3e（PR で詳細を決める）
+
 - **3e**: rescan の hit を範囲 target（device、seq、offset、length）として 3c の書換えに通す（preview
   なし）。retention は同じ書換えで tombstone を作らず、未 curate の raw は残し、claim は `raw expired`
   と表示する（spec 6.2）。#186（rescan が一部を伏せた directive を event から決定的に作り直す）も 3e:

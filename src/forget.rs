@@ -1727,7 +1727,8 @@ fn limits(sources: &[String]) -> String {
          their text, and those windows are listed for `oboete recurate`; a window curated before \
          this version did not record the claims it carried in, so its cards stay when only such a \
          claim was forgotten. A claim whose status stood on it (its acceptance, a passing run) \
-         holds none of its text and stays, as a proposal.\n\
+         holds none of its text and stays; once none of the records its status stood on is left, \
+         it is a proposal.\n\
          A packet already handed to an agent and a curation call already sent are not taken \
          back.\n\
          If raw.db, both request logs and the backups made since the request are lost (an \
