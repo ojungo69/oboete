@@ -1065,6 +1065,66 @@ forget、後の withdraw）claim は decided や done のまま残り、rebuild 
   書き換わらない。support の record が消える前に owner が status を決めた claim は下がらず supersedes を保ち、
   消えた後に決めた claim は下がったまま（rebuild でも同じ）。
 
+#### 3d-4: window が書いた claim（#476）
+
+3e-1 の測定で見つけた穴: curator は window の 1 つの record の文を、同じ window の**別の** record を引用する
+claim の本文に写せる。3d-1 は忘れた record を引用する claim を、3d-2 はその record を span に持つ window を
+書き換えるが、その window が書いた他の claim は文を持ったまま残る（評価用 home の写しで、伏せた文を本文に
+持つ claim が 1 件残った）。forget の場合をここで閉じる（伏せ字の場合は #478: 今の規則で op の文を走査して
+その場で伏せる）。
+
+- **(c) 同じ batch の claim**: 3d-2 の規則 (a)・(b)（と下の (b')）で record の job が当てた window op、または
+  record の job がすでに書き換えた window op の batch（`curate::cover` と recuration は window op の後に claim
+  op を 1 回の append で書く: 同じ device と batch で window の後に並ぶ）の claim op のうち、まだ文を持ち、
+  3d-1（忘れた record を引用する、その uid）と 3e-1（伏せた record を伏せる前に引用した）が書き換えない
+  ものを、window の card と同じく `{"forgotten": <window の job>}` にする（forget が書く 1 つの形のまま:
+  consumer・segment・コピーはこの形を頼る）。uid は tombstone しない（生きた record を引用している）:
+  3d-2 が recurate の列に入れた window の recuration が同じ uid を作り直す（MUST-M18）。window op と同じ
+  transaction で書く。伏せ字（job が `rescan`）の window は対象にしない（#478）。
+- **写し（`copied`）**: そのうち本文か理由（`why`）が、window の curator が見た忘れた文の 32 バイト以上の
+  連続を繰り返すものの uid を、書き換えた window op に `copied`、その時刻を `copied_at` として残す（どちらも
+  window op が残す構造）。見た文は、span と goals の忘れた record の保存された文（`consumer::fts::text`、
+  隠す前のもの）、window が名指した（candidates・carried）忘れた record を引用する claim の文（本文・理由・
+  引用。3d-1 が書き換える前に読む）、window が名指した写しの claim の文。判定は aho-corasick（依存に
+  ある）。
+- **(b') 写しをたどる**: `copied` の uid を `candidates` か `carried` に名指し、その `copied_at` の 1 分後
+  より前に書かれた window op は、3d-2 の (b) と同じく当てる（job はその uid の window のもの）。ただし、その
+  uid の claim op が `copied_at` の後にまた書かれた（recuration が record から同じ uid を作り直した）ときは、
+  それより後の window は作り直した claim を見たので当てない（forget の直後に `oboete recurate` を走らせても、
+  作り直した window を消さない）。その batch は
+  (c) で、写しは名指した写しの文と比べる。window は自分より前の op しか名指さないので op の順の 1 回の読みで
+  閉じるが、別の device の window は op の順（device, op_seq）で前に来うるので、写しが増えた読みの後に
+  もう一度読む（増えなくなるまで）。後の purge は window op の `copied` から同じ連鎖を読む。
+- **32 バイトの根拠**（評価用 home の写し、読み取りだけ、数だけ）: 写しで絞らない連鎖（window → その claim
+  → それを名指した window → …）は 1 つの record の forget 30 回で window の中央値 54、最大 1,245、claim の
+  中央値 155、最大 1,841（curated の window 2,691、claim op 5,314 のうち）。32 バイト以上の写しだけを
+  たどると、30 回で window は最大 13、claim は合計 7。repository の forget（6,727 record）でも増えない。
+  16 バイトでは window 最大 200。
+- **順序**: 判定はすべて書く前に読む（3d-1 の claim が文を持つうちに）。書く順は今のまま: 3d-1 の claim →
+  window とその batch の claim（window ごとに同じ transaction）→ turn → 3e-1 の claim → 行。3d-4 より前に
+  書き換えた record の job の window で batch の claim が文を持つもの（この版より前の purge）は、(c) で
+  `copied` なしに書き換える: `record_jobs_with_text` がその job を数えるので、更新後の最初の purge が step 2
+  からやり直す。
+- **step 4**: ops segment とコピーの claim op は、raw.db の当たった window（と raw.db が持たず segment か
+  コピーにだけある window、`widen`）の batch（device と batch）にあれば (c) で書き換える（segment の行と
+  コピーの ops は batch を持つ）。segment かコピーにだけある window からは写しを探さない（連鎖を始めない）。
+- **preview**: 当たる window の数に、それらが書いた claim のうちこれで文を失う数を足す（`oboete recurate` が
+  書き直すまで）。
+- **限界**: 別の window の claim への 32 バイト未満の写しはたどらない（同じ window の claim は中身を問わず
+  書き換える）ので、M4 の canary は 32 バイト以上にする。3d-1 の claim と window の間で止まった purge は、
+  引用する claim の文がもう無いので、それを名指した window の batch の claim を `copied` なしに書き換え、
+  そこから連鎖を始めない。window の途中で止まった purge も、書き換えた window の claim の文を後の window の
+  写しの元にできない。復元で戻った window op を書き直すときは、その batch の claim がもう文を持たない
+  ので `copied` を失う。
+- 受入テスト: span に R1（32 バイトの canary）と R2 を持つ window。C1 は R1 を、C2 は R2 を引用して本文に
+  canary を写し、C3 は R2 を引用して写さない。R1 の forget の後、canary は raw.db・knowledge.db・ops
+  segment・コピーのどこにもない。C2 と C3 は文を失い、`copied` は C2 だけ。uid は deny されない。window は
+  recurate の列にある。C2 を candidates に持つ後の window、carried に持つ別の device の window（op の順で
+  前）、忘れた record を引用する claim を名指してその文を写した claim を書いた window とそれを名指した
+  window は当たる。C3 を名指した window は当たらない。復元で文が戻った window と claim は purge し直す（連鎖は
+  `copied` から）。purge の 1 時間後に写しの claim を名指す window、R2 から C2 を書き直した recuration の
+  claim、その後の 1 分以内に C2 を名指した window は残る。raw.db が持たず ops segment とコピーにだけある window とその claim も書き換わる。preview の数。
+
 #### 3e-1: rescan の伏せ字を保存された byte に及ぼす
 
 rescan（spec 2.2）は、規則が増えたとき古い record を読み直し、新しい hit を範囲 tombstone（device、seq、
@@ -1128,7 +1188,7 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
 - **限界**: 他の端末の record と op（M6 の同期）は伏せ字の tombstone が届いたときその端末で同じことをする。
   今は自分の端末の rescan だけ。伏せる前に curator・埋め込みの provider に送った文は provider の条件の
   下（6.3）。curator が window の中の伏せた record の文を、別の record を引用する claim の body に写した
-  もの（同じ batch の claim）と、その claim を見せた後の window は #478（forget は #476）。secure_delete
+  もの（同じ batch の claim）と、その claim を見せた後の window は #478（forget は 3d-4）。secure_delete
   （2b）より前に作った raw.db の空きページと page の中の空き領域には、その前に消した byte が残りうる（#477）。
   伏せた record から作ったと辿れない op の文（伏せた uid の Correction の body、work state、import、curator が
   自分で書いた一致）には後から足した規則が届かない（#478）。step 4 が segment の途中で止まると、伏せた claim

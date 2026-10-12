@@ -250,6 +250,9 @@ pub struct Preview {
     /// text: what a curator was shown of the records or of those claims.
     pub cards: usize,
     pub summaries: usize,
+    /// Slice 3d-4: the claims those windows wrote, which lose their text with their cards until a
+    /// recuration writes them again.
+    pub written: usize,
 }
 
 /// What a session, repository or time range target resolved to (slice 3b, spec 6.2's preview):
@@ -542,10 +545,16 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
                 std::iter::empty(),
             ))?;
             preview.claims = quoting.uids.len();
-            let made = raw
-                .record_ops(crate::raw::Forgotten::of(keys, quoting.uids.into_keys()))?
-                .0;
+            let mut made = crate::raw::Forgotten::of(keys, quoting.uids.into_keys());
+            made.texts = quoting.texts;
+            let made = raw.record_ops(made)?.0;
             (preview.cards, preview.summaries) = (made.windows.len(), made.turns.len());
+            preview.written = made
+                .windows
+                .iter()
+                .filter_map(|(device, op_seq, _)| made.claims.get(&(device.clone(), *op_seq)))
+                .map(|c| c.ops.len())
+                .sum();
             Ok(preview)
         }
     }
@@ -740,6 +749,7 @@ fn uid_preview(home: &Path, raw: &crate::raw::Raw, uid: String) -> Result<Previe
         claims: 0,
         cards: 0,
         summaries: 0,
+        written: 0,
     })
 }
 
@@ -993,6 +1003,8 @@ fn record_jobs_with_text(raw: &crate::raw::Raw) -> Result<HashSet<String>> {
             .chain(ops.turns)
             .map(|(_, _, job)| job),
     );
+    // Slice 3d-4: and a window's claims that hold text, of a window rewritten before too.
+    jobs.extend(ops.claims.into_values().map(|c| c.job));
     Ok(jobs)
 }
 
@@ -1142,12 +1154,17 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             // derivation quotes another record) is shown until its uid is tombstoned, and the rows
             // can take minutes. The claims before the window and turn ops: a window that showed
             // one is found by its forget op (3d-2). Slice 3e-1: a masked record's claim, whose uid
-            // is not tombstoned, after them: until then its op is how they are found.
-            let claims = raw.record_claims(&forgotten(&raw)?)?;
-            purged.ops += raw.purge_record_claims(&claims)?;
+            // is not tombstoned, after them: until then its op is how they are found. Slice 3d-4:
+            // all of it judged before any is written, while the claims still hold the text a
+            // window's claims may have copied.
             let mut shown = forgotten(&raw)?;
-            shown.masked = claims.masked_uids;
-            purged.ops += raw.purge_record_ops(&raw.record_ops(shown)?.0)?;
+            let mut claims = raw.record_claims(&shown)?;
+            shown.uids.extend(claims.uids.clone());
+            shown.masked = std::mem::take(&mut claims.masked_uids);
+            shown.texts = std::mem::take(&mut claims.texts);
+            let made = raw.record_ops(shown)?.0;
+            purged.ops += raw.purge_record_claims(&claims)?;
+            purged.ops += raw.purge_record_ops(&made)?;
             purged.ops += raw.purge_masked_claims(&claims.masked)?;
             crate::backup::fail_after("record_claims_purged")?;
             purged.records = raw.purge_records()?;
@@ -1962,6 +1979,13 @@ pub fn run(
         println!(
             "Windows whose cards lose their text, then listed for `oboete recurate`: {}",
             p.cards
+        );
+    }
+    if p.written > 0 {
+        println!(
+            "Claims those windows wrote, which lose their text until `oboete recurate` writes \
+             them again: {}",
+            p.written
         );
     }
     if p.summaries > 0 {
@@ -3587,6 +3611,291 @@ mod tests {
         let wal = PathBuf::from(format!("{}-wal", copy.display()));
         assert!(!holds_text(&copy, WINDOW_CANARY) && !holds_text(&wal, WINDOW_CANARY));
         assert!(!backup_hits(&home, kept).is_empty());
+    }
+
+    /// Slice 3d-4: a canary of 32 bytes, the least a claim must repeat of what its window showed to
+    /// be followed.
+    const BATCH_CANARY: &str = "bcanary-4f1d9e7a2c3b6d5e8f0a1b2c";
+
+    /// The windows queued for recuration, by op seq.
+    fn queued(home: &Path) -> Vec<i64> {
+        rusqlite::Connection::open(home.join("knowledge.db"))
+            .unwrap()
+            .prepare("SELECT op_seq FROM recurate ORDER BY op_seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Slice 3d-4 (rule c): a window that showed a forgotten record loses the claims it wrote with
+    /// its cards: the one that quotes the record by its uid (3d-1), the others with their uids
+    /// kept. One that repeated 32 bytes of what its window showed (the record, a claim quoting it
+    /// the window named, or a claim copied before) is `copied`, and a later window that named it
+    /// before then, as a candidate or carried in, is judged by it (b'), with its own claims;
+    /// another device's window, before them in op order, too. In raw.db, knowledge.db, the ops
+    /// segments and a copy of raw.db; the preview counts them. A window that named the claim that
+    /// copied nothing stays. A window restored from older ops is purged again by the chain a
+    /// window's `copied` keeps, and a claim given back its text beside its rewritten window is
+    /// taken again; a window written a minute or more after the purge that names a copied claim, a
+    /// recuration's claim of its uid, and a window that named it after that claim, stay.
+    #[test]
+    fn the_claims_a_window_wrote_lose_their_text_with_its_cards() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {BATCH_CANARY} mode.");
+        let (deploys, tests) = ("Deploys run on Fridays.", "Tests run on CI.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, deploys);
+        let r3 = s.said("s", "github.com/o/r", 3_000, tests);
+        // Claims of one record's sentence told apart by the sentence their uid names.
+        let claim = |seq: i64, quote: &str, sentence: i64, body: &str| {
+            let mut op = claim_op(&device, &[(seq, quote)], body);
+            op.1["evidence"][0]["sentence"] = sentence.into();
+            op
+        };
+        let uid = |op: &(raw::OpKind, serde_json::Value)| raw::op_uid(op.0, &op.1).unwrap();
+        let c1 = claim(r1, &gone, 0, "Parsers stay strict.");
+        let c2 = claim(r2, deploys, 0, &format!("Deploys follow {BATCH_CANARY}."));
+        let c3 = claim(
+            r2,
+            deploys,
+            1,
+            "Deploys run on Fridays, never on a Monday morning.",
+        );
+        let c4 = claim(
+            r3,
+            tests,
+            0,
+            &format!("Tests run on CI as {BATCH_CANARY} says."),
+        );
+        let c5 = claim(r3, tests, 1, "Tests run on CI before each release.");
+        let c6 = claim(r3, tests, 2, &format!("Tests skip {BATCH_CANARY} on CI."));
+        let (u1, u2, u3, u4, u6) = (uid(&c1), uid(&c2), uid(&c3), uid(&c4), uid(&c6));
+        let mut append = |ops: &[(raw::OpKind, serde_json::Value)]| s.raw.append_ops(ops).unwrap();
+        let w1 = append(&[window_op(r1, r2, "Its span.", json!({})), c1, c2, c3]);
+        let w2 = append(&[
+            window_op(r3, r3, "It showed the copy.", json!({"candidates": [u2]})),
+            c4,
+        ]);
+        let w4 = append(&[
+            window_op(
+                r3,
+                r3,
+                "Kept: it showed a claim that copied nothing.",
+                json!({"candidates": [u3]}),
+            ),
+            c5,
+        ]);
+        let w5 = append(&[
+            window_op(
+                r3,
+                r3,
+                "It showed the quoting claim.",
+                json!({"candidates": [u1]}),
+            ),
+            c6,
+        ]);
+        let w6 = append(&[window_op(
+            r3,
+            r3,
+            "It showed the second copy.",
+            json!({"candidates": [u6]}),
+        )]);
+        // Another device's window that carried the copy in, synced: first in op order.
+        let w3 = 1_000_000;
+        let home = s.home.path().to_owned();
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+                 VALUES('0', ?1, 'window', ?2, ?3, ?1)",
+                rusqlite::params![
+                    w3,
+                    crate::db::now_ms(),
+                    window_op(r3, r3, "It carried the copy.", json!({"carried": [u2]}))
+                        .1
+                        .to_string()
+                ],
+            )
+            .unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        let before = op_bodies(&home);
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        let shown = preview(&home, target).unwrap();
+        assert_eq!((shown.claims, shown.cards, shown.written), (1, 5, 4));
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert!(!store_hits(&home, BATCH_CANARY.as_bytes()).is_empty());
+        let purged = purge(&home).unwrap().unwrap();
+        // The quoting claim, five windows and four of their claims.
+        assert_eq!((purged.records, purged.ops), (1, 10));
+        let job = crate::raw::open(&home).unwrap().forget_jobs().unwrap()[0]
+            .0
+            .job
+            .clone();
+        let after = op_bodies(&home);
+        let forgotten = json!({ "forgotten": job });
+        for seq in [w1[1], w1[2], w1[3], w2[1], w5[1]] {
+            assert_eq!(after[&seq], forgotten, "{seq}");
+        }
+        let at = after[&w1[0]]["copied_at"].as_i64().unwrap();
+        let rewritten = |seq: i64, copied: &[&str]| {
+            let mut body = before[&seq].clone();
+            if !copied.is_empty() {
+                body["copied"] = json!(copied);
+                body["copied_at"] = at.into();
+            }
+            crate::raw::forgotten_window_body(&body, &job)
+        };
+        for (seq, copied) in [
+            (w1[0], vec![u2.as_str()]),
+            (w2[0], vec![u4.as_str()]),
+            (w5[0], vec![u6.as_str()]),
+            (w6[0], vec![]),
+            (w3, vec![]),
+        ] {
+            assert_eq!(after[&seq], rewritten(seq, &copied), "{seq}");
+        }
+        for seq in [w4[0], w4[1]] {
+            assert_eq!(after[&seq], before[&seq], "{seq}");
+        }
+        let denied = crate::raw::open(&home)
+            .unwrap()
+            .record_derived_uids()
+            .unwrap();
+        assert!(denied.contains_key(&u1) && !denied.contains_key(&u2) && !denied.contains_key(&u3));
+        assert_eq!(
+            store_hits(&home, BATCH_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        assert_eq!(backup_hits(&home, BATCH_CANARY), Vec::<String>::new());
+        assert!(!holds_text(&copy, BATCH_CANARY) && !holds_text(&wal, BATCH_CANARY));
+        assert!(!store_hits(&home, b"before each release").is_empty());
+        assert_eq!(queued(&home), [w1[0], w2[0], w5[0], w6[0], w3]);
+        assert!(status(&home).unwrap().iter().all(|j| j.local == DONE));
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        // A restore from older ops segments gives one claim of the first window its text back, then
+        // a later window: each is owed and purged again, the claim by its window's job, the window
+        // by the `copied` of the one before it.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for seq in [w1[3], w6[0]] {
+            conn.execute(
+                "UPDATE ops SET body = ?1 WHERE op_seq = ?2",
+                rusqlite::params![before[&seq].to_string(), seq],
+            )
+            .unwrap();
+            assert!(
+                status(&home).unwrap().iter().any(|j| j.local == PENDING),
+                "{seq}"
+            );
+            assert_eq!(purge(&home).unwrap().unwrap().ops, 1, "{seq}");
+        }
+        assert_eq!(op_bodies(&home), after);
+        // Written after the purge, they stay: a window that names a copied claim an hour later; a
+        // recuration ten seconds after it that writes another copied claim again from its record
+        // without the copy; a window within the minute after the purge that names that claim
+        // after then (it showed the claim written again).
+        let later = [
+            window_op(
+                r3,
+                r3,
+                "Kept: cut an hour after.",
+                json!({"candidates": [u4]}),
+            ),
+            window_op(r2, r2, "Kept: the recuration.", json!({"recurate": true})),
+            claim(r2, deploys, 0, "Deploys run on Fridays only."),
+            window_op(
+                r3,
+                r3,
+                "Kept: cut after the recuration.",
+                json!({"candidates": [u2]}),
+            ),
+        ];
+        let mut store = crate::raw::open(&home).unwrap();
+        let mut seqs = store.append_ops(&later[..1]).unwrap();
+        seqs.extend(store.append_ops(&later[1..3]).unwrap());
+        seqs.extend(store.append_ops(&later[3..]).unwrap());
+        assert_eq!(uid(&later[2]), u2);
+        for (seq, after) in seqs.iter().zip([3_600_000, 10_000, 10_000, 20_000]) {
+            conn.execute(
+                "UPDATE ops SET ts = ?1 WHERE op_seq = ?2",
+                rusqlite::params![at + after, seq],
+            )
+            .unwrap();
+        }
+        drop(store);
+        let kept = op_bodies(&home);
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        for seq in seqs {
+            assert_eq!(op_bodies(&home)[&seq], kept[&seq], "{seq}");
+        }
+    }
+
+    /// Slice 3d-4: a window op and its claims that only the ops segments and a copy of raw.db
+    /// hold (raw.db put back without them) lose their text there by rule (c), with no copy looked
+    /// for.
+    #[test]
+    fn the_claims_of_a_window_raw_does_not_hold_lose_their_text() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {BATCH_CANARY} mode.");
+        let deploys = "Deploys run on Fridays.";
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, deploys);
+        let seqs = s
+            .raw
+            .append_ops(&[
+                window_op(r1, r2, "Its span.", json!({})),
+                claim_op(
+                    &device,
+                    &[(r2, deploys)],
+                    &format!("Deploys follow {BATCH_CANARY}."),
+                ),
+            ])
+            .unwrap();
+        let home = s.home.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq >= ?1", [seqs[0]])
+            .unwrap();
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        let held = || holds_text(&copy, BATCH_CANARY) || holds_text(&wal, BATCH_CANARY);
+        assert!(!backup_hits(&home, BATCH_CANARY).is_empty() && held());
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, BATCH_CANARY), Vec::<String>::new());
+        assert!(!held());
+        let job = crate::raw::open(&home).unwrap().forget_jobs().unwrap()[0]
+            .0
+            .job
+            .clone();
+        let claim = copy_ops(&copy)
+            .into_iter()
+            .find(|o| o.1 == seqs[1])
+            .unwrap();
+        assert_eq!(claim.2, json!({ "forgotten": job }).to_string());
     }
 
     /// Slice 3c, test 2 (rule 10): a session whose live records are all purged keeps its transcript
