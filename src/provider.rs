@@ -6437,13 +6437,19 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
              x-ratelimit-remaining-requests: 999\r\nx-ratelimit-reset-requests: 7.66s\r\n",
         );
         let schema = json!({"type": "object"});
+        let before = db::now_ms();
         Chain::new(&[stub(url.clone())], &conn)
             .run("curator", "s", "short", &schema)
             .unwrap();
+        let after = db::now_ms();
         let rate = crate::providers_db::rate(&conn, "stub").unwrap();
         assert_eq!((rate.tokens, rate.requests), (Some(300), Some(999)));
-        let left = rate.tokens_reset_at.unwrap() - db::now_ms();
-        assert!((178_000..=180_000).contains(&left), "{left}");
+        // 2m59.5s from when the answer was read, however long the call took (#479).
+        let reset = rate.tokens_reset_at.unwrap();
+        assert!(
+            (before + 179_500..=after + 179_500).contains(&reset),
+            "{reset}"
+        );
         // 2,000 characters are about 560 tokens: more than the 300 left this minute.
         let (next, _) = serve_once(answer.into_bytes(), "");
         let providers = [stub(url), {
@@ -6950,9 +6956,9 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         );
     }
 
-    /// An RFC 3339 time `ms` from now, as Anthropic writes its resets.
-    fn rfc3339_in(ms: i64) -> String {
-        chrono::DateTime::from_timestamp_millis(db::now_ms() + ms)
+    /// Unix ms `at` as an RFC 3339 time, as Anthropic writes its resets.
+    fn rfc3339(at: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(at)
             .unwrap()
             .to_rfc3339()
     }
@@ -6971,7 +6977,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let home = tempfile::tempdir().unwrap();
         let key_file = home.path().join("TEST_KEY.md");
         std::fs::write(&key_file, "# synthetic only\nmessages-test-key\n").unwrap();
-        let reset = rfc3339_in(30_000);
+        let at = db::now_ms() + 30_000;
+        let reset = rfc3339(at);
         let headers = leak(format!(
             "anthropic-ratelimit-tokens-remaining: 3000\r\nanthropic-ratelimit-tokens-reset: {reset}\r\n\
              anthropic-ratelimit-requests-remaining: 49\r\nanthropic-ratelimit-requests-reset: {reset}\r\n"
@@ -7016,8 +7023,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(a.usage, want);
         let rate = a.rate.unwrap();
         assert_eq!((rate.tokens, rate.requests), (Some(3000), Some(49)));
-        let left = rate.tokens_reset_at.unwrap() - db::now_ms();
-        assert!((28_000..=30_000).contains(&left), "{left}");
+        // The time as written, however long the call took (#479).
+        assert_eq!(rate.tokens_reset_at, Some(at));
         assert_eq!(rate.requests_reset_at, rate.tokens_reset_at);
         let req = request.recv().unwrap();
         let (head, body) = req.split_once("\r\n\r\n").unwrap();
@@ -7135,7 +7142,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let headers = leak(format!(
             "retry-after: 30\r\nanthropic-ratelimit-requests-remaining: 0\r\n\
              anthropic-ratelimit-requests-reset: {}\r\n",
-            rfc3339_in(30_000)
+            rfc3339(db::now_ms() + 30_000)
         ));
         let e = send(
             Api::Anthropic,
