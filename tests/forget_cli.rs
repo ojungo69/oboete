@@ -79,7 +79,7 @@ fn a_hook_record_is_forgotten_by_where_and_when_it_was_recorded() {
     assert!(!out.contains("check a guess"), "{out}");
     assert!(out.contains("the agent's own transcript files"), "{out}");
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged from raw and its index"));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged here and in the backups"));
     let log = std::fs::read_to_string(home.join("forget.log")).unwrap();
     assert!(!log.contains(CANARY), "{log}");
 }
@@ -741,25 +741,28 @@ fn forgetting_a_record_hides_it_logs_it_without_text_and_says_what_it_cannot_rea
         started.contains("Records rewritten without their text in raw.db: 1"),
         "{started}"
     );
-    // No file of the home holds a byte of the imported record's text but the backups (slice
-    // 3c-2) and the agent's own transcript.
+    // No file of the home holds a byte of the imported record's text, a backup segment read
+    // decompressed too, but the agent's own transcript.
     let mut dirs = vec![home.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                if !path.ends_with("claude") && !path.ends_with("backups") {
+                if !path.ends_with("claude") {
                     dirs.push(path);
                 }
             } else {
                 let bytes = std::fs::read(&path).unwrap();
-                let hit = bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes());
+                let text = zstd::stream::decode_all(&bytes[..]).unwrap_or_default();
+                let hit = [bytes, text]
+                    .iter()
+                    .any(|b| b.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()));
                 assert!(!hit, "{}", path.display());
             }
         }
     }
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged from raw and its index"));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged here and in the backups"));
     for log in [home.join("forget.log"), home.join("backups/forget.log")] {
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(text.lines().count(), 1, "{}", log.display());
@@ -2882,13 +2885,15 @@ fn raw_db_and_both_logs_lost_bring_the_text_back_as_forget_said() {
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     let id = record(home, CANARY);
-    let names = || -> std::collections::HashSet<_> {
-        std::fs::read_dir(home.join("backups"))
+    let backups = home.join("backups");
+    let files = || -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        std::fs::read_dir(&backups)
             .unwrap()
-            .map(|e| e.unwrap().file_name())
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.clone(), std::fs::read(p).unwrap()))
             .collect()
     };
-    let older = names();
+    let older = files();
     let said = ok(run(home, &["forget", "--record", &id, "--yes"], ""));
     assert!(
         said.contains("the backups made since the request are lost"),
@@ -2897,11 +2902,13 @@ fn raw_db_and_both_logs_lost_bring_the_text_back_as_forget_said() {
     for f in ["raw.db", "forget.log", "backups/forget.log"] {
         std::fs::remove_file(home.join(f)).unwrap();
     }
-    // The purge's rebuild backed the request up; an older copy of the home has no such segment.
-    let since: Vec<_> = names().difference(&older).cloned().collect();
-    assert!(!since.is_empty());
-    for name in since {
-        std::fs::remove_file(home.join("backups").join(name)).unwrap();
+    // The purge rewrote the backups and its rebuild backed the request up: an older copy of the
+    // home has the backups as they were before.
+    for (path, _) in files() {
+        std::fs::remove_file(path).unwrap();
+    }
+    for (path, bytes) in older {
+        std::fs::write(path, bytes).unwrap();
     }
     ok(run(home, &["restore"], ""));
     assert!(ok(run(home, &["get", &id], "")).contains(CANARY));

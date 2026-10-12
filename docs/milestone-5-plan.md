@@ -848,11 +848,47 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
   live の record を全部忘れた session の切れ目は deny の最小に残る。zstd の本文は圧縮した byte も残らない。
   carry は忘れた record の鍵の vector を持ち越さない。
 
-#### 3c-2〜3e（各 PR で詳細を決める）
-- **3c-2**: backup の record segment（`.seg.zst` と set aside の `.quarantined-`）の行のうち、identity（live は
-  行の device・seq・ts から、import は行の import_identity）が deny にある行を export が今書く Removed 行に
-  書き換える（2c-1 の 4 段の置換と停止点、seal のない segment で判定できない行があれば削除）。raw.db の
-  コピー（2c-2）にも 3c-1 と同じ書換え。record の job の step 5 は空（hook の状態は flag と uid だけ）。
+#### 3c-2: backup の record segment と raw.db のコピー
+
+- **対象**: 忘れた record の identity の集合 = raw.db の `denied_records` の origin 全部（step 4 の時点で要求は
+  raw.db に適用済み。3c-1 の purge と同じく、どの job の record かは問わない）。行の identity は、live の
+  record（source が hook・replay）なら行の device・seq・ts から `forget::live_origin`（seq の再利用で ts が
+  違う行は別の record で、対象にしない）、取り込みなら `import_identity` の origin。identity の無い取り込み
+  （v1 の touch など）の行はそのまま残す: 取り込みの identity は記録する transaction でだけ付き後から付かない
+  ので（export の `import_identity` と `import_origins` は同じ #389 から）、どの forget もその record を
+  名指せない（scope の forget も passed として飛ばす）。
+- **segment**: backup 先の record segment（export の名前の `.seg.zst` と、set aside の `.quarantined-<ms>`。
+  どの端末のものも）の event 行で identity が集合にあるものを、export が今その行に書く Removed 行にする:
+  device・seq・type `removed`・source・kind・ts・home_id・home_id_proven・import_identity（あれば）。
+  body・label・original_bytes・ledger は捨てる。tombstone 行と Removed 行はそのまま。JSON でない行、type が
+  event・removed・tombstone のどれでもない行、source の無い event 行、device・seq・ts の読めない live の
+  event 行は判定できない行（2c-1 の `Line::Unknown`）。手順は
+  2c-1 と同じ: seal のある segment は 4 段の置換、seal のない segment と set aside は書き直し、読めないか
+  判定できない行のある seal のない segment は削除、書き込みの途中で残った名前（`leftover`、record の segment の
+  名前も）は削除。ops と record の walk は 1 つの関数で、行の判定だけが違う。
+- **raw.db のコピー**（2c-2 の `copies_set_aside`）: 3c-1 の `purge_records` と同じ書換え（type `removed`、
+  本文・label を NULL、ledger 行を削除）を、identity が集合にある行に。取り込みの行の identity はコピーの
+  `import_origins`（行の無いもの、表の無い版はそのまま残す）。書き換えられないコピーは 2c-2 と同じく削除。
+- **step 4**: uid の job と同じ回に、step 3 を終え step 4 の前にいる record の job があれば segment とコピーを
+  書き換え、その job に step 4。行を書き換える前に raw.db の meta に印（`record_backups_owed`）を置き、
+  segment とコピーを書き換え終えたら消す: job の行のない deny（segment だけの restore の後。step を持たない）も、
+  purge が途中で止まった後の続きで書き換え、worker の `forget --continue` もこの印を見る（Codex on #469・#470）。record の job の step 5 は 3d が決める（3d が派生の uid の job を登録する
+  段）。3c-2 では record の job は step 4 で止まり、`due` は本文を持つ行があるか step 4 の前の job。
+- **status（D4）**: step 4 の record の job は「purged here and in the backups; the claims, cards and
+  summaries made from it pending」。3d まで done にしない。
+- **限界の文**: preview の「older backup segments and copies of raw.db set aside still hold its text」を
+  「backup 先の segment と set aside の raw.db のコピーからも消す」に。F3（home 全体が古いコピーに戻る）で
+  本文が戻るのは、その古いコピーの backup 先（purge の前のもの）から。spec 6.3 の「record backup segments
+  ... may contain text」も同じく。uid の preview と違い、segment の件数は preview で数えない（全 segment の
+  展開は大きな store で数分かかる）。
+- 受入テスト: live の record と transcript の record の canary を export し、segment の 1 つを set aside、raw.db の
+  コピーを 1 つ作り、両方を forget して purge すると、backup 先（展開して）とコピーのどれにも 0 hit。seal は
+  合い（`backup::verify`）、restore は忘れた record を Removed 行で戻し他の record の本文を戻す。判定できない
+  行のある seal のない segment は削除、seal のある segment は残る。identity の無い取り込みの行は segment でも
+  コピーでも byte 単位でそのままで、それだけの segment もコピーも消えない。置換の停止点で止めても続きで終わる。
+  status は step 4 で上の文。F3 の CLI テストは forget の前の backup 先を戻して本文が戻ることを確かめる。
+
+#### 3d〜3e（各 PR で詳細を決める）
 - **3d**: 忘れた record に証拠を持つ claim を uid で forget する（Slice 2 の pipeline。部分的な anchor も
   信用しない、spec 6.2 step 3）。重なる window を残りの record から recurate する（`Span::minus`、
   recurate queue。AI の tier がなければ待ち）。card と summary は K4・T7 で隠れる。#167（status の

@@ -2519,14 +2519,12 @@ impl Raw {
             self.current()?;
             let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
             {
-                let mut removed = tx.prepare(
-                    "UPDATE records SET type = 'removed', enc = 'plain', body = NULL,
-                       original_bytes = NULL, agent = NULL, session = NULL, repo = NULL,
-                       branch = NULL, head = NULL, gitdir = NULL, cwd = NULL
+                let mut removed = tx.prepare(&format!(
+                    "UPDATE records SET {REMOVED_ROW}
                      WHERE device = ?1 AND seq = ?2 AND type = 'event' AND EXISTS (
                        SELECT 1 FROM import_origins o JOIN denied_records d ON d.origin = o.origin
-                       WHERE o.device = records.device AND o.seq = records.seq)",
-                )?;
+                       WHERE o.device = records.device AND o.seq = records.seq)"
+                ))?;
                 let mut ledger = tx.prepare("DELETE FROM ledger WHERE device = ?1 AND seq = ?2")?;
                 for (device, seq) in batch {
                     if removed.execute(params![device, seq])? == 1 {
@@ -2550,6 +2548,52 @@ impl Raw {
             ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Slice 3c-2: whether rows of forgotten records were rewritten and the backup's segments and
+    /// the copies of raw.db set aside may still hold their text. Kept in raw.db, so a purge that
+    /// stops before step 4 is done owes it after a denial with no job row too (a restore from
+    /// segments alone, Codex on #470), which has no step to owe it by.
+    pub(crate) fn record_backups_owed(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'record_backups_owed')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// `record_backups_owed` set (before the rows are rewritten) or cleared (once step 4 is done).
+    pub(crate) fn owe_record_backups(&self, owed: bool) -> Result<()> {
+        if owed {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('record_backups_owed', '1')",
+                [],
+            )?;
+        } else {
+            self.conn
+                .execute("DELETE FROM meta WHERE key = 'record_backups_owed'", [])?;
+        }
+        Ok(())
+    }
+
+    /// Every forgotten record's identity (slice 3c-2): what a backup's line and a copy's row are
+    /// judged by.
+    pub(crate) fn forgotten_origins(&self) -> Result<ForgottenOrigins> {
+        let mut st = self.conn.prepare(
+            "SELECT d.origin, o.origin IS NOT NULL, o.native_session, o.ambiguous
+             FROM denied_records d LEFT JOIN import_origins o ON o.origin = d.origin",
+        )?;
+        let mut rows = st.query([])?;
+        let mut out = ForgottenOrigins::new();
+        while let Some(r) = rows.next()? {
+            let held = if r.get(1)? {
+                Some((r.get(2)?, r.get(3)?))
+            } else {
+                None
+            };
+            out.insert(r.get(0)?, held);
+        }
+        Ok(out)
     }
 
     /// Each forgotten record's vector key (slice 3c).
@@ -4814,8 +4858,9 @@ fn scope_tombstoned(
 
 /// Milestone 5 D5 (2c, decision 5): each copy of raw.db set aside (`raw.db.quarantined-*`,
 /// `raw.db.restored.quarantined-*`, and a stopped restore's `raw.db.restored` beside the live
-/// store), with every op of a uid in `jobs` rewritten as `Raw::purge_uid` rewrites it, under
-/// secure_delete, and its WAL truncated; one that does not open, or cannot be rewritten or
+/// store), with every op of a uid in `jobs` rewritten as `Raw::purge_uid` rewrites it, and (slice
+/// 3c-2) every row of a forgotten record (its identity in `origins`) as `Raw::purge_records`
+/// rewrites it, under secure_delete, and its WAL truncated; one that does not open, or cannot be rewritten or
 /// truncated, is removed with its sidecars: it may hold the text, and no reader uses it. A
 /// restore's partial build (`raw.db.restoring`, made again by each restore) is removed. How many
 /// copies it rewrote and how many it removed. Run under the worker lock, as a restore is, so no
@@ -4823,6 +4868,7 @@ fn scope_tombstoned(
 pub(crate) fn purge_copies(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
+    origins: &ForgottenOrigins,
 ) -> Result<(usize, usize)> {
     let (mut rewritten, mut removed) = (0, 0);
     for copy in copies_set_aside(home)? {
@@ -4830,7 +4876,7 @@ pub(crate) fn purge_copies(
         let done = if copy.ends_with("raw.db.restoring") {
             None
         } else {
-            rewrite_copy(&copy, jobs).ok()
+            rewrite_copy(&copy, jobs, origins).ok()
         };
         match done {
             Some(0) => {}
@@ -4916,23 +4962,75 @@ const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 /// whose holding a uid's text cannot be told (a kind it cannot name, a body that does not parse,
 /// or a claim, correction or import whose body names no uid and is not a purge's) fails it, and
 /// the copy is removed (Greptile on #458).
-fn rewrite_copy(copy: &Path, jobs: &std::collections::HashMap<String, String>) -> Result<usize> {
+fn rewrite_copy(
+    copy: &Path,
+    jobs: &std::collections::HashMap<String, String>,
+    origins: &ForgottenOrigins,
+) -> Result<usize> {
     let mut conn = Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     // No one reads a copy: one in use is removed rather than waited for.
     conn.busy_timeout(Duration::ZERO)?;
     conn.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = conn.transaction()?;
-    // A copy from before the op log holds no uid's op: it stays (CodeRabbit on #458).
-    let has_ops: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ops')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !has_ops {
-        return Ok(0);
+    let has = |table: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |r| r.get(0),
+        )
+    };
+    let mut rewritten = 0;
+    // Slice 3c-2: its rows of forgotten records, judged as an export's line is: a live record by
+    // its device, seq and time, an import by its identity; an import without one stays (no forget
+    // can name it).
+    if !origins.is_empty() && has("records")? {
+        let identities = if has("import_origins")? {
+            "(SELECT o.origin FROM import_origins o WHERE o.device = r.device AND o.seq = r.seq)"
+        } else {
+            "NULL"
+        };
+        let mut keys = Vec::new();
+        {
+            let mut st = tx.prepare(&format!(
+                "SELECT r.device, r.seq, r.ts, r.source, {identities} FROM records r
+                 WHERE r.type = 'event'"
+            ))?;
+            let mut rows = st.query([])?;
+            while let Some(row) = rows.next()? {
+                let (device, seq, ts, source): (String, i64, i64, String) =
+                    (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+                let identity = if is_live(&source) {
+                    crate::forget::live_origin(&device, seq, ts)
+                } else {
+                    match row.get::<_, Option<String>>(4)? {
+                        Some(origin) => origin,
+                        None => continue,
+                    }
+                };
+                if origins.contains_key(&identity) {
+                    keys.push((device, seq));
+                }
+            }
+        }
+        let ledger = has("ledger")?;
+        for (device, seq) in keys {
+            rewritten += tx.execute(
+                &format!(
+                    "UPDATE records SET {REMOVED_ROW} WHERE device = ?1 AND seq = ?2 AND type = 'event'"
+                ),
+                params![device, seq],
+            )?;
+            if ledger {
+                tx.execute(
+                    "DELETE FROM ledger WHERE device = ?1 AND seq = ?2",
+                    params![device, seq],
+                )?;
+            }
+        }
     }
+    // A copy from before the op log holds no uid's op (CodeRabbit on #458).
     let mut keys = Vec::new();
-    {
+    if !jobs.is_empty() && has("ops")? {
         let mut st = tx.prepare("SELECT device, op_seq, type, body FROM ops")?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
@@ -4953,7 +5051,6 @@ fn rewrite_copy(copy: &Path, jobs: &std::collections::HashMap<String, String>) -
             }
         }
     }
-    let mut rewritten = 0;
     for (device, op_seq, job) in keys {
         let body = serde_json::json!({ "forgotten": job }).to_string();
         rewritten += tx.execute(
@@ -4989,6 +5086,16 @@ fn remove_with_sidecars(db: &Path) -> Result<()> {
 const FORGOTTEN_RECORDS: &str = "denied_records d
     JOIN import_origins o ON o.origin = d.origin
     JOIN records r ON r.device = o.device AND r.seq = o.seq";
+
+/// Each forgotten record's identity (slice 3c-2), with the native session and ambiguity its
+/// record's `import_identity` has in an export now: none when this store holds no record of it.
+pub(crate) type ForgottenOrigins =
+    std::collections::HashMap<String, Option<(Option<String>, bool)>>;
+
+/// What a forgotten record's row becomes (slice 3c): a Removed row that keeps its device, seq, ts,
+/// source and kind (a live record's identity, `original_metadata`), with no text or label.
+const REMOVED_ROW: &str = "type = 'removed', enc = 'plain', body = NULL, original_bytes = NULL,
+    agent = NULL, session = NULL, repo = NULL, branch = NULL, head = NULL, gitdir = NULL, cwd = NULL";
 
 /// Forgotten records rewritten in one transaction (slice 3c): a hook waits behind one no longer
 /// than behind a page's registration.
