@@ -98,7 +98,8 @@ spec 6.3 に書く限界とする。forget が表示する限界は次のとお�
   record を SessionStart に注入しうる。登録の時点で hook が作り終えた packet と送信済みの provider
   呼出しは取り消さない。
 - raw の commit と最初のログ追記の間の crash の後、次の worker 起動の前に raw.db を失うと要求は
-  失われる。raw.db と両方のログを失った場合も同じ。
+  失われる。backup の segment が要求を持つ前に（purge の rebuild か次の worker の終了が書く）
+  raw.db と両方のログを失った場合も同じ。
 - ログの行が 1 つも残らない segment からの restore は deny 行を再構築するが job 行は戻らない。
 - ログと backup ディレクトリは origin と session の hash を持つ（本文はない）。v1 と transcript
   から取り込んだ record の origin は保存された payload の hash を含むので、ログを持つ人は保存された
@@ -609,7 +610,8 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
 | 3a identity と出所の橋 | live record の identity、同じ session の別の出所の写し、v1 の forget、#454 | 下記 3a |
 | 3b-1 session とページ | session の target、500 件を超える選択、要求の版 4、session tombstone | 下記 3b-1 |
 | 3b-2 repo と時間範囲 | repo・時間範囲の target、遅れて届く record、3a の拒否の改訂 | 第一 slice の 500 件制限の解消、D3 の端末ごとの上限 |
-| 3c record の物理 purge | raw の record 本文、FTS、backup の record segment、raw.db のコピー | 管理対象の物理 byte に 0 hit、transcript の切れ目の保持 |
+| 3c-1 raw の行 | raw.db の record の行、knowledge.db の作り直し、transcript の切れ目 | 下記 3c-1 |
+| 3c-2 backup | backup の record segment、raw.db のコピー | 管理対象の物理 byte に 0 hit |
 | 3d 派生物 | 証拠を持つ claim、重なる window の recurate、card・summary、#167、#186、#366 | 表の Slice 3 の完了条件の残り |
 | 3e rescan と retention | rescan の範囲 target、保存期間の失効 | 3c の書換えの再利用（spec 6.2） |
 
@@ -804,11 +806,53 @@ Slice 3 は 6 つの PR に分け、この順に作る（3b は 2026-10-12 に 3
   5. 版 5 のページは端末の違う record と session のない record を持てる。版 4 と 3 の repo・時間の target は
      未知の版。
 
-#### 3c〜3e（各 PR で詳細を決める）
-- **3c**: 忘れた record の行を Removed に書き換える（device・seq・ts・source・kind は identity と切れ目の
-  ために残す）。`raw_fts` の optimize と VACUUM、backup の record segment の書換え（2c-1 の ops と同じ
-  手順と停止点）、raw.db のコピー（2c-2）。transcript の切れ目（`earliest_by_session`）は
-  `denied_records.ts` と Removed 行の元の ts も数える（rule 10。書換え後も切れ目が後ろへずれない）。
+#### 3c-1: raw.db の行、knowledge.db、transcript の切れ目
+
+3c は 2b・2c と同じく 2 つの PR に分けた（2026-10-12）。3c-1 は raw.db と knowledge.db、3c-2 は backup。
+
+- **対象**: 忘れた record = `import_origins` の origin が `denied_records` にある (device, seq) の行
+  （apply_request が tombstone を置く相手と同じ。3a で live の record も入る）。store の全端末。seq の再利用で
+  identity が合わない行は別の record で、対象にしない。
+- **step 2**: その行を Removed にする。type `removed`、body・original_bytes・label（agent、session、repo、
+  branch、head、gitdir、cwd）を NULL、enc `plain`。device・seq・ts・source・kind は残す（live の identity、
+  `original_metadata`、export の Removed 行）。その record の ledger 行も消す（field は body の鍵名の JSON
+  pointer）。500 行ずつの transaction で、各 batch は dispatch の排他の下で identity を確かめ直す。全体は
+  worker lock の下。raw.db は secure_delete（既存）、最後に raw.db-wal を truncate。冪等。
+- **knowledge.db**: uid の job と同じ回の rebuild 1 回（2b の決定 4）。carry の規則に record を足す: 忘れた
+  record の鍵（vector_keys の kind `r`、`<device>:<seq>`）が指す vector は持ち越さない（Fts consumer が
+  tombstone を処理する前に rebuild が走ると、古いファイルにまだ鍵が残る）。ログにだけある要求の record も
+  同じ。rebuild の後、行が本文を持たない job に step 3。
+- **status（D4）**: record の job は step 3 で本文を持つ行がないとき「purged from raw and its index here;
+  the claims, cards and summaries made from it, and the backups, pending」。rebuild は op を読み直すので、
+  その record を言い換えた claim・card・summary は 3d まで残る。restore で本文が戻った job は step 2 から
+  やり直す（2b の「状態で決める」）。job ごとの本文の有無は 1 回の集約で読む（job ごとの EXISTS は #467 と同じ形）。
+  segment だけの restore（両ログを失った後）は deny を戻し job の行を戻さない（spec 6.3）: 本文を持つ忘れた
+  record の deny に job の行がなければ、その job を step 0 として状態で purge する（step は記録しない）。restore は
+  live の record と deny を identity で結び直す（3a の結びつけ。segment が forget の前のものなら行に無い）。
+  Codex on #469。
+- **切れ目（rule 10）**: `transcript_cut` は `recorded` と、その session hash の deny の ts の最小の小さい方を
+  返す。session の live record が全部書き換わり `earliest_by_session` に行がないときは deny の最小だけ
+  （無ければ切れ目が消え、登録前の turn が取り込まれる）。deny の ts は切れ目に数える record にだけある。
+- **索引**: `denied_records_session`（session 列）を最初の deny と purge が作る（`check_cross_source_forget`
+  と `transcript_cut` の読み。#467）。forget の preview の索引と同じく、raw.db を開いただけでは作らない。
+  knowledge.db の `manifest_facts_record`（device, seq, repo, branch）: manifest consumer は tombstone ごとに
+  その record の fact を引き直すが、効く索引が device までで端末の fact を全部走査していた（評価用 home の
+  写しで tombstone 1 件 約 60 ms、139,417 件の forget の後の rebuild が 2 時間を超える見込み）。(device, seq)
+  だけの索引は DELETE にしか使われず（読みは列を覆う既存の索引を選ぶ）、repo と branch まで覆うと 3 つの
+  文とも seek になり、同じ rebuild は 318 秒。
+- **CLI**: record の forget も登録の後この process で purge する（uid と同じ）。preview の limits は、行の
+  書換えと rebuild、3d と 3c-2 まで残るものを言う。
+- 受入テスト: plain の短い本文と page をはみ出す長い本文の canary を forget して purge すると、raw.db・
+  knowledge.db と WAL に 0 hit。行は device・seq・ts・source・kind を残し、label・本文・ledger がない。もう
+  一度の purge は何もしない。要求を適用し直しても tombstone は増えない。restore で本文が戻ると purge し直す。
+  live の record を全部忘れた session の切れ目は deny の最小に残る。zstd の本文は圧縮した byte も残らない。
+  carry は忘れた record の鍵の vector を持ち越さない。
+
+#### 3c-2〜3e（各 PR で詳細を決める）
+- **3c-2**: backup の record segment（`.seg.zst` と set aside の `.quarantined-`）の行のうち、identity（live は
+  行の device・seq・ts から、import は行の import_identity）が deny にある行を export が今書く Removed 行に
+  書き換える（2c-1 の 4 段の置換と停止点、seal のない segment で判定できない行があれば削除）。raw.db の
+  コピー（2c-2）にも 3c-1 と同じ書換え。record の job の step 5 は空（hook の状態は flag と uid だけ）。
 - **3d**: 忘れた record に証拠を持つ claim を uid で forget する（Slice 2 の pipeline。部分的な anchor も
   信用しない、spec 6.2 step 3）。重なる window を残りの record から recurate する（`Span::minus`、
   recurate queue。AI の tier がなければ待ち）。card と summary は K4・T7 で隠れる。#167（status の
@@ -897,8 +941,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
   古い backup と capture rule の変更で v1 の event が戻らないこと、redaction rule が変わっても
   コピーした transcript が忘れた identity を保つこと、壊れた raw.db がログから忘却を回復すること、
   backup ディレクトリに届かなかった忘却を home のログだけで戻すこと、巻き戻った raw.db で新しい
-  record が残り忘れた record は戻らないこと、raw.db と両方のログを失うと forget の表示どおり本文が
-  戻ること、破れたログ行の後の忘却も restore で残ること。
+  record が残り忘れた record は戻らないこと、raw.db と両方のログとその後の backup を失うと（home
+  全体が古いコピーに戻ると）forget の表示どおり本文が戻ること、破れたログ行の後の忘却も restore で残ること。
 - 型付き API と fence の試験: `forget.rs` の登録・ログ回復と、provider の呼出し中に登録された忘却が
   その答えを何も書かせないこと（`curate.rs`）。障害試験にオーナーのデータ・モデル・サービスは
   使っていない。

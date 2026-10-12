@@ -79,7 +79,7 @@ fn a_hook_record_is_forgotten_by_where_and_when_it_was_recorded() {
     assert!(!out.contains("check a guess"), "{out}");
     assert!(out.contains("the agent's own transcript files"), "{out}");
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).contains("physical purge pending"));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged from raw and its index"));
     let log = std::fs::read_to_string(home.join("forget.log")).unwrap();
     assert!(!log.contains(CANARY), "{log}");
 }
@@ -726,7 +726,10 @@ fn forgetting_a_record_hides_it_logs_it_without_text_and_says_what_it_cannot_rea
     assert!(!piped.status.success(), "a pipe confirmed a forget");
     let said = String::from_utf8_lossy(&piped.stdout);
     assert!(said.contains("Raw records: 1"), "{said}");
-    assert!(said.contains("Physical purge is not built yet"), "{said}");
+    assert!(
+        said.contains("rewritten without the text right after"),
+        "{said}"
+    );
     assert!(said.contains("the agent's own transcript files"), "{said}");
     assert!(String::from_utf8_lossy(&piped.stderr).contains("needs a terminal"));
     assert!(ok(run(home, &["forget", "--status"], "")).is_empty());
@@ -734,8 +737,29 @@ fn forgetting_a_record_hides_it_logs_it_without_text_and_says_what_it_cannot_rea
     let started = ok(run(home, &["forget", "--record", &id, "--yes"], ""));
     assert!(started.contains("physical purge pending"), "{started}");
     assert!(started.contains("Request logged in"), "{started}");
+    assert!(
+        started.contains("Records rewritten without their text in raw.db: 1"),
+        "{started}"
+    );
+    // No file of the home holds a byte of the imported record's text but the backups (slice
+    // 3c-2) and the agent's own transcript.
+    let mut dirs = vec![home.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if !path.ends_with("claude") && !path.ends_with("backups") {
+                    dirs.push(path);
+                }
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                let hit = bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes());
+                assert!(!hit, "{}", path.display());
+            }
+        }
+    }
     assert!(!String::from_utf8_lossy(&run(home, &["get", &id], "").stdout).contains(CANARY));
-    assert!(ok(run(home, &["forget", "--status"], "")).contains("physical purge pending"));
+    assert!(ok(run(home, &["forget", "--status"], "")).contains("purged from raw and its index"));
     for log in [home.join("forget.log"), home.join("backups/forget.log")] {
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(text.lines().count(), 1, "{}", log.display());
@@ -2357,8 +2381,12 @@ fn the_home_log_alone_restores_a_forget_the_backup_directory_missed() {
     let away = root.path().join("backups-away");
     std::fs::rename(home.join("backups"), &away).unwrap();
     std::fs::write(home.join("backups"), b"not a directory").unwrap();
-    let said = ok(run(&home, &["forget", "--record", &id, "--yes"], ""));
+    let out = run(&home, &["forget", "--record", &id, "--yes"], "");
+    let said = String::from_utf8_lossy(&out.stdout);
     assert!(said.contains("Not logged"), "{said}");
+    // The purge's rebuild reads both logs, so it waits for the backup directory.
+    let stopped = String::from_utf8_lossy(&out.stderr);
+    assert!(stopped.contains("the purge did not finish"), "{stopped}");
     std::fs::remove_file(home.join("backups")).unwrap();
     std::fs::rename(&away, home.join("backups")).unwrap();
     std::fs::remove_file(home.join("raw.db")).unwrap();
@@ -2845,21 +2873,35 @@ fn restoring_a_copied_stores_backup_keeps_its_forget_log() {
     assert!(imported.contains("\"records\":0"), "{imported}");
 }
 
-/// D1 limit (F3): raw.db and both request logs lost bring the text back from older segments,
-/// as forget said before it was confirmed.
+/// D1 limit (F3): raw.db, both request logs and the backups made since the forget lost (an older
+/// copy of the whole home put back) bring the text back from older segments, as forget said
+/// before it was confirmed.
 #[test]
 fn raw_db_and_both_logs_lost_bring_the_text_back_as_forget_said() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
     let id = record(home, CANARY);
+    let names = || -> std::collections::HashSet<_> {
+        std::fs::read_dir(home.join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect()
+    };
+    let older = names();
     let said = ok(run(home, &["forget", "--record", &id, "--yes"], ""));
     assert!(
-        said.contains("If raw.db and both request logs are lost"),
+        said.contains("the backups made since the request are lost"),
         "{said}"
     );
     for f in ["raw.db", "forget.log", "backups/forget.log"] {
         std::fs::remove_file(home.join(f)).unwrap();
+    }
+    // The purge's rebuild backed the request up; an older copy of the home has no such segment.
+    let since: Vec<_> = names().difference(&older).cloned().collect();
+    assert!(!since.is_empty());
+    for name in since {
+        std::fs::remove_file(home.join("backups").join(name)).unwrap();
     }
     ok(run(home, &["restore"], ""));
     assert!(ok(run(home, &["get", &id], "")).contains(CANARY));

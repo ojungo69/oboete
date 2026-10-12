@@ -1665,7 +1665,13 @@ fn carry_rebuild_vectors(
             // Milestone 5 D5: no forgotten claim's or document's vector comes back, nor one whose
             // forget only the logs hold yet: the pass after this reconciles them.
             let (forgotten, home_id) = match crate::raw::read_only(home)? {
-                Some(raw) => (raw.forgotten_set()?, raw.home_id()?),
+                Some(raw) => (
+                    crate::forget::Forgotten {
+                        uids: raw.forgotten_set()?,
+                        records: raw.forgotten_record_keys()?,
+                    },
+                    raw.home_id()?,
+                ),
                 None => Default::default(),
             };
             let forgotten = crate::forget::with_logged(home, forgotten, home_id.as_deref())?;

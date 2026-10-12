@@ -404,6 +404,27 @@ fn forgotten_set(conn: &Connection) -> Result<std::collections::HashSet<String>>
     Ok(uids)
 }
 
+/// Each forgotten record's vector key (`<device>:<seq>`, kind 'r'): a carry takes no vector of
+/// one (slice 3c). None in a store a writer of forget never opened.
+fn forgotten_record_keys(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let tables: bool = conn.query_row(
+        "SELECT COUNT(*) = 2 FROM sqlite_master
+         WHERE type = 'table' AND name IN ('denied_records', 'import_origins')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !tables {
+        return Ok(std::collections::HashSet::new());
+    }
+    Ok(conn
+        .prepare(
+            "SELECT o.device || ':' || o.seq FROM denied_records d
+             JOIN import_origins o ON o.origin = d.origin",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// Milestone 5 D5: whether a forget op names `uid`.
 fn forgotten_uid(conn: &Connection, uid: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -621,6 +642,11 @@ impl ReadOnly {
     /// Every forgotten uid (D5).
     pub(crate) fn forgotten_set(&self) -> Result<std::collections::HashSet<String>> {
         forgotten_set(&self.conn)
+    }
+
+    /// Each forgotten record's vector key (slice 3c).
+    pub(crate) fn forgotten_record_keys(&self) -> Result<std::collections::HashSet<String>> {
+        forgotten_record_keys(&self.conn)
     }
 
     /// The store's lineage, which each forget request names; none before a writer seeds it.
@@ -2471,6 +2497,66 @@ impl Raw {
         Ok(!uid_op_keys(&self.conn, uid)?.is_empty())
     }
 
+    /// Milestone 5 slice 3c: every forgotten record (an event whose identity a denial names, D2)
+    /// rewritten as a Removed row, in transactions of `RECORD_PURGE_BATCH` taken in registration's
+    /// order (dispatch, then raw), each checking the identity again: device, seq, ts, source and
+    /// kind stay (its live identity, `original_metadata`); its body, labels and ledger rows go (a
+    /// ledger field names keys of the body). How many it rewrote.
+    pub(crate) fn purge_records(&mut self) -> Result<usize> {
+        denied_session_index(&self.conn)?;
+        let keys: Vec<(String, i64)> = self
+            .conn
+            .prepare(&format!(
+                "SELECT o.device, o.seq FROM {FORGOTTEN_RECORDS} WHERE r.type = 'event'
+                 ORDER BY o.device, o.seq"
+            ))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut rewritten = 0;
+        for batch in keys.chunks(RECORD_PURGE_BATCH) {
+            let _dispatch = crate::dispatch::exclusive(&self.home)
+                .context("the forgotten records were not purged")?;
+            self.current()?;
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            {
+                let mut removed = tx.prepare(
+                    "UPDATE records SET type = 'removed', enc = 'plain', body = NULL,
+                       original_bytes = NULL, agent = NULL, session = NULL, repo = NULL,
+                       branch = NULL, head = NULL, gitdir = NULL, cwd = NULL
+                     WHERE device = ?1 AND seq = ?2 AND type = 'event' AND EXISTS (
+                       SELECT 1 FROM import_origins o JOIN denied_records d ON d.origin = o.origin
+                       WHERE o.device = records.device AND o.seq = records.seq)",
+                )?;
+                let mut ledger = tx.prepare("DELETE FROM ledger WHERE device = ?1 AND seq = ?2")?;
+                for (device, seq) in batch {
+                    if removed.execute(params![device, seq])? == 1 {
+                        ledger.execute(params![device, seq])?;
+                        rewritten += 1;
+                    }
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(rewritten)
+    }
+
+    /// The jobs a forgotten record of which still has its body (slice 3c: their step 2 is not
+    /// done), in one read.
+    pub(crate) fn record_jobs_holding(&self) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .conn
+            .prepare(&format!(
+                "SELECT DISTINCT d.job FROM {FORGOTTEN_RECORDS} WHERE r.type = 'event'"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Each forgotten record's vector key (slice 3c).
+    pub(crate) fn forgotten_record_keys(&self) -> Result<std::collections::HashSet<String>> {
+        forgotten_record_keys(&self.conn)
+    }
+
     /// Milestone 5 D5 (2b): the WAL checkpointed and truncated, so no frame from before a purge
     /// stays in raw.db-wal; tried every 100 ms for `wait`. False when readers kept it from
     /// truncating.
@@ -3798,12 +3884,21 @@ impl Raw {
         session: &str,
         recorded: Option<i64>,
     ) -> Result<Option<i64>> {
-        check_cross_source_forget(
-            &self.conn,
-            &crate::forget::session(agent, session),
-            "transcript",
+        let session = crate::forget::session(agent, session);
+        check_cross_source_forget(&self.conn, &session, "transcript")?;
+        // Slice 3c (rule 10): a forgotten live record's row loses its labels when it is purged,
+        // so its time counts from its denial, and the cut does not move later; with every live
+        // record of the session purged, from its denials alone. A denial's time is a live
+        // record's (or a historical v1 request's), and it counts when raw.db no longer holds the row.
+        let denied: Option<i64> = self.conn.query_row(
+            "SELECT MIN(ts) FROM denied_records WHERE session = ?1",
+            [&session],
+            |r| r.get(0),
         )?;
-        Ok(recorded)
+        Ok(match (recorded, denied) {
+            (Some(recorded), Some(denied)) => Some(recorded.min(denied)),
+            (recorded, denied) => recorded.or(denied),
+        })
     }
 
     /// `docs` as this device's `import` ops (D5), in appends of at most `IMPORT_BATCH` documents
@@ -4525,6 +4620,7 @@ impl Rebuild {
                 )?;
             }
         }
+        link_live_denials(&self.conn)?;
         for r in &self.forget {
             r.check()?;
             apply_request(&self.conn, &device, r)?;
@@ -4534,6 +4630,38 @@ impl Rebuild {
         // No forget op among them is lost: each is appended again, or its uid is forgotten already.
         Ok(dropped - forgets.len())
     }
+}
+
+/// Slice 3a's link of a forgotten live record to its identity, made again for the denials a
+/// restore brought back from tombstone lines: a segment written before the forget holds the
+/// record without it. A denial whose record this store holds, live, at the time that gives the
+/// same identity gets it, so the purge finds the record's text by the state when no log brings the
+/// request back (Codex on #469).
+fn link_live_denials(conn: &Connection) -> Result<()> {
+    let live = LIVE.map(|s| format!("'{s}'")).join(",");
+    let rows: Vec<(String, String, i64, String, i64)> = conn
+        .prepare(&format!(
+            "SELECT d.origin, d.device, d.seq, d.session, r.ts FROM denied_records d
+             JOIN records r ON r.device = d.device AND r.seq = d.seq
+             WHERE r.type IN ('event', 'removed') AND r.source IN ({live})
+               AND r.kind IS NOT NULL AND r.kind <> ''
+               AND NOT EXISTS (SELECT 1 FROM import_origins o
+                               WHERE o.device = d.device AND o.seq = d.seq)"
+        ))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (origin, device, seq, session, ts) in rows {
+        if crate::forget::live_origin(&device, seq, ts) == origin {
+            conn.execute(
+                "INSERT OR IGNORE INTO import_origins(device, seq, origin, native_session, ambiguous)
+                 VALUES(?1, ?2, ?3, ?4, 0)",
+                params![device, seq, origin, session],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Applies one forget request by identity (D1 rule 5), inside the caller's write transaction:
@@ -4584,6 +4712,9 @@ pub(crate) fn apply_request(
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![r.job, kind, key, r.started, device, since, until],
         )?;
+    }
+    if !r.records.is_empty() {
+        denied_session_index(conn)?;
     }
     for rec in &r.records {
         conn.execute(
@@ -4850,6 +4981,26 @@ fn remove_with_sidecars(db: &Path) -> Result<()> {
             Err(e) => return Err(e).with_context(|| format!("remove {}", file.display())),
         }
     }
+    Ok(())
+}
+
+/// Slice 3c: the forgotten records, `r` each one's row, `o` its identity and `d` the denial
+/// naming it.
+const FORGOTTEN_RECORDS: &str = "denied_records d
+    JOIN import_origins o ON o.origin = d.origin
+    JOIN records r ON r.device = o.device AND r.seq = o.seq";
+
+/// Forgotten records rewritten in one transaction (slice 3c): a hook waits behind one no longer
+/// than behind a page's registration.
+const RECORD_PURGE_BATCH: usize = 500;
+
+/// The index the session checks of the denials read (`check_cross_source_forget`, `transcript_cut`,
+/// #467), made by the first denial and the purge, as the forget preview makes its own (spec 1.6:
+/// raw.db opened alone has none on a session).
+fn denied_session_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS denied_records_session ON denied_records(session)",
+    )?;
     Ok(())
 }
 
