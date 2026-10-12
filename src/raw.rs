@@ -4082,6 +4082,43 @@ impl Raw {
 
     /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
     /// that the worker has not applied yet (`claims::Pending`).
+    /// #167 (Codex on #473): when the last of `records` went, the latest of their first
+    /// whole-record tombstones; none when one of them has none (it was never here).
+    pub(crate) fn gone_at<'a>(
+        &self,
+        records: impl IntoIterator<Item = (&'a String, i64)>,
+    ) -> Result<Option<i64>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT MIN(ts) FROM records WHERE type = 'tombstone' AND target_device = ?1
+               AND target_seq = ?2 AND target_offset IS NULL",
+        )?;
+        let mut last = None;
+        for (device, seq) in records {
+            let Some(at) = st.query_row(params![device, seq], |r| r.get::<_, Option<i64>>(0))?
+            else {
+                return Ok(None);
+            };
+            last = last.max(Some(at));
+        }
+        Ok(last)
+    }
+
+    /// #167 (Codex on #473): the time and body of each correction op whose text names `uid`.
+    pub(crate) fn corrections_naming(&self, uid: &str) -> Result<Vec<(i64, serde_json::Value)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT ts, body FROM ops WHERE type = 'correction' AND instr(body, ?1) > 0",
+        )?;
+        let rows = st.query_map([uid], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (ts, body) = row?;
+            if let Ok(body) = serde_json::from_str(&body) {
+                found.push((ts, body));
+            }
+        }
+        Ok(found)
+    }
+
     pub fn ops_of(
         &self,
         kind: OpKind,

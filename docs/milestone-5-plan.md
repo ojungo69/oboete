@@ -1045,13 +1045,20 @@ forget、後の withdraw）claim は decided や done のまま残り、rebuild 
   （owner の Correction の status が先）、hook の配達も検索もそれに従う。rebuild は consumer がそのときの raw で
   決めるので同じになる。Anchors がまだ読んでいない tombstone が support の record に当たる claim は、引用に
   当たるときと同じく読みから外す（`claims::Pending`。下がった後に出る。Codex on #473）。
+- **owner の Correction**（Codex on #473）: owner が status を決めた claim は、その Correction が support の
+  record が消える（最後の 1 つの最初の丸ごとの tombstone）より前に書かれていれば下げない: `active` は
+  Correction の status を見せ続けるので、derivation も立ったまま supersedes を保つ（下げると、owner が
+  決めたままの claim の陰にあった古い claim が current に戻る）。消えた後に書かれた Correction は status
+  だけを決め、下がった derivation を上げ直さない。どちらも時刻で決まるので、live の consumer と rebuild が
+  同じになる。Pending は owner が status を決めた claim を読みから外さない（見える status は変わらない）。
 - **forget**: support の record を忘れると、その claim は残って proposed になる（spec 6.3 の limits に 1 行）。
   window op の文は 3d-2 の規則（span にある）で消える。
 - 受入テスト: 受け入れ・答え・通った実行で立つ claim の op が support を持ち、user 自身の言葉で立つ claim は
   持たない。support の record を tombstone すると live の consumer でも rebuild でも proposed、claim は残る。
   通った実行が 2 つあって 1 つ消えても done のまま。引用の record を消すと今までどおり（evidence lost）。
   owner の Correction の status は下がらない。record forget で支えを忘れた claim は proposed で残り、その op は
-  書き換わらない。
+  書き換わらない。support の record が消える前に owner が status を決めた claim は下がらず supersedes を保ち、
+  消えた後に決めた claim は下がったまま（rebuild でも同じ）。
 
 #### 3e（PR で詳細を決める）
 

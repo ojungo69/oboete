@@ -1112,12 +1112,15 @@ impl Pending {
         }
         // As Anchors finds them: raw already reads each record as those tombstones leave it.
         let mut ops = std::collections::HashSet::new();
-        // One Anchors lowered already (a record tombstoned twice) is a proposal: nothing to wait for
-        // (Codex on #473).
+        // One Anchors lowered already (a record tombstoned twice) is a proposal: nothing to wait for;
+        // nor for one whose status the owner set, which `active` shows whatever Anchors does (Codex
+        // on #473).
         let mut st = k.prepare_cached(
             "SELECT DISTINCT s.op_device, s.op_seq FROM support s
              JOIN derivations d ON d.op_device = s.op_device AND d.op_seq = s.op_seq
-             WHERE s.device = ?1 AND s.seq = ?2 AND d.status <> 'proposed'",
+             WHERE s.device = ?1 AND s.seq = ?2 AND d.status <> 'proposed'
+               AND NOT EXISTS (SELECT 1 FROM corrections x WHERE x.uid = d.uid
+                               AND x.status IS NOT NULL)",
         )?;
         for (device, seq) in &p.records {
             for op in st.query_map(rusqlite::params![device, seq], |r| {
