@@ -969,11 +969,21 @@ fn capture_exclude(
     };
     let mut raw = raw::open(home)?;
     let was = raw.capture_exclusions()?;
-    let listed = |list: &raw::CaptureExclusions| match key {
-        "folder" => list.folders.contains(&value),
-        _ => list.repos.contains(&value),
+    let (field, stored) = match key {
+        "folder" => ("cwd", &was.folders),
+        _ => ("repo", &was.repos),
     };
-    let had = listed(&was);
+    // An undo takes the entry as it was stored, also one a rule added since would label otherwise
+    // now (Codex on #489).
+    let value = match undo {
+        true => stored
+            .iter()
+            .find(|s| **s == value || capture::exclusion_label(field, s, &settings) == value)
+            .cloned()
+            .unwrap_or(value),
+        false => value,
+    };
+    let had = stored.contains(&value);
     raw.exclude_capture((key, &value), undo)?;
     let list = raw.capture_exclusions()?;
     drop(raw);

@@ -5817,7 +5817,7 @@ mod tests {
         );
         let write = |list: &str, fields: Value| {
             let mut raw = crate::raw::open(&dir).unwrap();
-            raw.work_state(&repo::key(&dir), list, fields.as_object().unwrap())
+            raw.work_state(&repo::key(&dir), list, fields.as_object().unwrap(), None)
                 .unwrap();
         };
         write(
@@ -5888,8 +5888,13 @@ mod tests {
         built_manifest(&dir, &dir, "earlier work");
         let mut raw = crate::raw::open(&dir).unwrap();
         let fields = json!({"phase": "rc2"});
-        raw.work_state(&repo::key(&dir), "release", fields.as_object().unwrap())
-            .unwrap();
+        raw.work_state(
+            &repo::key(&dir),
+            "release",
+            fields.as_object().unwrap(),
+            None,
+        )
+        .unwrap();
         drop(raw);
         Connection::open(dir.join("raw.db"))
             .unwrap()

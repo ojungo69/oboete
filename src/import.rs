@@ -32,6 +32,8 @@ pub struct Stats {
     pub work_state: u64,
     /// Work state rows the checks a write passes refused.
     pub refused: u64,
+    /// Work state rows of a project whose repository is never recorded (slice 4a, I6).
+    pub never_recorded: u64,
 }
 
 struct Session {
@@ -259,6 +261,8 @@ fn work_state(
     stats: &mut Stats,
 ) -> Result<()> {
     let known = raw.work_state_keys(source)?;
+    // A list excluded after this read is refused by the append, which reads the list again.
+    let never = raw.capture_exclusions()?;
     let mut ops = Vec::new();
     each_row(
         src,
@@ -272,6 +276,10 @@ fn work_state(
             }
             let (project, list, fields, at): (String, String, String, i64) =
                 (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+            if never.covers_work_state(&repo(&project)) {
+                stats.never_recorded += 1;
+                return Ok(());
+            }
             let checked =
                 serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&fields)
                     .ok()
@@ -799,6 +807,29 @@ mod tests {
         assert_eq!(work_ops(&raw).len(), 2);
     }
 
+    /// I6, slice 4a (Codex on #489): a project whose repository is never recorded brings no work
+    /// state, its worktree's neither, by the name search reads them under (D13); its rows are
+    /// counted, and an import after the undo brings them.
+    #[test]
+    fn a_repository_never_recorded_keeps_its_imported_work_state_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude_capture(("repo", "github.com/o/free-mem"), false)
+            .unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(
+            (stats.work_state, stats.refused, stats.never_recorded),
+            (0, 0, 4)
+        );
+        assert!(work_ops(&raw).is_empty());
+        raw.exclude_capture(("repo", "github.com/o/free-mem"), true)
+            .unwrap();
+        let after = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!((after.work_state, after.never_recorded), (2, 0));
+    }
+
     /// Codex on #431: a row claude-mem merges into another project after it came in comes in
     /// again under that project, with the same uid, and the index files it there (readers take a
     /// document's newest row); a run after that adds nothing.
@@ -921,7 +952,7 @@ mod tests {
         let mut raw = crate::raw::open(dir.path()).unwrap();
         let repo = "github.com/o/free-mem";
         let done = json!({"task": "Port search", "status": "done"});
-        raw.work_state(repo, "plan", done.as_object().unwrap())
+        raw.work_state(repo, "plan", done.as_object().unwrap(), None)
             .unwrap();
         claude_mem(&mut raw, &src, &Default::default()).unwrap();
         raw.append_ops(&[(
@@ -988,7 +1019,7 @@ mod tests {
         .unwrap();
         let repo = "github.com/o/free-mem";
         let done = json!({"task": "Port search", "status": "done"});
-        raw.work_state(repo, "plan", done.as_object().unwrap())
+        raw.work_state(repo, "plan", done.as_object().unwrap(), None)
             .unwrap();
         let ops = work_ops(&raw);
         assert!(ops[1]["clock"].as_i64().unwrap() < ahead, "{ops:?}");
@@ -1008,8 +1039,13 @@ mod tests {
         let crafted = crate::repo::normalize("ssh://claude-mem:free-mem/x").unwrap();
         assert_eq!(crafted, "claude-mem:free-mem/x");
         let task = |t: &str| json!({"task": t, "status": "todo"});
-        raw.work_state(&crafted, "plan", task("Written here").as_object().unwrap())
-            .unwrap();
+        raw.work_state(
+            &crafted,
+            "plan",
+            task("Written here").as_object().unwrap(),
+            None,
+        )
+        .unwrap();
         raw.append_ops(&[(
             OpKind::WorkState,
             json!({"repo": crafted, "list": "plan", "fields": task("Imported"), "clock": 1,

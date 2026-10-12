@@ -1114,7 +1114,30 @@ impl CaptureExclusions {
                     .any(|f| std::path::Path::new(c).starts_with(f))
             })
     }
+
+    /// Whether a work state op of `repo` is never recorded: its repository listed, or, for a list
+    /// imported from claude-mem, the repository of its project's name (milestone 4 D13,
+    /// docs/claude-mem-import.md I6).
+    pub fn covers_work_state(&self, repo: &str) -> bool {
+        let repos: Vec<String> = self.repos.iter().cloned().collect();
+        crate::embed_phase::import_excluded(repo, &repos)
+    }
 }
+
+/// Slice 4a: a work state write refused inside its transaction: its repository, or the folder it
+/// was written from, excluded from capture by then (Codex on #489).
+#[derive(Debug)]
+pub struct NeverRecorded;
+
+impl std::fmt::Display for NeverRecorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "nothing is recorded in this repository or folder now: the work state was not kept",
+        )
+    }
+}
+
+impl std::error::Error for NeverRecorded {}
 
 /// Every device's exclusion ops in time order, each entry set by the last op that names it: the
 /// repositories `oboete exclude` keeps from being sent, and what is never recorded (level
@@ -3831,6 +3854,31 @@ impl Raw {
         ruleset: &str,
         checkpoint: Option<&Checkpoint>,
     ) -> Result<Vec<i64>> {
+        self.append_imported_with(batch, origins, ruleset, checkpoint, None)
+    }
+
+    /// `append_imported_origins` for records an importer labelled under `settings`: what is never
+    /// recorded is also matched as their labels are made now, so a rule added after an exclusion
+    /// masks both alike, as the hook's check does (slice 4a, Codex on #489).
+    pub fn append_imported_under(
+        &mut self,
+        batch: &[crate::capture::Captured],
+        origins: &[ImportIdentity],
+        settings: &crate::capture::Settings,
+        checkpoint: Option<&Checkpoint>,
+    ) -> Result<Vec<i64>> {
+        let ruleset = settings.rules.version();
+        self.append_imported_with(batch, origins, ruleset, checkpoint, Some(settings))
+    }
+
+    fn append_imported_with(
+        &mut self,
+        batch: &[crate::capture::Captured],
+        origins: &[ImportIdentity],
+        ruleset: &str,
+        checkpoint: Option<&Checkpoint>,
+        settings: Option<&crate::capture::Settings>,
+    ) -> Result<Vec<i64>> {
         anyhow::ensure!(
             origins.is_empty() || origins.len() == batch.len(),
             "import identity count differs from records"
@@ -3867,10 +3915,12 @@ impl Raw {
         }
         let from_seq = next_seq(&tx, &self.device)?;
         let never = capture_exclusions_in(&tx)?;
+        let now = settings.map(|settings| crate::capture::never_recorded(&never, settings));
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
             // Slice 4a: a place never recorded; the checkpoint still moves past it.
-            if never.covers(c.event.repo.as_deref(), c.event.cwd.as_deref()) {
+            let (repo, cwd) = (c.event.repo.as_deref(), c.event.cwd.as_deref());
+            if never.covers(repo, cwd) || now.as_ref().is_some_and(|now| now.covers(repo, cwd)) {
                 continue;
             }
             let identity = origins.get(index);
@@ -4709,13 +4759,34 @@ impl Raw {
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
+        self.append_ops_from(ops, None)
+    }
+
+    /// `append_ops` for ops written from `cwd`, the label of the writer's working directory. A
+    /// work state op of a repository never recorded, or written from a folder never recorded, is
+    /// refused here (`NeverRecorded`), after every exclusion committed before this write (slice
+    /// 4a, Codex on #489).
+    fn append_ops_from(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        cwd: Option<&str>,
+    ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        let lists = ops.iter().any(|(kind, _)| *kind == OpKind::WorkState);
+        let never = lists.then(|| capture_exclusions_in(&tx)).transpose()?;
         for (kind, body) in ops {
             anyhow::ensure!(
                 !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
+            if let Some(never) = &never
+                && *kind == OpKind::WorkState
+                && (never.covers(None, cwd)
+                    || never.covers_work_state(body["repo"].as_str().unwrap_or_default()))
+            {
+                return Err(NeverRecorded.into());
+            }
         }
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
         tx.commit()?;
@@ -4813,12 +4884,15 @@ impl Raw {
     /// as this device's next op; `list` and `fields` have passed the gate (L5). Its clock is one
     /// past every work state clock the store holds and at least now, as an exclusion's; an
     /// imported entry's time, another clock's, lifts none (docs/claude-mem-import.md I5). No
-    /// dispatch lock: a work state write orders against no provider call.
+    /// dispatch lock: a work state write orders against no provider call. `cwd` is the label of
+    /// the writer's working directory: refused (`NeverRecorded`) in a folder never recorded, as in
+    /// a repository never recorded (slice 4a).
     pub fn work_state(
         &mut self,
         repo: &str,
         list: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
+        cwd: Option<&str>,
     ) -> Result<i64> {
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
@@ -4828,7 +4902,7 @@ impl Raw {
         )?;
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
-        Ok(self.append_ops(&[(OpKind::WorkState, op)])?[0])
+        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd)?[0])
     }
 
     /// `work_state_in` on this store.
@@ -8342,6 +8416,46 @@ mod tests {
         );
     }
 
+    /// Slice 4a (Codex on #489): a work state write is refused inside its transaction once its
+    /// repository, the repository of the claude-mem project an imported list is filed under, or
+    /// the folder it is written from is never recorded; elsewhere it is kept.
+    #[test]
+    fn a_work_state_write_is_refused_in_its_transaction_where_nothing_is_recorded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let task = serde_json::json!({ "task": "canary-4a" });
+        let task = task.as_object().unwrap();
+        raw.exclude_capture(("repo", "github.com/o/secret"), false)
+            .unwrap();
+        raw.exclude_capture(("folder", "/x/private"), false)
+            .unwrap();
+        let refused = |written: Result<Vec<i64>>| written.unwrap_err().is::<NeverRecorded>();
+        let imported = |repo: &str| {
+            let op = serde_json::json!({"repo": repo, "list": "plan", "fields": task,
+                "clock": 1, "at": 1, "source": "claude-mem", "source_id": "w1"});
+            vec![(OpKind::WorkState, op)]
+        };
+        let written = |raw: &mut Raw, repo: &str, cwd: Option<&str>| {
+            raw.work_state(repo, "plan", task, cwd).map(|seq| vec![seq])
+        };
+        assert!(refused(written(&mut raw, "github.com/o/secret", None)));
+        assert!(refused(written(
+            &mut raw,
+            "github.com/o/open",
+            Some("/x/private/app")
+        )));
+        assert!(refused(raw.append_ops(&imported("claude-mem:secret/wt"))));
+        assert!(written(&mut raw, "github.com/o/open", Some("/x/privateer")).is_ok());
+        assert!(raw.append_ops(&imported("claude-mem:open")).is_ok());
+        let lists = raw
+            .ops_after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.kind == OpKind::WorkState)
+            .count();
+        assert_eq!(lists, 2);
+    }
+
     /// docs/work-state.md L4: work state folds in its clock's order: a write on a copied store
     /// (another device) comes after every write it holds, even when the old device's clock ran
     /// ahead of the new one's.
@@ -8355,8 +8469,8 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        raw.work_state("r", "release", &phase("one")).unwrap();
-        raw.work_state("r", "release", &phase("two")).unwrap();
+        raw.work_state("r", "release", &phase("one"), None).unwrap();
+        raw.work_state("r", "release", &phase("two"), None).unwrap();
         raw.conn
             .execute(
                 "UPDATE ops SET ts = ts + 3600000,
@@ -8368,9 +8482,11 @@ mod tests {
         let copy = tempfile::tempdir().unwrap();
         std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
         let mut other = open(copy.path()).unwrap();
-        other.work_state("r", "release", &phase("three")).unwrap();
         other
-            .work_state("s", "release", &phase("elsewhere"))
+            .work_state("r", "release", &phase("three"), None)
+            .unwrap();
+        other
+            .work_state("s", "release", &phase("elsewhere"), None)
             .unwrap();
         let phases: Vec<_> = other
             .work_state_entries("r")

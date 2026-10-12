@@ -1887,7 +1887,6 @@ fn events(
     // with it (`db::delete_session`), and the owner's store held none on 2026-10-01.
     let mut st = v1.prepare(EVENTS_SQL)?;
     let mut rows = st.query([through])?;
-    let ruleset = settings.rules.version();
     let mut batch = Batch::default();
     while let Some(r) = rows.next()? {
         let row = v1_row(r)?;
@@ -1898,7 +1897,7 @@ fn events(
         if batch.records.len() + captured.len() > IMPORT_BATCH
             || batch.bytes + bytes > MAX_BATCH_BYTES
         {
-            stats.records += batch.append(raw, &key, ruleset)?;
+            stats.records += batch.append(raw, &key, settings)?;
             notify(stats, Stage::Events, committed);
             #[cfg(test)]
             if let Some(between) = BETWEEN_BATCHES.with(|seam| seam.borrow_mut().take()) {
@@ -1925,7 +1924,7 @@ fn events(
         stats.events += 1;
     }
     if batch.last.is_some() {
-        stats.records += batch.append(raw, &key, ruleset)?;
+        stats.records += batch.append(raw, &key, settings)?;
         notify(stats, Stage::Events, committed);
     }
     Ok(())
@@ -1979,7 +1978,7 @@ struct Batch {
 impl Batch {
     /// The records in (ts, id) order with the checkpoint, also when none was recorded; nothing
     /// when no event was read. The records appended.
-    fn append(&mut self, raw: &mut Raw, key: &str, ruleset: &str) -> Result<u64> {
+    fn append(&mut self, raw: &mut Raw, key: &str, settings: &Settings) -> Result<u64> {
         let Some(last) = self.last.take() else {
             return Ok(0);
         };
@@ -1995,7 +1994,7 @@ impl Batch {
             prefix: None,
         };
         Ok(raw
-            .append_imported_origins(&records, &origins, ruleset, Some(&checkpoint))?
+            .append_imported_under(&records, &origins, settings, Some(&checkpoint))?
             .len() as u64)
     }
 }
@@ -2064,7 +2063,6 @@ fn repos(
     let mut known = raw.touches(SOURCE)?;
     let mut st = v1.prepare(REPOS_SQL)?;
     let mut rows = st.query([])?;
-    let ruleset = settings.rules.version();
     let mut batch = Vec::new();
     while let Some(r) = rows.next()? {
         for c in captured_repo(r, settings)? {
@@ -2074,7 +2072,7 @@ fn repos(
         }
     }
     for chunk in batch.chunks(IMPORT_BATCH) {
-        stats.repos += raw.append_imported(chunk, ruleset, None)?.len() as u64;
+        stats.repos += raw.append_imported_under(chunk, &[], settings, None)?.len() as u64;
         notify(stats, Stage::Repos, committed);
     }
     Ok(())
@@ -3531,6 +3529,33 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
         raw.exclude("github.com/o/secret", false).unwrap();
         let after = sent(&raw);
         assert!(!after.contains("Secret plan.") && after.contains("Open work."));
+    }
+
+    /// Slice 4a (Codex on #489): a repository excluded before a rule that masks part of its key is
+    /// still never recorded by a pass, its events and its `session_repos` rows alike: the pass
+    /// matches the list as its labels are made now.
+    #[test]
+    fn a_rule_added_after_a_repository_was_excluded_keeps_its_v1_records_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = V1::new(dir.path());
+        v1.session("s1", "github.com/o/acme-482915", 100);
+        v1.prompt("s1", 110, "canary-4a");
+        v1.session("s2", "github.com/o/open", 200);
+        v1.touched("s2", "github.com/o/acme-482915");
+        v1.prompt("s2", 210, "Open work.");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.exclude_capture(("repo", "github.com/o/acme-482915"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        pass(home.path(), &mut raw, &v1.path).unwrap();
+        let repos: std::collections::BTreeSet<_> =
+            records(&raw).into_iter().map(|e| e.repo).collect();
+        assert_eq!(repos, [Some("github.com/o/open".to_owned())].into());
     }
 
     /// D5: v1's observations, summaries and prompts become import ops under their uids (v1's own,

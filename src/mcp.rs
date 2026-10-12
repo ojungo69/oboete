@@ -348,7 +348,12 @@ impl Oboete {
                 "nothing is recorded here, so no work state is kept: {why}"
             ));
         }
-        raw.work_state(&repo, &list, &fields).map_err(internal)?;
+        // An exclusion committed since that read refuses the write in its transaction.
+        let cwd = crate::capture::exclusion_label("cwd", &self.cwd.to_string_lossy(), &settings);
+        match raw.work_state(&repo, &list, &fields, Some(&cwd)) {
+            Err(e) if e.is::<crate::raw::NeverRecorded>() => return failed(e.to_string()),
+            written => written.map_err(internal)?,
+        };
         let entries = raw.work_state_entries(&repo).map_err(internal)?;
         text(crate::work_state::written(
             &list,

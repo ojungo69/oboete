@@ -3601,9 +3601,11 @@ pub(crate) mod tests {
         let mut raw = raw::open(p).unwrap();
         let fields = |v: serde_json::Value| v.as_object().unwrap().clone();
         let state = fields(serde_json::json!({"phase": "rc2"}));
-        raw.work_state("github.com/o/r", "release", &state).unwrap();
+        raw.work_state("github.com/o/r", "release", &state, None)
+            .unwrap();
         let task = fields(serde_json::json!({"task": "notes", "status": "doing"}));
-        raw.work_state("github.com/o/r", "release", &task).unwrap();
+        raw.work_state("github.com/o/r", "release", &task, None)
+            .unwrap();
         let before = raw.work_state_entries("github.com/o/r").unwrap();
         drop(raw);
         export(p).unwrap();
