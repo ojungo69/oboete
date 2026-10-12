@@ -422,7 +422,8 @@ fn record_derived_uids(conn: &Connection) -> Result<std::collections::HashMap<St
 }
 
 /// Each forgotten record's vector key (`<device>:<seq>`, kind 'r'): a carry takes no vector of
-/// one (slice 3c). None in a store a writer of forget never opened.
+/// one (slice 3c), nor of a record a rescan masked, whose vector may be of its text before the mask
+/// (slice 3e-1). No forgotten record in a store a writer of forget never opened.
 fn forgotten_record_keys(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let tables: bool = conn.query_row(
         "SELECT COUNT(*) = 2 FROM sqlite_master
@@ -430,14 +431,18 @@ fn forgotten_record_keys(conn: &Connection) -> Result<std::collections::HashSet<
         [],
         |r| r.get(0),
     )?;
-    if !tables {
-        return Ok(std::collections::HashSet::new());
-    }
-    Ok(conn
-        .prepare(
+    let masked = "SELECT target_device || ':' || target_seq FROM records
+                  WHERE type = 'tombstone' AND target_offset IS NOT NULL";
+    let sql = if tables {
+        format!(
             "SELECT o.device || ':' || o.seq FROM denied_records d
-             JOIN import_origins o ON o.origin = d.origin",
-        )?
+             JOIN import_origins o ON o.origin = d.origin UNION {masked}"
+        )
+    } else {
+        masked.to_owned()
+    };
+    Ok(conn
+        .prepare(&sql)?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?)
 }
@@ -451,11 +456,23 @@ fn forgotten_uid(conn: &Connection, uid: &str) -> Result<bool> {
     )?)
 }
 
-/// What forget denies: records by origin, and uids by their forget ops. The derived writers'
-/// fence (rule 12) and a preview's token count both, so a uid's forget also cuts a window in
-/// flight again (D5: rare, and safe).
+/// What forget denies: records by origin, and uids by their forget ops. A preview's token count,
+/// and with the masks the derived writers' fence (`FENCE_COUNT`).
 const DENIED_COUNT: &str = "SELECT (SELECT COUNT(*) FROM denied_records)
   + (SELECT COUNT(*) FROM ops WHERE type = 'forget')";
+
+/// The derived writers' fence (rule 12): what forget denies, so a uid's forget also cuts a window in
+/// flight again (D5: rare, and safe), and the ranges a rescan masked (slice 3e-1): what a curator
+/// or a turn's call read before one is cut again, never written.
+const FENCE_COUNT: &str = "SELECT (SELECT COUNT(*) FROM denied_records)
+  + (SELECT COUNT(*) FROM ops WHERE type = 'forget')
+  + (SELECT COUNT(*) FROM records WHERE type = 'tombstone' AND target_offset IS NOT NULL)";
+
+/// Slice 3e-1: how many ranges a rescan masked, and how many of them the last purge that did every
+/// step paid (`Raw::masks_owed`).
+const MASKS: &str = "SELECT
+    (SELECT COUNT(*) FROM records WHERE type = 'tombstone' AND target_offset IS NOT NULL),
+    (SELECT value FROM meta WHERE key = 'rescan_masks_paid')";
 
 /// Opposite import sources do not share event identifiers. Keep exact-origin denials, but
 /// refuse an import that could reintroduce their copy from the other source.
@@ -2439,6 +2456,33 @@ impl Raw {
         Ok(self.conn.query_row(DENIED_COUNT, [], |r| r.get(0))?)
     }
 
+    /// What a derived writer is fenced by (`FENCE_COUNT`).
+    pub fn fence_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row(FENCE_COUNT, [], |r| r.get(0))?)
+    }
+
+    /// Slice 3e-1: while raw.db holds more ranges a rescan masked than the last purge that did
+    /// every step paid, the masks are owed to the stored bytes: raw.db's rows, what was made from
+    /// them, knowledge.db, the backups and the copies of raw.db. How many it holds then. A store
+    /// from before this version, or rebuilt from segments (a new meta), has paid none.
+    pub(crate) fn masks_owed(&self) -> Result<Option<String>> {
+        let (held, paid): (i64, Option<String>) = self
+            .conn
+            .query_row(MASKS, [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let paid = paid.and_then(|p| p.parse::<i64>().ok()).unwrap_or(0);
+        Ok((held > paid).then(|| held.to_string()))
+    }
+
+    /// Once a purge that read `seen` (`masks_owed`) has done every step: a range that came
+    /// meanwhile is owed still.
+    pub(crate) fn masks_paid(&self, seen: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('rescan_masks_paid', ?1)",
+            [seen],
+        )?;
+        Ok(())
+    }
+
     /// D5: `uid`'s ops in the op log when knowledge.db has not read them yet (right after an
     /// import, or while the worker lags; Codex on #435): a claim's, its uid computed as the
     /// consumer computes it, with the corrections that name it, or a document's import ops. Its
@@ -2573,7 +2617,7 @@ impl Raw {
     pub(crate) fn record_claims(&self, forgotten: &Forgotten) -> Result<RecordClaims> {
         let mut claims = RecordClaims {
             uids: forgotten.uids.clone(),
-            keys: std::collections::HashMap::new(),
+            ..RecordClaims::default()
         };
         // A store that never forgot a record, as most: its claim ops are not read.
         if forgotten.is_empty() {
@@ -2582,29 +2626,34 @@ impl Raw {
         let mut all: std::collections::HashMap<String, Vec<(String, i64)>> =
             std::collections::HashMap::new();
         let mut st = self.conn.prepare(
-            "SELECT device, op_seq, body FROM ops WHERE type = 'claim' ORDER BY device, op_seq",
+            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'claim'
+             ORDER BY device, op_seq",
         )?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
-            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
             else {
                 continue;
             };
             let Some(uid) = crate::claims::op_uid(&body) else {
                 continue;
             };
-            let first = body["evidence"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find_map(|e| forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?));
-            if let Some((_, job, _)) = first {
-                claims
-                    .uids
-                    .entry(uid.clone())
-                    .or_insert_with(|| job.clone());
+            let key: (String, i64) = (row.get(0)?, row.get(1)?);
+            match quoted_entry(forgotten, row.get(2)?, &body) {
+                // Slice 3e-1: this op alone, its uid not tombstoned.
+                Some((_, job, Some(at))) if job == MASK_JOB => {
+                    claims.masked.push(key.clone());
+                    claims.masked_uids.entry(uid.clone()).or_insert(*at);
+                }
+                Some((_, job, _)) => {
+                    claims
+                        .uids
+                        .entry(uid.clone())
+                        .or_insert_with(|| job.clone());
+                }
+                None => {}
             }
-            all.entry(uid).or_default().push((row.get(0)?, row.get(1)?));
+            all.entry(uid).or_default().push(key);
         }
         drop(rows);
         let mut st = self.conn.prepare(
@@ -2653,7 +2702,43 @@ impl Raw {
         Ok(Forgotten {
             records,
             uids: self.record_derived_uids()?,
+            masked: Default::default(),
         })
+    }
+
+    /// Slice 3e-1: `forgotten_records`, with every record a rescan masked (`Forgotten::with_masks`),
+    /// by the time of its latest mask.
+    pub(crate) fn forgotten_and_masked(&self) -> Result<Forgotten> {
+        let masks = self
+            .conn
+            .prepare(
+                "SELECT target_device, target_seq, MAX(ts) FROM records
+                 WHERE type = 'tombstone' AND target_offset IS NOT NULL
+                 GROUP BY target_device, target_seq",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(self.forgotten_records()?.with_masks(masks))
+    }
+
+    /// Slice 3e-1: what step 4 masks the backup's record lines and the copies' rows by (`Masks`).
+    pub(crate) fn masks(&self) -> Result<Masks> {
+        let mut masks = Masks::new();
+        let mut st = self.conn.prepare(
+            "SELECT t.target_device, t.target_seq, t.target_offset, t.target_length,
+               (SELECT r.ts FROM records r WHERE r.device = t.target_device
+                  AND r.seq = t.target_seq AND r.type = 'event')
+             FROM records t WHERE t.type = 'tombstone' AND t.target_offset IS NOT NULL",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let mask = masks
+                .entry((r.get(0)?, r.get(1)?))
+                .or_insert_with(|| (None, Vec::new()));
+            mask.0 = r.get(4)?;
+            mask.1.push((r.get(2)?, r.get(3)?));
+        }
+        Ok(masks)
     }
 
     /// Slice 3d-2: the window and turn ops that showed the curator a forgotten record or a claim
@@ -2717,8 +2802,13 @@ impl Raw {
 
     /// Slice 3d-2: how step 4 judges the backup's ops and the copies' (`Judge`), with the bodies
     /// of the window and turn ops a purge rewrote in raw.db.
-    pub(crate) fn judge(&self) -> Result<Judge> {
-        let (_, mut judge) = self.record_ops(self.forgotten_records()?)?;
+    pub(crate) fn judge(&self, masks: bool) -> Result<Judge> {
+        let forgotten = if masks {
+            self.forgotten_and_masked()?
+        } else {
+            self.forgotten_records()?
+        };
+        let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
         Ok(judge)
     }
@@ -2815,6 +2905,73 @@ impl Raw {
                 for (device, op_seq) in claims.keys.get(*uid).into_iter().flatten() {
                     rewritten += st.execute(params![body, device, op_seq])?;
                 }
+            }
+            tx.commit()?;
+        }
+        Ok(rewritten)
+    }
+
+    /// Slice 3e-1: the claim ops `ops` (`RecordClaims::masked`) given the body
+    /// `{"forgotten": "rescan"}`, their uids not tombstoned, in transactions of
+    /// `RECORD_PURGE_BATCH` ops under dispatch. How many it rewrote.
+    pub(crate) fn purge_masked_claims(&mut self, ops: &[(String, i64)]) -> Result<usize> {
+        let body = serde_json::json!({ "forgotten": MASK_JOB }).to_string();
+        let mut rewritten = 0;
+        for batch in ops.chunks(RECORD_PURGE_BATCH) {
+            let _dispatch = crate::dispatch::exclusive(&self.home)
+                .context("the claims made from the masked records were not purged")?;
+            self.current()?;
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            {
+                let mut st = tx.prepare_cached(
+                    "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND type = 'claim'
+                       AND body <> ?1",
+                )?;
+                for (device, op_seq) in batch {
+                    rewritten += st.execute(params![body, device, op_seq])?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(rewritten)
+    }
+
+    /// Slice 3e-1: each record a rescan masked, its row's body with every range of it as `*`
+    /// (`masked`: as many bytes, so every offset into it holds) where it still holds one of them,
+    /// and its ledger rows without their field, as an export writes them, in transactions of
+    /// `RECORD_PURGE_BATCH` records under dispatch. A Removed row has nothing to mask. How many
+    /// rows it rewrote.
+    pub(crate) fn mask_rows(&mut self) -> Result<usize> {
+        let mut masks: Vec<_> = self.masks()?.into_iter().collect();
+        masks.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut rewritten = 0;
+        for batch in masks.chunks(RECORD_PURGE_BATCH) {
+            let _dispatch = crate::dispatch::exclusive(&self.home)
+                .context("the masked records were not purged")?;
+            self.current()?;
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            for ((device, seq), (_, ranges)) in batch {
+                use rusqlite::OptionalExtension;
+                let row: Option<(Vec<u8>, String)> = tx
+                    .query_row(
+                        "SELECT body, enc FROM records
+                         WHERE device = ?1 AND seq = ?2 AND type = 'event'",
+                        params![device, seq],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((body, enc)) = row else { continue };
+                if let Some((body, enc)) = masked_row(body, &enc, ranges)? {
+                    rewritten += tx.execute(
+                        "UPDATE records SET body = ?1, enc = ?2 WHERE device = ?3 AND seq = ?4",
+                        params![body, enc, device, seq],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE ledger SET field = '~tombstoned'
+                     WHERE device = ?1 AND seq = ?2 AND field <> '~tombstoned'",
+                    params![device, seq],
+                )?;
             }
             tx.commit()?;
         }
@@ -3964,12 +4121,12 @@ impl Raw {
     pub fn append_ops_fenced(
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
-        denied: i64,
+        fence: i64,
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
-        let now: i64 = tx.query_row(DENIED_COUNT, [], |r| r.get(0))?;
-        if now != denied {
+        let now: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
+        if now != fence {
             return Err(crate::curate::ListChanged.into());
         }
         for (kind, body) in ops {
@@ -5192,6 +5349,7 @@ pub(crate) fn purge_copies(
     home: &Path,
     jobs: &std::collections::HashMap<String, String>,
     origins: &ForgottenOrigins,
+    masks: &Masks,
     judge: &Judge,
 ) -> Result<(usize, usize)> {
     let (mut rewritten, mut removed) = (0, 0);
@@ -5200,7 +5358,7 @@ pub(crate) fn purge_copies(
         let done = if copy.ends_with("raw.db.restoring") {
             None
         } else {
-            rewrite_copy(&copy, jobs, origins, judge).ok()
+            rewrite_copy(&copy, jobs, origins, masks, judge).ok()
         };
         match done {
             Some(0) => {}
@@ -5290,6 +5448,7 @@ fn rewrite_copy(
     copy: &Path,
     jobs: &std::collections::HashMap<String, String>,
     origins: &ForgottenOrigins,
+    masks: &Masks,
     judge: &Judge,
 ) -> Result<usize> {
     let mut conn = Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -5348,6 +5507,54 @@ fn rewrite_copy(
             if ledger {
                 tx.execute(
                     "DELETE FROM ledger WHERE device = ?1 AND seq = ?2",
+                    params![device, seq],
+                )?;
+            }
+        }
+    }
+    // Slice 3e-1: its rows of records a rescan masked, as `Raw::mask_rows` writes raw.db's.
+    if !masks.is_empty() && has("records")? {
+        use rusqlite::OptionalExtension;
+        // A copy older than the column has none to write (Task 10 added `enc`, the ledger `field`).
+        let column = |table: &str, name: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+                [table, name],
+                |r| r.get(0),
+            )
+        };
+        let ledger = has("ledger")? && column("ledger", "field")?;
+        let enc = column("records", "enc")?;
+        let read = format!(
+            "SELECT body, {}, ts FROM records WHERE device = ?1 AND seq = ?2 AND type = 'event'",
+            if enc { "enc" } else { "'plain'" }
+        );
+        for ((device, seq), (ts, ranges)) in masks {
+            let row: Option<(Vec<u8>, String, i64)> = tx
+                .query_row(&read, params![device, seq], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .optional()?;
+            let Some((body, stored, _)) = row.filter(|r| ts.is_none_or(|ts| r.2 == ts)) else {
+                continue;
+            };
+            if let Some((body, now)) = masked_row(body, &stored, ranges)? {
+                rewritten += if enc {
+                    tx.execute(
+                        "UPDATE records SET body = ?1, enc = ?2 WHERE device = ?3 AND seq = ?4",
+                        params![body, now, device, seq],
+                    )?
+                } else {
+                    tx.execute(
+                        "UPDATE records SET body = ?1 WHERE device = ?2 AND seq = ?3",
+                        params![body, device, seq],
+                    )?
+                };
+            }
+            if ledger {
+                tx.execute(
+                    "UPDATE ledger SET field = '~tombstoned'
+                     WHERE device = ?1 AND seq = ?2 AND field <> '~tombstoned'",
                     params![device, seq],
                 )?;
             }
@@ -5437,7 +5644,15 @@ const FORGOTTEN_RECORDS: &str = "denied_records d
 pub(crate) struct Forgotten {
     records: std::collections::HashMap<String, Vec<(i64, String, Option<i64>)>>,
     pub(crate) uids: std::collections::HashMap<String, String>,
+    /// Slice 3e-1: the uids of the claims made from a masked record's text before its mask, with
+    /// the time of the mask: a window that showed one before then showed its text.
+    pub(crate) masked: std::collections::HashMap<String, i64>,
 }
+
+/// Slice 3e-1: the job a masked record is `Forgotten`'s by, and that takes the text of what was
+/// made from it before its mask (`{"forgotten": "rescan"}`): a rescan's range, which no forget job
+/// names.
+pub(crate) const MASK_JOB: &str = "rescan";
 
 impl Forgotten {
     /// A preview's: `records` as they would be forgotten, and the claims that quote them.
@@ -5462,6 +5677,25 @@ impl Forgotten {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty() && self.uids.is_empty()
+    }
+
+    /// Slice 3e-1: `masks` (device, seq and the time of the record's latest mask) as `MASK_JOB`'s,
+    /// each record a forget took aside: it is forgotten whole.
+    fn with_masks(mut self, masks: Vec<(String, i64, i64)>) -> Self {
+        let masks: Vec<_> = masks
+            .into_iter()
+            .filter(|(device, seq, _)| self.entry(device, *seq).is_none())
+            .collect();
+        for (device, seq, at) in masks {
+            self.records
+                .entry(device)
+                .or_default()
+                .push((seq, MASK_JOB.to_owned(), Some(at)));
+        }
+        for seqs in self.records.values_mut() {
+            seqs.sort_by_key(|r| r.0);
+        }
+        self
     }
 
     /// The forgotten record `seq` of `device`.
@@ -5558,11 +5792,21 @@ impl Judge {
             .find(shown)
             .map(|r| r.1.clone())
             .or_else(|| {
-                items(&body["candidates"])
-                    .iter()
-                    .chain(items(&body["carried"]))
+                let shown = || {
+                    items(&body["candidates"])
+                        .iter()
+                        .chain(items(&body["carried"]))
+                };
+                shown()
                     .find_map(|u| self.forgotten.uids.get(u.as_str()?))
                     .cloned()
+                    // Slice 3e-1: a claim made from a masked record's text, shown before the mask.
+                    .or_else(|| {
+                        shown()
+                            .filter_map(|u| self.forgotten.masked.get(u.as_str()?))
+                            .any(|at| ts <= at.saturating_add(SHOWN_MARGIN_MS))
+                            .then(|| MASK_JOB.to_owned())
+                    })
             })
     }
 
@@ -5624,21 +5868,11 @@ impl Judge {
                 Some(body.to_string())
             }
             OpKind::Claim => {
-                Some(serde_json::json!({ "forgotten": self.claim_job(body)? }).to_string())
+                let job = &quoted_entry(&self.forgotten, ts, body)?.1;
+                Some(serde_json::json!({ "forgotten": job }).to_string())
             }
             _ => None,
         }
-    }
-
-    /// The job of the first forgotten record claim op `body` quotes.
-    fn claim_job(&self, body: &serde_json::Value) -> Option<String> {
-        items(&body["evidence"])
-            .iter()
-            .find_map(|e| {
-                self.forgotten
-                    .entry(e["device"].as_str()?, e["seq"].as_i64()?)
-            })
-            .map(|r| r.1.clone())
     }
 
     /// What the backup's ops segments and the copies of raw.db hold that raw.db does not, read
@@ -5646,18 +5880,33 @@ impl Judge {
     /// from a forgotten record, which a window's candidates and carried name, then the spans of
     /// the window ops among them, which a turn reads (rule b), with the job that takes each.
     pub(crate) fn widen(&mut self, home: &Path) -> Result<()> {
-        let mut uids = std::collections::HashMap::new();
-        let mut claim = |kind: OpKind, _: (&str, i64), _: i64, body: &serde_json::Value| {
+        let (mut uids, mut masked) = (
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let mut claim = |kind: OpKind, _: (&str, i64), ts: i64, body: &serde_json::Value| {
             if kind == OpKind::Claim
-                && let (Some(uid), Some(job)) = (op_uid(kind, body), self.claim_job(body))
+                && let (Some(uid), Some(r)) =
+                    (op_uid(kind, body), quoted_entry(&self.forgotten, ts, body))
             {
-                uids.entry(uid).or_insert(job);
+                // Slice 3e-1: a masked record's claim is not forgotten by its uid.
+                match r {
+                    (_, job, Some(at)) if job == MASK_JOB => {
+                        masked.entry(uid).or_insert(*at);
+                    }
+                    (_, job, _) => {
+                        uids.entry(uid).or_insert_with(|| job.clone());
+                    }
+                }
             }
         };
         crate::backup::each_op(home, &mut claim)?;
         each_copy_op(home, &mut claim)?;
         for (uid, job) in uids {
             self.forgotten.uids.entry(uid).or_insert(job);
+        }
+        for (uid, at) in masked {
+            self.forgotten.masked.entry(uid).or_insert(at);
         }
         let held: std::collections::HashSet<(String, i64)> = self
             .spans
@@ -5779,6 +6028,36 @@ pub(crate) fn forgotten_turn_body(body: &serde_json::Value, job: &str) -> serde_
     b
 }
 
+/// Slice 3e-1: a row's stored body (`enc` as stored) with each of `ranges` masked (`masked`), stored
+/// as `compress_through` would store it: none when it held none of them.
+fn masked_row(
+    body: Vec<u8>,
+    enc: &str,
+    ranges: &[(i64, i64)],
+) -> Result<Option<(Vec<u8>, &'static str)>> {
+    let plain = if enc == "zstd" { unzstd(&body)? } else { body };
+    let text = String::from_utf8_lossy(&plain).into_owned();
+    let now = ranges.iter().fold(text.clone(), |t, &(offset, length)| {
+        masked(&t, offset, length)
+    });
+    if now == text {
+        return Ok(None);
+    }
+    let z = (enc == "zstd")
+        .then(|| zstd::bulk::compress(now.as_bytes(), 3))
+        .transpose()?
+        .filter(|z| z.len() < now.len());
+    Ok(Some(match z {
+        Some(z) => (z, "zstd"),
+        None => (now.into_bytes(), "plain"),
+    }))
+}
+
+/// Slice 3e-1: each record a rescan masked, by its device and seq: the time of its row when raw.db
+/// holds it (a backup line or a copy's row of another record at a seq used again is not it), and
+/// its ranges (`Raw::masks`).
+pub(crate) type Masks = std::collections::HashMap<(String, i64), (Option<i64>, Vec<(i64, i64)>)>;
+
 /// Slice 3d-1: the claims made from forgotten records whose ops hold text (`Raw::record_claims`).
 #[derive(Debug, Default)]
 pub(crate) struct RecordClaims {
@@ -5786,6 +6065,32 @@ pub(crate) struct RecordClaims {
     pub(crate) uids: std::collections::HashMap<String, String>,
     /// The ops of each uid that hold text: its claim ops and Correction ops.
     pub(crate) keys: std::collections::HashMap<String, Vec<(String, i64)>>,
+    /// Slice 3e-1: the claim ops made from a masked record's text before its mask, each by its
+    /// device and op seq, and their uids with the time of the mask (`Forgotten::masked`).
+    pub(crate) masked: Vec<(String, i64)>,
+    pub(crate) masked_uids: std::collections::HashMap<String, i64>,
+}
+
+/// The entry of the first forgotten record claim op `body` quotes, else of the first masked one
+/// (slice 3e-1) when the op, written at `ts`, came before that mask (`SHOWN_MARGIN_MS`): what
+/// takes its text. A forget comes first: it tombstones the uid.
+fn quoted_entry<'a>(
+    forgotten: &'a Forgotten,
+    ts: i64,
+    body: &serde_json::Value,
+) -> Option<&'a (i64, String, Option<i64>)> {
+    let quoted = |mask: bool| {
+        items(&body["evidence"]).iter().find_map(|e| {
+            forgotten
+                .entry(e["device"].as_str()?, e["seq"].as_i64()?)
+                .filter(|r| (r.1 == MASK_JOB) == mask)
+        })
+    };
+    quoted(false).or_else(|| {
+        quoted(true).filter(|r| {
+            r.2.is_none_or(|at| ts <= at.saturating_add(SHOWN_MARGIN_MS))
+        })
+    })
 }
 
 /// Each forgotten record's identity (slice 3c-2), with the native session and ambiguity its
@@ -5882,7 +6187,7 @@ fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Re
 
 /// `body` with the bytes from `offset` for `length` replaced by `*`, widened to whole characters
 /// and cut at the body's end.
-fn masked(body: &str, offset: i64, length: i64) -> String {
+pub(crate) fn masked(body: &str, offset: i64, length: i64) -> String {
     let clamp = |n: i64| usize::try_from(n).unwrap_or(0).min(body.len());
     let (mut start, mut end) = (clamp(offset), clamp(offset.saturating_add(length)));
     while !body.is_char_boundary(start) {

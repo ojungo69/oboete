@@ -901,6 +901,15 @@ pub(crate) fn doctor_lines(home: &Path) -> Result<(Vec<String>, bool)> {
         })
         .collect();
     let stopped = !lines.is_empty();
+    let mut lines = lines;
+    // Slice 3e-1: not stopped, owed (a continuation or the worker's next look finishes it).
+    if crate::raw::exists(home) && crate::raw::open(home)?.masks_owed()?.is_some() {
+        lines.push(
+            "redaction masks: a rescan's masks are not yet in raw.db's rows, knowledge.db and the \
+             backups; `oboete forget --continue` puts them there"
+                .to_owned(),
+        );
+    }
     Ok((lines, stopped))
 }
 
@@ -921,6 +930,11 @@ pub struct Purged {
     pub ops: usize,
     /// Rows of forgotten records rewritten without their text (slice 3c).
     pub records: usize,
+    /// Rows of records a rescan masked, rewritten with the masks (slice 3e-1).
+    pub masked: usize,
+    /// Whether it went on with a rescan's masks (slice 3e-1): what `forget --continue` reports
+    /// with no job.
+    pub masks: bool,
     /// Jobs not done this time: readers kept raw.db-wal from truncating, or a restore put the
     /// text back meanwhile.
     pub unfinished: Vec<String>,
@@ -1083,14 +1097,19 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
     }
-    let (due, records_due, owed) = {
+    let (due, records_due, owed, masks) = {
         let raw = crate::raw::open(home)?;
-        (due(&raw)?, records_due(&raw)?, raw.record_backups_owed()?)
+        let owed = raw.record_backups_owed()?;
+        (due(&raw)?, records_due(&raw)?, owed, raw.masks_owed()?)
     };
     purged.jobs = due.len() + records_due.len();
-    if purged.jobs == 0 && !owed {
+    purged.masks = masks.is_some();
+    if purged.jobs == 0 && !owed && masks.is_none() {
         return Ok(Some(purged));
     }
+    // Slice 3e-1: whether the ranges a rescan masked reached raw.db's rows, what was made from them,
+    // raw.db-wal and knowledge.db: they are paid only then, and after step 4.
+    let mut masked = masks.is_none();
     // Step 2 for the jobs whose ops (a record job: whose rows, slice 3c) hold text, or that never
     // took it; the rebuild for those and the ones stopped after step 2. A job past step 3 does not
     // go back to the rebuild (2c, decision 8): a stopped one would rebuild at every continuation.
@@ -1099,7 +1118,10 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     let records_step_2 = records_due
         .iter()
         .any(|(_, step, held)| step_2(*step, *held));
-    if records_step_2 || due.iter().any(|(_, _, step, held)| step_2(*step, *held)) {
+    if records_step_2
+        || masks.is_some()
+        || due.iter().any(|(_, _, step, held)| step_2(*step, *held))
+    {
         let _worker = crate::worker::lock_asking(home)?;
         let mut raw = crate::raw::open(home)?;
         for (job, uid, step, held) in &due {
@@ -1107,19 +1129,34 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                 purged.ops += raw.purge_uid(uid, job)?;
             }
         }
-        if records_step_2 {
+        if records_step_2 || masks.is_some() {
             raw.owe_record_backups(true)?;
+            let forgotten = |raw: &crate::raw::Raw| {
+                if masks.is_some() {
+                    raw.forgotten_and_masked()
+                } else {
+                    raw.forgotten_records()
+                }
+            };
             // What was made from them first: a claim the anchors consumer keeps (its active
             // derivation quotes another record) is shown until its uid is tombstoned, and the rows
             // can take minutes. The claims before the window and turn ops: a window that showed
-            // one is found by its forget op (3d-2).
-            purged.ops +=
-                raw.purge_record_claims(&raw.record_claims(&raw.forgotten_records()?)?)?;
-            purged.ops += raw.purge_record_ops(&raw.record_ops(raw.forgotten_records()?)?.0)?;
+            // one is found by its forget op (3d-2). Slice 3e-1: a masked record's claim, whose uid
+            // is not tombstoned, after them: until then its op is how they are found.
+            let claims = raw.record_claims(&forgotten(&raw)?)?;
+            purged.ops += raw.purge_record_claims(&claims)?;
+            let mut shown = forgotten(&raw)?;
+            shown.masked = claims.masked_uids;
+            purged.ops += raw.purge_record_ops(&raw.record_ops(shown)?.0)?;
+            purged.ops += raw.purge_masked_claims(&claims.masked)?;
             crate::backup::fail_after("record_claims_purged")?;
             purged.records = raw.purge_records()?;
+            if masks.is_some() {
+                purged.masked = raw.mask_rows()?;
+            }
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
+        masked |= truncated;
         let holding = record_jobs_with_text(&raw)?;
         for (job, step, held) in records_due {
             if !step_2(step, held) {
@@ -1161,7 +1198,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     // The worker lock and raw are let go: the rebuild takes them itself.
     let uids: HashSet<String> = rebuild.iter().map(|(_, uid)| uid.clone()).collect();
-    let rebuilds = !rebuild.is_empty() || !record_rebuild.is_empty();
+    let rebuilds = !rebuild.is_empty() || !record_rebuild.is_empty() || masks.is_some();
     if rebuilds {
         // Rebuilt for every job not past step 3, though knowledge.db holds no row of its uid: rows
         // a rewind took out (a raw.db put back from an older copy) leave the text in the vector
@@ -1264,7 +1301,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // does not hold judged by the same rules: every ops segment, as one set aside may hold
         // such an op (Codex and CodeRabbit on #472).
         let (origins, judge) = if records_owed {
-            let mut judge = raw.judge()?;
+            let mut judge = raw.judge(masks.is_some())?;
             // And what only they hold, read first: the claims made from a forgotten record, every
             // op of their uids, and the spans of the windows (Codex on #472).
             judge.widen(home)?;
@@ -1275,15 +1312,21 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         } else {
             Default::default()
         };
+        // Slice 3e-1: and the lines and rows of the records a rescan masked, masked as raw.db's.
+        let masks_of = if masks.is_some() {
+            raw.masks()?
+        } else {
+            crate::raw::Masks::new()
+        };
         let ops = crate::backup::purge_ops(home, &jobs, &judge)?;
         (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
         if records_owed {
-            let lines = crate::backup::purge_record_segments(home, &origins)?;
+            let lines = crate::backup::purge_record_segments(home, &origins, &masks_of)?;
             purged.segments += lines.live + lines.aside;
             purged.segments_removed += lines.removed;
         }
         (purged.copies, purged.copies_removed) =
-            crate::raw::purge_copies(home, &jobs, &origins, &judge)?;
+            crate::raw::purge_copies(home, &jobs, &origins, &masks_of, &judge)?;
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 4)?;
         }
@@ -1305,6 +1348,11 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 5)?;
         }
+    }
+    match masks.as_deref() {
+        Some(seen) if masked => raw.masks_paid(seen)?,
+        Some(_) => purged.unfinished.push(crate::raw::MASK_JOB.to_owned()),
+        None => {}
     }
     Ok(Some(purged))
 }
@@ -1340,7 +1388,10 @@ pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
     }
     let waiting = due(raw)
         .and_then(|due| {
-            Ok(!due.is_empty() || !records_due(raw)?.is_empty() || raw.record_backups_owed()?)
+            Ok(!due.is_empty()
+                || !records_due(raw)?.is_empty()
+                || raw.record_backups_owed()?
+                || raw.masks_owed()?.is_some())
         })
         .unwrap_or_else(|e| {
             eprintln!("oboete: forget jobs not read: {e:#}");
@@ -1862,7 +1913,7 @@ pub fn run(
     if resume {
         // Nothing to continue says nothing: the worker starts it when a job waits (D5 item 8).
         return match purge(home)? {
-            Some(p) if p.jobs > 0 => say_purged(&p),
+            Some(p) if p.jobs > 0 || p.masks => say_purged(&p),
             _ => Ok(()),
         };
     }
@@ -2003,6 +2054,12 @@ fn say_purged(p: &Purged) -> Result<()> {
         println!(
             "Records rewritten without their text in raw.db: {}",
             p.records
+        );
+    }
+    if p.masked > 0 {
+        println!(
+            "Records a redaction rescan masked, rewritten with the masks in raw.db: {}",
+            p.masked
         );
     }
     if p.ops > 0 {
@@ -7372,6 +7429,346 @@ mod tests {
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         let jobs: std::collections::HashSet<String> = read.into_iter().map(|r| r.job).collect();
         assert_eq!(jobs.len(), 2);
+    }
+
+    /// A secret no rule found when it was recorded, and the rule a rescan finds it with (slice 3e-1).
+    const MASKED: &str = "acme-482915";
+    const MASK_RULE: &str =
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+
+    /// A prompt that holds `MASKED`, long enough to be stored compressed, its seq, recorded and
+    /// compressed in `s`, with a ledger row whose field names it (a JSON pointer names a body's
+    /// keys).
+    fn masked_prompt(s: &mut crate::search::b::fixture::Store) -> (i64, String) {
+        let device = s.raw.device().to_owned();
+        let said = format!(
+            "Deploy with {MASKED} on Fridays, {}",
+            "and keep the logs. ".repeat(40)
+        );
+        let seq = s.said("s", "github.com/o/r", 1_000, &said);
+        assert_eq!(s.raw.compress_through(&device, 0, seq).unwrap(), 1);
+        rusqlite::Connection::open(s.home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, ?3, 'aws', 0, 3, 1, 'v')",
+                rusqlite::params![device, seq, format!("/prompt#{MASKED}")],
+            )
+            .unwrap();
+        (seq, said)
+    }
+
+    /// Record `seq`'s body in `home`'s raw.db as stored, its compression undone.
+    fn stored_body(home: &Path, device: &str, seq: i64) -> String {
+        let (body, enc): (Vec<u8>, String) = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT body, enc FROM records WHERE device = ?1 AND seq = ?2",
+                rusqlite::params![device, seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let body = match enc.as_str() {
+            "zstd" => zstd::stream::decode_all(&body[..]).unwrap(),
+            _ => body,
+        };
+        String::from_utf8(body).unwrap()
+    }
+
+    /// Slice 3e-1 (spec 6.7, Rescan range): a secret that a rule added later finds leaves no byte in
+    /// raw.db (its compressed row too), its WAL, knowledge.db, any backup segment or a copy of raw.db
+    /// once the purge has run: in the record's row and its ledger row's field, the claim op that
+    /// quotes it, the window op whose card repeats it and the turn op that read it. The record's
+    /// other words are found, its window is listed for recuration, another window keeps its text,
+    /// the masks are paid and a second purge does nothing.
+    #[test]
+    fn a_rescan_mask_reaches_every_stored_byte() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, said) = masked_prompt(&mut s);
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Logs rotate daily.");
+        // An imported record with no identity (no forget names one): masked all the same.
+        let imported = s
+            .raw
+            .append(&raw::Event {
+                source: "oboete-v1".into(),
+                kind: "prompt".into(),
+                session: "v1".into(),
+                ts: 3_000,
+                ..raw::test_event(&json!({ "prompt": format!("Old note {MASKED}.") }).to_string())
+            })
+            .unwrap();
+        let home = s.home.path().to_owned();
+        let claim = claim_op(&device, &[(r1, &said)], &format!("Deploys use {MASKED}."));
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        // And a claim of another sentence quoting it too, and a window of another span that
+        // showed it, which only the backup and the copy hold (`Judge::widen`).
+        let lone = claim_op(
+            &device,
+            &[(r2, "Logs rotate daily."), (r1, &said)],
+            &format!("Logs and {MASKED}."),
+        );
+        let lone_uid = raw::op_uid(lone.0, &lone.1).unwrap();
+        let seqs = s
+            .raw
+            .append_ops(&[
+                window_op(r1, r1, &format!("They deploy with {MASKED}."), json!({})),
+                turn_op(r1, r1, &[], &format!("Asked to deploy with {MASKED}.")),
+                claim,
+                window_op(r2, r2, "Logs rotate.", json!({})),
+                window_op(
+                    r2,
+                    r2,
+                    &format!("Shown: {MASKED}."),
+                    json!({"candidates": [uid]}),
+                ),
+                lone,
+                window_op(
+                    r2,
+                    r2,
+                    &format!("Shown alone: {MASKED}."),
+                    json!({"carried": [lone_uid]}),
+                ),
+            ])
+            .unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        // Out of raw.db (a store put back without them), leaving none of their bytes behind.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        conn.execute_batch("PRAGMA secure_delete = ON").unwrap();
+        conn.execute("DELETE FROM ops WHERE op_seq >= ?1", [seqs[5]])
+            .unwrap();
+        drop(conn);
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        assert!(s.raw.masks_owed().unwrap().is_some());
+        assert!(
+            s.raw
+                .forgotten_record_keys()
+                .unwrap()
+                .contains(&format!("{device}:{r1}"))
+        );
+        let (lines, stopped) = doctor_lines(&home).unwrap();
+        assert!(!stopped && lines.iter().any(|l| l.starts_with("redaction masks")));
+        std::fs::remove_file(home.join("state").join("forget-continue")).unwrap();
+        CONTINUED.set(0);
+        continue_due(&home, &s.raw);
+        assert_eq!(CONTINUED.get(), 1);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        assert!(!backup_hits(&home, MASKED).is_empty());
+        assert!(holds_text(&copy, MASKED) || holds_text(&wal, MASKED));
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.masked, purged.rebuilt), (2, true));
+        assert!(!stored_body(&home, &device, imported).contains(MASKED));
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
+        assert!(!holds_text(&copy, MASKED) && !holds_text(&wal, MASKED));
+        let stars = "*".repeat(MASKED.len());
+        assert!(stored_body(&home, &device, r1).contains(&format!("Deploy with {stars} on")));
+        assert!(
+            !crate::search::raw(&home, "Fridays", None, 5)
+                .unwrap()
+                .is_empty()
+        );
+        let bodies = op_bodies(&home);
+        for seq in [seqs[0], seqs[1], seqs[2], seqs[4]] {
+            assert!(bodies[&seq].get("forgotten").is_some(), "{}", bodies[&seq]);
+        }
+        assert_eq!(bodies[&seqs[2]], json!({"forgotten": crate::raw::MASK_JOB}));
+        assert_eq!(bodies[&seqs[3]]["summary"], "Logs rotate.");
+        assert!(holds_text(&copy, "Logs rotate.") || holds_text(&wal, "Logs rotate."));
+        let k = crate::knowledge::open(&home).unwrap();
+        let queued = |seq: i64| -> i64 {
+            k.query_row(
+                "SELECT COUNT(*) FROM recurate WHERE from_seq <= ?1 AND to_seq >= ?1",
+                [seq],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!((queued(r1), queued(r2)), (1, 1));
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Slice 3e-1: a claim op made from the masked text, after the mask, stays, and its uid, the
+    /// same as the one made before it, is not denied: a recuration of the window, or #186's
+    /// directive, makes the claim again.
+    #[test]
+    fn a_claim_made_after_the_mask_stays_and_its_uid_is_not_denied() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, said) = masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        let before = claim_op(&device, &[(r1, &said)], &format!("Deploys use {MASKED}."));
+        let uid = raw::op_uid(before.0, &before.1).unwrap();
+        let seqs = s.raw.append_ops(&[before]).unwrap();
+        s.run();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        // The mask two minutes old, the claim older still.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        conn.execute("UPDATE ops SET ts = ts - 200000", []).unwrap();
+        conn.execute(
+            "UPDATE records SET ts = ts - 120000 WHERE type = 'tombstone'",
+            [],
+        )
+        .unwrap();
+        let stars = "*".repeat(MASKED.len());
+        let now = said.replace(MASKED, &stars);
+        let after = claim_op(&device, &[(r1, &now)], "Deploys use the deploy key.");
+        assert_eq!(raw::op_uid(after.0, &after.1).unwrap(), uid);
+        let later = s.raw.append_ops(&[after]).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        let bodies = op_bodies(&home);
+        assert_eq!(bodies[&seqs[0]], serde_json::json!({"forgotten": "rescan"}));
+        assert_eq!(bodies[&later[0]]["body"], "Deploys use the deploy key.");
+        assert!(
+            !raw::open(&home)
+                .unwrap()
+                .forgotten_set()
+                .unwrap()
+                .contains(&uid)
+        );
+        crate::worker::run_once(&home).unwrap();
+        let k = crate::knowledge::open(&home).unwrap();
+        let current = crate::claims::current(&k, "github.com/o/r").unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(
+            (current[0].uid.as_str(), current[0].body.as_str()),
+            (uid.as_str(), "Deploys use the deploy key.")
+        );
+    }
+
+    /// Slice 3e-1: a restore from segments that hold a record from before its mask, and the mask
+    /// after it, owes the mask again: the purge masks the row it brought back.
+    #[test]
+    fn a_restore_owes_the_masks_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, _) = masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        crate::worker::run_once(&home).unwrap();
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
+        assert!(stored_body(&home, &device, r1).contains(MASKED));
+        purge(&home).unwrap().unwrap();
+        assert!(!stored_body(&home, &device, r1).contains(MASKED));
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+    }
+
+    /// Slice 3e-1: ranges a rescan masked before this version, which marked nothing, are owed as a
+    /// later one is: a store upgraded with them has paid none.
+    #[test]
+    fn masks_from_before_this_version_are_owed() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, _) = masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        s.run();
+        let offset = stored_body(&home, &device, r1).find(MASKED).unwrap();
+        // The row alone, as an older version's rescan wrote it.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
+                                     target_offset, target_length)
+                 VALUES(?1, (SELECT MAX(seq) + 1 FROM records WHERE device = ?1), 'tombstone',
+                        ?2, 'rescan', ?1, ?3, ?4, ?5)",
+                rusqlite::params![
+                    device,
+                    crate::db::now_ms(),
+                    r1,
+                    offset as i64,
+                    MASKED.len() as i64
+                ],
+            )
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
+        assert_eq!(purge(&home).unwrap().unwrap().masked, 1);
+        assert!(!stored_body(&home, &device, r1).contains(MASKED));
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+    }
+
+    /// Slice 3e-1: a mask a rescan writes while a purge runs is not taken for done: it is owed
+    /// until a purge that read it finishes.
+    #[test]
+    fn a_mask_written_during_a_purge_stays_owed() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, _) = masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        s.run();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let at = home.clone();
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                raw::open(&at)
+                    .unwrap()
+                    .append_tombstone(raw::Target::Range {
+                        device,
+                        seq: r1,
+                        offset: 2,
+                        length: 4,
+                    })
+                    .unwrap();
+            }));
+        });
+        purge(&home).unwrap().unwrap();
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
+        assert_eq!(purge(&home).unwrap().unwrap().masked, 1);
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_none());
+    }
+
+    /// Slice 3e-1: a range a rescan masks while a curator's or a turn's call is out cuts its window
+    /// again before anything is written (rule 12's fence), as a forget's denial does.
+    #[test]
+    fn a_mask_during_a_call_fences_its_write() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let (r1, _) = masked_prompt(&mut s);
+        let reading = crate::curate::Reading::now(&s.raw, Default::default()).unwrap();
+        reading.still(&s.raw).unwrap();
+        let device = s.raw.device().to_owned();
+        s.raw
+            .append_tombstone(raw::Target::Range {
+                device,
+                seq: r1,
+                offset: 0,
+                length: 2,
+            })
+            .unwrap();
+        let changed = reading.still(&s.raw).unwrap_err();
+        assert!(changed.is::<crate::curate::ListChanged>(), "{changed:#}");
+        let op = serde_json::json!({"outcome": "skipped", "from_seq": r1, "to_seq": r1});
+        let fenced = s
+            .raw
+            .append_ops_fenced(&[(raw::OpKind::Window, op)], reading.fence)
+            .unwrap_err();
+        assert!(fenced.is::<crate::curate::ListChanged>(), "{fenced:#}");
     }
 
     /// "A line names its home": a request of another home in a log is reported, not applied.

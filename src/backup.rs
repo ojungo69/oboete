@@ -1022,11 +1022,12 @@ pub(crate) fn ops_to_purge(
 pub(crate) fn purge_record_segments(
     home: &Path,
     origins: &raw::ForgottenOrigins,
+    masks: &raw::Masks,
 ) -> Result<OpsPurge> {
     walk(
         home,
         Kind::Records,
-        &|text| purge_lines(text, |l| purged_record_line(l, origins)),
+        &|text| purge_lines(text, |l| purged_record_line(l, origins, masks)),
         true,
     )
 }
@@ -1352,11 +1353,13 @@ fn purged_line(
 /// its `import_identity`. An imported event line without one stays: an import is given its identity
 /// when it is recorded and never later, so it had none and no forget can name it (a scope forget
 /// passes it over). A line that does not parse, or a live one without its time, cannot be judged.
-fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins) -> Line {
+/// Slice 3e-1: an event line of a record a rescan masked, not forgotten, is the line an export
+/// writes for it now (`masked_record_line`).
+fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins, masks: &raw::Masks) -> Line {
     if line.trim().is_empty() {
         return Line::Kept;
     }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
         return Line::Unknown;
     };
     match v["type"].as_str() {
@@ -1370,20 +1373,19 @@ fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins) -> Line {
                 (Some(device), Some(seq), Some(ts)) => {
                     Some(crate::forget::live_origin(device, seq, ts))
                 }
-                _ => None,
+                _ => return Line::Unknown,
             }
         }
-        Some(_) => match v["import_identity"]["origin"].as_str() {
-            Some(origin) => Some(origin.to_owned()),
-            None => return Line::Kept,
-        },
-        None => None,
+        Some(_) => v["import_identity"]["origin"].as_str().map(str::to_owned),
+        None => return Line::Unknown,
     };
-    let Some(identity) = identity else {
-        return Line::Unknown;
-    };
-    let Some(held) = origins.get(&identity) else {
-        return Line::Kept;
+    let Some((identity, held)) = identity.and_then(|id| origins.get(&id).map(|held| (id, held)))
+    else {
+        return if masked_record_line(&mut v, masks) {
+            Line::Purged(v.to_string())
+        } else {
+            Line::Kept
+        };
     };
     let mut removed =
         serde_json::json!({"device": v["device"], "seq": v["seq"], "type": "removed"});
@@ -1405,6 +1407,37 @@ fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins) -> Line {
             serde_json::json!({ "origin": identity, "session": session, "ambiguous": ambiguous });
     }
     Line::Purged(removed.to_string())
+}
+
+/// Slice 3e-1: event line `v` of a record a rescan masked (`masks`, by its device and seq, and its
+/// time when raw.db holds its row: a line of another record at a seq used again is not it) with
+/// every range of it applied to its body, as `Raw::mask_rows` writes the row, and its ledger rows
+/// without their field. Whether that changed the line.
+fn masked_record_line(v: &mut serde_json::Value, masks: &raw::Masks) -> bool {
+    let (Some(device), Some(seq)) = (v["device"].as_str(), v["seq"].as_i64()) else {
+        return false;
+    };
+    let Some((ts, ranges)) = masks.get(&(device.to_owned(), seq)) else {
+        return false;
+    };
+    let Some(body) = v["body"]
+        .as_str()
+        .filter(|_| ts.is_none_or(|ts| v["ts"] == ts))
+    else {
+        return false;
+    };
+    let now = ranges.iter().fold(body.to_owned(), |t, &(offset, length)| {
+        raw::masked(&t, offset, length)
+    });
+    let mut changed = now != body;
+    v["body"] = now.into();
+    for row in v["ledger"].as_array_mut().into_iter().flatten() {
+        if row["field"] != "~tombstoned" {
+            row["field"] = "~tombstoned".into();
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// `<name>` (and its -wal and -shm, which SQLite binds to the name) moved aside as

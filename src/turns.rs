@@ -338,7 +338,7 @@ pub fn phase(
             let op = fitted(turn.op(&res.output, rules))?.unwrap_or_else(|| skip.clone());
             // The provider gate and the append fence share the ListChanged wait below. A
             // forget after reading the turn keeps none of the answer (M5 D1 rule 12).
-            raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.denied)?;
+            raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.fence)?;
             Ok(())
         });
         let failed = match answer {
