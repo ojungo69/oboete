@@ -1283,7 +1283,8 @@ pub(crate) fn each_op(home: &Path, f: &mut raw::EachOp) -> Result<()> {
                     v["device"].as_str().unwrap_or(""),
                     v["op_seq"].as_i64().unwrap_or(0),
                 );
-                (f.borrow_mut())(kind, at, v["ts"].as_i64().unwrap_or(0), &body);
+                let (ts, batch) = (v["ts"].as_i64().unwrap_or(0), v["batch"].as_i64());
+                (f.borrow_mut())(kind, at, ts, batch, &body);
             }
             (None, false)
         },
@@ -1312,9 +1313,9 @@ fn purged_line(
         v["device"].as_str().unwrap_or(""),
         v["op_seq"].as_i64().unwrap_or(0),
     );
-    let ts = v["ts"].as_i64().unwrap_or(0);
+    let (ts, batch) = (v["ts"].as_i64().unwrap_or(0), v["batch"].as_i64());
     if matches!(kind, raw::OpKind::Window | raw::OpKind::Turn) {
-        return match judge.purged(kind, at, ts, &body) {
+        return match judge.purged(kind, at, ts, batch, &body) {
             Some(now) if v["body"].as_str() != Some(now.as_str()) => {
                 v["body"] = now.into();
                 Line::Purged(v.to_string())
@@ -1334,8 +1335,9 @@ fn purged_line(
     };
     let now = match jobs.get(&uid) {
         Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
-        // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2).
-        None => judge.purged(kind, at, ts, &body),
+        // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2), or of a
+        // window's batch a record job took (3d-4).
+        None => judge.purged(kind, at, ts, batch, &body),
     };
     match now {
         Some(now) => {
