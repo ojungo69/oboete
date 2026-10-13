@@ -160,3 +160,32 @@ fn a_repository_is_stored_as_given_and_the_forget_hint_names_it_so() {
         "{out}"
     );
 }
+
+/// Codex on #489: a folder excluded again in another spelling of letter case, where the platform's
+/// file systems ignore it, keeps the one entry, so the undo leaves none; elsewhere they are two
+/// folders.
+#[test]
+fn a_folder_excluded_in_another_spelling_keeps_one_entry_where_case_is_ignored() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let oboete = |args: &[&str]| run(home.path(), cwd.path(), args);
+    let folder = cwd.path().join("Private").to_string_lossy().into_owned();
+    let other = cwd.path().join("private").to_string_lossy().into_owned();
+    oboete(&["capture", "exclude", "--folder", &folder]);
+    let out = oboete(&["capture", "exclude", "--folder", &other]);
+    let listed = |f: &str| out.contains(&format!("{f} (folder)"));
+    if !cfg!(any(windows, target_os = "macos")) {
+        assert!(listed(&folder) && listed(&other), "{out}");
+        return;
+    }
+    assert!(
+        out.contains(&format!("never recorded from now on: {folder}")) && !listed(&other),
+        "{out}"
+    );
+    let out = oboete(&["capture", "exclude", "--folder", &other, "--undo"]);
+    assert!(
+        out.contains(&format!("recorded again from now on: {folder}"))
+            && out.contains("everything is recorded"),
+        "{out}"
+    );
+}
