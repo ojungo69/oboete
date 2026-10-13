@@ -1284,8 +1284,10 @@ egress の gate が今の規則で伏せる）。
   する（raw.db が持たない op にも）。raw.db-wal を truncate でき step 4 まで終わった回が、始めに読んだ版を
   記録して pending を消す（途中で版が変わったら次の回がもう一度走査する）。記録は走査を始めた raw.db
   にだけする（始めた印 `ops_text_scanning`）: 途中の restore が segment から作り直した raw.db（新しい
-  meta）はその segment の op を持つので、走査を払わない。worker の `continue_due` は版が違う間、raw.db の
-  op を自分で読み、規則が何も伏せなければ走査を記録して purge を起こさず（新しい store の最初の回も）、
+  meta）はその segment の op を持つので、走査を払わない。worker の `continue_due` は版が違う間、backup の
+  ops segment か raw.db のコピーがあれば `forget --continue` を起こす（raw.db が持たない op を持ちうる。
+  restore が外した op など。それを読むのは purge の step 4 だけ。Codex on #487）。どちらも無ければ raw.db
+  の op を自分で読み、規則が何も伏せなければ走査を記録して purge を起こさず（新しい store の最初の回も）、
   伏せるものがあれば `forget --continue` を起こす（設定が読めない間は待つ）。
 - **3e-1・3e-2 の後**: 走査は 3e-1 の書換え（伏せた record から作られた op）と 3e-2 の preference の後。
   3e-1 の判定は変えない（伏せる前に書かれ伏せた record を引用する claim は、走査で引用がまた一致しても
@@ -1293,10 +1295,8 @@ egress の gate が今の規則で伏せる）。
 - **報告**: `Ops whose text the current redaction rules masked: N`。raw.db-wal を truncate できなかった
   回は 3e-1 と同じく未完了（`MASK_JOB`）。
 - **限界**: キー（作業メモの fields の名前など）と上の名前の値は伏せない（repo に当たる規則でも）。
-  worker が raw.db の op に何も見つけずに記録した版では、backup とコピーだけが持つ op（restore の後）を
-  読まない（他の理由で purge が走れば読む）。
   vector の cache は伏せる前の文から作った vector をその sha で持ち続ける（文字ではない。作り直した
-  vector_keys は伏せた文の sha を指す）。他の端末の op は M6。規則を変えるたびに op を全部読む（測る）。
+  vector_keys は伏せた文の sha を指す）。他の端末の op は M6。規則を変えるたびに op を全部読む（backup とコピーがあればそれらも。測る）。
 - 受入テスト（#478）: (1) window の span の record が秘密を持ち、同じ window の claim が別の record を
   引用して body に秘密を写し、後の window がその claim を候補に出して summary に秘密を写す: purge の後、
   どれも秘密を持たず、claim は伏せた body で current のまま、どちらの window もこのためには再 curate の
@@ -1304,7 +1304,9 @@ egress の gate が今の規則で伏せる）。
   rescan と purge の後、raw.db・その WAL・knowledge.db・ops segment・raw.db のコピーに 0 件、各 op は
   前と同じに読める（Correction は uid の status を直したまま）。(3) 同じ規則の 2 回目の purge は走査
   しない、3 つ目の規則でまた走査する。(4) 64 桁の 16 進の規則を足しても、Correction・forget・候補の
-  uid は変わらない。(5) 大きなコピーで走査の時間と hook の待ちを測る。
+  uid は変わらない。(5) 大きなコピーで走査の時間と hook の待ちを測る。(6) backup の ops segment か
+  raw.db のコピーだけが持つ op（raw.db には無い）も、規則を足した後の purge が伏せ、worker はそれまで
+  走査を記録しない（Codex on #487）。
 
 ## 実装順序と完了条件
 

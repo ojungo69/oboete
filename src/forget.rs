@@ -1444,13 +1444,19 @@ fn text_owed(home: &Path, raw: &crate::raw::Raw) -> Result<Option<crate::redact:
 }
 
 /// Slice 3e-4: whether raw.db's op text waits for a purge: owed a scan with the rules now, and an
-/// op they mask, or masked by a purge that stopped. With none they mask, the scan is recorded here
-/// and no purge starts: a new store, or a rule that finds nothing in an op.
+/// op they mask, or masked by a purge that stopped, or a backup's ops segment or a copy of raw.db
+/// set aside, which may hold an op raw.db does not (a restore that left it out), and only a
+/// purge's step 4 reads (Codex on #487). With none of them, the scan is recorded here and no purge
+/// starts: a new store, or a rule that finds nothing in an op.
 fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     let Some(rules) = text_owed(home, raw)? else {
         return Ok(false);
     };
-    if raw.ops_text_pending()? || !raw.op_text_masks(&rules, None, 1)?.is_empty() {
+    if crate::backup::any_ops_segment(home)?
+        || !crate::raw::copies_set_aside(home)?.is_empty()
+        || raw.ops_text_pending()?
+        || !raw.op_text_masks(&rules, None, 1)?.is_empty()
+    {
         return Ok(true);
     }
     // The worker holds its lock: no restore makes raw.db anew meanwhile.
@@ -9124,6 +9130,59 @@ mod tests {
                 format!("Again {stars}.").into()
             )
         );
+    }
+
+    /// Slice 3e-4 (Codex on #487): an op only a backup's ops segment or a copy of raw.db set aside
+    /// holds (a restore that left it out of raw.db) is masked by a rule added later: a worker that
+    /// finds no op in raw.db the rules mask starts the purge while either is there, rather than
+    /// recording the scan, and the purge's step 4 masks it. The next look starts none.
+    #[test]
+    fn an_op_only_a_segment_or_a_copy_holds_is_masked_by_a_rule_added_later() {
+        for aside in [false, true] {
+            let mut s = crate::search::b::fixture::Store::new();
+            let home = s.home.path().to_owned();
+            let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+            let seq = s
+                .raw
+                .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+                .unwrap();
+            let crate::search::b::fixture::Store { home: _kept, raw } = s;
+            drop(raw);
+            let copy = aside.then(|| {
+                copy_raw(
+                    &home,
+                    &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+                )
+            });
+            if !aside {
+                crate::backup::export(&home).unwrap();
+                assert!(!backup_hits(&home, MASKED).is_empty());
+            }
+            // raw.db without it, as a restore that left it out makes it.
+            rusqlite::Connection::open(home.join("raw.db"))
+                .unwrap()
+                .execute("DELETE FROM ops WHERE op_seq = ?1", [seq])
+                .unwrap();
+            std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+            std::fs::create_dir_all(home.join("state")).unwrap();
+            let look = || {
+                let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+                CONTINUED.set(0);
+                continue_due(&home, &raw::open(&home).unwrap());
+                CONTINUED.get()
+            };
+            assert_eq!(look(), 1, "aside: {aside}");
+            let purged = purge(&home).unwrap().unwrap();
+            assert_eq!(
+                (purged.texts, purged.segments, purged.copies),
+                (0, usize::from(!aside), usize::from(aside))
+            );
+            match copy {
+                Some(copy) => assert!(!holds_text(&copy, MASKED)),
+                None => assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new()),
+            }
+            assert_eq!(look(), 0, "aside: {aside}");
+        }
     }
 
     /// Slice 3e-4: a purge that stops after masking op text, before knowledge.db is rebuilt, leaves

@@ -1002,6 +1002,27 @@ pub(crate) fn purge_ops(
     )
 }
 
+/// Slice 3e-4: whether the backup location holds an ops segment, live or set aside, by its name
+/// alone: one may hold an op raw.db does not (Codex on #487).
+pub(crate) fn any_ops_segment(home: &Path) -> Result<bool> {
+    let dir = dir(home)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    for entry in entries {
+        let name = entry?.file_name();
+        if name
+            .to_str()
+            .is_some_and(|n| segment(n, Kind::Ops) || set_aside(n, Kind::Ops))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// What `purge_ops` would do for `jobs`, counted without changing a file (2c, decision 9).
 pub(crate) fn ops_to_purge(
     home: &Path,
