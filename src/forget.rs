@@ -1215,6 +1215,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // 3e-2 wrote: the claims, windows and turns made from a masked record lose theirs by its
         // time, as before, and what is left (a correction's body, a work state, an import, a
         // curator's own words) by the rules.
+        let mut text_stopped = false;
         if let Some(rules) = &text {
             text_mark = Some(raw.op_text_scan_begun()?);
             let mut after = None;
@@ -1225,9 +1226,18 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                     break;
                 };
                 after = Some((device.clone(), *op_seq));
-                purged.texts += raw.mask_op_text(&page)?;
+                // Rules changed meanwhile mask no further page; the scan stays owed to the rules
+                // now (owner decision 43).
+                let Some(masked) = raw.mask_op_text(&page, rules)? else {
+                    text_stopped = true;
+                    break;
+                };
+                purged.texts += masked;
             }
             crate::backup::fail_after("op_text_masked")?;
+        }
+        if text_stopped {
+            text = None;
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
         masked |= truncated;

@@ -668,17 +668,6 @@ fn embedded(
         Ok(Err(_)) => return Ok(Err(VectorSkip::Waiting)),
         Err(_) => return Ok(Err(VectorSkip::Error)),
     };
-    // Again as near the call as it can be: an exclusion made since the first check holds.
-    let excluded_now = excluded_now(home, raw, q);
-    if !matches!(excluded_now, Ok(false)) {
-        if let Err(e) = pdb::unreserve(&db, call) {
-            eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
-        }
-        return Ok(Err(match excluded_now {
-            Ok(_) => VectorSkip::Excluded,
-            Err(_) => VectorSkip::Error,
-        }));
-    }
     // Admitted to dispatch as a batch is, then gated again under the rules now: a save that
     // changes the rules waits for this call, and one made before it reads the query otherwise,
     // so what was gated before is not sent (owner decision 43; Codex on #502).
@@ -694,6 +683,18 @@ fn embedded(
     #[cfg(test)]
     if let Some(meanwhile) = AFTER_QUERY_GATE.lock().unwrap().take() {
         meanwhile();
+    }
+    // Again as near the call as it can be, once admitted: an exclusion made since the first check
+    // holds, and so does one the rules now read as the caller's (CodeRabbit on #502).
+    let excluded_now = excluded_now(home, raw, q);
+    if !matches!(excluded_now, Ok(false)) {
+        if let Err(e) = pdb::unreserve(&db, call) {
+            eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
+        }
+        return Ok(Err(match excluded_now {
+            Ok(_) => VectorSkip::Excluded,
+            Err(_) => VectorSkip::Error,
+        }));
     }
     let again: String = redact::outbound_lines(&q.text)
         .chars()
@@ -4630,6 +4631,62 @@ mod tests {
         let home = s.home.path().to_owned();
         let sent = stub.requests();
         let name = "search::b::tests::a_query_gated_under_other_rules_is_not_sent";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, &home)
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        assert_eq!(stub.requests(), sent);
+    }
+
+    /// CodeRabbit on #502: the exclusions are read again once the query is admitted to dispatch,
+    /// as the rules now read the caller: a rule written meanwhile under which an exclusion names
+    /// the caller sends nothing. (An exclusion itself cannot commit while the query is admitted:
+    /// it waits for the dispatch lock.) The search runs in a child process, as egress reads the
+    /// home `redact::set_home` names.
+    #[test]
+    fn a_query_from_a_repository_excluded_once_admitted_is_not_sent() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_EXCLUDED_QUERY_HOME";
+        const RULE: &str = "[redaction]\nextra_rules = [{ id = \"r\", regex = 'o/r$' }]\n";
+        let ask = Query {
+            text: "deploy the parser".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let config = home.join("config.toml");
+            let plain = std::fs::read_to_string(&config).unwrap();
+            *AFTER_QUERY_GATE.lock().unwrap() = Some(Box::new(move || {
+                std::fs::write(&config, format!("{plain}{RULE}")).unwrap();
+            }));
+            query(&home, &ask).unwrap();
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "deploy the parser");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let ruled =
+            crate::redact::Rules::new(&crate::config::parse_capture(Some(RULE)).unwrap().redaction)
+                .unwrap();
+        let masked = crate::capture::label_with(R, &ruled);
+        assert_ne!(masked, R);
+        s.raw.exclude(&masked, false).unwrap();
+        let home = s.home.path().to_owned();
+        let sent = stub.requests();
+        let name = "search::b::tests::a_query_from_a_repository_excluded_once_admitted_is_not_sent";
         let out = std::process::Command::new(std::env::args_os().next().unwrap())
             .args(["--exact", name])
             .env(HOME, &home)

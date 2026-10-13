@@ -2554,7 +2554,9 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
     let mut head = redact::redact_unless_off(&head, rules);
-    if let Some(begin) = head.rfind("-----BEGIN")
+    // A key block the cut leaves open goes, unless redaction is off (owner decision 43).
+    if !rules.is_off()
+        && let Some(begin) = head.rfind("-----BEGIN")
         && !head[begin..].contains("-----END")
     {
         head.truncate(begin);
@@ -8329,6 +8331,16 @@ mod tests {
             &rules("[redaction]\nenabled = true\n"),
         );
         assert!(!on.contains(&key), "{on}");
+        // The cut keeps what it leaves of a key block as typed while off (CodeRabbit on #502).
+        let long = format!(
+            "{}-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+            "a".repeat(7_000),
+            "B".repeat(6_000)
+        );
+        let kept = clip(&long, &rules("[redaction]\nenabled = false\n"));
+        assert!(kept.contains("-----BEGIN"));
+        let cut = clip(&long, &rules("[redaction]\nenabled = true\n"));
+        assert!(!cut.contains("-----BEGIN"));
     }
 
     #[test]

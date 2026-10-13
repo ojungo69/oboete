@@ -25,8 +25,8 @@ What stays, since none of it is redaction:
   while off cannot fail only when redaction is turned on again.
 - What is already masked stays masked: `[REDACTED]` in a stored text is the text now, and a range
   tombstone keeps masking what it covers. Turning redaction off restores nothing.
-- An output cut at the cap (2.4) still loses the half of a key block the cut leaves, as before: that
-  is the cut, not a rule.
+- An output cut at the cap (2.4) keeps head and tail as before; while redaction is off it keeps what
+  the cut leaves of a key block as typed too (on, the cut drops a key block it leaves open).
 
 ## Config and version
 
@@ -72,8 +72,10 @@ of the settings page that changes the rules waits for each call already admitted
 the dispatch lock until config.toml is replaced, as a forget's registration does, so from the
 save's answer on no text gated under the rules before leaves; a hand edit of config.toml has the
 gates alone. The other way round, rules turned off while the rescan consumer reads a batch, or
-while a purge waits for the worker lock, mask nothing: each checks the rules again before it
-writes, so a record or an op stored as typed under the switch off stays so.
+while a purge masks op text, mask nothing: the rescan checks the rules again before it writes its
+tombstones, and the purge checks them again under each page's dispatch hold, the hold a save that
+changes them takes too, so a record or an op stored as typed under the switch off stays so. A
+search reads its exclusions again once its query is admitted, as the rules now read the caller.
 
 `Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
 than with the home's settings is the claude-mem import's prompts (`hook::clip`): it keeps them, so

@@ -739,15 +739,18 @@ pub fn scan_capped(text: &str, cap: usize, rules: &Rules) -> (String, Vec<Findin
             tail_start = s;
         }
     }
-    // ASCII lowercasing keeps byte offsets.
+    // ASCII lowercasing keeps byte offsets. While redaction is off the cut keeps what it leaves
+    // of a key block as typed (owner decision 43).
     let head = masked[..head_end].to_ascii_lowercase();
-    if let Some(b) = key_markers(&head, "-----begin").last()
+    if !rules.off
+        && let Some(b) = key_markers(&head, "-----begin").last()
         && key_markers(&head[b..], "-----end").next().is_none()
     {
         head_end = b;
     }
     let tail = masked[tail_start..].to_ascii_lowercase();
-    if let Some(e) = key_markers(&tail, "-----end").next()
+    if !rules.off
+        && let Some(e) = key_markers(&tail, "-----end").next()
         && key_markers(&tail[..e], "-----begin").next().is_none()
     {
         let end = tail_start + e;
@@ -2115,6 +2118,15 @@ mod tests {
         assert_eq!(hidden(&text, &off), Some(Vec::new()));
         let private = format!("{text} <private>pin 4242</private>");
         assert!(!outbound_with(&private, &off).contains("4242"));
+        // The cut at the cap keeps what it leaves of a key block as typed (CodeRabbit on #502).
+        let block = format!(
+            "{}-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----{}",
+            "x".repeat(20),
+            "A".repeat(200),
+            "y".repeat(20)
+        );
+        let (stored, _, cut) = scan_capped(&block, 100, &off);
+        assert!(cut.is_some() && stored.contains("-----BEGIN"), "{stored}");
         assert_eq!(
             user("[redaction]\nenabled = false\n").unwrap().version(),
             OFF

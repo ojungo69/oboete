@@ -2712,11 +2712,24 @@ impl Raw {
     /// Slice 3e-4: `found` (`op_text_masks`) written, in transactions of `RECORD_PURGE_BATCH` ops
     /// under dispatch, each op only while its body is the one read, with the pending mark: the
     /// rebuild and the backups owe it until `ops_text_scanned`. How many ops it rewrote.
-    pub(crate) fn mask_op_text(&mut self, found: &[OpText]) -> Result<usize> {
+    pub(crate) fn mask_op_text(
+        &mut self,
+        found: &[OpText],
+        rules: &crate::redact::Rules,
+    ) -> Result<Option<usize>> {
         let mut rewritten = 0;
         for batch in found.chunks(RECORD_PURGE_BATCH) {
             let _dispatch = crate::dispatch::exclusive(&self.home)
                 .context("the text of the ops was not masked")?;
+            // Owner decision 43: under the hold a save that changes the rules also takes, the
+            // rules are still the ones the page was read with, or nothing more is masked (Codex on
+            // #502).
+            if crate::redact::Rules::load(&self.home)
+                .map(|now| now.version() != rules.version())
+                .unwrap_or(true)
+            {
+                return Ok(None);
+            }
             self.current()?;
             let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
             tx.execute(
@@ -2733,7 +2746,7 @@ impl Raw {
             }
             tx.commit()?;
         }
-        Ok(rewritten)
+        Ok(Some(rewritten))
     }
 
     /// Owner decision 43: the rules the text of the ops this handle appends is gated with. Turned
@@ -9408,6 +9421,28 @@ mod tests {
             raw.imported_counts(&dev, &[(1, 10)]).unwrap(),
             [("oboete-v1".to_owned(), 1)].into_iter().collect()
         );
+    }
+
+    /// Owner decision 43 (Codex on #502): a page of op text read under rules changed since (the
+    /// switch turned off, say) is not masked: under the dispatch hold a save takes too, the rules
+    /// are checked again, and nothing more is written.
+    #[test]
+    fn a_page_masked_after_the_rules_changed_is_left_as_it_was() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(&config, rule).unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let body = serde_json::json!({"text": "deploy acme-482915"});
+        raw.append_ops(&[(OpKind::Claim, body.clone())]).unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let page = raw.op_text_masks(&rules, None, 10).unwrap();
+        assert_eq!(page.len(), 1);
+        let off = rule.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        std::fs::write(&config, off).unwrap();
+        assert_eq!(raw.mask_op_text(&page, &rules).unwrap(), None);
+        let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
+        assert_eq!(ops[0].body, body);
     }
 
     /// Owner decision 43 (Codex's security review of the switch): a scan whose mark an append
