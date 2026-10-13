@@ -1068,6 +1068,7 @@ const TEXT = {
   never_undone_covered: ['This folder is no longer excluded, but nothing there is recorded yet: another exclusion, or its checkout’s .oboete.toml, still covers it.', 'このフォルダーの除外は外しましたが、別の除外かチェックアウトの .oboete.toml がまだ当てはまるため、ここはまだ記録しません。'],
   capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
   folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
+  never_other: ['Another repository never recorded reads as this one under the rules now, so this one is not recorded either. Recording it again here would record that repository too: record it again from its own row, or change the rule that makes them read alike.', '記録しない別のリポジトリが、今の規則ではこのリポジトリと同じに読めるため、こちらも記録されていません。ここで記録を再開すると、そのリポジトリも記録されます。そのリポジトリの行から再開するか、同じに読ませている規則を変えてください。'],
   never_ambiguous: ['Several repositories never recorded read as this one now: record each again from its own row, or with `oboete capture exclude --undo` and the name it was excluded under.', '記録しない複数のリポジトリが、今の規則ではこのリポジトリと同じに読めます。それぞれの行から、または `oboete capture exclude --undo` に除外したときの名前を付けて、記録を再開してください。'],
   rescan_h: ['Rescan on this device', 'この端末の再検査'],
   rescan_empty: ['No raw records to scan.', '検査する元の記録はありません。'],

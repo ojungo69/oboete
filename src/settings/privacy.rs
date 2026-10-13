@@ -434,8 +434,19 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                     let stored = crate::raw::capture_exclusions_in(&raw.conn)
                         .map_err(|_| unavailable())?
                         .repos;
-                    crate::capture::undone("repo", &label, &stored, &settings)
-                        .map_err(|_| refused(409, "never_ambiguous", "selector"))?
+                    // Another repository's entry that reads as this one now is its own to take
+                    // back (Codex Security Review on #491).
+                    crate::capture::undone("repo", &label, &stored, &settings).map_err(|e| {
+                        let other = e
+                            .downcast_ref::<crate::capture::ReadAlike>()
+                            .is_some_and(|alike| alike.entries.len() == 1);
+                        let code = if other {
+                            "never_other"
+                        } else {
+                            "never_ambiguous"
+                        };
+                        refused(409, code, "selector")
+                    })?
                 } else {
                     label
                 };
@@ -833,8 +844,10 @@ mod tests {
     }
 
     /// Codex on #491: a rule added after an exclusion that reads another listed repository as the
-    /// excluded one shows that one as never recorded too, as a hook reads its events now, and its
-    /// undo takes back the exclusion that covers it, as the CLI's does; refused when several do.
+    /// excluded one shows that one as never recorded too, as a hook reads its events now. Its undo
+    /// does not take back the exclusion stored for the other repository, which would record that
+    /// one too (Codex Security Review on #491): the other's own row does; refused too when several
+    /// read as it.
     #[test]
     fn a_repository_a_rule_reads_as_an_excluded_one_is_never_recorded_until_its_undo() {
         const A: &str = "github.com/o/secret-a1";
@@ -876,7 +889,16 @@ mod tests {
         // Nor is its session sent, as its row says (Cursor on #491: #489's `exclusions_now`).
         let reading = crate::curate::Reading::now(&store.raw, crate::curate::Reads::Live).unwrap();
         assert!(reading.excluded.contains("claude\0sb"), "{reading:?}");
-        post(json!({"selector": selector(B), "undo": true})).unwrap();
+        let before = store.raw.max_op_seq().unwrap();
+        assert_eq!(
+            post(json!({"selector": selector(B), "undo": true}))
+                .unwrap_err()
+                .code,
+            "never_other"
+        );
+        assert_eq!(store.raw.max_op_seq().unwrap(), before);
+        assert_eq!((never(A), never(B)), (json!(true), json!(true)));
+        post(json!({"selector": selector(A), "undo": true})).unwrap();
         assert_eq!(
             store.raw.capture_exclusions().unwrap(),
             crate::raw::CaptureExclusions::default()
