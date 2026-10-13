@@ -679,13 +679,22 @@ fn embedded(
             Err(_) => VectorSkip::Error,
         }));
     }
+    // Admitted to dispatch as a batch is, then gated again under the rules now: a save that
+    // changes the rules waits for this call, and one made before it reads the query otherwise,
+    // so what was gated before is not sent (owner decision 43; Codex on #502).
+    let dispatch = match raw.dispatch() {
+        Ok(dispatch) => dispatch,
+        Err(_) => {
+            if let Err(e) = pdb::unreserve(&db, call) {
+                eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
+            }
+            return Ok(Err(VectorSkip::Error));
+        }
+    };
     #[cfg(test)]
     if let Some(meanwhile) = AFTER_QUERY_GATE.lock().unwrap().take() {
         meanwhile();
     }
-    // And gated again under the rules now: redaction turned on, or a rule added, while the
-    // reservation waited reads the query otherwise, and what was gated before is not sent (owner
-    // decision 43; Codex's security review of the switch).
     let again: String = redact::outbound_lines(&q.text)
         .chars()
         .take(crate::embed::PROMPT_CHARS)
@@ -697,7 +706,7 @@ fn embedded(
         return Ok(Err(VectorSkip::Error));
     }
     let started = Instant::now();
-    let result = embedder.run(&[&sent], timeout);
+    let result = embedder.run_admitted(&[&sent], timeout, Some(dispatch));
     let (outcome, detail, billed) = match &result {
         Ok(_) => ("ok", "1 query".to_owned(), true),
         Err(f) => ("error", f.message.clone(), f.billed()),

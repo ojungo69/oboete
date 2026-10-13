@@ -205,15 +205,7 @@ impl Embedder {
         }))
     }
 
-    /// One request: the texts' unit vectors, in order.
-    pub fn run(
-        &self,
-        texts: &[&str],
-        timeout: Duration,
-    ) -> std::result::Result<Vec<Vec<f32>>, Failure> {
-        self.run_admitted(texts, timeout, None)
-    }
-
+    /// One request: the texts' unit vectors, in order, the request admitted to dispatch.
     pub(crate) fn run_admitted(
         &self,
         texts: &[&str],
