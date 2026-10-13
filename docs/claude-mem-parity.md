@@ -42,7 +42,8 @@ each milestone and new features are added here.
 - The page's API needs a token (the page's own files are served without one) and every request's
   Host header is checked. The installed claude-mem answers any local program without one, its
   settings route included (checked on the owner's PC, 2026-10-03).
-- Redaction is always on.
+- Redaction is on by default, and a change of its rules reaches what is already stored; claude-mem's is
+  off by default and masks new records only. Both can be turned off (decision 43).
 - Search on the owner's questions: nDCG@10 0.545 with vectors against claude-mem's 0.244 (spec 4.10).
 - Memory: 13 MB at its peak for the recording path, against claude-mem's 120 MB worker and 4.65 GB of Chroma
   (docs/plan.md, the M0 measurement). The resident worker and viewer are measured when built (spec 1.8).
@@ -74,6 +75,12 @@ each milestone and new features are added here.
 | 13 | **Tokens and money spent are recorded but not shown.** oboete records tokens and cost of every curation call and enforces a monthly cap, and shows only the embedding spend (doctor). The month's curation spend is shown beside the cap on the settings page. claude-mem shows no money figure. | S |
 | 28 | **No 'memory is on' note in a brand-new project.** In a project with no memory yet claude-mem says that recording has started and where the page is. oboete says nothing. Folded into the terminal line at session start. | S |
 | 31 | **Per-prompt memory hints are more conservative.** Both tools can add matching memories to each prompt. The owner has claude-mem's on; oboete's is off by default and adds only current decisions, lessons and approved open items from a prepared shortlist. It is switched on at the switch; its threshold is measured in the one evaluation (decision 34). | M |
+
+### Before the switch (added 2026-10-13, decision 43)
+
+| # | Difference | Size |
+|---|---|---|
+| 60 | **Secret masking can be switched off.** In claude-mem masking of secrets is an optional setting, off by default. oboete has the same switch, on by default, in `[redaction]` and on the settings page; off, nothing is masked at capture, when text is sent, or in what agents read. It was left out on 2026-10-03 (decision 37) and asked for on 2026-10-13. | S |
 
 ### After the switch, first
 
@@ -153,4 +160,3 @@ each milestone and new features are added here.
 | 57 | **Usage statistics and error reports sent to the maker.** claude-mem sends anonymous usage data and error reports to its maker by default. oboete sends nothing. | - |
 | 58 | **claude-mem's internal queue, retry and size-limit machinery.** claude-mem keeps waiting work in memory, retries bad answers on the same provider and looks up each model's size limit. oboete writes everything to disk first, sends small fixed batches, and on a bad answer asks the next provider and tries again later. | - |
 | 59 | **Worktree 'adopt' step and start-up repair jobs.** claude-mem files a worktree as its own project and merges it into the main one after the branch is merged. oboete files a worktree under the main repository from the first record, so there is nothing to adopt. | - |
-| 60 | **Secret masking cannot be switched off.** In claude-mem masking of secrets is an optional setting. In oboete it is always on; a value masked by mistake can only be kept by allowing that one value. | - |

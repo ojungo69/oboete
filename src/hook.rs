@@ -7125,6 +7125,39 @@ mod tests {
         assert_eq!(row, ("user:acme".into(), version));
     }
 
+    /// Owner decision 43: with redaction off, a prompt's key is stored as typed and the ledger
+    /// names nothing; a `<private>` block still goes, as it is not redaction.
+    #[test]
+    fn redaction_off_stores_a_key_as_typed_and_still_drops_a_private_block() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let prompt = json!({
+            "session_id": "s",
+            "prompt": format!("deploy with {key} <private>pin 4242</private>"),
+        })
+        .to_string();
+        run_io(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            prompt.as_bytes(),
+            Vec::new(),
+        )
+        .unwrap();
+        let c = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let body: Vec<u8> = c
+            .query_row("SELECT body FROM records", [], |r| r.get(0))
+            .unwrap();
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.contains(&key) && !body.contains("4242"), "{body}");
+        let found: i64 = c
+            .query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(found, 0);
+    }
+
     #[test]
     fn a_wrong_redaction_table_records_nothing() {
         let home = tempfile::tempdir().unwrap();

@@ -78,7 +78,9 @@ impl Consumer for Rescan {
                  ON CONFLICT(device) DO UPDATE SET version = excluded.version",
                 params![device, version],
             )?;
-            0
+            // Rules turned off find nothing in what is stored: no pass from seq 1 for them, and
+            // turning them on again starts one (owner decision 43).
+            if settings.rules.is_off() { after } else { 0 }
         };
         let recs = raw.after(device, from, BATCH)?;
         // A second handle on raw.db for the tombstones (the worker's own is read-only here),
@@ -175,6 +177,31 @@ mod tests {
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 1);
         assert!(!body(&raw, old).contains("acme"));
+    }
+
+    /// Owner decision 43: a record stored while redaction is off, and read by the rescan then, is
+    /// masked once redaction is on again.
+    #[test]
+    fn turning_redaction_on_again_masks_what_was_stored_while_it_was_off() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        worker::run_once(p).unwrap(); // the rescan's version is the bundled rules'
+        std::fs::write(p.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        // As capture stores it while off: as typed.
+        let seq = raw
+            .append(&raw::test_event(&format!(
+                r#"{{"prompt":"deploy {key} now"}}"#
+            )))
+            .unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 0);
+        assert!(body(&raw, seq).contains(&key));
+        std::fs::write(p.join("config.toml"), "[redaction]\nenabled = true\n").unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 1);
+        assert!(!body(&raw, seq).contains("ghp_"), "{}", body(&raw, seq));
     }
 
     #[test]

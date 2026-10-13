@@ -1450,14 +1450,16 @@ fn text_owed(home: &Path, raw: &crate::raw::Raw) -> Result<Option<crate::redact:
 /// Slice 3e-4: whether raw.db's op text waits for a purge: owed a scan with the rules now, and an
 /// op they mask, or masked by a purge that stopped, or a backup's ops segment or a copy of raw.db
 /// set aside, which may hold an op raw.db does not (a restore that left it out), and only a
-/// purge's step 4 reads (Codex on #487). With none of them, the scan is recorded here and no purge
-/// starts: a new store, or a rule that finds nothing in an op.
+/// purge's step 4 reads (Codex on #487); rules turned off find nothing there either (owner
+/// decision 43). With none of them, the scan is recorded here and no purge starts: a new store, or
+/// a rule that finds nothing in an op.
 fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     let Some(rules) = text_owed(home, raw)? else {
         return Ok(false);
     };
-    if crate::backup::any_ops_segment(home)?
-        || !crate::raw::copies_set_aside(home)?.is_empty()
+    if !rules.is_off()
+        && (crate::backup::any_ops_segment(home)?
+            || !crate::raw::copies_set_aside(home)?.is_empty())
         || raw.ops_text_pending()?
         || !raw.op_text_masks(&rules, None, 1)?.is_empty()
     {
@@ -9339,6 +9341,40 @@ mod tests {
             }
             assert_eq!(look(), 0, "aside: {aside}");
         }
+    }
+
+    /// Owner decision 43: rules turned off find nothing in a backup's ops segment either, so a
+    /// worker records the scan under them and starts no purge for it; turned on again with a rule
+    /// that masks an op, the purge starts.
+    #[test]
+    fn rules_turned_off_start_no_purge_for_the_op_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        s.raw
+            .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let look = || {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, &raw::open(&home).unwrap());
+            CONTINUED.get()
+        };
+        assert_eq!(look(), 0);
+        let off = crate::redact::Rules::load(&home).unwrap();
+        assert!(
+            !raw::open(&home)
+                .unwrap()
+                .ops_text_owed(off.version())
+                .unwrap()
+        );
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert_eq!(look(), 1);
     }
 
     /// Slice 3e-4 (Codex on #487): an op whose uid cannot be told, a claim of the shape from before

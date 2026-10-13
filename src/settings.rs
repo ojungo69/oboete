@@ -204,7 +204,11 @@ pub fn show(home: &Path) -> Value {
             "tool_output": tool_output(capture.tool_output),
         },
         "backup": {"dir": backup},
-        "redaction": {"extra_rules": redaction.extra_rules, "allowlist": redaction.allowlist},
+        "redaction": {
+            "enabled": redaction.enabled != Some(false),
+            "extra_rules": redaction.extra_rules,
+            "allowlist": redaction.allowlist,
+        },
         "embedding": embedding::section(
             home,
             &cfg.embedding,
@@ -1185,6 +1189,12 @@ fn write_privacy_config(
         let old = config::parse_capture(Some(text))
             .map_err(|_| invalid())?
             .redaction;
+        // Unnamed (an older page), the switch keeps what the file says (owner decision 43).
+        if let Some(enabled) = redaction.enabled
+            && enabled != (old.enabled != Some(false))
+        {
+            put(doc, "redaction", "enabled", enabled.into());
+        }
         if serde_json::to_value(&redaction.extra_rules).expect("rules serialize")
             != serde_json::to_value(&old.extra_rules).expect("rules serialize")
         {
@@ -1572,6 +1582,37 @@ mod tests {
         ] {
             assert!(!home.path().join(name).exists());
         }
+    }
+
+    /// Owner decision 43: the page turns redaction off and on; a request that does not name the
+    /// switch, as an older page's, keeps what the file says.
+    #[test]
+    fn the_redaction_switch_saves_and_a_request_without_it_keeps_it() {
+        let home = home_with(Some("providers = []\n"));
+        let shown = show(home.path());
+        assert_eq!(shown["redaction"]["enabled"], true);
+        let off = posted(&shown, |v| v["redaction"]["enabled"] = json!(false));
+        let saved = save_to(&home, &off).unwrap();
+        assert_eq!(saved["redaction"]["enabled"], false);
+        assert!(file(&home).unwrap().contains("enabled = false"));
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        assert!(rules.is_off());
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        assert_eq!(crate::redact::outbound_with(&key, &rules), key);
+        let older = posted(&saved, |v| {
+            v["redaction"] = json!({"extra_rules": [], "allowlist": []});
+        });
+        let saved = save_to(&home, &older).unwrap();
+        assert_eq!(saved["redaction"]["enabled"], false);
+        let on = posted(&saved, |v| v["redaction"]["enabled"] = json!(true));
+        let saved = save_to(&home, &on).unwrap();
+        assert_eq!(saved["redaction"]["enabled"], true);
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        assert!(!rules.is_off());
+        assert_eq!(
+            crate::redact::outbound_with(&key, &rules),
+            crate::redact::MASK
+        );
     }
 
     #[test]

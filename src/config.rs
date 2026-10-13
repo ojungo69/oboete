@@ -1144,6 +1144,10 @@ pub fn parse_view(text: &str) -> Result<View> {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Redaction {
+    /// `false` turns every rule off, the built-in ones too (owner decision 43). Unset: on, and a
+    /// save that does not name it keeps what the file says.
+    #[serde(default)]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub extra_rules: Vec<ExtraRule>,
     #[serde(default)]

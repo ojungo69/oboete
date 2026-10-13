@@ -1015,7 +1015,9 @@ const TEXT = {
   backup_reset: ['Use the default backup location', '既定のバックアップ先を使う'],
   backup_desc: ['An empty field uses the default. Relative paths start at the memory home; absolute paths stay absolute. The next backup uses this location. Saving creates no directory and moves no existing backups or forget logs.', '空欄では既定の場所を使います。相対パスは記憶の保存先を基準とし、絶対パスはそのまま使います。次のバックアップから反映されます。保存してもディレクトリは作らず、既存のバックアップや忘却のログは移動しません。'],
   redaction_h: ['Masking sensitive values', '機密値のマスキング'],
-  redaction_desc: ['Built-in rules always stay on. Saved changes apply at the next recording, send or display. The worker rescans this device’s stored records at its next run; a saved change does not start the worker. This does not erase backups or cover other devices.', '組み込みのルールは常に有効です。保存した変更は、次の記録・送信・表示から使われます。ワーカーは次回の処理で、この端末の保存済み記録を再検査します。保存だけではワーカーは起動しません。バックアップの削除や他の端末の検査は含みません。'],
+  redaction_desc: ['Masking replaces secrets such as API keys with [REDACTED] before text is stored, sent or shown, using the built-in rules and the rules you add. Saved changes apply at the next recording, send or display. The worker rescans this device’s stored records at its next run; a saved change does not start the worker. This does not erase backups or cover other devices.', 'マスキングは、本文を保存・送信・表示する前に、組み込みのルールと追加したルールで API キーなどの機密値を [REDACTED] に置き換えます。保存した変更は、次の記録・送信・表示から使われます。ワーカーは次回の処理で、この端末の保存済み記録を再検査します。保存だけではワーカーは起動しません。バックアップの削除や他の端末の検査は含みません。'],
+  redaction_enabled: ['Mask secrets such as API keys and passwords', 'API キーやパスワードなどの機密値をマスクする'],
+  redaction_off_warning: ['With masking off, secrets are stored as typed on this device and in its backups, sent to the AI services set up here for summaries and search, and shown to your agents. What has been sent cannot be called back. Turning masking on again masks what was stored meanwhile from the worker’s next run on, but not what was sent.', 'マスキングがオフの間は、機密値が入力どおりにこの端末とバックアップに保存され、要約や検索のために設定した AI サービスへ送られ、エージェントにもそのまま渡ります。送信したものは取り消せません。マスキングをオンに戻すと、それまでに保存された分はワーカーの次回の処理からマスクされますが、送信したものは戻りません。'],
   redaction_rule: ['Additional rule {number}', '追加ルール {number}'],
   redaction_add: ['Add a masking rule', 'マスキングのルールを追加'],
   redaction_remove: ['Remove this rule', 'このルールを削除'],
@@ -2467,7 +2469,7 @@ function formOf(s) {
     inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
     backup: { dir: s.backup?.dir ?? null, edit: text(s.backup?.dir), reset: false },
-    redaction: { rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
+    redaction: { enabled: s.redaction?.enabled !== false, rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
     privacy: s.privacy || privacyUnavailable(),
     preference: preferenceDraft,
     maintenance: maintenanceDraft,
@@ -2516,7 +2518,7 @@ function redactionBody() {
   }
   const allowlist = form.redaction.hashes.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
   if (allowlist.some((v) => !/^[0-9a-fA-F]{64}$/.test(v))) return { field: 'redaction.allowlist' };
-  return { value: { extra_rules, allowlist } };
+  return { value: { enabled: form.redaction.enabled, extra_rules, allowlist } };
 }
 
 function redactionSection(f) {
@@ -2571,7 +2573,12 @@ function redactionSection(f) {
       if (fields) fields.inert = false;
     }
   });
-  return el('section', null, el('h3', null, t('redaction_h')), el('p', 'desc', t('redaction_desc')),
+  // Owner decision 43: off stops every rule; the warning shows before the save, without a redraw.
+  const warning = el('p', 'desc error', t('redaction_off_warning'));
+  warning.hidden = f.redaction.enabled;
+  const enabled = el('label', 'check', checkbox(f.redaction.enabled, (v) => { f.redaction.enabled = v; warning.hidden = v; }),
+    t('redaction_enabled'));
+  return el('section', null, el('h3', null, t('redaction_h')), el('p', 'desc', t('redaction_desc')), enabled, warning,
     ...rows, add, el('h4', null, t('redaction_allow_h')), el('p', 'desc', t('redaction_allow_desc')),
     el('label', 'field', el('span', null, t('redaction_value')), exact), hash,
     el('details', null, el('summary', null, t('redaction_hashes')),
