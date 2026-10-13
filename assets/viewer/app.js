@@ -1065,6 +1065,7 @@ const TEXT = {
   never_repo_stopped: ['Recording of {label} stopped. What was recorded before stays; `oboete forget --repo <a folder in it>` removes it.', '{label} の記録を止めました。これまでの記録は残ります。`oboete forget --repo <そのリポジトリ内のフォルダー>` で消せます。'],
   never_folder_stopped: ['Recording in this folder stopped. What was recorded before stays.', 'このフォルダーの記録を止めました。これまでの記録は残ります。'],
   never_undone: ['The exclusion is removed. From now on this is recorded, unless another exclusion or a checkout’s .oboete.toml still covers it. Nothing from while it was excluded comes back.', '除外を外しました。別の除外やチェックアウトの .oboete.toml が当てはまらない限り、今後は記録します。除外していた間の記録は戻りません。'],
+  never_undone_repo_covered: ['This exclusion is removed, but the repository is not recorded yet: another exclusion reads as it under the rules now. Record that one again from its own row.', 'この除外は外しましたが、今の規則で同じに読める別の除外があるため、このリポジトリはまだ記録しません。その除外の行から記録を再開してください。'],
   never_undone_covered: ['This folder is no longer excluded, but nothing there is recorded yet: another exclusion, or its checkout’s .oboete.toml, still covers it.', 'このフォルダーの除外は外しましたが、別の除外かチェックアウトの .oboete.toml がまだ当てはまるため、ここはまだ記録しません。'],
   capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
   folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
@@ -3773,8 +3774,10 @@ function captureSection(f) {
       if (!currentSettings(f)) return;
       if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
       if (body.folder) f.neverFolder = '';
-      // A folder another entry still covers is not recorded again (Codex on #491).
+      // A folder or a repository another entry still covers is not recorded again (Codex and
+      // CodeRabbit on #491).
       if (body.folder_selector && answer.never_recorded === true) receipt = t('never_undone_covered');
+      if (body.selector && body.undo && answer.never_recorded === true) receipt = t('never_undone_repo_covered');
       const refreshed = await refreshPrivacy(f);
       if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
     } catch {

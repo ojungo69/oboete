@@ -270,34 +270,55 @@ enum RawRepos<'a> {
 }
 
 /// The page's repositories: those the records and knowledge.db name (`history`), and each
-/// exclusion besides, but a capture entry that reads now as one of them (stored as given while
-/// the records hold the label a rule made), which is that one's row, not a second (Codex and
-/// Cursor on #491). Entries that read now as one label together keep rows of their own: that row's
-/// undo is refused as ambiguous, and each is taken back from its own (Cursor on #491).
+/// exclusion besides, but a capture entry that reads now as one of them and as no other (stored as
+/// given while the records hold the label a rule made), which is that one's row, not a second
+/// (Codex and Cursor on #491); that row's undo takes it back (`stands_for`). Entries that read now
+/// as one label together, or an entry several listed labels read as, keep rows of their own: an
+/// undo from a row they only read alike is refused, and each is taken back from its own (Cursor
+/// and Codex on #491).
 fn rows(
     mut history: BTreeSet<String>,
     excluded: &[String],
     never: &crate::raw::CaptureExclusions,
     settings: &crate::capture::Settings,
 ) -> BTreeSet<String> {
-    let read: BTreeSet<String> = history
-        .iter()
-        .map(|label| crate::capture::exclusion_label("repo", label, settings))
-        .collect();
-    let mut alike = std::collections::BTreeMap::<String, usize>::new();
-    for label in &never.repos {
-        *alike
-            .entry(crate::capture::exclusion_label("repo", label, settings))
-            .or_default() += 1;
-    }
+    let count = |labels: &mut dyn Iterator<Item = &String>| {
+        let mut n = std::collections::BTreeMap::<String, usize>::new();
+        for label in labels {
+            *n.entry(crate::capture::exclusion_label("repo", label, settings))
+                .or_default() += 1;
+        }
+        n
+    };
+    let (listed, alike) = (count(&mut history.iter()), count(&mut never.repos.iter()));
     for label in excluded {
         let now = crate::capture::exclusion_label("repo", label, settings);
-        let merged = never.repos.contains(label) && read.contains(&now) && alike[&now] == 1;
+        let merged = never.repos.contains(label)
+            && listed.get(&now) == Some(&1)
+            && alike.get(&now) == Some(&1);
         if !merged {
             history.insert(label.clone());
         }
     }
     history
+}
+
+/// Whether the listed row `row` stands for the capture entry `entry` (`rows`): the entry has no
+/// label of its own among `history`, and `row` is the one listed label that reads as it now (Codex
+/// on #491).
+fn stands_for(
+    history: &BTreeSet<String>,
+    settings: &crate::capture::Settings,
+    row: &str,
+    entry: &str,
+) -> bool {
+    let now = crate::capture::exclusion_label("repo", entry, settings);
+    let mut read = history
+        .iter()
+        .filter(|label| crate::capture::exclusion_label("repo", label, settings) == now);
+    !history.contains(entry)
+        && read.next().map(String::as_str) == Some(row)
+        && read.next().is_none()
 }
 
 /// Include newly captured repository metadata before indexing, the viewer's derived labels,
@@ -354,7 +375,7 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (raw, label) = listed_repository(home, &posted.selector)?;
+    let (raw, label, _) = listed_repository(home, &posted.selector)?;
     let mut writer = raw
         .into_writer(home)
         .map_err(|_| refused(503, "privacy_unavailable", ""))?;
@@ -371,27 +392,38 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
 
 /// The repository `selector` names in the list a GET shows, read fresh, with the read-only store
 /// the write goes on with.
-fn listed_repository(home: &Path, wanted: &str) -> Result<(crate::raw::ReadOnly, String), Refusal> {
+/// The listed repository `wanted` selects, with the labels the records and knowledge.db name
+/// (`rows`'s `history`).
+fn listed_repository(
+    home: &Path,
+    wanted: &str,
+) -> Result<(crate::raw::ReadOnly, String, BTreeSet<String>), Refusal> {
     let unavailable = || refused(503, "privacy_unavailable", "");
     let raw = crate::raw::read_only(home)
         .map_err(|_| unavailable())?
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
     let excluded = crate::raw::exclusions_in(&raw.conn).map_err(|_| unavailable())?;
     let k = knowledge(home).map_err(|_| unavailable())?;
-    let labels = labels(
+    let history = labels(
         k.as_ref().map(|(conn, _)| conn),
         RawRepos::Main(&raw.conn),
-        &excluded,
+        &[],
     )
     .map_err(|_| unavailable())?;
-    let mut selected = labels.into_iter().filter(|label| selector(label) == wanted);
+    let selected: BTreeSet<String> = history
+        .iter()
+        .chain(&excluded)
+        .filter(|label| selector(label) == wanted)
+        .cloned()
+        .collect();
+    let mut selected = selected.into_iter();
     let label = selected
         .next()
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
     if selected.next().is_some() {
         return Err(refused(409, "repo_changed", "selector"));
     }
-    Ok((raw, label))
+    Ok((raw, label, history))
 }
 
 /// Slice 4b's request: a listed repository by its `selector`, a folder to stop recording in by its
@@ -418,40 +450,42 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (key, label, mut writer, answer) =
+    let (key, label, row, mut writer, answer) =
         match (posted.selector, posted.folder, posted.folder_selector) {
             (Some(wanted), None, None) => {
                 if !is_selector(&wanted) {
                     return Err(refused(422, "privacy_selector", "selector"));
                 }
-                let (raw, label) = listed_repository(home, &wanted)?;
+                let (raw, row, history) = listed_repository(home, &wanted)?;
                 // Stored as its records name it, the one name the page has for it (owner,
                 // 2026-10-13: what is never recorded is stored as given); an undo takes back the
-                // entry stored for it, as the CLI's does (Codex on #491).
+                // entry stored for it, as the CLI's does (Codex on #491), or the one its row
+                // stands for (`rows`), and never another repository's entry that only reads as it
+                // now (Codex Security Review and Codex on #491).
                 let label = if posted.undo {
                     let settings =
                         crate::capture::Settings::load(home).map_err(|_| unavailable())?;
                     let stored = crate::raw::capture_exclusions_in(&raw.conn)
                         .map_err(|_| unavailable())?
                         .repos;
-                    // Another repository's entry that reads as this one now is its own to take
-                    // back (Codex Security Review on #491).
-                    crate::capture::undone("repo", &label, &stored, &settings).map_err(|e| {
-                        let other = e
+                    match crate::capture::undone("repo", &row, &stored, &settings) {
+                        Ok(entry) => entry,
+                        Err(e) => match e
                             .downcast_ref::<crate::capture::ReadAlike>()
-                            .is_some_and(|alike| alike.entries.len() == 1);
-                        let code = if other {
-                            "never_other"
-                        } else {
-                            "never_ambiguous"
-                        };
-                        refused(409, code, "selector")
-                    })?
+                            .map(|alike| alike.entries.as_slice())
+                        {
+                            Some([entry]) if stands_for(&history, &settings, &row, entry) => {
+                                entry.clone()
+                            }
+                            Some([_]) => return Err(refused(409, "never_other", "selector")),
+                            _ => return Err(refused(409, "never_ambiguous", "selector")),
+                        },
+                    }
                 } else {
-                    label
+                    row.clone()
                 };
                 let writer = raw.into_writer(home).map_err(|_| unavailable())?;
-                ("repo", label, writer, json!({ "selector": wanted }))
+                ("repo", label, row, writer, json!({ "selector": wanted }))
             }
             (None, Some(folder), None) if !posted.undo => {
                 if folder.len() > 4096 || folder.contains('\0') || !Path::new(&folder).is_absolute()
@@ -472,7 +506,7 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                     .cloned()
                     .unwrap_or(given);
                 let answer = json!({ "folder_selector": folder_selector(&label) });
-                ("folder", label, writer, answer)
+                ("folder", label.clone(), label, writer, answer)
             }
             (None, None, Some(wanted)) if posted.undo => {
                 if !is_selector(&wanted) {
@@ -491,6 +525,7 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                 let writer = raw.into_writer(home).map_err(|_| unavailable())?;
                 (
                     "folder",
+                    label.clone(),
                     label,
                     writer,
                     json!({ "folder_selector": wanted }),
@@ -498,15 +533,25 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
             }
             _ => return Err(refused(400, "bad_request", "")),
         };
-    // A folder taken off the list stays unrecorded while another entry still covers it, one
-    // around it or its repository (Codex on #491, CodeRabbit on #489): the answer says so, with no
-    // path, which the list shows masked (Codex and Cursor on #491). Read before the write, so
-    // nothing fails once it is committed (Codex on #491).
-    let still = if key == "folder" && posted.undo {
+    // What is taken off the list stays unrecorded while another entry still covers it: a folder,
+    // one around it or its repository (Codex on #491, CodeRabbit on #489), and a repository,
+    // another entry that reads as it now, as its row reads (CodeRabbit on #491). The answer says
+    // so, with no path, which the list shows masked (Codex and Cursor on #491). Read before the
+    // write, so nothing fails once it is committed (Codex on #491).
+    let still = if posted.undo {
         let mut list = writer.capture_exclusions().map_err(|_| unavailable())?;
         let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
-        list.folders.remove(&label);
-        crate::capture::not_recorded_why(&label, &list, &settings).is_some()
+        if key == "folder" {
+            list.folders.remove(&label);
+            crate::capture::not_recorded_why(&label, &list, &settings).is_some()
+        } else {
+            list.repos.remove(&label);
+            let gated = crate::capture::never_recorded(&list, &settings);
+            let now = crate::capture::exclusion_label("repo", &row, &settings);
+            [&row, &now]
+                .into_iter()
+                .any(|l| list.repos.contains(l) || gated.repos.contains(l))
+        }
     } else {
         false
     };
@@ -917,6 +962,71 @@ mod tests {
             "never_ambiguous"
         );
         assert_eq!(store.raw.max_op_seq().unwrap(), before);
+        // A taken back from its own row stays unrecorded while C reads as it, and the answer says
+        // so, as its row does (CodeRabbit on #491); C taken back too, both are recorded.
+        let answer = post(json!({"selector": selector(A), "undo": true})).unwrap();
+        assert_eq!(
+            (answer["never_recorded"].clone(), never(A)),
+            (json!(true), json!(true))
+        );
+        let answer = post(json!({"selector": selector(C), "undo": true})).unwrap();
+        assert_eq!(
+            (answer["never_recorded"].clone(), never(A)),
+            (json!(false), json!(false))
+        );
+    }
+
+    /// Codex on #491: an entry stored as given whose records carry only the label a rule made of
+    /// it is listed under that label alone, and that row's undo takes it back; once another listed
+    /// repository reads as it too, it keeps a row of its own, and only that row takes it back.
+    #[test]
+    fn a_stored_entry_listed_under_its_masked_label_is_taken_back_from_that_row() {
+        const A: &str = "github.com/o/secret-a1";
+        const B: &str = "github.com/o/secret-b2";
+        let mut store = Store::new();
+        let home = store.home.path().to_owned();
+        std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{ id = 'secret', regex = 'secret-[a-z][0-9]' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let masked = crate::capture::exclusion_label("repo", A, &settings);
+        assert_ne!(masked, A);
+        // A's records carry the label the rule made of it; its exclusion is stored as given.
+        store.said("sa", &masked, 1_000, "Masked label journey.");
+        store.run();
+        store.raw.exclude_capture(("repo", A), false).unwrap();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let labels = || {
+            show(&home)["repositories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["selector"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(), [selector(&masked)]);
+        post(json!({"selector": selector(&masked), "undo": true})).unwrap();
+        assert!(store.raw.capture_exclusions().unwrap().repos.is_empty());
+        // B's records read as A now too: A's entry keeps a row of its own, which alone takes it
+        // back; the masked label's row is refused, nothing written.
+        store.raw.exclude_capture(("repo", A), false).unwrap();
+        store.said("sb", B, 2_000, "Another repository journey.");
+        store.run();
+        assert!(labels().contains(&selector(A)));
+        let before = store.raw.max_op_seq().unwrap();
+        assert_eq!(
+            post(json!({"selector": selector(&masked), "undo": true}))
+                .unwrap_err()
+                .code,
+            "never_other"
+        );
+        assert_eq!(store.raw.max_op_seq().unwrap(), before);
+        post(json!({"selector": selector(A), "undo": true})).unwrap();
+        assert!(store.raw.capture_exclusions().unwrap().repos.is_empty());
     }
 
     /// Codex on #491, owner 2026-10-13: the page stores a repository as its records name it, the
@@ -1049,7 +1159,9 @@ mod tests {
     }
 
     /// Cursor on #491: capture entries a rule now reads as one label keep rows of their own, so
-    /// each is taken back from its row (that label's own undo is refused as ambiguous).
+    /// each is taken back from its row (that label's own undo is refused as ambiguous). One taken
+    /// back stays unrecorded while the other reads as it, and the answer says so (CodeRabbit on
+    /// #491).
     #[test]
     fn entries_a_rule_reads_alike_keep_their_own_rows() {
         const ONE: &str = "github.com/o/acme-111111";
@@ -1082,7 +1194,7 @@ mod tests {
             &saving,
             &serde_json::to_vec(&body).unwrap(),
         );
-        assert_eq!(undone.unwrap()["never_recorded"], false);
+        assert_eq!(undone.unwrap()["never_recorded"], true);
         assert!(!store.raw.capture_exclusions().unwrap().repos.contains(TWO));
     }
 

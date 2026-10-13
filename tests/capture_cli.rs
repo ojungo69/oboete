@@ -117,12 +117,15 @@ fn an_undo_does_not_take_back_another_folders_exclusion_that_reads_alike() {
         "{out}{err}"
     );
     assert!(!out.contains("recorded again"), "{out}");
-    // Still excluded: doctor in it says nothing there is recorded.
-    let out = run(home.path(), &kept, &["doctor"]);
-    assert!(
-        out.contains("nothing in this directory is recorded"),
-        "{out}"
-    );
+    // Still excluded: an undo by its own name takes it back.
+    let (out, _) = oboete(&[
+        "capture",
+        "exclude",
+        "--folder",
+        &kept.to_string_lossy(),
+        "--undo",
+    ]);
+    assert!(out.contains("recorded again from now on"), "{out}");
 }
 
 /// Codex on #489: two folders a rule added since reads alike: an undo by the name one was

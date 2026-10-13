@@ -100,7 +100,11 @@ it, so a rule added since an exclusion may cover another repository it now reads
 alike. Its undo does not take back an exclusion stored for another repository,
 which would record that one too: it is refused (`never_other`, or `never_ambiguous`
 when several exclusions read as it now), as `oboete capture exclude --undo` refuses
-it, and those exclusions keep rows of their own, each taken back from its row.
+it, and those exclusions keep rows of their own, each taken back from its row. An
+exclusion whose repository's records carry only the label a rule made of it is
+listed under that label, when no other listed repository reads as it, and that
+row's undo takes it back. An undo's answer says when the repository stays
+unrecorded because another exclusion still reads as it.
 
 A repository is named by the same opaque selector as the send exclusion, resolved
 freshly on the server, and stored as its records name it, the one name the page has
