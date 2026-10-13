@@ -65,7 +65,9 @@ A text gated under rules that are no longer the home's is not sent: the gate bef
 curator or a summarizer, retries and fallbacks included, compares the version the text was gated
 under with the rules now, as the embedder's batches already do, and on a change the window is cut
 again under the rules now (`ListChanged`), with no attempt counted. So redaction turned on while a
-call waits sends nothing gated while it was off; a rule added meanwhile is held the same way.
+call waits sends nothing gated while it was off; a rule added meanwhile is held the same way. The
+embedder's batches compare the rules after they wait for raw.db and the dispatch guard, and a
+search's query is gated again after its reservation and not sent when it reads otherwise.
 
 `Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
 than with the home's settings is the claude-mem import's prompts (`hook::clip`): it keeps them, so
@@ -84,6 +86,15 @@ it), and follows the switch: while it is off, a prompt is kept as typed, cut as 
   privacy fields.
 - doctor's capture line says `redaction off` when it is, in place of the rule counts.
 - No CLI command: the switch is the config key and the page, as the other `[redaction]` keys.
+
+## Limits
+
+- The rescan consumer and forget's scan of op text read a stored field's value without its key, and
+  the op text scan skips numbers, so a value a rule finds only with its key's name (gitleaks'
+  generic-api-key) stays when redaction is turned on again; the full-text index and the embedding
+  gate read values without keys too. Capture finds such values; these later readers do not. #501
+  has the acceptance tests. It touched only rules added later before the switch.
+- What was sent while redaction was off stays sent.
 
 ## Tests
 

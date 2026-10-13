@@ -679,6 +679,23 @@ fn embedded(
             Err(_) => VectorSkip::Error,
         }));
     }
+    #[cfg(test)]
+    if let Some(meanwhile) = AFTER_QUERY_GATE.lock().unwrap().take() {
+        meanwhile();
+    }
+    // And gated again under the rules now: redaction turned on, or a rule added, while the
+    // reservation waited reads the query otherwise, and what was gated before is not sent (owner
+    // decision 43; Codex's security review of the switch).
+    let again: String = redact::outbound_lines(&q.text)
+        .chars()
+        .take(crate::embed::PROMPT_CHARS)
+        .collect();
+    if again != sent {
+        if let Err(e) = pdb::unreserve(&db, call) {
+            eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
+        }
+        return Ok(Err(VectorSkip::Error));
+    }
     let started = Instant::now();
     let result = embedder.run(&[&sent], timeout);
     let (outcome, detail, billed) = match &result {
@@ -2203,6 +2220,13 @@ thread_local! {
     static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
+
+/// A test seam: what happens to the home between a query's gate and its call to the embedder,
+/// which runs beside the full-text sides on a thread of its own.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static AFTER_QUERY_GATE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 
 /// Claim `id` (a uid, or the first characters of one) as the viewer shows it: `None` when the id
 /// names no claim, several, or something else (milestone 4 D11).
@@ -4559,6 +4583,56 @@ mod tests {
             assert!(out.status.success(), "answered {answered}: {said}");
             assert!(said.contains("1 passed"), "{said}");
         }
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a query gated while redaction
+    /// is off is not sent once it is on again before the call: it is gated again after the
+    /// reservation, and the embedder gets nothing. Egress reads the rules of the home
+    /// `redact::set_home` names, the process's, so the search runs in a child process.
+    #[test]
+    fn a_query_gated_under_other_rules_is_not_sent() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_SWITCH_QUERY_HOME";
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let ask = Query {
+            text: format!("deploy {key}"),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let config = home.join("config.toml");
+            let on = std::fs::read_to_string(&config).unwrap();
+            std::fs::write(&config, format!("{on}[redaction]\nenabled = false\n")).unwrap();
+            *AFTER_QUERY_GATE.lock().unwrap() = Some(Box::new(move || {
+                std::fs::write(&config, &on).unwrap();
+            }));
+            query(&home, &ask).unwrap();
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "deploy the parser");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let sent = stub.requests();
+        let name = "search::b::tests::a_query_gated_under_other_rules_is_not_sent";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, &home)
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        assert_eq!(stub.requests(), sent);
     }
 
     /// Q2 replaces D7's knowledge-before-prompts split: imported documents share one full-text
