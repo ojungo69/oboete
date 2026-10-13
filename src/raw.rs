@@ -1109,9 +1109,10 @@ impl CaptureExclusions {
     pub fn covers(&self, repo: Option<&str>, cwd: Option<&str>) -> bool {
         repo.is_some_and(|r| self.repos.contains(r))
             || cwd.is_some_and(|c| {
+                let c = folded(c);
                 self.folders
                     .iter()
-                    .any(|f| std::path::Path::new(c).starts_with(f))
+                    .any(|f| std::path::Path::new(&*c).starts_with(&*folded(f)))
             })
     }
 
@@ -1125,6 +1126,17 @@ impl CaptureExclusions {
         }
         let repos: Vec<String> = self.repos.iter().cloned().collect();
         crate::embed_phase::import_excluded(repo, &repos)
+    }
+}
+
+/// Slice 4a: a folder as the platform's file systems name one: Windows' and macOS's ignore letter
+/// case unless a volume was made otherwise, so either spelling of an excluded folder is covered
+/// (Codex on #489).
+fn folded(path: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(any(windows, target_os = "macos")) {
+        path.to_lowercase().into()
+    } else {
+        path.into()
     }
 }
 
@@ -8375,6 +8387,25 @@ mod tests {
         let mut other = open(copy.path()).unwrap();
         other.exclude("x", false).unwrap();
         assert_eq!(other.exclusions().unwrap(), ["x"]);
+    }
+
+    /// Codex on #489: a folder excluded under one spelling covers another where the platform's file
+    /// systems ignore letter case (Windows, macOS), and only there.
+    #[test]
+    fn a_folder_covers_another_spelling_of_itself_only_where_case_is_ignored() {
+        let (stored, event) = if cfg!(windows) {
+            (r"C:\Work\Private", r"c:\work\private\sub")
+        } else {
+            ("/Users/x/Work/Private", "/users/x/work/private/sub")
+        };
+        let list = CaptureExclusions {
+            folders: [stored.to_owned()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            list.covers(None, Some(event)),
+            cfg!(any(windows, target_os = "macos"))
+        );
     }
 
     /// Slice 4a (spec 6.1): what is never recorded is never sent either, and each undo takes its

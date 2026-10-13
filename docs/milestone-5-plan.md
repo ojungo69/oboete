@@ -1340,7 +1340,8 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   から比べる（後から足した規則が path の一部を伏せても、event の label と同じに伏せる）。hook の `cwd` が
   相対か無いときは、hook が動く directory を絶対パスにしてから label にする。CLI の folder と hook の `cwd`
   はどちらも `capture::folder_path` で、`.` と `..` を名前の上で外し、末尾の区切りを落とす（link はたどら
-  ない。Codex on #489）。claude-mem から取り込む一覧の project の名前も、今の規則で gate した形とも比べる
+  ない。Codex on #489）。Windows と macOS では大文字と小文字を区別せずに比べる（既定の file system がそう
+  なので、どちらの書き方で除外しても覆う。Codex on #489）。claude-mem から取り込む一覧の project の名前も、今の規則で gate した形とも比べる
   （規則が repo の名前の一部を伏せていても合う）。`folder` と
   `level` は `repo` と同じく op の名前で、#487 が `OP_NAMES` に足す。
 - **`.oboete.toml`**: checkout の top（`repo::key` が `.git` を探す一度の歩きで分かる、worktree なら

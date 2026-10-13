@@ -130,20 +130,26 @@ pub fn repo_capture(top: Option<&Path>) -> anyhow::Result<bool> {
     };
     // The repository's file, read only as a regular file of at most `CHECKOUT_TOML_LIMIT` bytes:
     // one that names a device or a pipe, or a large one, stops recording rather than holding the
-    // hook (push security review of #489).
-    let mut text = String::new();
-    let read = match std::fs::metadata(&path) {
-        Ok(meta) if !meta.is_file() => anyhow::bail!("{} is not a regular file", path.display()),
-        Ok(_) => std::fs::File::open(&path)
-            .and_then(|f| f.take(CHECKOUT_TOML_LIMIT + 1).read_to_string(&mut text)),
-        Err(e) => Err(e),
+    // hook (push security review of #489). Opened without waiting on a pipe, and the handle it
+    // opened is what is checked: a name swapped meanwhile is not read (Codex on #489).
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => anyhow::bail!("{} cannot be read ({})", path.display(), e.kind()),
     };
-    match read {
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    let mut text = String::new();
+    match file.take(CHECKOUT_TOML_LIMIT + 1).read_to_string(&mut text) {
         Ok(n) if n as u64 > CHECKOUT_TOML_LIMIT => {
             anyhow::bail!("{} is over {CHECKOUT_TOML_LIMIT} bytes", path.display())
         }
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => anyhow::bail!("{} cannot be read ({})", path.display(), e.kind()),
     }
     let Ok(table) = text.parse::<toml::Table>() else {
@@ -892,6 +898,12 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/dev/zero", &file).unwrap();
+            let e = repo_capture(Some(top.path())).unwrap_err().to_string();
+            assert!(e.contains("not a regular file"), "{e}");
+            // A pipe no one writes to is opened without waiting, and refused (Codex on #489).
+            std::fs::remove_file(&file).unwrap();
+            let made = std::process::Command::new("mkfifo").arg(&file).status();
+            assert!(made.unwrap().success());
             let e = repo_capture(Some(top.path())).unwrap_err().to_string();
             assert!(e.contains("not a regular file"), "{e}");
         }
