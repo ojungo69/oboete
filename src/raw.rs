@@ -1309,14 +1309,34 @@ fn open_within_report(
     let mut bound = !file_before.is_empty() && crate::db::store_file(&path) == file_before;
     #[cfg(test)]
     crate::crash::arm(&conn);
+    // docs/store-format.md: a raw.db a newer oboete wrote is refused before anything writes the
+    // file, its journal mode included (CodeRabbit, Codex and Cursor on #503).
+    let format = crate::db::retry_busy(&conn, deadline, || format_of(&conn))?;
     crate::db::wal_until(&conn, "FULL", deadline)?;
-    // docs/store-format.md: a raw.db a newer oboete wrote is refused before anything changes it.
-    let format = format_of(&conn)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
     // Milestone 5 D5 (2b): what a write frees is overwritten with zeros, so neither a rewritten op
     // body nor a deleted row leaves its bytes in the file.
     conn.execute_batch("PRAGMA secure_delete=ON;")?;
+    // Stamped before the schema and the migrations, read again under the write lock: of two
+    // binaries opening together, the newer one's stamp stays, and the older one refuses it before
+    // it migrates anything.
+    if format < FORMAT
+        && crate::db::retry_busy(&conn, deadline, || {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let raised = format_of(&tx)? < FORMAT;
+            if raised {
+                tx.execute_batch(&format!("PRAGMA user_version = {FORMAT}"))?;
+            }
+            tx.commit()?;
+            Ok(raised)
+        })?
+    {
+        committed("stores_changed")?;
+    }
     if crate::db::ensure_schema_until(&conn, &schema_for_file(&conn, &path)?, deadline)
         .context("raw schema")?
     {
@@ -1372,24 +1392,6 @@ fn open_within_report(
         {
             committed("stores_changed")?;
         }
-    }
-    // Stamped once its schema is this binary's, read again under the write lock: of two binaries
-    // opening together, the newer one's stamp stays, and the older one refuses it.
-    if format < FORMAT
-        && crate::db::retry_busy(&conn, deadline, || {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &conn,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let raised = format_of(&tx)? < FORMAT;
-            if raised {
-                tx.execute_batch(&format!("PRAGMA user_version = {FORMAT}"))?;
-            }
-            tx.commit()?;
-            Ok(raised)
-        })?
-    {
-        committed("stores_changed")?;
     }
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
@@ -1452,6 +1454,13 @@ fn open_within_report(
             })?
         }
     };
+    #[cfg(test)]
+    if let Some(meanwhile) = BEFORE_OPEN_RETURNS.take() {
+        meanwhile(&path);
+    }
+    // And once more before the handle is returned: a newer oboete may have stamped the file while
+    // this one migrated it (CodeRabbit on #503).
+    format_of(&conn)?;
     Ok(Raw {
         conn,
         home: home.to_owned(),
@@ -1511,6 +1520,12 @@ fn format_of(conn: &Connection) -> Result<i64> {
 /// other callers 10 s); a restore waits at most 10 s for open stores to close.
 const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(test)]
+thread_local! {
+    /// What happens to raw.db after an open's migrations, before it checks the format once more.
+    static BEFORE_OPEN_RETURNS: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
 
 #[cfg(test)]
 thread_local! {
@@ -4010,6 +4025,9 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // docs/store-format.md: a handle opened before a newer oboete stamped raw.db appends
+        // nothing after (CodeRabbit on #503).
+        format_of(&tx)?;
         let never = capture_exclusions_in(&tx)?;
         let now = settings.map(|s| crate::capture::never_recorded(&never, s));
         if scope_tombstoned(
@@ -4043,6 +4061,7 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        format_of(&tx)?;
         if let Some(hash) = hash
             && tx.execute(
                 "INSERT OR IGNORE INTO unwritten_written(hash, at) VALUES(?1, ?2)",
@@ -5030,6 +5049,7 @@ impl Raw {
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        format_of(&tx)?;
         let lists = ops.iter().any(|(kind, _)| *kind == OpKind::WorkState);
         let never = lists.then(|| capture_exclusions_in(&tx)).transpose()?;
         let now = never
@@ -5077,6 +5097,7 @@ impl Raw {
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        format_of(&tx)?;
         let now: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
         if now != fence {
             return Err(crate::curate::ListChanged.into());
@@ -7787,7 +7808,8 @@ mod tests {
         let mut raw = open(p).unwrap();
         raw.append(&test_event(r#"{"prompt":"kept as it was"}"#))
             .unwrap();
-        // Without a column this binary's migration adds back: a refused open adds nothing.
+        // Without a column this binary's migration adds back, and in rollback-journal mode, which
+        // this binary's open sets to WAL: a refused open changes neither (Codex on #503).
         raw.conn
             .execute_batch(&format!(
                 "ALTER TABLE import_origins DROP COLUMN ambiguous;
@@ -7796,6 +7818,17 @@ mod tests {
             ))
             .unwrap();
         drop(raw);
+        let mode = || {
+            Connection::open(p.join("raw.db"))
+                .unwrap()
+                .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                .unwrap()
+        };
+        Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode = DELETE")
+            .unwrap();
+        assert_eq!(mode(), "delete");
         let bytes = |name: &str| std::fs::read(p.join(name)).ok();
         let before = bytes("raw.db");
         for refused in [open(p).err(), read_only(p).err()] {
@@ -7806,6 +7839,7 @@ mod tests {
         }
         assert_eq!(bytes("raw.db"), before);
         assert!(bytes("raw.db-wal").is_none_or(|wal| wal.is_empty()));
+        assert_eq!(mode(), "delete");
     }
 
     /// docs/store-format.md: a raw.db from before the stamp gets it at its first writable open,
@@ -7833,12 +7867,40 @@ mod tests {
         })
         .unwrap();
         assert_eq!((format_in(&again), changed), (FORMAT, vec![]));
-        // A newer binary stamps it while this handle is open: the handle says so.
+        // A newer binary stamps it while this handle is open: the handle says so, and appends
+        // neither an event nor an op (CodeRabbit on #503).
         again
             .conn
             .execute_batch(&format!("PRAGMA user_version = {}", FORMAT + 1))
             .unwrap();
         assert!(raw.newer_format());
+        let mut raw = raw;
+        let refused = |e: anyhow::Error| e.is::<NewerFormat>();
+        assert!(refused(
+            raw.append(&test_event("after the stamp")).unwrap_err()
+        ));
+        let op = (
+            OpKind::Correction,
+            serde_json::json!({"uid": "u", "status": "rejected"}),
+        );
+        assert!(refused(raw.append_ops(&[op]).unwrap_err()));
+    }
+
+    /// CodeRabbit on #503: a newer oboete that stamps raw.db while an open migrates it is refused
+    /// before the open returns its handle.
+    #[test]
+    fn an_open_during_which_a_newer_oboete_stamps_raw_db_refuses_it() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        drop(open(p).unwrap());
+        BEFORE_OPEN_RETURNS.set(Some(|path| {
+            Connection::open(path)
+                .unwrap()
+                .execute_batch(&format!("PRAGMA user_version = {}", FORMAT + 1))
+                .unwrap();
+        }));
+        let e = open(p).err().expect("refused");
+        assert!(e.is::<NewerFormat>(), "{e:#}");
     }
 
     /// Codex on #458: a copy's sidecars are named on its path's own bytes, which need not be

@@ -31,19 +31,20 @@ switches to.
 
 ## The refusal
 
-- Every open of raw.db reads `user_version` right after its connection, before any schema change,
-  and refuses a value above `FORMAT` with a typed error, `raw::NewerFormat { found, known }`:
-  "raw.db was written by a newer oboete (format 2; this one reads up to 1): update oboete". The
-  writable open (`open_within_report`, under every `raw::open`) and `raw::read_only` both check.
-  A refused open changes no byte of the file.
-- The writable open raises a lower value to `FORMAT` after its schema and migrations, in an
+- Every open of raw.db reads `user_version` right after its connection, before anything writes
+  the file (its journal mode included), and refuses a value above `FORMAT` with a typed error,
+  `raw::NewerFormat { found }`: "raw.db was written by a newer oboete (format 2; this one reads up
+  to 1): update oboete". The writable open (`open_within_report`, under every `raw::open`) and
+  `raw::read_only` both check. A refused open changes no byte of the file.
+- The writable open raises a lower value to `FORMAT` before its schema and migrations, in an
   IMMEDIATE transaction that reads it again, so that of two binaries opening together the newer
-  one's stamp stays and the older one, opening after it, refuses. A raw.db already at `FORMAT` is
-  not written: a hook's open stays read-only when the schema is complete, as now.
-- A restore's rebuild gets the restoring binary's stamp with its schema, and a restore does not
-  rebuild over a raw.db a newer oboete wrote while that file still reads (`oboete restore` and the
-  page's restore would otherwise put an older home in its place). `oboete migrate` (v1) creates
-  raw.db through the writable open.
+  one's stamp stays and the older one refuses it before it migrates anything. A raw.db already at
+  `FORMAT` is not written: a hook's open stays read-only when the schema is complete, as now.
+- The open reads it once more before it returns its handle (a newer binary may have stamped the
+  file while this one migrated it), and each append of events or ops reads it in its own
+  transaction: a handle opened before a newer binary stamped the file appends nothing after.
+  Other writes of a handle opened before the stamp (a worker's tombstones, a purge) go on until
+  its next open; the resident worker opens again at its next round (below).
 
 ## Who says what
 
