@@ -1057,7 +1057,7 @@ const TEXT = {
   never_folders_h: ['Folders on this device', 'この端末のフォルダー'],
   never_folders_none: ['No folder is excluded.', '除外しているフォルダーはありません。'],
   never_on: ['Never recorded', '記録しない'],
-  never_off: ['Recorded', '記録する'],
+  never_off: ['Not excluded', '除外していません'],
   never_exclude: ['Never record from now on', '今後は記録しない'],
   never_undo: ['Record again from now on', '今後は記録を再開'],
   never_folder_input: ['Folder to never record (full path)', '記録しないフォルダー (フルパス)'],
