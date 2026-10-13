@@ -1347,7 +1347,9 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   その worktree の top）の `.oboete.toml` の `capture` の鍵だけを読む（他の鍵は見ない）。`capture =
   false` なら記録しない。`capture = true` は一覧を外さない。ファイルが読めない、TOML として読めない、
   `capture` が真偽値でないときも記録しない（repo の設定は制限しかできないので閉じる側に倒す。Claude;
-  overrulable）。そのとき hook は stderr に一行、doctor はその checkout で一行出す。読むのは hook の経路
+  overrulable）。通常のファイルで 64 KiB までしか読まない: repository が持つファイルなので、device を指す
+  link や大きなファイルは読まずに記録しない側にする（hook を止めない。push の security review on #489）。
+  そのとき hook は stderr に一行、doctor はその checkout で一行出す。読むのは hook の経路
   だけ（取り込みは checkout が動いた後なので op の一覧だけを見る）。
 - **どこで断るか**: `Raw::append_with_ledger` と `append_imported_origins` の書込み transaction の中で一覧
   を読み（保存した値のまま比べる）、除外なら書かない（slice 3b の忘れた session と同じ `Ok(None)`）。除外

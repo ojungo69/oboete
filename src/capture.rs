@@ -117,18 +117,35 @@ fn checkout_records(top: Option<&Path>) -> bool {
     })
 }
 
+/// The most of a checkout's `.oboete.toml` that is read: it holds one key (Claude; overrulable).
+const CHECKOUT_TOML_LIMIT: u64 = 64 * 1024;
+
 /// The `capture` key of `.oboete.toml` at the checkout's `top`, which may only restrict: true
 /// with no such file or key. An error for a file that cannot be read, is not TOML, or whose
 /// `capture` is not true or false; never its text, which may hold anything.
 pub fn repo_capture(top: Option<&Path>) -> anyhow::Result<bool> {
+    use std::io::Read;
     let Some(path) = top.map(|t| t.join(".oboete.toml")) else {
         return Ok(true);
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    // The repository's file, read only as a regular file of at most `CHECKOUT_TOML_LIMIT` bytes:
+    // one that names a device or a pipe, or a large one, stops recording rather than holding the
+    // hook (push security review of #489).
+    let mut text = String::new();
+    let read = match std::fs::metadata(&path) {
+        Ok(meta) if !meta.is_file() => anyhow::bail!("{} is not a regular file", path.display()),
+        Ok(_) => std::fs::File::open(&path)
+            .and_then(|f| f.take(CHECKOUT_TOML_LIMIT + 1).read_to_string(&mut text)),
+        Err(e) => Err(e),
+    };
+    match read {
+        Ok(n) if n as u64 > CHECKOUT_TOML_LIMIT => {
+            anyhow::bail!("{} is over {CHECKOUT_TOML_LIMIT} bytes", path.display())
+        }
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => anyhow::bail!("{} cannot be read ({})", path.display(), e.kind()),
-    };
+    }
     let Ok(table) = text.parse::<toml::Table>() else {
         anyhow::bail!("{} is not valid TOML", path.display());
     };
@@ -855,6 +872,29 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         assert!(repo_capture(Some(top.path())).is_err());
+    }
+
+    /// Push security review of #489: a checkout's `.oboete.toml` past the limit, or one that names
+    /// a device (a link the repository holds), stops recording at once rather than holding the
+    /// hook while it reads.
+    #[test]
+    fn a_checkout_toml_that_is_no_small_file_stops_recording() {
+        let top = tempfile::tempdir().unwrap();
+        let file = top.path().join(".oboete.toml");
+        let big = format!(
+            "capture = true\n#{}\n",
+            "x".repeat(CHECKOUT_TOML_LIMIT as usize)
+        );
+        std::fs::write(&file, big).unwrap();
+        let e = repo_capture(Some(top.path())).unwrap_err().to_string();
+        assert!(e.contains("over"), "{e}");
+        std::fs::remove_file(&file).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/dev/zero", &file).unwrap();
+            let e = repo_capture(Some(top.path())).unwrap_err().to_string();
+            assert!(e.contains("not a regular file"), "{e}");
+        }
     }
 
     /// Slice 4a: a checkout whose `.oboete.toml` stops recording, or cannot be read, gets no event,
