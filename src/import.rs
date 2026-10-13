@@ -313,14 +313,40 @@ fn work_state(
     for op in ops {
         let size = op.1.to_string().len();
         if batch.len() == crate::raw::IMPORT_BATCH || bytes + size > crate::raw::MAX_BATCH_BYTES {
-            raw.append_imported_ops(&std::mem::take(&mut batch), settings)?;
+            append_work_state(raw, &std::mem::take(&mut batch), settings, stats)?;
             bytes = 0;
         }
         bytes += size;
         batch.push(op);
     }
     if !batch.is_empty() {
-        raw.append_imported_ops(&batch, settings)?;
+        append_work_state(raw, &batch, settings, stats)?;
+    }
+    Ok(())
+}
+
+/// One batch of imported work state ops. A repository excluded after this run read the list
+/// refuses its rows in the append (`NeverRecorded`): the batch then goes in one op at a time, and
+/// each op refused is counted as never recorded rather than imported (Codex on #489).
+fn append_work_state(
+    raw: &mut Raw,
+    batch: &[(crate::raw::OpKind, serde_json::Value)],
+    settings: &crate::capture::Settings,
+    stats: &mut Stats,
+) -> Result<()> {
+    let never = |e: &anyhow::Error| e.is::<crate::raw::NeverRecorded>();
+    match raw.append_imported_ops(batch, settings) {
+        Err(e) if never(&e) => {}
+        other => return other.map(drop),
+    }
+    for op in batch {
+        match raw.append_imported_ops(std::slice::from_ref(op), settings) {
+            Err(e) if never(&e) => {
+                stats.work_state -= 1;
+                stats.never_recorded += 1;
+            }
+            other => other.map(drop)?,
+        }
     }
     Ok(())
 }
@@ -832,6 +858,35 @@ mod tests {
             .unwrap();
         let after = claude_mem(&mut raw, &src, &Default::default()).unwrap();
         assert_eq!((after.work_state, after.never_recorded), (2, 0));
+    }
+
+    /// Codex on #489: a repository excluded after the import read the list refuses its rows in
+    /// the append; the batch's other rows still come in, and the refused ones are counted.
+    #[test]
+    fn an_exclusion_made_during_the_import_leaves_out_only_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let op = |project: &str, id: &str| {
+            (
+                OpKind::WorkState,
+                json!({"repo": repo(project), "list": "plan",
+                    "fields": {"task": "Port search", "status": "doing"}, "clock": 1_000,
+                    "at": 1_000, "source": "claude-mem:b62f07076e19", "source_id": id}),
+            )
+        };
+        let batch = [op("free-mem", "w1"), op("other", "w2")];
+        // After the import's read of the list, before its append.
+        raw.exclude_capture(("repo", "github.com/o/free-mem"), false)
+            .unwrap();
+        let mut stats = Stats {
+            work_state: 2,
+            ..Default::default()
+        };
+        append_work_state(&mut raw, &batch, &Default::default(), &mut stats).unwrap();
+        assert_eq!((stats.work_state, stats.never_recorded), (1, 1));
+        let ops = work_ops(&raw);
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0]["source_id"], "w2");
     }
 
     /// Codex on #489: a repository excluded under a rule that masks part of its name keeps its
