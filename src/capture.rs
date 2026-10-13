@@ -207,31 +207,43 @@ pub fn exclusion_label(field: &str, value: &str, settings: &Settings) -> String 
     gate.text(field, &without_blocks(value, false), cap)
 }
 
-/// Slice 4a: the entry of `stored` an undo of `given` takes back: the one stored as given (a
-/// folder in any spelling of letter case where the platform ignores it, as `covers` reads one),
-/// else the one entry that reads as `given` under the rules now (one stored masked: by the page,
-/// or before exclusions were stored as given), else `given`, which takes nothing back. An error
-/// naming them when several read so (Codex on #489).
+/// Slice 4a: whether two exclusions of `field` name one place: a folder in any spelling of letter
+/// case where the platform ignores it, as `covers` reads one; a repository exactly.
+fn same_place(field: &str, a: &str, b: &str) -> bool {
+    if field == "cwd" {
+        crate::raw::folded(a) == crate::raw::folded(b)
+    } else {
+        a == b
+    }
+}
+
+/// Slice 4a: the entry of `stored` that names `given`'s place (`same_place`), so adding another
+/// spelling of a folder keeps the one entry an undo takes back (Codex on #489).
+pub fn stored_entry<'a>(
+    field: &str,
+    given: &str,
+    stored: &'a std::collections::BTreeSet<String>,
+) -> Option<&'a String> {
+    stored.iter().find(|s| same_place(field, s, given))
+}
+
+/// Slice 4a: the entry of `stored` an undo of `given` takes back: the one stored as given
+/// (`stored_entry`), else the one entry that reads as `given` under the rules now (one stored
+/// masked: by the page, or before exclusions were stored as given), else `given`, which takes
+/// nothing back. An error naming them when several read so (Codex on #489).
 pub fn undone(
     field: &str,
     given: &str,
     stored: &std::collections::BTreeSet<String>,
     settings: &Settings,
 ) -> anyhow::Result<String> {
-    let same = |a: &str, b: &str| {
-        if field == "cwd" {
-            crate::raw::folded(a) == crate::raw::folded(b)
-        } else {
-            a == b
-        }
-    };
-    if let Some(entry) = stored.iter().find(|s| same(s, given)) {
+    if let Some(entry) = stored_entry(field, given, stored) {
         return Ok(entry.clone());
     }
     let now = exclusion_label(field, given, settings);
     let read: Vec<&String> = stored
         .iter()
-        .filter(|s| same(&exclusion_label(field, s, settings), &now))
+        .filter(|s| same_place(field, &exclusion_label(field, s, settings), &now))
         .collect();
     match read.as_slice() {
         [] => Ok(given.to_owned()),
@@ -972,7 +984,7 @@ mod tests {
     }
 
     /// Codex on #489: an undo finds a folder stored in another spelling of letter case where the
-    /// platform ignores it, as `covers` reads one, and only there.
+    /// platform ignores it, as `covers` reads one, and only there; an add finds it the same way.
     #[test]
     fn an_undo_finds_a_folder_in_another_spelling_only_where_case_is_ignored() {
         let (stored, given) = if cfg!(windows) {
@@ -988,6 +1000,10 @@ mod tests {
             given
         };
         assert_eq!(found, want);
+        // An exclusion added in another spelling keeps that one entry, as the CLI's add takes it.
+        let kept = stored_entry("cwd", given, &list).map(String::as_str);
+        assert_eq!(kept, (want == stored).then_some(stored));
+        assert_eq!(stored_entry("repo", given, &list), None);
     }
 
     /// Push security review of #489: a checkout's `.oboete.toml` past the limit, or one that names

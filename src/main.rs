@@ -963,9 +963,12 @@ fn capture_exclude(
         "folder" => ("cwd", &was.folders),
         _ => ("repo", &was.repos),
     };
-    // An undo takes the entry stored for it (Codex on #489).
+    // An undo takes the entry stored for it, and an add keeps one entry for a folder in either
+    // spelling of letter case where that is one folder (Codex on #489).
     let value = match undo {
-        false => given.clone(),
+        false => capture::stored_entry(field, &given, stored)
+            .cloned()
+            .unwrap_or_else(|| given.clone()),
         true => capture::undone(field, &given, stored, &settings)?,
     };
     let had = stored.contains(&value);
