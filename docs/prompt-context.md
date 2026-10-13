@@ -35,11 +35,16 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
 2. **Who computes.** The resident viewer, which the resident worker keeps up, asked by the hook:
    `POST /api/prompt-context` on `127.0.0.1` at the configured port, with the token of
    `state/view-token`, only when the viewer holds `state/view.lock` and its outcome says it
-   listens (`view::resident_up`). The hook loads no model and calls nothing off the machine. The
-   viewer runs the search as it runs one for the page or the MCP server (`search::b`'s
-   `Caller::Reader`): it embeds the prompt with the embedder set up (the local model, loaded on the
-   first query and kept, on this PC; Workers AI on the iMac) through the egress gate, waits for
-   that vector at most `QUERY_TIMEOUT` (1.2 s) and answers from words alone past it.
+   listens (`view::resident_up`). The request names the calling checkout's repository (and
+   branch), as the hook labels it: the viewer has no checkout of its own and its other searches
+   read every repository, so the repository is the search's scope and `Query::caller`, and a
+   repository excluded from sending (spec 5.5) or never recorded (6.1) has its prompt embedded by
+   no provider and gets the words side only. The hook loads no model and calls nothing off the
+   machine. The viewer runs the search as it runs one for the page or the MCP server
+   (`search::b`'s `Caller::Reader`): it embeds the prompt with the embedder set up (the local
+   model, loaded on the first query and kept, on this PC; Workers AI on the iMac) through the
+   egress gate, waits for that vector at most `QUERY_TIMEOUT` (1.2 s) and answers from words
+   alone past it.
 3. **What.** The repository's delivered claims, current cards, session summaries and imported
    history (decision 44's second answer), ranked as search ranks them: meaning and words fused
    (reciprocal rank fusion, spec 4.10; nDCG@10 0.545 against claude-mem's 0.244 on the owner's
@@ -57,17 +62,23 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
    The one evaluation sets both thresholds, with the false-premise questions, by the same line.
    `[inject] per_prompt` stays off by default until then (4.6); the owner turns it on, as the
    owner has claude-mem's on.
-5. **A cap on the wait.** The hook waits at most `[inject] per_prompt_wait_ms`. Its default comes
-   from measurement, before the code merges: the viewer's answer time (the query vector within
-   its 1.2 s, the search, the lines) on the owner's two machines, this PC with the local model
+5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the whole prompt
+   point, from the hook's read fence to the block, not the viewer's answer alone. The hook builds
+   the words side (as now but over the same kinds: the full-text index of claims, cards, summaries
+   and imports, with the same 0.53 cut) while it waits for the viewer, so a late or missing
+   answer leaves a block that is already built. The default comes from measurement, before the
+   code merges: the prompt point's time (the fence, the viewer's answer with its query vector
+   within 1.2 s, the search, the lines) on the owner's two machines, this PC with the local model
    and the iMac with Workers AI, set so that the slower machine's 95th percentile fits, and not
    above claude-mem's 2 s for Codex unless the measurement says so. No resident viewer, no answer
-   in time, or an error: the hook builds the block from the words side alone, as now but over the
-   same kinds (the full-text index of claims, cards, summaries and imports), with the same 0.53
-   cut. A meaning answer that comes late is lost for that prompt; this is the known cost.
-6. **Fail-open.** Nothing on this path blocks the prompt past the cap, and nothing it does is
-   written: the answer is read, gated (`outbound`, as every block), fenced and shown. The hook
-   latency lines (milestone 2's write line, milestone 4's read line) are measured again with it.
+   by the deadline, or an error: the words side's block. A meaning answer that comes late is lost
+   for that prompt; this is the known cost.
+6. **Fail-open.** Nothing on this path blocks the prompt past the deadline, and it writes no
+   memory and no index: the answer is read, gated (`outbound`, as every block), fenced and shown.
+   What it writes is what a search and a prompt point write now: a query sent to a provider is
+   reserved and settled in `providers.db` (the embedding budget), and what is shown joins the
+   session's shown set, so it is not shown again. The hook latency lines (milestone 2's write
+   line, milestone 4's read line) are measured again with it.
 
 ## Where it does not reach yet
 
@@ -93,9 +104,12 @@ page's injection section (the wait, and which side answered last).
 
 ## Tests
 
-- The hook asks the viewer only when it is up; the answer is gated and fenced; nothing below
-  either threshold is shown; nothing already shown is shown again.
-- A viewer that answers after the cap: the block is the words side's, built in time.
+- The hook asks the viewer only when it is up; the request names the checkout's repository,
+  which scopes the search; a repository excluded from sending gets the words side and no query is
+  sent; the answer is gated and fenced; nothing below either threshold is shown; nothing already
+  shown is shown again.
+- A viewer that answers after the deadline: the block is the words side's, built meanwhile, and
+  the prompt point ends within the deadline.
 - No resident viewer (the iMac today): the words side, over cards, summaries and imports too.
 - A prompt under 20 characters or an envelope asks nothing; imported records carry their label.
 - The measurements above: answer times on both machines; `T` from the no-answer questions.
