@@ -394,8 +394,9 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                     return Err(refused(422, "privacy_selector", "selector"));
                 }
                 let (raw, label) = listed_repository(home, &wanted)?;
-                // An undo takes back the entry that keeps it from being recorded now, as the CLI's
-                // does (Codex on #491).
+                // Stored as its records name it, the one name the page has for it (owner,
+                // 2026-10-13: what is never recorded is stored as given); an undo takes back the
+                // entry stored for it, as the CLI's does (Codex on #491).
                 let label = if posted.undo {
                     let settings =
                         crate::capture::Settings::load(home).map_err(|_| unavailable())?;
@@ -789,8 +790,8 @@ mod tests {
         const B: &str = "github.com/o/secret-b2";
         const C: &str = "github.com/o/secret-c3";
         let mut store = Store::new();
-        for (ts, repo) in [(1_000, A), (2_000, B), (3_000, C)] {
-            store.said("s", repo, ts, "Labels read alike journey.");
+        for (ts, session, repo) in [(1_000, "sa", A), (2_000, "sb", B), (3_000, "sc", C)] {
+            store.said(session, repo, ts, "Labels read alike journey.");
         }
         store.run();
         let home = store.home.path().to_owned();
@@ -806,28 +807,35 @@ mod tests {
                 .unwrap()["never_recorded"]
                 .clone()
         };
+        let rule = |on: bool| {
+            let rules =
+                "[redaction]\nextra_rules = [{ id = 'secret', regex = 'secret-[a-z][0-9]' }]\n";
+            let text = format!("[summary]\ncurate = false\n{}", if on { rules } else { "" });
+            std::fs::write(home.join("config.toml"), text).unwrap();
+        };
         post(json!({"selector": selector(A), "undo": false})).unwrap();
         assert_eq!(never(B), json!(false));
-        std::fs::write(
-            home.join("config.toml"),
-            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{ id = 'secret', \
-             regex = 'secret-[a-z][0-9]' }]\n",
-        )
-        .unwrap();
+        rule(true);
         // A hook reads B's events as A's exclusion now.
         let settings = crate::capture::Settings::load(&home).unwrap();
         let list = store.raw.capture_exclusions().unwrap();
         let b_now = crate::capture::exclusion_label("repo", B, &settings);
         assert!(crate::capture::never_recorded(&list, &settings).covers(Some(&b_now), None));
         assert_eq!(never(B), json!(true));
+        // Nor is its session sent, as its row says (Cursor on #491: #489's `exclusions_now`).
+        let reading = crate::curate::Reading::now(&store.raw, crate::curate::Reads::Live).unwrap();
+        assert!(reading.excluded.contains("claude\0sb"), "{reading:?}");
         post(json!({"selector": selector(B), "undo": true})).unwrap();
         assert_eq!(
             store.raw.capture_exclusions().unwrap(),
             crate::raw::CaptureExclusions::default()
         );
         assert_eq!((never(A), never(B)), (json!(false), json!(false)));
+        // A and C excluded before the rule, each under its own label, both read as B now.
+        rule(false);
         post(json!({"selector": selector(A), "undo": false})).unwrap();
         post(json!({"selector": selector(C), "undo": false})).unwrap();
+        rule(true);
         let before = store.raw.max_op_seq().unwrap();
         assert_eq!(
             post(json!({"selector": selector(B), "undo": true}))
@@ -836,6 +844,43 @@ mod tests {
             "never_ambiguous"
         );
         assert_eq!(store.raw.max_op_seq().unwrap(), before);
+    }
+
+    /// Codex on #491, owner 2026-10-13: the page stores a repository as its records name it, the
+    /// one name it has for it, and an event a hook labelled under a rule that masks the name, while
+    /// the exclusion committed, is refused by its append, which reads the list as the rules now
+    /// read it.
+    #[test]
+    fn the_page_stores_a_repository_as_its_records_name_it() {
+        const OLD: &str = "github.com/o/acme-482915";
+        let mut store = Store::new();
+        store.said("s", OLD, 1_000, "Before the rule.");
+        store.run();
+        let home = store.home.path().to_owned();
+        std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{ id = 'acme', \
+             regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let now = crate::capture::exclusion_label("repo", OLD, &settings);
+        assert_ne!(now, OLD);
+        let saving = Mutex::new(());
+        let body = serde_json::to_vec(&json!({"selector": selector(OLD), "undo": false})).unwrap();
+        capture(&home, &saving, &body).unwrap();
+        let stored = store.raw.capture_exclusions().unwrap().repos;
+        assert_eq!(Vec::from_iter(stored), [OLD]);
+        let event = crate::raw::Event {
+            repo: Some(now),
+            ..crate::raw::test_event("After the rule.")
+        };
+        let elsewhere = ("github.com/o/open", None);
+        let appended = store
+            .raw
+            .append_captured(&event, &[], &settings, elsewhere)
+            .unwrap();
+        assert_eq!(appended, None);
     }
 
     #[test]
