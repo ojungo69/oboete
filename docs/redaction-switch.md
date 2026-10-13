@@ -46,9 +46,16 @@ For the same reason a worker does not start forget's purge to scan the op text i
 ops segments and the copies of raw.db set aside when the rules are off (3e-4): it records the scan
 under `off`, and a purge that stopped still finishes.
 
+A text gated under rules that are no longer the home's is not sent: the gate before each call to a
+curator or a summarizer, retries and fallbacks included, compares the version the text was gated
+under with the rules now, as the embedder's batches already do, and on a change the window is cut
+again under the rules now (`ListChanged`), with no attempt counted. So redaction turned on while a
+call waits sends nothing gated while it was off; a rule added meanwhile is held the same way.
+
 `Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
-than with the home's settings is the claude-mem import's prompts (`hook::clip`); it takes the
-egress rules, as the import's other fields do, so it follows the switch and the user's rules.
+than with the home's settings is the claude-mem import's prompts (`hook::clip`): it keeps them, so
+its check for a key block it cuts sees every header (a user's rule that masked a header would hide
+it), and follows the switch: while it is off, a prompt is kept as typed, cut as before.
 
 ## The page, doctor, the CLI
 

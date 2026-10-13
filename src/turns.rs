@@ -332,6 +332,7 @@ pub fn phase(
         let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
             let dispatch = raw.dispatch()?;
             reading.still(raw)?;
+            crate::curate::rules_still(raw, rules)?;
             Ok(Some(dispatch))
         })
         .and_then(|res| {
@@ -1054,6 +1055,58 @@ mod tests {
         let raw = crate::raw::open(home).unwrap();
         let k = crate::knowledge::open(home).unwrap();
         recent(&k, &raw, "r", 10, rules).unwrap()
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a turn read while redaction was
+    /// off is not sent once it is on again before the call: the gate finds other rules, nothing
+    /// goes out, and no summary is kept.
+    #[test]
+    fn a_turn_read_under_other_rules_is_not_sent() {
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        // As `home` makes it, recorded and read while redaction is off.
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, "[redaction]\nenabled = false\n").unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        raw.append(&said("s1", "prompt", &format!("Deploy with {key}.")))
+            .unwrap();
+        raw.append(&said("s1", "reply", "Deployed.")).unwrap();
+        raw.append_ops(&[window(1, 2, "Deployed.", &[])]).unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        let off = Rules::load(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let sent = std::cell::Cell::new(false);
+        let mut summarizer = |_: &str,
+                              p: &str,
+                              _: &crate::provider::AnswerCheck,
+                              gate: &crate::provider::Gate|
+         -> Result<ChainResult> {
+            assert!(p.contains(&key), "read under the rules off: {p}");
+            std::fs::write(&config, "[redaction]\nenabled = true\n").unwrap();
+            gate()?;
+            sent.set(true);
+            Ok(ChainResult {
+                provider: "fake".into(),
+                output: completed("Deployed."),
+                tier: 1,
+            })
+        };
+        let phase = phase(
+            &mut raw,
+            &k,
+            &db,
+            &off,
+            &Summary::default(),
+            "chain",
+            &mut summarizer,
+            Phase::Idle,
+        )
+        .unwrap();
+        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        assert!(!sent.get());
+        drop((raw, k, db));
+        assert!(turn_ops(home.path()).is_empty());
     }
 
     /// docs/summaries.md test 1: a turn end curation has passed gets one summary, once; one it

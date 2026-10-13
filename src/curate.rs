@@ -350,6 +350,16 @@ impl Reading {
     }
 }
 
+/// The egress gate's rules (owner decision 43): the redaction rules a text was gated with are still
+/// the home's, else `ListChanged`, and the text is gated again under the rules now before anything
+/// is sent: redaction turned on, or a rule added, while a call waits.
+pub(crate) fn rules_still(raw: &Raw, rules: &Rules) -> Result<()> {
+    if Rules::load(raw.home())?.version() != rules.version() {
+        return Err(ListChanged.into());
+    }
+    Ok(())
+}
+
 /// Whether knowledge.db lags raw's tombstones (milestone 5 D1 rule 12): a claim or card it
 /// shows may still hold what a forget took, so a phase sends nothing until the consumers reach
 /// them.
@@ -1637,6 +1647,7 @@ fn answered(
     let answer = curator(&span, &req.prompt, &|v| check(w, v), &|| {
         let dispatch = raw.dispatch()?;
         w.reading.still(raw)?;
+        rules_still(raw, rules)?;
         Ok(Some(dispatch))
     });
     drop(in_flight);
@@ -5970,6 +5981,46 @@ mod tests {
             result.is_err(),
             "a replaced authority was admitted for recuration"
         );
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a window gated while redaction
+    /// was off is not sent once it is on again before the call: the gate before the call finds
+    /// other rules, nothing goes out and no attempt is counted, and the next pass cuts the window
+    /// under the rules now.
+    #[test]
+    fn a_window_gated_under_other_rules_is_not_sent() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, "[redaction]\nenabled = false\n").unwrap();
+        let (mut raw, db) = open(home.path());
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        raw.append(&prompt(&format!("deploy with {key}"))).unwrap();
+        raw.append(&prompt("two")).unwrap();
+        let off = Rules::load(home.path()).unwrap();
+        let sent = std::cell::Cell::new(false);
+        let mut curator = |_: &str, text: &str, _: &AnswerCheck, gate: &Gate| {
+            assert!(text.contains(&key), "gated under the rules off");
+            std::fs::write(&config, "[redaction]\nenabled = true\n").unwrap();
+            let gated = gate();
+            assert!(gated.as_ref().is_err_and(|e| e.is::<ListChanged>()));
+            gated?;
+            sent.set(true);
+            Ok(answered("fake"))
+        };
+        let phase = run_phase(
+            &mut raw,
+            &kn(),
+            &db,
+            &off,
+            &curating(WINDOW_TOKENS),
+            "",
+            &mut curator,
+        )
+        .unwrap();
+        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        assert!(!sent.get());
+        let device = raw.device().to_owned();
+        assert!(providers_db::pending_of(&db, &device).unwrap().is_none());
     }
 
     #[test]

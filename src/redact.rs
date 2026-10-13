@@ -589,12 +589,14 @@ fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
     None // Alternating whole/line cascades past the scan bound mask the view whole.
 }
 
-/// The claude-mem import's prompts (`hook::clip`): egress's rules, the home's as they are now, so
-/// a prompt follows `[redaction]` as the import's other fields do (owner decision 43). Hooks go
-/// through `capture` and its settings.
+/// The claude-mem import's prompts (`hook::clip`): the bundled rules only, so `clip`'s check for a
+/// key block it cuts sees every header (a user's rule could mask one: Codex's security review of
+/// the switch), and none while the switch is off (owner decision 43). Hooks go through `capture`
+/// and its settings.
 pub fn redact(text: &str) -> String {
     match egress() {
-        Some(rules) => scan(text, &rules).0,
+        Some(rules) if rules.off => text.to_owned(),
+        Some(_) => scan(text, &Rules::default()).0,
         None => MASK.to_string(),
     }
 }

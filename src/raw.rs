@@ -3832,6 +3832,11 @@ impl Raw {
         &self.device
     }
 
+    /// The home this store is in.
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub(crate) fn home_id(&self) -> &str {
         &self.home_id
     }
