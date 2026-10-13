@@ -487,17 +487,21 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
             }
             _ => return Err(refused(400, "bad_request", "")),
         };
+    // A folder taken off the list stays unrecorded while another entry still covers it, one
+    // around it or its repository (Codex on #491, CodeRabbit on #489): the answer says so, with no
+    // path, which the list shows masked (Codex and Cursor on #491). Read before the write, so
+    // nothing fails once it is committed (Codex on #491).
+    let still = if key == "folder" && posted.undo {
+        let mut list = writer.capture_exclusions().map_err(|_| unavailable())?;
+        let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
+        list.folders.remove(&label);
+        crate::capture::not_recorded_why(&label, &list, &settings).is_some()
+    } else {
+        false
+    };
     let op_seq = writer
         .exclude_capture((key, &label), posted.undo)
         .map_err(|_| unavailable())?;
-    // A folder taken off the list stays unrecorded while another entry still covers it, one
-    // around it or its repository (Codex on #491, CodeRabbit on #489): the answer says so, with no
-    // path, which the list shows masked (Codex and Cursor on #491).
-    let still = key == "folder" && posted.undo && {
-        let list = writer.capture_exclusions().map_err(|_| unavailable())?;
-        let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
-        crate::capture::not_recorded_why(&label, &list, &settings).is_some()
-    };
     let mut answer = answer;
     answer["never_recorded"] = json!(!posted.undo || still);
     answer["recorded"] = json!(true);
@@ -994,6 +998,32 @@ mod tests {
         let outer = json!({"folder_selector": folder_selector(&around), "undo": true});
         let undone = post(outer).unwrap();
         assert_eq!(undone["never_recorded"], false);
+    }
+
+    /// Codex on #491: a folder undo whose settings do not load is refused before its write, rather
+    /// than committed and then answered as failed.
+    #[test]
+    fn a_folder_undo_under_settings_that_do_not_load_writes_nothing() {
+        let store = Store::new();
+        let home = store.home.path().to_owned();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let folder = home.join("private").to_string_lossy().into_owned();
+        let added = post(json!({"folder": folder, "undo": false})).unwrap();
+        std::fs::write(home.join("config.toml"), "[redaction\n").unwrap();
+        let before = store.raw.max_op_seq().unwrap();
+        let undo = json!({"folder_selector": added["folder_selector"], "undo": true});
+        assert_eq!(post(undo).unwrap_err().code, "privacy_unavailable");
+        assert_eq!(store.raw.max_op_seq().unwrap(), before);
+        assert!(
+            store
+                .raw
+                .capture_exclusions()
+                .unwrap()
+                .folders
+                .contains(&folder)
+        );
     }
 
     /// Cursor on #491: capture entries a rule now reads as one label keep rows of their own, so

@@ -86,10 +86,13 @@ happens there is written from then on, and a repository never recorded is never
 sent either: its send row says so and offers no undo until recording is allowed
 again. What was recorded before stays; the receipt names `oboete forget --repo`
 for a repository, with a folder in it rather than the label the page shows, which
-a redaction rule may mask. Recording again starts from then on, except in a folder
-that another entry still covers (a listed folder around it, its repository, or its
-checkout's `.oboete.toml`): its receipt says nothing there is recorded yet, naming
-no path, as the list shows the paths masked.
+a redaction rule may mask. An undo's receipt says the exclusion is removed and that
+recording follows from then on unless another exclusion or a checkout's
+`.oboete.toml` still covers the place; for a folder that another entry still covers
+(a listed folder around it, its repository, or its checkout's `.oboete.toml`) it
+says nothing there is recorded yet, naming no path, as the list shows the paths
+masked. What it answers is read before the write, so a write is never answered as
+failed after it committed.
 
 A repository shows as never recorded when a hook would not record it now: its
 label, or that label as the rules now read it, matches an exclusion as they read
