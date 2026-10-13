@@ -1331,8 +1331,10 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   `cwd` の label にして保存する。event の repo の label が一覧の repo と等しいか、event の cwd の label が
   一覧の folder の中（path の component 単位）なら記録しない。hook は一覧の値を今の規則で gate し直して
   から比べる（後から足した規則が path の一部を伏せても、event の label と同じに伏せる）。hook の `cwd` が
-  相対か無いときは、hook が動く directory を絶対パスにしてから label にする（folder と同じ形。Codex on
-  #489）。`folder` と
+  相対か無いときは、hook が動く directory を絶対パスにしてから label にする。CLI の folder と hook の `cwd`
+  はどちらも `capture::folder_path` で、`.` と `..` を名前の上で外し、末尾の区切りを落とす（link はたどら
+  ない。Codex on #489）。claude-mem から取り込む一覧の project の名前も、今の規則で gate した形とも比べる
+  （規則が repo の名前の一部を伏せていても合う）。`folder` と
   `level` は `repo` と同じく op の名前で、#487 が `OP_NAMES` に足す。
 - **`.oboete.toml`**: checkout の top（`repo::key` が `.git` を探す一度の歩きで分かる、worktree なら
   その worktree の top）の `.oboete.toml` の `capture` の鍵だけを読む（他の鍵は見ない）。`capture =
@@ -1359,7 +1361,8 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   repo（`oboete exclude` と同じ label）。folder は絶対パスにして保存する。結果の一覧を表示する。repo を
   除外したとき、端末なら「すでに記録した分も忘れますか（既定: 残す）」と聞き、はいなら `forget --repo`
   の preview と確認に進む。端末でなければ `oboete forget --repo <repo>` で消せると表示する。folder は
-  forget の target にないので、記録済みは残ると表示する。undo は保存した値を外す: 与えた名前（入力のまま、次に今の
+  forget の target にないので、記録済みは残ると表示する。forget の案内と問いは、規則が今の label を伏せて
+  いても、与えた名前（記録が持つ名前）で `forget --repo` する（Codex on #489）。undo は保存した値を外す: 与えた名前（入力のまま、次に今の
   label）で保存したもの、なければ今の規則で gate し直すと入力の label と等しくなる 1 件。2 件以上なら何も
   せず断り、それらを並べる（除外した時の名前で選ぶ。Codex on #489）。
 - **見ないもの・制限**: claude-mem の取り込み文書（import op。`claude-mem:<name>` との対応は送信の除外の

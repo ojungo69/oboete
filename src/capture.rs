@@ -339,12 +339,29 @@ fn capture(
 }
 
 /// The checkout `payload`'s `cwd` names.
+/// Slice 4a: `path` as a folder exclusion and an event's `cwd` both hold it: absolute against the
+/// current directory, with `.` and `..` taken by name and no link followed, so the same folder
+/// reads alike however it was written (Codex on #489).
+pub fn folder_path(path: &str) -> String {
+    let Ok(absolute) = std::path::absolute(path) else {
+        return path.to_owned();
+    };
+    let mut named = std::path::PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                named.pop();
+            }
+            part => named.push(part),
+        }
+    }
+    named.to_string_lossy().into_owned()
+}
+
 fn place(payload: &Value) -> Place {
-    let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
-    // Absolute, as `oboete capture exclude --folder` stores a folder: a relative or missing `cwd`
-    // is the directory the agent runs the hook in (Codex on #489).
-    let cwd = std::path::absolute(cwd)
-        .map_or_else(|_| cwd.to_owned(), |p| p.to_string_lossy().into_owned());
+    // A relative or missing `cwd` is the directory the agent runs the hook in.
+    let cwd = folder_path(str_field(payload, &["cwd"]).unwrap_or("."));
     Place {
         repo: repo::key(Path::new(&cwd)),
         git: git(Path::new(&cwd)),
@@ -861,6 +878,27 @@ mod tests {
             std::fs::write(top.path().join(".oboete.toml"), text).unwrap();
             assert_eq!(n(), want, "{text}");
         }
+    }
+
+    /// Codex on #489: a folder reads alike however it was written: `.` and `..` by name, a
+    /// trailing separator dropped, a relative path against the current directory.
+    #[test]
+    fn a_folder_reads_alike_however_it_was_written() {
+        let here = std::env::current_dir().unwrap();
+        let private = here
+            .join("x")
+            .join("private")
+            .to_string_lossy()
+            .into_owned();
+        let sep = std::path::MAIN_SEPARATOR;
+        for written in [
+            here.join("x").join("open").join("..").join("private"),
+            here.join("x").join(".").join("private"),
+        ] {
+            assert_eq!(folder_path(&written.to_string_lossy()), private);
+        }
+        assert_eq!(folder_path(&format!("{private}{sep}")), private);
+        assert_eq!(folder_path("x/open/../private"), private);
     }
 
     /// Slice 4a: why a directory is not recorded, as doctor and the work state say it: its

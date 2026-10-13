@@ -40,9 +40,11 @@ fn capture_exclude_lists_stops_recording_and_takes_it_back() {
             && out.contains("`oboete forget --repo github.com/o/secret` removes it"),
         "{out}"
     );
-    let out = oboete(&["capture", "exclude", "--folder", "private"]);
+    let out = oboete(&["capture", "exclude", "--folder", "sub/../private"]);
     assert!(
-        out.contains("never recorded: github.com/o/secret, ") && out.contains("private (folder)"),
+        out.contains("never recorded: github.com/o/secret, ")
+            && out.contains("private (folder)")
+            && !out.contains(".."),
         "{out}"
     );
     let out = oboete(&["exclude", "--undo", "github.com/o/secret"]);
@@ -129,6 +131,29 @@ fn an_undo_takes_back_the_folder_named_when_two_read_alike_now() {
             "recorded again from now on: {}",
             two.to_string_lossy()
         )) && out.contains(&format!("never recorded: {one} (folder)")),
+        "{out}"
+    );
+}
+
+/// Codex on #489: under a rule that masks part of a repository's name, the forget hint names the
+/// repository as its earlier records do, which `oboete forget --repo` selects.
+#[test]
+fn the_forget_hint_names_the_repository_as_its_records_do() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+    )
+    .unwrap();
+    let out = run(
+        home.path(),
+        cwd.path(),
+        &["capture", "exclude", "github.com/o/acme-482915"],
+    );
+    assert!(
+        out.contains("`oboete forget --repo github.com/o/acme-482915` removes it")
+            && !out.contains("never recorded from now on: github.com/o/acme-482915"),
         "{out}"
     );
 }

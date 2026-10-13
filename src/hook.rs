@@ -2887,7 +2887,8 @@ mod tests {
     }
 
     /// Codex on #489: a payload's relative `cwd`, or none, names the directory the hook runs in:
-    /// it is made absolute before it is labelled, so an excluded folder matches it.
+    /// it is made absolute, `..` taken by name, before it is labelled, so an excluded folder
+    /// matches it.
     #[test]
     fn a_relative_or_missing_cwd_is_matched_as_the_folder_it_names() {
         let (relative, missing) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -2908,6 +2909,12 @@ mod tests {
         let said = |session: &str, cwd: &str, text: &str| json!({"session_id": session, "cwd": cwd, "prompt": text});
         let inner = said("s", "target/oboete-relative-cwd/inner", "canary-relative");
         hook(relative.path(), "claude", "UserPromptSubmit", &inner);
+        let dots = said(
+            "u",
+            "target/oboete-open-cwd/../oboete-relative-cwd",
+            "canary-dots",
+        );
+        hook(relative.path(), "claude", "UserPromptSubmit", &dots);
         let open = said("t", "target/oboete-open-cwd", "open-relative");
         hook(relative.path(), "claude", "UserPromptSubmit", &open);
         assert_eq!(stored_bytes(relative.path(), "canary-"), 0);

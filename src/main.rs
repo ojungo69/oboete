@@ -950,9 +950,9 @@ fn capture_exclude(
     // What was given, and its label now.
     let (key, given, value) = match folder {
         Some(folder) => {
-            // As an agent's `cwd` names it: absolute, with no `\\?\` that `canonicalize` gives on
-            // Windows.
-            let folder = std::path::absolute(&folder)?.to_string_lossy().into_owned();
+            // As an agent's `cwd` is labelled (`capture::folder_path`), with no `\\?\` that
+            // `canonicalize` gives on Windows.
+            let folder = capture::folder_path(&folder.to_string_lossy());
             let label = capture::exclusion_label("cwd", &folder, &settings);
             ("folder", folder, label)
         }
@@ -975,7 +975,7 @@ fn capture_exclude(
     // entry a rule added since labels as the given value now (Codex on #489).
     let value = match undo {
         false => value,
-        true if stored.contains(&given) => given,
+        true if stored.contains(&given) => given.clone(),
         true if stored.contains(&value) => value,
         true => {
             let now: Vec<&String> = stored
@@ -1023,14 +1023,16 @@ fn capture_exclude(
         println!("What was recorded there before stays.");
         return Ok(());
     }
+    // The records name the repository as it was given, also when a rule masks its label now
+    // (Codex on #489).
     let keep = format!(
-        "What was recorded of {value} before stays; `oboete forget --repo {value}` removes it."
+        "What was recorded of {given} before stays; `oboete forget --repo {given}` removes it."
     );
     if !std::io::stdin().is_terminal() {
         println!("{keep}");
         return Ok(());
     }
-    print!("Forget what was recorded of {value} before, too? [y/N] ");
+    print!("Forget what was recorded of {given} before, too? [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
@@ -1044,7 +1046,7 @@ fn capture_exclude(
         None,
         None,
         None,
-        Some(&value),
+        Some(&given),
         None,
         false,
         false,

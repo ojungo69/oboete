@@ -276,7 +276,10 @@ fn work_state(
             }
             let (project, list, fields, at): (String, String, String, i64) =
                 (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
-            if never.covers_work_state(&repo(&project)) {
+            // Also as the list's labels hold it: a rule may mask part of the project's name.
+            let named = repo(&project);
+            let labelled = crate::capture::exclusion_label("repo", &named, settings);
+            if never.covers_work_state(&named) || never.covers_work_state(&labelled) {
                 stats.never_recorded += 1;
                 return Ok(());
             }
@@ -828,6 +831,25 @@ mod tests {
             .unwrap();
         let after = claude_mem(&mut raw, &src, &Default::default()).unwrap();
         assert_eq!((after.work_state, after.never_recorded), (2, 0));
+    }
+
+    /// Codex on #489: a repository excluded under a rule that masks part of its name keeps its
+    /// claude-mem project's work state out too: the project's name is matched as labelled now.
+    #[test]
+    fn a_masked_repository_name_keeps_its_imported_work_state_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let rule = "[[redaction.extra_rules]]\nid = \"fm\"\nregex = 'free-mem'\n";
+        std::fs::write(dir.path().join("config.toml"), rule).unwrap();
+        let settings = crate::capture::Settings::load(dir.path()).unwrap();
+        let label = crate::capture::exclusion_label("repo", "github.com/o/free-mem", &settings);
+        assert!(!label.contains("free-mem"), "{label}");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude_capture(("repo", &label), false).unwrap();
+        let stats = claude_mem(&mut raw, &src, &settings).unwrap();
+        assert_eq!((stats.work_state, stats.never_recorded), (0, 4));
+        assert!(work_ops(&raw).is_empty());
     }
 
     /// Codex on #431: a row claude-mem merges into another project after it came in comes in
