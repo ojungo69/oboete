@@ -2509,15 +2509,26 @@ impl Raw {
         )?)
     }
 
-    /// Slice 3e-4: the ops whose text `rules` mask now (`masked_op_text`), each with its device, op
-    /// seq, its body as read and as masked, in one read with no write lock.
-    pub(crate) fn op_text_masks(&self, rules: &crate::redact::Rules) -> Result<Vec<OpText>> {
-        let mut st = self
-            .conn
-            .prepare("SELECT device, op_seq, type, body FROM ops")?;
-        let mut rows = st.query([])?;
+    /// Slice 3e-4: up to `limit` ops after `after` (a device and an op seq, in that order) whose
+    /// text `rules` mask now (`masked_op_text`), each with its device, op seq, its body as read and
+    /// as masked, in one read with no write lock. A purge pages through the log with it, so a rule
+    /// that matches much of it holds one page at a time (Codex on #487).
+    pub(crate) fn op_text_masks(
+        &self,
+        rules: &crate::redact::Rules,
+        after: Option<&(String, i64)>,
+        limit: usize,
+    ) -> Result<Vec<OpText>> {
+        let (device, op_seq) = after.map_or(("", i64::MIN), |(d, s)| (d.as_str(), *s));
+        let mut st = self.conn.prepare(
+            "SELECT device, op_seq, type, body FROM ops WHERE (device, op_seq) > (?1, ?2)
+             ORDER BY device, op_seq",
+        )?;
+        let mut rows = st.query(params![device, op_seq])?;
         let mut found = Vec::new();
-        while let Some(row) = rows.next()? {
+        while found.len() < limit
+            && let Some(row) = rows.next()?
+        {
             let Some(kind) = OpKind::from_name(row.get_ref(2)?.as_str()?) else {
                 continue;
             };
@@ -6832,7 +6843,7 @@ const REMOVED_ROW: &str = "type = 'removed', enc = 'plain', body = NULL, origina
 
 /// Forgotten records rewritten in one transaction (slice 3c): a hook waits behind one no longer
 /// than behind a page's registration.
-const RECORD_PURGE_BATCH: usize = 500;
+pub(crate) const RECORD_PURGE_BATCH: usize = 500;
 
 /// The index the session checks of the denials read (`check_cross_source_forget`, `transcript_cut`,
 /// #467), made by the first denial and the purge, as the forget preview makes its own (spec 1.6:

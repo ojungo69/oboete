@@ -1260,7 +1260,9 @@ egress の gate が今の規則で伏せる）。
   1 文字ずつ `*` にする。record の伏せ字（3e-1）は ledger の offset のために byte 数を保つが、op の文に
   offset はなく、文字数も byte 数も増やさない方を取る（訂正や claim が 1,000 文字の上限を超えて読み捨て
   られないように。Codex on #487）。値を解析して書き直すので JSON は壊れず、キーの順も変わらない
-  （`preserve_order`）。再 curate の列には入れない。
+  （`preserve_order`）。再 curate の列には入れない。読みと書換えは op の `(device, op_seq)` 順に 500 件
+  ずつ（広い規則が log の大半に当たっても、持つのは 1 ページ分）、worker の確かめは最初の 1 件で止める
+  （Codex on #487）。
 - **伏せない値**（`OP_NAMES`）: oboete が付ける名前（識別子と自分の語彙）の値: `uid`、`id`、
   `supersedes`、`candidates`、`carried`、`copied`、`device`、`forgotten`、`job`、`source`、`source_id`、
   `session`、`repo`、`list`、`kind`、`type`、`status`、`speaker`、`scope`、`recipe`、`outcome`、`agent`、

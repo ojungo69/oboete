@@ -1202,8 +1202,16 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // curator's own words) by the rules.
         if let Some(rules) = &text {
             raw.op_text_scan_begun()?;
-            let found = raw.op_text_masks(rules)?;
-            purged.texts = raw.mask_op_text(&found)?;
+            let mut after = None;
+            loop {
+                let page =
+                    raw.op_text_masks(rules, after.as_ref(), crate::raw::RECORD_PURGE_BATCH)?;
+                let Some((device, op_seq, ..)) = page.last() else {
+                    break;
+                };
+                after = Some((device.clone(), *op_seq));
+                purged.texts += raw.mask_op_text(&page)?;
+            }
             crate::backup::fail_after("op_text_masked")?;
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
@@ -1442,7 +1450,7 @@ fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     let Some(rules) = text_owed(home, raw)? else {
         return Ok(false);
     };
-    if raw.ops_text_pending()? || !raw.op_text_masks(&rules)?.is_empty() {
+    if raw.ops_text_pending()? || !raw.op_text_masks(&rules, None, 1)?.is_empty() {
         return Ok(true);
     }
     // The worker holds its lock: no restore makes raw.db anew meanwhile.
@@ -9149,6 +9157,33 @@ mod tests {
         assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
         assert!(!raw::open(&home).unwrap().ops_text_pending().unwrap());
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Slice 3e-4 (Codex on #487): a rule that matches more ops than a page of the purge holds
+    /// masks every one of them, a page at a time.
+    #[test]
+    fn a_rule_matching_many_ops_masks_them_a_page_at_a_time() {
+        let mut s = crate::search::b::fixture::Store::new();
+        s.said("s", "github.com/o/r", 1_000, "Logs rotate daily.");
+        let many = crate::raw::RECORD_PURGE_BATCH * 2 + 1;
+        let ops: Vec<_> = (0..many)
+            .map(|i| {
+                let fields = serde_json::json!({ "task": format!("Rotate {MASKED} {i}.") });
+                let op = serde_json::json!({"repo": "github.com/o/r", "list": "deploys",
+                    "fields": fields, "clock": i});
+                (crate::raw::OpKind::WorkState, op)
+            })
+            .collect();
+        for batch in crate::raw::append_batches(&ops) {
+            s.raw.append_ops(batch).unwrap();
+        }
+        s.run();
+        let home = s.home.path().to_owned();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert_eq!(purge(&home).unwrap().unwrap().texts, many);
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
     }
 
     /// Slice 3e-4: while a reader holds raw.db-wal, which may still hold the ops' old pages, or when
