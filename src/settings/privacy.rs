@@ -16,6 +16,8 @@ use super::{Refusal, refused};
 struct PrivacyState {
     available: bool,
     repositories: Vec<Repository>,
+    /// Slice 4b: this device's folders never recorded (spec 6.1).
+    folders: Vec<Folder>,
     rescan: RescanState,
 }
 
@@ -24,6 +26,14 @@ struct Repository {
     selector: String,
     label: String,
     excluded: bool,
+    /// Slice 4b: never recorded (spec 6.1), and so never sent either.
+    never_recorded: bool,
+}
+
+#[derive(Serialize)]
+struct Folder {
+    selector: String,
+    label: String,
 }
 
 #[derive(Serialize)]
@@ -50,11 +60,26 @@ struct Exclusion {
 }
 
 fn selector(label: &str) -> String {
+    hashed(b"oboete:privacy-repo:v1", label)
+}
+
+/// Slice 4b: a folder never recorded, as the page names it back.
+fn folder_selector(label: &str) -> String {
+    hashed(b"oboete:privacy-folder:v1", label)
+}
+
+fn hashed(domain: &[u8], label: &str) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"oboete:privacy-repo:v1");
+    hash.update(domain);
     hash.update([0]);
     hash.update(label.as_bytes());
     hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn is_selector(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Current rules only touch display text. Selectors and state are validated protocol metadata.
@@ -62,6 +87,7 @@ pub fn show(home: &Path) -> Value {
     let state = read(home).unwrap_or_else(|_| PrivacyState {
         available: false,
         repositories: Vec::new(),
+        folders: Vec::new(),
         rescan: RescanState {
             state: RescanPhase::Unavailable,
             processed: None,
@@ -76,6 +102,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         return Ok(PrivacyState {
             available: true,
             repositories: Vec::new(),
+            folders: Vec::new(),
             rescan: RescanState {
                 state: RescanPhase::Empty,
                 processed: Some(0),
@@ -85,6 +112,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
     };
     let settings = crate::capture::Settings::load(home)?;
     let excluded = crate::raw::exclusions_in(&raw.conn)?;
+    let never = crate::raw::capture_exclusions_in(&raw.conn)?;
     let (labels, rescan) = if let Some((mut k, identity)) = knowledge(home)? {
         let path = &raw.sqlite_path;
         let uri = format!(
@@ -135,11 +163,21 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
             selector: selector(&label),
             label: crate::redact::outbound_with(&label, &settings.rules),
             excluded: excluded.contains(&label),
+            never_recorded: never.repos.contains(&label),
+        })
+        .collect();
+    let folders = never
+        .folders
+        .iter()
+        .map(|label| Folder {
+            selector: folder_selector(label),
+            label: crate::redact::outbound_with(label, &settings.rules),
         })
         .collect();
     Ok(PrivacyState {
         available: true,
         repositories,
+        folders,
         rescan,
     })
 }
@@ -271,17 +309,30 @@ fn labels(
 pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
     let posted: Exclusion =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
-    if posted.selector.len() != 64
-        || !posted
-            .selector
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+    if !is_selector(&posted.selector) {
         return Err(refused(422, "privacy_selector", "selector"));
     }
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (raw, label) = listed_repository(home, &posted.selector)?;
+    let mut writer = raw
+        .into_writer(home)
+        .map_err(|_| refused(503, "privacy_unavailable", ""))?;
+    let op_seq = writer
+        .exclude(&label, posted.undo)
+        .map_err(|_| refused(503, "privacy_unavailable", ""))?;
+    Ok(json!({
+        "selector": posted.selector,
+        "excluded": !posted.undo,
+        "recorded": true,
+        "op_seq": op_seq,
+    }))
+}
+
+/// The repository `selector` names in the list a GET shows, read fresh, with the read-only store
+/// the write goes on with.
+fn listed_repository(home: &Path, wanted: &str) -> Result<(crate::raw::ReadOnly, String), Refusal> {
     let unavailable = || refused(503, "privacy_unavailable", "");
     let raw = crate::raw::read_only(home)
         .map_err(|_| unavailable())?
@@ -294,25 +345,93 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
         &excluded,
     )
     .map_err(|_| unavailable())?;
-    let mut selected = labels
-        .iter()
-        .filter(|label| selector(label) == posted.selector);
+    let mut selected = labels.into_iter().filter(|label| selector(label) == wanted);
     let label = selected
         .next()
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
     if selected.next().is_some() {
         return Err(refused(409, "repo_changed", "selector"));
     }
-    let mut writer = raw.into_writer(home).map_err(|_| unavailable())?;
+    Ok((raw, label))
+}
+
+/// Slice 4b's request: a listed repository by its `selector`, a folder to stop recording in by its
+/// absolute path, or a listed folder by its `folder_selector` to record in again.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Capture {
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    folder_selector: Option<String>,
+    undo: bool,
+}
+
+/// Slice 4b (spec 6.1, `oboete capture exclude`): stop recording a listed repository or a folder
+/// of this device, or record it again. A folder is an absolute path, stored through the gate as an
+/// event's `cwd` label; what was recorded stays.
+pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    let posted: Capture =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    let unavailable = || refused(503, "privacy_unavailable", "");
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (key, label, mut writer, answer) =
+        match (posted.selector, posted.folder, posted.folder_selector) {
+            (Some(wanted), None, None) => {
+                if !is_selector(&wanted) {
+                    return Err(refused(422, "privacy_selector", "selector"));
+                }
+                let (raw, label) = listed_repository(home, &wanted)?;
+                let writer = raw.into_writer(home).map_err(|_| unavailable())?;
+                ("repo", label, writer, json!({ "selector": wanted }))
+            }
+            (None, Some(folder), None) if !posted.undo => {
+                if folder.len() > 4096 || folder.contains('\0') || !Path::new(&folder).is_absolute()
+                {
+                    return Err(refused(422, "capture_folder", "folder"));
+                }
+                let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
+                let label = crate::capture::exclusion_label("cwd", &folder, &settings);
+                let writer = crate::raw::open(home).map_err(|_| unavailable())?;
+                let answer = json!({ "folder_selector": folder_selector(&label) });
+                ("folder", label, writer, answer)
+            }
+            (None, None, Some(wanted)) if posted.undo => {
+                if !is_selector(&wanted) {
+                    return Err(refused(422, "privacy_selector", "folder_selector"));
+                }
+                let raw = crate::raw::read_only(home)
+                    .map_err(|_| unavailable())?
+                    .ok_or_else(|| refused(404, "folder_not_found", "folder_selector"))?;
+                let folders = crate::raw::capture_exclusions_in(&raw.conn)
+                    .map_err(|_| unavailable())?
+                    .folders;
+                let label = folders
+                    .into_iter()
+                    .find(|f| folder_selector(f) == wanted)
+                    .ok_or_else(|| refused(404, "folder_not_found", "folder_selector"))?;
+                let writer = raw.into_writer(home).map_err(|_| unavailable())?;
+                (
+                    "folder",
+                    label,
+                    writer,
+                    json!({ "folder_selector": wanted }),
+                )
+            }
+            _ => return Err(refused(400, "bad_request", "")),
+        };
     let op_seq = writer
-        .exclude(label, posted.undo)
+        .exclude_capture((key, &label), posted.undo)
         .map_err(|_| unavailable())?;
-    Ok(json!({
-        "selector": posted.selector,
-        "excluded": !posted.undo,
-        "recorded": true,
-        "op_seq": op_seq,
-    }))
+    let mut answer = answer;
+    answer["never_recorded"] = json!(!posted.undo);
+    answer["recorded"] = json!(true);
+    answer["op_seq"] = json!(op_seq);
+    Ok(answer)
 }
 
 #[cfg(test)]
@@ -355,7 +474,8 @@ mod tests {
         assert_eq!(shown["available"], true);
         assert_eq!(
             shown["repositories"],
-            json!([{"selector": selector("new-repo"), "label": "new-repo", "excluded": false}])
+            json!([{"selector": selector("new-repo"), "label": "new-repo", "excluded": false,
+                     "never_recorded": false}])
         );
         assert_eq!(
             (
@@ -552,6 +672,88 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Slice 4b: the page stops recording a listed repository by its selector and a folder by its
+    /// absolute path, lists both, and records them again; a repository never recorded shows as
+    /// never sent, a relative path or an unknown selector is refused before any write, and the
+    /// folder's selector names its label as stored.
+    #[test]
+    fn the_page_stops_recording_a_repository_or_a_folder_and_takes_it_back() {
+        const REPO: &str = "github.com/o/private";
+        let mut store = Store::new();
+        store.said("s", REPO, 1_000, "Capture page journey.");
+        store.run();
+        let home = store.home.path().to_owned();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let wanted = selector(REPO);
+        let saved = post(json!({"selector": wanted, "undo": false})).unwrap();
+        assert_eq!(
+            (saved["never_recorded"].clone(), saved["recorded"].clone()),
+            (json!(true), json!(true))
+        );
+        assert!(store.raw.capture_exclusions().unwrap().repos.contains(REPO));
+        let folder = home.join("private-folder").to_string_lossy().into_owned();
+        let saved = post(json!({"folder": folder, "undo": false})).unwrap();
+        let folder_id = saved["folder_selector"].as_str().unwrap().to_owned();
+        let shown = show(&home);
+        let row = shown["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["selector"] == wanted.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (row["never_recorded"].clone(), row["excluded"].clone()),
+            (json!(true), json!(true))
+        );
+        assert_eq!(
+            shown["folders"],
+            json!([{"selector": folder_id, "label": folder}])
+        );
+        for (body, code) in [
+            (
+                json!({"folder": "relative/path", "undo": false}),
+                "capture_folder",
+            ),
+            (
+                json!({"selector": "0".repeat(64), "undo": false}),
+                "repo_not_found",
+            ),
+            (
+                json!({"folder_selector": "0".repeat(64), "undo": true}),
+                "folder_not_found",
+            ),
+            (
+                json!({"selector": "nope", "undo": false}),
+                "privacy_selector",
+            ),
+            (json!({"folder": folder, "undo": true}), "bad_request"),
+            (
+                json!({"selector": wanted, "folder": folder, "undo": false}),
+                "bad_request",
+            ),
+        ] {
+            let before = store.raw.max_op_seq().unwrap();
+            assert_eq!(post(body.clone()).unwrap_err().code, code, "{body}");
+            assert_eq!(store.raw.max_op_seq().unwrap(), before, "{body}");
+        }
+        assert_eq!(
+            post(json!({"folder_selector": folder_id, "undo": true})).unwrap()["never_recorded"],
+            false
+        );
+        assert_eq!(
+            post(json!({"selector": wanted, "undo": true})).unwrap()["never_recorded"],
+            false
+        );
+        assert_eq!(
+            store.raw.capture_exclusions().unwrap(),
+            crate::raw::CaptureExclusions::default()
+        );
+        assert_eq!(show(&home)["folders"], json!([]));
     }
 
     #[test]

@@ -76,6 +76,26 @@ read connection closes before the recovery rename so Windows can move the file;
 the original swap hold remains until the writer owns its hold and the pinned
 identity is checked again.
 
+## Never record
+
+The page's "Never record" section is `oboete capture exclude`'s backend (spec 6.1,
+docs/milestone-5-plan.md slices 4a and 4b). Each listed repository can be set to
+never be recorded, or recorded again; a folder of this device is added by its
+absolute path and listed with its own selector for taking it back. Nothing that
+happens there is written from then on, and a repository never recorded is never
+sent either: its send row says so and offers no undo until recording is allowed
+again. What was recorded before stays; the receipt names `oboete forget --repo`
+for a repository. Recording again starts from then on.
+
+A repository is named by the same opaque selector as the send exclusion, resolved
+freshly on the server. A folder must be an absolute path of at most 4,096 bytes;
+it is stored through the gate as an event's `cwd` label, and its selector is a
+hash of that stored label. A relative path, an unknown selector, or a request that
+names more than one target is refused before any write.
+
+The first-run guide says to name such places before their next session and
+offers a button to this section.
+
 ## Owner claims
 
 Claim details accept a correction and status change, mute or unmute. A muted

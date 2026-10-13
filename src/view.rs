@@ -1134,6 +1134,7 @@ impl Viewer {
             ("POST", "/api/embedding/key") => (MAX_KEY_BODY, Self::save_embedding_key),
             ("POST", "/api/resume") => (MAX_BODY, |v, b, _| v.resume(b)),
             ("POST", "/api/privacy/exclude") => (MAX_BODY, |v, b, _| v.exclude(b)),
+            ("POST", "/api/privacy/capture") => (MAX_BODY, |v, b, _| v.capture(b)),
             ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
             ("POST", "/api/claims/mute") => (MAX_BODY, |v, b, _| v.claim_mute(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
@@ -1468,6 +1469,14 @@ impl Viewer {
 
     fn exclude(&self, body: &[u8]) -> Response {
         saved(crate::settings::privacy::exclude(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    fn capture(&self, body: &[u8]) -> Response {
+        saved(crate::settings::privacy::capture(
             &self.home,
             &self.saving,
             body,
@@ -4528,6 +4537,7 @@ curate = false
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
         for path in [
             "/api/privacy/exclude",
+            "/api/privacy/capture",
             "/api/claims/correct",
             "/api/claims/mute",
             "/api/preferences",
@@ -5348,6 +5358,24 @@ curate = false
         );
         assert!(!fixed_methods("fetch('/api/x', {method: 'DELETE'})"));
         assert!(!fixed_methods("fetch('/api/x', {method: chosenMethod})"));
+    }
+
+    /// A key the page's `TEXT` defines twice keeps only its last strings, which the other
+    /// section then shows (slice 4b nearly gave "Recording" the heading of "Never record").
+    #[test]
+    fn every_page_text_key_is_defined_once() {
+        let start = APP_JS.find("const TEXT = {").unwrap();
+        let end = start + APP_JS[start..].find("\n};").unwrap();
+        let key = regex::Regex::new(r"(?m)^  ([A-Za-z_0-9]+):").unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for found in key.captures_iter(&APP_JS[start..end]) {
+            assert!(
+                seen.insert(found[1].to_owned()),
+                "{} is defined twice",
+                &found[1]
+            );
+        }
+        assert!(seen.len() > 1_000, "{}", seen.len());
     }
 
     /// #269: `--open` hands the opener an owner-only page that sends the browser on to the

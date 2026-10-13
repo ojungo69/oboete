@@ -876,6 +876,7 @@ const TEXT = {
   onboarding_save: ['Save settings', '設定を保存'],
   onboarding_agents: ['Agent connections', 'エージェントの接続'],
   onboarding_doctor: ['Run diagnostics', '診断を実行'],
+  onboarding_never: ['If the work in some repositories or folders must never be stored, add them under “{section}” before their next session.', '記録したくないリポジトリやフォルダーがあれば、次のセッションの前に「{section}」で指定してください。'],
   onboarding_search_step: ['After saving, confirm an agent connection separately. In its next session, type a harmless unique phrase; then open Records and search for it. This checks only that session’s recording and search.', '保存後、エージェントの接続を別に確認してください。その次のセッションで害のない固有の語を入力し、「記録」で検索します。確認できるのは、そのセッションの記録と検索だけです。'],
   onboarding_scope: ['These choices control AI summaries. Embeddings and other AI roles have separate settings. Saving starts no connection test, model download or agent session.', 'ここで選ぶのは要約用の AI です。埋め込みや他の AI の役割は個別に設定します。保存だけで接続確認・モデルのダウンロード・エージェントのセッションを開始しません。'],
   onboarding_policy_h: ['Subscription rules and sign-in', 'サブスクリプションの規約とログイン'],
@@ -921,7 +922,7 @@ const TEXT = {
   group_providers_h: ['AI providers', '要約役'],
   group_providers_desc: ['The AI services that write summaries: their order, keys and connection tests.', '要約を書く AI の接続先と、その順番、キー、接続テストです。'],
   group_privacy_h: ['Privacy', 'プライバシー'],
-  group_privacy_desc: ['Masking sensitive values, and repositories whose records are not sent out.', '機密値のマスキングと、記録を外部に送らないリポジトリの指定です。'],
+  group_privacy_desc: ['Masking sensitive values, repositories whose records are not sent out, and repositories and folders never recorded.', '機密値のマスキング、記録を外部に送らないリポジトリ、記録しないリポジトリとフォルダーの指定です。'],
   group_computer_h: ['This computer', 'このパソコン'],
   group_computer_desc: ['Running between sessions, the page’s address and where backups go.', 'セッション間の常駐、画面のアドレス、バックアップの保存先です。'],
   group_agents_h: ['Agents', 'エージェント'],
@@ -1049,6 +1050,23 @@ const TEXT = {
   repo_not_found: ['This repository is no longer in the stored list. Reload its state.', 'このリポジトリは保存済み一覧にありません。状態を再読み込みしてください。'],
   repo_changed: ['The repository selection changed. Reload its state.', 'リポジトリの選択対象が変わりました。状態を再読み込みしてください。'],
   privacy_refresh: ['Refresh privacy state', 'プライバシーの状態を更新'],
+  privacy_never_recorded: ['Never recorded, so never sent', '記録しないため送信もしません'],
+  never_h: ['Never record', '記録しない'],
+  never_desc: ['Nothing that happens in these repositories and folders is written from now on: no prompt, tool call or reply. A repository that is never recorded is never sent out either. What was already recorded stays; for a repository, `oboete forget --repo <name>` removes it. Recording again starts from then on, and nothing from while it was excluded comes back. A repository can also stop its own recording with `capture = false` in its `.oboete.toml`.', 'ここに挙げたリポジトリとフォルダーで起きたことを、今後は書き込みません。プロンプト・ツールの実行・返答のどれも記録しません。記録しないリポジトリは外部にも送りません。すでに記録した分は残ります。リポジトリの分は `oboete forget --repo <名前>` で消せます。記録を再開すると、その時点から記録します。除外していた間の記録は戻りません。リポジトリ側でも `.oboete.toml` に `capture = false` と書くと記録を止められます。'],
+  never_repos_h: ['Repositories', 'リポジトリ'],
+  never_folders_h: ['Folders on this device', 'この端末のフォルダー'],
+  never_folders_none: ['No folder is excluded.', '除外しているフォルダーはありません。'],
+  never_on: ['Never recorded', '記録しない'],
+  never_off: ['Recorded', '記録する'],
+  never_exclude: ['Never record from now on', '今後は記録しない'],
+  never_undo: ['Record again from now on', '今後は記録を再開'],
+  never_folder_input: ['Folder to never record (full path)', '記録しないフォルダー (フルパス)'],
+  never_folder_add: ['Never record this folder', 'このフォルダーを記録しない'],
+  never_repo_stopped: ['Recording of {label} stopped. What was recorded before stays; `oboete forget --repo {label}` removes it.', '{label} の記録を止めました。これまでの記録は残ります。`oboete forget --repo {label}` で消せます。'],
+  never_folder_stopped: ['Recording in this folder stopped. What was recorded before stays.', 'このフォルダーの記録を止めました。これまでの記録は残ります。'],
+  never_undone: ['Recording resumes from now on. Nothing from while it was excluded comes back.', '今後の記録を再開しました。除外していた間の記録は戻りません。'],
+  capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
+  folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
   rescan_h: ['Rescan on this device', 'この端末の再検査'],
   rescan_empty: ['No raw records to scan.', '検査する元の記録はありません。'],
   rescan_pending: ['Waiting for the worker or still scanning.', 'ワーカーの処理待ち、または検査中です。'],
@@ -3668,7 +3686,7 @@ async function embeddingAction(action) {
 }
 
 function privacyUnavailable() {
-  return { available: false, repositories: [], rescan: { state: 'unavailable', processed: null, total: null } };
+  return { available: false, repositories: [], folders: [], rescan: { state: 'unavailable', processed: null, total: null } };
 }
 
 async function memoryWrite(path, body) {
@@ -3724,6 +3742,8 @@ function privacySection(f) {
         if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
       } finally { fields.inert = false; action.disabled = false; }
     });
+    // A repository never recorded is never sent: its own row takes that back first.
+    if (repo.never_recorded) return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t('privacy_never_recorded')));
     return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t(repo.excluded ? 'privacy_excluded' : 'privacy_allowed')), action);
   });
   const scan = state.rescan;
@@ -3734,6 +3754,51 @@ function privacySection(f) {
     listing,
     el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
     scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null, refresh);
+}
+
+// Slice 4b (spec 6.1): never record a repository or a folder of this device, or record it again,
+// through `oboete capture exclude`'s backend.
+function captureSection(f) {
+  const state = f.privacy;
+  if (!state.available) return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('privacy_unavailable')));
+  const write = async (button, body, receipt) => {
+    const fields = button.closest('.settings');
+    fields.inert = true;
+    button.disabled = true;
+    try {
+      const { res, answer } = await memoryWrite('privacy/capture', body);
+      if (!currentSettings(f)) return;
+      if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
+      if (body.folder) f.neverFolder = '';
+      const refreshed = await refreshPrivacy(f);
+      if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
+    } catch {
+      if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
+    } finally { fields.inert = false; button.disabled = false; }
+  };
+  const row = (label, never, onClick) => {
+    const action = el('button', 'quiet small', t(never ? 'never_undo' : 'never_exclude'));
+    action.type = 'button';
+    action.addEventListener('click', () => onClick(action));
+    return el('li', null, el('p', 'text', label), el('p', 'desc', t(never ? 'never_on' : 'never_off')), action);
+  };
+  const repos = (state.repositories || []).map((repo) => row(repo.label, repo.never_recorded, (action) =>
+    write(action, { selector: repo.selector, undo: !!repo.never_recorded },
+      t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label }))));
+  const folders = (state.folders || []).map((folder) => row(folder.label, true, (action) =>
+    write(action, { folder_selector: folder.selector, undo: true }, t('never_undone'))));
+  const folder = input('text', f.neverFolder || '', '', 'never.folder', (v) => { f.neverFolder = v; });
+  const add = el('button', 'quiet small', t('never_folder_add'));
+  add.type = 'button';
+  add.addEventListener('click', () => {
+    const path = folder.value.trim();
+    if (!path) { setStatus(t('capture_folder'), true, lang); return; }
+    write(add, { folder: path, undo: false }, t('never_folder_stopped'));
+  });
+  return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
+    el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('privacy_none')),
+    el('h4', null, t('never_folders_h')), folders.length ? el('ul', null, ...folders) : el('p', 'desc', t('never_folders_none')),
+    el('label', 'field', el('span', null, t('never_folder_input')), folder), add);
 }
 
 function claimReceipt(answer) {
@@ -4835,6 +4900,7 @@ function onboardingSection(f) {
       jump('.settings form button.save','onboarding_save'),
       jump('.agent-setup','onboarding_agents'),
       jump('.doctor-diagnostics','onboarding_doctor')),
+    el('p','desc',t('onboarding_never',{section:t('never_h')})),jump('.never-record','never_h'),
     el('p','desc',t(f.saved?.capture?.store_prompts===false?'onboarding_prompt_off':'onboarding_search_step',
       {section:t('capture_h'),setting:t('store_prompts')})),
     f.saved?.capture?.store_prompts===false?jump('.capture-settings','capture_h'):null,
@@ -4974,7 +5040,7 @@ function drawSettings() {
       el('section', null,
         el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState())),
     settingsGroup('search', Boolean(embeddingDraft.status?.active), embeddingSection(f)),
-    settingsGroup('privacy', false, redactionSection(f), privacySection(f)),
+    settingsGroup('privacy', false, redactionSection(f), privacySection(f), captureSection(f)),
     settingsGroup('computer', f.firstRun,
       el('section', null,
         el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
