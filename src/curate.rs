@@ -2661,7 +2661,10 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
         &cfg.summary,
         &mut curator,
         &plan.spans,
-    )?;
+    );
+    // Owner decision 43: what it wrote under rules turned off owes the op text scan.
+    raw.owe_op_text_scan(&rules)?;
+    let sent = sent?;
     out.push_str(&format!(
         "{} window(s) curated again: {} claim(s), {} retracted\n",
         sent.windows, sent.claims, sent.retracted

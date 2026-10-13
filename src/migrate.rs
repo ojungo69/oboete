@@ -2095,11 +2095,13 @@ fn documents(
     read_documents(v1, device, settings, &mut known, stats, |doc| {
         docs.push(doc)
     })?;
-    raw.append_imports_counted(docs, |n| {
+    let appended = raw.append_imports_counted(docs, |n| {
         stats.documents += n;
         notify(stats, Stage::Documents, committed);
-    })?;
-    Ok(())
+    });
+    // Owner decision 43: documents gated under rules turned off owe the op text scan.
+    raw.owe_op_text_scan(&settings.rules)?;
+    appended.map(drop)
 }
 
 fn read_documents(

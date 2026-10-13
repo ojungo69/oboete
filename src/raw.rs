@@ -2732,6 +2732,22 @@ impl Raw {
         Ok(rewritten)
     }
 
+    /// Owner decision 43: ops whose text was gated with `rules` turned off were gated by none, so
+    /// the scan of the op text is owed again under whatever rules there are when it runs, also
+    /// their version the same as the last scan's; a scan begun before records nothing
+    /// (`ops_text_scanned`). Called by each writer after its ops, with the rules it gated them by.
+    pub(crate) fn owe_op_text_scan(&self, rules: &crate::redact::Rules) -> Result<()> {
+        if rules.is_off() {
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            tx.execute(
+                "DELETE FROM meta WHERE key IN ('ops_text_scanned', 'ops_text_scanning')",
+                [],
+            )?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
     /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
     /// only while it holds the mark: a raw.db a restore made meanwhile (a new meta) holds the ops
     /// its segments held, and stays owed.
@@ -5134,7 +5150,9 @@ impl Raw {
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
         let ops = [(OpKind::WorkState, op)];
-        Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0])
+        let seq = self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0];
+        self.owe_op_text_scan(&settings.rules)?;
+        Ok(seq)
     }
 
     /// `work_state_in` on this store.

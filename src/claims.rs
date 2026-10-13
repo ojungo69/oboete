@@ -533,6 +533,9 @@ fn correction_recorded(
     let seqs = raw
         .append_ops(&[(crate::raw::OpKind::Correction, body)])
         .map_err(OwnerRefusal::unavailable)?;
+    // Owner decision 43: a body gated under rules turned off owes the op text scan.
+    raw.owe_op_text_scan(&rules)
+        .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
     // A search or a SessionStart right after never shows the old claim.
@@ -688,6 +691,9 @@ pub(crate) fn pref_add_recorded(
         Ok(seqs) => seqs,
         Err(cause) => return Ok(OwnerReceipt::DirectiveOnly { cause }),
     };
+    // Owner decision 43: a text gated under rules turned off owes the op text scan.
+    raw.owe_op_text_scan(&settings.rules)
+        .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
     if let Err(cause) = applied(home, &k, &device, &seqs, "preference") {

@@ -9343,6 +9343,44 @@ mod tests {
         }
     }
 
+    /// Owner decision 43 (Codex's security review of the switch): an agent's work state written
+    /// while redaction is off, and the same rules back on before any worker read them off, still
+    /// owes the scan of the op text, though the version is the one the last scan recorded: the
+    /// worker starts the purge that masks it.
+    #[test]
+    fn an_op_written_while_off_owes_the_scan_when_the_same_rules_come_back() {
+        let s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let look = || {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, &raw::open(&home).unwrap());
+            CONTINUED.get()
+        };
+        assert_eq!(look(), 0);
+        let on = crate::capture::Settings::load(&home).unwrap();
+        let mut raw = raw::open(&home).unwrap();
+        assert!(!raw.ops_text_owed(on.rules.version()).unwrap());
+        let off_rules = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        std::fs::write(home.join("config.toml"), off_rules).unwrap();
+        let off = crate::capture::Settings::load(&home).unwrap();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        raw.work_state_under(
+            "github.com/o/r",
+            "deploys",
+            fields.as_object().unwrap(),
+            "/x",
+            &off,
+            ("github.com/o/r", Some("/x")),
+        )
+        .unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert!(raw.ops_text_owed(on.rules.version()).unwrap());
+        assert_eq!(look(), 1);
+    }
+
     /// Owner decision 43: rules turned off find nothing in a backup's ops segment either, so a
     /// worker records the scan under them and starts no purge for it; turned on again with a rule
     /// that masks an op, the purge starts.
@@ -9352,7 +9390,12 @@ mod tests {
         let home = s.home.path().to_owned();
         let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
         s.raw
-            .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
             .unwrap();
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
