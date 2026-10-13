@@ -67,11 +67,12 @@ switches to.
 
 - A binary from before this slice cannot refuse: MUST-M17's update path stops the worker first,
   and the release that moves `FORMAT` past 1 says so in its notes.
-- Two binaries' first opens of a home with no stamp, racing: a newer one may stamp between this
-  open's stamp and its migrations, which then run on the newer home. They create what is missing
-  and add columns (`CREATE ... IF NOT EXISTS`, a column added only when absent), so they write
-  nothing a newer schema has, unless a later format removed something; the open's last check
-  refuses the handle before anything else is written.
+- Two binaries opening one home at the same moment: a newer one may stamp between this open's
+  first check and its last. In that window this open writes only its setup: the journal mode,
+  WAL, which every oboete store already has (so nothing is written), and its migrations, which
+  create what is missing and add a column only when absent (`CREATE ... IF NOT EXISTS`), so they
+  write nothing a newer schema has unless a later format removed something. The open's last
+  check refuses the handle before anything else is written.
 - Backup segments carry no stamp: a restore by an older binary reads the lines it knows. A
   release that changes a segment's lines raises `FORMAT`, and the newer restore stamps the
   rebuilt raw.db; an older binary's restore from those segments is not refused in this slice.
