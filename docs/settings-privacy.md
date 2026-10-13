@@ -89,8 +89,8 @@ for a repository. Recording again starts from then on.
 
 A repository is named by the same opaque selector as the send exclusion, resolved
 freshly on the server. A folder must be an absolute path of at most 4,096 bytes;
-it is stored through the gate as an event's `cwd` label, and its selector is a
-hash of that stored label. A relative path, an unknown selector, or a request that
+it is stored as the CLI stores it (`.` and `..` taken by name), through the gate
+as an event's `cwd` label, and its selector is a hash of that stored label. A relative path, an unknown selector, or a request that
 names more than one target is refused before any write.
 
 The first-run guide says to name such places before their next session and

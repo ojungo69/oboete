@@ -395,6 +395,8 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                     return Err(refused(422, "capture_folder", "folder"));
                 }
                 let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
+                // As the CLI stores it: `.` and `..` by name (slice 4a's `folder_path`).
+                let folder = crate::capture::folder_path(&folder);
                 let label = crate::capture::exclusion_label("cwd", &folder, &settings);
                 let writer = crate::raw::open(home).map_err(|_| unavailable())?;
                 let answer = json!({ "folder_selector": folder_selector(&label) });
@@ -696,7 +698,8 @@ mod tests {
         );
         assert!(store.raw.capture_exclusions().unwrap().repos.contains(REPO));
         let folder = home.join("private-folder").to_string_lossy().into_owned();
-        let saved = post(json!({"folder": folder, "undo": false})).unwrap();
+        let written = home.join("x").join("..").join("private-folder");
+        let saved = post(json!({"folder": written.to_string_lossy(), "undo": false})).unwrap();
         let folder_id = saved["folder_selector"].as_str().unwrap().to_owned();
         let shown = show(&home);
         let row = shown["repositories"]
