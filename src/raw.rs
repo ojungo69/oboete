@@ -4160,6 +4160,8 @@ impl Raw {
         }
         // No hook imports: the batch waits for another writer as a non-hook open does (#362).
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        // docs/store-format.md: as every append of records (Codex on #503).
+        format_of(&tx)?;
         if batch.iter().enumerate().any(|(index, c)| {
             c.event.kind != "touch" && origins.get(index).is_none_or(|i| i.unverified)
         }) {
@@ -4257,6 +4259,7 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        format_of(&tx)?;
         let at = next_seq(&tx, &self.device)?;
         // ponytail: every tombstone is the redaction rescan's this milestone (D8); forget
         // (milestone 5) names its own source.
@@ -7884,6 +7887,16 @@ mod tests {
             serde_json::json!({"uid": "u", "status": "rejected"}),
         );
         assert!(refused(raw.append_ops(&[op]).unwrap_err()));
+        // Nor a tombstone or an imported record (Codex on #503).
+        let target = Target::Record {
+            device: raw.device().to_owned(),
+            seq: 1,
+        };
+        assert!(refused(raw.append_tombstone(target).unwrap_err()));
+        assert!(refused(
+            raw.append_imported(&[imported("after")], "", None)
+                .unwrap_err()
+        ));
     }
 
     /// CodeRabbit on #503: a newer oboete that stamps raw.db while an open migrates it is refused

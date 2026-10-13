@@ -1079,6 +1079,11 @@ fn serve(
         if gone(home, holding) {
             return false;
         }
+        // At every batch, not only at the backup deadline: a newer oboete's stamp stops the
+        // consumers at the next batch (docs/store-format.md; Codex on #503).
+        if raw.newer_format() {
+            return true;
+        }
         if Instant::now() >= *next_backup {
             if replaced(raw) {
                 return true;
@@ -5246,6 +5251,47 @@ mod tests {
         fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// Stamps raw.db with a newer format in its first step (docs/store-format.md), counting steps.
+    struct StampsNewer(
+        std::path::PathBuf,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    );
+    impl Consumer for StampsNewer {
+        fn name(&self) -> &'static str {
+            "stamps-newer"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
+            if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Connection::open(self.0.join("raw.db"))?
+                    .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))?;
+            }
+            Ok((after + 1).min(raw.max_seq()?))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// docs/store-format.md (Codex on #503): a newer oboete's stamp made while a worker drains a
+    /// backlog stops it at the next batch, before the backup's deadline, not at the round's end.
+    #[test]
+    fn a_drain_stops_at_the_next_batch_once_a_newer_oboete_stamps_raw_db() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        {
+            let mut raw = raw::open(p).unwrap();
+            for text in ["a", "b", "c"] {
+                raw.append(&raw::test_event(text)).unwrap();
+            }
+        }
+        let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let consumers: Vec<Box<dyn Consumer>> =
+            vec![Box::new(StampsNewer(p.to_owned(), steps.clone()))];
+        let why = run_consumers(p, 0, consumers).unwrap_err();
+        assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+        assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// R3 within a drain: the rescan opens raw.db by its path in each step, so a home replaced

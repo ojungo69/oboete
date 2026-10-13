@@ -41,10 +41,11 @@ switches to.
   one's stamp stays and the older one refuses it before it migrates anything. A raw.db already at
   `FORMAT` is not written: a hook's open stays read-only when the schema is complete, as now.
 - The open reads it once more before it returns its handle (a newer binary may have stamped the
-  file while this one migrated it), and each append of events or ops reads it in its own
-  transaction: a handle opened before a newer binary stamped the file appends nothing after.
-  Other writes of a handle opened before the stamp (a worker's tombstones, a purge) go on until
-  its next open; the resident worker opens again at its next round (below).
+  file while this one migrated it), and each append of records or ops (captured events, kept
+  events, imports, tombstones, ops) reads it in its own transaction: a handle opened before a
+  newer binary stamped the file appends nothing after. Other writes of a handle opened before
+  the stamp (a purge's rewrites) go on until its next open; a worker checks at every batch
+  (below).
 
 ## Who says what
 
@@ -56,10 +57,9 @@ switches to.
   oboete …") and turns red. **The worker** exits with the error; a refused open is never taken
   for damage (`backup::damaged`), which would restore an older home over the newer one. **The
   MCP server and the viewer** answer each request with it.
-- **A resident worker** that opened raw.db before a newer binary stamped it would keep writing
-  with its own meaning. At each wait tick and phase round, where it already checks whether
-  raw.db's path names another file, it reads `user_version` too, opens the store again on a newer
-  one, and stops on the refusal. The MCP server's tools, search and the viewer's routes open raw.db
+- **A worker** that opened raw.db before a newer binary stamped it would keep writing with its
+  own meaning. Between two batches of its consumers and at each wait tick and phase round, it
+  reads `user_version` too, opens the store again on a newer one, and stops on the refusal. The MCP server's tools, search and the viewer's routes open raw.db
   for each request, so each meets the check.
 - **The updater** (spec 7.3, step 2) runs the same check with the staged binary.
 
@@ -67,6 +67,11 @@ switches to.
 
 - A binary from before this slice cannot refuse: MUST-M17's update path stops the worker first,
   and the release that moves `FORMAT` past 1 says so in its notes.
+- Two binaries' first opens of a home with no stamp, racing: a newer one may stamp between this
+  open's stamp and its migrations, which then run on the newer home. They create what is missing
+  and add columns (`CREATE ... IF NOT EXISTS`, a column added only when absent), so they write
+  nothing a newer schema has, unless a later format removed something; the open's last check
+  refuses the handle before anything else is written.
 - Backup segments carry no stamp: a restore by an older binary reads the lines it knows. A
   release that changes a segment's lines raises `FORMAT`, and the newer restore stamps the
   rebuilt raw.db; an older binary's restore from those segments is not refused in this slice.
