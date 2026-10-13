@@ -1344,7 +1344,8 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   読んで `built` で先に外し、unwritten の spool にも入れない。開けないとき（docs/unwritten.md U2）は
   spool に置き、書き戻しの append が断る（制限: それまで spool のファイルに残る）。取り込み（transcript、v1 の
   event と `session_repos`）は `append_imported_under` で、その取り込みの settings で一覧を gate し直した値
-  とも比べる（hook と同じ。Codex on #489）。
+  とも比べる（hook と同じ）。spool の書き戻し（`append_kept`）も、書き戻す hook の settings で同じく比べる
+  （Codex on #489）。
 - **hook の時間**: `oboete replay` の hook の p95 を前後で測り、PR に書く（Windows は 25.5 ms の線の上）。
 - **work state**: 除外された repo か folder の checkout からの書込み（MCP、docs/work-state.md）は断る。MCP
   の確認の後に除外が commit されても、`append_ops` が書込みの transaction の中で一覧を読み直し、work state の
@@ -1356,13 +1357,17 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   repo（`oboete exclude` と同じ label）。folder は絶対パスにして保存する。結果の一覧を表示する。repo を
   除外したとき、端末なら「すでに記録した分も忘れますか（既定: 残す）」と聞き、はいなら `forget --repo`
   の preview と確認に進む。端末でなければ `oboete forget --repo <repo>` で消せると表示する。folder は
-  forget の target にないので、記録済みは残ると表示する。undo は保存した値を外す: 入力の label と等しいもの、
-  または今の規則で gate し直すと等しくなるもの（Codex on #489）。
+  forget の target にないので、記録済みは残ると表示する。undo は保存した値を外す: 与えた名前（入力のまま、次に今の
+  label）で保存したもの、なければ今の規則で gate し直すと入力の label と等しくなる 1 件。2 件以上なら何も
+  せず断り、それらを並べる（除外した時の名前で選ぶ。Codex on #489）。
 - **見ないもの・制限**: claude-mem の取り込み文書（import op。`claude-mem:<name>` との対応は送信の除外の
   D13 の話）。他の repo の session が除外した repo のファイルを読んだ tool の出力は記録される（spec 6.1 の
   制限）。除外していた間に取り込みが飛ばした event は checkpoint の後ろにあるので、undo しても戻らない
   （除外していた間の記録が戻らないのと同じ）。除外の後に規則を外すか狭めると、その規則が伏せた部分を含む
-  除外の値は event の label と合わなくなる（除外し直す）。
+  除外の値は event の label と合わなくなる（除外し直す）。folder の op は端末で分けない: raw.db を別の機械に
+  写すと、元の機械で除外した folder は、その機械でも同じパスなら記録しない（写しも restore で置いた新しい
+  ファイルも新しい端末 id になるので、端末で分けると自分の除外が外れて記録が戻る。安全側。Codex on
+  #489）。除外の前に folder で記録した分の送信は #490（送信の除外は repo 単位で、folder にはまだない）。
 
 受入:
 - 除外した repo と folder の canary の event（hook 経由）は raw.db にも spool にも 0 件。undo の後の event

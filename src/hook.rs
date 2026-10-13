@@ -963,7 +963,7 @@ pub fn record(
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
     let back;
-    (*written_back, back) = crate::unwritten::write_back(home, raw);
+    (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
     match back {
         Ok(()) => {}
@@ -2855,7 +2855,8 @@ mod tests {
     }
 
     /// Slice 4a: a rule added after a folder was excluded masks its path in an event's cwd as in
-    /// the exclusion read now: the folder still records nothing.
+    /// the exclusion read now: the folder still records nothing, neither from a hook call nor from
+    /// one kept while raw.db could not be opened and written back later (Codex on #489).
     #[test]
     fn a_rule_added_after_a_folder_was_excluded_still_records_nothing_there() {
         let home = tempfile::tempdir().unwrap();
@@ -2873,10 +2874,16 @@ mod tests {
             "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
         )
         .unwrap();
+        let now = crate::capture::Settings::load(home).unwrap();
+        let kept = json!({"session_id": "k", "cwd": folder, "prompt": "canary-kept"});
+        let kept = crate::capture::events("claude", "UserPromptSubmit", &kept, 1, &now);
+        crate::unwritten::keep(home, &kept, now.rules.version()).unwrap();
         let said = json!({"session_id": "s", "cwd": folder, "prompt": "canary-rule"});
         hook(home, "claude", "UserPromptSubmit", &said);
+        assert_eq!(crate::unwritten::counts(home).unwrap(), (0, 0));
         assert_eq!(stored_bytes(home, "canary-"), 0);
         assert!(recorded(home, "claude", "s").is_empty());
+        assert!(recorded(home, "claude", "k").is_empty());
     }
 
     fn built_manifest(home: &Path, cwd: &Path, prompt: &str) -> String {

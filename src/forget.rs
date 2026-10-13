@@ -7004,7 +7004,9 @@ mod tests {
             "r",
         )
         .unwrap();
-        crate::unwritten::write_back(h, &mut raw).1.unwrap();
+        crate::unwritten::write_back(h, &mut raw, &Default::default())
+            .1
+            .unwrap();
         assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
         // A transcript import of the transcript-only session's turn from before it.
         let mut turn = raw::test_event(r#"{"prompt":"turn"}"#);
@@ -7654,7 +7656,9 @@ mod tests {
             "r",
         )
         .unwrap();
-        crate::unwritten::write_back(h, &mut raw).1.unwrap();
+        crate::unwritten::write_back(h, &mut raw, &Default::default())
+            .1
+            .unwrap();
         // In the range, from before it: not recorded, nor imported.
         assert_eq!(
             raw.append_with_ledger(&event(None, 9_500), &[], "")

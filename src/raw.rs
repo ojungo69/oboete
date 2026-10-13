@@ -3796,12 +3796,15 @@ impl Raw {
     /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
     /// ledger rows and the kept file's `hash` when it has one, in one transaction: all of them or
     /// none. False, and nothing appended, when that file was written back before (#454: a call
-    /// stopped between that commit and the file's removal left it behind).
+    /// stopped between that commit and the file's removal left it behind). What is never recorded
+    /// is also matched as labelled under `settings` now, as the hook's own check does (slice 4a,
+    /// Codex on #489).
     pub fn append_kept(
         &mut self,
         events: &[crate::capture::Captured],
         ruleset: &str,
         hash: Option<&str>,
+        settings: &crate::capture::Settings,
     ) -> Result<bool> {
         let tx = self
             .conn
@@ -3815,12 +3818,15 @@ impl Raw {
             return Ok(false);
         }
         let never = capture_exclusions_in(&tx)?;
+        let now = crate::capture::never_recorded(&never, settings);
         for c in events {
             // Slice 3b (D3): a forgotten session's record from before its forget is not recorded,
             // nor one of a place excluded since (slice 4a).
             let session = crate::forget::session(&c.event.agent, &c.event.session);
+            let (repo, cwd) = (c.event.repo.as_deref(), c.event.cwd.as_deref());
             if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)?
-                && !never.covers(c.event.repo.as_deref(), c.event.cwd.as_deref())
+                && !never.covers(repo, cwd)
+                && !now.covers(repo, cwd)
             {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             }
@@ -8378,8 +8384,13 @@ mod tests {
             ledger: Vec::new(),
         };
         assert!(
-            raw.append_kept(&[kept(at("github.com/o/secret", "/w/secret"))], "", None)
-                .unwrap()
+            raw.append_kept(
+                &[kept(at("github.com/o/secret", "/w/secret"))],
+                "",
+                None,
+                &Default::default()
+            )
+            .unwrap()
         );
         let (mut secret, mut open) = (imported("canary-4a"), imported("canary-4a"));
         secret.event.repo = Some("github.com/o/secret".into());
