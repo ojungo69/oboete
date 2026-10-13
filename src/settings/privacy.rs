@@ -440,9 +440,18 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                     return Err(refused(422, "capture_folder", "folder"));
                 }
                 // As the CLI stores it: as given, `.` and `..` by name (slice 4a's `folder_path`;
-                // owner 2026-10-13: what is never recorded is stored as given).
-                let label = crate::capture::folder_path(&folder);
+                // owner 2026-10-13: what is never recorded is stored as given), and as the entry
+                // already stored for it in another spelling of letter case where that is one
+                // folder (Codex on #489).
+                let given = crate::capture::folder_path(&folder);
                 let writer = crate::raw::open(home).map_err(|_| unavailable())?;
+                let stored = writer
+                    .capture_exclusions()
+                    .map_err(|_| unavailable())?
+                    .folders;
+                let label = crate::capture::stored_entry("cwd", &given, &stored)
+                    .cloned()
+                    .unwrap_or(given);
                 let answer = json!({ "folder_selector": folder_selector(&label) });
                 ("folder", label, writer, answer)
             }
@@ -939,6 +948,30 @@ mod tests {
             .append_captured(&event, &[], &settings, elsewhere)
             .unwrap();
         assert_eq!(appended, None);
+    }
+
+    /// Codex on #489: a folder posted again in another spelling of letter case, where that is one
+    /// folder, keeps the one entry stored for it, so the undo of its row leaves none.
+    #[test]
+    fn the_page_keeps_one_entry_for_a_folder_in_either_spelling_where_case_is_ignored() {
+        let store = Store::new();
+        let home = store.home.path().to_owned();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let folder = home.join("Private").to_string_lossy().into_owned();
+        let other = home.join("private").to_string_lossy().into_owned();
+        post(json!({"folder": folder, "undo": false})).unwrap();
+        let saved = post(json!({"folder": other, "undo": false})).unwrap();
+        let folders = store.raw.capture_exclusions().unwrap().folders;
+        if !cfg!(any(windows, target_os = "macos")) {
+            assert_eq!(folders.len(), 2);
+            return;
+        }
+        assert_eq!(Vec::from_iter(folders), [folder.as_str()]);
+        assert_eq!(saved["folder_selector"], json!(folder_selector(&folder)));
+        post(json!({"folder_selector": saved["folder_selector"], "undo": true})).unwrap();
+        assert!(store.raw.capture_exclusions().unwrap().folders.is_empty());
     }
 
     #[test]
