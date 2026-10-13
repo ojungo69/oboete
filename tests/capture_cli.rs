@@ -189,3 +189,33 @@ fn a_folder_excluded_in_another_spelling_keeps_one_entry_where_case_is_ignored()
         "{out}"
     );
 }
+
+/// Codex on #491: a folder taken off the list while a folder around it is listed is not said to be
+/// recorded again.
+#[test]
+fn an_undo_under_a_listed_folder_says_nothing_there_is_recorded() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let oboete = |args: &[&str]| run(home.path(), cwd.path(), args);
+    let around = cwd.path().join("private").to_string_lossy().into_owned();
+    let inside = cwd
+        .path()
+        .join("private")
+        .join("project")
+        .to_string_lossy()
+        .into_owned();
+    oboete(&["capture", "exclude", "--folder", &around]);
+    oboete(&["capture", "exclude", "--folder", &inside]);
+    let out = oboete(&["capture", "exclude", "--folder", &inside, "--undo"]);
+    assert!(
+        out.contains(&format!(
+            "{inside} is no longer excluded, but {around} around it is: nothing there is recorded"
+        )) && !out.contains("recorded again"),
+        "{out}"
+    );
+    let out = oboete(&["capture", "exclude", "--folder", &around, "--undo"]);
+    assert!(
+        out.contains(&format!("recorded again from now on: {around}")),
+        "{out}"
+    );
+}

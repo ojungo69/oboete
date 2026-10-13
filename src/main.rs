@@ -976,7 +976,14 @@ fn capture_exclude(
     let list = raw.capture_exclusions()?;
     drop(raw);
     match (undo, had) {
-        (true, true) => println!("recorded again from now on: {value}"),
+        (true, true) => match (key, list.folder_around(&value)) {
+            // Taken off the list, a folder stays unrecorded while one around it is listed (Codex
+            // on #491).
+            ("folder", Some(around)) => println!(
+                "{value} is no longer excluded, but {around} around it is: nothing there is recorded"
+            ),
+            _ => println!("recorded again from now on: {value}"),
+        },
         (true, false) => println!("{value} was not excluded"),
         (false, _) => println!("never recorded from now on: {value}"),
     }

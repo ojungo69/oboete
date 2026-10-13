@@ -1108,12 +1108,15 @@ impl CaptureExclusions {
     /// working directory in a listed folder, component by component.
     pub fn covers(&self, repo: Option<&str>, cwd: Option<&str>) -> bool {
         repo.is_some_and(|r| self.repos.contains(r))
-            || cwd.is_some_and(|c| {
-                let c = folded(c);
-                self.folders
-                    .iter()
-                    .any(|f| std::path::Path::new(&*c).starts_with(&*folded(f)))
-            })
+            || cwd.is_some_and(|c| self.folder_around(c).is_some())
+    }
+
+    /// The listed folder that `cwd` lies in, component by component, `cwd` itself included.
+    pub fn folder_around(&self, cwd: &str) -> Option<&String> {
+        let c = folded(cwd);
+        self.folders
+            .iter()
+            .find(|f| std::path::Path::new(&*c).starts_with(&*folded(f)))
     }
 
     /// Slice 4a (owner, 2026-10-13): whether an event is never recorded, as every writer asks it:
