@@ -51,7 +51,18 @@ impl Admission {
 
 /// Taken before a live raw write transaction, never by hook opens or appends.
 pub(crate) fn exclusive(home: &Path) -> Result<File> {
-    lock(home, true, crate::db::OPEN_WRITE_WAIT)
+    exclusive_within(home, crate::db::OPEN_WRITE_WAIT)
+}
+
+/// `exclusive`, waiting `wait` at most.
+pub(crate) fn exclusive_within(home: &Path, wait: Duration) -> Result<File> {
+    lock(home, true, wait)
+}
+
+/// Whether `e` is a hold that did not come within its wait.
+pub(crate) fn busy(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
 }
 
 /// Milestone 5 D5 (#439): a reader's shared hold, from its first read until its answer is built,

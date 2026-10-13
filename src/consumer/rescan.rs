@@ -5,7 +5,7 @@
 
 use crate::raw::{Item, Raw, Target};
 use crate::worker::Consumer;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,10 @@ impl Rescan {
 
 /// Records per step, as the other consumers.
 const BATCH: usize = 500;
+
+/// How long a step waits for the dispatch hold before it leaves its batch to the next pass: short,
+/// as the consumers after it in the same pass (full text first) wait for it.
+const HOLD_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[cfg(test)]
 thread_local! {
@@ -124,8 +128,14 @@ impl Consumer for Rescan {
         // forgotten and the batch read again. The check and the tombstones are under the hold a
         // save that changes the rules takes too, so none changes them in between (owner decision
         // 43; Codex and CodeRabbit on #502).
-        let _dispatch = crate::dispatch::exclusive(&self.home)
-            .context("the rescan's tombstones were not written")?;
+        // A hold that does not come within its wait (readers holding it one after another, a
+        // forget's registration) writes nothing and fails nothing: the batch is read again at the
+        // next pass (Windows CI on #491).
+        let _dispatch = match crate::dispatch::exclusive_within(&self.home, HOLD_WAIT) {
+            Ok(held) => held,
+            Err(e) if crate::dispatch::busy(&e) => return Ok(from),
+            Err(e) => return Err(e.context("the rescan's tombstones were not written")),
+        };
         if crate::capture::Settings::load(&self.home)
             .ok()
             .map(|s| s.rules.version().to_owned())
@@ -307,6 +317,32 @@ mod tests {
         assert!(!body(&raw, seq).contains("ghp_"), "{}", body(&raw, seq));
         let config = std::fs::read_to_string(p.join("config.toml")).unwrap();
         assert!(config.contains("enabled = false"), "{config}");
+    }
+
+    /// Windows CI on #491: a hold that does not come within its wait (readers holding dispatch one
+    /// after another) writes no tombstone and fails no worker run; the next pass masks the record.
+    #[test]
+    fn a_busy_hold_leaves_the_batch_to_the_next_pass() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let seq = raw
+            .append(&raw::test_event(&format!(
+                r#"{{"prompt":"deploy {key} now"}}"#
+            )))
+            .unwrap();
+        // A reader holds dispatch past the step's wait, then lets it go.
+        let reader = crate::dispatch::Admission::shared(p).unwrap();
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(HOLD_WAIT * 3);
+            drop(reader);
+        });
+        worker::run_once(p).unwrap();
+        released.join().unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 1);
+        assert!(!body(&raw, seq).contains("ghp_"), "{}", body(&raw, seq));
     }
 
     #[test]
