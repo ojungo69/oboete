@@ -1065,6 +1065,7 @@ const TEXT = {
   never_repo_stopped: ['Recording of {label} stopped. What was recorded before stays; `oboete forget --repo <a folder in it>` removes it.', '{label} の記録を止めました。これまでの記録は残ります。`oboete forget --repo <そのリポジトリ内のフォルダー>` で消せます。'],
   never_folder_stopped: ['Recording in this folder stopped. What was recorded before stays.', 'このフォルダーの記録を止めました。これまでの記録は残ります。'],
   never_undone: ['Recording resumes from now on. Nothing from while it was excluded comes back.', '今後の記録を再開しました。除外していた間の記録は戻りません。'],
+  never_undone_around: ['This folder is no longer excluded, but {label} around it is, so nothing there is recorded.', 'このフォルダーの除外は外しましたが、それを含む {label} が除外されたままのため、ここは記録しません。'],
   capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
   folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
   never_ambiguous: ['Several repositories never recorded read as this one now: record each again from its own row, or with `oboete capture exclude --undo` and the name it was excluded under.', '記録しない複数のリポジトリが、今の規則ではこのリポジトリと同じに読めます。それぞれの行から、または `oboete capture exclude --undo` に除外したときの名前を付けて、記録を再開してください。'],
@@ -3771,6 +3772,8 @@ function captureSection(f) {
       if (!currentSettings(f)) return;
       if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
       if (body.folder) f.neverFolder = '';
+      // A folder still inside a listed one is not recorded again (Codex on #491).
+      if (typeof answer.folder_around === 'string') receipt = t('never_undone_around', { label: answer.folder_around });
       const refreshed = await refreshPrivacy(f);
       if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
     } catch {

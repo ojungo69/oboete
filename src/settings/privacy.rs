@@ -482,8 +482,19 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     let op_seq = writer
         .exclude_capture((key, &label), posted.undo)
         .map_err(|_| unavailable())?;
+    // A folder taken off the list stays unrecorded while one around it is listed: the answer
+    // names that folder rather than say that recording resumes (Codex on #491).
+    let around = if key == "folder" && posted.undo {
+        let list = writer.capture_exclusions().map_err(|_| unavailable())?;
+        list.folder_around(&label).cloned()
+    } else {
+        None
+    };
     let mut answer = answer;
-    answer["never_recorded"] = json!(!posted.undo);
+    answer["never_recorded"] = json!(!posted.undo || around.is_some());
+    if let Some(around) = around {
+        answer["folder_around"] = json!(around);
+    }
     answer["recorded"] = json!(true);
     answer["op_seq"] = json!(op_seq);
     Ok(answer)
@@ -948,6 +959,35 @@ mod tests {
             .append_captured(&event, &[], &settings, elsewhere)
             .unwrap();
         assert_eq!(appended, None);
+    }
+
+    /// Codex on #491: a folder taken off the list while a folder around it is listed is answered
+    /// as still never recorded, with the folder around it named; the outer one's undo records
+    /// again.
+    #[test]
+    fn the_undo_of_a_folder_inside_a_listed_folder_names_the_folder_around_it() {
+        let store = Store::new();
+        let home = store.home.path().to_owned();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let around = home.join("private").to_string_lossy().into_owned();
+        let inside = home.join("private").join("project");
+        post(json!({"folder": around, "undo": false})).unwrap();
+        let added = post(json!({"folder": inside.to_string_lossy(), "undo": false})).unwrap();
+        let undone =
+            post(json!({"folder_selector": added["folder_selector"], "undo": true})).unwrap();
+        assert_eq!(
+            (
+                undone["never_recorded"].clone(),
+                undone["folder_around"].clone()
+            ),
+            (json!(true), json!(around))
+        );
+        let outer = json!({"folder_selector": folder_selector(&around), "undo": true});
+        let undone = post(outer).unwrap();
+        assert_eq!(undone["never_recorded"], false);
+        assert!(undone.get("folder_around").is_none(), "{undone}");
     }
 
     /// Codex on #489: a folder posted again in another spelling of letter case, where that is one
