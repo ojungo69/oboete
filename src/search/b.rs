@@ -437,7 +437,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         }),
         // Before anything else: an excluded repository's query is never sent (row 30-2). One the
         // local model embeds leaves no machine, so it keeps its vector (D13).
-        Ask::Embed(_) if !local(home) && excluded(&raw.exclusions()?, q) => {
+        Ask::Embed(_) if !local(home) && excluded_now(home, &raw, q).unwrap_or(true) => {
             Some((Vector::Skipped(VectorSkip::Excluded), None))
         }
         Ask::Embed(_) => None,
@@ -669,7 +669,7 @@ fn embedded(
         Err(_) => return Ok(Err(VectorSkip::Error)),
     };
     // Again as near the call as it can be: an exclusion made since the first check holds.
-    let excluded_now = raw.exclusions().map(|list| excluded(&list, q));
+    let excluded_now = excluded_now(home, raw, q);
     if !matches!(excluded_now, Ok(false)) {
         if let Err(e) = pdb::unreserve(&db, call) {
             eprintln!("oboete: a query embedding not sent stays counted: {e:#}");
@@ -1173,6 +1173,27 @@ fn rrf_lists(lists: &[&[String]]) -> Vec<String> {
     }
     order.sort_by(|a, b| score[b].total_cmp(&score[a]));
     order.into_iter().map(str::to_owned).collect()
+}
+
+/// Row 30-2 as the egress reads it: `excluded` over `Raw::exclusions_now`, also with the caller's
+/// and the searched repository's keys as the rules now read them, as a hook reads a label: a
+/// repository never recorded under a label a rule masks is listed so (Codex and Cursor on #489).
+fn excluded_now(home: &Path, raw: &crate::raw::Raw, q: &Query) -> Result<bool> {
+    let list = raw.exclusions_now()?;
+    if excluded(&list, q) {
+        return Ok(true);
+    }
+    let rules = crate::redact::Rules::load(home)?;
+    let read = |key: &Option<String>| {
+        key.as_deref()
+            .map(|key| crate::capture::label_with(key, &rules))
+    };
+    let now = Query {
+        caller: read(&q.caller),
+        repo: read(&q.repo),
+        ..q.clone()
+    };
+    Ok(excluded(&list, &now))
 }
 
 /// Row 30-2 over D13's `list`: whether the caller's repository or the one `q` searches is
@@ -3786,6 +3807,38 @@ mod tests {
         assert!(known(home.path(), "github.com/o/r").is_err());
         drop(held);
         assert!(known(home.path(), "github.com/o/r").unwrap());
+    }
+
+    /// Codex and Cursor on #489: a search from a checkout a hook would not record sends no query,
+    /// whose key is read as the rules now read it: one never recorded under the label a rule makes
+    /// of it, with no record of it, and one the rule reads as another never recorded.
+    #[test]
+    fn a_checkout_a_hook_would_not_record_sends_no_query() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        let ask = |caller: &str| Query {
+            caller: Some(caller.into()),
+            ..q("x")
+        };
+        let not_sent = |raw: &crate::raw::Raw, caller: &str| {
+            assert!(!excluded(&raw.exclusions().unwrap(), &ask(caller)));
+            excluded_now(home.path(), raw, &ask(caller)).unwrap()
+        };
+        // Excluded before the rule under its own label, which the rule reads as another's.
+        raw.exclude_capture(("repo", "github.com/o/acme-222222"), false)
+            .unwrap();
+        std::fs::write(home.path().join("config.toml"), rule).unwrap();
+        assert!(not_sent(&raw, "github.com/o/acme-111111"));
+        // Excluded after the rule, under the label it makes, with no record of it.
+        raw.exclude_capture(("repo", "github.com/o/acme-222222"), true)
+            .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let masked = "github.com/o/acme-482915";
+        let now = crate::capture::exclusion_label("repo", masked, &settings);
+        raw.exclude_capture(("repo", &now), false).unwrap();
+        assert!(not_sent(&raw, masked));
+        assert!(!excluded_now(home.path(), &raw, &ask("github.com/o/open")).unwrap());
     }
 
     #[test]

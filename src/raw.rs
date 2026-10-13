@@ -4881,8 +4881,9 @@ impl Raw {
     /// `exclusions`, with each repository label the records hold that the rules now read as one
     /// never recorded, as a hook reads an event's: a repository excluded from capture after a rule
     /// that masks its label is listed by the masked label, and its records from before the rule
-    /// hold the label unmasked (Codex on #489). The settings are read only while a repository is
-    /// never recorded; one that does not load sends nothing.
+    /// hold the label unmasked (Codex on #489); and each entry as the rules now read it, for a
+    /// reader that reads its own key so. The settings are read only while a repository is never
+    /// recorded; one that does not load sends nothing.
     pub fn exclusions_now(&self) -> Result<Vec<String>> {
         let (mut sent, never) = exclusion_sets(&self.conn)?;
         if !never.repos.is_empty() {
@@ -4901,6 +4902,9 @@ impl Raw {
                     sent.insert(label);
                 }
             }
+            // And the entries as the rules now read them, for a key read so (Codex and Cursor on
+            // #489: an import's project, a search's checkout).
+            sent.extend(now.repos);
         }
         sent.extend(never.repos);
         Ok(sent.into_iter().collect())

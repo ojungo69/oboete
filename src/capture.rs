@@ -163,6 +163,13 @@ pub fn exclusion_label(field: &str, value: &str, settings: &Settings) -> String 
     gate.text(field, &without_blocks(value, false), cap)
 }
 
+/// `exclusion_label` under `rules` alone, for a reader that loads no capture settings (the
+/// embedding phase, search): the same scan, with no ledger kept.
+pub fn label_with(value: &str, rules: &redact::Rules) -> String {
+    let cap = field_cap(std::env::var(FIELD_CAP_ENV).ok().as_deref());
+    redact::scan_capped(&without_blocks(value, false), cap, rules).0
+}
+
 /// Slice 4a: why nothing that happens in `cwd` is recorded: its checkout's `.oboete.toml`, or an
 /// exclusion (`list`) of its repository or of a folder around it, as its events would be
 /// labelled now; None when it is recorded.

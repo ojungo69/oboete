@@ -1331,7 +1331,9 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   repo の label のうち今の規則で読むと記録しない repo になるものを足す。hook が event の label を読むのと同じ）
   を読む: 規則を足した後に除外した repo は伏せた label で載り、規則の前の record は伏せていない label を持つ
   ので、その session も送らない（Codex on #489）。記録しない repo があるときだけ設定を読み、読めなければ何も
-  送らない。
+  送らない。一覧には今の規則で読んだ除外の値も載せ、取り込み文書の project（埋め込み）と検索のクエリを送る
+  checkout の repo も今の規則で読んで比べる（record を持たない repo、規則で同じに読める別の repo も。Codex・
+  Cursor on #489）。
 - **判定は gate を通した値どうし**: repo は `oboete exclude` と同じ label、folder は event の cwd と同じ
   `cwd` の label にして保存する。event の repo の label が一覧の repo と等しいか、event の cwd の label が
   一覧の folder の中（path の component 単位）なら記録しない。hook は一覧の値を今の規則で gate し直して

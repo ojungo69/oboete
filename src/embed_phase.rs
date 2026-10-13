@@ -1819,7 +1819,13 @@ fn passed_over(
                 || crate::curate::quotes_excluded(raw, k, &reading.excluded, &r.doc.key)?;
             Ok(excluded.then_some("excluded"))
         }
-        "k" | "p" => Ok(import_excluded(&r.doc.repo, list).then_some("excluded")),
+        // Its project as stored and as the rules now read it, as a hook reads a label: one never
+        // recorded under a label a rule masks is listed so (Codex on #489).
+        "k" | "p" => {
+            let now = crate::capture::label_with(&r.doc.repo, rules);
+            let excluded = import_excluded(&r.doc.repo, list) || import_excluded(&now, list);
+            Ok(excluded.then_some("excluded"))
+        }
         "o" | "s" if r.text.trim().is_empty() => Ok(Some("empty")),
         "o" | "s" => {
             // A card or summary a removal hides (K4, T7) is sent nowhere, as a removed record is
@@ -3866,6 +3872,28 @@ mod tests {
             .map(|(kind, ..)| kind)
             .collect();
         assert_eq!(mapped, ["k", "r"]);
+    }
+
+    /// Codex on #489: a claude-mem project imported before a rule that masks its name sends none
+    /// of its documents once its repository is never recorded under the label the rule makes of
+    /// it: the document's project is read as the rules now read it, as a hook reads a label.
+    #[test]
+    fn an_import_from_before_a_rule_is_not_sent_once_its_repository_is_never_recorded() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "acme-482915", 1_000, "Notes", "Project notes.");
+        let path = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(&path, format!("{text}{rule}")).unwrap();
+        let settings = crate::capture::Settings::load(s.home.path()).unwrap();
+        let now = crate::capture::exclusion_label("repo", "github.com/o/acme-482915", &settings);
+        s.raw.exclude_capture(("repo", &now), false).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("excluded"));
+        assert_eq!(stub.requests(), 0);
     }
 
     /// Steps 4 and 5 (D13): an `excluded` mark goes whenever its document is written again, its
