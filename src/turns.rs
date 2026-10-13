@@ -1103,7 +1103,7 @@ mod tests {
             Phase::Idle,
         )
         .unwrap();
-        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        assert!(matches!(phase, Phase::Waiting { .. }));
         assert!(!sent.get());
         drop((raw, k, db));
         assert!(turn_ops(home.path()).is_empty());

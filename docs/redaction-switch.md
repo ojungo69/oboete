@@ -67,7 +67,13 @@ under with the rules now, as the embedder's batches already do, and on a change 
 again under the rules now (`ListChanged`), with no attempt counted. So redaction turned on while a
 call waits sends nothing gated while it was off; a rule added meanwhile is held the same way. The
 embedder's batches compare the rules after they wait for raw.db and the dispatch guard, and a
-search's query is gated again after its reservation and not sent when it reads otherwise.
+search's query is gated again after its reservation and not sent when it reads otherwise. A save
+of the settings page that changes the rules waits for each call already admitted to send and holds
+the dispatch lock until config.toml is replaced, as a forget's registration does, so from the
+save's answer on no text gated under the rules before leaves; a hand edit of config.toml has the
+gates alone. The other way round, rules turned off while the rescan consumer reads a batch, or
+while a purge waits for the worker lock, mask nothing: each checks the rules again before it
+writes, so a record or an op stored as typed under the switch off stays so.
 
 `Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
 than with the home's settings is the claude-mem import's prompts (`hook::clip`): it keeps them, so

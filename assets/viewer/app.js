@@ -1610,6 +1610,7 @@ const TEXT = {
   bad_request: ['The request was not understood. Please reload the page.', '要求を処理できませんでした。ページを再読み込みしてください。'],
   too_large: ['The request is too large.', '要求が大きすぎます。'],
   write_failed: ['config.toml could not be written.', 'config.toml に書き込めませんでした。'],
+  dispatch_busy: ['A call to an AI service is still being sent, so the masking settings were not saved. Save again in a moment.', 'AI サービスへの送信が続いているため、マスキングの設定を保存できませんでした。少し待ってからもう一度保存してください。'],
   unauthorized: [
     'This page needs the full address printed by `oboete view` (it carries the access key after #).',
     'このページは `oboete view` が表示するアドレス全体(# の後ろのアクセスキーを含む)で開いてください。',

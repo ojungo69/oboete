@@ -24,6 +24,13 @@ impl Rescan {
 /// Records per step, as the other consumers.
 const BATCH: usize = 500;
 
+#[cfg(test)]
+thread_local! {
+    /// What happens to the home between a step's read of its batch and its tombstones.
+    static BEFORE_TOMBSTONES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn schema(k: &Connection) -> Result<()> {
     // The ruleset each device's records were last scanned with.
     k.execute_batch(
@@ -83,28 +90,54 @@ impl Consumer for Rescan {
             if settings.rules.is_off() { after } else { 0 }
         };
         let recs = raw.after(device, from, BATCH)?;
+        let found: Vec<(i64, usize, usize)> = recs
+            .iter()
+            .filter_map(|r| match &r.item {
+                Item::Event(e) => Some((r.seq, e)),
+                _ => None,
+            })
+            .flat_map(|(seq, e)| {
+                crate::redact::field_ranges(&e.body, &settings.rules)
+                    .into_iter()
+                    .map(move |(start, end)| (seq, start, end))
+            })
+            .collect();
+        #[cfg(test)]
+        if let Some(meanwhile) = BEFORE_TOMBSTONES.take() {
+            meanwhile();
+        }
+        // Rules changed while the batch was read (redaction turned off, say) write no tombstone:
+        // one would mask for good a record a hook appended under the rules now. The version is
+        // forgotten and the batch read again (owner decision 43; Codex on #502).
+        if !found.is_empty()
+            && crate::capture::Settings::load(&self.home)
+                .ok()
+                .map(|s| s.rules.version().to_owned())
+                .as_deref()
+                != Some(version)
+        {
+            k.execute("DELETE FROM rescan WHERE device = ?1", [device])?;
+            return Ok(after);
+        }
         // A second handle on raw.db for the tombstones (the worker's own is read-only here),
         // closed with the step: a handle kept open would hold raw.lock, and a restore waits for
         // every open store to close.
         let mut writer = None;
-        for r in &recs {
-            let Item::Event(e) = &r.item else { continue };
-            for (start, end) in crate::redact::field_ranges(&e.body, &settings.rules) {
-                if writer.is_none() {
-                    writer = Some(crate::raw::open_report(&self.home, None, &mut |_| {
-                        committed();
-                        Ok(())
-                    })?);
-                }
-                let w = writer.as_mut().expect("opened");
-                w.append_tombstone(Target::Range {
-                    device: device.to_owned(),
-                    seq: r.seq,
-                    offset: start as i64,
-                    length: (end - start) as i64,
-                })?;
-                committed();
+        for (seq, start, end) in found {
+            if writer.is_none() {
+                writer = Some(crate::raw::open_report(&self.home, None, &mut |_| {
+                    committed();
+                    Ok(())
+                })?);
             }
+            let w = writer.as_mut().expect("opened");
+            w.append_tombstone(Target::Range {
+                device: device.to_owned(),
+                seq,
+                offset: start as i64,
+                length: (end - start) as i64,
+            })?;
+            committed();
         }
         Ok(recs.last().map_or(from, |r| r.seq))
     }
@@ -202,6 +235,28 @@ mod tests {
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 1);
         assert!(!body(&raw, seq).contains("ghp_"), "{}", body(&raw, seq));
+    }
+
+    /// Owner decision 43 (Codex on #502): rules turned off while a batch is read write no
+    /// tombstone for it, so a record stored as typed under the switch off stays so.
+    #[test]
+    fn rules_turned_off_while_a_batch_is_read_write_no_tombstone() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let seq = raw
+            .append(&raw::test_event(&format!(
+                r#"{{"prompt":"deploy {key} now"}}"#
+            )))
+            .unwrap();
+        let config = p.join("config.toml");
+        BEFORE_TOMBSTONES.set(Some(Box::new(move || {
+            std::fs::write(&config, "[redaction]\nenabled = false\n").unwrap();
+        })));
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 0);
+        assert!(body(&raw, seq).contains(&key));
     }
 
     #[test]

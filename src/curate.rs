@@ -6019,7 +6019,7 @@ mod tests {
             &mut curator,
         )
         .unwrap();
-        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        assert!(matches!(phase, Phase::Waiting { .. }));
         assert!(!sent.get());
         let device = raw.device().to_owned();
         assert!(providers_db::pending_of(&db, &device).unwrap().is_none());

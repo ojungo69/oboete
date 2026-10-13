@@ -1113,7 +1113,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
     }
-    let (due, records_due, owed, masks, text) = {
+    let (due, records_due, owed, masks, mut text) = {
         let raw = crate::raw::open(home)?;
         let owed = raw.record_backups_owed()?;
         let text = text_owed(home, &raw)?;
@@ -1152,6 +1152,18 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     {
         let _worker = crate::worker::lock_asking(home)?;
         let mut raw = crate::raw::open(home)?;
+        #[cfg(test)]
+        if let Some(meanwhile) = AFTER_PURGE_LOCK.take() {
+            meanwhile();
+        }
+        // The rules the op text owes its scan to, read again under the worker lock: rules changed
+        // while it was awaited (redaction turned off, say) mask nothing with the ones before, and
+        // the scan stays owed to the rules now (owner decision 43; Codex on #502).
+        if let Some(rules) = &text
+            && text_owed(home, &raw)?.is_none_or(|now| now.version() != rules.version())
+        {
+            text = None;
+        }
         for (job, uid, step, held) in &due {
             if step_2(*step, *held) {
                 purged.ops += raw.purge_uid(uid, job)?;
@@ -1494,6 +1506,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// What happens to the home between a worker's look at the op text and the scan it records.
     static AFTER_TEXT_LOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// What happens to the home once a purge holds the worker lock, before its step 2.
+    static AFTER_PURGE_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -9353,6 +9368,36 @@ mod tests {
             }
             assert_eq!(look(), 0, "aside: {aside}");
         }
+    }
+
+    /// Owner decision 43 (Codex on #502): rules turned off while a purge waits for the worker
+    /// lock mask no op text with the rules before; the scan stays owed to the rules now.
+    #[test]
+    fn rules_turned_off_while_a_purge_waits_mask_no_op_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        let seq = s
+            .raw
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let config = home.join("config.toml");
+        let off = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        AFTER_PURGE_LOCK.set(Some(Box::new(move || {
+            std::fs::write(&config, off).unwrap();
+        })));
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.texts, 0);
+        let task = op_bodies(&home)[&seq]["fields"]["task"].clone();
+        assert_eq!(task, format!("Rotate {MASKED}."));
     }
 
     /// Owner decision 43 (Codex's security review of the switch): an op appended under rules
