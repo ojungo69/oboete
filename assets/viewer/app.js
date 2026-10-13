@@ -3791,9 +3791,9 @@ function captureSection(f) {
   const add = el('button', 'quiet small', t('never_folder_add'));
   add.type = 'button';
   add.addEventListener('click', () => {
-    const path = folder.value.trim();
-    if (!path) { setStatus(t('capture_folder'), true, lang); return; }
-    write(add, { folder: path, undo: false }, t('never_folder_stopped'));
+    // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
+    if (!folder.value.trim()) { setStatus(t('capture_folder'), true, lang); return; }
+    write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
   });
   return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
     el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('privacy_none')),
