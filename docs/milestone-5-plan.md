@@ -1333,7 +1333,9 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   ので、その session も送らない（Codex on #489）。記録しない repo があるときだけ設定を読み、読めなければ何も
   送らない。一覧には今の規則で読んだ除外の値も載せ、取り込み文書の project（埋め込み）と検索のクエリを送る
   checkout の repo も今の規則で読んで比べる（record を持たない repo、規則で同じに読める別の repo も。Codex・
-  Cursor on #489）。
+  Cursor on #489）。その後に外した規則で伏せた label（`github.com/o/[REDACTED]`）はもう読み直せないので、
+  伏せ字をどんな文字列とも読んで記録しない repo のどれかになりうる label も一覧に足し、その session を送らない
+  （安全側に多めに止める。Codex's security review of #489）。
 - **入力どおり保存し、今の規則でも読んで比べる**（owner 2026-10-13）: repo は与えられた key のまま、folder
   は `capture::folder_path` を通した絶対パスのまま、伏せ字をかけずに保存する（spec 2.2 の明示の例外。
   伏せ字を切ったり規則を足し引きしたりしても除外が効き続けるように）。値が一覧の値 R に合うのは、R と

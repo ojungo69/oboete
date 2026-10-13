@@ -1147,6 +1147,23 @@ impl CaptureExclusions {
     }
 }
 
+/// Slice 4a: whether `label`, which a mask hides part of, may be one of `names`: each mask read as
+/// any text. A label masked under a rule removed since cannot be read again, so a repository never
+/// recorded holds back from sending every label it may be (Codex's security review of #489).
+fn may_name<'a>(label: &str, mut names: impl Iterator<Item = &'a String>) -> bool {
+    if !label.contains(crate::redact::MASK) {
+        return false;
+    }
+    let parts: Vec<String> = label
+        .split(crate::redact::MASK)
+        .map(regex::escape)
+        .collect();
+    let Ok(masked) = regex::Regex::new(&format!("^{}$", parts.join(".+"))) else {
+        return true;
+    };
+    names.any(|n| masked.is_match(n))
+}
+
 /// Slice 4a: a folder as the platform's file systems name one: Windows' and macOS's ignore letter
 /// case unless a volume was made otherwise, so either spelling of an excluded folder is covered
 /// (Codex on #489).
@@ -4974,6 +4991,7 @@ impl Raw {
                 if now
                     .repos
                     .contains(&crate::capture::exclusion_label("repo", &label, &settings))
+                    || may_name(&label, never.repos.iter().chain(&now.repos))
                 {
                     sent.insert(label);
                 }
@@ -9288,6 +9306,32 @@ mod tests {
             raw.imported_counts(&dev, &[(1, 10)]).unwrap(),
             [("oboete-v1".to_owned(), 1)].into_iter().collect()
         );
+    }
+
+    /// Codex's security review of #489: a repository label masked under a rule removed since
+    /// cannot be read again, so its records are held back from sending once a repository it may
+    /// be is never recorded; one of another owner leaves them be.
+    #[test]
+    fn a_label_masked_under_a_rule_removed_since_is_held_back_when_it_may_be_excluded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let masked = format!("github.com/o/{}", crate::redact::MASK);
+        let seq = raw
+            .append(&Event {
+                repo: Some(masked.clone()),
+                ..test_event("deploy notes")
+            })
+            .unwrap();
+        raw.exclude_capture(("repo", "github.com/x/other"), false)
+            .unwrap();
+        assert!(!raw.exclusions_now().unwrap().contains(&masked));
+        raw.exclude_capture(("repo", "github.com/o/acme-482915"), false)
+            .unwrap();
+        let list = raw.exclusions_now().unwrap();
+        assert!(list.contains(&masked), "{list:?}");
+        let device = raw.device().to_owned();
+        let key = raw.session_key(&device, seq).unwrap().unwrap();
+        assert!(raw.sessions_in(&list).unwrap().contains(&key));
     }
 
     /// OpenCodeReview on #304: an event's agent and session labels may be NULL; `sessions_in`
