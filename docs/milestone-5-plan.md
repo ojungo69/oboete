@@ -1256,9 +1256,11 @@ egress の gate が今の規則で伏せる）。
 
 - **今の規則で op の文を伏せる**: 規則の版（`Rules::version`: `[redaction]` の規則と残す値で決まる）が
   raw.db の meta `ops_text_scanned`（op の文を最後に走査した版）と違う間、purge が step 2 で raw.db の
-  op を全部読み、本文の JSON の文字列値ごとに今の規則で探し（`redact::ranges`）、見つかった所を 3e-1 と
-  同じく `*` にする（`masked`: 文字の境界まで広げ、byte 数は同じ）。値を解析して書き直すので JSON は
-  壊れず、キーの順も変わらない（`preserve_order`）。再 curate の列には入れない。
+  op を全部読み、本文の JSON の文字列値ごとに今の規則で探し（`redact::ranges`）、見つかった所の文字を
+  1 文字ずつ `*` にする。record の伏せ字（3e-1）は ledger の offset のために byte 数を保つが、op の文に
+  offset はなく、文字数も byte 数も増やさない方を取る（訂正や claim が 1,000 文字の上限を超えて読み捨て
+  られないように。Codex on #487）。値を解析して書き直すので JSON は壊れず、キーの順も変わらない
+  （`preserve_order`）。再 curate の列には入れない。
 - **伏せない値**（`OP_NAMES`）: oboete が付ける名前（識別子と自分の語彙）の値: `uid`、`id`、
   `supersedes`、`candidates`、`carried`、`copied`、`device`、`forgotten`、`job`、`source`、`source_id`、
   `session`、`repo`、`list`、`kind`、`type`、`status`、`speaker`、`scope`、`recipe`、`outcome`、`agent`、

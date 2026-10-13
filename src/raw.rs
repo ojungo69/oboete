@@ -6956,10 +6956,12 @@ const OP_NAMES: &[&str] = &[
     "uid",
 ];
 
-/// Slice 3e-4 (#478): an op's `body` of `kind` with each string `rules` find something in masked as
-/// a rescan masks a record (`masked`: `*` for every byte of each character a finding touches), but
-/// the values of `OP_NAMES`; none when they find nothing or the body does not parse. A forget's op
-/// (a uid and a job) and a migration's (a checkpoint and hashes) hold no text.
+/// Slice 3e-4 (#478): an op's `body` of `kind` with each string `rules` find something in masked,
+/// one `*` for each character a finding touches, but the values of `OP_NAMES`; none when they find
+/// nothing or the body does not parse. A forget's op (a uid and a job) and a migration's (a
+/// checkpoint and hashes) hold no text. Unlike a record's masks, which keep its bytes for the
+/// ledger's offsets, these never lengthen a text: a correction or a claim stays under its
+/// character cap (Codex on #487).
 pub(crate) fn masked_op_text(
     kind: OpKind,
     body: &str,
@@ -6968,11 +6970,17 @@ pub(crate) fn masked_op_text(
     fn walk(v: &mut serde_json::Value, rules: &crate::redact::Rules, names: bool) -> bool {
         match v {
             serde_json::Value::String(text) => {
-                let now = crate::redact::ranges(text, rules)
-                    .into_iter()
-                    .fold(text.clone(), |t, (start, end)| {
-                        masked(&t, start as i64, (end - start) as i64)
-                    });
+                let found = crate::redact::ranges(text, rules);
+                let now: String = text
+                    .char_indices()
+                    .map(|(at, c)| {
+                        let end = at + c.len_utf8();
+                        match found.iter().any(|&(start, stop)| at < stop && start < end) {
+                            true => '*',
+                            false => c,
+                        }
+                    })
+                    .collect();
                 let changed = now != *text;
                 *text = now;
                 changed
@@ -8005,8 +8013,6 @@ mod tests {
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
     }
 
-    /// Codex on #304: the list folds a device's ops in their own order, so a clock set back
-    /// between two of them never puts the newer one first.
     /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, are
     /// names no rule masks, so an excluded folder keeps matching its events' `cwd` labels.
     #[test]
@@ -8029,6 +8035,35 @@ mod tests {
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
     }
 
+    /// Slice 3e-4 (Codex on #487): a correction at its 1,000-character cap, in characters of
+    /// three bytes, keeps its status and stays a correction once a rule masks part of its body:
+    /// one `*` for each character.
+    #[test]
+    fn a_masked_correction_stays_under_its_character_cap() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = '機密[あ-ん]{8}' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let text = format!("機密{}{}", "あ".repeat(8), "い".repeat(990));
+        assert_eq!(text.chars().count(), crate::claims::MAX_BODY_CHARS);
+        let body = serde_json::json!({
+            "uid": "a".repeat(64), "status": "retracted", "body": text,
+            "anchor": {"device": "d", "seq": 1},
+        });
+        let now = masked_op_text(OpKind::Correction, &body.to_string(), &rules).unwrap();
+        let op: crate::claims::CorrectionOp = serde_json::from_str(&now).unwrap();
+        assert_eq!(op.fault(), None);
+        assert_eq!(op.status.as_deref(), Some("retracted"));
+        let masked = op.body.unwrap();
+        assert_eq!(masked.chars().count(), crate::claims::MAX_BODY_CHARS);
+        assert!(masked.starts_with(&"*".repeat(10)) && !masked.contains("機密"));
+    }
+
+    /// Codex on #304: the list folds a device's ops in their own order, so a clock set back
+    /// between two of them never puts the newer one first.
     #[test]
     fn a_clock_set_back_never_puts_a_newer_exclusion_first() {
         let home = tempfile::tempdir().unwrap();
