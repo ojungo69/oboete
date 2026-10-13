@@ -1193,8 +1193,14 @@ byte の offset と length）にする。今は読むたびに `hide` が `*` �
   もの（同じ batch の claim）と、その claim を見せた後の window は #478（forget は 3d-4）。secure_delete
   （2b）より前に作った raw.db の空きページと page の中の空き領域には、その前に消した byte が残りうる（#477）。
   伏せた record から作ったと辿れない op の文（伏せた uid の Correction の body、work state、import、curator が
-  自分で書いた一致）には後から足した規則が届かない（#478）。step 4 が segment の途中で止まると、伏せた claim
-  の行を書き換えた後は、その uid を名指した別の segment の window の行を次の purge が辿れない（#483）。
+  自分で書いた一致）には後から足した規則が届かない（#478）。
+- **止まった purge と伏せた claim の uid**（#483）: 伏せた claim の uid は tombstone しないので、claim の op と
+  segment・コピーの行を書き換えると、その uid を名指した window を辿る手がかりが消える。purge は uid と
+  伏せ字の時刻を、その claim の行のどれかを書き換える前に raw.db の meta `rescan_masked_uids` に残し（step 2
+  は raw.db の claim から、step 4 は segment とコピーの claim の行から）、次の purge は step 2 と step 4 の
+  `Judge` でそれも読む。伏せ字を払う時に消す（その時には名指した window をすべて判定済み）。step 4 は
+  segment を名前の順に書き換える（止まる所が毎回同じ）。uid は文を持たない（MUST-M18）。segment から作り
+  直した raw.db（新しい meta）は残した uid を持たない（止まった purge の後の restore）。
 - 受入テスト（6.7 の Rescan range）: 古い規則の下で秘密を含む prompt を記録し、それを引用する claim、
   その window op（summary にも秘密）、それを読んだ turn op を書き、backup を書き、raw.db のコピーを set
   aside し、規則を足して rescan、purge。raw.db（展開した本文も）・WAL・knowledge.db・すべての segment

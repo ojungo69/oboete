@@ -2477,13 +2477,53 @@ impl Raw {
     }
 
     /// Once a purge that read `seen` (`masks_owed`) has done every step: a range that came
-    /// meanwhile is owed still.
+    /// meanwhile is owed still. The uids kept for it (`keep_masked_uids`) go with it: every window
+    /// that named one was judged by then.
     pub(crate) fn masks_paid(&self, seen: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('rescan_masks_paid', ?1)",
             [seen],
         )?;
+        tx.execute("DELETE FROM meta WHERE key = 'rescan_masked_uids'", [])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Slice 3e-1 (#483): the uid of each claim made from a masked record's text before its mask,
+    /// with the time of that mask, kept in meta `rescan_masked_uids` from before any line of the
+    /// claim loses its text until the masks are paid: a purge stopped after it rewrote the claim's
+    /// op or segment line, but before a segment's or a copy's window that named it, leaves the next
+    /// one the uid to judge that window by. A uid holds no text (MUST-M18). With `uids` added,
+    /// each at the later of its times (`later`): what is kept now.
+    pub(crate) fn keep_masked_uids(
+        &self,
+        uids: &std::collections::HashMap<String, i64>,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        use rusqlite::OptionalExtension;
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let kept: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'rescan_masked_uids'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut kept: std::collections::HashMap<String, i64> = match kept {
+            Some(text) => serde_json::from_str(&text)?,
+            None => std::collections::HashMap::new(),
+        };
+        if uids.iter().any(|(uid, at)| kept.get(uid) < Some(at)) {
+            for (uid, at) in uids {
+                later(&mut kept, uid, *at);
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('rescan_masked_uids', ?1)",
+                [serde_json::to_string(&kept)?],
+            )?;
+            tx.commit()?;
+        }
+        Ok(kept)
     }
 
     /// Slice 3e-4 (#478): whether the text of raw.db's ops is owed a scan with the redaction rules
@@ -3178,11 +3218,15 @@ impl Raw {
     /// Slice 3d-2: how step 4 judges the backup's ops and the copies' (`Judge`), with the bodies
     /// of the window and turn ops a purge rewrote in raw.db.
     pub(crate) fn judge(&self, masks: bool) -> Result<Judge> {
-        let forgotten = if masks {
+        let mut forgotten = if masks {
             self.forgotten_and_masked()?
         } else {
             self.forgotten_records()?
         };
+        // #483: and the masked claims' uids a purge kept, whose own lines may be rewritten.
+        if masks {
+            forgotten.masked = self.keep_masked_uids(&forgotten.masked)?;
+        }
         let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
         if masks {
@@ -6643,6 +6687,12 @@ impl Judge {
             }
         }
         Ok(())
+    }
+
+    /// Slice 3e-1 (#483): the masked claims' uids, with their masks' times: raw.db's, those a purge
+    /// kept, and once `widen` has read them, those only the backups hold.
+    pub(crate) fn masked(&self) -> &std::collections::HashMap<String, i64> {
+        &self.forgotten.masked
     }
 
     /// The uids of the claims made from forgotten records, with their jobs: raw.db's, and once
