@@ -135,10 +135,11 @@ fn an_undo_takes_back_the_folder_named_when_two_read_alike_now() {
     );
 }
 
-/// Codex on #489: under a rule that masks part of a repository's name, the forget hint names the
-/// repository as its earlier records do, which `oboete forget --repo` selects.
+/// Codex on #489, owner 2026-10-13: under a rule that masks part of a repository's name, the
+/// repository is stored and listed as given, and the forget hint names it as its earlier records
+/// do, which `oboete forget --repo` selects.
 #[test]
-fn the_forget_hint_names_the_repository_as_its_records_do() {
+fn a_repository_is_stored_as_given_and_the_forget_hint_names_it_so() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -151,9 +152,11 @@ fn the_forget_hint_names_the_repository_as_its_records_do() {
         cwd.path(),
         &["capture", "exclude", "github.com/o/acme-482915"],
     );
+    // Stored as given (owner, 2026-10-13): the list names it so, and the hint as its records do.
     assert!(
         out.contains("`oboete forget --repo github.com/o/acme-482915` removes it")
-            && !out.contains("never recorded from now on: github.com/o/acme-482915"),
+            && out.contains("never recorded from now on: github.com/o/acme-482915")
+            && out.contains("never recorded: github.com/o/acme-482915"),
         "{out}"
     );
 }

@@ -947,23 +947,15 @@ fn capture_exclude(
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
     let settings = capture::Settings::load(home)?;
-    // What was given, and its label now.
-    let (key, given, value) = match folder {
-        Some(folder) => {
-            // As an agent's `cwd` is labelled (`capture::folder_path`), with no `\\?\` that
-            // `canonicalize` gives on Windows.
-            let folder = capture::folder_path(&folder.to_string_lossy());
-            let label = capture::exclusion_label("cwd", &folder, &settings);
-            ("folder", folder, label)
-        }
-        None => {
-            let repo = match repo {
-                Some(r) => r,
-                None => repo::key(&std::env::current_dir()?),
-            };
-            let label = capture::exclusion_label("repo", &repo, &settings);
-            ("repo", repo, label)
-        }
+    // Stored as given, unmasked, so it holds whatever the rules become (owner, 2026-10-13).
+    let (key, given) = match folder {
+        // As an agent's `cwd` is labelled (`capture::folder_path`), with no `\\?\` that
+        // `canonicalize` gives on Windows.
+        Some(folder) => ("folder", capture::folder_path(&folder.to_string_lossy())),
+        None => match repo {
+            Some(r) => ("repo", r),
+            None => ("repo", repo::key(&std::env::current_dir()?)),
+        },
     };
     let mut raw = raw::open(home)?;
     let was = raw.capture_exclusions()?;
@@ -971,30 +963,10 @@ fn capture_exclude(
         "folder" => ("cwd", &was.folders),
         _ => ("repo", &was.repos),
     };
-    // An undo takes the entry as it was stored: the one given, or labelled as now, else the one
-    // entry a rule added since labels as the given value now (Codex on #489).
+    // An undo takes the entry stored for it (Codex on #489).
     let value = match undo {
-        false => value,
-        true if stored.contains(&given) => given.clone(),
-        true if stored.contains(&value) => value,
-        true => {
-            let now: Vec<&String> = stored
-                .iter()
-                .filter(|s| capture::exclusion_label(field, s, &settings) == value)
-                .collect();
-            match now.as_slice() {
-                [] => value,
-                [one] => (*one).clone(),
-                many => anyhow::bail!(
-                    "{value} is how {} excluded entries read now ({}): undo one by the name it was excluded under",
-                    many.len(),
-                    many.iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }
-        }
+        false => given.clone(),
+        true => capture::undone(field, &given, stored, &settings)?,
     };
     let had = stored.contains(&value);
     raw.exclude_capture((key, &value), undo)?;

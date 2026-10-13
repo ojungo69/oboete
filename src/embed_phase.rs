@@ -3896,6 +3896,28 @@ mod tests {
         assert_eq!(stub.requests(), 0);
     }
 
+    /// #496 (owner, 2026-10-13): with the repository stored as given, a rule that needs more than
+    /// a project's name (`o/acme-…`) keeps the project's imported documents back too: the stored
+    /// key and the import's project are compared as they are, by D13's name.
+    #[test]
+    fn an_import_is_not_sent_under_a_rule_that_reads_a_repository_across_its_owner() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "acme-482915", 1_000, "Notes", "Project notes.");
+        let path = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'o/acme-[0-9]{6}' }]\n";
+        std::fs::write(&path, format!("{text}{rule}")).unwrap();
+        s.raw
+            .exclude_capture(("repo", "github.com/o/acme-482915"), false)
+            .unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("excluded"));
+        assert_eq!(stub.requests(), 0);
+    }
+
     /// Steps 4 and 5 (D13): an `excluded` mark goes whenever its document is written again, its
     /// text the same or not, since what excluded it can change under the same text: a uid
     /// imported again under another project.

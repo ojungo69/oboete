@@ -1334,16 +1334,22 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   送らない。一覧には今の規則で読んだ除外の値も載せ、取り込み文書の project（埋め込み）と検索のクエリを送る
   checkout の repo も今の規則で読んで比べる（record を持たない repo、規則で同じに読める別の repo も。Codex・
   Cursor on #489）。
-- **判定は gate を通した値どうし**: repo は `oboete exclude` と同じ label、folder は event の cwd と同じ
-  `cwd` の label にして保存する。event の repo の label が一覧の repo と等しいか、event の cwd の label が
-  一覧の folder の中（path の component 単位）なら記録しない。hook は一覧の値を今の規則で gate し直して
-  から比べる（後から足した規則が path の一部を伏せても、event の label と同じに伏せる）。hook の `cwd` が
-  相対か無いときは、hook が動く directory を絶対パスにしてから label にする。CLI の folder と hook の `cwd`
-  はどちらも `capture::folder_path` で、`.` と `..` を名前の上で外し、末尾の区切りを落とす（link はたどら
-  ない。Codex on #489）。Windows と macOS では大文字と小文字を区別せずに比べる（既定の file system がそう
-  なので、どちらの書き方で除外しても覆う。Codex on #489）。claude-mem から取り込む一覧の project の名前も、今の規則で gate した形とも比べる
-  （規則が repo の名前の一部を伏せていても合う）。`folder` と
-  `level` は `repo` と同じく op の名前で、#487 が `OP_NAMES` に足す。
+- **入力どおり保存し、今の規則でも読んで比べる**（owner 2026-10-13）: repo は与えられた key のまま、folder
+  は `capture::folder_path` を通した絶対パスのまま、伏せ字をかけずに保存する（spec 2.2 の明示の例外。
+  伏せ字を切ったり規則を足し引きしたりしても除外が効き続けるように）。値が一覧の値 R に合うのは、R と
+  等しいとき、R を今の規則で読んだ形（`capture::never_recorded`）と等しいとき、そして hook が gate の前の
+  repo と cwd を持つところでは、それが R と等しいか R の中（path の component 単位、Windows と macOS では
+  大文字と小文字を区別しない）のとき。記録済みの event の label はその時の規則で読まれているので、規則の
+  前の record は R そのものに、後の record は今の規則で読んだ R に合う。hook の書込み transaction の中の
+  確かめ（`Raw::append_captured`）も今の規則で読んだ一覧と比べる（label どうし。gate の前の値は持たない）。
+  hook の `cwd` が相対か無いときは、hook が動く directory を絶対パスにしてから比べる。CLI の folder と
+  hook の `cwd` はどちらも `capture::folder_path` で、`.` と `..` を名前の上で外し、末尾の区切りを落とす
+  （link はたどらない。Codex on #489）。取り消しは保存された値を探す（folder は大文字と小文字を区別しない
+  platform ではそのように、なければ今の規則で同じに読める 1 つ。`capture::undone`）。claude-mem から取り
+  込む一覧と文書は project の名前で比べる（D13）。規則が区切りを食う、名前の外の文脈に当たる場合も、gate
+  の前の値と入力どおりの値どうしなら合う（#496）。設定画面が repository を選ぶときは record の label しか
+  持たないので、その label を保存する（伏せてあればそのまま）。`folder` と `level` は `repo` と同じく op
+  の名前で、#487 が `OP_NAMES` に足す。
 - **`.oboete.toml`**: checkout の top（`repo::key` が `.git` を探す一度の歩きで分かる、worktree なら
   その worktree の top）の `.oboete.toml` の `capture` の鍵だけを読む（他の鍵は見ない）。`capture =
   false` なら記録しない。`capture = true` は一覧を外さない。ファイルが読めない、TOML として読めない、

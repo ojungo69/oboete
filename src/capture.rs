@@ -98,11 +98,32 @@ pub fn events(
     ts: i64,
     settings: &Settings,
 ) -> Vec<Captured> {
+    events_read(agent, event, payload, ts, settings)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// `events`, each with its repository and folder as the hook read them, before the gate: the hook
+/// compares them with what is never recorded, stored as given (slice 4a; owner, 2026-10-13). They
+/// are never stored.
+pub fn events_read(
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    ts: i64,
+    settings: &Settings,
+) -> Vec<(Captured, (String, Option<String>))> {
     shaped(event, payload, settings)
         .and_then(|(kind, body)| {
             let place = place(payload);
-            checkout_records(place.git.top.as_deref())
-                .then(|| labelled(agent, kind, body, payload, ts, place, settings))
+            let read = (place.repo.clone(), place.cwd.clone());
+            checkout_records(place.git.top.as_deref()).then(|| {
+                (
+                    labelled(agent, kind, body, payload, ts, place, settings),
+                    read,
+                )
+            })
         })
         .into_iter()
         .collect()
@@ -184,6 +205,46 @@ pub fn exclusion_label(field: &str, value: &str, settings: &Settings) -> String 
     let mut gate = Gate::new(settings);
     let cap = gate.cap;
     gate.text(field, &without_blocks(value, false), cap)
+}
+
+/// Slice 4a: the entry of `stored` an undo of `given` takes back: the one stored as given (a
+/// folder in any spelling of letter case where the platform ignores it, as `covers` reads one),
+/// else the one entry that reads as `given` under the rules now (one stored masked: by the page,
+/// or before exclusions were stored as given), else `given`, which takes nothing back. An error
+/// naming them when several read so (Codex on #489).
+pub fn undone(
+    field: &str,
+    given: &str,
+    stored: &std::collections::BTreeSet<String>,
+    settings: &Settings,
+) -> anyhow::Result<String> {
+    let same = |a: &str, b: &str| {
+        if field == "cwd" {
+            crate::raw::folded(a) == crate::raw::folded(b)
+        } else {
+            a == b
+        }
+    };
+    if let Some(entry) = stored.iter().find(|s| same(s, given)) {
+        return Ok(entry.clone());
+    }
+    let now = exclusion_label(field, given, settings);
+    let read: Vec<&String> = stored
+        .iter()
+        .filter(|s| same(&exclusion_label(field, s, settings), &now))
+        .collect();
+    match read.as_slice() {
+        [] => Ok(given.to_owned()),
+        [one] => Ok((*one).clone()),
+        many => anyhow::bail!(
+            "{given} is how {} excluded entries read now ({}): undo one by the name it was excluded under",
+            many.len(),
+            many.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// `exclusion_label` under `rules` alone, for a reader that loads no capture settings (the
@@ -878,6 +939,25 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         assert!(repo_capture(Some(top.path())).is_err());
+    }
+
+    /// Codex on #489: an undo finds a folder stored in another spelling of letter case where the
+    /// platform ignores it, as `covers` reads one, and only there.
+    #[test]
+    fn an_undo_finds_a_folder_in_another_spelling_only_where_case_is_ignored() {
+        let (stored, given) = if cfg!(windows) {
+            (r"C:\Work\Private", r"c:\work\private")
+        } else {
+            ("/Users/x/Work/Private", "/users/x/work/private")
+        };
+        let list = std::collections::BTreeSet::from([stored.to_owned()]);
+        let found = undone("cwd", given, &list, &Settings::default()).unwrap();
+        let want = if cfg!(any(windows, target_os = "macos")) {
+            stored
+        } else {
+            given
+        };
+        assert_eq!(found, want);
     }
 
     /// Push security review of #489: a checkout's `.oboete.toml` past the limit, or one that names

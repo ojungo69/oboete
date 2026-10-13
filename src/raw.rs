@@ -1132,7 +1132,7 @@ impl CaptureExclusions {
 /// Slice 4a: a folder as the platform's file systems name one: Windows' and macOS's ignore letter
 /// case unless a volume was made otherwise, so either spelling of an excluded folder is covered
 /// (Codex on #489).
-fn folded(path: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn folded(path: &str) -> std::borrow::Cow<'_, str> {
     if cfg!(any(windows, target_os = "macos")) {
         path.to_lowercase().into()
     } else {
@@ -3791,16 +3791,42 @@ impl Raw {
         ledger: &[(String, crate::redact::Finding)],
         ruleset: &str,
     ) -> Result<Option<i64>> {
+        self.append_under(e, ledger, ruleset, None)
+    }
+
+    /// `append_with_ledger` for an event a hook captured under `settings`: what is never recorded,
+    /// stored as given (owner, 2026-10-13), is matched in the write transaction as the rules now
+    /// read it too, as the hook's own check reads it, so an exclusion committed after that check
+    /// refuses the event though a rule masks its labels (slice 4a, Codex on #491).
+    pub fn append_captured(
+        &mut self,
+        e: &Event,
+        ledger: &[(String, crate::redact::Finding)],
+        settings: &crate::capture::Settings,
+    ) -> Result<Option<i64>> {
+        self.append_under(e, ledger, settings.rules.version(), Some(settings))
+    }
+
+    fn append_under(
+        &mut self,
+        e: &Event,
+        ledger: &[(String, crate::redact::Finding)],
+        ruleset: &str,
+        settings: Option<&crate::capture::Settings>,
+    ) -> Result<Option<i64>> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let never = capture_exclusions_in(&tx)?;
+        let (repo, cwd) = (e.repo.as_deref(), e.cwd.as_deref());
         if scope_tombstoned(
             &tx,
             &self.device,
             &crate::forget::session(&e.agent, &e.session),
             e,
             ledger,
-        )? || capture_exclusions_in(&tx)?.covers(e.repo.as_deref(), e.cwd.as_deref())
+        )? || never.covers(repo, cwd)
+            || settings.is_some_and(|s| crate::capture::never_recorded(&never, s).covers(repo, cwd))
         {
             return Ok(None);
         }
@@ -4890,12 +4916,12 @@ impl Raw {
         capture_exclusions_in(&self.conn)
     }
 
-    /// `exclusions`, with each repository label the records hold that the rules now read as one
-    /// never recorded, as a hook reads an event's: a repository excluded from capture after a rule
-    /// that masks its label is listed by the masked label, and its records from before the rule
-    /// hold the label unmasked (Codex on #489); and each entry as the rules now read it, for a
-    /// reader that reads its own key so. The settings are read only while a repository is never
-    /// recorded; one that does not load sends nothing.
+    /// `exclusions`, with each entry never recorded as the rules now read it (a repository stored
+    /// as given is so labelled in the records from after a rule that masks its name), and each
+    /// repository label the records hold that the rules now read as one never recorded (an entry
+    /// stored masked, by the page or before exclusions were stored as given, and its records from
+    /// before the rule, which hold the label unmasked; Codex on #489). The settings are read only
+    /// while a repository is never recorded; one that does not load sends nothing.
     pub fn exclusions_now(&self) -> Result<Vec<String>> {
         let (mut sent, never) = exclusion_sets(&self.conn)?;
         if !never.repos.is_empty() {
@@ -8435,6 +8461,37 @@ mod tests {
             CaptureExclusions::default()
         );
         assert_eq!(raw.exclusions().unwrap(), ["a"]);
+    }
+
+    /// Codex on #491 (owner, 2026-10-13): a repository stored as given is matched in the hook's
+    /// write transaction as the rules now read it too, so an event the hook labelled under a rule
+    /// that masks the name is refused there; an append with no settings compares the list as stored.
+    #[test]
+    fn a_hooks_append_matches_the_list_as_the_rules_now_read_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let given = "github.com/o/acme-482915";
+        raw.exclude_capture(("repo", given), false).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let labelled = Event {
+            repo: Some(crate::capture::exclusion_label("repo", given, &settings)),
+            ..test_event("After the rule.")
+        };
+        assert_ne!(labelled.repo.as_deref(), Some(given));
+        assert_eq!(
+            raw.append_captured(&labelled, &[], &settings).unwrap(),
+            None
+        );
+        assert!(
+            raw.append_with_ledger(&labelled, &[], "")
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Codex on #489: a repository never recorded under the label a rule now makes of it keeps its

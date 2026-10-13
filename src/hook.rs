@@ -993,11 +993,7 @@ pub fn record(
     }
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
-        match raw.append_with_ledger(
-            &b.captured.event,
-            &b.captured.ledger,
-            settings.rules.version(),
-        ) {
+        match raw.append_captured(&b.captured.event, &b.captured.ledger, settings) {
             Ok(Some(seq)) => appended.push((seq, b.captured.event.clone())),
             // Slice 3b (D3): a forgotten session's event from before its forget, not recorded.
             Ok(None) => {}
@@ -1035,11 +1031,15 @@ fn built(
 ) -> Result<(Vec<Built>, Option<String>)> {
     let mut built = Vec::new();
     let mut prompt = None;
-    // Slice 4a: what is never recorded, read once a call and labelled as this call's events are.
-    // Without a store (U2) the append refuses such events as it writes them back.
+    // Slice 4a: what is never recorded, read once a call, as stored (as given, owner 2026-10-13)
+    // and as the rules now read it. Without a store (U2) the append refuses such events as it
+    // writes them back.
     let never = raw
         .and_then(|raw| raw.capture_exclusions().ok())
-        .map(|list| crate::capture::never_recorded(&list, settings));
+        .map(|list| {
+            let now = crate::capture::never_recorded(&list, settings);
+            (list, now)
+        });
     for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
         if event == "UserPromptSubmit" {
             prompt = str_field(&payload, &["prompt"]).map(str::to_owned);
@@ -1051,11 +1051,21 @@ fn built(
                 let session = payload["session_id"].as_str().unwrap_or("unknown");
                 (session.to_owned(), step)
             });
-        for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
-            if never
-                .as_ref()
-                .is_some_and(|n| n.covers(c.event.repo.as_deref(), c.event.cwd.as_deref()))
-            {
+        for (mut c, (repo, cwd)) in
+            crate::capture::events_read(agent, &event, &payload, ts, settings)
+        {
+            // The repository and folder as read, before the gate, with the list as given: a rule
+            // that masks part of a name, or one taken away since, changes neither (#496); and the
+            // labels, with the list as given and as the rules now read it.
+            let (labels, folder) = (
+                (c.event.repo.as_deref(), c.event.cwd.as_deref()),
+                (Some(repo.as_str()), cwd.as_deref()),
+            );
+            if never.as_ref().is_some_and(|(list, now)| {
+                list.covers(folder.0, folder.1)
+                    || list.covers(labels.0, labels.1)
+                    || now.covers(labels.0, labels.1)
+            }) {
                 continue;
             }
             if let Some(raw) = raw {
@@ -2884,6 +2894,32 @@ mod tests {
         assert_eq!(stored_bytes(home, "canary-"), 0);
         assert!(recorded(home, "claude", "s").is_empty());
         assert!(recorded(home, "claude", "k").is_empty());
+    }
+
+    /// Owner, 2026-10-13 (#496): what is never recorded is stored as given and the hook compares
+    /// the folder as it read it, so a rule that takes a folder's separator with its name
+    /// (`private(?:/|$)`) records nothing below an excluded folder, though the labels it makes no
+    /// longer match the list's.
+    #[test]
+    fn a_folder_stored_as_given_holds_under_a_rule_that_takes_its_separator() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let folder = home.join("x").join("private");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        let given = crate::capture::folder_path(&folder.to_string_lossy());
+        crate::raw::open(home)
+            .unwrap()
+            .exclude_capture(("folder", &given), false)
+            .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+        )
+        .unwrap();
+        let said = json!({"session_id": "s", "cwd": folder.join("sub"), "prompt": "canary-sep"});
+        hook(home, "claude", "UserPromptSubmit", &said);
+        assert_eq!(stored_bytes(home, "canary-"), 0);
+        assert!(recorded(home, "claude", "s").is_empty());
     }
 
     /// Codex on #489: a payload's relative `cwd`, or none, names the directory the hook runs in:
