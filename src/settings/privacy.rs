@@ -127,7 +127,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         k.execute("ATTACH DATABASE ?1 AS privacy_raw", [uri])?;
         let tx = k.transaction()?;
         let state = rescan_in(&tx, settings.rules.version(), &crate::db::store_file(path))?;
-        let labels = labels(Some(&tx), RawRepos::Attached(&tx), &excluded)?;
+        let labels = labels(Some(&tx), RawRepos::Attached(&tx), &[])?;
         tx.commit()?;
         anyhow::ensure!(
             std::fs::symlink_metadata(home.join("knowledge.db")).is_ok_and(|m| m.is_file())
@@ -144,7 +144,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         (
-            labels(None, RawRepos::Main(&raw.conn), &excluded)?,
+            labels(None, RawRepos::Main(&raw.conn), &[])?,
             RescanState {
                 state: RescanPhase::Pending,
                 processed: None,
@@ -160,7 +160,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
     // As the hook reads an event's label now: a rule added since an exclusion may read another
     // repository as one listed (Codex on #491).
     let gated = crate::capture::never_recorded(&never, &settings);
-    let repositories = labels
+    let repositories = rows(labels, &excluded, &never, &settings)
         .into_iter()
         .map(|label| {
             let now = crate::capture::exclusion_label("repo", &label, &settings);
@@ -267,6 +267,29 @@ fn knowledge(home: &Path) -> anyhow::Result<Option<(Connection, String)>> {
 enum RawRepos<'a> {
     Main(&'a Connection),
     Attached(&'a Connection),
+}
+
+/// The page's repositories: those the records and knowledge.db name (`history`), and each
+/// exclusion besides, but a capture entry that reads now as one of them (stored as given while
+/// the records hold the label a rule made), which is that one's row, not a second (Codex and
+/// Cursor on #491).
+fn rows(
+    mut history: BTreeSet<String>,
+    excluded: &[String],
+    never: &crate::raw::CaptureExclusions,
+    settings: &crate::capture::Settings,
+) -> BTreeSet<String> {
+    let read: BTreeSet<String> = history
+        .iter()
+        .map(|label| crate::capture::exclusion_label("repo", label, settings))
+        .collect();
+    for label in excluded {
+        let now = crate::capture::exclusion_label("repo", label, settings);
+        if !(never.repos.contains(label) && read.contains(&now)) {
+            history.insert(label.clone());
+        }
+    }
+    history
 }
 
 /// Include newly captured repository metadata before indexing, the viewer's derived labels,
@@ -871,6 +894,16 @@ mod tests {
         capture(&home, &saving, &body).unwrap();
         let stored = store.raw.capture_exclusions().unwrap().repos;
         assert_eq!(Vec::from_iter(stored), [OLD]);
+        // One row, the repository's, not a second for the label it is stored under (Codex and
+        // Cursor on #491).
+        let shown = show(&home);
+        let rows: Vec<_> = shown["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["selector"].clone(), r["never_recorded"].clone()))
+            .collect();
+        assert_eq!(rows, [(json!(selector(OLD)), json!(true))]);
         let event = crate::raw::Event {
             repo: Some(now),
             ..crate::raw::test_event("After the rule.")
