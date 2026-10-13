@@ -1418,6 +1418,31 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   書込み（MCP、claude-mem の取り込み）は書込みの transaction の中で断られる。規則を足した後の undo は保存
   した値を外す。
 
+#### 4b: 設定画面の「記録しない」
+
+settings-coverage.md の「Stop recording a repository or folder」（W3）と、初回の設定の質問（spec 6.1 の
+「setup」。spec-webui.md により初回の設定は画面で行う）。
+
+- **画面**: プライバシーの群に「記録しない」の節。一覧にある repo（送信の除外と同じ選択子、サーバで引き直す）
+  ごとに「今後は記録しない」と「今後は記録を再開」。この端末の folder は絶対パスを入れて足し、一覧の各 folder
+  は自分の選択子（保存した label の hash）で外す。backend は `oboete capture exclude` と同じ
+  `Raw::exclude_capture`（`POST /api/privacy/capture`、送信の除外と同じ token・Host・保存の lock）。
+- **送信の除外の行**: 記録しない repo はその行で「記録しないため送信もしません」と表示し、送信の undo を出さ
+  ない（4a の制限を解く）。
+- **初回**: 初回の案内（onboarding）に「記録したくない場所は次のセッションの前に指定」の一文と「記録しない」の
+  節への移動のボタン。
+- **断る**: 相対パス、4,096 bytes を超える path、NUL、知らない選択子、二つ以上の対象を名指す要求は何も書かずに
+  断る。
+- **見ないもの・制限**: 画面の repo の一覧は記録か除外のある repo だけ（まだ記録のない repo は、その folder か
+  `.oboete.toml` か CLI で止める）。記録済みを消すのは forget（画面の forget は slice 5）。
+
+受入:
+- 画面から repo と folder を記録しない一覧に入れ、外せる。一覧の取得はその両方を返し、記録しない repo は送信の
+  行で undo を出さない。
+- 断る要求は op を書かない。
+- 画面の文言は日英で、`TEXT` の鍵は一つにつき一度だけ定義する（4b の途中で既存の「記録」の見出しを上書き
+  しかけた）。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |

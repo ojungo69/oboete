@@ -87,6 +87,47 @@ fn an_undo_after_a_new_rule_takes_the_stored_folder_back() {
     );
 }
 
+/// Codex Security Review on #491: an undo by a name that only reads as another folder's exclusion
+/// now takes nothing back, which would record that folder too: refused, nothing changed.
+#[test]
+fn an_undo_does_not_take_back_another_folders_exclusion_that_reads_alike() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (kept, other) = (
+        cwd.path().join("acme-111111"),
+        cwd.path().join("acme-333333"),
+    );
+    std::fs::create_dir_all(&kept).unwrap();
+    let oboete = |args: &[&str]| run_both(home.path(), cwd.path(), args);
+    oboete(&["capture", "exclude", "--folder", &kept.to_string_lossy()]);
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+    )
+    .unwrap();
+    let (out, err) = oboete(&[
+        "capture",
+        "exclude",
+        "--folder",
+        &other.to_string_lossy(),
+        "--undo",
+    ]);
+    assert!(
+        err.contains("excluded under its own name") && err.contains(&*kept.to_string_lossy()),
+        "{out}{err}"
+    );
+    assert!(!out.contains("recorded again"), "{out}");
+    // Still excluded: an undo by its own name takes it back.
+    let (out, _) = oboete(&[
+        "capture",
+        "exclude",
+        "--folder",
+        &kept.to_string_lossy(),
+        "--undo",
+    ]);
+    assert!(out.contains("recorded again from now on"), "{out}");
+}
+
 /// Codex on #489: two folders a rule added since reads alike: an undo by the name one was
 /// excluded under takes that one back, and one by a name of neither is refused, nothing changed.
 /// The rule still reads the one taken back as the other, so nothing there is recorded, and the

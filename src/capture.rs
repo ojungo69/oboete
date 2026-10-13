@@ -228,9 +228,9 @@ pub fn stored_entry<'a>(
 }
 
 /// Slice 4a: the entry of `stored` an undo of `given` takes back: the one stored as given
-/// (`stored_entry`), else the one entry that reads as `given` under the rules now (one stored
-/// masked: by the page, or before exclusions were stored as given), else `given`, which takes
-/// nothing back. An error naming them when several read so (Codex on #489).
+/// (`stored_entry`), else `given`, which takes nothing back. Refused (`ReadAlike`) when other
+/// entries read as `given` under the rules now: taking one back would record what it was stored
+/// for too (Codex Security Review on #491), and several cannot be told apart (Codex on #489).
 pub fn undone(
     field: &str,
     given: &str,
@@ -241,23 +241,51 @@ pub fn undone(
         return Ok(entry.clone());
     }
     let now = exclusion_label(field, given, settings);
-    let read: Vec<&String> = stored
+    let entries: Vec<String> = stored
         .iter()
         .filter(|s| same_place(field, &exclusion_label(field, s, settings), &now))
+        .cloned()
         .collect();
-    match read.as_slice() {
-        [] => Ok(given.to_owned()),
-        [one] => Ok((*one).clone()),
-        many => anyhow::bail!(
-            "{given} is how {} excluded entries read now ({}): undo one by the name it was excluded under",
-            many.len(),
-            many.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+    anyhow::ensure!(
+        entries.is_empty(),
+        ReadAlike {
+            given: given.to_owned(),
+            entries,
+        }
+    );
+    Ok(given.to_owned())
+}
+
+/// `undone`'s refusal: `entries`, stored under their own names, read as `given` under the rules
+/// now.
+#[derive(Debug)]
+pub struct ReadAlike {
+    pub given: String,
+    pub entries: Vec<String>,
+}
+
+impl std::fmt::Display for ReadAlike {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.entries.as_slice() {
+            [one] => write!(
+                f,
+                "{} reads now as {one}, excluded under its own name, and is not recorded while \
+                 it is: undo that one by its name, or change the rule that makes them read alike",
+                self.given
+            ),
+            many => write!(
+                f,
+                "{} is how {} excluded entries read now ({}): undo one by the name it was excluded \
+                 under",
+                self.given,
+                many.len(),
+                many.join(", ")
+            ),
+        }
     }
 }
+
+impl std::error::Error for ReadAlike {}
 
 /// `exclusion_label` under `rules` alone, for a reader that loads no capture settings (the
 /// embedding phase, search): the same scan, with no ledger kept.

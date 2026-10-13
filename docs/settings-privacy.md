@@ -76,6 +76,49 @@ read connection closes before the recovery rename so Windows can move the file;
 the original swap hold remains until the writer owns its hold and the pinned
 identity is checked again.
 
+## Never record
+
+The page's "Never record" section is `oboete capture exclude`'s backend (spec 6.1,
+docs/milestone-5-plan.md slices 4a and 4b). Each listed repository can be set to
+never be recorded, or recorded again; a folder of this device is added by its
+absolute path and listed with its own selector for taking it back. Nothing that
+happens there is written from then on, and a repository never recorded is never
+sent either: its send row says so and offers no undo until recording is allowed
+again. What was recorded before stays; the receipt names `oboete forget --repo`
+for a repository, with a folder in it rather than the label the page shows, which
+a redaction rule may mask. An undo's receipt says the exclusion is removed and that
+recording follows from then on unless another exclusion or a checkout's
+`.oboete.toml` still covers the place; for a folder that another entry still covers
+(a listed folder around it, its repository, or its checkout's `.oboete.toml`) it
+says nothing there is recorded yet, naming no path, as the list shows the paths
+masked. What it answers is read before the write, so a write is never answered as
+failed after it committed.
+
+A repository shows as never recorded when a hook would not record it now: its
+label, or that label as the rules now read it, matches an exclusion as they read
+it, so a rule added since an exclusion may cover another repository it now reads
+alike. Its undo does not take back an exclusion stored for another repository,
+which would record that one too: it is refused (`never_other`, or `never_ambiguous`
+when several exclusions read as it now), as `oboete capture exclude --undo` refuses
+it, and those exclusions keep rows of their own, each taken back from its row. An
+exclusion whose repository's records carry only the label a rule made of it is
+listed under that label, when no other listed repository reads as it, and that
+row's undo takes it back. An undo's answer says when the repository stays
+unrecorded because another exclusion still reads as it.
+
+A repository is named by the same opaque selector as the send exclusion, resolved
+freshly on the server, and stored as its records name it, the one name the page has
+for it; a folder is stored as typed, as `oboete capture exclude --folder` stores one.
+What is never recorded is stored as given, so it holds whatever the redaction rules
+become (owner decision 43), and a hook compares it as given and as the rules now
+read it. A folder must be an absolute path of at most 4,096 bytes;
+it is stored as the CLI stores it (`.` and `..` taken by name), through the gate
+as an event's `cwd` label, and its selector is a hash of that stored label. A relative path, an unknown selector, or a request that
+names more than one target is refused before any write.
+
+The first-run guide says to name such places before their next session and
+offers a button to this section.
+
 ## Owner claims
 
 Claim details accept a correction and status change, mute or unmute. A muted
@@ -110,11 +153,11 @@ status read reports both the recorded write and the unavailable readback.
 
 ## Local API boundary
 
-`GET /api/privacy` reads repository exclusions and rescan state. The typed writes
-are `POST /api/privacy/exclude`, `/api/claims/correct`, `/api/claims/mute` and
-`/api/preferences`. They share the viewer's Host, token, same-origin, JSON framing
+`GET /api/privacy` reads repository exclusions, what is never recorded and rescan
+state. The typed writes are `POST /api/privacy/exclude`, `/api/privacy/capture`,
+`/api/claims/correct`, `/api/claims/mute` and `/api/preferences`. They share the viewer's Host, token, same-origin, JSON framing
 and 16 KiB body guards before parsing or store work. Unknown fields and invalid
 selectors are refused. Responses expose only canonical identifiers, typed state
 and vetted codes; they do not expose backend error causes.
 
-Capture exclusion, retention and the forget UI follow their milestone-5 slices.
+Retention and the forget UI follow their milestone-5 slices.
