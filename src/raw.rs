@@ -6108,15 +6108,26 @@ fn rewrite_copy(
             }
         }
     }
-    // A copy from before the op log holds no uid's op (CodeRabbit on #458).
+    // A copy from before the op log holds no uid's op (CodeRabbit on #458). Its ops are read and
+    // rewritten a page at a time, in (device, op_seq) order, so a rule that matches much of the
+    // log holds one page's bodies (Codex on #487).
     let mut keys: Vec<(String, i64, String)> = Vec::new();
-    if (!jobs.is_empty() || !judge.forgotten.is_empty() || judge.text.is_some()) && has("ops")? {
-        let mut st = tx.prepare("SELECT device, op_seq, type, ts, body, batch FROM ops")?;
-        let mut rows = st.query([])?;
+    let mut after = (String::new(), i64::MIN);
+    let mut more =
+        (!jobs.is_empty() || !judge.forgotten.is_empty() || judge.text.is_some()) && has("ops")?;
+    while more {
+        let mut st = tx.prepare_cached(
+            "SELECT device, op_seq, type, ts, body, batch FROM ops
+             WHERE (device, op_seq) > (?1, ?2) ORDER BY device, op_seq LIMIT ?3",
+        )?;
+        let mut rows = st.query(params![after.0, after.1, RECORD_PURGE_BATCH as i64])?;
+        let mut read = 0;
         while let Some(row) = rows.next()? {
+            read += 1;
             let kind = OpKind::from_name(&row.get::<_, String>(2)?)
                 .context("an op of a kind that cannot be named")?;
             let key: (String, i64) = (row.get(0)?, row.get(1)?);
+            after = key.clone();
             let (ts, batch): (i64, Option<i64>) = (row.get(3)?, row.get(5)?);
             let text: String = row.get(4)?;
             // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does
@@ -6154,12 +6165,15 @@ fn rewrite_copy(
                 keys.push((key.0, key.1, now));
             }
         }
-    }
-    for (device, op_seq, body) in keys {
-        rewritten += tx.execute(
-            "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body <> ?1",
-            params![body, device, op_seq],
-        )?;
+        drop(rows);
+        drop(st);
+        for (device, op_seq, body) in keys.drain(..) {
+            rewritten += tx.execute(
+                "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body <> ?1",
+                params![body, device, op_seq],
+            )?;
+        }
+        more = read == RECORD_PURGE_BATCH;
     }
     tx.commit()?;
     let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;

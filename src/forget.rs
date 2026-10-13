@@ -9160,7 +9160,7 @@ mod tests {
     }
 
     /// Slice 3e-4 (Codex on #487): a rule that matches more ops than a page of the purge holds
-    /// masks every one of them, a page at a time.
+    /// masks every one of them, a page at a time, in raw.db and in a copy of it set aside.
     #[test]
     fn a_rule_matching_many_ops_masks_them_a_page_at_a_time() {
         let mut s = crate::search::b::fixture::Store::new();
@@ -9181,9 +9181,19 @@ mod tests {
         let home = s.home.path().to_owned();
         let crate::search::b::fixture::Store { home: _kept, raw } = s;
         drop(raw);
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
         std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
         assert_eq!(purge(&home).unwrap().unwrap().texts, many);
         assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        let masked = copy_ops(&copy)
+            .into_iter()
+            .filter(|(_, _, body)| body.contains("Rotate *"))
+            .count();
+        assert_eq!(masked, many);
+        assert!(!holds_text(&copy, MASKED));
     }
 
     /// Slice 3e-4: while a reader holds raw.db-wal, which may still hold the ops' old pages, or when
