@@ -5043,7 +5043,8 @@ curate = false
     }
 
     /// D4, D11: the Context page is what SessionStart shows a new session in the viewer's
-    /// checkout, as `oboete inject` prints it.
+    /// checkout, as `oboete inject` prints it, but for the backlog's age in minutes, which can
+    /// turn over between the two reads.
     #[test]
     fn the_context_page_is_what_session_start_shows_for_that_checkout() {
         let (_s, v, _) = seeded();
@@ -5058,8 +5059,16 @@ curate = false
         );
         let shown = crate::hook::inject_text(&v.home, v.cwd.as_deref().unwrap(), None);
         assert!(shown.contains("Parser errors go to stderr"), "{shown}");
-        assert_eq!(ctx["text"], shown);
-        assert_eq!(ctx["chars"], shown.chars().count());
+        let minutes = regex::Regex::new(r"/ \d+ min not yet curated").unwrap();
+        let aged = |text: &str| {
+            minutes
+                .replace_all(text, "/ N min not yet curated")
+                .into_owned()
+        };
+        let text = ctx["text"].as_str().unwrap();
+        assert!(minutes.is_match(text), "{text}");
+        assert_eq!(aged(text), aged(&shown));
+        assert_eq!(ctx["chars"], text.chars().count());
         let other = get(&v, "/api/context?repo=github.com%2Fx%2Fother");
         assert_eq!(other["repo"], "github.com/x/other");
         assert!(!other["text"].as_str().unwrap().contains("Parser"));
