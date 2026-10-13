@@ -1386,6 +1386,20 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
     }
     if !jobs.is_empty() || records_owed || text.is_some() {
+        // Owner decision 43 (Codex on #502): the rules the op text is masked with, read again under
+        // the hold a save that changes them takes, kept through the rewrites below. Rules changed
+        // since the look at raw.db (redaction turned off, say) mask no op the backups or the copies
+        // hold, which may be one stored as typed while they were off, and the scan stays owed to
+        // the rules now.
+        let _dispatch = text
+            .is_some()
+            .then(|| crate::dispatch::exclusive(home).context("the backups were not purged"))
+            .transpose()?;
+        if let Some(rules) = &text
+            && text_owed(home, &raw)?.is_none_or(|now| now.version() != rules.version())
+        {
+            text = None;
+        }
         // And the window and turn ops 3d-2 rewrote, to the bodies raw.db holds now, and those it
         // does not hold judged by the same rules: every ops segment, as one set aside may hold
         // such an op (Codex and CodeRabbit on #472).
@@ -9378,6 +9392,48 @@ mod tests {
             }
             assert_eq!(look(), 0, "aside: {aside}");
         }
+    }
+
+    /// Owner decision 43 (Codex on #502): rules turned off after a purge's look at raw.db's op text
+    /// and before its step 4 mask no op only the backups hold with the rules before (it may have
+    /// been stored as typed while they were off); the scan stays owed to the rules now.
+    #[test]
+    fn rules_turned_off_before_step_4_mask_no_op_only_the_backups_hold() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        let seq = s
+            .raw
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        // raw.db without it, as a restore that left it out makes it.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq = ?1", [seq])
+            .unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let config = home.join("config.toml");
+        let off = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || std::fs::write(&config, off).unwrap()));
+        });
+        purge(&home).unwrap().unwrap();
+        assert!(!backup_hits(&home, MASKED).is_empty());
+        let now = crate::redact::Rules::load(&home).unwrap();
+        assert!(
+            raw::open(&home)
+                .unwrap()
+                .ops_text_owed(now.version())
+                .unwrap()
+        );
     }
 
     /// Owner decision 43 (Codex on #502): rules turned off while a purge waits for the worker

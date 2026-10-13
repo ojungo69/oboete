@@ -74,7 +74,9 @@ save's answer on no text gated under the rules before leaves; a hand edit of con
 gates alone. The other way round, rules turned off while the rescan consumer reads a batch, or
 while a purge masks op text, mask nothing: the rescan checks the rules again and writes its
 tombstones under the dispatch hold a save that changes them takes too, and the purge checks them
-again under each page's hold, so a record or an op stored as typed under the switch off stays so. A
+again under each page's hold and once more under it before it rewrites the backups' segments and
+the copies of raw.db, kept through them, so a record or an op stored as typed under the switch off
+stays so. A
 search reads its exclusions again once its query is admitted, as the rules now read the caller.
 
 `Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
