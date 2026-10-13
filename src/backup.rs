@@ -1085,6 +1085,9 @@ fn walk(
             segments.push((path, true));
         }
     }
+    // In name order, a device's in the order it wrote them: a purge that stops between two stops
+    // at the same one each time.
+    segments.sort();
     for (path, aside) in segments {
         let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
         let seal_path = dir.join(format!("{name}.sha256"));
@@ -1127,6 +1130,7 @@ fn walk(
                 if apply {
                     let z = zstd::bulk::compress(text.as_bytes(), 3)?;
                     write_synced_at(&dir, name, &z, Some("purge_rewrite_unrenamed"))?;
+                    fail_after("purge_rewrite_renamed")?;
                 }
                 *rewritten += 1;
             }

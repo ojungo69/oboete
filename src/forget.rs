@@ -1174,7 +1174,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             let mut shown = forgotten(&raw)?;
             let mut claims = raw.record_claims(&shown)?;
             shown.uids.extend(claims.uids.clone());
-            shown.masked = std::mem::take(&mut claims.masked_uids);
+            // #483: kept before any of their ops is rewritten, with those a stopped purge kept.
+            shown.masked = raw.keep_masked_uids(&claims.masked_uids)?;
             shown.texts = std::mem::take(&mut claims.texts);
             let made = raw.record_ops(shown)?.0;
             purged.ops += raw.purge_record_claims(&claims)?;
@@ -1372,6 +1373,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             for (uid, job) in judge.uids() {
                 jobs.entry(uid.clone()).or_insert_with(|| job.clone());
             }
+            // #483: and the masked claims' uids only the backups hold, before their lines lose them.
+            raw.keep_masked_uids(judge.masked())?;
             (raw.forgotten_origins()?, judge)
         } else {
             Default::default()
@@ -1386,6 +1389,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         };
         let ops = crate::backup::purge_ops(home, &jobs, &judge)?;
         (purged.segments, purged.segments_removed) = (ops.live + ops.aside, ops.removed);
+        crate::backup::fail_after("ops_segments_purged")?;
         if records_owed {
             let lines = crate::backup::purge_record_segments(home, &origins, &masks_of)?;
             purged.segments += lines.live + lines.aside;
@@ -8148,6 +8152,8 @@ mod tests {
 
     /// A secret no rule found when it was recorded, and the rule a rescan finds it with (slice 3e-1).
     const MASKED: &str = "acme-482915";
+    /// #483: what a window that named a masked record's claim said, which its purge takes.
+    const SHOWN: &str = "It showed the deploy notes.";
     const MASK_RULE: &str =
         "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
 
@@ -8635,6 +8641,140 @@ mod tests {
         let bodies = op_bodies(&home);
         assert!(bodies[&seqs[2]].get("forgotten").is_some());
         assert!(bodies[&seqs[4]].get("forgotten").is_some());
+    }
+
+    /// #483: a purge that stops in step 4 after the segment holding a masked record's claim, before
+    /// the segment holding a window that named it, leaves the next one the claim's uid: it rewrites
+    /// that window's line, and pays the masks only then. No other store holds either (a restore left
+    /// them out of raw.db): the uid is kept from the segment's line.
+    #[test]
+    fn a_purge_stopped_between_segments_judges_a_window_by_a_kept_uid() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, said) = masked_prompt(&mut s);
+        let r2 = s.said("s", "github.com/o/r", 2_000, "We deploy on Fridays.");
+        let home = s.home.path().to_owned();
+        let claim = claim_op(&device, &[(r1, &said)], "Deploys on Fridays.");
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        let c = s.raw.append_ops(&[claim]).unwrap()[0];
+        crate::backup::export(&home).unwrap();
+        let named = window_op(r2, r2, SHOWN, json!({"candidates": [uid]}));
+        let w = s.raw.append_ops(&[named]).unwrap()[0];
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        // raw.db without either, as a restore that left them out makes it: the purge's rebuild
+        // sets their segments aside, and step 4 rewrites each in name order.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for seq in [c, w] {
+            conn.execute("DELETE FROM ops WHERE op_seq = ?1", [seq])
+                .unwrap();
+        }
+        drop(conn);
+        crate::backup::FAIL_AFTER.set(Some("purge_rewrite_renamed"));
+        assert!(purge(&home).is_err());
+        assert!(!backup_hits(&home, SHOWN).is_empty());
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, SHOWN), Vec::<String>::new());
+        let raw = raw::open(&home).unwrap();
+        assert!(raw.masks_owed().unwrap().is_none());
+        assert!(raw.keep_masked_uids(&HashMap::new()).unwrap().is_empty());
+    }
+
+    /// #483 (CodeRabbit on #497): kept uids that do not parse stop the purge, naming them, rather
+    /// than pay the masks without them.
+    #[test]
+    fn kept_uids_that_do_not_parse_stop_the_purge() {
+        let mut s = crate::search::b::fixture::Store::new();
+        masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('rescan_masked_uids', '{')",
+                [],
+            )
+            .unwrap();
+        let e = format!("{:#}", purge(&home).unwrap_err());
+        assert!(e.contains("rescan_masked_uids"), "{e}");
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
+    }
+
+    /// #483: a purge that stops after rewriting a masked record's claim in raw.db, before step 4,
+    /// keeps its uid: the next one judges a segment's window that named it, though no backup or
+    /// copy holds the claim and raw.db no longer holds the window.
+    #[test]
+    fn a_purge_stopped_after_the_masked_claims_keeps_their_uids() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, said) = masked_prompt(&mut s);
+        let r2 = s.said("s", "github.com/o/r", 2_000, "We deploy on Fridays.");
+        let home = s.home.path().to_owned();
+        let claim = claim_op(&device, &[(r1, &said)], "Deploys on Fridays.");
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        let named = window_op(r2, r2, SHOWN, json!({"candidates": [uid]}));
+        let w = s.raw.append_ops(&[named]).unwrap()[0];
+        crate::backup::export(&home).unwrap();
+        // The window in the segment alone, the claim, written after it, in raw.db alone.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq = ?1", [w])
+            .unwrap();
+        s.raw.append_ops(&[claim]).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::FAIL_AFTER.set(Some("masked_claims_purged"));
+        assert!(purge(&home).is_err());
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, SHOWN), Vec::<String>::new());
+    }
+
+    /// #483: and a window only a copy of raw.db holds, the purge stopped after the ops segments,
+    /// before the copies: the next one judges the copy's window by the kept uid, though the copy,
+    /// set aside before the claim was written, never held it, and raw.db no longer holds the
+    /// window.
+    #[test]
+    fn a_purge_stopped_before_the_copies_judges_a_copys_window_by_a_kept_uid() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, said) = masked_prompt(&mut s);
+        let r2 = s.said("s", "github.com/o/r", 2_000, "We deploy on Fridays.");
+        let home = s.home.path().to_owned();
+        let claim = claim_op(&device, &[(r1, &said)], "Deploys on Fridays.");
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        let named = window_op(r2, r2, SHOWN, json!({"candidates": [uid]}));
+        let w = s.raw.append_ops(&[named]).unwrap()[0];
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        // The window in the copy alone.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq = ?1", [w])
+            .unwrap();
+        s.raw.append_ops(&[claim]).unwrap();
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::FAIL_AFTER.set(Some("ops_segments_purged"));
+        assert!(purge(&home).is_err());
+        assert!(holds_text(&copy, SHOWN));
+        purge(&home).unwrap().unwrap();
+        assert!(!holds_text(&copy, SHOWN));
     }
 
     /// Slice 3e-1: a restore between the purge's rebuild and its last steps, which put a row back
