@@ -1330,7 +1330,9 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
 - **判定は gate を通した値どうし**: repo は `oboete exclude` と同じ label、folder は event の cwd と同じ
   `cwd` の label にして保存する。event の repo の label が一覧の repo と等しいか、event の cwd の label が
   一覧の folder の中（path の component 単位）なら記録しない。hook は一覧の値を今の規則で gate し直して
-  から比べる（後から足した規則が path の一部を伏せても、event の label と同じに伏せる）。`folder` と
+  から比べる（後から足した規則が path の一部を伏せても、event の label と同じに伏せる）。hook の `cwd` が
+  相対か無いときは、hook が動く directory を絶対パスにしてから label にする（folder と同じ形。Codex on
+  #489）。`folder` と
   `level` は `repo` と同じく op の名前で、#487 が `OP_NAMES` に足す。
 - **`.oboete.toml`**: checkout の top（`repo::key` が `.git` を探す一度の歩きで分かる、worktree なら
   その worktree の top）の `.oboete.toml` の `capture` の鍵だけを読む（他の鍵は見ない）。`capture =
@@ -1367,7 +1369,9 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   除外の値は event の label と合わなくなる（除外し直す）。folder の op は端末で分けない: raw.db を別の機械に
   写すと、元の機械で除外した folder は、その機械でも同じパスなら記録しない（写しも restore で置いた新しい
   ファイルも新しい端末 id になるので、端末で分けると自分の除外が外れて記録が戻る。安全側。Codex on
-  #489）。除外の前に folder で記録した分の送信は #490（送信の除外は repo 単位で、folder にはまだない）。
+  #489）。除外の前に folder で記録した分の送信は #490（送信の除外は repo 単位で、folder にはまだない）。規則の追加、
+  除外の commit、settings を先に読んだ hook の書込みが同じ数ミリ秒に重なると、その hook の event は記録され
+  うる（#492）。
 
 受入:
 - 除外した repo と folder の canary の event（hook 経由）は raw.db にも spool にも 0 件。undo の後の event

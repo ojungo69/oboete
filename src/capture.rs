@@ -341,10 +341,14 @@ fn capture(
 /// The checkout `payload`'s `cwd` names.
 fn place(payload: &Value) -> Place {
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
+    // Absolute, as `oboete capture exclude --folder` stores a folder: a relative or missing `cwd`
+    // is the directory the agent runs the hook in (Codex on #489).
+    let cwd = std::path::absolute(cwd)
+        .map_or_else(|_| cwd.to_owned(), |p| p.to_string_lossy().into_owned());
     Place {
-        repo: repo::key(Path::new(cwd)),
-        cwd: Some(cwd.to_owned()),
-        git: git(Path::new(cwd)),
+        repo: repo::key(Path::new(&cwd)),
+        git: git(Path::new(&cwd)),
+        cwd: Some(cwd),
     }
 }
 

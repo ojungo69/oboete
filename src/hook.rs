@@ -2886,6 +2886,40 @@ mod tests {
         assert!(recorded(home, "claude", "k").is_empty());
     }
 
+    /// Codex on #489: a payload's relative `cwd`, or none, names the directory the hook runs in:
+    /// it is made absolute before it is labelled, so an excluded folder matches it.
+    #[test]
+    fn a_relative_or_missing_cwd_is_matched_as_the_folder_it_names() {
+        let (relative, missing) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let exclude = |home: &Path, folder: &Path| {
+            let settings = crate::capture::Settings::load(home).unwrap();
+            let label =
+                crate::capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+            crate::raw::open(home)
+                .unwrap()
+                .exclude_capture(("folder", &label), false)
+                .unwrap();
+        };
+        let here = std::env::current_dir().unwrap();
+        exclude(
+            relative.path(),
+            &here.join("target").join("oboete-relative-cwd"),
+        );
+        let said = |session: &str, cwd: &str, text: &str| json!({"session_id": session, "cwd": cwd, "prompt": text});
+        let inner = said("s", "target/oboete-relative-cwd/inner", "canary-relative");
+        hook(relative.path(), "claude", "UserPromptSubmit", &inner);
+        let open = said("t", "target/oboete-open-cwd", "open-relative");
+        hook(relative.path(), "claude", "UserPromptSubmit", &open);
+        assert_eq!(stored_bytes(relative.path(), "canary-"), 0);
+        let elsewhere = here.join("target").join("oboete-open-cwd");
+        let got = recorded(relative.path(), "claude", "t");
+        assert_eq!(got[0].cwd.as_deref(), Some(&*elsewhere.to_string_lossy()));
+        exclude(missing.path(), &here);
+        let none = json!({"session_id": "m", "prompt": "canary-missing"});
+        hook(missing.path(), "claude", "UserPromptSubmit", &none);
+        assert_eq!(stored_bytes(missing.path(), "canary-"), 0);
+    }
+
     fn built_manifest(home: &Path, cwd: &Path, prompt: &str) -> String {
         hook(
             home,
