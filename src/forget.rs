@@ -1135,6 +1135,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // op text masked with the rules now, whether raw.db-wal was truncated after it.
     let mut masked = masks.is_none();
     let mut text_truncated = false;
+    // Owner decision 43: this purge's own mark on the scan of the op text it begins.
+    let mut text_mark: Option<String> = None;
     // Step 2 for the jobs whose ops (a record job: whose rows, slice 3c) hold text, or that never
     // took it; the rebuild for those and the ones stopped after step 2. A job past step 3 does not
     // go back to the rebuild (2c, decision 8): a stopped one would rebuild at every continuation.
@@ -1202,7 +1204,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // time, as before, and what is left (a correction's body, a work state, an import, a
         // curator's own words) by the rules.
         if let Some(rules) = &text {
-            raw.op_text_scan_begun()?;
+            text_mark = Some(raw.op_text_scan_begun()?);
             let mut after = None;
             loop {
                 let page =
@@ -1427,7 +1429,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     // A restore since step 2 made raw.db anew from the segments it read then (Codex on #480).
     if let Some(rules) = &text
-        && !(text_truncated && raw.ops_text_scanned(rules.version())?)
+        && !(text_truncated
+            && raw.ops_text_scanned(rules.version(), text_mark.as_deref().unwrap_or_default())?)
         && !purged.unfinished.iter().any(|j| j == crate::raw::MASK_JOB)
     {
         purged.unfinished.push(crate::raw::MASK_JOB.to_owned());
@@ -1461,7 +1464,7 @@ fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     // the scan is not recorded (owner decision 43; Codex's security review of the switch). The
     // worker holds its lock: no restore makes raw.db anew meanwhile.
     let store = crate::raw::open(home)?;
-    store.op_text_scan_begun()?;
+    let mark = store.op_text_scan_begun()?;
     if !rules.is_off()
         && (crate::backup::any_ops_segment(home)?
             || !crate::raw::copies_set_aside(home)?.is_empty())
@@ -1474,7 +1477,7 @@ fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     if let Some(between) = AFTER_TEXT_LOOK.take() {
         between();
     }
-    store.ops_text_scanned(rules.version())?;
+    store.ops_text_scanned(rules.version(), &mark)?;
     Ok(false)
 }
 

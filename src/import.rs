@@ -900,8 +900,8 @@ mod tests {
         .unwrap();
         let off = crate::capture::Settings::load(off_home.path()).unwrap();
         let mut raw = crate::raw::open(off_home.path()).unwrap();
-        raw.op_text_scan_begun().unwrap();
-        assert!(raw.ops_text_scanned("v").unwrap());
+        let mark = raw.op_text_scan_begun().unwrap();
+        assert!(raw.ops_text_scanned("v", &mark).unwrap());
         raw.gates_with(&off.rules);
         claude_mem(&mut raw, &src, &off).unwrap();
         let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");

@@ -2745,21 +2745,35 @@ impl Raw {
 
     /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
     /// only while it holds the mark: a raw.db a restore made meanwhile (a new meta) holds the ops
-    /// its segments held, and stays owed.
-    pub(crate) fn op_text_scan_begun(&self) -> Result<()> {
+    /// its segments held, and stays owed. The mark is this scan's own (the value returned), so a
+    /// scan whose mark an append under rules turned off took away cannot record under the mark of
+    /// a scan begun after (owner decision 43; Codex's security review of the switch); a scan begun
+    /// later replaces an earlier one's, which then records nothing.
+    pub(crate) fn op_text_scan_begun(&self) -> Result<String> {
+        static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mark = format!(
+            "{}-{}-{}",
+            crate::db::now_ms(),
+            std::process::id(),
+            SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('ops_text_scanning', '1')",
-            [],
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('ops_text_scanning', ?1)",
+            [&mark],
         )?;
-        Ok(())
+        Ok(mark)
     }
 
     /// Slice 3e-4: the text of raw.db's ops masked with the rules of `version` everywhere a purge
     /// puts it, recorded with the marks taken away, in one transaction, when the scan was begun in
-    /// this raw.db (`op_text_scan_begun`). Whether it was.
-    pub(crate) fn ops_text_scanned(&self, version: &str) -> Result<bool> {
+    /// this raw.db (`op_text_scan_begun`) and its mark (`mark`) is still the one there. Whether it
+    /// was.
+    pub(crate) fn ops_text_scanned(&self, version: &str, mark: &str) -> Result<bool> {
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-        let begun = tx.execute("DELETE FROM meta WHERE key = 'ops_text_scanning'", [])? == 1;
+        let begun = tx.execute(
+            "DELETE FROM meta WHERE key = 'ops_text_scanning' AND value = ?1",
+            [mark],
+        )? == 1;
         if begun {
             tx.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('ops_text_scanned', ?1)",
@@ -9396,6 +9410,30 @@ mod tests {
         );
     }
 
+    /// Owner decision 43 (Codex's security review of the switch): a scan whose mark an append
+    /// under rules turned off took away records nothing, also when a scan begun after has put a
+    /// mark of its own there, which that later scan alone records by.
+    #[test]
+    fn a_scan_records_only_under_its_own_mark() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let off = crate::redact::Rules::new(
+            &crate::config::parse_capture(Some("[redaction]\nenabled = false\n"))
+                .unwrap()
+                .redaction,
+        )
+        .unwrap();
+        let first = raw.op_text_scan_begun().unwrap();
+        raw.gates_with(&off);
+        raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))])
+            .unwrap();
+        let second = raw.op_text_scan_begun().unwrap();
+        assert!(!raw.ops_text_scanned("v", &first).unwrap());
+        assert!(raw.ops_text_owed("v").unwrap());
+        assert!(raw.ops_text_scanned("v", &second).unwrap());
+        assert!(!raw.ops_text_owed("v").unwrap());
+    }
+
     /// Owner decision 43 (Codex's security review of the switch): a handle whose ops' text was
     /// gated with the rules off owes the op text scan in each append's own transaction, the
     /// fenced one of curation too; a handle gated with rules on owes nothing.
@@ -9409,8 +9447,8 @@ mod tests {
         };
         let claim = || [(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))];
         let scanned = |raw: &Raw| {
-            raw.op_text_scan_begun().unwrap();
-            assert!(raw.ops_text_scanned("v").unwrap());
+            let mark = raw.op_text_scan_begun().unwrap();
+            assert!(raw.ops_text_scanned("v", &mark).unwrap());
         };
         scanned(&raw);
         raw.gates_with(&rules("[redaction]\nenabled = true\n"));

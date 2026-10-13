@@ -57,7 +57,8 @@ state, a correction or a preference, the claude-mem import, v1's documents, a re
 command or the page, the worker's curation and summaries), so this holds for a writer whose rules
 were off when it read its text and the switch on when it wrote. The worker's look at the op text
 begins the scan before it looks, so an append between its look and its record leaves the scan
-unrecorded. The claude-mem import gates every field with the settings it started with, the rules
+unrecorded, and each scan records by a mark of its own, so a purge whose mark such an append took
+away cannot record under the mark of a scan begun after it. The claude-mem import gates every field with the settings it started with, the rules
 its appends owe the scan by.
 
 A text gated under rules that are no longer the home's is not sent: the gate before each call to a
