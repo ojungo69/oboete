@@ -142,11 +142,13 @@ pub fn claude_mem(
         |r| {
             let (id, memory, project, ts): (i64, String, String, i64) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            let title = redact::outbound(&r.get::<_, String>(5)?);
-            let body = redact::outbound(&observation_body(
-                &r.get::<_, String>(6)?,
-                &r.get::<_, String>(7)?,
-            ));
+            // The import's rules throughout, as the writes owe the op text scan by them (owner
+            // decision 43; Codex's security review of the switch).
+            let title = redact::outbound_with(&r.get::<_, String>(5)?, &settings.rules);
+            let body = redact::outbound_with(
+                &observation_body(&r.get::<_, String>(6)?, &r.get::<_, String>(7)?),
+                &settings.rules,
+            );
             if title.is_empty() && body.is_empty() {
                 stats.empty += 1;
                 return Ok(());
@@ -194,7 +196,7 @@ pub fn claude_mem(
                     parts.push(format!("{label}: {}", text.trim()));
                 }
             }
-            let body = redact::outbound(&parts.join("\n"));
+            let body = redact::outbound_with(&parts.join("\n"), &settings.rules);
             if body.is_empty() {
                 stats.empty += 1;
                 return Ok(());
@@ -222,7 +224,7 @@ pub fn claude_mem(
             let (id, content, ts, text): (i64, String, i64, String) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
             // The same cleaning a live prompt gets: blocks out, secrets masked, notifications dropped.
-            let body = hook::clip(&hook::strip_blocks(&text, true));
+            let body = hook::clip(&hook::strip_blocks(&text, true), &settings.rules);
             if body.is_empty() || hook::is_envelope(&body) {
                 stats.empty += 1;
                 return Ok(());
@@ -858,6 +860,53 @@ mod tests {
             .unwrap();
         let after = claude_mem(&mut raw, &src, &Default::default()).unwrap();
         assert_eq!((after.work_state, after.never_recorded), (2, 0));
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): the import gates every field
+    /// with its own settings' rules, which its writes owe the op text scan by: a rule they hold
+    /// masks a title (egress, read per row, would not here), and with redaction off a work state
+    /// row comes in as typed and the scan recorded before is owed again.
+    #[test]
+    fn the_import_gates_with_its_settings_and_owes_the_scan_when_they_are_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        Connection::open(&src)
+            .unwrap()
+            .execute(
+                "INSERT INTO observations(id, memory_session_id, project, created_at_epoch, type,
+                   title, narrative, facts)
+                 VALUES(41, 'mem-1', 'free-mem', 1800, 'change', 'Deploy acme-482915', 'Done.',
+                   '[]')",
+                [],
+            )
+            .unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        let ruled_home = tempfile::tempdir().unwrap();
+        std::fs::write(ruled_home.path().join("config.toml"), rule).unwrap();
+        let ruled = crate::capture::Settings::load(ruled_home.path()).unwrap();
+        let mut raw = crate::raw::open(ruled_home.path()).unwrap();
+        claude_mem(&mut raw, &src, &ruled).unwrap();
+        let titles: Vec<String> = docs(&raw).into_iter().map(|d| d.title).collect();
+        assert!(
+            titles.iter().any(|t| t == "Deploy [REDACTED]"),
+            "{titles:?}"
+        );
+        let off_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            off_home.path().join("config.toml"),
+            "[redaction]\nenabled = false\n",
+        )
+        .unwrap();
+        let off = crate::capture::Settings::load(off_home.path()).unwrap();
+        let mut raw = crate::raw::open(off_home.path()).unwrap();
+        raw.op_text_scan_begun().unwrap();
+        assert!(raw.ops_text_scanned("v").unwrap());
+        raw.gates_with(&off.rules);
+        claude_mem(&mut raw, &src, &off).unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        assert!(work_ops(&raw).iter().any(|o| o.to_string().contains(&key)));
+        assert!(raw.ops_text_owed("v").unwrap());
     }
 
     /// Codex on #489: a repository excluded after the import read the list refuses its rows in

@@ -670,11 +670,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let settings = capture::Settings::load(&home)?;
             let _lock = import::lock(&home)?;
             let mut raw = raw::open(&home)?;
-            let stats = import::claude_mem(&mut raw, &db, &settings);
-            // Owner decision 43: what it wrote under rules turned off owes the op text scan,
-            // also when it stopped midway.
-            raw.owe_op_text_scan(&settings.rules)?;
-            let stats = stats?;
+            // Owner decision 43: what it writes under rules turned off owes the op text scan.
+            raw.gates_with(&settings.rules);
+            let stats = import::claude_mem(&mut raw, &db, &settings)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }

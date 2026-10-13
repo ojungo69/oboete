@@ -589,16 +589,19 @@ fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
     None // Alternating whole/line cascades past the scan bound mask the view whole.
 }
 
+/// The bundled rules alone. Hooks go through `capture` and its settings.
+pub fn redact(text: &str) -> String {
+    scan(text, &Rules::default()).0
+}
+
 /// The claude-mem import's prompts (`hook::clip`): the bundled rules only, so `clip`'s check for a
 /// key block it cuts sees every header (a user's rule could mask one: Codex's security review of
-/// the switch), and none while the switch is off (owner decision 43). Hooks go through `capture`
-/// and its settings.
-pub fn redact(text: &str) -> String {
-    match egress() {
-        Some(rules) if rules.off => text.to_owned(),
-        Some(_) => scan(text, &Rules::default()).0,
-        None => MASK.to_string(),
+/// the switch), and none while the import's `rules` are off (owner decision 43).
+pub fn redact_unless_off(text: &str, rules: &Rules) -> String {
+    if rules.off {
+        return text.to_owned();
     }
+    redact(text)
 }
 
 /// One secret masked in stored text: the rule that found it, where the mask hiding it starts in

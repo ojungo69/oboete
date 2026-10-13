@@ -2661,10 +2661,7 @@ fn planned(home: &std::path::Path, source: Again, send: bool) -> Result<String> 
         &cfg.summary,
         &mut curator,
         &plan.spans,
-    );
-    // Owner decision 43: what it wrote under rules turned off owes the op text scan.
-    raw.owe_op_text_scan(&rules)?;
-    let sent = sent?;
+    )?;
     out.push_str(&format!(
         "{} window(s) curated again: {} claim(s), {} retracted\n",
         sent.windows, sent.claims, sent.retracted
@@ -2777,6 +2774,8 @@ fn send_plan_report(
     drain: &mut impl FnMut(&Raw, &mut Connection) -> Result<()>,
     progress: &mut impl FnMut(&WindowCommit),
 ) -> Result<Sent> {
+    // Owner decision 43: what it writes under rules turned off owes the op text scan.
+    raw.gates_with(rules);
     let mut sent = Sent::default();
     let changed = |sent: &mut Sent, e: anyhow::Error| {
         sent.stopped = Some(format!("{e}: run oboete recurate again"));

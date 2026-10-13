@@ -530,11 +530,10 @@ fn correction_recorded(
         });
     }
     let body = serde_json::to_value(&op).map_err(OwnerRefusal::unavailable)?;
+    // Owner decision 43: a body gated under rules turned off owes the op text scan.
+    raw.gates_with(&rules);
     let seqs = raw
         .append_ops(&[(crate::raw::OpKind::Correction, body)])
-        .map_err(OwnerRefusal::unavailable)?;
-    // Owner decision 43: a body gated under rules turned off owes the op text scan.
-    raw.owe_op_text_scan(&rules)
         .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
@@ -684,6 +683,8 @@ pub(crate) fn pref_add_recorded(
     };
     let uid = uid("preference", &evidence);
     let op = preference_op(evidence);
+    // Owner decision 43: a text gated under rules turned off owes the op text scan.
+    raw.gates_with(&settings.rules);
     let append = (|| -> Result<Vec<i64>> {
         raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])
     })();
@@ -691,9 +692,6 @@ pub(crate) fn pref_add_recorded(
         Ok(seqs) => seqs,
         Err(cause) => return Ok(OwnerReceipt::DirectiveOnly { cause }),
     };
-    // Owner decision 43: a text gated under rules turned off owes the op text scan.
-    raw.owe_op_text_scan(&settings.rules)
-        .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
     if let Err(cause) = applied(home, &k, &device, &seqs, "preference") {

@@ -2538,19 +2538,22 @@ pub(crate) fn compact(v: &Value) -> String {
 
 /// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
 /// discarded tail of a megabyte tool output would only cost hook time.
-pub fn clip(s: &str) -> String {
+pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
     let s = &without_blocks(s, false);
     let total = s.chars().count();
     if total <= MAX_FIELD {
-        return redact::redact(s);
+        return redact::redact_unless_off(s, rules);
     }
     let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
-    let head: String = redact::redact(&window).chars().take(MAX_FIELD).collect();
+    let head: String = redact::redact_unless_off(&window, rules)
+        .chars()
+        .take(MAX_FIELD)
+        .collect();
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
-    let mut head = redact::redact(&head);
+    let mut head = redact::redact_unless_off(&head, rules);
     if let Some(begin) = head.rfind("-----BEGIN")
         && !head[begin..].contains("-----END")
     {
@@ -8307,51 +8310,32 @@ mod tests {
         }
     }
 
-    /// Owner decision 43: the claude-mem import's prompts (`clip`) follow the switch: kept as
-    /// typed while redaction is off, masked by the bundled rules while it is on. Egress reads the
-    /// rules of the home `redact::set_home` names, the process's, so each runs in a child process.
+    /// Owner decision 43: the claude-mem import's prompts (`clip`) follow the import's rules: kept
+    /// as typed while redaction is off, masked by the bundled rules while it is on.
     #[test]
     fn an_imported_prompt_follows_the_switch() {
-        const HOME: &str = "OBOETE_TEST_SWITCH_CLIP_HOME";
         let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
-        if let Ok(home) = std::env::var(HOME) {
-            let home = std::path::PathBuf::from(home);
-            crate::redact::set_home(&home).unwrap();
-            let off = crate::redact::Rules::load(&home).unwrap().is_off();
-            let clipped = clip(&format!("deploy with {key}"));
-            assert_eq!(clipped.contains(&key), off, "{clipped}");
-            return;
-        }
-        let name = "hook::tests::an_imported_prompt_follows_the_switch";
-        for enabled in [false, true] {
-            let home = tempfile::tempdir().unwrap();
-            std::fs::write(
-                home.path().join("config.toml"),
-                format!("[redaction]\nenabled = {enabled}\n"),
-            )
-            .unwrap();
-            let out = std::process::Command::new(std::env::args_os().next().unwrap())
-                .args(["--exact", name])
-                .env(HOME, home.path())
-                .output()
-                .unwrap();
-            let said = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert!(
-                out.status.success() && said.contains("1 passed"),
-                "enabled {enabled}: {said}"
-            );
-        }
+        let rules = |toml: &str| {
+            redact::Rules::new(&crate::config::parse_capture(Some(toml)).unwrap().redaction)
+                .unwrap()
+        };
+        let off = clip(
+            &format!("deploy with {key}"),
+            &rules("[redaction]\nenabled = false\n"),
+        );
+        assert!(off.contains(&key), "{off}");
+        let on = clip(
+            &format!("deploy with {key}"),
+            &rules("[redaction]\nenabled = true\n"),
+        );
+        assert!(!on.contains(&key), "{on}");
     }
 
     #[test]
     fn secret_straddling_the_clip_boundary_is_masked() {
         let key = "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";
         let s = format!("{} {key} {}", "a".repeat(MAX_FIELD - 20), "b".repeat(3_000));
-        let out = clip(&s);
+        let out = clip(&s, &redact::Rules::default());
         assert!(!out.contains("gsk_") && out.contains("[REDACTED]"));
         assert!(
             out.contains("…[clipped, 11038 chars in full]"),
@@ -8364,10 +8348,13 @@ mod tests {
             "a".repeat(MAX_FIELD - 40),
             "Q".repeat(9_000)
         );
-        let out = clip(&s);
+        let out = clip(&s, &redact::Rules::default());
         assert!(!out.contains("BEGIN") && !out.contains("QQ") && out.contains("aaa"));
         assert_eq!(
-            clip("x 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 y"),
+            clip(
+                "x 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 y",
+                &redact::Rules::default()
+            ),
             "x [REDACTED] y"
         );
     }

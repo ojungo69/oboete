@@ -1457,6 +1457,11 @@ fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     let Some(rules) = text_owed(home, raw)? else {
         return Ok(false);
     };
+    // Begun before the look: an append under rules turned off meanwhile takes the mark away, and
+    // the scan is not recorded (owner decision 43; Codex's security review of the switch). The
+    // worker holds its lock: no restore makes raw.db anew meanwhile.
+    let store = crate::raw::open(home)?;
+    store.op_text_scan_begun()?;
     if !rules.is_off()
         && (crate::backup::any_ops_segment(home)?
             || !crate::raw::copies_set_aside(home)?.is_empty())
@@ -1465,9 +1470,10 @@ fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     {
         return Ok(true);
     }
-    // The worker holds its lock: no restore makes raw.db anew meanwhile.
-    let store = crate::raw::open(home)?;
-    store.op_text_scan_begun()?;
+    #[cfg(test)]
+    if let Some(between) = AFTER_TEXT_LOOK.take() {
+        between();
+    }
     store.ops_text_scanned(rules.version())?;
     Ok(false)
 }
@@ -1482,6 +1488,9 @@ thread_local! {
     /// What happens to the home after a purge's rebuild on this thread, before its step 3 takes
     /// the worker lock.
     static BEFORE_STEP_3: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// What happens to the home between a worker's look at the op text and the scan it records.
+    static AFTER_TEXT_LOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -9341,6 +9350,51 @@ mod tests {
             }
             assert_eq!(look(), 0, "aside: {aside}");
         }
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): an op appended under rules
+    /// turned off between a worker's look at the op text and its record of the scan leaves the
+    /// scan unrecorded, so the next look finds the op and starts the purge.
+    #[test]
+    fn an_op_appended_off_during_the_look_leaves_the_scan_unrecorded() {
+        let s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let on = crate::redact::Rules::load(&home).unwrap();
+        let off_toml = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        let off = crate::redact::Rules::new(
+            &crate::config::parse_capture(Some(&off_toml))
+                .unwrap()
+                .redaction,
+        )
+        .unwrap();
+        let look = || {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, &raw::open(&home).unwrap());
+            CONTINUED.get()
+        };
+        let writer = home.clone();
+        AFTER_TEXT_LOOK.set(Some(Box::new(move || {
+            let mut raw = raw::open(&writer).unwrap();
+            raw.gates_with(&off);
+            let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+            raw.append_ops(&[(
+                raw::OpKind::WorkState,
+                serde_json::json!({"repo": "github.com/o/r", "list": "deploys",
+                    "fields": fields, "clock": 1}),
+            )])
+            .unwrap();
+        })));
+        assert_eq!(look(), 0);
+        assert!(
+            raw::open(&home)
+                .unwrap()
+                .ops_text_owed(on.version())
+                .unwrap()
+        );
+        assert_eq!(look(), 1);
     }
 
     /// Owner decision 43 (Codex's security review of the switch): an agent's work state written

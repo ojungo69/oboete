@@ -621,6 +621,9 @@ pub struct Raw {
     home_id: String,
     /// The shared hold on `<home>/raw.lock` every open keeps (see `swap_lock`).
     _swap: std::fs::File,
+    /// Owner decision 43: the text of the ops this handle appends was gated with the redaction
+    /// rules turned off (`gates_with`), so each append owes the op text scan in its transaction.
+    gated_off: bool,
 }
 
 /// The raw store file, including a stopped restore's file when raw.db has not been renamed in.
@@ -1435,6 +1438,7 @@ fn open_within_report(
         device,
         home_id,
         _swap: swap,
+        gated_off: false,
     })
 }
 
@@ -2732,20 +2736,11 @@ impl Raw {
         Ok(rewritten)
     }
 
-    /// Owner decision 43: ops whose text was gated with `rules` turned off were gated by none, so
-    /// the scan of the op text is owed again under whatever rules there are when it runs, also
-    /// their version the same as the last scan's; a scan begun before records nothing
-    /// (`ops_text_scanned`). Called by each writer after its ops, with the rules it gated them by.
-    pub(crate) fn owe_op_text_scan(&self, rules: &crate::redact::Rules) -> Result<()> {
-        if rules.is_off() {
-            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-            tx.execute(
-                "DELETE FROM meta WHERE key IN ('ops_text_scanned', 'ops_text_scanning')",
-                [],
-            )?;
-            tx.commit()?;
-        }
-        Ok(())
+    /// Owner decision 43: the rules the text of the ops this handle appends is gated with. Turned
+    /// off, they gate nothing, so each append owes the op text scan in its own transaction
+    /// (`owe_op_text_scan`). Each writer of op text calls it with its rules before it appends.
+    pub(crate) fn gates_with(&mut self, rules: &crate::redact::Rules) {
+        self.gated_off = rules.is_off();
     }
 
     /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
@@ -4980,6 +4975,9 @@ impl Raw {
             }
         }
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        if self.gated_off || settings.is_some_and(|s| s.rules.is_off()) {
+            owe_op_text_scan(&tx)?;
+        }
         tx.commit()?;
         Ok(seqs)
     }
@@ -5005,6 +5003,9 @@ impl Raw {
             );
         }
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        if self.gated_off {
+            owe_op_text_scan(&tx)?;
+        }
         tx.commit()?;
         Ok(seqs)
     }
@@ -5150,9 +5151,7 @@ impl Raw {
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
         let ops = [(OpKind::WorkState, op)];
-        let seq = self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0];
-        self.owe_op_text_scan(&settings.rules)?;
-        Ok(seq)
+        Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0])
     }
 
     /// `work_state_in` on this store.
@@ -7597,6 +7596,19 @@ fn within_batch_cap(ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<(&'static
 }
 
 /// `bodies` as `device`'s next ops, one batch, inside a write transaction.
+/// Owner decision 43: ops whose text was gated with the redaction rules turned off were gated by
+/// none, so the scan of the op text is owed again under whatever rules there are when it runs,
+/// also when their version is the one the last scan recorded; a scan begun before records nothing
+/// (`Raw::ops_text_scanned`). In the transaction that appends them, so no stop between the two
+/// leaves them counted as scanned.
+fn owe_op_text_scan(tx: &Connection) -> Result<()> {
+    tx.execute(
+        "DELETE FROM meta WHERE key IN ('ops_text_scanned', 'ops_text_scanning')",
+        [],
+    )?;
+    Ok(())
+}
+
 fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Result<Vec<i64>> {
     let mut op_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
@@ -9382,6 +9394,35 @@ mod tests {
             raw.imported_counts(&dev, &[(1, 10)]).unwrap(),
             [("oboete-v1".to_owned(), 1)].into_iter().collect()
         );
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a handle whose ops' text was
+    /// gated with the rules off owes the op text scan in each append's own transaction, the
+    /// fenced one of curation too; a handle gated with rules on owes nothing.
+    #[test]
+    fn an_append_gated_off_owes_the_scan_in_its_transaction() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let rules = |toml: &str| {
+            crate::redact::Rules::new(&crate::config::parse_capture(Some(toml)).unwrap().redaction)
+                .unwrap()
+        };
+        let claim = || [(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))];
+        let scanned = |raw: &Raw| {
+            raw.op_text_scan_begun().unwrap();
+            assert!(raw.ops_text_scanned("v").unwrap());
+        };
+        scanned(&raw);
+        raw.gates_with(&rules("[redaction]\nenabled = true\n"));
+        raw.append_ops(&claim()).unwrap();
+        assert!(!raw.ops_text_owed("v").unwrap());
+        raw.gates_with(&rules("[redaction]\nenabled = false\n"));
+        raw.append_ops(&claim()).unwrap();
+        assert!(raw.ops_text_owed("v").unwrap());
+        scanned(&raw);
+        let fence = raw.fence_count().unwrap();
+        raw.append_ops_fenced(&claim(), fence).unwrap();
+        assert!(raw.ops_text_owed("v").unwrap());
     }
 
     /// Codex's security review of #489: a repository label masked under a rule removed since

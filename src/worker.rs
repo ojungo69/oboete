@@ -1453,9 +1453,9 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             crate::provider::budget_keys(&cfg.providers)
         );
         // Owner decision 43: ops written under rules turned off owe the op text scan.
-        let ops_before = raw.max_op_seq()?;
+        raw.gates_with(&rules);
         let windows =
-            crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator);
+            crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator)?;
         // The same chain, as the summary role (docs/summaries.md T1), in the digest's place: spec
         // 1.4 lets each role have its own, and one list serves until measurement asks for two.
         let mut summarizer = |span: &str,
@@ -1468,22 +1468,16 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 .gate(gate)
                 .run("summary", span, prompt, &crate::turns::answer_schema())
         };
-        let phase = windows.and_then(|windows| {
-            crate::turns::phase(
-                raw,
-                k,
-                db,
-                &rules,
-                &cfg.summary,
-                &chain,
-                &mut summarizer,
-                windows,
-            )
-        });
-        if raw.max_op_seq()? != ops_before {
-            raw.owe_op_text_scan(&rules)?;
-        }
-        phase
+        crate::turns::phase(
+            raw,
+            k,
+            db,
+            &rules,
+            &cfg.summary,
+            &chain,
+            &mut summarizer,
+            windows,
+        )
     })
 }
 

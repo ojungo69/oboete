@@ -49,12 +49,16 @@ under `off`, and a purge that stopped still finishes.
 Op text needs one more step. 3e-4 scans it only when the version of the rules changes, since an op
 is gated with the rules of its time when it is written. An op written while redaction is off is
 gated by no rule, and the switch can go off and on again before any worker reads the rules off:
-the version is then the same as the last scan's, and the op would never be scanned. So each writer
-of op text that gated it with the rules off (an agent's work state, a correction or a preference,
-an import, the worker's curation and summaries) owes the scan again right after its write: it
-takes away the record of the last scan, and of a scan begun meanwhile, which then records
-nothing. That holds for a writer whose rules were off when it read its text and the switch on
-when it wrote.
+the version is then the same as the last scan's, and the op would never be scanned. So an append
+whose text was gated with the rules off owes the scan again, in its own transaction: it takes away
+the record of the last scan, and the mark of a scan begun meanwhile, which then records nothing.
+Each writer of op text says which rules it gated its text with (`Raw::gates_with`: an agent's work
+state, a correction or a preference, the claude-mem import, v1's documents, a recuration from the
+command or the page, the worker's curation and summaries), so this holds for a writer whose rules
+were off when it read its text and the switch on when it wrote. The worker's look at the op text
+begins the scan before it looks, so an append between its look and its record leaves the scan
+unrecorded. The claude-mem import gates every field with the settings it started with, the rules
+its appends owe the scan by.
 
 A text gated under rules that are no longer the home's is not sent: the gate before each call to a
 curator or a summarizer, retries and fallbacks included, compares the version the text was gated
