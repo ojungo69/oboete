@@ -2870,9 +2870,13 @@ fn send_plan_report(
 /// `oboete recurate --skipped` sends. Not the imported records the phase set aside (D6), nor an
 /// excluded repository's sessions (D13), which no provider was asked about.
 pub fn skipped_spans(raw: &Raw) -> Result<Vec<Span>> {
-    spans_skipped(raw, |reason| {
-        !reason.starts_with("imported:") && reason != "excluded"
-    })
+    spans_skipped(raw, |reason| !set_aside(reason))
+}
+
+/// A skipped window's `reason` when oboete set the window aside without asking a provider: an
+/// import's (D6) or an excluded repository's (D13). Any other is a provider's failure, free text.
+pub(crate) fn set_aside(reason: &str) -> bool {
+    reason.starts_with("imported:") || reason == "excluded"
 }
 
 /// The spans of `source`'s imported records that the curation phase set aside (D6), less what a

@@ -115,6 +115,15 @@ struct Extra {
     secret_group: Option<usize>,
 }
 
+/// Its version alone: no rule or kept value is shown (slice 3e-4's `raw::Judge` holds one).
+impl std::fmt::Debug for Rules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rules")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for Rules {
     fn default() -> Self {
         Self {
@@ -2533,7 +2542,7 @@ extra_rules = [
             format!("[[redaction.extra_rules]]\nid = \"x\"\nregex = 'x'\nentropy = \"{v}\""),
             format!("[capture]\ntool_output = \"{v}\""),
         ] {
-            let e = format!("{:#}", user(&toml).err().expect(&toml));
+            let e = format!("{:#}", user(&toml).expect_err(&toml));
             assert!(!e.contains(&v), "{toml}: {e}");
             // The whole config, as doctor and `oboete mcp` read it.
             let home = tempfile::tempdir().unwrap();
@@ -2588,7 +2597,7 @@ extra_rules = [
                 "line 2 is not valid",
             ),
         ] {
-            let e = format!("{:#}", user(toml).err().expect(toml));
+            let e = format!("{:#}", user(toml).expect_err(toml));
             assert!(e.contains(says), "{toml}: {e}");
         }
         // The tables other commands read are no mistake here.

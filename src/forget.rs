@@ -942,9 +942,11 @@ pub struct Purged {
     pub records: usize,
     /// Rows of records a rescan masked, rewritten with the masks (slice 3e-1).
     pub masked: usize,
-    /// Whether it went on with a rescan's masks (slice 3e-1): what `forget --continue` reports
-    /// with no job.
+    /// Whether it went on with a rescan's masks (slice 3e-1), or with op text owed a scan with
+    /// the redaction rules now (slice 3e-4): what `forget --continue` reports with no job.
     pub masks: bool,
+    /// Ops whose text the redaction rules now masked in raw.db (slice 3e-4).
+    pub texts: usize,
     /// Preferences written again from the masked text of their directive (slice 3e-2).
     pub preferences: usize,
     /// Jobs not done this time: readers kept raw.db-wal from truncating, or a restore put the
@@ -1111,19 +1113,28 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
     }
-    let (due, records_due, owed, masks) = {
+    let (due, records_due, owed, masks, text) = {
         let raw = crate::raw::open(home)?;
         let owed = raw.record_backups_owed()?;
-        (due(&raw)?, records_due(&raw)?, owed, raw.masks_owed()?)
+        let text = text_owed(home, &raw)?;
+        (
+            due(&raw)?,
+            records_due(&raw)?,
+            owed,
+            raw.masks_owed()?,
+            text,
+        )
     };
     purged.jobs = due.len() + records_due.len();
-    purged.masks = masks.is_some();
-    if purged.jobs == 0 && !owed && masks.is_none() {
+    purged.masks = masks.is_some() || text.is_some();
+    if purged.jobs == 0 && !owed && !purged.masks {
         return Ok(Some(purged));
     }
     // Slice 3e-1: whether the ranges a rescan masked reached raw.db's rows, what was made from them,
-    // raw.db-wal and knowledge.db: they are paid only then, and after step 4.
+    // raw.db-wal and knowledge.db: they are paid only then, and after step 4. Slice 3e-4: and the
+    // op text masked with the rules now, whether raw.db-wal was truncated after it.
     let mut masked = masks.is_none();
+    let mut text_truncated = false;
     // Step 2 for the jobs whose ops (a record job: whose rows, slice 3c) hold text, or that never
     // took it; the rebuild for those and the ones stopped after step 2. A job past step 3 does not
     // go back to the rebuild (2c, decision 8): a stopped one would rebuild at every continuation.
@@ -1134,6 +1145,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         .any(|(_, step, held)| step_2(*step, *held));
     if records_step_2
         || masks.is_some()
+        || text.is_some()
         || due.iter().any(|(_, _, step, held)| step_2(*step, *held))
     {
         let _worker = crate::worker::lock_asking(home)?;
@@ -1184,8 +1196,27 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                 purged.masked = raw.mask_rows()?;
             }
         }
+        // Slice 3e-4 (#478): the text of every op masked with the rules now, after what 3e-1 and
+        // 3e-2 wrote: the claims, windows and turns made from a masked record lose theirs by its
+        // time, as before, and what is left (a correction's body, a work state, an import, a
+        // curator's own words) by the rules.
+        if let Some(rules) = &text {
+            raw.op_text_scan_begun()?;
+            let mut after = None;
+            loop {
+                let page =
+                    raw.op_text_masks(rules, after.as_ref(), crate::raw::RECORD_PURGE_BATCH)?;
+                let Some((device, op_seq, ..)) = page.last() else {
+                    break;
+                };
+                after = Some((device.clone(), *op_seq));
+                purged.texts += raw.mask_op_text(&page)?;
+            }
+            crate::backup::fail_after("op_text_masked")?;
+        }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
         masked |= truncated;
+        text_truncated = truncated;
         let holding = record_jobs_with_text(&raw)?;
         for (job, step, held) in records_due {
             if !step_2(step, held) {
@@ -1227,7 +1258,11 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     // The worker lock and raw are let go: the rebuild takes them itself.
     let uids: HashSet<String> = rebuild.iter().map(|(_, uid)| uid.clone()).collect();
-    let rebuilds = !rebuild.is_empty() || !record_rebuild.is_empty() || masks.is_some();
+    // Slice 3e-4: and for op text masked, by this purge or one that stopped.
+    let rebuilds = !rebuild.is_empty()
+        || !record_rebuild.is_empty()
+        || masks.is_some()
+        || (text.is_some() && crate::raw::open(home)?.ops_text_pending()?);
     if rebuilds {
         // Rebuilt for every job not past step 3, though knowledge.db holds no row of its uid: rows
         // a rewind took out (a raw.db put back from an older copy) leave the text in the vector
@@ -1325,11 +1360,11 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
             jobs.entry(uid).or_insert(job);
         }
     }
-    if !jobs.is_empty() || records_owed {
+    if !jobs.is_empty() || records_owed || text.is_some() {
         // And the window and turn ops 3d-2 rewrote, to the bodies raw.db holds now, and those it
         // does not hold judged by the same rules: every ops segment, as one set aside may hold
         // such an op (Codex and CodeRabbit on #472).
-        let (origins, judge) = if records_owed {
+        let (origins, mut judge) = if records_owed {
             let mut judge = raw.judge(masks.is_some())?;
             // And what only they hold, read first: the claims made from a forgotten record, every
             // op of their uids, and the spans of the windows (Codex on #472).
@@ -1341,6 +1376,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         } else {
             Default::default()
         };
+        // Slice 3e-4: and every op's text, as raw.db's.
+        judge.text = text.clone();
         // Slice 3e-1: and the lines and rows of the records a rescan masked, masked as raw.db's.
         let masks_of = if masks.is_some() {
             raw.masks()?
@@ -1384,7 +1421,49 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         Some(_) => purged.unfinished.push(crate::raw::MASK_JOB.to_owned()),
         None => {}
     }
+    // A restore since step 2 made raw.db anew from the segments it read then (Codex on #480).
+    if let Some(rules) = &text
+        && !(text_truncated && raw.ops_text_scanned(rules.version())?)
+        && !purged.unfinished.iter().any(|j| j == crate::raw::MASK_JOB)
+    {
+        purged.unfinished.push(crate::raw::MASK_JOB.to_owned());
+    }
     Ok(Some(purged))
+}
+
+/// Slice 3e-4 (#478): the redaction rules now when raw.db's op text is owed a scan with them
+/// (`Raw::ops_text_owed`); none while the settings do not load (capture stops then too, and doctor
+/// names them).
+fn text_owed(home: &Path, raw: &crate::raw::Raw) -> Result<Option<crate::redact::Rules>> {
+    let Ok(settings) = crate::capture::Settings::load(home) else {
+        return Ok(None);
+    };
+    Ok(raw
+        .ops_text_owed(settings.rules.version())?
+        .then_some(settings.rules))
+}
+
+/// Slice 3e-4: whether raw.db's op text waits for a purge: owed a scan with the rules now, and an
+/// op they mask, or masked by a purge that stopped, or a backup's ops segment or a copy of raw.db
+/// set aside, which may hold an op raw.db does not (a restore that left it out), and only a
+/// purge's step 4 reads (Codex on #487). With none of them, the scan is recorded here and no purge
+/// starts: a new store, or a rule that finds nothing in an op.
+fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
+    let Some(rules) = text_owed(home, raw)? else {
+        return Ok(false);
+    };
+    if crate::backup::any_ops_segment(home)?
+        || !crate::raw::copies_set_aside(home)?.is_empty()
+        || raw.ops_text_pending()?
+        || !raw.op_text_masks(&rules, None, 1)?.is_empty()
+    {
+        return Ok(true);
+    }
+    // The worker holds its lock: no restore makes raw.db anew meanwhile.
+    let store = crate::raw::open(home)?;
+    store.op_text_scan_begun()?;
+    store.ops_text_scanned(rules.version())?;
+    Ok(false)
 }
 
 /// How often a worker looks for a uid job its purge left (D5 item 8).
@@ -1421,7 +1500,8 @@ pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
             Ok(!due.is_empty()
                 || !records_due(raw)?.is_empty()
                 || raw.record_backups_owed()?
-                || raw.masks_owed()?.is_some())
+                || raw.masks_owed()?.is_some()
+                || text_waits(home, raw)?)
         })
         .unwrap_or_else(|e| {
             eprintln!("oboete: forget jobs not read: {e:#}");
@@ -2107,6 +2187,12 @@ fn say_purged(p: &Purged) -> Result<()> {
     }
     if p.ops > 0 {
         println!("Ops rewritten without their text in raw.db: {}", p.ops);
+    }
+    if p.texts > 0 {
+        println!(
+            "Ops whose text the current redaction rules masked in raw.db: {}",
+            p.texts
+        );
     }
     if p.rebuilt {
         println!("knowledge.db rebuilt from raw.db without it.");
@@ -8862,6 +8948,513 @@ mod tests {
                 .values()
                 .all(|b| b["recipe"] != crate::claims::PREF_RECIPE)
         );
+    }
+
+    /// Slice 3e-4 (#478, spec 6.7's Rescan range): a rule added later masks what it finds in the
+    /// text of every op, not only in what was made from a masked record: a claim that quotes
+    /// another record and repeats the secret in its body, a window that named it and repeated it,
+    /// the owner's correction of that claim, a work state and an imported document. No byte is left
+    /// in raw.db, its WAL, knowledge.db, the ops segments or a copy of raw.db; each op reads as
+    /// before (the claim is current with its body masked, the correction still sets its status),
+    /// no uid an op names changes, and the window is not listed for recuration. A second purge
+    /// scans nothing.
+    #[test]
+    fn a_rule_added_later_masks_the_text_of_every_op() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (r1, _) = masked_prompt(&mut s);
+        let logs = "Logs rotate daily.";
+        let r2 = s.said("s", "github.com/o/r", 2_000, logs);
+        let r3 = s.said("s", "github.com/o/r", 3_000, "Tests run on CI.");
+        let home = s.home.path().to_owned();
+        let copied = claim_op(&device, &[(r2, logs)], &format!("Logs keep {MASKED}."));
+        let uid = raw::op_uid(copied.0, &copied.1).unwrap();
+        let seqs = s
+            .raw
+            .append_ops(&[
+                window_op(r1, r2, "Their span.", json!({})),
+                copied,
+                window_op(
+                    r3,
+                    r3,
+                    &format!("It showed {MASKED}."),
+                    json!({"candidates": [uid]}),
+                ),
+            ])
+            .unwrap();
+        let fields = json!({"task": format!("Rotate {MASKED}."), "status": "doing",
+            "source": format!("ci {MASKED}")});
+        let state = s
+            .raw
+            .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+            .unwrap();
+        s.raw
+            .append_imports(vec![raw::ImportDoc {
+                uid: "claude-mem:abc:o1".into(),
+                source: "claude-mem:abc".into(),
+                source_id: "o1".into(),
+                kind: "decision".into(),
+                repo: "github.com/o/r".into(),
+                session: "s".into(),
+                ts: 1,
+                title: "An old note".into(),
+                body: format!("Old note {MASKED}."),
+            }])
+            .unwrap();
+        s.run();
+        let fix = format!("Logs keep {MASKED} a week.");
+        crate::claims::correct(&home, &uid, Some("done"), Some(&fix)).unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let before = op_bodies(&home);
+        let purged = purge(&home).unwrap().unwrap();
+        // The claim, the window that named it, the work state, the import and the correction.
+        assert_eq!((purged.texts, purged.rebuilt), (5, true));
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
+        assert!(!holds_text(&copy, MASKED) && !holds_text(&wal, MASKED));
+        let stars = "*".repeat(MASKED.len());
+        let k = crate::knowledge::open(&home).unwrap();
+        let shown: (String, String) = k
+            .query_row(
+                "SELECT status, body FROM active WHERE uid = ?1",
+                [&uid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(shown, ("done".into(), format!("Logs keep {stars} a week.")));
+        let after = op_bodies(&home);
+        assert_eq!(after[&seqs[1]]["body"], format!("Logs keep {stars}."));
+        assert_eq!(after[&seqs[2]]["summary"], format!("It showed {stars}."));
+        assert_eq!(after[&state]["fields"]["task"], format!("Rotate {stars}."));
+        assert_eq!(after[&state]["fields"]["source"], format!("ci {stars}"));
+        // The names of every op that keeps its text (3e-1 took the first window's).
+        for (seq, body) in before
+            .iter()
+            .filter(|(seq, _)| after[seq].get("forgotten").is_none())
+        {
+            for name in [
+                "uid",
+                "candidates",
+                "device",
+                "anchor",
+                "status",
+                "list",
+                "repo",
+            ] {
+                assert_eq!(after[seq].get(name), body.get(name), "{seq} {name}");
+            }
+        }
+        let queued: i64 = k
+            .query_row(
+                "SELECT COUNT(*) FROM recurate WHERE from_seq <= ?1 AND to_seq >= ?1",
+                [r3],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0);
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Slice 3e-4: a worker that finds op text the rules now mask none of records the scan and
+    /// starts no purge (a new store's first look too); one that finds some starts it. A purge scans
+    /// the op text once for each version of the rules: an op written after it, its text not masked
+    /// by the rules of its time, waits for the next change of the rules.
+    #[test]
+    fn op_text_is_scanned_once_for_each_version_of_the_rules() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let fields = |task: String| {
+            serde_json::json!({ "task": task })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let first = s
+            .raw
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                &fields(format!("Rotate {MASKED}.")),
+            )
+            .unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let look = |raw: &raw::Raw| {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, raw);
+            CONTINUED.get()
+        };
+        assert_eq!(look(&s.raw), 0);
+        let bundled = crate::redact::Rules::default();
+        assert!(!s.raw.ops_text_owed(bundled.version()).unwrap());
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert_eq!(look(&s.raw), 1);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert_eq!(purge(&home).unwrap().unwrap().texts, 1);
+        let second = crate::raw::open(&home)
+            .unwrap()
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                &fields(format!("Again {MASKED}.")),
+            )
+            .unwrap();
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        let task = |seq: i64| op_bodies(&home)[&seq]["fields"]["task"].clone();
+        assert_eq!(task(second), format!("Again {MASKED}."));
+        let zeta = r#"{ id = "zeta", regex = 'zeta-[0-9]{4}' }"#;
+        let acme = r#"{ id = "acme", regex = 'acme-[0-9]{6}' }"#;
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{acme}, {zeta}]\n"),
+        )
+        .unwrap();
+        assert_eq!(purge(&home).unwrap().unwrap().texts, 1);
+        let stars = "*".repeat(MASKED.len());
+        assert_eq!(
+            (task(first), task(second)),
+            (
+                format!("Rotate {stars}.").into(),
+                format!("Again {stars}.").into()
+            )
+        );
+    }
+
+    /// Slice 3e-4 (Codex on #487): an op only a backup's ops segment or a copy of raw.db set aside
+    /// holds (a restore that left it out of raw.db) is masked by a rule added later: a worker that
+    /// finds no op in raw.db the rules mask starts the purge while either is there, rather than
+    /// recording the scan, and the purge's step 4 masks it. The next look starts none.
+    #[test]
+    fn an_op_only_a_segment_or_a_copy_holds_is_masked_by_a_rule_added_later() {
+        for aside in [false, true] {
+            let mut s = crate::search::b::fixture::Store::new();
+            let home = s.home.path().to_owned();
+            let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+            let seq = s
+                .raw
+                .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+                .unwrap();
+            let crate::search::b::fixture::Store { home: _kept, raw } = s;
+            drop(raw);
+            let copy = aside.then(|| {
+                copy_raw(
+                    &home,
+                    &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+                )
+            });
+            if !aside {
+                crate::backup::export(&home).unwrap();
+                assert!(!backup_hits(&home, MASKED).is_empty());
+            }
+            // raw.db without it, as a restore that left it out makes it.
+            rusqlite::Connection::open(home.join("raw.db"))
+                .unwrap()
+                .execute("DELETE FROM ops WHERE op_seq = ?1", [seq])
+                .unwrap();
+            std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+            std::fs::create_dir_all(home.join("state")).unwrap();
+            let look = || {
+                let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+                CONTINUED.set(0);
+                continue_due(&home, &raw::open(&home).unwrap());
+                CONTINUED.get()
+            };
+            assert_eq!(look(), 1, "aside: {aside}");
+            let purged = purge(&home).unwrap().unwrap();
+            assert_eq!(
+                (purged.texts, purged.segments, purged.copies),
+                (0, usize::from(!aside), usize::from(aside))
+            );
+            match copy {
+                Some(copy) => assert!(!holds_text(&copy, MASKED)),
+                None => assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new()),
+            }
+            assert_eq!(look(), 0, "aside: {aside}");
+        }
+    }
+
+    /// Slice 3e-4 (Codex on #487): an op whose uid cannot be told, a claim of the shape from before
+    /// Task 7, has its text masked in a backup's ops segment as in raw.db.
+    #[test]
+    fn an_op_whose_uid_cannot_be_told_has_its_text_masked_in_the_backup() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let old = serde_json::json!({ "text": format!("Logs keep {MASKED}.") });
+        let seq = s.raw.append_ops(&[(raw::OpKind::Claim, old)]).unwrap()[0];
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        assert!(!backup_hits(&home, MASKED).is_empty());
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.texts, purged.segments), (1, 1));
+        assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
+        let stars = "*".repeat(MASKED.len());
+        assert_eq!(
+            op_bodies(&home)[&seq]["text"],
+            format!("Logs keep {stars}.")
+        );
+    }
+
+    /// Slice 3e-4: a purge that stops after masking op text, before knowledge.db is rebuilt, leaves
+    /// it owed: the next one rebuilds knowledge.db, though it masks nothing more, even once the
+    /// rule is taken back (the rules are again those the op text was last scanned with).
+    #[test]
+    fn a_purge_stopped_after_masking_op_text_finishes_it_later() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let logs = "Logs rotate daily.";
+        let r1 = s.said("s", "github.com/o/r", 1_000, logs);
+        let claim = claim_op(&device, &[(r1, logs)], &format!("Logs keep {MASKED}."));
+        s.raw
+            .append_ops(&[window_op(r1, r1, "Its span.", json!({})), claim])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert!(store_hits(&home, MASKED.as_bytes()).contains(&"knowledge.db"));
+        crate::backup::FAIL_AFTER.set(Some("op_text_masked"));
+        assert!(purge(&home).is_err());
+        assert!(store_hits(&home, MASKED.as_bytes()).contains(&"knowledge.db"));
+        assert!(raw::open(&home).unwrap().ops_text_pending().unwrap());
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.texts, purged.rebuilt), (0, true));
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        assert!(!raw::open(&home).unwrap().ops_text_pending().unwrap());
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+    }
+
+    /// Slice 3e-4 (Codex on #487): a rule that matches more ops than a page of the purge holds
+    /// masks every one of them, a page at a time, in raw.db and in a copy of it set aside.
+    #[test]
+    fn a_rule_matching_many_ops_masks_them_a_page_at_a_time() {
+        let mut s = crate::search::b::fixture::Store::new();
+        s.said("s", "github.com/o/r", 1_000, "Logs rotate daily.");
+        let many = crate::raw::RECORD_PURGE_BATCH * 2 + 1;
+        let ops: Vec<_> = (0..many)
+            .map(|i| {
+                let fields = serde_json::json!({ "task": format!("Rotate {MASKED} {i}.") });
+                let op = serde_json::json!({"repo": "github.com/o/r", "list": "deploys",
+                    "fields": fields, "clock": i});
+                (crate::raw::OpKind::WorkState, op)
+            })
+            .collect();
+        for batch in crate::raw::append_batches(&ops) {
+            s.raw.append_ops(batch).unwrap();
+        }
+        s.run();
+        let home = s.home.path().to_owned();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert_eq!(purge(&home).unwrap().unwrap().texts, many);
+        assert_eq!(store_hits(&home, MASKED.as_bytes()), Vec::<&str>::new());
+        let masked = copy_ops(&copy)
+            .into_iter()
+            .filter(|(_, _, body)| body.contains("Rotate *"))
+            .count();
+        assert_eq!(masked, many);
+        assert!(!holds_text(&copy, MASKED));
+    }
+
+    /// Slice 3e-4: while a reader holds raw.db-wal, which may still hold the ops' old pages, or when
+    /// a restore during the purge makes raw.db anew from segments that held the op text unmasked,
+    /// the op text stays owed, and the next purge finishes it.
+    #[test]
+    fn a_reader_or_a_restore_during_the_purge_leaves_the_op_text_owed() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        // A record, so the backup has segments a restore reads.
+        s.said("s", "github.com/o/r", 1_000, "Logs rotate daily.");
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        let state = s
+            .raw
+            .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+            .unwrap();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let version = crate::capture::Settings::load(&home).unwrap().rules;
+        let owed = || {
+            raw::open(&home)
+                .unwrap()
+                .ops_text_owed(version.version())
+                .unwrap()
+        };
+        let task = || op_bodies(&home)[&state]["fields"]["task"].clone();
+        let reader = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM ops", [], |r| r.get(0))
+            .unwrap();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.texts, 1);
+        assert!(purged.unfinished.iter().any(|j| j == crate::raw::MASK_JOB));
+        assert!(owed());
+        reader.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        purge(&home).unwrap().unwrap();
+        assert!(!owed());
+        // A rule that finds it again (a wider one), and a restore before step 3 from segments the
+        // first purge has not rewritten since.
+        crate::backup::export(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"rotate\", regex = 'Rotate' }]\n",
+        )
+        .unwrap();
+        let version = crate::capture::Settings::load(&home).unwrap().rules;
+        let owed = || {
+            raw::open(&home)
+                .unwrap()
+                .ops_text_owed(version.version())
+                .unwrap()
+        };
+        let at = home.clone();
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(at.join("raw.db"), b"not a database at all").unwrap();
+                for f in ["raw.db-wal", "raw.db-shm"] {
+                    let _ = std::fs::remove_file(at.join(f));
+                }
+                crate::worker::run_once(&at).unwrap();
+            }));
+        });
+        let purged = purge(&home).unwrap().unwrap();
+        assert!(purged.unfinished.iter().any(|j| j == crate::raw::MASK_JOB));
+        let stars = "*".repeat(MASKED.len());
+        assert_eq!(task(), format!("Rotate {stars}."));
+        assert!(owed());
+        purge(&home).unwrap().unwrap();
+        assert_eq!(task(), format!("****** {stars}."));
+        assert!(!owed());
+    }
+
+    /// Slice 3e-4: a claim's quote keeps what its record holds, masked or not: a rule anchored at
+    /// a field's start finds the secret at the quote's start, though not in the middle of the
+    /// record's field, which keeps it; the claim still reads in its record, and is current.
+    #[test]
+    fn a_quote_keeps_what_its_record_holds() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let said = format!("Deploy with {MASKED} on Fridays.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &said);
+        let quote = format!("{MASKED} on Fridays.");
+        let mut claim = claim_op(&device, &[(r1, &quote)], "Deploys run on Fridays.");
+        claim.1["evidence"][0]["offset"] = said.find(MASKED).unwrap().into();
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        let seqs = s
+            .raw
+            .append_ops(&[window_op(r1, r1, "Its span.", json!({})), claim])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"start\", regex = '^acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert_eq!(op_bodies(&home)[&seqs[1]]["evidence"][0]["quote"], quote);
+        let k = crate::knowledge::open(&home).unwrap();
+        let current: i64 = k
+            .query_row("SELECT COUNT(*) FROM active WHERE uid = ?1", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(current, 1);
+    }
+
+    /// Slice 3e-4: a rule for 64 hex digits, as a user may add for a secret of that form, masks
+    /// them in an op's text but not in the uids ops name (a window's candidates, a claim's
+    /// supersedes, a correction's uid) or in an import's checkpoint.
+    #[test]
+    fn a_rule_for_hex_digits_leaves_the_uids_ops_name() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let (logs, tests) = ("Logs rotate daily.", "Tests run on CI.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, logs);
+        let r2 = s.said("s", "github.com/o/r", 2_000, tests);
+        let claim = claim_op(&device, &[(r1, logs)], "Logs rotate.");
+        let uid = raw::op_uid(claim.0, &claim.1).unwrap();
+        let mut later = claim_op(&device, &[(r2, tests)], "Tests run.");
+        later.1["supersedes"] = json!([uid]);
+        let hex = "ab".repeat(32);
+        s.raw
+            .append_ops(&[
+                window_op(r1, r2, "Its span.", json!({"candidates": [uid]})),
+                claim,
+                later,
+            ])
+            .unwrap();
+        // An import's checkpoint, which names v1's session by its SHA-256.
+        let row = json!({"id": 1, "ts": 1, "session_id": "cd".repeat(32)});
+        s.raw
+            .append_ops(&[(
+                raw::OpKind::Migration,
+                json!({"key": "v1", "through": 1, "row": row}),
+            )])
+            .unwrap();
+        let fields = json!({ "task": format!("Key {hex}.") });
+        let state = s
+            .raw
+            .work_state("github.com/o/r", "keys", fields.as_object().unwrap())
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        crate::claims::correct(&home, &uid, Some("done"), None).unwrap();
+        // A copy of raw.db set aside: with no record masked, only the op text takes it.
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"hex\", regex = '[0-9a-f]{64}' }]\n",
+        )
+        .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let before = op_bodies(&home);
+        let wal = PathBuf::from(format!("{}-wal", copy.display()));
+        assert!(holds_text(&copy, &hex) || holds_text(&wal, &hex));
+        assert_eq!(purge(&home).unwrap().unwrap().texts, 1);
+        let mut after = op_bodies(&home);
+        assert_eq!(
+            after[&state]["fields"]["task"],
+            format!("Key {}.", "*".repeat(64))
+        );
+        assert!(!holds_text(&copy, &hex) && !holds_text(&wal, &hex));
+        after.insert(state, before[&state].clone());
+        assert_eq!(after, before);
     }
 
     /// CodeRabbit on #480: masks a purge left owed are said as a rescan's, not as a job named

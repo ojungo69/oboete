@@ -2486,6 +2486,115 @@ impl Raw {
         Ok(())
     }
 
+    /// Slice 3e-4 (#478): whether the text of raw.db's ops is owed a scan with the redaction rules
+    /// of `version`: they were last scanned with others (or never: a store from before this
+    /// version), or a purge that masked some has not finished.
+    pub(crate) fn ops_text_owed(&self, version: &str) -> Result<bool> {
+        let (scanned, pending): (Option<String>, bool) = self.conn.query_row(
+            "SELECT (SELECT value FROM meta WHERE key = 'ops_text_scanned'),
+                    EXISTS(SELECT 1 FROM meta WHERE key = 'ops_text_pending')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(pending || scanned.as_deref() != Some(version))
+    }
+
+    /// Slice 3e-4: whether a purge masked op text it has not finished with: knowledge.db and the
+    /// backups owe it.
+    pub(crate) fn ops_text_pending(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ops_text_pending')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Slice 3e-4: up to `limit` ops after `after` (a device and an op seq, in that order) whose
+    /// text `rules` mask now (`masked_op_text`), each with its device, op seq, its body as read and
+    /// as masked, in one read with no write lock. A purge pages through the log with it, so a rule
+    /// that matches much of it holds one page at a time (Codex on #487).
+    pub(crate) fn op_text_masks(
+        &self,
+        rules: &crate::redact::Rules,
+        after: Option<&(String, i64)>,
+        limit: usize,
+    ) -> Result<Vec<OpText>> {
+        let (device, op_seq) = after.map_or(("", i64::MIN), |(d, s)| (d.as_str(), *s));
+        let mut st = self.conn.prepare(
+            "SELECT device, op_seq, type, body FROM ops WHERE (device, op_seq) > (?1, ?2)
+             ORDER BY device, op_seq",
+        )?;
+        let mut rows = st.query(params![device, op_seq])?;
+        let mut found = Vec::new();
+        while found.len() < limit
+            && let Some(row) = rows.next()?
+        {
+            let Some(kind) = OpKind::from_name(row.get_ref(2)?.as_str()?) else {
+                continue;
+            };
+            let body: String = row.get(3)?;
+            if let Some(now) = masked_op_text(kind, &body, rules) {
+                found.push((row.get(0)?, row.get(1)?, body, now));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Slice 3e-4: `found` (`op_text_masks`) written, in transactions of `RECORD_PURGE_BATCH` ops
+    /// under dispatch, each op only while its body is the one read, with the pending mark: the
+    /// rebuild and the backups owe it until `ops_text_scanned`. How many ops it rewrote.
+    pub(crate) fn mask_op_text(&mut self, found: &[OpText]) -> Result<usize> {
+        let mut rewritten = 0;
+        for batch in found.chunks(RECORD_PURGE_BATCH) {
+            let _dispatch = crate::dispatch::exclusive(&self.home)
+                .context("the text of the ops was not masked")?;
+            self.current()?;
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES('ops_text_pending', '1')",
+                [],
+            )?;
+            {
+                let mut st = tx.prepare_cached(
+                    "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body = ?4",
+                )?;
+                for (device, op_seq, was, now) in batch {
+                    rewritten += st.execute(params![now, device, op_seq, was])?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(rewritten)
+    }
+
+    /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
+    /// only while it holds the mark: a raw.db a restore made meanwhile (a new meta) holds the ops
+    /// its segments held, and stays owed.
+    pub(crate) fn op_text_scan_begun(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES('ops_text_scanning', '1')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Slice 3e-4: the text of raw.db's ops masked with the rules of `version` everywhere a purge
+    /// puts it, recorded with the marks taken away, in one transaction, when the scan was begun in
+    /// this raw.db (`op_text_scan_begun`). Whether it was.
+    pub(crate) fn ops_text_scanned(&self, version: &str) -> Result<bool> {
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        let begun = tx.execute("DELETE FROM meta WHERE key = 'ops_text_scanning'", [])? == 1;
+        if begun {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('ops_text_scanned', ?1)",
+                [version],
+            )?;
+            tx.execute("DELETE FROM meta WHERE key = 'ops_text_pending'", [])?;
+        }
+        tx.commit()?;
+        Ok(begun)
+    }
+
     /// D5: `uid`'s ops in the op log when knowledge.db has not read them yet (right after an
     /// import, or while the worker lags; Codex on #435): a claim's, its uid computed as the
     /// consumer computes it, with the corrections that name it, or a document's import ops. Its
@@ -5999,54 +6108,72 @@ fn rewrite_copy(
             }
         }
     }
-    // A copy from before the op log holds no uid's op (CodeRabbit on #458).
+    // A copy from before the op log holds no uid's op (CodeRabbit on #458). Its ops are read and
+    // rewritten a page at a time, in (device, op_seq) order, so a rule that matches much of the
+    // log holds one page's bodies (Codex on #487).
     let mut keys: Vec<(String, i64, String)> = Vec::new();
-    if (!jobs.is_empty() || !judge.forgotten.is_empty()) && has("ops")? {
-        let mut st = tx.prepare("SELECT device, op_seq, type, ts, body, batch FROM ops")?;
-        let mut rows = st.query([])?;
+    let mut after = (String::new(), i64::MIN);
+    let mut more =
+        (!jobs.is_empty() || !judge.forgotten.is_empty() || judge.text.is_some()) && has("ops")?;
+    while more {
+        let mut st = tx.prepare_cached(
+            "SELECT device, op_seq, type, ts, body, batch FROM ops
+             WHERE (device, op_seq) > (?1, ?2) ORDER BY device, op_seq LIMIT ?3",
+        )?;
+        let mut rows = st.query(params![after.0, after.1, RECORD_PURGE_BATCH as i64])?;
+        let mut read = 0;
         while let Some(row) = rows.next()? {
+            read += 1;
             let kind = OpKind::from_name(&row.get::<_, String>(2)?)
                 .context("an op of a kind that cannot be named")?;
             let key: (String, i64) = (row.get(0)?, row.get(1)?);
+            after = key.clone();
             let (ts, batch): (i64, Option<i64>) = (row.get(3)?, row.get(5)?);
+            let text: String = row.get(4)?;
             // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does
             // not hold judged by its own (Codex and CodeRabbit on #472).
             // A body that does not parse may hold a card's or a summary's text: it fails the copy,
             // as a claim's does (Codex on #472).
-            if matches!(kind, OpKind::Window | OpKind::Turn) {
-                let body = serde_json::from_str(&row.get::<_, String>(4)?)
-                    .context("an op whose body does not parse")?;
-                if let Some(now) = judge.purged(kind, (&key.0, key.1), ts, batch, &body) {
-                    keys.push((key.0, key.1, now));
-                }
-                continue;
-            }
-            if !matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
-                continue;
-            }
-            let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(4)?)
-                .context("an op whose body does not parse")?;
-            match op_uid(kind, &body) {
-                Some(uid) => {
-                    let now = match jobs.get(&uid) {
+            let now = if matches!(kind, OpKind::Window | OpKind::Turn) {
+                let body =
+                    serde_json::from_str(&text).context("an op whose body does not parse")?;
+                judge.purged(kind, (&key.0, key.1), ts, batch, &body)
+            } else if matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
+                let body: serde_json::Value =
+                    serde_json::from_str(&text).context("an op whose body does not parse")?;
+                match op_uid(kind, &body) {
+                    Some(uid) => match jobs.get(&uid) {
                         Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
                         // A claim op raw.db does not hold that quotes a forgotten record, or of a
                         // window's batch a record job took (3d-4).
                         None => judge.purged(kind, (&key.0, key.1), ts, batch, &body),
-                    };
-                    if let Some(now) = now {
-                        keys.push((key.0, key.1, now));
+                    },
+                    None => {
+                        anyhow::ensure!(forgotten_body(&body), "an op that names no uid");
+                        None
                     }
                 }
-                None => anyhow::ensure!(forgotten_body(&body), "an op that names no uid"),
+            } else {
+                None
+            };
+            // Slice 3e-4: and the text left, masked with the rules now as raw.db's.
+            let now = match &judge.text {
+                Some(rules) => masked_op_text(kind, now.as_deref().unwrap_or(&text), rules).or(now),
+                None => now,
+            };
+            if let Some(now) = now {
+                keys.push((key.0, key.1, now));
             }
         }
-    }
-    for (device, op_seq, body) in keys {
-        rewritten += tx.execute(
-            "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body <> ?1",
-            params![body, device, op_seq],
-        )?;
+        drop(rows);
+        drop(st);
+        for (device, op_seq, body) in keys.drain(..) {
+            rewritten += tx.execute(
+                "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body <> ?1",
+                params![body, device, op_seq],
+            )?;
+        }
+        more = read == RECORD_PURGE_BATCH;
     }
     tx.commit()?;
     let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
@@ -6289,6 +6416,9 @@ pub(crate) struct Judge {
     /// text when it holds the same body, not another op a restore gave that op seq to (Codex on
     /// #485).
     now: std::collections::HashMap<(String, i64), serde_json::Value>,
+    /// Slice 3e-4 (#478): the redaction rules every op's text is masked with, as raw.db's, when it
+    /// is owed a scan with them (`masked_op_text`).
+    pub(crate) text: Option<crate::redact::Rules>,
 }
 
 impl Judge {
@@ -6727,7 +6857,7 @@ const REMOVED_ROW: &str = "type = 'removed', enc = 'plain', body = NULL, origina
 
 /// Forgotten records rewritten in one transaction (slice 3c): a hook waits behind one no longer
 /// than behind a page's registration.
-const RECORD_PURGE_BATCH: usize = 500;
+pub(crate) const RECORD_PURGE_BATCH: usize = 500;
 
 /// The index the session checks of the denials read (`check_cross_source_forget`, `transcript_cut`,
 /// #467), made by the first denial and the purge, as the forget preview makes its own (spec 1.6:
@@ -6805,6 +6935,103 @@ fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Re
         OpKind::Correction => anchor(&body["anchor"]),
         _ => Ok(false),
     }
+}
+
+/// Slice 3e-4: an op whose text the rules now mask, its device, op seq, body as read and as masked.
+pub(crate) type OpText = (String, i64, String, String);
+
+/// Slice 3e-4 (#478): the keys of an op's body whose values oboete gives (identifiers and the
+/// words of its own vocabulary), or a record holds verbatim (a quote, which its record's mask
+/// covers): no rule masks them in an op. A user's rule for 64 hex digits would otherwise change the
+/// uid a correction, a forget or an import names (as `view::gated_with_ids` keeps them), and one
+/// for a repository which op is whose. Inside `fields` (a work state's, a turn's) every value is
+/// text. A key is matched at any depth outside `fields`: an op field added later under one of these
+/// names keeps its value unmasked, so a new field is checked against this list (CodeRabbit on #487).
+/// A window's `reason` is one only when oboete set the window aside (`curate::set_aside`, which
+/// `oboete recurate` reads): a provider's failure is free text, masked (Codex on #487).
+const OP_NAMES: &[&str] = &[
+    "agent",
+    "candidates",
+    "carried",
+    "copied",
+    "device",
+    "dropped",
+    // A folder never recorded, by its path as an event's `cwd` label holds it (slice 4a, #489).
+    "folder",
+    "forgotten",
+    "id",
+    "job",
+    "kind",
+    // An exclusion op's level (slice 4a, #489).
+    "level",
+    "list",
+    "lowered",
+    "outcome",
+    "provider",
+    "quote",
+    "recipe",
+    "repo",
+    "scope",
+    "session",
+    "source",
+    "source_id",
+    "speaker",
+    "status",
+    "supersedes",
+    "type",
+    "uid",
+];
+
+/// Slice 3e-4 (#478): an op's `body` of `kind` with each string `rules` find something in masked,
+/// one `*` for each character a finding touches, but the values of `OP_NAMES`; none when they find
+/// nothing or the body does not parse. A forget's op (a uid and a job) and a migration's (a
+/// checkpoint and hashes) hold no text. Unlike a record's masks, which keep its bytes for the
+/// ledger's offsets, these never lengthen a text: a correction or a claim stays under its
+/// character cap (Codex on #487).
+pub(crate) fn masked_op_text(
+    kind: OpKind,
+    body: &str,
+    rules: &crate::redact::Rules,
+) -> Option<String> {
+    fn walk(v: &mut serde_json::Value, rules: &crate::redact::Rules, names: bool) -> bool {
+        match v {
+            serde_json::Value::String(text) => {
+                let found = crate::redact::ranges(text, rules);
+                let now: String = text
+                    .char_indices()
+                    .map(|(at, c)| {
+                        let end = at + c.len_utf8();
+                        match found.iter().any(|&(start, stop)| at < stop && start < end) {
+                            true => '*',
+                            false => c,
+                        }
+                    })
+                    .collect();
+                let changed = now != *text;
+                *text = now;
+                changed
+            }
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .fold(false, |changed, item| walk(item, rules, names) | changed),
+            serde_json::Value::Object(map) => map.iter_mut().fold(false, |changed, (key, item)| {
+                // Any depth: see `OP_NAMES` before naming a new op field.
+                let name = OP_NAMES.contains(&key.as_str())
+                    || key == "reason" && item.as_str().is_some_and(crate::curate::set_aside);
+                if names && name {
+                    changed
+                } else {
+                    walk(item, rules, names && key != "fields") | changed
+                }
+            }),
+            _ => false,
+        }
+    }
+    if matches!(kind, OpKind::Forget | OpKind::Migration) {
+        return None;
+    }
+    let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
+    walk(&mut v, rules, true).then(|| v.to_string())
 }
 
 /// `body` with the bytes from `offset` for `length` replaced by `*`, widened to whole characters
@@ -7812,6 +8039,83 @@ mod tests {
             "the bodies were not compressed: {stored} bytes"
         );
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
+    }
+
+    /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, are
+    /// names no rule masks, so an excluded folder keeps matching its events' `cwd` labels.
+    #[test]
+    fn an_exclusion_ops_folder_and_level_are_names() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'acme-[0-9]{6}|capture' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let body = serde_json::json!({
+            "folder": "/w/acme-482915", "level": "capture", "undo": false, "clock": 1,
+        });
+        assert_eq!(
+            masked_op_text(OpKind::Exclusion, &body.to_string(), &rules),
+            None
+        );
+        let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
+        assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// Slice 3e-4 (Codex on #487): a window's `reason` is kept only when oboete set the window
+    /// aside, which `oboete recurate --skipped` and `--source` read; a provider's failure is free
+    /// text and a rule masks it.
+    #[test]
+    fn a_windows_reason_is_masked_unless_oboete_set_it_aside() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'acme-[0-9]{6}|excluded|transcript' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        for kept in ["excluded", "imported:transcript"] {
+            let body = serde_json::json!({"outcome": "skipped", "reason": kept});
+            assert_eq!(
+                masked_op_text(OpKind::Window, &body.to_string(), &rules),
+                None
+            );
+        }
+        let failed = "every provider failed: groq: key file /w/acme-482915/key.md unreadable";
+        let body = serde_json::json!({"outcome": "skipped", "reason": failed});
+        let now = masked_op_text(OpKind::Window, &body.to_string(), &rules).unwrap();
+        let now: serde_json::Value = serde_json::from_str(&now).unwrap();
+        let reason = now["reason"].as_str().unwrap();
+        assert!(!reason.contains("acme-482915") && reason.contains("/w/***********/key.md"));
+        assert!(!crate::curate::set_aside(reason));
+    }
+
+    /// Slice 3e-4 (Codex on #487): a correction at its 1,000-character cap, in characters of
+    /// three bytes, keeps its status and stays a correction once a rule masks part of its body:
+    /// one `*` for each character.
+    #[test]
+    fn a_masked_correction_stays_under_its_character_cap() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = '機密[あ-ん]{8}' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let text = format!("機密{}{}", "あ".repeat(8), "い".repeat(990));
+        assert_eq!(text.chars().count(), crate::claims::MAX_BODY_CHARS);
+        let body = serde_json::json!({
+            "uid": "a".repeat(64), "status": "retracted", "body": text,
+            "anchor": {"device": "d", "seq": 1},
+        });
+        let now = masked_op_text(OpKind::Correction, &body.to_string(), &rules).unwrap();
+        let op: crate::claims::CorrectionOp = serde_json::from_str(&now).unwrap();
+        assert_eq!(op.fault(), None);
+        assert_eq!(op.status.as_deref(), Some("retracted"));
+        let masked = op.body.unwrap();
+        assert_eq!(masked.chars().count(), crate::claims::MAX_BODY_CHARS);
+        assert!(masked.starts_with(&"*".repeat(10)) && !masked.contains("機密"));
     }
 
     /// Codex on #304: the list folds a device's ops in their own order, so a clock set back
