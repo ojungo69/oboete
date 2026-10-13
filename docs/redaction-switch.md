@@ -46,6 +46,16 @@ For the same reason a worker does not start forget's purge to scan the op text i
 ops segments and the copies of raw.db set aside when the rules are off (3e-4): it records the scan
 under `off`, and a purge that stopped still finishes.
 
+Op text needs one more step. 3e-4 scans it only when the version of the rules changes, since an op
+is gated with the rules of its time when it is written. An op written while redaction is off is
+gated by no rule, and the switch can go off and on again before any worker reads the rules off:
+the version is then the same as the last scan's, and the op would never be scanned. So each writer
+of op text that gated it with the rules off (an agent's work state, a correction or a preference,
+an import, the worker's curation and summaries) owes the scan again right after its write: it
+takes away the record of the last scan, and of a scan begun meanwhile, which then records
+nothing. That holds for a writer whose rules were off when it read its text and the switch on
+when it wrote.
+
 A text gated under rules that are no longer the home's is not sent: the gate before each call to a
 curator or a summarizer, retries and fallbacks included, compares the version the text was gated
 under with the rules now, as the embedder's batches already do, and on a change the window is cut
