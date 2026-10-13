@@ -509,7 +509,7 @@ impl Phase {
         if crate::curate::lagging(raw, k)? {
             return Ok(Step::Idle);
         }
-        cleared(k, crate::embed::EMBEDDER, &reading)?;
+        cleared(k, crate::embed::EMBEDDER, &reading, &rules)?;
         if self.masked_under.as_deref() != Some(rules.version()) {
             unmask(k, crate::embed::EMBEDDER, rules.version())?;
             self.masked_under = Some(rules.version().to_owned());
@@ -1235,9 +1235,16 @@ fn usd(before: i64, tokens: i64) -> f64 {
 }
 
 /// The `excluded` markers hold only under the list they were made under: a new list clears them,
-/// so undoing an exclusion queues its documents again (D13).
-fn cleared(k: &Connection, embedder: &str, reading: &Reading) -> Result<()> {
-    let list = serde_json::to_string(&*reading.exclusions)?;
+/// so undoing an exclusion queues its documents again (D13). And under the rules: an imported
+/// document's project is read as they read it, so a rule taken away can free one (CodeRabbit on
+/// #489).
+fn cleared(
+    k: &Connection,
+    embedder: &str,
+    reading: &Reading,
+    rules: &crate::redact::Rules,
+) -> Result<()> {
+    let list = serde_json::to_string(&(&*reading.exclusions, rules.version()))?;
     let made: Option<Option<String>> = k
         .query_row(
             "SELECT exclusions FROM vec_generation WHERE embedder = ?1",
@@ -1819,7 +1826,13 @@ fn passed_over(
                 || crate::curate::quotes_excluded(raw, k, &reading.excluded, &r.doc.key)?;
             Ok(excluded.then_some("excluded"))
         }
-        "k" | "p" => Ok(import_excluded(&r.doc.repo, list).then_some("excluded")),
+        // Its project as stored and as the rules now read it, as a hook reads a label: one never
+        // recorded under a label a rule masks is listed so (Codex on #489).
+        "k" | "p" => {
+            let now = crate::capture::label_with(&r.doc.repo, rules);
+            let excluded = import_excluded(&r.doc.repo, list) || import_excluded(&now, list);
+            Ok(excluded.then_some("excluded"))
+        }
         "o" | "s" if r.text.trim().is_empty() => Ok(Some("empty")),
         "o" | "s" => {
             // A card or summary a removal hides (K4, T7) is sent nowhere, as a removed record is
@@ -2250,7 +2263,7 @@ pub(crate) mod fixture {
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
         let rules = crate::redact::Rules::load(s.home.path()).unwrap();
         let id = crate::embed::EMBEDDER;
-        cleared(&k, id, &reading).unwrap();
+        cleared(&k, id, &reading, &rules).unwrap();
         while let Some(batch) = pending(&s.raw, &k, id, &reading, &rules, false).unwrap() {
             let vectors: Vec<_> = batch
                 .texts
@@ -3866,6 +3879,75 @@ mod tests {
             .map(|(kind, ..)| kind)
             .collect();
         assert_eq!(mapped, ["k", "r"]);
+    }
+
+    /// Codex on #489: a claude-mem project imported before a rule that masks its name sends none
+    /// of its documents once its repository is never recorded under the label the rule makes of
+    /// it: the document's project is read as the rules now read it, as a hook reads a label.
+    #[test]
+    fn an_import_from_before_a_rule_is_not_sent_once_its_repository_is_never_recorded() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "acme-482915", 1_000, "Notes", "Project notes.");
+        let path = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(&path, format!("{text}{rule}")).unwrap();
+        let settings = crate::capture::Settings::load(s.home.path()).unwrap();
+        let now = crate::capture::exclusion_label("repo", "github.com/o/acme-482915", &settings);
+        s.raw.exclude_capture(("repo", &now), false).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("excluded"));
+        assert_eq!(stub.requests(), 0);
+    }
+
+    /// CodeRabbit on #489: an imported document excluded under a rule that masks its project's
+    /// name is judged again once the rule is taken away, though the list of exclusions reads the
+    /// same: it gets its vector.
+    #[test]
+    fn an_import_excluded_under_a_rule_is_judged_again_when_the_rule_goes() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "acme-482915", 1_000, "Notes", "Project notes.");
+        let path = s.home.path().join("config.toml");
+        let plain = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(&path, format!("{plain}{rule}")).unwrap();
+        let settings = crate::capture::Settings::load(s.home.path()).unwrap();
+        let now = crate::capture::exclusion_label("repo", "github.com/o/acme-482915", &settings);
+        s.raw.exclude_capture(("repo", &now), false).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("excluded"));
+        std::fs::write(&path, &plain).unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid), None);
+    }
+
+    /// #496 (owner, 2026-10-13): with the repository stored as given, a rule that needs more than
+    /// a project's name (`o/acme-…`) keeps the project's imported documents back too: the stored
+    /// key and the import's project are compared as they are, by D13's name.
+    #[test]
+    fn an_import_is_not_sent_under_a_rule_that_reads_a_repository_across_its_owner() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let uid = s.imported("o1", "acme-482915", 1_000, "Notes", "Project notes.");
+        let path = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'o/acme-[0-9]{6}' }]\n";
+        std::fs::write(&path, format!("{text}{rule}")).unwrap();
+        s.raw
+            .exclude_capture(("repo", "github.com/o/acme-482915"), false)
+            .unwrap();
+        s.run();
+        embed_all(&s);
+        assert_eq!(skipped(&s, &uid).as_deref(), Some("excluded"));
+        assert_eq!(stub.requests(), 0);
     }
 
     /// Steps 4 and 5 (D13): an `excluded` mark goes whenever its document is written again, its

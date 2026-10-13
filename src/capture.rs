@@ -89,7 +89,8 @@ pub struct Captured {
 /// a Codex rollout, or by the transcript parser, and never by an agent.
 pub(crate) const AGENT_SENT: &str = "oboete_agent_sent";
 
-/// The events one hook call of a ported agent records: none for events that carry nothing.
+/// The events one hook call of a ported agent records: none for events that carry nothing, nor
+/// in a checkout whose `.oboete.toml` stops recording (slice 4a, `checkout_records`).
 pub fn events(
     agent: &str,
     event: &str,
@@ -97,10 +98,205 @@ pub fn events(
     ts: i64,
     settings: &Settings,
 ) -> Vec<Captured> {
+    events_read(agent, event, payload, ts, settings)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// `events`, each with its repository and folder as the hook read them, before the gate: the hook
+/// compares them with what is never recorded, stored as given (slice 4a; owner, 2026-10-13). They
+/// are never stored.
+pub fn events_read(
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    ts: i64,
+    settings: &Settings,
+) -> Vec<(Captured, (String, Option<String>))> {
     shaped(event, payload, settings)
-        .map(|(kind, body)| capture(agent, kind, body, payload, ts, settings))
+        .and_then(|(kind, body)| {
+            let place = place(payload);
+            let read = (place.repo.clone(), place.cwd.clone());
+            checkout_records(place.git.top.as_deref()).then(|| {
+                (
+                    labelled(agent, kind, body, payload, ts, place, settings),
+                    read,
+                )
+            })
+        })
         .into_iter()
         .collect()
+}
+
+/// Slice 4a (spec 6.1, A28): whether the checkout at `top` lets its events be recorded, as its
+/// `.oboete.toml` says (`repo_capture`); one that cannot be read stops them too, said on stderr.
+fn checkout_records(top: Option<&Path>) -> bool {
+    repo_capture(top).unwrap_or_else(|e| {
+        eprintln!("oboete: {e:#}: nothing in this checkout is recorded until it can be read");
+        false
+    })
+}
+
+/// The most of a checkout's `.oboete.toml` that is read: it holds one key (Claude; overrulable).
+const CHECKOUT_TOML_LIMIT: u64 = 64 * 1024;
+
+/// The `capture` key of `.oboete.toml` at the checkout's `top`, which may only restrict: true
+/// with no such file or key. An error for a file that cannot be read, is not TOML, or whose
+/// `capture` is not true or false; never its text, which may hold anything.
+pub fn repo_capture(top: Option<&Path>) -> anyhow::Result<bool> {
+    use std::io::Read;
+    let Some(path) = top.map(|t| t.join(".oboete.toml")) else {
+        return Ok(true);
+    };
+    // The repository's file, read only as a regular file of at most `CHECKOUT_TOML_LIMIT` bytes:
+    // one that names a device or a pipe, or a large one, stops recording rather than holding the
+    // hook (push security review of #489). Opened without waiting on a pipe, and the handle it
+    // opened is what is checked: a name swapped meanwhile is not read (Codex on #489).
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => anyhow::bail!("{} cannot be read ({})", path.display(), e.kind()),
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    let mut text = String::new();
+    match file.take(CHECKOUT_TOML_LIMIT + 1).read_to_string(&mut text) {
+        Ok(n) if n as u64 > CHECKOUT_TOML_LIMIT => {
+            anyhow::bail!("{} is over {CHECKOUT_TOML_LIMIT} bytes", path.display())
+        }
+        Ok(_) => {}
+        Err(e) => anyhow::bail!("{} cannot be read ({})", path.display(), e.kind()),
+    }
+    let Ok(table) = text.parse::<toml::Table>() else {
+        anyhow::bail!("{} is not valid TOML", path.display());
+    };
+    match table.get("capture") {
+        None => Ok(true),
+        Some(toml::Value::Boolean(on)) => Ok(*on),
+        Some(_) => anyhow::bail!("{}: capture is neither true nor false", path.display()),
+    }
+}
+
+/// Slice 4a: `list` as an event labelled now holds its values: each repository through the gate
+/// as a `repo` label, each folder as a `cwd` label, so a rule added after an exclusion masks both
+/// alike.
+pub fn never_recorded(
+    list: &crate::raw::CaptureExclusions,
+    settings: &Settings,
+) -> crate::raw::CaptureExclusions {
+    let mut gate = Gate::new(settings);
+    let cap = gate.cap;
+    let mut label = |field: &str, s: &str| gate.text(field, &without_blocks(s, false), cap);
+    crate::raw::CaptureExclusions {
+        repos: list.repos.iter().map(|r| label("repo", r)).collect(),
+        folders: list.folders.iter().map(|f| label("cwd", f)).collect(),
+    }
+}
+
+/// Slice 4a: a repository or folder as `oboete capture exclude` stores it, through the same gate
+/// as an event's `repo` or `cwd` label (`field`).
+pub fn exclusion_label(field: &str, value: &str, settings: &Settings) -> String {
+    let mut gate = Gate::new(settings);
+    let cap = gate.cap;
+    gate.text(field, &without_blocks(value, false), cap)
+}
+
+/// Slice 4a: whether two exclusions of `field` name one place: a folder in any spelling of letter
+/// case where the platform ignores it, as `covers` reads one; a repository exactly.
+fn same_place(field: &str, a: &str, b: &str) -> bool {
+    if field == "cwd" {
+        crate::raw::folded(a) == crate::raw::folded(b)
+    } else {
+        a == b
+    }
+}
+
+/// Slice 4a: the entry of `stored` that names `given`'s place (`same_place`), so adding another
+/// spelling of a folder keeps the one entry an undo takes back (Codex on #489).
+pub fn stored_entry<'a>(
+    field: &str,
+    given: &str,
+    stored: &'a std::collections::BTreeSet<String>,
+) -> Option<&'a String> {
+    stored.iter().find(|s| same_place(field, s, given))
+}
+
+/// Slice 4a: the entry of `stored` an undo of `given` takes back: the one stored as given
+/// (`stored_entry`), else the one entry that reads as `given` under the rules now (one stored
+/// masked: by the page, or before exclusions were stored as given), else `given`, which takes
+/// nothing back. An error naming them when several read so (Codex on #489).
+pub fn undone(
+    field: &str,
+    given: &str,
+    stored: &std::collections::BTreeSet<String>,
+    settings: &Settings,
+) -> anyhow::Result<String> {
+    if let Some(entry) = stored_entry(field, given, stored) {
+        return Ok(entry.clone());
+    }
+    let now = exclusion_label(field, given, settings);
+    let read: Vec<&String> = stored
+        .iter()
+        .filter(|s| same_place(field, &exclusion_label(field, s, settings), &now))
+        .collect();
+    match read.as_slice() {
+        [] => Ok(given.to_owned()),
+        [one] => Ok((*one).clone()),
+        many => anyhow::bail!(
+            "{given} is how {} excluded entries read now ({}): undo one by the name it was excluded under",
+            many.len(),
+            many.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// `exclusion_label` under `rules` alone, for a reader that loads no capture settings (the
+/// embedding phase, search): the same scan, with no ledger kept.
+pub fn label_with(value: &str, rules: &redact::Rules) -> String {
+    let cap = field_cap(std::env::var(FIELD_CAP_ENV).ok().as_deref());
+    redact::scan_capped(&without_blocks(value, false), cap, rules).0
+}
+
+/// Slice 4a: why nothing that happens in `cwd` is recorded: its checkout's `.oboete.toml`, or an
+/// exclusion (`list`) of its repository or of a folder around it, as its events would be
+/// labelled now; None when it is recorded.
+pub fn not_recorded_why(
+    cwd: &str,
+    list: &crate::raw::CaptureExclusions,
+    settings: &Settings,
+) -> Option<String> {
+    let place = place(&json!({ "cwd": cwd }));
+    match repo_capture(place.git.top.as_deref()) {
+        Ok(true) => {}
+        Ok(false) => return Some("its checkout's .oboete.toml says capture = false".into()),
+        Err(e) => return Some(format!("{e:#}")),
+    }
+    let folder = place.cwd.clone().unwrap_or_else(|| folder_path(cwd));
+    let (repo, cwd) = (
+        exclusion_label("repo", &place.repo, settings),
+        exclusion_label("cwd", &folder, settings),
+    );
+    // As the hook asks it: the place as read against the list as given, the labels against the
+    // list as given and as the rules now read it (security review of #489).
+    let never = never_recorded(list, settings);
+    if list.refuses(Some(&never), (Some(&repo), None), Some((&place.repo, None))) {
+        return Some(format!(
+            "its repository {repo} is excluded (oboete capture exclude)"
+        ));
+    }
+    (list.covers(None, Some(&folder))
+        || list.covers(None, Some(&cwd))
+        || never.covers(None, Some(&cwd)))
+    .then(|| format!("{cwd} is in an excluded folder (oboete capture exclude --folder)"))
 }
 
 /// The events an imported hook payload records (milestone 4 D6): `events`' kinds and bodies, under
@@ -247,13 +443,38 @@ fn capture(
     ts: i64,
     settings: &Settings,
 ) -> Captured {
-    let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
-    let place = Place {
-        repo: repo::key(Path::new(cwd)),
-        cwd: Some(cwd.to_owned()),
-        git: git(Path::new(cwd)),
+    labelled(agent, kind, body, payload, ts, place(payload), settings)
+}
+
+/// The checkout `payload`'s `cwd` names.
+/// Slice 4a: `path` as a folder exclusion and an event's `cwd` both hold it: absolute against the
+/// current directory, with `.` and `..` taken by name and no link followed, so the same folder
+/// reads alike however it was written (Codex on #489).
+pub fn folder_path(path: &str) -> String {
+    let Ok(absolute) = std::path::absolute(path) else {
+        return path.to_owned();
     };
-    labelled(agent, kind, body, payload, ts, place, settings)
+    let mut named = std::path::PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                named.pop();
+            }
+            part => named.push(part),
+        }
+    }
+    named.to_string_lossy().into_owned()
+}
+
+fn place(payload: &Value) -> Place {
+    // A relative or missing `cwd` is the directory the agent runs the hook in.
+    let cwd = folder_path(str_field(payload, &["cwd"]).unwrap_or("."));
+    Place {
+        repo: repo::key(Path::new(&cwd)),
+        git: git(Path::new(&cwd)),
+        cwd: Some(cwd),
+    }
 }
 
 /// Where an event was recorded, as its labels name it.
@@ -640,6 +861,8 @@ pub struct Git {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub gitdir: Option<String>,
+    /// The checkout's top: the directory holding its `.git` (a linked worktree's own).
+    pub top: Option<std::path::PathBuf>,
 }
 
 /// Branch, HEAD SHA and the checkout's own git directory, read from files (plan D9): `.git` may
@@ -653,10 +876,16 @@ pub fn git(cwd: &Path) -> Git {
     else {
         return Git::default();
     };
+    let top = dot_git.parent().map(Path::to_path_buf);
     let gitdir = if dot_git.is_file() {
         match repo::gitdir(&dot_git) {
             Some(g) => g.canonicalize().unwrap_or(g),
-            None => return Git::default(),
+            None => {
+                return Git {
+                    top,
+                    ..Git::default()
+                };
+            }
         }
     } else {
         dot_git
@@ -675,6 +904,7 @@ pub fn git(cwd: &Path) -> Git {
         branch,
         head: sha,
         gitdir: Some(gitdir.to_string_lossy().into_owned()),
+        top,
     }
 }
 
@@ -695,6 +925,212 @@ fn resolve(common: &Path, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Slice 4a (A28): a checkout's `.oboete.toml` may only stop recording: its `capture` key alone
+    /// is read, and a file that cannot be read, is not TOML or holds another `capture` stops it
+    /// too, its text never in the error.
+    #[test]
+    fn a_checkouts_oboete_toml_may_only_stop_recording() {
+        let top = tempfile::tempdir().unwrap();
+        let file = top.path().join(".oboete.toml");
+        let read = |text: Option<&str>| {
+            let _ = std::fs::remove_file(&file);
+            if let Some(text) = text {
+                std::fs::write(&file, text).unwrap();
+            }
+            repo_capture(Some(top.path()))
+        };
+        assert!(repo_capture(None).unwrap());
+        for (text, on) in [
+            (None, true),
+            (Some("capture = false\n"), false),
+            (Some("capture = true\n"), true),
+            (Some("[sync]\nother = 1\n"), true),
+        ] {
+            assert_eq!(read(text).unwrap(), on, "{text:?}");
+        }
+        for text in ["capture = \"no-4a\"\n", "capture = [\n"] {
+            let e = read(Some(text)).unwrap_err().to_string();
+            assert!(e.contains(".oboete.toml") && !e.contains("no-4a"), "{e}");
+        }
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(repo_capture(Some(top.path())).is_err());
+    }
+
+    /// Security review of #489: why a directory is not recorded is asked as the hook asks it, so a
+    /// folder stored as given covers a directory below it under a rule that takes its separator.
+    #[test]
+    fn why_a_directory_is_not_recorded_reads_its_folder_as_the_hook_does() {
+        let top = tempfile::tempdir().unwrap();
+        let folder = top.path().join("private");
+        let below = folder.join("sub");
+        std::fs::create_dir_all(&below).unwrap();
+        let mut list = crate::raw::CaptureExclusions::default();
+        list.folders.insert(folder_path(&folder.to_string_lossy()));
+        let settings = Settings {
+            rules: redact::Rules::new(
+                &crate::config::parse_capture(Some(
+                    "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+                ))
+                .unwrap()
+                .redaction,
+            )
+            .unwrap(),
+            ..Settings::default()
+        };
+        let why = not_recorded_why(&below.to_string_lossy(), &list, &settings);
+        assert!(why.is_some_and(|w| w.contains("excluded folder")));
+    }
+
+    /// Codex on #489: an undo finds a folder stored in another spelling of letter case where the
+    /// platform ignores it, as `covers` reads one, and only there; an add finds it the same way.
+    #[test]
+    fn an_undo_finds_a_folder_in_another_spelling_only_where_case_is_ignored() {
+        let (stored, given) = if cfg!(windows) {
+            (r"C:\Work\Private", r"c:\work\private")
+        } else {
+            ("/Users/x/Work/Private", "/users/x/work/private")
+        };
+        let list = std::collections::BTreeSet::from([stored.to_owned()]);
+        let found = undone("cwd", given, &list, &Settings::default()).unwrap();
+        let want = if cfg!(any(windows, target_os = "macos")) {
+            stored
+        } else {
+            given
+        };
+        assert_eq!(found, want);
+        // An exclusion added in another spelling keeps that one entry, as the CLI's add takes it.
+        let kept = stored_entry("cwd", given, &list).map(String::as_str);
+        assert_eq!(kept, (want == stored).then_some(stored));
+        assert_eq!(stored_entry("repo", given, &list), None);
+    }
+
+    /// Push security review of #489: a checkout's `.oboete.toml` past the limit, or one that names
+    /// a device (a link the repository holds), stops recording at once rather than holding the
+    /// hook while it reads.
+    #[test]
+    fn a_checkout_toml_that_is_no_small_file_stops_recording() {
+        let top = tempfile::tempdir().unwrap();
+        let file = top.path().join(".oboete.toml");
+        let big = format!(
+            "capture = true\n#{}\n",
+            "x".repeat(CHECKOUT_TOML_LIMIT as usize)
+        );
+        std::fs::write(&file, big).unwrap();
+        let e = repo_capture(Some(top.path())).unwrap_err().to_string();
+        assert!(e.contains("over"), "{e}");
+        std::fs::remove_file(&file).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/dev/zero", &file).unwrap();
+            let e = repo_capture(Some(top.path())).unwrap_err().to_string();
+            assert!(e.contains("not a regular file"), "{e}");
+            // A pipe no one writes to is opened without waiting, and refused (Codex on #489).
+            std::fs::remove_file(&file).unwrap();
+            let made = std::process::Command::new("mkfifo").arg(&file).status();
+            assert!(made.unwrap().success());
+            let e = repo_capture(Some(top.path())).unwrap_err().to_string();
+            assert!(e.contains("not a regular file"), "{e}");
+        }
+    }
+
+    /// Slice 4a: a checkout whose `.oboete.toml` stops recording, or cannot be read, gets no event,
+    /// whatever its kind; `capture = true` records as before.
+    #[test]
+    fn a_checkout_that_stops_recording_gets_no_event() {
+        let top = tempfile::tempdir().unwrap();
+        std::fs::create_dir(top.path().join(".git")).unwrap();
+        let cwd = top.path().join("src");
+        std::fs::create_dir(&cwd).unwrap();
+        let payload = json!({"session_id": "s", "cwd": cwd, "prompt": "canary-4a"});
+        let n = || {
+            events(
+                "claude",
+                "UserPromptSubmit",
+                &payload,
+                7,
+                &Settings::default(),
+            )
+            .len()
+        };
+        assert_eq!(n(), 1);
+        for (text, want) in [
+            ("capture = false\n", 0),
+            ("capture =\n", 0),
+            ("capture = true\n", 1),
+        ] {
+            std::fs::write(top.path().join(".oboete.toml"), text).unwrap();
+            assert_eq!(n(), want, "{text}");
+        }
+    }
+
+    /// Codex on #489: a folder reads alike however it was written: `.` and `..` by name, a
+    /// trailing separator dropped, a relative path against the current directory.
+    #[test]
+    fn a_folder_reads_alike_however_it_was_written() {
+        let here = std::env::current_dir().unwrap();
+        let private = here
+            .join("x")
+            .join("private")
+            .to_string_lossy()
+            .into_owned();
+        let sep = std::path::MAIN_SEPARATOR;
+        for written in [
+            here.join("x").join("open").join("..").join("private"),
+            here.join("x").join(".").join("private"),
+        ] {
+            assert_eq!(folder_path(&written.to_string_lossy()), private);
+        }
+        assert_eq!(folder_path(&format!("{private}{sep}")), private);
+        assert_eq!(folder_path("x/open/../private"), private);
+    }
+
+    /// Slice 4a: why a directory is not recorded, as doctor and the work state say it: its
+    /// checkout's `.oboete.toml`, its repository excluded, or a folder around it; nothing when it is
+    /// recorded.
+    #[test]
+    fn why_a_directory_is_not_recorded() {
+        let top = tempfile::tempdir().unwrap();
+        std::fs::create_dir(top.path().join(".git")).unwrap();
+        let dir = top.path().join("deep");
+        std::fs::create_dir(&dir).unwrap();
+        let (dir, settings) = (dir.to_string_lossy().into_owned(), Settings::default());
+        let mut list = crate::raw::CaptureExclusions::default();
+        assert_eq!(not_recorded_why(&dir, &list, &settings), None);
+        std::fs::write(top.path().join(".oboete.toml"), "capture = false\n").unwrap();
+        let why = not_recorded_why(&dir, &list, &settings).unwrap();
+        assert!(why.contains("capture = false"), "{why}");
+        std::fs::remove_file(top.path().join(".oboete.toml")).unwrap();
+        list.folders
+            .insert(top.path().to_string_lossy().into_owned());
+        let why = not_recorded_why(&dir, &list, &settings).unwrap();
+        assert!(why.contains("excluded folder"), "{why}");
+        list.folders.clear();
+        list.repos.insert(repo::key(top.path()));
+        let why = not_recorded_why(&dir, &list, &settings).unwrap();
+        assert!(why.contains("its repository"), "{why}");
+    }
+
+    /// Slice 4a: an exclusion's values as events labelled now hold them, through today's rules: a
+    /// rule added after a folder was excluded masks it as it masks the cwd of an event in it.
+    #[test]
+    fn exclusions_are_labelled_as_events_are_now() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = "/w/acme-482915/private";
+        let mut list = crate::raw::CaptureExclusions::default();
+        list.folders.insert(folder.into());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = Settings::load(home.path()).unwrap();
+        let cwd = exclusion_label("cwd", &format!("{folder}/sub"), &settings);
+        assert!(!cwd.contains("acme-482915"));
+        assert!(!list.covers(None, Some(&cwd)));
+        assert!(never_recorded(&list, &settings).covers(None, Some(&cwd)));
+    }
 
     fn one(event: &str, payload: Value) -> Event {
         let mut v = events("claude", event, &payload, 7, &Settings::default());

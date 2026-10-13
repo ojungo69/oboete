@@ -123,13 +123,22 @@ thread_local! {
 /// read, or that raw refuses, goes to `bad/`; a busy or failing store stops it, the files kept.
 /// How many were written back, also beside the error that stopped it (Greptile and Codex on
 /// #440).
-pub fn write_back(home: &Path, raw: &mut crate::raw::Raw) -> (usize, Result<()>) {
+pub fn write_back(
+    home: &Path,
+    raw: &mut crate::raw::Raw,
+    settings: &crate::capture::Settings,
+) -> (usize, Result<()>) {
     let mut written = 0;
-    let back = write_back_counting(home, raw, &mut written);
+    let back = write_back_counting(home, raw, &mut written, settings);
     (written, back)
 }
 
-fn write_back_counting(home: &Path, raw: &mut crate::raw::Raw, written: &mut usize) -> Result<()> {
+fn write_back_counting(
+    home: &Path,
+    raw: &mut crate::raw::Raw,
+    written: &mut usize,
+    settings: &crate::capture::Settings,
+) -> Result<()> {
     let dir = home.join(DIR);
     if !dir.is_dir() {
         return Ok(());
@@ -173,7 +182,7 @@ fn write_back_counting(home: &Path, raw: &mut crate::raw::Raw, written: &mut usi
         // payload in one millisecond hold the same bytes, so its hash names no one keep and is not
         // kept (Greptile, Codex, CodeRabbit on #460); left behind, it is written again, as before.
         let hash = kept.id.is_some().then(|| crate::forget::hash(&bytes));
-        match raw.append_kept(&kept.events, &kept.ruleset, hash.as_deref()) {
+        match raw.append_kept(&kept.events, &kept.ruleset, hash.as_deref(), settings) {
             Ok(appended) => {
                 std::fs::remove_file(&path)?;
                 *written += usize::from(appended);
@@ -273,7 +282,7 @@ mod tests {
         keep(h, &[prompt("second", 2)], "r").unwrap();
         let mut raw = crate::raw::open(h).unwrap();
         FAILS.set(Some((1, rusqlite::ffi::SQLITE_FULL)));
-        let (n, back) = write_back(h, &mut raw);
+        let (n, back) = write_back(h, &mut raw, &Default::default());
         assert_eq!(n, 1);
         assert!(back.is_err());
         assert_eq!(counts(h).unwrap(), (1, 0));
@@ -428,7 +437,7 @@ mod tests {
             keep(h, &[prompt(&format!("kept {n}"), 1_000 + n)], "r").unwrap();
             let file = files(&h.join(DIR)).unwrap().pop().unwrap();
             std::fs::write(&file, format!("damaged {n}")).unwrap();
-            assert_eq!(written(write_back(h, &mut raw)), 0);
+            assert_eq!(written(write_back(h, &mut raw, &Default::default())), 0);
         }
         let bad: Vec<String> = files(&h.join(DIR).join("bad"))
             .unwrap()
@@ -455,10 +464,10 @@ mod tests {
             .unwrap();
         held.lock().unwrap();
         let mut raw = crate::raw::open(h).unwrap();
-        assert!(write_back(h, &mut raw).1.is_err());
+        assert!(write_back(h, &mut raw, &Default::default()).1.is_err());
         assert_eq!(counts(h).unwrap(), (1, 0));
         drop(held);
-        assert_eq!(written(write_back(h, &mut raw)), 0);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 0);
         assert_eq!(counts(h).unwrap(), (0, 1));
     }
 
@@ -486,7 +495,7 @@ mod tests {
             assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
         let mut raw = crate::raw::open(h).unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 1);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 1);
         assert_eq!(counts(h).unwrap(), (0, 0));
         let later = prompt("third", 2_000);
         raw.append_with_ledger(&later.event, &later.ledger, &ruleset)
@@ -511,7 +520,7 @@ mod tests {
         let file = files(&h.join(DIR)).unwrap().pop().unwrap();
         let copy = std::fs::read(&file).unwrap();
         let mut raw = crate::raw::open(h).unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 1);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 1);
         // Forgotten between the commit and the file coming back.
         let target = crate::forget::Target::Record {
             device: raw.device().into(),
@@ -520,7 +529,7 @@ mod tests {
         crate::forget::start(h, &crate::forget::preview(h, target).unwrap()).unwrap();
         std::fs::write(&file, &copy).unwrap();
         keep(h, &[prompt("another", 2)], "r").unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 1);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 1);
         assert_eq!(counts(h).unwrap(), (0, 0));
         let bodies: Vec<String> = events(&raw).into_iter().map(|e| e.body).collect();
         assert_eq!(bodies.len(), 1, "{bodies:?}");
@@ -528,12 +537,12 @@ mod tests {
         // The names start again once the directory is empty: the same name, other events.
         keep(h, &[prompt("third", 3)], "r").unwrap();
         assert_eq!(files(&h.join(DIR)).unwrap().pop().unwrap(), file);
-        assert_eq!(written(write_back(h, &mut raw)), 1);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 1);
         assert_eq!(events(&raw).len(), 2);
         // Two calls in one millisecond with one payload keep the same events: both are written.
         keep(h, &[prompt("twice", 4)], "r").unwrap();
         keep(h, &[prompt("twice", 4)], "r").unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 2);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 2);
         assert_eq!(events(&raw).len(), 4);
     }
 
@@ -558,7 +567,7 @@ mod tests {
             std::fs::read(&kept[1]).unwrap()
         );
         let mut raw = crate::raw::open(h).unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 2);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 2);
         assert_eq!(events(&raw).len(), 2);
         assert_eq!(counts(h).unwrap(), (0, 0));
     }
@@ -578,10 +587,10 @@ mod tests {
             .open(h.join(DIR).join("write-back.lock"))
             .unwrap();
         held.lock().unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 0);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 0);
         assert_eq!(counts(h).unwrap(), (1, 0));
         drop(held);
-        assert_eq!(written(write_back(h, &mut raw)), 1);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 1);
         assert_eq!(counts(h).unwrap(), (0, 0));
     }
 
@@ -595,7 +604,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("1-1.json"), "not json").unwrap();
         let mut raw = crate::raw::open(h).unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 0);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 0);
         assert_eq!(counts(h).unwrap(), (0, 1));
         assert!(events(&raw).is_empty());
         // A store that fails the write keeps the file for a later call: it is no bad file.
@@ -605,10 +614,10 @@ mod tests {
             "CREATE TRIGGER refuse BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'test'); END;",
         )
         .unwrap();
-        assert!(write_back(h, &mut raw).1.is_err());
+        assert!(write_back(h, &mut raw, &Default::default()).1.is_err());
         assert_eq!(counts(h).unwrap(), (1, 1));
         conn.execute_batch("DROP TRIGGER refuse;").unwrap();
-        assert_eq!(written(write_back(h, &mut raw)), 1);
+        assert_eq!(written(write_back(h, &mut raw, &Default::default())), 1);
         // A file that would take it past the bound is not kept either.
         std::fs::File::create(dir.join("2-1.json"))
             .unwrap()

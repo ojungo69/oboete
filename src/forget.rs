@@ -7008,7 +7008,9 @@ mod tests {
             "r",
         )
         .unwrap();
-        crate::unwritten::write_back(h, &mut raw).1.unwrap();
+        crate::unwritten::write_back(h, &mut raw, &Default::default())
+            .1
+            .unwrap();
         assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
         // A transcript import of the transcript-only session's turn from before it.
         let mut turn = raw::test_event(r#"{"prompt":"turn"}"#);
@@ -7658,7 +7660,9 @@ mod tests {
             "r",
         )
         .unwrap();
-        crate::unwritten::write_back(h, &mut raw).1.unwrap();
+        crate::unwritten::write_back(h, &mut raw, &Default::default())
+            .1
+            .unwrap();
         // In the range, from before it: not recorded, nor imported.
         assert_eq!(
             raw.append_with_ledger(&event(None, 9_500), &[], "")
@@ -9127,7 +9131,12 @@ mod tests {
             "source": format!("ci {MASKED}")});
         let state = s
             .raw
-            .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
             .unwrap();
         s.raw
             .append_imports(vec![raw::ImportDoc {
@@ -9226,6 +9235,7 @@ mod tests {
                 "github.com/o/r",
                 "deploys",
                 &fields(format!("Rotate {MASKED}.")),
+                None,
             )
             .unwrap();
         std::fs::create_dir_all(home.join("state")).unwrap();
@@ -9249,6 +9259,7 @@ mod tests {
                 "github.com/o/r",
                 "deploys",
                 &fields(format!("Again {MASKED}.")),
+                None,
             )
             .unwrap();
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
@@ -9284,7 +9295,12 @@ mod tests {
             let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
             let seq = s
                 .raw
-                .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+                .work_state(
+                    "github.com/o/r",
+                    "deploys",
+                    fields.as_object().unwrap(),
+                    None,
+                )
                 .unwrap();
             let crate::search::b::fixture::Store { home: _kept, raw } = s;
             drop(raw);
@@ -9430,7 +9446,12 @@ mod tests {
         let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
         let state = s
             .raw
-            .work_state("github.com/o/r", "deploys", fields.as_object().unwrap())
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
             .unwrap();
         s.run();
         crate::backup::export(&home).unwrap();
@@ -9566,7 +9587,7 @@ mod tests {
         let fields = json!({ "task": format!("Key {hex}.") });
         let state = s
             .raw
-            .work_state("github.com/o/r", "keys", fields.as_object().unwrap())
+            .work_state("github.com/o/r", "keys", fields.as_object().unwrap(), None)
             .unwrap();
         s.run();
         let home = s.home.path().to_owned();

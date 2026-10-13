@@ -54,8 +54,10 @@ split what claude-mem kept under one name.
 I6. **Exclusion and forget.** Unchanged and by the same names: the embedding phase passes over an
 imported document of an excluded repository's project (milestone 4 D13), and work state goes to no
 provider (L8). Milestone 5's forget of a repository is to reach its imported documents and work
-state by the same rule, and its capture exclusion is to keep an excluded repository's imported
-lists out by that rule, as it refuses the repository's writes (docs/work-state.md L8).
+state by the same rule. Its capture exclusion keeps an excluded repository's imported lists out
+by that rule, as it refuses the repository's writes (docs/work-state.md L8): the rows are counted
+(`never_recorded`), and since claude-mem still holds them, an import after the undo brings them
+(slice 4a, Codex on #489).
 
 I7. **Size.** The owner's database of 2026-09-24 (178,370 documents) made raw.db 323 MB and
 knowledge.db 864 MB in an evaluation home (docs/milestone-4.md); their vectors add about 930 MB,

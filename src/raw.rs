@@ -1082,8 +1082,120 @@ pub(crate) fn work_state_in(
     Ok(writes.into_iter().map(|w| w.3).collect())
 }
 
-/// The same current list for an existing read-only connection: no indexes or schema writes.
+/// The same current list for an existing read-only connection: no indexes or schema writes. What
+/// is never recorded is never sent either (slice 4a, spec 6.1).
 pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
+    let (mut sent, never) = exclusion_sets(conn)?;
+    sent.extend(never.repos);
+    Ok(sent.into_iter().collect())
+}
+
+/// Slice 4a (spec 6.1): what is never recorded now, on an existing connection.
+pub(crate) fn capture_exclusions_in(conn: &Connection) -> Result<CaptureExclusions> {
+    Ok(exclusion_sets(conn)?.1)
+}
+
+/// Slice 4a (spec 6.1): what is never recorded, as every device's exclusion ops of level `capture`
+/// leave it: repositories by their label (`repo`), this device's folders by their `cwd` label.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct CaptureExclusions {
+    pub repos: std::collections::BTreeSet<String>,
+    pub folders: std::collections::BTreeSet<String>,
+}
+
+impl CaptureExclusions {
+    /// Whether an event labelled `repo` and `cwd` is never recorded: its repository listed, or its
+    /// working directory in a listed folder, component by component.
+    pub fn covers(&self, repo: Option<&str>, cwd: Option<&str>) -> bool {
+        repo.is_some_and(|r| self.repos.contains(r))
+            || cwd.is_some_and(|c| self.folder_around(c).is_some())
+    }
+
+    /// The listed folder that `cwd` lies in, component by component, `cwd` itself included.
+    pub fn folder_around(&self, cwd: &str) -> Option<&String> {
+        let c = folded(cwd);
+        self.folders
+            .iter()
+            .find(|f| std::path::Path::new(&*c).starts_with(&*folded(f)))
+    }
+
+    /// Slice 4a (owner, 2026-10-13): whether an event is never recorded, as every writer asks it:
+    /// its repository and folder as the writer read them before the gate (`read`, where it holds
+    /// them) against the list as given, and its labels against the list as given and as the rules
+    /// now read it (`now`, `capture::never_recorded`).
+    pub fn refuses(
+        &self,
+        now: Option<&CaptureExclusions>,
+        labels: (Option<&str>, Option<&str>),
+        read: Option<(&str, Option<&str>)>,
+    ) -> bool {
+        read.is_some_and(|(repo, cwd)| self.covers(Some(repo), cwd))
+            || self.covers(labels.0, labels.1)
+            || now.is_some_and(|now| now.covers(labels.0, labels.1))
+    }
+
+    /// Whether a work state op of `repo` is never recorded: its repository listed, or, for a list
+    /// imported from claude-mem (`imported`), the repository of its project's name (milestone 4
+    /// D13, docs/claude-mem-import.md I6). A list written here is matched by its own key alone, as
+    /// `work_state_in` reads it, whatever shape that key has (Codex on #489).
+    pub fn covers_work_state(&self, repo: &str, imported: bool) -> bool {
+        if !imported {
+            return self.repos.contains(repo);
+        }
+        let repos: Vec<String> = self.repos.iter().cloned().collect();
+        crate::embed_phase::import_excluded(repo, &repos)
+    }
+}
+
+/// Slice 4a: whether `label`, which a mask hides part of, may be one of `names`: each mask read as
+/// any text. A label masked under a rule removed since cannot be read again, so a repository never
+/// recorded holds back from sending every label it may be (Codex's security review of #489).
+fn may_name<'a>(label: &str, mut names: impl Iterator<Item = &'a String>) -> bool {
+    if !label.contains(crate::redact::MASK) {
+        return false;
+    }
+    let parts: Vec<String> = label
+        .split(crate::redact::MASK)
+        .map(regex::escape)
+        .collect();
+    let Ok(masked) = regex::Regex::new(&format!("^{}$", parts.join(".+"))) else {
+        return true;
+    };
+    names.any(|n| masked.is_match(n))
+}
+
+/// Slice 4a: a folder as the platform's file systems name one: Windows' and macOS's ignore letter
+/// case unless a volume was made otherwise, so either spelling of an excluded folder is covered
+/// (Codex on #489).
+pub(crate) fn folded(path: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(any(windows, target_os = "macos")) {
+        path.to_lowercase().into()
+    } else {
+        path.into()
+    }
+}
+
+/// Slice 4a: a work state write refused inside its transaction: its repository, or the folder it
+/// was written from, excluded from capture by then (Codex on #489).
+#[derive(Debug)]
+pub struct NeverRecorded;
+
+impl std::fmt::Display for NeverRecorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "nothing is recorded in this repository or folder now: the work state was not kept",
+        )
+    }
+}
+
+impl std::error::Error for NeverRecorded {}
+
+/// Every device's exclusion ops in time order, each entry set by the last op that names it: the
+/// repositories `oboete exclude` keeps from being sent, and what is never recorded (level
+/// `capture`, slice 4a). An undo takes its entry out of its own set only.
+fn exclusion_sets(
+    conn: &Connection,
+) -> Result<(std::collections::BTreeSet<String>, CaptureExclusions)> {
     // A device's ops in its own order (op_seq), its clock never going back in it, then every
     // device's by that clock: a clock set back never puts a newer op first, and an op
     // `exclude` wrote comes after every op its store held (Codex on #304).
@@ -1103,18 +1215,28 @@ pub(crate) fn exclusions_in(conn: &Connection) -> Result<Vec<String>> {
         ops.push((clock, from, i, v));
     }
     ops.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
-    let mut out = std::collections::BTreeSet::new();
+    let (mut sent, mut never) = (
+        std::collections::BTreeSet::new(),
+        CaptureExclusions::default(),
+    );
     for (_, _, _, v) in ops {
-        let Some(repo) = v["repo"].as_str() else {
-            continue;
+        let (set, name) = match (
+            v["level"].as_str(),
+            v["repo"].as_str(),
+            v["folder"].as_str(),
+        ) {
+            (None, Some(repo), _) => (&mut sent, repo),
+            (Some("capture"), Some(repo), _) => (&mut never.repos, repo),
+            (Some("capture"), None, Some(folder)) => (&mut never.folders, folder),
+            _ => continue,
         };
         if v["undo"] == true {
-            out.remove(repo);
+            set.remove(name);
         } else {
-            out.insert(repo.to_owned());
+            set.insert(name.to_owned());
         }
     }
-    Ok(out.into_iter().collect())
+    Ok((sent, never))
 }
 
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s SQLite busy timeout.
@@ -3735,30 +3857,68 @@ impl Raw {
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
-        self.append_with_ledger(e, &[], "")?
-            .context("a record of a forgotten session from before its forget: not recorded")
+        self.append_with_ledger(e, &[], "")?.context(
+            "a record of a forgotten session from before its forget, or of a place never recorded: not recorded",
+        )
     }
 
     /// `append`, with the event's redaction ledger rows in the same transaction; `ruleset` is the
     /// version of the rules that found them (`redact::Rules::version`). None, and nothing recorded,
     /// for a record of a forgotten session from before its forget (slice 3b, D3): a hook call that
-    /// took its time before the registration and waited for this lock behind it.
+    /// took its time before the registration and waited for this lock behind it; and for one of a
+    /// repository or folder never recorded (slice 4a), excluded before this write took the lock.
     pub fn append_with_ledger(
         &mut self,
         e: &Event,
         ledger: &[(String, crate::redact::Finding)],
         ruleset: &str,
     ) -> Result<Option<i64>> {
+        self.append_under(e, ledger, ruleset, None, None)
+    }
+
+    /// `append_with_ledger` for an event a hook captured under `settings`: what is never recorded,
+    /// stored as given (owner, 2026-10-13), is matched in the write transaction as the rules now
+    /// read it too, as the hook's own check reads it, so an exclusion committed after that check
+    /// refuses the event though a rule masks its labels (slice 4a, Codex on #491).
+    pub fn append_captured(
+        &mut self,
+        e: &Event,
+        ledger: &[(String, crate::redact::Finding)],
+        settings: &crate::capture::Settings,
+        read: (&str, Option<&str>),
+    ) -> Result<Option<i64>> {
+        self.append_under(
+            e,
+            ledger,
+            settings.rules.version(),
+            Some(settings),
+            Some(read),
+        )
+    }
+
+    /// `read`: the repository and the folder as the hook read them, before the gate (security
+    /// review of #489: the transaction asks what the hook's own check asks).
+    fn append_under(
+        &mut self,
+        e: &Event,
+        ledger: &[(String, crate::redact::Finding)],
+        ruleset: &str,
+        settings: Option<&crate::capture::Settings>,
+        read: Option<(&str, Option<&str>)>,
+    ) -> Result<Option<i64>> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let never = capture_exclusions_in(&tx)?;
+        let now = settings.map(|s| crate::capture::never_recorded(&never, s));
         if scope_tombstoned(
             &tx,
             &self.device,
             &crate::forget::session(&e.agent, &e.session),
             e,
             ledger,
-        )? {
+        )? || never.refuses(now.as_ref(), (e.repo.as_deref(), e.cwd.as_deref()), read)
+        {
             return Ok(None);
         }
         let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
@@ -3769,12 +3929,15 @@ impl Raw {
     /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
     /// ledger rows and the kept file's `hash` when it has one, in one transaction: all of them or
     /// none. False, and nothing appended, when that file was written back before (#454: a call
-    /// stopped between that commit and the file's removal left it behind).
+    /// stopped between that commit and the file's removal left it behind). What is never recorded
+    /// is also matched as labelled under `settings` now, as the hook's own check does (slice 4a,
+    /// Codex on #489).
     pub fn append_kept(
         &mut self,
         events: &[crate::capture::Captured],
         ruleset: &str,
         hash: Option<&str>,
+        settings: &crate::capture::Settings,
     ) -> Result<bool> {
         let tx = self
             .conn
@@ -3787,10 +3950,17 @@ impl Raw {
         {
             return Ok(false);
         }
+        let never = capture_exclusions_in(&tx)?;
+        let now = crate::capture::never_recorded(&never, settings);
         for c in events {
-            // Slice 3b (D3): a forgotten session's record from before its forget is not recorded.
+            // Slice 3b (D3): a forgotten session's record from before its forget is not recorded,
+            // nor one of a place excluded since (slice 4a).
             let session = crate::forget::session(&c.event.agent, &c.event.session);
-            if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)? {
+            // A kept call's file holds the labels alone, never the place before the gate.
+            let labels = (c.event.repo.as_deref(), c.event.cwd.as_deref());
+            if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)?
+                && !never.refuses(Some(&now), labels, None)
+            {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             }
         }
@@ -3822,6 +3992,31 @@ impl Raw {
         origins: &[ImportIdentity],
         ruleset: &str,
         checkpoint: Option<&Checkpoint>,
+    ) -> Result<Vec<i64>> {
+        self.append_imported_with(batch, origins, ruleset, checkpoint, None)
+    }
+
+    /// `append_imported_origins` for records an importer labelled under `settings`: what is never
+    /// recorded is also matched as their labels are made now, so a rule added after an exclusion
+    /// masks both alike, as the hook's check does (slice 4a, Codex on #489).
+    pub fn append_imported_under(
+        &mut self,
+        batch: &[crate::capture::Captured],
+        origins: &[ImportIdentity],
+        settings: &crate::capture::Settings,
+        checkpoint: Option<&Checkpoint>,
+    ) -> Result<Vec<i64>> {
+        let ruleset = settings.rules.version();
+        self.append_imported_with(batch, origins, ruleset, checkpoint, Some(settings))
+    }
+
+    fn append_imported_with(
+        &mut self,
+        batch: &[crate::capture::Captured],
+        origins: &[ImportIdentity],
+        ruleset: &str,
+        checkpoint: Option<&Checkpoint>,
+        settings: Option<&crate::capture::Settings>,
     ) -> Result<Vec<i64>> {
         anyhow::ensure!(
             origins.is_empty() || origins.len() == batch.len(),
@@ -3858,8 +4053,18 @@ impl Raw {
             );
         }
         let from_seq = next_seq(&tx, &self.device)?;
+        let never = capture_exclusions_in(&tx)?;
+        let now = settings.map(|settings| crate::capture::never_recorded(&never, settings));
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
+            // Slice 4a: a place never recorded; the checkpoint still moves past it.
+            if never.refuses(
+                now.as_ref(),
+                (c.event.repo.as_deref(), c.event.cwd.as_deref()),
+                None,
+            ) {
+                continue;
+            }
             let identity = origins.get(index);
             let origin = identity.map(|i| i.origin.as_str());
             let session = identity.map_or_else(
@@ -4696,13 +4901,62 @@ impl Raw {
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
+        self.append_ops_from(ops, None, None, None)
+    }
+
+    /// `append_ops` for claude-mem's work state lists, imported under `settings`: a list is also
+    /// refused when its project's name labelled under them, as the import's own check labels it,
+    /// is never recorded, so an exclusion a rule masks that commits during the import refuses the
+    /// lists after it (Codex on #489).
+    pub fn append_imported_ops(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        settings: &crate::capture::Settings,
+    ) -> Result<Vec<i64>> {
+        self.append_ops_from(ops, None, Some(settings), None)
+    }
+
+    /// `append_ops` for ops written from `cwd`, the label of the writer's working directory. A
+    /// work state op of a repository never recorded, or written from a folder never recorded, is
+    /// refused here (`NeverRecorded`), after every exclusion committed before this write (slice
+    /// 4a, Codex on #489).
+    fn append_ops_from(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        cwd: Option<&str>,
+        settings: Option<&crate::capture::Settings>,
+        read: Option<(&str, Option<&str>)>,
+    ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        let lists = ops.iter().any(|(kind, _)| *kind == OpKind::WorkState);
+        let never = lists.then(|| capture_exclusions_in(&tx)).transpose()?;
+        let now = never
+            .as_ref()
+            .zip(settings)
+            .map(|(never, s)| crate::capture::never_recorded(never, s));
         for (kind, body) in ops {
             anyhow::ensure!(
                 !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
+            let (repo, imported) = (
+                body["repo"].as_str().unwrap_or_default(),
+                !body["source"].is_null(),
+            );
+            let labelled = |settings| crate::capture::exclusion_label("repo", repo, settings);
+            if let Some(never) = &never
+                && *kind == OpKind::WorkState
+                && (never.refuses(now.as_ref(), (None, cwd), read)
+                    || never.covers_work_state(repo, imported)
+                    || now
+                        .as_ref()
+                        .is_some_and(|now| now.covers_work_state(repo, imported))
+                    || imported
+                        && settings.is_some_and(|s| never.covers_work_state(&labelled(s), true)))
+            {
+                return Err(NeverRecorded.into());
+            }
         }
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
         tx.commit()?;
@@ -4759,11 +5013,62 @@ impl Raw {
         exclusions_in(&self.conn)
     }
 
+    /// Slice 4a: what is never recorded now (`CaptureExclusions`).
+    pub fn capture_exclusions(&self) -> Result<CaptureExclusions> {
+        capture_exclusions_in(&self.conn)
+    }
+
+    /// `exclusions`, with each entry never recorded as the rules now read it (a repository stored
+    /// as given is so labelled in the records from after a rule that masks its name), and each
+    /// repository label the records hold that the rules now read as one never recorded (an entry
+    /// stored masked, by the page or before exclusions were stored as given, and its records from
+    /// before the rule, which hold the label unmasked; Codex on #489). The settings are read only
+    /// while a repository is never recorded; one that does not load sends nothing.
+    pub fn exclusions_now(&self) -> Result<Vec<String>> {
+        let (mut sent, never) = exclusion_sets(&self.conn)?;
+        if !never.repos.is_empty() {
+            let settings = crate::capture::Settings::load(&self.home)?;
+            let now = crate::capture::never_recorded(&never, &settings);
+            self.repo_index()?;
+            let mut st = self.conn.prepare(
+                "SELECT DISTINCT repo FROM records WHERE type = 'event' AND repo IS NOT NULL",
+            )?;
+            for label in st.query_map([], |r| r.get::<_, String>(0))? {
+                let label = label?;
+                if now
+                    .repos
+                    .contains(&crate::capture::exclusion_label("repo", &label, &settings))
+                    || may_name(&label, never.repos.iter().chain(&now.repos))
+                {
+                    sent.insert(label);
+                }
+            }
+            // And the entries as the rules now read them, for a key read so (Codex and Cursor on
+            // #489: an import's project, a search's checkout).
+            sent.extend(now.repos);
+        }
+        sent.extend(never.repos);
+        Ok(sent.into_iter().collect())
+    }
+
     /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op
     /// this store holds, as a Lamport clock: it takes effect after each op its device had seen,
     /// whatever the clocks of the devices that wrote them. A copied store keeps its old device's
     /// ops under a new device (Codex on #304).
     pub fn exclude(&mut self, repo: &str, undo: bool) -> Result<i64> {
+        self.exclusion(serde_json::json!({ "repo": repo, "undo": undo }))
+    }
+
+    /// Slice 4a (spec 6.1): an exclusion op of level `capture`, or its undo, as `exclude` appends
+    /// one: `("repo", label)` stops every device recording that repository, and sending it;
+    /// `("folder", cwd label)` stops this device recording under that folder.
+    pub fn exclude_capture(&mut self, (key, value): (&str, &str), undo: bool) -> Result<i64> {
+        let mut op = serde_json::json!({ "undo": undo, "level": "capture" });
+        op[key] = value.into();
+        self.exclusion(op)
+    }
+
+    fn exclusion(&mut self, mut op: serde_json::Value) -> Result<i64> {
         let _dispatch = crate::dispatch::exclusive(&self.home)?;
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
@@ -4771,8 +5076,10 @@ impl Raw {
             [],
             |r| r.get(0),
         )?;
-        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
-        let op = serde_json::json!({ "repo": repo, "undo": undo, "clock": clock });
+        op["clock"] = seen
+            .map_or(i64::MIN, |c| c + 1)
+            .max(crate::db::now_ms())
+            .into();
         Ok(self.append_ops(&[(OpKind::Exclusion, op)])?[0])
     }
 
@@ -4780,12 +5087,15 @@ impl Raw {
     /// as this device's next op; `list` and `fields` have passed the gate (L5). Its clock is one
     /// past every work state clock the store holds and at least now, as an exclusion's; an
     /// imported entry's time, another clock's, lifts none (docs/claude-mem-import.md I5). No
-    /// dispatch lock: a work state write orders against no provider call.
+    /// dispatch lock: a work state write orders against no provider call. `cwd` is the label of
+    /// the writer's working directory: refused (`NeverRecorded`) in a folder never recorded, as in
+    /// a repository never recorded (slice 4a).
     pub fn work_state(
         &mut self,
         repo: &str,
         list: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
+        cwd: Option<&str>,
     ) -> Result<i64> {
         let seen: Option<i64> = self.conn.query_row(
             "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
@@ -4795,7 +5105,31 @@ impl Raw {
         )?;
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
-        Ok(self.append_ops(&[(OpKind::WorkState, op)])?[0])
+        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd, None, None)?[0])
+    }
+
+    /// `work_state` for a writer that holds its capture settings and its repository and folder as
+    /// read before the gate (`read`): the write's transaction asks what the writer's own check
+    /// asks (`CaptureExclusions::refuses`; security review of #489).
+    pub fn work_state_under(
+        &mut self,
+        repo: &str,
+        list: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+        cwd: &str,
+        settings: &crate::capture::Settings,
+        read: (&str, Option<&str>),
+    ) -> Result<i64> {
+        let seen: Option<i64> = self.conn.query_row(
+            "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
+             WHERE type = 'work_state' AND json_extract(body, '$.source') IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
+        let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
+        let ops = [(OpKind::WorkState, op)];
+        Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0])
     }
 
     /// `work_state_in` on this store.
@@ -8214,6 +8548,350 @@ mod tests {
         assert_eq!(other.exclusions().unwrap(), ["x"]);
     }
 
+    /// Codex on #489: a folder excluded under one spelling covers another where the platform's file
+    /// systems ignore letter case (Windows, macOS), and only there.
+    #[test]
+    fn a_folder_covers_another_spelling_of_itself_only_where_case_is_ignored() {
+        let (stored, event) = if cfg!(windows) {
+            (r"C:\Work\Private", r"c:\work\private\sub")
+        } else {
+            ("/Users/x/Work/Private", "/users/x/work/private/sub")
+        };
+        let list = CaptureExclusions {
+            folders: [stored.to_owned()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            list.covers(None, Some(event)),
+            cfg!(any(windows, target_os = "macos"))
+        );
+    }
+
+    /// Slice 4a (spec 6.1): what is never recorded is never sent either, and each undo takes its
+    /// entry out of its own list only: a capture undo leaves `oboete exclude`'s exclusion, and an
+    /// undo of that leaves what is never recorded. A folder is never a repository to send.
+    #[test]
+    fn what_is_never_recorded_and_what_is_not_sent_keep_their_own_undo() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.exclude("a", false).unwrap();
+        raw.exclude_capture(("repo", "a"), false).unwrap();
+        raw.exclude_capture(("repo", "b"), false).unwrap();
+        raw.exclude_capture(("folder", "/x/y"), false).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["a", "b"]);
+        raw.exclude_capture(("repo", "a"), true).unwrap();
+        raw.exclude("b", true).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["a", "b"]);
+        let never = raw.capture_exclusions().unwrap();
+        assert_eq!(
+            (Vec::from_iter(never.repos), Vec::from_iter(never.folders)),
+            (vec!["b".to_owned()], vec!["/x/y".to_owned()])
+        );
+        raw.exclude_capture(("folder", "/x/y"), true).unwrap();
+        raw.exclude_capture(("repo", "b"), true).unwrap();
+        assert_eq!(
+            raw.capture_exclusions().unwrap(),
+            CaptureExclusions::default()
+        );
+        assert_eq!(raw.exclusions().unwrap(), ["a"]);
+    }
+
+    /// Codex on #491 (owner, 2026-10-13): a repository stored as given is matched in the hook's
+    /// write transaction as the rules now read it too, so an event the hook labelled under a rule
+    /// that masks the name is refused there; an append with no settings compares the list as stored.
+    #[test]
+    fn a_hooks_append_matches_the_list_as_the_rules_now_read_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let given = "github.com/o/acme-482915";
+        raw.exclude_capture(("repo", given), false).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let labelled = Event {
+            repo: Some(crate::capture::exclusion_label("repo", given, &settings)),
+            ..test_event("After the rule.")
+        };
+        assert_ne!(labelled.repo.as_deref(), Some(given));
+        let elsewhere = ("github.com/o/open", None);
+        assert_eq!(
+            raw.append_captured(&labelled, &[], &settings, elsewhere)
+                .unwrap(),
+            None
+        );
+        assert!(
+            raw.append_with_ledger(&labelled, &[], "")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Security review of #489: the hook's write transaction also asks about the folder as the hook
+    /// read it, so an exclusion committed after the hook's check refuses an event below it though a
+    /// rule that takes the folder's separator keeps the labels from matching.
+    #[test]
+    fn a_hooks_append_matches_the_folder_as_the_hook_read_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.exclude_capture(("folder", "/x/private"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let below = "/x/private/sub";
+        let labelled = Event {
+            cwd: Some(crate::capture::exclusion_label("cwd", below, &settings)),
+            ..test_event("Below the folder.")
+        };
+        let read = ("github.com/o/r", Some(below));
+        assert_eq!(
+            raw.append_captured(&labelled, &[], &settings, read)
+                .unwrap(),
+            None
+        );
+        let elsewhere = ("github.com/o/r", Some("/x/open/sub"));
+        assert!(
+            raw.append_captured(&labelled, &[], &settings, elsewhere)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Security review of #489: a work state write the MCP server makes asks in its transaction
+    /// what the server's own check asks: the folder as read, and the labels against the list as
+    /// given and as the rules now read it.
+    #[test]
+    fn a_work_state_write_asks_in_its_transaction_what_its_writer_asks() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let given = "github.com/o/acme-482915";
+        raw.exclude_capture(("repo", given), false).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let repo = crate::capture::exclusion_label("repo", given, &settings);
+        let fields = serde_json::json!({ "task": "Plan." });
+        let fields = fields.as_object().unwrap();
+        let read = (given, Some("/w/acme"));
+        let refused = raw.work_state_under(&repo, "plan", fields, "/w/[x]", &settings, read);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        // The list as the rules now read it, with the place read elsewhere.
+        let elsewhere = ("github.com/o/open", Some("/w/open"));
+        let refused = raw.work_state_under(&repo, "plan", fields, "/w/open", &settings, elsewhere);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        assert!(raw.work_state(&repo, "plan", fields, None).is_ok());
+        // A folder whose separator a rule takes: only the place as read matches it.
+        raw.exclude_capture(("folder", "/w/private"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let cwd = crate::capture::exclusion_label("cwd", "/w/private/sub", &settings);
+        let read = ("github.com/o/open", Some("/w/private/sub"));
+        let refused =
+            raw.work_state_under("github.com/o/open", "plan", fields, &cwd, &settings, read);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        // Another folder the rules read as an excluded one: only the list as read now matches it,
+        // as the hook's check reads it.
+        raw.exclude_capture(("folder", "/v/acme-111111"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let cwd = crate::capture::exclusion_label("cwd", "/v/acme-222222", &settings);
+        let read = ("github.com/o/open", Some("/v/acme-222222"));
+        let refused =
+            raw.work_state_under("github.com/o/open", "plan", fields, &cwd, &settings, read);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+    }
+
+    /// Codex on #489: a repository never recorded under the label a rule now makes of it keeps its
+    /// records from before the rule, which hold the label unmasked, from every provider too.
+    #[test]
+    fn records_from_before_a_rule_are_not_sent_once_their_repository_is_never_recorded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let secret = "github.com/o/acme-482915";
+        raw.append(&Event {
+            repo: Some(secret.into()),
+            session: "old".into(),
+            ..test_event("Old work.")
+        })
+        .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let now = crate::capture::exclusion_label("repo", secret, &settings);
+        assert_ne!(now, secret);
+        raw.exclude_capture(("repo", &now), false).unwrap();
+        let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live).unwrap();
+        assert!(reading.excluded.contains("claude\0old"), "{reading:?}");
+        assert_eq!(raw.exclusions().unwrap(), [now]);
+    }
+
+    /// Slice 4a: an event of a repository or folder never recorded is refused by every append that
+    /// writes one, once the exclusion is committed: a hook's, a kept call's written back, an
+    /// import's (whose batch records the rest); a folder covers what is in it, component by
+    /// component, and an undo records what comes after it.
+    #[test]
+    fn an_event_never_recorded_is_refused_by_every_append() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let at = |repo: &str, cwd: &str| Event {
+            repo: Some(repo.into()),
+            cwd: Some(cwd.into()),
+            ..test_event("canary-4a")
+        };
+        raw.exclude_capture(("repo", "github.com/o/secret"), false)
+            .unwrap();
+        raw.exclude_capture(("folder", "/x/private"), false)
+            .unwrap();
+        for e in [
+            at("github.com/o/secret", "/w/secret"),
+            at("/x/private", "/x/private"),
+            at("/x/private/sub", "/x/private/sub/dir"),
+        ] {
+            assert_eq!(raw.append_with_ledger(&e, &[], "").unwrap(), None);
+        }
+        assert!(
+            raw.append_with_ledger(&at("/x/privateer", "/x/privateer"), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        let kept = |e: Event| crate::capture::Captured {
+            event: e,
+            ledger: Vec::new(),
+        };
+        assert!(
+            raw.append_kept(
+                &[kept(at("github.com/o/secret", "/w/secret"))],
+                "",
+                None,
+                &Default::default()
+            )
+            .unwrap()
+        );
+        let (mut secret, mut open) = (imported("canary-4a"), imported("canary-4a"));
+        secret.event.repo = Some("github.com/o/secret".into());
+        open.event.repo = Some("github.com/o/open".into());
+        assert_eq!(
+            raw.append_imported(&[secret, open], "", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        raw.exclude_capture(("repo", "github.com/o/secret"), true)
+            .unwrap();
+        assert!(
+            raw.append_with_ledger(&at("github.com/o/secret", "/w/secret"), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        let repos: Vec<Option<String>> = raw
+            .after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.item {
+                Item::Event(e) => Some(e.repo),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            repos,
+            [
+                Some("/x/privateer".to_owned()),
+                Some("github.com/o/open".to_owned()),
+                Some("github.com/o/secret".to_owned())
+            ]
+        );
+    }
+
+    /// Slice 4a (Codex on #489): a work state write is refused inside its transaction once its
+    /// repository, the repository of the claude-mem project an imported list is filed under, or
+    /// the folder it is written from is never recorded; elsewhere it is kept, and a list written
+    /// here is matched by its own key alone.
+    #[test]
+    fn a_work_state_write_is_refused_in_its_transaction_where_nothing_is_recorded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let task = serde_json::json!({ "task": "canary-4a" });
+        let task = task.as_object().unwrap();
+        raw.exclude_capture(("repo", "github.com/o/secret"), false)
+            .unwrap();
+        raw.exclude_capture(("folder", "/x/private"), false)
+            .unwrap();
+        let refused = |written: Result<Vec<i64>>| written.unwrap_err().is::<NeverRecorded>();
+        let imported = |repo: &str| {
+            let op = serde_json::json!({"repo": repo, "list": "plan", "fields": task,
+                "clock": 1, "at": 1, "source": "claude-mem", "source_id": "w1"});
+            vec![(OpKind::WorkState, op)]
+        };
+        let written = |raw: &mut Raw, repo: &str, cwd: Option<&str>| {
+            raw.work_state(repo, "plan", task, cwd).map(|seq| vec![seq])
+        };
+        assert!(refused(written(&mut raw, "github.com/o/secret", None)));
+        assert!(refused(written(
+            &mut raw,
+            "github.com/o/open",
+            Some("/x/private/app")
+        )));
+        assert!(refused(raw.append_ops(&imported("claude-mem:secret/wt"))));
+        assert!(written(&mut raw, "github.com/o/open", Some("/x/privateer")).is_ok());
+        assert!(raw.append_ops(&imported("claude-mem:open")).is_ok());
+        // A list written here by its own key alone, though that key has the shape of a claude-mem
+        // project's (`ssh://claude-mem:secret/x`).
+        assert!(written(&mut raw, "claude-mem:secret/x", None).is_ok());
+        let lists = raw
+            .ops_after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.kind == OpKind::WorkState)
+            .count();
+        assert_eq!(lists, 3);
+    }
+
+    /// Slice 4a (Codex on #489): an imported list is refused inside its transaction also when its
+    /// project's name, labelled under the import's settings, is what an exclusion committed during
+    /// the import stored: a rule masks part of that name.
+    #[test]
+    fn an_imported_list_is_refused_by_an_exclusion_its_rules_mask() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'secret-[0-9]{4}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let stored = crate::capture::exclusion_label("repo", "github.com/o/secret-1234", &settings);
+        assert!(!stored.contains("secret-1234"), "{stored}");
+        raw.exclude_capture(("repo", &stored), false).unwrap();
+        let op = serde_json::json!({"repo": "claude-mem:secret-1234", "list": "plan",
+            "fields": {"task": "canary-4a"}, "clock": 1, "at": 1, "source": "claude-mem",
+            "source_id": "w1"});
+        let ops = [(OpKind::WorkState, op)];
+        let refused = raw.append_imported_ops(&ops, &settings).unwrap_err();
+        assert!(refused.is::<NeverRecorded>(), "{refused}");
+    }
+
     /// docs/work-state.md L4: work state folds in its clock's order: a write on a copied store
     /// (another device) comes after every write it holds, even when the old device's clock ran
     /// ahead of the new one's.
@@ -8227,8 +8905,8 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        raw.work_state("r", "release", &phase("one")).unwrap();
-        raw.work_state("r", "release", &phase("two")).unwrap();
+        raw.work_state("r", "release", &phase("one"), None).unwrap();
+        raw.work_state("r", "release", &phase("two"), None).unwrap();
         raw.conn
             .execute(
                 "UPDATE ops SET ts = ts + 3600000,
@@ -8240,9 +8918,11 @@ mod tests {
         let copy = tempfile::tempdir().unwrap();
         std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
         let mut other = open(copy.path()).unwrap();
-        other.work_state("r", "release", &phase("three")).unwrap();
         other
-            .work_state("s", "release", &phase("elsewhere"))
+            .work_state("r", "release", &phase("three"), None)
+            .unwrap();
+        other
+            .work_state("s", "release", &phase("elsewhere"), None)
             .unwrap();
         let phases: Vec<_> = other
             .work_state_entries("r")
@@ -8679,6 +9359,32 @@ mod tests {
             raw.imported_counts(&dev, &[(1, 10)]).unwrap(),
             [("oboete-v1".to_owned(), 1)].into_iter().collect()
         );
+    }
+
+    /// Codex's security review of #489: a repository label masked under a rule removed since
+    /// cannot be read again, so its records are held back from sending once a repository it may
+    /// be is never recorded; one of another owner leaves them be.
+    #[test]
+    fn a_label_masked_under_a_rule_removed_since_is_held_back_when_it_may_be_excluded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let masked = format!("github.com/o/{}", crate::redact::MASK);
+        let seq = raw
+            .append(&Event {
+                repo: Some(masked.clone()),
+                ..test_event("deploy notes")
+            })
+            .unwrap();
+        raw.exclude_capture(("repo", "github.com/x/other"), false)
+            .unwrap();
+        assert!(!raw.exclusions_now().unwrap().contains(&masked));
+        raw.exclude_capture(("repo", "github.com/o/acme-482915"), false)
+            .unwrap();
+        let list = raw.exclusions_now().unwrap();
+        assert!(list.contains(&masked), "{list:?}");
+        let device = raw.device().to_owned();
+        let key = raw.session_key(&device, seq).unwrap().unwrap();
+        assert!(raw.sessions_in(&list).unwrap().contains(&key));
     }
 
     /// OpenCodeReview on #304: an event's agent and session labels may be NULL; `sessions_in`

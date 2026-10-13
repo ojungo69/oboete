@@ -1307,12 +1307,7 @@ fn append_batch(
     let (records, origins): (Vec<_>, Vec<_>) = batch.drain(..).unzip();
     stats.events += match raw.as_mut() {
         Some(raw) => raw
-            .append_imported_origins(
-                &records,
-                &origins,
-                settings.rules.version(),
-                Some(checkpoint),
-            )?
+            .append_imported_under(&records, &origins, settings, Some(checkpoint))?
             .len() as u64,
         None => records.len() as u64,
     };
@@ -1817,6 +1812,44 @@ mod tests {
         for e in got {
             assert_ne!(e.repo.as_deref(), Some(here.as_str()), "{e:?}");
         }
+    }
+
+    /// Slice 4a (Codex on #489): a folder excluded before a rule that masks part of its path is
+    /// still never recorded by an import: the import matches the list as its labels are made now.
+    #[test]
+    fn a_rule_added_after_a_folder_was_excluded_keeps_its_transcript_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("claude/projects/-x");
+        std::fs::create_dir_all(&project).unwrap();
+        for (session, cwd, said) in [
+            ("s", "/x/acme-482915/app", "canary-4a"),
+            ("t", "/x/open", "Open work."),
+        ] {
+            let line = json!({"type": "user", "timestamp": "2026-09-01T00:00:01Z",
+                              "sessionId": session, "cwd": cwd,
+                              "message": {"role": "user", "content": said}});
+            std::fs::write(
+                project.join(format!("{session}.jsonl")),
+                format!("{line}\n"),
+            )
+            .unwrap();
+        }
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        raw::open(&home)
+            .unwrap()
+            .exclude_capture(("folder", "/x/acme-482915"), false)
+            .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let claude = dir.path().join("claude/projects");
+        import(&home, &[("claude", &claude)], true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        assert!(got.iter().any(|e| e.body.contains("Open work.")), "{got:?}");
+        assert!(got.iter().all(|e| e.session != "s"), "{got:?}");
     }
 
     /// The parser's own SessionEnd is not imported: a session resumed after an import gets its

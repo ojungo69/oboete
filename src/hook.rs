@@ -963,7 +963,7 @@ pub fn record(
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
     let back;
-    (*written_back, back) = crate::unwritten::write_back(home, raw);
+    (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
     match back {
         Ok(()) => {}
@@ -993,11 +993,8 @@ pub fn record(
     }
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
-        match raw.append_with_ledger(
-            &b.captured.event,
-            &b.captured.ledger,
-            settings.rules.version(),
-        ) {
+        let read = (b.read.0.as_str(), b.read.1.as_deref());
+        match raw.append_captured(&b.captured.event, &b.captured.ledger, settings, read) {
             Ok(Some(seq)) => appended.push((seq, b.captured.event.clone())),
             // Slice 3b (D3): a forgotten session's event from before its forget, not recorded.
             Ok(None) => {}
@@ -1018,6 +1015,9 @@ pub fn record(
 struct Built {
     step: Option<(String, i64)>,
     captured: crate::capture::Captured,
+    /// The repository and folder as read before the gate, which the append's transaction asks
+    /// about too (slice 4a). Never kept.
+    read: (String, Option<String>),
 }
 
 /// A hook call's events as they would be appended: adapted, through the gate, an event that names
@@ -1035,6 +1035,15 @@ fn built(
 ) -> Result<(Vec<Built>, Option<String>)> {
     let mut built = Vec::new();
     let mut prompt = None;
+    // Slice 4a: what is never recorded, read once a call, as stored (as given, owner 2026-10-13)
+    // and as the rules now read it. Without a store (U2) the append refuses such events as it
+    // writes them back.
+    let never = raw
+        .and_then(|raw| raw.capture_exclusions().ok())
+        .map(|list| {
+            let now = crate::capture::never_recorded(&list, settings);
+            (list, now)
+        });
     for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
         if event == "UserPromptSubmit" {
             prompt = str_field(&payload, &["prompt"]).map(str::to_owned);
@@ -1046,13 +1055,23 @@ fn built(
                 let session = payload["session_id"].as_str().unwrap_or("unknown");
                 (session.to_owned(), step)
             });
-        for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
+        for (mut c, read) in crate::capture::events_read(agent, &event, &payload, ts, settings) {
+            // The repository and folder as read, before the gate, with the list as given: a rule
+            // that masks part of a name, or one taken away since, changes neither (#496); and the
+            // labels, with the list as given and as the rules now read it.
+            let labels = (c.event.repo.as_deref(), c.event.cwd.as_deref());
+            if never.as_ref().is_some_and(|(list, now)| {
+                list.refuses(Some(now), labels, Some((&read.0, read.1.as_deref())))
+            }) {
+                continue;
+            }
             if let Some(raw) = raw {
                 c.event.session = own_session(std::mem::take(&mut c.event.session), raw);
             }
             built.push(Built {
                 step: step.clone(),
                 captured: c,
+                read,
             });
         }
     }
@@ -2745,6 +2764,201 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Bytes of `needle` in any file of `home`: its stores, the kept calls, the hooks' state
+    /// (slice 4a).
+    fn stored_bytes(home: &Path, needle: &str) -> usize {
+        let mut files = Vec::new();
+        let mut dirs = vec![home.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    dirs.push(e.path());
+                } else {
+                    files.push(e.path());
+                }
+            }
+        }
+        files
+            .iter()
+            .filter_map(|f| std::fs::read(f).ok())
+            .map(|b| {
+                b.windows(needle.len())
+                    .filter(|w| *w == needle.as_bytes())
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Slice 4a (spec 6.1, the capture exclusion canary): a prompt in an excluded repository and
+    /// one in a folder below an excluded folder leave no byte in raw.db or among the kept calls,
+    /// nor does a call kept before the exclusion and written back after it. After an undo the
+    /// repository's next prompt is recorded, and nothing from while it was excluded comes back.
+    #[test]
+    fn a_canary_where_nothing_is_recorded_leaves_no_byte() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let checkout = home.join("secret");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::write(
+            checkout.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:o/secret.git\n",
+        )
+        .unwrap();
+        let folder = home.join("private");
+        std::fs::create_dir_all(folder.join("deep")).unwrap();
+        let settings = crate::capture::Settings::load(home).unwrap();
+        let said = |cwd: &Path, text: &str| json!({"session_id": "s", "cwd": cwd, "prompt": text});
+        let kept = crate::capture::events(
+            "claude",
+            "UserPromptSubmit",
+            &said(&checkout, "canary-kept"),
+            1,
+            &settings,
+        );
+        crate::unwritten::keep(home, &kept, settings.rules.version()).unwrap();
+        let repo = crate::capture::checkout(&json!({"cwd": checkout}), &settings).1;
+        let mut raw = crate::raw::open(home).unwrap();
+        raw.exclude_capture(("repo", &repo), false).unwrap();
+        let label = crate::capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+        raw.exclude_capture(("folder", &label), false).unwrap();
+        drop(raw);
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(&checkout, "canary-repo"),
+        );
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(&folder.join("deep"), "canary-folder"),
+        );
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(home, "open-prompt"),
+        );
+        assert_eq!(stored_bytes(home, "canary-"), 0);
+        assert_eq!(recorded(home, "claude", "s").len(), 1);
+        crate::raw::open(home)
+            .unwrap()
+            .exclude_capture(("repo", &repo), true)
+            .unwrap();
+        hook(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            &said(&checkout, "after-undo"),
+        );
+        let bodies: Vec<String> = recorded(home, "claude", "s")
+            .into_iter()
+            .map(|e| e.body)
+            .collect();
+        assert!(bodies[1].contains("after-undo"), "{bodies:?}");
+        assert_eq!((bodies.len(), stored_bytes(home, "canary-")), (2, 0));
+    }
+
+    /// Slice 4a: a rule added after a folder was excluded masks its path in an event's cwd as in
+    /// the exclusion read now: the folder still records nothing, neither from a hook call nor from
+    /// one kept while raw.db could not be opened and written back later (Codex on #489).
+    #[test]
+    fn a_rule_added_after_a_folder_was_excluded_still_records_nothing_there() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let folder = home.join("acme-482915");
+        std::fs::create_dir_all(&folder).unwrap();
+        let settings = crate::capture::Settings::load(home).unwrap();
+        let label = crate::capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+        crate::raw::open(home)
+            .unwrap()
+            .exclude_capture(("folder", &label), false)
+            .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let now = crate::capture::Settings::load(home).unwrap();
+        let kept = json!({"session_id": "k", "cwd": folder, "prompt": "canary-kept"});
+        let kept = crate::capture::events("claude", "UserPromptSubmit", &kept, 1, &now);
+        crate::unwritten::keep(home, &kept, now.rules.version()).unwrap();
+        let said = json!({"session_id": "s", "cwd": folder, "prompt": "canary-rule"});
+        hook(home, "claude", "UserPromptSubmit", &said);
+        assert_eq!(crate::unwritten::counts(home).unwrap(), (0, 0));
+        assert_eq!(stored_bytes(home, "canary-"), 0);
+        assert!(recorded(home, "claude", "s").is_empty());
+        assert!(recorded(home, "claude", "k").is_empty());
+    }
+
+    /// Owner, 2026-10-13 (#496): what is never recorded is stored as given and the hook compares
+    /// the folder as it read it, so a rule that takes a folder's separator with its name
+    /// (`private(?:/|$)`) records nothing below an excluded folder, though the labels it makes no
+    /// longer match the list's.
+    #[test]
+    fn a_folder_stored_as_given_holds_under_a_rule_that_takes_its_separator() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let folder = home.join("x").join("private");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        let given = crate::capture::folder_path(&folder.to_string_lossy());
+        crate::raw::open(home)
+            .unwrap()
+            .exclude_capture(("folder", &given), false)
+            .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+        )
+        .unwrap();
+        let said = json!({"session_id": "s", "cwd": folder.join("sub"), "prompt": "canary-sep"});
+        hook(home, "claude", "UserPromptSubmit", &said);
+        assert_eq!(stored_bytes(home, "canary-"), 0);
+        assert!(recorded(home, "claude", "s").is_empty());
+    }
+
+    /// Codex on #489: a payload's relative `cwd`, or none, names the directory the hook runs in:
+    /// it is made absolute, `..` taken by name, before it is labelled, so an excluded folder
+    /// matches it.
+    #[test]
+    fn a_relative_or_missing_cwd_is_matched_as_the_folder_it_names() {
+        let (relative, missing) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let exclude = |home: &Path, folder: &Path| {
+            let settings = crate::capture::Settings::load(home).unwrap();
+            let label =
+                crate::capture::exclusion_label("cwd", &folder.to_string_lossy(), &settings);
+            crate::raw::open(home)
+                .unwrap()
+                .exclude_capture(("folder", &label), false)
+                .unwrap();
+        };
+        let here = std::env::current_dir().unwrap();
+        exclude(
+            relative.path(),
+            &here.join("target").join("oboete-relative-cwd"),
+        );
+        let said = |session: &str, cwd: &str, text: &str| json!({"session_id": session, "cwd": cwd, "prompt": text});
+        let inner = said("s", "target/oboete-relative-cwd/inner", "canary-relative");
+        hook(relative.path(), "claude", "UserPromptSubmit", &inner);
+        let dots = said(
+            "u",
+            "target/oboete-open-cwd/../oboete-relative-cwd",
+            "canary-dots",
+        );
+        hook(relative.path(), "claude", "UserPromptSubmit", &dots);
+        let open = said("t", "target/oboete-open-cwd", "open-relative");
+        hook(relative.path(), "claude", "UserPromptSubmit", &open);
+        assert_eq!(stored_bytes(relative.path(), "canary-"), 0);
+        let elsewhere = here.join("target").join("oboete-open-cwd");
+        let got = recorded(relative.path(), "claude", "t");
+        assert_eq!(got[0].cwd.as_deref(), Some(&*elsewhere.to_string_lossy()));
+        exclude(missing.path(), &here);
+        let none = json!({"session_id": "m", "prompt": "canary-missing"});
+        hook(missing.path(), "claude", "UserPromptSubmit", &none);
+        assert_eq!(stored_bytes(missing.path(), "canary-"), 0);
     }
 
     fn built_manifest(home: &Path, cwd: &Path, prompt: &str) -> String {
@@ -5685,7 +5899,7 @@ mod tests {
         );
         let write = |list: &str, fields: Value| {
             let mut raw = crate::raw::open(&dir).unwrap();
-            raw.work_state(&repo::key(&dir), list, fields.as_object().unwrap())
+            raw.work_state(&repo::key(&dir), list, fields.as_object().unwrap(), None)
                 .unwrap();
         };
         write(
@@ -5756,8 +5970,13 @@ mod tests {
         built_manifest(&dir, &dir, "earlier work");
         let mut raw = crate::raw::open(&dir).unwrap();
         let fields = json!({"phase": "rc2"});
-        raw.work_state(&repo::key(&dir), "release", fields.as_object().unwrap())
-            .unwrap();
+        raw.work_state(
+            &repo::key(&dir),
+            "release",
+            fields.as_object().unwrap(),
+            None,
+        )
+        .unwrap();
         drop(raw);
         Connection::open(dir.join("raw.db"))
             .unwrap()

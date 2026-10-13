@@ -32,6 +32,8 @@ pub struct Stats {
     pub work_state: u64,
     /// Work state rows the checks a write passes refused.
     pub refused: u64,
+    /// Work state rows of a project whose repository is never recorded (slice 4a, I6).
+    pub never_recorded: u64,
 }
 
 struct Session {
@@ -259,6 +261,9 @@ fn work_state(
     stats: &mut Stats,
 ) -> Result<()> {
     let known = raw.work_state_keys(source)?;
+    // A list excluded after this read is refused by the append, which reads the list again and
+    // labels the project's name as this read does.
+    let never = raw.capture_exclusions()?;
     let mut ops = Vec::new();
     each_row(
         src,
@@ -272,6 +277,13 @@ fn work_state(
             }
             let (project, list, fields, at): (String, String, String, i64) =
                 (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+            // Also as the list's labels hold it: a rule may mask part of the project's name.
+            let named = repo(&project);
+            let labelled = crate::capture::exclusion_label("repo", &named, settings);
+            if never.covers_work_state(&named, true) || never.covers_work_state(&labelled, true) {
+                stats.never_recorded += 1;
+                return Ok(());
+            }
             let checked =
                 serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&fields)
                     .ok()
@@ -301,14 +313,40 @@ fn work_state(
     for op in ops {
         let size = op.1.to_string().len();
         if batch.len() == crate::raw::IMPORT_BATCH || bytes + size > crate::raw::MAX_BATCH_BYTES {
-            raw.append_ops(&std::mem::take(&mut batch))?;
+            append_work_state(raw, &std::mem::take(&mut batch), settings, stats)?;
             bytes = 0;
         }
         bytes += size;
         batch.push(op);
     }
     if !batch.is_empty() {
-        raw.append_ops(&batch)?;
+        append_work_state(raw, &batch, settings, stats)?;
+    }
+    Ok(())
+}
+
+/// One batch of imported work state ops. A repository excluded after this run read the list
+/// refuses its rows in the append (`NeverRecorded`): the batch then goes in one op at a time, and
+/// each op refused is counted as never recorded rather than imported (Codex on #489).
+fn append_work_state(
+    raw: &mut Raw,
+    batch: &[(crate::raw::OpKind, serde_json::Value)],
+    settings: &crate::capture::Settings,
+    stats: &mut Stats,
+) -> Result<()> {
+    let never = |e: &anyhow::Error| e.is::<crate::raw::NeverRecorded>();
+    match raw.append_imported_ops(batch, settings) {
+        Err(e) if never(&e) => {}
+        other => return other.map(drop),
+    }
+    for op in batch {
+        match raw.append_imported_ops(std::slice::from_ref(op), settings) {
+            Err(e) if never(&e) => {
+                stats.work_state -= 1;
+                stats.never_recorded += 1;
+            }
+            other => other.map(drop)?,
+        }
     }
     Ok(())
 }
@@ -799,6 +837,77 @@ mod tests {
         assert_eq!(work_ops(&raw).len(), 2);
     }
 
+    /// I6, slice 4a (Codex on #489): a project whose repository is never recorded brings no work
+    /// state, its worktree's neither, by the name search reads them under (D13); its rows are
+    /// counted, and an import after the undo brings them.
+    #[test]
+    fn a_repository_never_recorded_keeps_its_imported_work_state_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude_capture(("repo", "github.com/o/free-mem"), false)
+            .unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(
+            (stats.work_state, stats.refused, stats.never_recorded),
+            (0, 0, 4)
+        );
+        assert!(work_ops(&raw).is_empty());
+        raw.exclude_capture(("repo", "github.com/o/free-mem"), true)
+            .unwrap();
+        let after = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!((after.work_state, after.never_recorded), (2, 0));
+    }
+
+    /// Codex on #489: a repository excluded after the import read the list refuses its rows in
+    /// the append; the batch's other rows still come in, and the refused ones are counted.
+    #[test]
+    fn an_exclusion_made_during_the_import_leaves_out_only_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        let op = |project: &str, id: &str| {
+            (
+                OpKind::WorkState,
+                json!({"repo": repo(project), "list": "plan",
+                    "fields": {"task": "Port search", "status": "doing"}, "clock": 1_000,
+                    "at": 1_000, "source": "claude-mem:b62f07076e19", "source_id": id}),
+            )
+        };
+        let batch = [op("free-mem", "w1"), op("other", "w2")];
+        // After the import's read of the list, before its append.
+        raw.exclude_capture(("repo", "github.com/o/free-mem"), false)
+            .unwrap();
+        let mut stats = Stats {
+            work_state: 2,
+            ..Default::default()
+        };
+        append_work_state(&mut raw, &batch, &Default::default(), &mut stats).unwrap();
+        assert_eq!((stats.work_state, stats.never_recorded), (1, 1));
+        let ops = work_ops(&raw);
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0]["source_id"], "w2");
+    }
+
+    /// Codex on #489: a repository excluded under a rule that masks part of its name keeps its
+    /// claude-mem project's work state out too: the project's name is matched as labelled now.
+    #[test]
+    fn a_masked_repository_name_keeps_its_imported_work_state_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let rule = "[[redaction.extra_rules]]\nid = \"fm\"\nregex = 'free-mem'\n";
+        std::fs::write(dir.path().join("config.toml"), rule).unwrap();
+        let settings = crate::capture::Settings::load(dir.path()).unwrap();
+        let label = crate::capture::exclusion_label("repo", "github.com/o/free-mem", &settings);
+        assert!(!label.contains("free-mem"), "{label}");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude_capture(("repo", &label), false).unwrap();
+        let stats = claude_mem(&mut raw, &src, &settings).unwrap();
+        assert_eq!((stats.work_state, stats.never_recorded), (0, 4));
+        assert!(work_ops(&raw).is_empty());
+    }
+
     /// Codex on #431: a row claude-mem merges into another project after it came in comes in
     /// again under that project, with the same uid, and the index files it there (readers take a
     /// document's newest row); a run after that adds nothing.
@@ -921,7 +1030,7 @@ mod tests {
         let mut raw = crate::raw::open(dir.path()).unwrap();
         let repo = "github.com/o/free-mem";
         let done = json!({"task": "Port search", "status": "done"});
-        raw.work_state(repo, "plan", done.as_object().unwrap())
+        raw.work_state(repo, "plan", done.as_object().unwrap(), None)
             .unwrap();
         claude_mem(&mut raw, &src, &Default::default()).unwrap();
         raw.append_ops(&[(
@@ -988,7 +1097,7 @@ mod tests {
         .unwrap();
         let repo = "github.com/o/free-mem";
         let done = json!({"task": "Port search", "status": "done"});
-        raw.work_state(repo, "plan", done.as_object().unwrap())
+        raw.work_state(repo, "plan", done.as_object().unwrap(), None)
             .unwrap();
         let ops = work_ops(&raw);
         assert!(ops[1]["clock"].as_i64().unwrap() < ahead, "{ops:?}");
@@ -1008,8 +1117,13 @@ mod tests {
         let crafted = crate::repo::normalize("ssh://claude-mem:free-mem/x").unwrap();
         assert_eq!(crafted, "claude-mem:free-mem/x");
         let task = |t: &str| json!({"task": t, "status": "todo"});
-        raw.work_state(&crafted, "plan", task("Written here").as_object().unwrap())
-            .unwrap();
+        raw.work_state(
+            &crafted,
+            "plan",
+            task("Written here").as_object().unwrap(),
+            None,
+        )
+        .unwrap();
         raw.append_ops(&[(
             OpKind::WorkState,
             json!({"repo": crafted, "list": "plan", "fields": task("Imported"), "clock": 1,

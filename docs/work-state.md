@@ -161,8 +161,10 @@ quoted and so longer. The memory's own fence stays outside the size, as it alway
 with no store yet (which it does not create). Pi gets no section: its
 extension has no MCP client, so neither tool, and its manifest keeps the whole size.
 
-L8. **Exclusion.** A repository excluded from capture (milestone 5) refuses a write, with
-claude-mem's message in oboete's words; until that exclusion exists every repository writes. The
+L8. **Exclusion.** A repository excluded from capture (milestone 5 slice 4a), or a write from a
+folder excluded from it, is refused, with claude-mem's message in oboete's words; the write's own
+transaction reads the list again, so an exclusion committed after the tool's check refuses it too
+(Codex on #489). The
 send exclusion (5.5) refuses nothing: work state goes to no curator and no embedder, only to the
 agent in that repository, as the manifest does (the session start reads no exclusion).
 

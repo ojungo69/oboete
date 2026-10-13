@@ -2503,6 +2503,24 @@ pub fn doctor(home: &Path) -> Result<()> {
         );
         unhealthy.push("low free space");
     }
+    // Slice 4a: whether what happens in this directory is recorded at all.
+    if let (Ok(cwd), Ok(settings)) = (
+        std::env::current_dir(),
+        crate::capture::Settings::load(home),
+    ) {
+        let list = if crate::raw::exists(home) {
+            crate::raw::open(home)
+                .and_then(|raw| raw.capture_exclusions())
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        if let Some(why) =
+            crate::capture::not_recorded_why(&cwd.to_string_lossy(), &list, &settings)
+        {
+            println!("  nothing in this directory is recorded: {why}");
+        }
+    }
     // A store that cannot be read is a line and a failed exit, and the report goes on: doctor is
     // needed most when a store is damaged.
     fn section(unhealthy: &mut Vec<&str>, store: &str, read: Result<()>) {

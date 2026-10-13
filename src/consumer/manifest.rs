@@ -2148,7 +2148,7 @@ extra_rules = [
         store.append_ops(&[tabs]).unwrap();
         let phase = serde_json::json!({"phase": "rc2"});
         store
-            .work_state("r", "release", phase.as_object().unwrap())
+            .work_state("r", "release", phase.as_object().unwrap(), None)
             .unwrap();
         let (flaky, _) = claimed(
             &mut store,
