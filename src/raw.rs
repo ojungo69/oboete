@@ -6947,6 +6947,8 @@ pub(crate) type OpText = (String, i64, String, String);
 /// for a repository which op is whose. Inside `fields` (a work state's, a turn's) every value is
 /// text. A key is matched at any depth outside `fields`: an op field added later under one of these
 /// names keeps its value unmasked, so a new field is checked against this list (CodeRabbit on #487).
+/// A window's `reason` is one only when oboete set the window aside (`curate::set_aside`, which
+/// `oboete recurate` reads): a provider's failure is free text, masked (Codex on #487).
 const OP_NAMES: &[&str] = &[
     "agent",
     "candidates",
@@ -6967,7 +6969,6 @@ const OP_NAMES: &[&str] = &[
     "outcome",
     "provider",
     "quote",
-    "reason",
     "recipe",
     "repo",
     "scope",
@@ -7015,7 +7016,9 @@ pub(crate) fn masked_op_text(
                 .fold(false, |changed, item| walk(item, rules, names) | changed),
             serde_json::Value::Object(map) => map.iter_mut().fold(false, |changed, (key, item)| {
                 // Any depth: see `OP_NAMES` before naming a new op field.
-                if names && OP_NAMES.contains(&key.as_str()) {
+                let name = OP_NAMES.contains(&key.as_str())
+                    || key == "reason" && item.as_str().is_some_and(crate::curate::set_aside);
+                if names && name {
                     changed
                 } else {
                     walk(item, rules, names && key != "fields") | changed
@@ -8058,6 +8061,34 @@ mod tests {
         );
         let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// Slice 3e-4 (Codex on #487): a window's `reason` is kept only when oboete set the window
+    /// aside, which `oboete recurate --skipped` and `--source` read; a provider's failure is free
+    /// text and a rule masks it.
+    #[test]
+    fn a_windows_reason_is_masked_unless_oboete_set_it_aside() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'acme-[0-9]{6}|excluded|transcript' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        for kept in ["excluded", "imported:transcript"] {
+            let body = serde_json::json!({"outcome": "skipped", "reason": kept});
+            assert_eq!(
+                masked_op_text(OpKind::Window, &body.to_string(), &rules),
+                None
+            );
+        }
+        let failed = "every provider failed: groq: key file /w/acme-482915/key.md unreadable";
+        let body = serde_json::json!({"outcome": "skipped", "reason": failed});
+        let now = masked_op_text(OpKind::Window, &body.to_string(), &rules).unwrap();
+        let now: serde_json::Value = serde_json::from_str(&now).unwrap();
+        let reason = now["reason"].as_str().unwrap();
+        assert!(!reason.contains("acme-482915") && reason.contains("/w/***********/key.md"));
+        assert!(!crate::curate::set_aside(reason));
     }
 
     /// Slice 3e-4 (Codex on #487): a correction at its 1,000-character cap, in characters of

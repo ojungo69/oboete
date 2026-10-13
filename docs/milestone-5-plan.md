@@ -1266,8 +1266,10 @@ egress の gate が今の規則で伏せる）。
 - **伏せない値**（`OP_NAMES`）: oboete が付ける名前（識別子と自分の語彙）の値: `uid`、`id`、
   `supersedes`、`candidates`、`carried`、`copied`、`device`、`forgotten`、`job`、`source`、`source_id`、
   `session`、`repo`、`list`、`kind`、`type`、`status`、`speaker`、`scope`、`recipe`、`outcome`、`agent`、
-  `provider`、`reason`、`dropped`、`lowered`、slice 4a の除外の op の `folder` と `level`。それに record の文を
-  そのまま写した `quote`（その record の
+  `provider`、`dropped`、`lowered`、slice 4a の除外の op の `folder` と `level`。window の `reason` は oboete
+  が provider に聞かずに外したとき（取り込みの `imported:<source>` と除外の `excluded`、`curate::set_aside`。
+  `oboete recurate` が読む）だけ伏せない。provider の失敗の理由は文なので伏せる（Codex on #487）。それに
+  record の文をそのまま写した `quote`（その record の
   伏せ字が決める。引用だけを走査すると、行頭に固定した規則が record の欄の途中とは違う所に当たり、
   引用が読めなくなる）。キーも伏せない。`fields`（作業メモと turn の要約）の中は全部が文。forget の op
   （uid と job）と migration の op（checkpoint と v1 の session id の SHA-256）は文を持たないので読まない。
