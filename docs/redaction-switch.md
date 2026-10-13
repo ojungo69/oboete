@@ -72,9 +72,9 @@ of the settings page that changes the rules waits for each call already admitted
 the dispatch lock until config.toml is replaced, as a forget's registration does, so from the
 save's answer on no text gated under the rules before leaves; a hand edit of config.toml has the
 gates alone. The other way round, rules turned off while the rescan consumer reads a batch, or
-while a purge masks op text, mask nothing: the rescan checks the rules again before it writes its
-tombstones, and the purge checks them again under each page's dispatch hold, the hold a save that
-changes them takes too, so a record or an op stored as typed under the switch off stays so. A
+while a purge masks op text, mask nothing: the rescan checks the rules again and writes its
+tombstones under the dispatch hold a save that changes them takes too, and the purge checks them
+again under each page's hold, so a record or an op stored as typed under the switch off stays so. A
 search reads its exclusions again once its query is admitted, as the rules now read the caller.
 
 `Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
@@ -103,6 +103,10 @@ it), and follows the switch: while it is off, a prompt is kept as typed, cut as 
   gate read values without keys too. Capture finds such values; these later readers do not. #501
   has the acceptance tests. It touched only rules added later before the switch.
 - What was sent while redaction was off stays sent.
+- A hook that read the rules before a save that turns redaction off stores its event masked with
+  them: the event came before the save's answer, and what is masked stays masked. A capture takes
+  no dispatch hold, so that it never waits on one. The other way round, an event a hook stored as
+  typed with the rules it read off is masked by the rescan once they are on.
 
 ## Tests
 

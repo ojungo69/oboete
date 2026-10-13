@@ -5,7 +5,7 @@
 
 use crate::raw::{Item, Raw, Target};
 use crate::worker::Consumer;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,9 @@ const BATCH: usize = 500;
 thread_local! {
     /// What happens to the home between a step's read of its batch and its tombstones.
     static BEFORE_TOMBSTONES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// What happens to the home once a step has checked the rules again, before its tombstones.
+    static WHILE_TOMBSTONES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -106,32 +109,38 @@ impl Consumer for Rescan {
         if let Some(meanwhile) = BEFORE_TOMBSTONES.take() {
             meanwhile();
         }
-        // Rules changed while the batch was read (redaction turned off, say) write no tombstone:
-        // one would mask for good a record a hook appended under the rules now. The version is
-        // forgotten and the batch read again (owner decision 43; Codex on #502).
-        if !found.is_empty()
-            && crate::capture::Settings::load(&self.home)
-                .ok()
-                .map(|s| s.rules.version().to_owned())
-                .as_deref()
-                != Some(version)
-        {
-            k.execute("DELETE FROM rescan WHERE device = ?1", [device])?;
-            return Ok(after);
+        if found.is_empty() {
+            return Ok(recs.last().map_or(from, |r| r.seq));
         }
         // A second handle on raw.db for the tombstones (the worker's own is read-only here),
         // closed with the step: a handle kept open would hold raw.lock, and a restore waits for
         // every open store to close.
-        let mut writer = None;
+        let mut writer = crate::raw::open_report(&self.home, None, &mut |_| {
+            committed();
+            Ok(())
+        })?;
+        // Rules changed while the batch was read (redaction turned off, say) write no tombstone:
+        // one would mask for good a record a hook appended under the rules now. The version is
+        // forgotten and the batch read again. The check and the tombstones are under the hold a
+        // save that changes the rules takes too, so none changes them in between (owner decision
+        // 43; Codex and CodeRabbit on #502).
+        let _dispatch = crate::dispatch::exclusive(&self.home)
+            .context("the rescan's tombstones were not written")?;
+        if crate::capture::Settings::load(&self.home)
+            .ok()
+            .map(|s| s.rules.version().to_owned())
+            .as_deref()
+            != Some(version)
+        {
+            k.execute("DELETE FROM rescan WHERE device = ?1", [device])?;
+            return Ok(after);
+        }
+        #[cfg(test)]
+        if let Some(meanwhile) = WHILE_TOMBSTONES.take() {
+            meanwhile();
+        }
         for (seq, start, end) in found {
-            if writer.is_none() {
-                writer = Some(crate::raw::open_report(&self.home, None, &mut |_| {
-                    committed();
-                    Ok(())
-                })?);
-            }
-            let w = writer.as_mut().expect("opened");
-            w.append_tombstone(Target::Range {
+            writer.append_tombstone(Target::Range {
                 device: device.to_owned(),
                 seq,
                 offset: start as i64,
@@ -257,6 +266,47 @@ mod tests {
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 0);
         assert!(body(&raw, seq).contains(&key));
+    }
+
+    /// Owner decision 43 (CodeRabbit on #502): from its check of the rules to its last tombstone, a
+    /// step holds what a save that changes them takes, so a save made in between waits until the
+    /// tombstones of the rules it replaces are written.
+    #[test]
+    fn a_save_made_while_tombstones_are_written_waits_for_them() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_owned();
+        let mut raw = raw::open(&p).unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let seq = raw
+            .append(&raw::test_event(&format!(
+                r#"{{"prompt":"deploy {key} now"}}"#
+            )))
+            .unwrap();
+        let saving = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let (started, at) = (std::rc::Rc::clone(&saving), p.clone());
+        WHILE_TOMBSTONES.set(Some(Box::new(move || {
+            crate::dispatch::blocked(&at); // no earlier wait is this save's
+            let home = at.clone();
+            // A save of the page turning redaction off: the hold, then config.toml.
+            *started.borrow_mut() = Some(std::thread::spawn(move || {
+                let _held = crate::dispatch::exclusive(&home).unwrap();
+                std::fs::write(home.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+            }));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !crate::dispatch::blocked(&at) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the save did not wait"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })));
+        worker::run_once(&p).unwrap();
+        saving.borrow_mut().take().unwrap().join().unwrap();
+        assert_eq!(tombstones(&raw), 1);
+        assert!(!body(&raw, seq).contains("ghp_"), "{}", body(&raw, seq));
+        let config = std::fs::read_to_string(p.join("config.toml")).unwrap();
+        assert!(config.contains("enabled = false"), "{config}");
     }
 
     #[test]
