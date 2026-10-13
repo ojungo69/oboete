@@ -241,7 +241,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 
 - `raw.db` uses synchronous=FULL.
 - Startup reconciles consumer checkpoints above raw's highest sequence.
-- A write failure never blocks the agent. Failures are classified: disk full, I/O error, lock contention as a label. doctor turns red, and the next injection says recording has failed since T.
+- A write failure never blocks the agent. Failures are classified: disk full, I/O error, lock contention as a label, and a home a newer oboete wrote (docs/store-format.md). doctor turns red, and the next injection says recording has failed since T.
 - SQLITE_BUSY is classified as lock contention, as a doctor label only (RD/constraints-synthesis.md S2-15) (Claude; overrulable).
 
 ### 2.6 Backups
@@ -985,7 +985,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
     - No hook starts a new worker until step 6 ends.
     - This also covers renaming the exe while a worker runs it on Windows.
   - **1.** Download to a staging path, then verify the checksum and the attestation.
-  - **2.** Run a read-only schema check with the staged binary. It compares `PRAGMA user_version` (used today at src/db.rs:179, :219) with the versions it can migrate from. A store newer than the binary is refused, so there is no downgrade across a schema version.
+  - **2.** Run a read-only schema check with the staged binary. It reads the home's format, raw.db's `PRAGMA user_version` (`raw::FORMAT`, docs/store-format.md), which every open of raw.db checks too: a home newer than the binary is refused, so there is no downgrade across a format. A release raises the format when an older binary would mishandle anything it writes, in any store or a backup segment.
   - **3.** Check that there is free space for the backup plus the staged binary (Claude; overrulable). Then take the backup: MUST-M15's sealed segments of raw.db and the op log (knowledge.db is rebuildable, section 1).
     - The backup comes before any change (R13, RD/issue50.md:47).
     - forget reaches it like any other backup.

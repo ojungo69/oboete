@@ -82,6 +82,12 @@ each milestone and new features are added here.
 |---|---|---|
 | 60 | **Secret masking can be switched off.** In claude-mem masking of secrets is an optional setting, off by default. oboete has the same switch, on by default, in `[redaction]` and on the settings page; off, nothing is masked at capture, when text is sent, or in what agents read. It was left out on 2026-10-03 (decision 37) and asked for on 2026-10-13. | S |
 
+### Before the switch (added 2026-10-14, from claude-mem 13.36)
+
+| # | Difference | Size |
+|---|---|---|
+| N2 | **An older binary run on a newer home.** claude-mem 13.36 stamps its database with the newest schema that wrote it and refuses changes from an older build. oboete had no such stamp: an older binary run against a home a newer one wrote would write with the older meaning. Built in docs/store-format.md: raw.db carries the home's format, and every open of it refuses a newer one. | M |
+
 ### After the switch, first
 
 | # | Difference | Size |

@@ -820,6 +820,7 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     conn.busy_timeout(OPEN_WAIT)?;
+    format_of(&conn)?;
     let read = ReadOnly {
         conn,
         sqlite_path,
@@ -1309,6 +1310,8 @@ fn open_within_report(
     #[cfg(test)]
     crate::crash::arm(&conn);
     crate::db::wal_until(&conn, "FULL", deadline)?;
+    // docs/store-format.md: a raw.db a newer oboete wrote is refused before anything changes it.
+    let format = format_of(&conn)?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
     // Milestone 5 D5 (2b): what a write frees is overwritten with zeros, so neither a rewritten op
@@ -1369,6 +1372,24 @@ fn open_within_report(
         {
             committed("stores_changed")?;
         }
+    }
+    // Stamped once its schema is this binary's, read again under the write lock: of two binaries
+    // opening together, the newer one's stamp stays, and the older one refuses it.
+    if format < FORMAT
+        && crate::db::retry_busy(&conn, deadline, || {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let raised = format_of(&tx)? < FORMAT;
+            if raised {
+                tx.execute_batch(&format!("PRAGMA user_version = {FORMAT}"))?;
+            }
+            tx.commit()?;
+            Ok(raised)
+        })?
+    {
+        committed("stores_changed")?;
     }
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
@@ -1454,6 +1475,37 @@ impl std::fmt::Display for Restoring {
 }
 
 impl std::error::Error for Restoring {}
+
+/// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
+/// writes anything an older binary would mishandle, in any store or a backup segment.
+pub(crate) const FORMAT: i64 = 1;
+
+/// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
+/// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
+#[derive(Debug)]
+pub struct NewerFormat {
+    pub found: i64,
+}
+
+impl std::fmt::Display for NewerFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "raw.db was written by a newer oboete (format {}; this one reads up to {FORMAT}): \
+             update oboete",
+            self.found
+        )
+    }
+}
+
+impl std::error::Error for NewerFormat {}
+
+/// The format `conn`'s raw.db was last written with, refused when it is newer than this binary's.
+fn format_of(conn: &Connection) -> Result<i64> {
+    let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    anyhow::ensure!(found <= FORMAT, NewerFormat { found });
+    Ok(found)
+}
 
 /// Restore-lock waits: opens wait at most 2 s within their initialization budget (hooks 2 s,
 /// other callers 10 s); a restore waits at most 10 s for open stores to close.
@@ -3875,6 +3927,12 @@ impl Raw {
         &self.home
     }
 
+    /// docs/store-format.md: whether a newer oboete has stamped raw.db since this handle opened
+    /// it, so a long-lived process stops writing with its own meaning of the home.
+    pub(crate) fn newer_format(&self) -> bool {
+        format_of(&self.conn).is_err_and(|e| e.is::<NewerFormat>())
+    }
+
     pub(crate) fn home_id(&self) -> &str {
         &self.home_id
     }
@@ -5848,6 +5906,8 @@ impl Rebuild {
         anyhow::ensure!(!path.exists(), "{} exists", path.display());
         let conn = Connection::open(path)?;
         conn.execute_batch(&schema_for_file(&conn, path)?)?;
+        // The rebuild is this binary's: its format (docs/store-format.md).
+        conn.execute_batch(&format!("PRAGMA user_version = {FORMAT}"))?;
         // A staging file is fresh, but the history rebuilt into it is not proof of a fresh home.
         conn.execute("DELETE FROM meta WHERE key='home_id_proven'", [])?;
         crate::db::ensure_device(&conn, path)?;
@@ -7711,6 +7771,75 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn format_in(raw: &Raw) -> i64 {
+        raw.conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// docs/store-format.md: a raw.db a newer oboete stamped is refused by the writable open and
+    /// the read-only one, and neither changes a byte of it (a reader may leave an empty WAL).
+    #[test]
+    fn a_raw_db_a_newer_oboete_wrote_is_refused_and_left_as_it_was() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = open(p).unwrap();
+        raw.append(&test_event(r#"{"prompt":"kept as it was"}"#))
+            .unwrap();
+        // Without a column this binary's migration adds back: a refused open adds nothing.
+        raw.conn
+            .execute_batch(&format!(
+                "ALTER TABLE import_origins DROP COLUMN ambiguous;
+                 PRAGMA user_version = {};",
+                FORMAT + 1
+            ))
+            .unwrap();
+        drop(raw);
+        let bytes = |name: &str| std::fs::read(p.join(name)).ok();
+        let before = bytes("raw.db");
+        for refused in [open(p).err(), read_only(p).err()] {
+            let e = refused.expect("refused");
+            let found = e.downcast_ref::<NewerFormat>().map(|n| n.found);
+            assert_eq!(found, Some(FORMAT + 1), "{e:#}");
+            assert!(e.to_string().contains("update oboete"), "{e:#}");
+        }
+        assert_eq!(bytes("raw.db"), before);
+        assert!(bytes("raw.db-wal").is_none_or(|wal| wal.is_empty()));
+    }
+
+    /// docs/store-format.md: a raw.db from before the stamp gets it at its first writable open,
+    /// and an open of a stamped one writes nothing for it.
+    #[test]
+    fn a_raw_db_from_before_the_stamp_gets_it_once() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let raw = open(p).unwrap();
+        assert_eq!(format_in(&raw), FORMAT);
+        raw.conn.execute_batch("PRAGMA user_version = 0").unwrap();
+        drop(raw);
+        let mut changed = Vec::new();
+        let raw = open_report(p, None, &mut |stage| {
+            changed.push(stage);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((format_in(&raw), changed), (FORMAT, vec!["stores_changed"]));
+        assert!(!raw.newer_format());
+        let mut changed = Vec::new();
+        let again = open_report(p, None, &mut |stage| {
+            changed.push(stage);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((format_in(&again), changed), (FORMAT, vec![]));
+        // A newer binary stamps it while this handle is open: the handle says so.
+        again
+            .conn
+            .execute_batch(&format!("PRAGMA user_version = {}", FORMAT + 1))
+            .unwrap();
+        assert!(raw.newer_format());
+    }
 
     /// Codex on #458: a copy's sidecars are named on its path's own bytes, which need not be
     /// UTF-8.

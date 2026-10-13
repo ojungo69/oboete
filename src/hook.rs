@@ -3053,6 +3053,39 @@ mod tests {
         assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
     }
 
+    /// docs/store-format.md: a home a newer oboete wrote is neither written nor read: the hook
+    /// keeps its event, marks the failure as that, and the next SessionStart says to update.
+    #[test]
+    fn a_home_a_newer_oboete_wrote_is_not_written_and_the_next_session_start_says_so() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        drop(crate::raw::open(home).unwrap());
+        Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute_batch(&format!("PRAGMA user_version = {}", crate::raw::FORMAT + 1))
+            .unwrap();
+        let before = std::fs::read(home.join("raw.db")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"first"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(home, "claude", "UserPromptSubmit", &prompt[..], &mut out).is_err());
+        assert!(out.is_empty());
+        let failed = crate::failure::since(home).map(|f| f.0);
+        assert_eq!(failed, Some(crate::failure::Class::Newer));
+        let start = br#"{"session_id":"t","source":"startup"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(home, "claude", "SessionStart", &start[..], &mut out).is_err());
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("a newer oboete wrote this home: update oboete"),
+            "{text}"
+        );
+        assert_eq!(crate::unwritten::counts(home).unwrap(), (2, 0));
+        assert_eq!(std::fs::read(home.join("raw.db")).unwrap(), before);
+    }
+
     #[test]
     fn a_hook_open_timeout_marks_the_failure_before_its_agent_timeout() {
         let home = tempfile::tempdir().unwrap();

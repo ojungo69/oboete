@@ -1752,6 +1752,13 @@ fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
     ) else {
         return Ok(Vec::new());
     };
+    // docs/store-format.md: a raw.db a newer oboete wrote is not restored over while it reads:
+    // the rebuild would put an older home in its place, from segments it may not read right.
+    if let Ok(found) = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        && found > raw::FORMAT
+    {
+        return Err(raw::NewerFormat { found }.into());
+    }
     requests_in(&conn)
 }
 
@@ -2102,6 +2109,11 @@ pub(crate) fn open_knowledge_report(
 /// database, or a check that ran and reported a problem (the one error that is no
 /// `rusqlite::Error`). Busy, permission and the like are not.
 pub(crate) fn damaged(e: &anyhow::Error) -> bool {
+    // A raw.db a newer oboete wrote is not damaged: a restore would put an older home in its
+    // place (docs/store-format.md).
+    if e.chain().any(|c| c.is::<crate::raw::NewerFormat>()) {
+        return false;
+    }
     corrupt(e)
         || (e
             .chain()
@@ -3171,6 +3183,34 @@ pub(crate) mod tests {
             .path;
         overwrite(&seg, 10, &[0xA5; 16]);
         assert_eq!(verify(&p.join("backups")).unwrap().len(), 1); // the checksum names it
+    }
+
+    /// docs/store-format.md: a refused open is never damage, whatever context names it.
+    #[test]
+    fn a_newer_format_is_never_damage() {
+        let newer = anyhow::Error::new(raw::NewerFormat { found: 9 }).context("quick_check");
+        assert!(!damaged(&newer));
+    }
+
+    /// docs/store-format.md: `oboete restore` does not put an older home in place of a raw.db a
+    /// newer oboete wrote: it is refused, and raw.db stays where it is, as it was.
+    #[test]
+    fn a_restore_refuses_a_raw_db_a_newer_oboete_wrote() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("kept")).unwrap();
+        assert!(export(p).unwrap().is_some());
+        drop(raw);
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))
+            .unwrap();
+        let before = std::fs::read(p.join("raw.db")).unwrap();
+        let e = crate::worker::restore(p).unwrap_err();
+        assert!(e.is::<raw::NewerFormat>(), "{e:#}");
+        assert!(!quarantined(p, "raw.db"));
+        assert_eq!(std::fs::read(p.join("raw.db")).unwrap(), before);
     }
 
     #[test]

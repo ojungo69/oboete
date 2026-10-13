@@ -9,6 +9,8 @@ pub enum Class {
     DiskFull,
     Io,
     Busy,
+    /// docs/store-format.md: raw.db was written by a newer oboete.
+    Newer,
     Other,
 }
 
@@ -18,6 +20,7 @@ impl Class {
             Class::DiskFull => "disk-full",
             Class::Io => "io",
             Class::Busy => "busy",
+            Class::Newer => "newer",
             Class::Other => "other",
         }
     }
@@ -27,6 +30,7 @@ impl Class {
             "disk-full" => Class::DiskFull,
             "io" => Class::Io,
             "busy" => Class::Busy,
+            "newer" => Class::Newer,
             _ => Class::Other,
         }
     }
@@ -36,10 +40,14 @@ impl Class {
 /// filesystem (APFS, btrfs) can still refuse it; doctor's free-space check covers that.
 const SIZE: usize = 64;
 
-/// SQLITE_FULL or ENOSPC, SQLITE_IOERR or another I/O error, SQLITE_BUSY or SQLITE_LOCKED, the
-/// first found along the error's chain; anything else (a malformed payload) is `Other`.
+/// A raw.db a newer oboete wrote, SQLITE_FULL or ENOSPC, SQLITE_IOERR or another I/O error,
+/// SQLITE_BUSY or SQLITE_LOCKED, the first found along the error's chain; anything else (a
+/// malformed payload) is `Other`.
 pub fn classify(e: &anyhow::Error) -> Class {
     for cause in e.chain() {
+        if cause.is::<crate::raw::NewerFormat>() {
+            return Class::Newer;
+        }
         if let Some(code) = cause
             .downcast_ref::<rusqlite::Error>()
             .and_then(rusqlite::Error::sqlite_error_code)
@@ -235,6 +243,7 @@ pub fn line((class, ts): (Class, i64), kept: usize) -> String {
         Class::DiskFull => "disk full",
         Class::Io => "I/O error",
         Class::Busy => "store busy",
+        Class::Newer => "a newer oboete wrote this home: update oboete",
         Class::Other => "error",
     };
     let then = match kept {
@@ -670,6 +679,8 @@ mod tests {
         assert_eq!(classify(&anyhow::Error::new(io)), Class::Io);
         let json = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
         assert_eq!(classify(&anyhow::Error::new(json)), Class::Other);
+        let newer = anyhow::Error::new(crate::raw::NewerFormat { found: 9 }).context("open");
+        assert_eq!(classify(&newer), Class::Newer);
     }
 
     #[test]
@@ -779,5 +790,16 @@ mod tests {
             "{line}"
         );
         assert!(line.contains("disk full"), "{line}");
+        // docs/store-format.md: the marker keeps the class, and the line says what to do.
+        let home = tempfile::tempdir().unwrap();
+        prepare(home.path());
+        mark(home.path(), Class::Newer, 1_000);
+        let failed = since(home.path()).unwrap();
+        assert_eq!(failed.0, Class::Newer);
+        let said = super::line(failed, 0);
+        assert!(
+            said.contains("a newer oboete wrote this home: update oboete"),
+            "{said}"
+        );
     }
 }

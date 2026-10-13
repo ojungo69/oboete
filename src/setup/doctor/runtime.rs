@@ -377,6 +377,7 @@ impl Observation {
                     crate::failure::Class::DiskFull => "disk_full",
                     crate::failure::Class::Io => "io",
                     crate::failure::Class::Busy => "busy",
+                    crate::failure::Class::Newer => "newer",
                     crate::failure::Class::Other => "other",
                 }),
                 since_ns: Some(first),
