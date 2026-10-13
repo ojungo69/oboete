@@ -148,11 +148,11 @@ status read reports both the recorded write and the unavailable readback.
 
 ## Local API boundary
 
-`GET /api/privacy` reads repository exclusions and rescan state. The typed writes
-are `POST /api/privacy/exclude`, `/api/claims/correct`, `/api/claims/mute` and
-`/api/preferences`. They share the viewer's Host, token, same-origin, JSON framing
+`GET /api/privacy` reads repository exclusions, what is never recorded and rescan
+state. The typed writes are `POST /api/privacy/exclude`, `/api/privacy/capture`,
+`/api/claims/correct`, `/api/claims/mute` and `/api/preferences`. They share the viewer's Host, token, same-origin, JSON framing
 and 16 KiB body guards before parsing or store work. Unknown fields and invalid
 selectors are refused. Responses expose only canonical identifiers, typed state
 and vetted codes; they do not expose backend error causes.
 
-Capture exclusion, retention and the forget UI follow their milestone-5 slices.
+Retention and the forget UI follow their milestone-5 slices.
