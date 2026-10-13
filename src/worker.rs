@@ -5024,7 +5024,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(rounds.load(Ordering::SeqCst), 1, "a round with nothing new");
         let changed = "[worker]\nresident = true\n[summary]\ncurate = false\n";
-        std::fs::write(p.join("config.toml"), changed).unwrap();
+        // Published whole: written in place, the file is empty for a moment, which reads as
+        // `resident = false`, and a worker that reads it then leaves at its idle step (#462).
+        let staged = p.join("config.toml.next");
+        std::fs::write(&staged, changed).unwrap();
+        std::fs::rename(staged, p.join("config.toml")).unwrap();
         // A worker that left says why (#462).
         until("a round after the change", || {
             rounds.load(Ordering::SeqCst) > 1 || worker.is_finished()
