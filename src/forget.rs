@@ -1113,7 +1113,7 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
     }
-    let (due, records_due, owed, masks, text) = {
+    let (due, records_due, owed, masks, mut text) = {
         let raw = crate::raw::open(home)?;
         let owed = raw.record_backups_owed()?;
         let text = text_owed(home, &raw)?;
@@ -1135,6 +1135,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // op text masked with the rules now, whether raw.db-wal was truncated after it.
     let mut masked = masks.is_none();
     let mut text_truncated = false;
+    // Owner decision 43: this purge's own mark on the scan of the op text it begins.
+    let mut text_mark: Option<String> = None;
     // Step 2 for the jobs whose ops (a record job: whose rows, slice 3c) hold text, or that never
     // took it; the rebuild for those and the ones stopped after step 2. A job past step 3 does not
     // go back to the rebuild (2c, decision 8): a stopped one would rebuild at every continuation.
@@ -1150,6 +1152,18 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     {
         let _worker = crate::worker::lock_asking(home)?;
         let mut raw = crate::raw::open(home)?;
+        #[cfg(test)]
+        if let Some(meanwhile) = AFTER_PURGE_LOCK.take() {
+            meanwhile();
+        }
+        // The rules the op text owes its scan to, read again under the worker lock: rules changed
+        // while it was awaited (redaction turned off, say) mask nothing with the ones before, and
+        // the scan stays owed to the rules now (owner decision 43; Codex on #502).
+        if let Some(rules) = &text
+            && text_owed(home, &raw)?.is_none_or(|now| now.version() != rules.version())
+        {
+            text = None;
+        }
         for (job, uid, step, held) in &due {
             if step_2(*step, *held) {
                 purged.ops += raw.purge_uid(uid, job)?;
@@ -1201,8 +1215,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // 3e-2 wrote: the claims, windows and turns made from a masked record lose theirs by its
         // time, as before, and what is left (a correction's body, a work state, an import, a
         // curator's own words) by the rules.
+        let mut text_stopped = false;
         if let Some(rules) = &text {
-            raw.op_text_scan_begun()?;
+            text_mark = Some(raw.op_text_scan_begun()?);
             let mut after = None;
             loop {
                 let page =
@@ -1211,9 +1226,18 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                     break;
                 };
                 after = Some((device.clone(), *op_seq));
-                purged.texts += raw.mask_op_text(&page)?;
+                // Rules changed meanwhile mask no further page; the scan stays owed to the rules
+                // now (owner decision 43).
+                let Some(masked) = raw.mask_op_text(&page, rules)? else {
+                    text_stopped = true;
+                    break;
+                };
+                purged.texts += masked;
             }
             crate::backup::fail_after("op_text_masked")?;
+        }
+        if text_stopped {
+            text = None;
         }
         let truncated = raw.truncate_wal(TRUNCATE_WAIT)?;
         masked |= truncated;
@@ -1362,6 +1386,20 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         }
     }
     if !jobs.is_empty() || records_owed || text.is_some() {
+        // Owner decision 43 (Codex on #502): the rules the op text is masked with, read again under
+        // the hold a save that changes them takes, kept through the rewrites below. Rules changed
+        // since the look at raw.db (redaction turned off, say) mask no op the backups or the copies
+        // hold, which may be one stored as typed while they were off, and the scan stays owed to
+        // the rules now.
+        let _dispatch = text
+            .is_some()
+            .then(|| crate::dispatch::exclusive(home).context("the backups were not purged"))
+            .transpose()?;
+        if let Some(rules) = &text
+            && text_owed(home, &raw)?.is_none_or(|now| now.version() != rules.version())
+        {
+            text = None;
+        }
         // And the window and turn ops 3d-2 rewrote, to the bodies raw.db holds now, and those it
         // does not hold judged by the same rules: every ops segment, as one set aside may hold
         // such an op (Codex and CodeRabbit on #472).
@@ -1427,7 +1465,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     }
     // A restore since step 2 made raw.db anew from the segments it read then (Codex on #480).
     if let Some(rules) = &text
-        && !(text_truncated && raw.ops_text_scanned(rules.version())?)
+        && !(text_truncated
+            && raw.ops_text_scanned(rules.version(), text_mark.as_deref().unwrap_or_default())?)
         && !purged.unfinished.iter().any(|j| j == crate::raw::MASK_JOB)
     {
         purged.unfinished.push(crate::raw::MASK_JOB.to_owned());
@@ -1450,23 +1489,31 @@ fn text_owed(home: &Path, raw: &crate::raw::Raw) -> Result<Option<crate::redact:
 /// Slice 3e-4: whether raw.db's op text waits for a purge: owed a scan with the rules now, and an
 /// op they mask, or masked by a purge that stopped, or a backup's ops segment or a copy of raw.db
 /// set aside, which may hold an op raw.db does not (a restore that left it out), and only a
-/// purge's step 4 reads (Codex on #487). With none of them, the scan is recorded here and no purge
-/// starts: a new store, or a rule that finds nothing in an op.
+/// purge's step 4 reads (Codex on #487); rules turned off find nothing there either (owner
+/// decision 43). With none of them, the scan is recorded here and no purge starts: a new store, or
+/// a rule that finds nothing in an op.
 fn text_waits(home: &Path, raw: &crate::raw::Raw) -> Result<bool> {
     let Some(rules) = text_owed(home, raw)? else {
         return Ok(false);
     };
-    if crate::backup::any_ops_segment(home)?
-        || !crate::raw::copies_set_aside(home)?.is_empty()
+    // Begun before the look: an append under rules turned off meanwhile takes the mark away, and
+    // the scan is not recorded (owner decision 43; Codex's security review of the switch). The
+    // worker holds its lock: no restore makes raw.db anew meanwhile.
+    let store = crate::raw::open(home)?;
+    let mark = store.op_text_scan_begun()?;
+    if !rules.is_off()
+        && (crate::backup::any_ops_segment(home)?
+            || !crate::raw::copies_set_aside(home)?.is_empty())
         || raw.ops_text_pending()?
         || !raw.op_text_masks(&rules, None, 1)?.is_empty()
     {
         return Ok(true);
     }
-    // The worker holds its lock: no restore makes raw.db anew meanwhile.
-    let store = crate::raw::open(home)?;
-    store.op_text_scan_begun()?;
-    store.ops_text_scanned(rules.version())?;
+    #[cfg(test)]
+    if let Some(between) = AFTER_TEXT_LOOK.take() {
+        between();
+    }
+    store.ops_text_scanned(rules.version(), &mark)?;
     Ok(false)
 }
 
@@ -1480,6 +1527,12 @@ thread_local! {
     /// What happens to the home after a purge's rebuild on this thread, before its step 3 takes
     /// the worker lock.
     static BEFORE_STEP_3: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// What happens to the home between a worker's look at the op text and the scan it records.
+    static AFTER_TEXT_LOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// What happens to the home once a purge holds the worker lock, before its step 2.
+    static AFTER_PURGE_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -9339,6 +9392,200 @@ mod tests {
             }
             assert_eq!(look(), 0, "aside: {aside}");
         }
+    }
+
+    /// Owner decision 43 (Codex on #502): rules turned off after a purge's look at raw.db's op text
+    /// and before its step 4 mask no op only the backups hold with the rules before (it may have
+    /// been stored as typed while they were off); the scan stays owed to the rules now.
+    #[test]
+    fn rules_turned_off_before_step_4_mask_no_op_only_the_backups_hold() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        let seq = s
+            .raw
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        // raw.db without it, as a restore that left it out makes it.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE op_seq = ?1", [seq])
+            .unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let config = home.join("config.toml");
+        let off = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        BEFORE_STEP_3.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || std::fs::write(&config, off).unwrap()));
+        });
+        purge(&home).unwrap().unwrap();
+        assert!(!backup_hits(&home, MASKED).is_empty());
+        let now = crate::redact::Rules::load(&home).unwrap();
+        assert!(
+            raw::open(&home)
+                .unwrap()
+                .ops_text_owed(now.version())
+                .unwrap()
+        );
+    }
+
+    /// Owner decision 43 (Codex on #502): rules turned off while a purge waits for the worker
+    /// lock mask no op text with the rules before; the scan stays owed to the rules now.
+    #[test]
+    fn rules_turned_off_while_a_purge_waits_mask_no_op_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        let seq = s
+            .raw
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let config = home.join("config.toml");
+        let off = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        AFTER_PURGE_LOCK.set(Some(Box::new(move || {
+            std::fs::write(&config, off).unwrap();
+        })));
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.texts, 0);
+        let task = op_bodies(&home)[&seq]["fields"]["task"].clone();
+        assert_eq!(task, format!("Rotate {MASKED}."));
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): an op appended under rules
+    /// turned off between a worker's look at the op text and its record of the scan leaves the
+    /// scan unrecorded, so the next look finds the op and starts the purge.
+    #[test]
+    fn an_op_appended_off_during_the_look_leaves_the_scan_unrecorded() {
+        let s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let on = crate::redact::Rules::load(&home).unwrap();
+        let off_toml = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        let off = crate::redact::Rules::new(
+            &crate::config::parse_capture(Some(&off_toml))
+                .unwrap()
+                .redaction,
+        )
+        .unwrap();
+        let look = || {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, &raw::open(&home).unwrap());
+            CONTINUED.get()
+        };
+        let writer = home.clone();
+        AFTER_TEXT_LOOK.set(Some(Box::new(move || {
+            let mut raw = raw::open(&writer).unwrap();
+            raw.gates_with(&off);
+            let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+            raw.append_ops(&[(
+                raw::OpKind::WorkState,
+                serde_json::json!({"repo": "github.com/o/r", "list": "deploys",
+                    "fields": fields, "clock": 1}),
+            )])
+            .unwrap();
+        })));
+        assert_eq!(look(), 0);
+        assert!(
+            raw::open(&home)
+                .unwrap()
+                .ops_text_owed(on.version())
+                .unwrap()
+        );
+        assert_eq!(look(), 1);
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): an agent's work state written
+    /// while redaction is off, and the same rules back on before any worker read them off, still
+    /// owes the scan of the op text, though the version is the one the last scan recorded: the
+    /// worker starts the purge that masks it.
+    #[test]
+    fn an_op_written_while_off_owes_the_scan_when_the_same_rules_come_back() {
+        let s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let look = || {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, &raw::open(&home).unwrap());
+            CONTINUED.get()
+        };
+        assert_eq!(look(), 0);
+        let on = crate::capture::Settings::load(&home).unwrap();
+        let mut raw = raw::open(&home).unwrap();
+        assert!(!raw.ops_text_owed(on.rules.version()).unwrap());
+        let off_rules = MASK_RULE.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        std::fs::write(home.join("config.toml"), off_rules).unwrap();
+        let off = crate::capture::Settings::load(&home).unwrap();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        raw.work_state_under(
+            "github.com/o/r",
+            "deploys",
+            fields.as_object().unwrap(),
+            "/x",
+            &off,
+            ("github.com/o/r", Some("/x")),
+        )
+        .unwrap();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert!(raw.ops_text_owed(on.rules.version()).unwrap());
+        assert_eq!(look(), 1);
+    }
+
+    /// Owner decision 43: rules turned off find nothing in a backup's ops segment either, so a
+    /// worker records the scan under them and starts no purge for it; turned on again with a rule
+    /// that masks an op, the purge starts.
+    #[test]
+    fn rules_turned_off_start_no_purge_for_the_op_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let fields = serde_json::json!({ "task": format!("Rotate {MASKED}.") });
+        s.raw
+            .work_state(
+                "github.com/o/r",
+                "deploys",
+                fields.as_object().unwrap(),
+                None,
+            )
+            .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let look = || {
+            let _ = std::fs::remove_file(home.join("state").join("forget-continue"));
+            CONTINUED.set(0);
+            continue_due(&home, &raw::open(&home).unwrap());
+            CONTINUED.get()
+        };
+        assert_eq!(look(), 0);
+        let off = crate::redact::Rules::load(&home).unwrap();
+        assert!(
+            !raw::open(&home)
+                .unwrap()
+                .ops_text_owed(off.version())
+                .unwrap()
+        );
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        assert_eq!(look(), 1);
     }
 
     /// Slice 3e-4 (Codex on #487): an op whose uid cannot be told, a claim of the shape from before

@@ -2855,8 +2855,18 @@ pub fn doctor(home: &Path) -> Result<()> {
     match &capture {
         Ok(s) => {
             let (rules, kept) = s.rules.counts();
+            // Off, no rule runs: saying how many there are would read as if they did.
+            let redaction = if s.rules.is_off() {
+                "redaction off: secrets are stored and sent as typed ([redaction] enabled = false)"
+                    .to_owned()
+            } else {
+                format!(
+                    "{rules} extra redaction rule(s), {kept} allowlisted value(s), ruleset {}",
+                    s.rules.version()
+                )
+            };
             println!(
-                "capture: prompts {}, tool output {}, {rules} extra redaction rule(s), {kept} allowlisted value(s), ruleset {}",
+                "capture: prompts {}, tool output {}, {redaction}",
                 if s.store_prompts {
                     "stored"
                 } else {
@@ -2866,7 +2876,6 @@ pub fn doctor(home: &Path) -> Result<()> {
                     config::ToolOutput::Full => "full",
                     config::ToolOutput::HeadTail => "head and tail",
                 },
-                s.rules.version()
             );
         }
         Err(e) => println!(

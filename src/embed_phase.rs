@@ -66,19 +66,29 @@ thread_local! {
     static AFTER_SEND_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
         std::cell::RefCell::new(None)
     };
+    /// What happens to the home while `still` waits for raw.db and the dispatch guard.
+    static WHILE_STILL_WAITS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
 }
 
 /// Rules loaded, raw.db opened, exclusions and tombstones checked against the batch's, raw.db
 /// closed: what `send` and `send_local` do before the model runs. A call that leaves the machine
 /// holds the dispatch guard, which a forget waits for.
 fn still(home: &Path, batch: &Batch, leaves: bool) -> Result<Option<crate::dispatch::Guard>> {
+    let raw = crate::raw::open(home)?;
+    let dispatch = leaves.then(|| raw.dispatch()).transpose()?;
+    #[cfg(test)]
+    if let Some(meanwhile) = WHILE_STILL_WAITS.take() {
+        meanwhile();
+    }
+    // After the waits: rules turned on while one held are the batch's no longer (owner decision
+    // 43; Codex's security review of the switch).
     let rules = crate::redact::Rules::load(home)?;
     anyhow::ensure!(
         rules.version() == batch.ruleset,
         "the redaction rules changed since the batch was composed"
     );
-    let raw = crate::raw::open(home)?;
-    let dispatch = leaves.then(|| raw.dispatch()).transpose()?;
     batch.reading.still(&raw)?;
     anyhow::ensure!(
         raw.tombstones()? == batch.tombstones,
@@ -3879,6 +3889,39 @@ mod tests {
             .map(|(kind, ..)| kind)
             .collect();
         assert_eq!(mapped, ["k", "r"]);
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a batch composed while
+    /// redaction is off is not sent once it is on again while the send waits for raw.db or the
+    /// dispatch guard: the rules are compared after the waits.
+    #[test]
+    fn a_batch_composed_under_other_rules_is_not_sent_after_the_waits() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let path = s.home.path().join("config.toml");
+        let plain = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{plain}[redaction]\nenabled = false\n")).unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        s.said("s", "github.com/o/r", 1_000, &format!("deploy with {key}"));
+        s.run();
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        let loaded = crate::config::load(&home).unwrap();
+        let embedder = Embedder::from_config(&loaded.embedding).unwrap().unwrap();
+        let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+        let off = crate::redact::Rules::load(&home).unwrap();
+        let batch = pending(&s.raw, &k, &embedder.id, &reading, &off, false)
+            .unwrap()
+            .unwrap();
+        assert!(batch.texts.iter().any(|t| t.contains(&key)));
+        let config_home = home.clone();
+        WHILE_STILL_WAITS.set(Some(Box::new(move || {
+            std::fs::write(config_home.join("config.toml"), &plain).unwrap();
+        })));
+        let e = still(&home, &batch, true).unwrap_err();
+        assert!(e.to_string().contains("redaction rules changed"), "{e:#}");
+        assert_eq!(stub.requests(), 0);
     }
 
     /// Codex on #489: a claude-mem project imported before a rule that masks its name sends none

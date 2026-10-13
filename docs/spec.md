@@ -172,7 +172,7 @@ The other checked items in RD/constraints-synthesis.md (the "2. Inherited constr
 
 The user can set (owner decision 16; Claude; overrulable):
 - capture exclusion per repo or folder (not only sync exclusion);
-- extra redaction rules, and an allowlist for false positives. Built-in rules cannot be removed;
+- redaction on or off, on by default (decision 43); extra redaction rules, and an allowlist for false positives. Built-in rules cannot be removed one by one;
 - injection on/off and size per kind: SessionStart, per prompt, mid-session correction;
 - raw retention period (default forever);
 - capture detail: whether prompts are stored, and whether tool output is kept full or head+tail;
@@ -180,7 +180,7 @@ The user can set (owner decision 16; Claude; overrulable):
 
 The defaults of capture detail and injection are sections 2 and 4 as written: prompts are stored, tool outputs are kept as 2.4 says, and per-prompt injection's default follows 4.6's 10% line. The user may change them, including turning per-prompt injection on before it passes that line (Claude; overrulable).
 
-Safety rules stay fixed and are not settings: decision gates, the global-scope channel, data fencing, built-in redaction, deletion propagation (owner decision 16).
+Safety rules stay fixed and are not settings: decision gates, the global-scope channel, data fencing, deletion propagation (owner decision 16). Built-in redaction was one of them until the owner asked for a switch (decision 43).
 
 ### 1.6 Ordering and partition key
 
@@ -782,7 +782,8 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
   - A secret split across two events, or an encoded one (base64, hex, URL encoding), passes both passes.
   - The entropy scanner was rejected for its false positives (RD/improvements-synthesis.md:581).
   - forget is the remedy once such a secret is noticed.
-- **Rules**: built-in rules cannot be turned off. Users add rules and allowlist false positives (owner decision 16). An allowlist entry is the SHA-256 of one exact value, never a pattern, so it cannot switch a rule off.
+- **Rules**: built-in rules cannot be turned off one by one. Users add rules and allowlist false positives (owner decision 16). An allowlist entry is the SHA-256 of one exact value, never a pattern, so it cannot switch a rule off.
+- **The switch** (decision 43): `[redaction] enabled = false` turns every rule off, the built-in ones too: nothing is masked at capture, at the egress gate, or in what agents and the page read. `<private>` blocks and binary markers stay, a `[redaction]` table that does not load still stops capture and sends nothing, and what was masked before stays masked. The rules' version reads `off` then, so turning redaction on again rescans what was stored meanwhile, as a new rule does (2.2). docs/redaction-switch.md has the design.
 - **Keys**: provider API keys are read from files and never go into a subprocess environment, a command line or a log.
   - Curator subprocesses get S8's environment: `env_clear` plus an allow-list (PATH, HOME/USERPROFILE, APPDATA/LOCALAPPDATA, TMP/TEMP, LANG/LC_*, XDG_*, the proxy variables, and each CLI's own config-directory variable; RD/improvements-synthesis.md:480-484), plus the self-capture marker (src/provider.rs:446). On Windows, names are compared case-insensitively. (Claude; overrulable)
     - The allow-list never includes an `ANTHROPIC_*` or `CLAUDE_CODE_*` name, so an inherited base URL, token or effort level cannot reach the claude curator (docs/research/curator-providers-2026-09-25.md §2.2 area 1, §2.3 item 4) (Claude; overrulable).

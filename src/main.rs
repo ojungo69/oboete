@@ -670,6 +670,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let settings = capture::Settings::load(&home)?;
             let _lock = import::lock(&home)?;
             let mut raw = raw::open(&home)?;
+            // Owner decision 43: what it writes under rules turned off owes the op text scan.
+            raw.gates_with(&settings.rules);
             let stats = import::claude_mem(&mut raw, &db, &settings)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())

@@ -15,9 +15,17 @@ memory home and an absolute path stays absolute. Clearing the override selects
 `<home>/backups`. A save creates no backup directory and moves no segments or
 forget logs. Existing backups remain in their old location.
 
+The masking switch, `[redaction] enabled`, is on unless the file says `false`
+(owner decision 43). Off, no rule runs, the bundled ones included: secrets are
+stored, sent and shown as typed from the next recording, send or display on.
+The page shows that warning, in both languages, as soon as the box is cleared
+and before the save. A request that does not name the switch keeps the saved
+value. Turning it on again rescans this device's records at the worker's next
+run, as a new rule does; what was sent while it was off stays sent.
+
 Additional redaction rules retain `id`, `regex`, `keywords`, `entropy` and
-`secret_group`. The capture reader and `Rules::new` validate the complete candidate;
-the bundled rules remain enabled. Invalid patterns, duplicate names, invalid
+`secret_group`. The capture reader and `Rules::new` validate the complete candidate,
+also while the switch is off; the bundled rules cannot be removed one by one. Invalid patterns, duplicate names, invalid
 capture groups or invalid exception hashes leave the previous file unchanged.
 Errors contain vetted codes rather than patterns or values. An older request
 that omits these fields preserves their saved values, comments and defaults.

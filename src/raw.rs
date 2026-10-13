@@ -621,6 +621,9 @@ pub struct Raw {
     home_id: String,
     /// The shared hold on `<home>/raw.lock` every open keeps (see `swap_lock`).
     _swap: std::fs::File,
+    /// Owner decision 43: the text of the ops this handle appends was gated with the redaction
+    /// rules turned off (`gates_with`), so each append owes the op text scan in its transaction.
+    gated_off: bool,
 }
 
 /// The raw store file, including a stopped restore's file when raw.db has not been renamed in.
@@ -1435,6 +1438,7 @@ fn open_within_report(
         device,
         home_id,
         _swap: swap,
+        gated_off: false,
     })
 }
 
@@ -2708,11 +2712,24 @@ impl Raw {
     /// Slice 3e-4: `found` (`op_text_masks`) written, in transactions of `RECORD_PURGE_BATCH` ops
     /// under dispatch, each op only while its body is the one read, with the pending mark: the
     /// rebuild and the backups owe it until `ops_text_scanned`. How many ops it rewrote.
-    pub(crate) fn mask_op_text(&mut self, found: &[OpText]) -> Result<usize> {
+    pub(crate) fn mask_op_text(
+        &mut self,
+        found: &[OpText],
+        rules: &crate::redact::Rules,
+    ) -> Result<Option<usize>> {
         let mut rewritten = 0;
         for batch in found.chunks(RECORD_PURGE_BATCH) {
             let _dispatch = crate::dispatch::exclusive(&self.home)
                 .context("the text of the ops was not masked")?;
+            // Owner decision 43: under the hold a save that changes the rules also takes, the
+            // rules are still the ones the page was read with, or nothing more is masked (Codex on
+            // #502).
+            if crate::redact::Rules::load(&self.home)
+                .map(|now| now.version() != rules.version())
+                .unwrap_or(true)
+            {
+                return Ok(None);
+            }
             self.current()?;
             let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
             tx.execute(
@@ -2729,26 +2746,47 @@ impl Raw {
             }
             tx.commit()?;
         }
-        Ok(rewritten)
+        Ok(Some(rewritten))
+    }
+
+    /// Owner decision 43: the rules the text of the ops this handle appends is gated with. Turned
+    /// off, they gate nothing, so each append owes the op text scan in its own transaction
+    /// (`owe_op_text_scan`). Each writer of op text calls it with its rules before it appends.
+    pub(crate) fn gates_with(&mut self, rules: &crate::redact::Rules) {
+        self.gated_off = rules.is_off();
     }
 
     /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
     /// only while it holds the mark: a raw.db a restore made meanwhile (a new meta) holds the ops
-    /// its segments held, and stays owed.
-    pub(crate) fn op_text_scan_begun(&self) -> Result<()> {
+    /// its segments held, and stays owed. The mark is this scan's own (the value returned), so a
+    /// scan whose mark an append under rules turned off took away cannot record under the mark of
+    /// a scan begun after (owner decision 43; Codex's security review of the switch); a scan begun
+    /// later replaces an earlier one's, which then records nothing.
+    pub(crate) fn op_text_scan_begun(&self) -> Result<String> {
+        static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mark = format!(
+            "{}-{}-{}",
+            crate::db::now_ms(),
+            std::process::id(),
+            SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('ops_text_scanning', '1')",
-            [],
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('ops_text_scanning', ?1)",
+            [&mark],
         )?;
-        Ok(())
+        Ok(mark)
     }
 
     /// Slice 3e-4: the text of raw.db's ops masked with the rules of `version` everywhere a purge
     /// puts it, recorded with the marks taken away, in one transaction, when the scan was begun in
-    /// this raw.db (`op_text_scan_begun`). Whether it was.
-    pub(crate) fn ops_text_scanned(&self, version: &str) -> Result<bool> {
+    /// this raw.db (`op_text_scan_begun`) and its mark (`mark`) is still the one there. Whether it
+    /// was.
+    pub(crate) fn ops_text_scanned(&self, version: &str, mark: &str) -> Result<bool> {
         let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
-        let begun = tx.execute("DELETE FROM meta WHERE key = 'ops_text_scanning'", [])? == 1;
+        let begun = tx.execute(
+            "DELETE FROM meta WHERE key = 'ops_text_scanning' AND value = ?1",
+            [mark],
+        )? == 1;
         if begun {
             tx.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('ops_text_scanned', ?1)",
@@ -3830,6 +3868,11 @@ impl Raw {
 
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    /// The home this store is in.
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
     }
 
     pub(crate) fn home_id(&self) -> &str {
@@ -4959,6 +5002,9 @@ impl Raw {
             }
         }
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        if self.gated_off || settings.is_some_and(|s| s.rules.is_off()) {
+            owe_op_text_scan(&tx)?;
+        }
         tx.commit()?;
         Ok(seqs)
     }
@@ -4984,6 +5030,9 @@ impl Raw {
             );
         }
         let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        if self.gated_off {
+            owe_op_text_scan(&tx)?;
+        }
         tx.commit()?;
         Ok(seqs)
     }
@@ -7574,6 +7623,19 @@ fn within_batch_cap(ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<(&'static
 }
 
 /// `bodies` as `device`'s next ops, one batch, inside a write transaction.
+/// Owner decision 43: ops whose text was gated with the redaction rules turned off were gated by
+/// none, so the scan of the op text is owed again under whatever rules there are when it runs,
+/// also when their version is the one the last scan recorded; a scan begun before records nothing
+/// (`Raw::ops_text_scanned`). In the transaction that appends them, so no stop between the two
+/// leaves them counted as scanned.
+fn owe_op_text_scan(tx: &Connection) -> Result<()> {
+    tx.execute(
+        "DELETE FROM meta WHERE key IN ('ops_text_scanned', 'ops_text_scanning')",
+        [],
+    )?;
+    Ok(())
+}
+
 fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Result<Vec<i64>> {
     let mut op_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
@@ -9359,6 +9421,81 @@ mod tests {
             raw.imported_counts(&dev, &[(1, 10)]).unwrap(),
             [("oboete-v1".to_owned(), 1)].into_iter().collect()
         );
+    }
+
+    /// Owner decision 43 (Codex on #502): a page of op text read under rules changed since (the
+    /// switch turned off, say) is not masked: under the dispatch hold a save takes too, the rules
+    /// are checked again, and nothing more is written.
+    #[test]
+    fn a_page_masked_after_the_rules_changed_is_left_as_it_was() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(&config, rule).unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let body = serde_json::json!({"text": "deploy acme-482915"});
+        raw.append_ops(&[(OpKind::Claim, body.clone())]).unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let page = raw.op_text_masks(&rules, None, 10).unwrap();
+        assert_eq!(page.len(), 1);
+        let off = rule.replace("[redaction]\n", "[redaction]\nenabled = false\n");
+        std::fs::write(&config, off).unwrap();
+        assert_eq!(raw.mask_op_text(&page, &rules).unwrap(), None);
+        let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
+        assert_eq!(ops[0].body, body);
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a scan whose mark an append
+    /// under rules turned off took away records nothing, also when a scan begun after has put a
+    /// mark of its own there, which that later scan alone records by.
+    #[test]
+    fn a_scan_records_only_under_its_own_mark() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let off = crate::redact::Rules::new(
+            &crate::config::parse_capture(Some("[redaction]\nenabled = false\n"))
+                .unwrap()
+                .redaction,
+        )
+        .unwrap();
+        let first = raw.op_text_scan_begun().unwrap();
+        raw.gates_with(&off);
+        raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))])
+            .unwrap();
+        let second = raw.op_text_scan_begun().unwrap();
+        assert!(!raw.ops_text_scanned("v", &first).unwrap());
+        assert!(raw.ops_text_owed("v").unwrap());
+        assert!(raw.ops_text_scanned("v", &second).unwrap());
+        assert!(!raw.ops_text_owed("v").unwrap());
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a handle whose ops' text was
+    /// gated with the rules off owes the op text scan in each append's own transaction, the
+    /// fenced one of curation too; a handle gated with rules on owes nothing.
+    #[test]
+    fn an_append_gated_off_owes_the_scan_in_its_transaction() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let rules = |toml: &str| {
+            crate::redact::Rules::new(&crate::config::parse_capture(Some(toml)).unwrap().redaction)
+                .unwrap()
+        };
+        let claim = || [(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))];
+        let scanned = |raw: &Raw| {
+            let mark = raw.op_text_scan_begun().unwrap();
+            assert!(raw.ops_text_scanned("v", &mark).unwrap());
+        };
+        scanned(&raw);
+        raw.gates_with(&rules("[redaction]\nenabled = true\n"));
+        raw.append_ops(&claim()).unwrap();
+        assert!(!raw.ops_text_owed("v").unwrap());
+        raw.gates_with(&rules("[redaction]\nenabled = false\n"));
+        raw.append_ops(&claim()).unwrap();
+        assert!(raw.ops_text_owed("v").unwrap());
+        scanned(&raw);
+        let fence = raw.fence_count().unwrap();
+        raw.append_ops_fenced(&claim(), fence).unwrap();
+        assert!(raw.ops_text_owed("v").unwrap());
     }
 
     /// Codex's security review of #489: a repository label masked under a rule removed since

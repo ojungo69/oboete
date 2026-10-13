@@ -204,7 +204,11 @@ pub fn show(home: &Path) -> Value {
             "tool_output": tool_output(capture.tool_output),
         },
         "backup": {"dir": backup},
-        "redaction": {"extra_rules": redaction.extra_rules, "allowlist": redaction.allowlist},
+        "redaction": {
+            "enabled": redaction.enabled != Some(false),
+            "extra_rules": redaction.extra_rules,
+            "allowlist": redaction.allowlist,
+        },
         "embedding": embedding::section(
             home,
             &cfg.embedding,
@@ -688,10 +692,7 @@ pub fn save_held(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
 /// `save_held` short of its rename: every refusal it gives, and the new file staged beside
 /// config.toml (`None` when nothing would change). A port saved on the resident page renames it
 /// only once the new token is in place (docs/resident.md R6).
-pub(crate) fn stage_held(
-    home: &Path,
-    body: &[u8],
-) -> Result<Option<crate::setup::Staged>, Refusal> {
+pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettings>, Refusal> {
     let posted: Save = serde_json::from_slice(body).map_err(|e| match e.classify() {
         serde_json::error::Category::Data => refused(422, "type", ""),
         _ => refused(400, "bad_request", ""),
@@ -815,6 +816,19 @@ pub(crate) fn stage_held(
         return Ok(None);
     }
     parsed(&path, &candidate).ok_or_else(invalid)?;
+    // Owner decision 43: a change of the redaction rules (the switch turned on, say) waits for each
+    // call already admitted to send and holds the dispatch lock until the file is replaced, so no
+    // text gated under the rules before leaves after the save (Codex on #502).
+    let rules = |text: &str| {
+        config::parse_capture(Some(text))
+            .ok()
+            .and_then(|c| crate::redact::Rules::new(&c.redaction).ok())
+            .map(|r| r.version().to_owned())
+    };
+    let dispatch = (rules(text) != rules(&candidate))
+        .then(|| crate::dispatch::exclusive(home))
+        .transpose()
+        .map_err(|_| refused(409, "dispatch_busy", ""))?;
     let staged =
         crate::setup::stage(&path, &candidate).map_err(|_| refused(500, "write_failed", ""))?;
     // A hand edit or another viewer between the read and here is not overwritten (the temp file
@@ -823,7 +837,23 @@ pub(crate) fn stage_held(
     if version(bytes(home).map_err(|_| invalid())?.as_deref()) != posted.version {
         return Err(refused(409, "stale", ""));
     }
-    Ok(Some(staged))
+    Ok(Some(StagedSettings {
+        staged,
+        _dispatch: dispatch,
+    }))
+}
+
+/// The page's new config.toml staged beside it, with the dispatch lock while it changes the
+/// redaction rules (`stage_held`), released once the file is replaced.
+pub(crate) struct StagedSettings {
+    staged: crate::setup::Staged,
+    _dispatch: Option<std::fs::File>,
+}
+
+impl StagedSettings {
+    pub(crate) fn commit(self) -> anyhow::Result<()> {
+        self.staged.commit()
+    }
 }
 
 /// `[view] port` set to `port`, the rest of config.toml as it was (`oboete view --new-token`,
@@ -1185,6 +1215,12 @@ fn write_privacy_config(
         let old = config::parse_capture(Some(text))
             .map_err(|_| invalid())?
             .redaction;
+        // Unnamed (an older page), the switch keeps what the file says (owner decision 43).
+        if let Some(enabled) = redaction.enabled
+            && enabled != (old.enabled != Some(false))
+        {
+            put(doc, "redaction", "enabled", enabled.into());
+        }
         if serde_json::to_value(&redaction.extra_rules).expect("rules serialize")
             != serde_json::to_value(&old.extra_rules).expect("rules serialize")
         {
@@ -1572,6 +1608,64 @@ mod tests {
         ] {
             assert!(!home.path().join(name).exists());
         }
+    }
+
+    /// Owner decision 43: the page turns redaction off and on; a request that does not name the
+    /// switch, as an older page's, keeps what the file says.
+    #[test]
+    fn the_redaction_switch_saves_and_a_request_without_it_keeps_it() {
+        let home = home_with(Some("providers = []\n"));
+        let shown = show(home.path());
+        assert_eq!(shown["redaction"]["enabled"], true);
+        let off = posted(&shown, |v| v["redaction"]["enabled"] = json!(false));
+        let saved = save_to(&home, &off).unwrap();
+        assert_eq!(saved["redaction"]["enabled"], false);
+        assert!(file(&home).unwrap().contains("enabled = false"));
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        assert!(rules.is_off());
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        assert_eq!(crate::redact::outbound_with(&key, &rules), key);
+        let older = posted(&saved, |v| {
+            v["redaction"] = json!({"extra_rules": [], "allowlist": []});
+        });
+        let saved = save_to(&home, &older).unwrap();
+        assert_eq!(saved["redaction"]["enabled"], false);
+        let on = posted(&saved, |v| v["redaction"]["enabled"] = json!(true));
+        let saved = save_to(&home, &on).unwrap();
+        assert_eq!(saved["redaction"]["enabled"], true);
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        assert!(!rules.is_off());
+        assert_eq!(
+            crate::redact::outbound_with(&key, &rules),
+            crate::redact::MASK
+        );
+    }
+
+    /// Owner decision 43 (Codex on #502): a save that changes the redaction rules waits for a call
+    /// already admitted to send, and replaces config.toml only once that call is out; a save that
+    /// leaves the rules as they are does not wait.
+    #[test]
+    fn a_save_that_changes_the_rules_waits_for_a_call_already_admitted() {
+        let home = home_with(Some("providers = []\n"));
+        let shown = show(home.path());
+        let admitted = crate::dispatch::Admission::shared(home.path()).unwrap();
+        let other = posted(&shown, |v| v["capture"]["store_prompts"] = json!(false));
+        let shown = save_to(&home, &other).unwrap();
+        let body = posted(&shown, |v| v["redaction"] = json!({"enabled": false}));
+        let path = home.path().to_owned();
+        let saving = std::thread::spawn(move || save(&path, &Mutex::new(()), &body));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !crate::dispatch::blocked(home.path()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the save did not wait"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!file(&home).unwrap().contains("enabled = false"));
+        drop(admitted);
+        let saved = saving.join().unwrap().unwrap();
+        assert_eq!(saved["redaction"]["enabled"], false);
     }
 
     #[test]

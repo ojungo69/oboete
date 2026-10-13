@@ -96,14 +96,21 @@ fn bundled() -> &'static Bundled {
 }
 
 /// The rules one scan applies: the bundled ones, which cannot be removed, plus the user's
-/// (`[redaction]` in config.toml, spec 1.5 and 6.4).
+/// (`[redaction]` in config.toml, spec 1.5 and 6.4), or none while the user turns redaction off.
 #[derive(Clone)]
 pub struct Rules {
     extra: Vec<Extra>,
     /// SHA-256 (lowercase hex) of each exact value the user keeps.
     allow: HashSet<String>,
     version: String,
+    /// `[redaction] enabled = false` (owner decision 43): no rule finds anything.
+    off: bool,
 }
+
+/// The version of the rules while redaction is off, whatever rules and kept values the user has:
+/// no hash reads so, so each reader that compares versions sees the switch turn as a change of
+/// rules, and turning redaction on again rescans what was stored meanwhile (docs/redaction-switch.md).
+const OFF: &str = "off";
 
 #[derive(Clone)]
 struct Extra {
@@ -130,6 +137,7 @@ impl Default for Rules {
             extra: Vec::new(),
             allow: HashSet::new(),
             version: bundled_version().to_owned(),
+            off: false,
         }
     }
 }
@@ -193,7 +201,11 @@ impl Rules {
             );
             allow.insert(a.to_ascii_lowercase());
         }
-        let version = if extra.is_empty() && allow.is_empty() {
+        // Checked above when off too, so a rule saved then cannot fail only once it is turned on.
+        let off = r.enabled == Some(false);
+        let version = if off {
+            OFF.to_owned()
+        } else if extra.is_empty() && allow.is_empty() {
             bundled_version().to_owned()
         } else {
             // Canonical: the order of rules, keywords or allowlist entries in the file does not
@@ -217,6 +229,7 @@ impl Rules {
             extra,
             allow,
             version,
+            off,
         })
     }
 
@@ -234,6 +247,11 @@ impl Rules {
     /// For doctor: how many rules and kept values the user added.
     pub fn counts(&self) -> (usize, usize) {
         (self.extra.len(), self.allow.len())
+    }
+
+    /// Whether the user turned redaction off (owner decision 43).
+    pub fn is_off(&self) -> bool {
+        self.off
     }
 
     /// ponytail: the value is hashed as it appears in the view being scanned, so a false positive
@@ -571,10 +589,19 @@ fn hidden_lines(text: &str, rules: &Rules) -> Option<(Runs, Runs)> {
     None // Alternating whole/line cascades past the scan bound mask the view whole.
 }
 
-/// v1's import into oboete.db (`hook::clip`): the bundled rules only. Hooks go through
-/// `capture` and its settings.
+/// The bundled rules alone. Hooks go through `capture` and its settings.
 pub fn redact(text: &str) -> String {
     scan(text, &Rules::default()).0
+}
+
+/// The claude-mem import's prompts (`hook::clip`): the bundled rules only, so `clip`'s check for a
+/// key block it cuts sees every header (a user's rule could mask one: Codex's security review of
+/// the switch), and none while the import's `rules` are off (owner decision 43).
+pub fn redact_unless_off(text: &str, rules: &Rules) -> String {
+    if rules.off {
+        return text.to_owned();
+    }
+    redact(text)
 }
 
 /// One secret masked in stored text: the rule that found it, where the mask hiding it starts in
@@ -712,15 +739,18 @@ pub fn scan_capped(text: &str, cap: usize, rules: &Rules) -> (String, Vec<Findin
             tail_start = s;
         }
     }
-    // ASCII lowercasing keeps byte offsets.
+    // ASCII lowercasing keeps byte offsets. While redaction is off the cut keeps what it leaves
+    // of a key block as typed (owner decision 43).
     let head = masked[..head_end].to_ascii_lowercase();
-    if let Some(b) = key_markers(&head, "-----begin").last()
+    if !rules.off
+        && let Some(b) = key_markers(&head, "-----begin").last()
         && key_markers(&head[b..], "-----end").next().is_none()
     {
         head_end = b;
     }
     let tail = masked[tail_start..].to_ascii_lowercase();
-    if let Some(e) = key_markers(&tail, "-----end").next()
+    if !rules.off
+        && let Some(e) = key_markers(&tail, "-----end").next()
         && key_markers(&tail[..e], "-----begin").next().is_none()
     {
         let end = tail_start + e;
@@ -783,6 +813,10 @@ fn bundled_version() -> &'static str {
 /// user keeps is never one. Every rule looks at the text once; a rule that found or kept
 /// something then looks again on its own until it finds nothing new (`fixpoint`).
 fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
+    // Every scan, gate and rescan comes here: off, nothing is a secret (owner decision 43).
+    if rules.off {
+        return Vec::new();
+    }
     let mut kept = Vec::new();
     let first = views(text, rules, None, &mut kept);
     let mut again: Vec<usize> = first.iter().chain(&kept).map(|x| x.2).collect();
@@ -2062,6 +2096,48 @@ mod tests {
 
     fn user(toml: &str) -> anyhow::Result<Rules> {
         Rules::new(&crate::config::parse_capture(Some(toml))?.redaction)
+    }
+
+    /// Owner decision 43: off, no rule finds anything, the bundled ones neither, through each gate;
+    /// `<private>` blocks still go; the version reads `off` whatever the rules, and a rule that
+    /// does not compile is still refused.
+    #[test]
+    fn off_masks_nothing_and_its_version_is_off() {
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let off = user(
+            "[redaction]\nenabled = false\nextra_rules = [{ id = \"a\", regex = 'acme-[0-9]+' }]\n",
+        )
+        .unwrap();
+        assert!(off.is_off());
+        assert_eq!(off.version(), OFF);
+        let text = format!("token {key} and acme-482915");
+        let (stored, found) = scan(&text, &off);
+        assert_eq!((stored.as_str(), found.len()), (text.as_str(), 0));
+        assert_eq!(outbound_with(&text, &off), text);
+        assert_eq!(lines_with(&text, &off), text);
+        assert_eq!(hidden(&text, &off), Some(Vec::new()));
+        let private = format!("{text} <private>pin 4242</private>");
+        assert!(!outbound_with(&private, &off).contains("4242"));
+        // The cut at the cap keeps what it leaves of a key block as typed (CodeRabbit on #502).
+        let block = format!(
+            "{}-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----{}",
+            "x".repeat(20),
+            "A".repeat(200),
+            "y".repeat(20)
+        );
+        let (stored, _, cut) = scan_capped(&block, 100, &off);
+        assert!(cut.is_some() && stored.contains("-----BEGIN"), "{stored}");
+        assert_eq!(
+            user("[redaction]\nenabled = false\n").unwrap().version(),
+            OFF
+        );
+        assert!(
+            user("[redaction]\nenabled = false\nextra_rules = [{ id = \"b\", regex = '(' }]\n")
+                .is_err()
+        );
+        let on = user("[redaction]\nenabled = true\n").unwrap();
+        assert_eq!(on.version(), bundled_version());
+        assert_eq!(outbound_with(&key, &on), MASK);
     }
 
     /// Codex on 6c19081: a joined text's parts are gated alone, and a rule on the whole still

@@ -2538,20 +2538,25 @@ pub(crate) fn compact(v: &Value) -> String {
 
 /// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
 /// discarded tail of a megabyte tool output would only cost hook time.
-pub fn clip(s: &str) -> String {
+pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
     let s = &without_blocks(s, false);
     let total = s.chars().count();
     if total <= MAX_FIELD {
-        return redact::redact(s);
+        return redact::redact_unless_off(s, rules);
     }
     let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
-    let head: String = redact::redact(&window).chars().take(MAX_FIELD).collect();
+    let head: String = redact::redact_unless_off(&window, rules)
+        .chars()
+        .take(MAX_FIELD)
+        .collect();
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
-    let mut head = redact::redact(&head);
-    if let Some(begin) = head.rfind("-----BEGIN")
+    let mut head = redact::redact_unless_off(&head, rules);
+    // A key block the cut leaves open goes, unless redaction is off (owner decision 43).
+    if !rules.is_off()
+        && let Some(begin) = head.rfind("-----BEGIN")
         && !head[begin..].contains("-----END")
     {
         head.truncate(begin);
@@ -7125,6 +7130,39 @@ mod tests {
         assert_eq!(row, ("user:acme".into(), version));
     }
 
+    /// Owner decision 43: with redaction off, a prompt's key is stored as typed and the ledger
+    /// names nothing; a `<private>` block still goes, as it is not redaction.
+    #[test]
+    fn redaction_off_stores_a_key_as_typed_and_still_drops_a_private_block() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let prompt = json!({
+            "session_id": "s",
+            "prompt": format!("deploy with {key} <private>pin 4242</private>"),
+        })
+        .to_string();
+        run_io(
+            home,
+            "claude",
+            "UserPromptSubmit",
+            prompt.as_bytes(),
+            Vec::new(),
+        )
+        .unwrap();
+        let c = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let body: Vec<u8> = c
+            .query_row("SELECT body FROM records", [], |r| r.get(0))
+            .unwrap();
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.contains(&key) && !body.contains("4242"), "{body}");
+        let found: i64 = c
+            .query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(found, 0);
+    }
+
     #[test]
     fn a_wrong_redaction_table_records_nothing() {
         let home = tempfile::tempdir().unwrap();
@@ -8274,11 +8312,42 @@ mod tests {
         }
     }
 
+    /// Owner decision 43: the claude-mem import's prompts (`clip`) follow the import's rules: kept
+    /// as typed while redaction is off, masked by the bundled rules while it is on.
+    #[test]
+    fn an_imported_prompt_follows_the_switch() {
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let rules = |toml: &str| {
+            redact::Rules::new(&crate::config::parse_capture(Some(toml)).unwrap().redaction)
+                .unwrap()
+        };
+        let off = clip(
+            &format!("deploy with {key}"),
+            &rules("[redaction]\nenabled = false\n"),
+        );
+        assert!(off.contains(&key), "{off}");
+        let on = clip(
+            &format!("deploy with {key}"),
+            &rules("[redaction]\nenabled = true\n"),
+        );
+        assert!(!on.contains(&key), "{on}");
+        // The cut keeps what it leaves of a key block as typed while off (CodeRabbit on #502).
+        let long = format!(
+            "{}-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+            "a".repeat(7_000),
+            "B".repeat(6_000)
+        );
+        let kept = clip(&long, &rules("[redaction]\nenabled = false\n"));
+        assert!(kept.contains("-----BEGIN"));
+        let cut = clip(&long, &rules("[redaction]\nenabled = true\n"));
+        assert!(!cut.contains("-----BEGIN"));
+    }
+
     #[test]
     fn secret_straddling_the_clip_boundary_is_masked() {
         let key = "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";
         let s = format!("{} {key} {}", "a".repeat(MAX_FIELD - 20), "b".repeat(3_000));
-        let out = clip(&s);
+        let out = clip(&s, &redact::Rules::default());
         assert!(!out.contains("gsk_") && out.contains("[REDACTED]"));
         assert!(
             out.contains("…[clipped, 11038 chars in full]"),
@@ -8291,10 +8360,13 @@ mod tests {
             "a".repeat(MAX_FIELD - 40),
             "Q".repeat(9_000)
         );
-        let out = clip(&s);
+        let out = clip(&s, &redact::Rules::default());
         assert!(!out.contains("BEGIN") && !out.contains("QQ") && out.contains("aaa"));
         assert_eq!(
-            clip("x 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 y"),
+            clip(
+                "x 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 y",
+                &redact::Rules::default()
+            ),
             "x [REDACTED] y"
         );
     }

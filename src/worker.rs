@@ -1452,6 +1452,8 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             cfg.paid_usd_per_month,
             crate::provider::budget_keys(&cfg.providers)
         );
+        // Owner decision 43: ops written under rules turned off owe the op text scan.
+        raw.gates_with(&rules);
         let windows =
             crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator)?;
         // The same chain, as the summary role (docs/summaries.md T1), in the digest's place: spec
