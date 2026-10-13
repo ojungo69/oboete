@@ -2509,8 +2509,11 @@ impl Raw {
                 |r| r.get(0),
             )
             .optional()?;
+        // One that does not parse stops the purge: paying the masks without the uids would leave a
+        // window's text in a backup (CodeRabbit on #497).
         let mut kept: std::collections::HashMap<String, i64> = match kept {
-            Some(text) => serde_json::from_str(&text)?,
+            Some(text) => serde_json::from_str(&text)
+                .context("raw.db's meta rescan_masked_uids does not parse")?,
             None => std::collections::HashMap::new(),
         };
         if uids.iter().any(|(uid, at)| kept.get(uid) < Some(at)) {

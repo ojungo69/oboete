@@ -8684,6 +8684,29 @@ mod tests {
         assert!(raw.keep_masked_uids(&HashMap::new()).unwrap().is_empty());
     }
 
+    /// #483 (CodeRabbit on #497): kept uids that do not parse stop the purge, naming them, rather
+    /// than pay the masks without them.
+    #[test]
+    fn kept_uids_that_do_not_parse_stop_the_purge() {
+        let mut s = crate::search::b::fixture::Store::new();
+        masked_prompt(&mut s);
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        s.run();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('rescan_masked_uids', '{')",
+                [],
+            )
+            .unwrap();
+        let e = format!("{:#}", purge(&home).unwrap_err());
+        assert!(e.contains("rescan_masked_uids"), "{e}");
+        assert!(raw::open(&home).unwrap().masks_owed().unwrap().is_some());
+    }
+
     /// #483: a purge that stops after rewriting a masked record's claim in raw.db, before step 4,
     /// keeps its uid: the next one judges a segment's window that named it, though no backup or
     /// copy holds the claim and raw.db no longer holds the window.
