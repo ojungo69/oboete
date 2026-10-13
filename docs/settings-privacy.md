@@ -95,8 +95,11 @@ alike. Its undo takes back that exclusion, as `oboete capture exclude --undo` do
 and is refused (`never_ambiguous`) when several exclusions read as it now.
 
 A repository is named by the same opaque selector as the send exclusion, resolved
-freshly on the server, and stored as `oboete capture exclude` stores it, labelled as
-the rules now read it, which is how a hook labels its events. A folder must be an absolute path of at most 4,096 bytes;
+freshly on the server, and stored as its records name it, the one name the page has
+for it; a folder is stored as typed, as `oboete capture exclude --folder` stores one.
+What is never recorded is stored as given, so it holds whatever the redaction rules
+become (owner decision 43), and a hook compares it as given and as the rules now
+read it. A folder must be an absolute path of at most 4,096 bytes;
 it is stored as the CLI stores it (`.` and `..` taken by name), through the gate
 as an event's `cwd` label, and its selector is a hash of that stored label. A relative path, an unknown selector, or a request that
 names more than one target is refused before any write.

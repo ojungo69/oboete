@@ -439,10 +439,9 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                 {
                     return Err(refused(422, "capture_folder", "folder"));
                 }
-                let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
-                // As the CLI stores it: `.` and `..` by name (slice 4a's `folder_path`).
-                let folder = crate::capture::folder_path(&folder);
-                let label = crate::capture::exclusion_label("cwd", &folder, &settings);
+                // As the CLI stores it: as given, `.` and `..` by name (slice 4a's `folder_path`;
+                // owner 2026-10-13: what is never recorded is stored as given).
+                let label = crate::capture::folder_path(&folder);
                 let writer = crate::raw::open(home).map_err(|_| unavailable())?;
                 let answer = json!({ "folder_selector": folder_selector(&label) });
                 ("folder", label, writer, answer)
@@ -876,6 +875,7 @@ mod tests {
     #[test]
     fn the_page_stores_a_repository_as_its_records_name_it() {
         const OLD: &str = "github.com/o/acme-482915";
+        const NEW: &str = "github.com/o/acme-731904";
         let mut store = Store::new();
         store.said("s", OLD, 1_000, "Before the rule.");
         store.run();
@@ -904,6 +904,31 @@ mod tests {
             .map(|r| (r["selector"].clone(), r["never_recorded"].clone()))
             .collect();
         assert_eq!(rows, [(json!(selector(OLD)), json!(true))]);
+        // And one row for an entry the CLI stored as given, which the records name by the label
+        // the rule made: the records' row, never recorded.
+        let masked = crate::raw::Event {
+            repo: Some(crate::capture::exclusion_label("repo", NEW, &settings)),
+            session: "t".into(),
+            ..crate::raw::test_event("Under the rule.")
+        };
+        store.raw.append(&masked).unwrap();
+        store.raw.exclude_capture(("repo", NEW), false).unwrap();
+        let shown = show(&home);
+        let rows: Vec<_> = shown["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["selector"] != json!(selector(OLD)))
+            .map(|r| (r["selector"].clone(), r["never_recorded"].clone()))
+            .collect();
+        let label = crate::capture::exclusion_label("repo", NEW, &settings);
+        assert_eq!(rows, [(json!(selector(&label)), json!(true))]);
+        // A folder is stored as typed, though the rule masks part of it.
+        let folder = home.join("acme-482915").to_string_lossy().into_owned();
+        let body = serde_json::to_vec(&json!({"folder": folder, "undo": false})).unwrap();
+        capture(&home, &saving, &body).unwrap();
+        let folders = store.raw.capture_exclusions().unwrap().folders;
+        assert_eq!(Vec::from_iter(folders), [folder]);
         let event = crate::raw::Event {
             repo: Some(now),
             ..crate::raw::test_event("After the rule.")
