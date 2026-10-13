@@ -5366,7 +5366,7 @@ curate = false
     fn every_page_text_key_is_defined_once() {
         let start = APP_JS.find("const TEXT = {").unwrap();
         let end = start + APP_JS[start..].find("\n};").unwrap();
-        let key = regex::Regex::new(r"(?m)^  ([A-Za-z_0-9]+):").unwrap();
+        let key = regex::Regex::new(r"(?m)^ {2}([A-Za-z_0-9]+):").unwrap();
         let mut seen = std::collections::HashSet::new();
         for found in key.captures_iter(&APP_JS[start..end]) {
             assert!(
@@ -5376,6 +5376,20 @@ curate = false
             );
         }
         assert!(seen.len() > 1_000, "{}", seen.len());
+    }
+
+    /// The page shows values gated for display, and a command takes what it is given as it is: a
+    /// command the page prints names none of them (Codex on #491: a masked repository's label).
+    #[test]
+    fn a_command_the_page_prints_names_no_value_it_shows() {
+        let start = APP_JS.find("const TEXT = {").unwrap();
+        let end = start + APP_JS[start..].find("\n};").unwrap();
+        let command = regex::Regex::new(r"`oboete [^`]*\{[A-Za-z_0-9]+\}[^`]*`").unwrap();
+        let found: Vec<&str> = command
+            .find_iter(&APP_JS[start..end])
+            .map(|m| m.as_str())
+            .collect();
+        assert!(found.is_empty(), "{found:?}");
     }
 
     /// #269: `--open` hands the opener an owner-only page that sends the browser on to the

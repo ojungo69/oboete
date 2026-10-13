@@ -85,7 +85,14 @@ absolute path and listed with its own selector for taking it back. Nothing that
 happens there is written from then on, and a repository never recorded is never
 sent either: its send row says so and offers no undo until recording is allowed
 again. What was recorded before stays; the receipt names `oboete forget --repo`
-for a repository. Recording again starts from then on.
+for a repository, with a folder in it rather than the label the page shows, which
+a redaction rule may mask. Recording again starts from then on.
+
+A repository shows as never recorded when a hook would not record it now: its
+label, or that label as the rules now read it, matches an exclusion as they read
+it, so a rule added since an exclusion may cover another repository it now reads
+alike. Its undo takes back that exclusion, as `oboete capture exclude --undo` does,
+and is refused (`never_ambiguous`) when several exclusions read as it now.
 
 A repository is named by the same opaque selector as the send exclusion, resolved
 freshly on the server. A folder must be an absolute path of at most 4,096 bytes;

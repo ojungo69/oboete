@@ -1052,7 +1052,7 @@ const TEXT = {
   privacy_refresh: ['Refresh privacy state', 'プライバシーの状態を更新'],
   privacy_never_recorded: ['Never recorded, so never sent', '記録しないため送信もしません'],
   never_h: ['Never record', '記録しない'],
-  never_desc: ['Nothing that happens in these repositories and folders is written from now on: no prompt, tool call or reply. A repository that is never recorded is never sent out either. What was already recorded stays; for a repository, `oboete forget --repo <name>` removes it. Recording again starts from then on, and nothing from while it was excluded comes back. A repository can also stop its own recording with `capture = false` in its `.oboete.toml`.', 'ここに挙げたリポジトリとフォルダーで起きたことを、今後は書き込みません。プロンプト・ツールの実行・返答のどれも記録しません。記録しないリポジトリは外部にも送りません。すでに記録した分は残ります。リポジトリの分は `oboete forget --repo <名前>` で消せます。記録を再開すると、その時点から記録します。除外していた間の記録は戻りません。リポジトリ側でも `.oboete.toml` に `capture = false` と書くと記録を止められます。'],
+  never_desc: ['Nothing that happens in these repositories and folders is written from now on: no prompt, tool call or reply. A repository that is never recorded is never sent out either. What was already recorded stays; for a repository, `oboete forget --repo <a folder in it>` removes it. Recording again starts from then on, and nothing from while it was excluded comes back. A repository can also stop its own recording with `capture = false` in its `.oboete.toml`.', 'ここに挙げたリポジトリとフォルダーで起きたことを、今後は書き込みません。プロンプト・ツールの実行・返答のどれも記録しません。記録しないリポジトリは外部にも送りません。すでに記録した分は残ります。リポジトリの分は `oboete forget --repo <そのリポジトリ内のフォルダー>` で消せます。記録を再開すると、その時点から記録します。除外していた間の記録は戻りません。リポジトリ側でも `.oboete.toml` に `capture = false` と書くと記録を止められます。'],
   never_repos_h: ['Repositories', 'リポジトリ'],
   never_folders_h: ['Folders on this device', 'この端末のフォルダー'],
   never_folders_none: ['No folder is excluded.', '除外しているフォルダーはありません。'],
@@ -1062,11 +1062,12 @@ const TEXT = {
   never_undo: ['Record again from now on', '今後は記録を再開'],
   never_folder_input: ['Folder to never record (full path)', '記録しないフォルダー (フルパス)'],
   never_folder_add: ['Never record this folder', 'このフォルダーを記録しない'],
-  never_repo_stopped: ['Recording of {label} stopped. What was recorded before stays; `oboete forget --repo {label}` removes it.', '{label} の記録を止めました。これまでの記録は残ります。`oboete forget --repo {label}` で消せます。'],
+  never_repo_stopped: ['Recording of {label} stopped. What was recorded before stays; `oboete forget --repo <a folder in it>` removes it.', '{label} の記録を止めました。これまでの記録は残ります。`oboete forget --repo <そのリポジトリ内のフォルダー>` で消せます。'],
   never_folder_stopped: ['Recording in this folder stopped. What was recorded before stays.', 'このフォルダーの記録を止めました。これまでの記録は残ります。'],
   never_undone: ['Recording resumes from now on. Nothing from while it was excluded comes back.', '今後の記録を再開しました。除外していた間の記録は戻りません。'],
   capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
   folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
+  never_ambiguous: ['Several repositories never recorded read as this one now: record each again from its own row, or with `oboete capture exclude --undo` and the name it was excluded under.', '記録しない複数のリポジトリが、今の規則ではこのリポジトリと同じに読めます。それぞれの行から、または `oboete capture exclude --undo` に除外したときの名前を付けて、記録を再開してください。'],
   rescan_h: ['Rescan on this device', 'この端末の再検査'],
   rescan_empty: ['No raw records to scan.', '検査する元の記録はありません。'],
   rescan_pending: ['Waiting for the worker or still scanning.', 'ワーカーの処理待ち、または検査中です。'],
@@ -3793,7 +3794,7 @@ function captureSection(f) {
   add.addEventListener('click', () => {
     // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
     if (!folder.value.trim()) { setStatus(t('capture_folder'), true, lang); return; }
-    write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
+    void write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
   });
   return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
     el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('privacy_none')),

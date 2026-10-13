@@ -157,13 +157,21 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         crate::capture::Settings::load(home)?.rules.version() == settings.rules.version(),
         "rules changed during a read"
     );
+    // As the hook reads an event's label now: a rule added since an exclusion may read another
+    // repository as one listed (Codex on #491).
+    let gated = crate::capture::never_recorded(&never, &settings);
     let repositories = labels
         .into_iter()
-        .map(|label| Repository {
-            selector: selector(&label),
-            label: crate::redact::outbound_with(&label, &settings.rules),
-            excluded: excluded.contains(&label),
-            never_recorded: never.repos.contains(&label),
+        .map(|label| {
+            let now = crate::capture::exclusion_label("repo", &label, &settings);
+            Repository {
+                selector: selector(&label),
+                label: crate::redact::outbound_with(&label, &settings.rules),
+                excluded: excluded.contains(&label),
+                never_recorded: [&label, &now]
+                    .into_iter()
+                    .any(|l| never.repos.contains(l) || gated.repos.contains(l)),
+            }
         })
         .collect();
     let folders = never
@@ -386,6 +394,19 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                     return Err(refused(422, "privacy_selector", "selector"));
                 }
                 let (raw, label) = listed_repository(home, &wanted)?;
+                // An undo takes back the entry that keeps it from being recorded now, as the CLI's
+                // does (Codex on #491).
+                let label = if posted.undo {
+                    let settings =
+                        crate::capture::Settings::load(home).map_err(|_| unavailable())?;
+                    let stored = crate::raw::capture_exclusions_in(&raw.conn)
+                        .map_err(|_| unavailable())?
+                        .repos;
+                    crate::capture::undone("repo", &label, &stored, &settings)
+                        .map_err(|_| refused(409, "never_ambiguous", "selector"))?
+                } else {
+                    label
+                };
                 let writer = raw.into_writer(home).map_err(|_| unavailable())?;
                 ("repo", label, writer, json!({ "selector": wanted }))
             }
@@ -757,6 +778,64 @@ mod tests {
             crate::raw::CaptureExclusions::default()
         );
         assert_eq!(show(&home)["folders"], json!([]));
+    }
+
+    /// Codex on #491: a rule added after an exclusion that reads another listed repository as the
+    /// excluded one shows that one as never recorded too, as a hook reads its events now, and its
+    /// undo takes back the exclusion that covers it, as the CLI's does; refused when several do.
+    #[test]
+    fn a_repository_a_rule_reads_as_an_excluded_one_is_never_recorded_until_its_undo() {
+        const A: &str = "github.com/o/secret-a1";
+        const B: &str = "github.com/o/secret-b2";
+        const C: &str = "github.com/o/secret-c3";
+        let mut store = Store::new();
+        for (ts, repo) in [(1_000, A), (2_000, B), (3_000, C)] {
+            store.said("s", repo, ts, "Labels read alike journey.");
+        }
+        store.run();
+        let home = store.home.path().to_owned();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let never = |repo: &str| {
+            show(&home)["repositories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["selector"] == selector(repo).as_str())
+                .unwrap()["never_recorded"]
+                .clone()
+        };
+        post(json!({"selector": selector(A), "undo": false})).unwrap();
+        assert_eq!(never(B), json!(false));
+        std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{ id = 'secret', \
+             regex = 'secret-[a-z][0-9]' }]\n",
+        )
+        .unwrap();
+        // A hook reads B's events as A's exclusion now.
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let list = store.raw.capture_exclusions().unwrap();
+        let b_now = crate::capture::exclusion_label("repo", B, &settings);
+        assert!(crate::capture::never_recorded(&list, &settings).covers(Some(&b_now), None));
+        assert_eq!(never(B), json!(true));
+        post(json!({"selector": selector(B), "undo": true})).unwrap();
+        assert_eq!(
+            store.raw.capture_exclusions().unwrap(),
+            crate::raw::CaptureExclusions::default()
+        );
+        assert_eq!((never(A), never(B)), (json!(false), json!(false)));
+        post(json!({"selector": selector(A), "undo": false})).unwrap();
+        post(json!({"selector": selector(C), "undo": false})).unwrap();
+        let before = store.raw.max_op_seq().unwrap();
+        assert_eq!(
+            post(json!({"selector": selector(B), "undo": true}))
+                .unwrap_err()
+                .code,
+            "never_ambiguous"
+        );
+        assert_eq!(store.raw.max_op_seq().unwrap(), before);
     }
 
     #[test]
