@@ -3724,6 +3724,8 @@ function privacySection(f) {
     try { if (await refreshPrivacy(f)) setStatus(''); } finally { refresh.disabled = false; }
   });
   const rows = (state.repositories || []).map((repo) => {
+    // A repository never recorded is never sent: its own row takes that back first.
+    if (repo.never_recorded) return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t('privacy_never_recorded')));
     const action = el('button', 'quiet small', t(repo.excluded ? 'privacy_undo' : 'privacy_exclude'));
     action.type = 'button';
     action.dataset.selector = repo.selector;
@@ -3744,8 +3746,6 @@ function privacySection(f) {
         if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
       } finally { fields.inert = false; action.disabled = false; }
     });
-    // A repository never recorded is never sent: its own row takes that back first.
-    if (repo.never_recorded) return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t('privacy_never_recorded')));
     return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t(repo.excluded ? 'privacy_excluded' : 'privacy_allowed')), action);
   });
   const scan = state.rescan;
