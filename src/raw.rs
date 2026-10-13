@@ -1116,6 +1116,21 @@ impl CaptureExclusions {
             })
     }
 
+    /// Slice 4a (owner, 2026-10-13): whether an event is never recorded, as every writer asks it:
+    /// its repository and folder as the writer read them before the gate (`read`, where it holds
+    /// them) against the list as given, and its labels against the list as given and as the rules
+    /// now read it (`now`, `capture::never_recorded`).
+    pub fn refuses(
+        &self,
+        now: Option<&CaptureExclusions>,
+        labels: (Option<&str>, Option<&str>),
+        read: Option<(&str, Option<&str>)>,
+    ) -> bool {
+        read.is_some_and(|(repo, cwd)| self.covers(Some(repo), cwd))
+            || self.covers(labels.0, labels.1)
+            || now.is_some_and(|now| now.covers(labels.0, labels.1))
+    }
+
     /// Whether a work state op of `repo` is never recorded: its repository listed, or, for a list
     /// imported from claude-mem (`imported`), the repository of its project's name (milestone 4
     /// D13, docs/claude-mem-import.md I6). A list written here is matched by its own key alone, as
@@ -3791,7 +3806,7 @@ impl Raw {
         ledger: &[(String, crate::redact::Finding)],
         ruleset: &str,
     ) -> Result<Option<i64>> {
-        self.append_under(e, ledger, ruleset, None)
+        self.append_under(e, ledger, ruleset, None, None)
     }
 
     /// `append_with_ledger` for an event a hook captured under `settings`: what is never recorded,
@@ -3803,30 +3818,39 @@ impl Raw {
         e: &Event,
         ledger: &[(String, crate::redact::Finding)],
         settings: &crate::capture::Settings,
+        read: (&str, Option<&str>),
     ) -> Result<Option<i64>> {
-        self.append_under(e, ledger, settings.rules.version(), Some(settings))
+        self.append_under(
+            e,
+            ledger,
+            settings.rules.version(),
+            Some(settings),
+            Some(read),
+        )
     }
 
+    /// `read`: the repository and the folder as the hook read them, before the gate (security
+    /// review of #489: the transaction asks what the hook's own check asks).
     fn append_under(
         &mut self,
         e: &Event,
         ledger: &[(String, crate::redact::Finding)],
         ruleset: &str,
         settings: Option<&crate::capture::Settings>,
+        read: Option<(&str, Option<&str>)>,
     ) -> Result<Option<i64>> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let never = capture_exclusions_in(&tx)?;
-        let (repo, cwd) = (e.repo.as_deref(), e.cwd.as_deref());
+        let now = settings.map(|s| crate::capture::never_recorded(&never, s));
         if scope_tombstoned(
             &tx,
             &self.device,
             &crate::forget::session(&e.agent, &e.session),
             e,
             ledger,
-        )? || never.covers(repo, cwd)
-            || settings.is_some_and(|s| crate::capture::never_recorded(&never, s).covers(repo, cwd))
+        )? || never.refuses(now.as_ref(), (e.repo.as_deref(), e.cwd.as_deref()), read)
         {
             return Ok(None);
         }
@@ -3865,10 +3889,10 @@ impl Raw {
             // Slice 3b (D3): a forgotten session's record from before its forget is not recorded,
             // nor one of a place excluded since (slice 4a).
             let session = crate::forget::session(&c.event.agent, &c.event.session);
-            let (repo, cwd) = (c.event.repo.as_deref(), c.event.cwd.as_deref());
+            // A kept call's file holds the labels alone, never the place before the gate.
+            let labels = (c.event.repo.as_deref(), c.event.cwd.as_deref());
             if !scope_tombstoned(&tx, &self.device, &session, &c.event, &c.ledger)?
-                && !never.covers(repo, cwd)
-                && !now.covers(repo, cwd)
+                && !never.refuses(Some(&now), labels, None)
             {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
             }
@@ -3967,8 +3991,11 @@ impl Raw {
         let mut seqs = Vec::with_capacity(batch.len());
         for (index, c) in batch.iter().enumerate() {
             // Slice 4a: a place never recorded; the checkpoint still moves past it.
-            let (repo, cwd) = (c.event.repo.as_deref(), c.event.cwd.as_deref());
-            if never.covers(repo, cwd) || now.as_ref().is_some_and(|now| now.covers(repo, cwd)) {
+            if never.refuses(
+                now.as_ref(),
+                (c.event.repo.as_deref(), c.event.cwd.as_deref()),
+                None,
+            ) {
                 continue;
             }
             let identity = origins.get(index);
@@ -4807,7 +4834,7 @@ impl Raw {
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
-        self.append_ops_from(ops, None, None)
+        self.append_ops_from(ops, None, None, None)
     }
 
     /// `append_ops` for claude-mem's work state lists, imported under `settings`: a list is also
@@ -4819,7 +4846,7 @@ impl Raw {
         ops: &[(OpKind, serde_json::Value)],
         settings: &crate::capture::Settings,
     ) -> Result<Vec<i64>> {
-        self.append_ops_from(ops, None, Some(settings))
+        self.append_ops_from(ops, None, Some(settings), None)
     }
 
     /// `append_ops` for ops written from `cwd`, the label of the writer's working directory. A
@@ -4831,11 +4858,16 @@ impl Raw {
         ops: &[(OpKind, serde_json::Value)],
         cwd: Option<&str>,
         settings: Option<&crate::capture::Settings>,
+        read: Option<(&str, Option<&str>)>,
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         let lists = ops.iter().any(|(kind, _)| *kind == OpKind::WorkState);
         let never = lists.then(|| capture_exclusions_in(&tx)).transpose()?;
+        let now = never
+            .as_ref()
+            .zip(settings)
+            .map(|(never, s)| crate::capture::never_recorded(never, s));
         for (kind, body) in ops {
             anyhow::ensure!(
                 !forgotten_op(&tx, *kind, body)?,
@@ -4848,8 +4880,11 @@ impl Raw {
             let labelled = |settings| crate::capture::exclusion_label("repo", repo, settings);
             if let Some(never) = &never
                 && *kind == OpKind::WorkState
-                && (never.covers(None, cwd)
+                && (never.refuses(now.as_ref(), (None, cwd), read)
                     || never.covers_work_state(repo, imported)
+                    || now
+                        .as_ref()
+                        .is_some_and(|now| now.covers_work_state(repo, imported))
                     || imported
                         && settings.is_some_and(|s| never.covers_work_state(&labelled(s), true)))
             {
@@ -5002,7 +5037,31 @@ impl Raw {
         )?;
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
-        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd, None)?[0])
+        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd, None, None)?[0])
+    }
+
+    /// `work_state` for a writer that holds its capture settings and its repository and folder as
+    /// read before the gate (`read`): the write's transaction asks what the writer's own check
+    /// asks (`CaptureExclusions::refuses`; security review of #489).
+    pub fn work_state_under(
+        &mut self,
+        repo: &str,
+        list: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+        cwd: &str,
+        settings: &crate::capture::Settings,
+        read: (&str, Option<&str>),
+    ) -> Result<i64> {
+        let seen: Option<i64> = self.conn.query_row(
+            "SELECT MAX(COALESCE(json_extract(body, '$.clock'), ts)) FROM ops
+             WHERE type = 'work_state' AND json_extract(body, '$.source') IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
+        let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
+        let ops = [(OpKind::WorkState, op)];
+        Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0])
     }
 
     /// `work_state_in` on this store.
@@ -8483,8 +8542,10 @@ mod tests {
             ..test_event("After the rule.")
         };
         assert_ne!(labelled.repo.as_deref(), Some(given));
+        let elsewhere = ("github.com/o/open", None);
         assert_eq!(
-            raw.append_captured(&labelled, &[], &settings).unwrap(),
+            raw.append_captured(&labelled, &[], &settings, elsewhere)
+                .unwrap(),
             None
         );
         assert!(
@@ -8492,6 +8553,97 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// Security review of #489: the hook's write transaction also asks about the folder as the hook
+    /// read it, so an exclusion committed after the hook's check refuses an event below it though a
+    /// rule that takes the folder's separator keeps the labels from matching.
+    #[test]
+    fn a_hooks_append_matches_the_folder_as_the_hook_read_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.exclude_capture(("folder", "/x/private"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let below = "/x/private/sub";
+        let labelled = Event {
+            cwd: Some(crate::capture::exclusion_label("cwd", below, &settings)),
+            ..test_event("Below the folder.")
+        };
+        let read = ("github.com/o/r", Some(below));
+        assert_eq!(
+            raw.append_captured(&labelled, &[], &settings, read)
+                .unwrap(),
+            None
+        );
+        let elsewhere = ("github.com/o/r", Some("/x/open/sub"));
+        assert!(
+            raw.append_captured(&labelled, &[], &settings, elsewhere)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Security review of #489: a work state write the MCP server makes asks in its transaction
+    /// what the server's own check asks: the folder as read, and the labels against the list as
+    /// given and as the rules now read it.
+    #[test]
+    fn a_work_state_write_asks_in_its_transaction_what_its_writer_asks() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let given = "github.com/o/acme-482915";
+        raw.exclude_capture(("repo", given), false).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let repo = crate::capture::exclusion_label("repo", given, &settings);
+        let fields = serde_json::json!({ "task": "Plan." });
+        let fields = fields.as_object().unwrap();
+        let read = (given, Some("/w/acme"));
+        let refused = raw.work_state_under(&repo, "plan", fields, "/w/[x]", &settings, read);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        // The list as the rules now read it, with the place read elsewhere.
+        let elsewhere = ("github.com/o/open", Some("/w/open"));
+        let refused = raw.work_state_under(&repo, "plan", fields, "/w/open", &settings, elsewhere);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        assert!(raw.work_state(&repo, "plan", fields, None).is_ok());
+        // A folder whose separator a rule takes: only the place as read matches it.
+        raw.exclude_capture(("folder", "/w/private"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let cwd = crate::capture::exclusion_label("cwd", "/w/private/sub", &settings);
+        let read = ("github.com/o/open", Some("/w/private/sub"));
+        let refused =
+            raw.work_state_under("github.com/o/open", "plan", fields, &cwd, &settings, read);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        // Another folder the rules read as an excluded one: only the list as read now matches it,
+        // as the hook's check reads it.
+        raw.exclude_capture(("folder", "/v/acme-111111"), false)
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let cwd = crate::capture::exclusion_label("cwd", "/v/acme-222222", &settings);
+        let read = ("github.com/o/open", Some("/v/acme-222222"));
+        let refused =
+            raw.work_state_under("github.com/o/open", "plan", fields, &cwd, &settings, read);
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
     }
 
     /// Codex on #489: a repository never recorded under the label a rule now makes of it keeps its

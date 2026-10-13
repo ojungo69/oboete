@@ -348,9 +348,13 @@ impl Oboete {
                 "nothing is recorded here, so no work state is kept: {why}"
             ));
         }
-        // An exclusion committed since that read refuses the write in its transaction.
-        let cwd = crate::capture::exclusion_label("cwd", &self.cwd.to_string_lossy(), &settings);
-        match raw.work_state(&repo, &list, &fields, Some(&cwd)) {
+        // An exclusion committed since that read refuses the write in its transaction, which asks
+        // what that check asked: the place as read and its labels.
+        let folder = crate::capture::folder_path(&self.cwd.to_string_lossy());
+        let cwd = crate::capture::exclusion_label("cwd", &folder, &settings);
+        let key = crate::repo::key(std::path::Path::new(&folder));
+        let read = (key.as_str(), Some(folder.as_str()));
+        match raw.work_state_under(&repo, &list, &fields, &cwd, &settings, read) {
             Err(e) if e.is::<crate::raw::NeverRecorded>() => return failed(e.to_string()),
             written => written.map_err(internal)?,
         };

@@ -993,7 +993,8 @@ pub fn record(
     }
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
-        match raw.append_captured(&b.captured.event, &b.captured.ledger, settings) {
+        let read = (b.read.0.as_str(), b.read.1.as_deref());
+        match raw.append_captured(&b.captured.event, &b.captured.ledger, settings, read) {
             Ok(Some(seq)) => appended.push((seq, b.captured.event.clone())),
             // Slice 3b (D3): a forgotten session's event from before its forget, not recorded.
             Ok(None) => {}
@@ -1014,6 +1015,9 @@ pub fn record(
 struct Built {
     step: Option<(String, i64)>,
     captured: crate::capture::Captured,
+    /// The repository and folder as read before the gate, which the append's transaction asks
+    /// about too (slice 4a). Never kept.
+    read: (String, Option<String>),
 }
 
 /// A hook call's events as they would be appended: adapted, through the gate, an event that names
@@ -1051,20 +1055,13 @@ fn built(
                 let session = payload["session_id"].as_str().unwrap_or("unknown");
                 (session.to_owned(), step)
             });
-        for (mut c, (repo, cwd)) in
-            crate::capture::events_read(agent, &event, &payload, ts, settings)
-        {
+        for (mut c, read) in crate::capture::events_read(agent, &event, &payload, ts, settings) {
             // The repository and folder as read, before the gate, with the list as given: a rule
             // that masks part of a name, or one taken away since, changes neither (#496); and the
             // labels, with the list as given and as the rules now read it.
-            let (labels, folder) = (
-                (c.event.repo.as_deref(), c.event.cwd.as_deref()),
-                (Some(repo.as_str()), cwd.as_deref()),
-            );
+            let labels = (c.event.repo.as_deref(), c.event.cwd.as_deref());
             if never.as_ref().is_some_and(|(list, now)| {
-                list.covers(folder.0, folder.1)
-                    || list.covers(labels.0, labels.1)
-                    || now.covers(labels.0, labels.1)
+                list.refuses(Some(now), labels, Some((&read.0, read.1.as_deref())))
             }) {
                 continue;
             }
@@ -1074,6 +1071,7 @@ fn built(
             built.push(Built {
                 step: step.clone(),
                 captured: c,
+                read,
             });
         }
     }

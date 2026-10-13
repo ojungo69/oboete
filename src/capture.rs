@@ -268,18 +268,23 @@ pub fn not_recorded_why(
         Ok(false) => return Some("its checkout's .oboete.toml says capture = false".into()),
         Err(e) => return Some(format!("{e:#}")),
     }
+    let folder = place.cwd.clone().unwrap_or_else(|| folder_path(cwd));
     let (repo, cwd) = (
         exclusion_label("repo", &place.repo, settings),
-        exclusion_label("cwd", cwd, settings),
+        exclusion_label("cwd", &folder, settings),
     );
+    // As the hook asks it: the place as read against the list as given, the labels against the
+    // list as given and as the rules now read it (security review of #489).
     let never = never_recorded(list, settings);
-    if never.covers(Some(&repo), None) || list.covers(Some(&repo), None) {
+    if list.refuses(Some(&never), (Some(&repo), None), Some((&place.repo, None))) {
         return Some(format!(
             "its repository {repo} is excluded (oboete capture exclude)"
         ));
     }
-    (never.covers(None, Some(&cwd)) || list.covers(None, Some(&cwd)))
-        .then(|| format!("{cwd} is in an excluded folder (oboete capture exclude --folder)"))
+    (list.covers(None, Some(&folder))
+        || list.covers(None, Some(&cwd))
+        || never.covers(None, Some(&cwd)))
+    .then(|| format!("{cwd} is in an excluded folder (oboete capture exclude --folder)"))
 }
 
 /// The events an imported hook payload records (milestone 4 D6): `events`' kinds and bodies, under
@@ -939,6 +944,31 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         assert!(repo_capture(Some(top.path())).is_err());
+    }
+
+    /// Security review of #489: why a directory is not recorded is asked as the hook asks it, so a
+    /// folder stored as given covers a directory below it under a rule that takes its separator.
+    #[test]
+    fn why_a_directory_is_not_recorded_reads_its_folder_as_the_hook_does() {
+        let top = tempfile::tempdir().unwrap();
+        let folder = top.path().join("private");
+        let below = folder.join("sub");
+        std::fs::create_dir_all(&below).unwrap();
+        let mut list = crate::raw::CaptureExclusions::default();
+        list.folders.insert(folder_path(&folder.to_string_lossy()));
+        let settings = Settings {
+            rules: redact::Rules::new(
+                &crate::config::parse_capture(Some(
+                    "[redaction]\nextra_rules = [{ id = \"p\", regex = 'private(?:/|$)' }]\n",
+                ))
+                .unwrap()
+                .redaction,
+            )
+            .unwrap(),
+            ..Settings::default()
+        };
+        let why = not_recorded_why(&below.to_string_lossy(), &list, &settings);
+        assert!(why.is_some_and(|w| w.contains("excluded folder")));
     }
 
     /// Codex on #489: an undo finds a folder stored in another spelling of letter case where the

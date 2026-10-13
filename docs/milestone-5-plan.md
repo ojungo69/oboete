@@ -1340,8 +1340,11 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
   等しいとき、R を今の規則で読んだ形（`capture::never_recorded`）と等しいとき、そして hook が gate の前の
   repo と cwd を持つところでは、それが R と等しいか R の中（path の component 単位、Windows と macOS では
   大文字と小文字を区別しない）のとき。記録済みの event の label はその時の規則で読まれているので、規則の
-  前の record は R そのものに、後の record は今の規則で読んだ R に合う。hook の書込み transaction の中の
-  確かめ（`Raw::append_captured`）も今の規則で読んだ一覧と比べる（label どうし。gate の前の値は持たない）。
+  前の record は R そのものに、後の record は今の規則で読んだ R に合う。どの書き手も同じ問い
+  （`CaptureExclusions::refuses`）で確かめる: hook の書込み transaction（`Raw::append_captured`）と MCP
+  の作業メモ（`Raw::work_state_under`）は gate の前の値も渡し、doctor と MCP の理由（`not_recorded_why`）
+  も同じに読む。止まった hook の書き戻し（spool は label だけを持つ）と取り込みは label どうしで比べる
+  （規則が区切りを食う場合はそこで合わないことがある。push の security review on #489）。
   hook の `cwd` が相対か無いときは、hook が動く directory を絶対パスにしてから比べる。CLI の folder と
   hook の `cwd` はどちらも `capture::folder_path` で、`.` と `..` を名前の上で外し、末尾の区切りを落とす
   （link はたどらない。Codex on #489）。取り消しは保存された値を探す（folder は大文字と小文字を区別しない
