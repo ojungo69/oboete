@@ -1261,8 +1261,9 @@ fn purge_lines(text: &str, judge: impl Fn(&str) -> Line) -> (Option<String>, boo
                 changed = true;
             }
             Line::Kept => out.push_str(line),
-            Line::Unknown => {
-                out.push_str(line);
+            Line::Unknown(masked) => {
+                changed |= masked.is_some();
+                out.push_str(masked.as_deref().unwrap_or(line));
                 unknown = true;
             }
         }
@@ -1278,8 +1279,9 @@ enum Line {
     /// Its op holds no such text.
     Kept,
     /// Whether it holds such text cannot be told: not an op line, or an op of a kind that holds a
-    /// uid's text (`raw::op_uid`) whose body names none.
-    Unknown,
+    /// uid's text (`raw::op_uid`) whose body names none. Slice 3e-4: with the line its text masked
+    /// with the rules makes, if they mask any.
+    Unknown(Option<String>),
 }
 
 /// An ops segment's line: its fields, its op's kind and its op's body.
@@ -1326,9 +1328,6 @@ fn purged_line(
     let Some(rules) = &judge.text else {
         return judged;
     };
-    if matches!(judged, Line::Unknown) {
-        return judged;
-    }
     let text = match &judged {
         Line::Purged(text) => text.as_str(),
         _ => line,
@@ -1338,7 +1337,12 @@ fn purged_line(
         v["body"] = now.into();
         Some(v.to_string())
     });
-    masked.map_or(judged, Line::Purged)
+    match judged {
+        // An op whose uid cannot be told has its text masked too, and stays one that cannot be
+        // told (Codex on #487).
+        Line::Unknown(_) => Line::Unknown(masked),
+        judged => masked.map_or(judged, Line::Purged),
+    }
 }
 
 /// `purged_line` by what forget took.
@@ -1351,7 +1355,7 @@ fn judged_line(
         return Line::Kept;
     }
     let Some((mut v, kind, body)) = op_line(line) else {
-        return Line::Unknown;
+        return Line::Unknown(None);
     };
     // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does not hold
     // (a segment set aside) judged by its own (Codex and CodeRabbit on #472). A line with no time
@@ -1378,7 +1382,11 @@ fn judged_line(
                 kind,
                 raw::OpKind::Claim | raw::OpKind::Correction | raw::OpKind::Import
             );
-        return if none { Line::Kept } else { Line::Unknown };
+        return if none {
+            Line::Kept
+        } else {
+            Line::Unknown(None)
+        };
     };
     let now = match jobs.get(&uid) {
         Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
@@ -1409,12 +1417,12 @@ fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins, masks: &raw::
         return Line::Kept;
     }
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
-        return Line::Unknown;
+        return Line::Unknown(None);
     };
     match v["type"].as_str() {
         Some("event") => {}
         Some("removed" | "tombstone") => return Line::Kept,
-        _ => return Line::Unknown,
+        _ => return Line::Unknown(None),
     }
     let identity = match v["source"].as_str() {
         Some(source) if raw::is_live(source) => {
@@ -1422,11 +1430,11 @@ fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins, masks: &raw::
                 (Some(device), Some(seq), Some(ts)) => {
                     Some(crate::forget::live_origin(device, seq, ts))
                 }
-                _ => return Line::Unknown,
+                _ => return Line::Unknown(None),
             }
         }
         Some(_) => v["import_identity"]["origin"].as_str().map(str::to_owned),
-        None => return Line::Unknown,
+        None => return Line::Unknown(None),
     };
     let Some((identity, held)) = identity.and_then(|id| origins.get(&id).map(|held| (id, held)))
     else {
@@ -2266,7 +2274,7 @@ pub(crate) mod tests {
             assert!(
                 matches!(
                     purged_line(&unknown, &jobs, &raw::Judge::default()),
-                    Line::Unknown
+                    Line::Unknown(None)
                 ),
                 "{unknown}"
             );

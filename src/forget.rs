@@ -9185,6 +9185,29 @@ mod tests {
         }
     }
 
+    /// Slice 3e-4 (Codex on #487): an op whose uid cannot be told, a claim of the shape from before
+    /// Task 7, has its text masked in a backup's ops segment as in raw.db.
+    #[test]
+    fn an_op_whose_uid_cannot_be_told_has_its_text_masked_in_the_backup() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let old = serde_json::json!({ "text": format!("Logs keep {MASKED}.") });
+        let seq = s.raw.append_ops(&[(raw::OpKind::Claim, old)]).unwrap()[0];
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::backup::export(&home).unwrap();
+        assert!(!backup_hits(&home, MASKED).is_empty());
+        std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.texts, purged.segments), (1, 1));
+        assert_eq!(backup_hits(&home, MASKED), Vec::<String>::new());
+        let stars = "*".repeat(MASKED.len());
+        assert_eq!(
+            op_bodies(&home)[&seq]["text"],
+            format!("Logs keep {stars}.")
+        );
+    }
+
     /// Slice 3e-4: a purge that stops after masking op text, before knowledge.db is rebuilt, leaves
     /// it owed: the next one rebuilds knowledge.db, though it masks nothing more, even once the
     /// rule is taken back (the rules are again those the op text was last scanned with).

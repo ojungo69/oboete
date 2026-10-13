@@ -1281,7 +1281,7 @@ egress の gate が今の規則で伏せる）。
   transaction（本文が読んだ時のままの op だけ）。op を書き換えた transaction で meta `ops_text_pending`
   を立て、それがある間 knowledge.db を作り直す（止まった purge が残しても、次の回の走査は何も書かないが
   作り直す）。step 4 は版が違う回ごとに backup の ops segment とコピーの op を全部読み、同じ書換えを
-  する（raw.db が持たない op にも）。raw.db-wal を truncate でき step 4 まで終わった回が、始めに読んだ版を
+  する（raw.db が持たない op にも、uid を判定できない op の行にも。後者は判定できない行のまま。Codex on #487）。raw.db-wal を truncate でき step 4 まで終わった回が、始めに読んだ版を
   記録して pending を消す（途中で版が変わったら次の回がもう一度走査する）。記録は走査を始めた raw.db
   にだけする（始めた印 `ops_text_scanning`）: 途中の restore が segment から作り直した raw.db（新しい
   meta）はその segment の op を持つので、走査を払わない。worker の `continue_due` は版が違う間、backup の
