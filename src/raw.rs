@@ -1116,9 +1116,13 @@ impl CaptureExclusions {
     }
 
     /// Whether a work state op of `repo` is never recorded: its repository listed, or, for a list
-    /// imported from claude-mem, the repository of its project's name (milestone 4 D13,
-    /// docs/claude-mem-import.md I6).
-    pub fn covers_work_state(&self, repo: &str) -> bool {
+    /// imported from claude-mem (`imported`), the repository of its project's name (milestone 4
+    /// D13, docs/claude-mem-import.md I6). A list written here is matched by its own key alone, as
+    /// `work_state_in` reads it, whatever shape that key has (Codex on #489).
+    pub fn covers_work_state(&self, repo: &str, imported: bool) -> bool {
+        if !imported {
+            return self.repos.contains(repo);
+        }
         let repos: Vec<String> = self.repos.iter().cloned().collect();
         crate::embed_phase::import_excluded(repo, &repos)
     }
@@ -4765,7 +4769,19 @@ impl Raw {
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
-        self.append_ops_from(ops, None)
+        self.append_ops_from(ops, None, None)
+    }
+
+    /// `append_ops` for claude-mem's work state lists, imported under `settings`: a list is also
+    /// refused when its project's name labelled under them, as the import's own check labels it,
+    /// is never recorded, so an exclusion a rule masks that commits during the import refuses the
+    /// lists after it (Codex on #489).
+    pub fn append_imported_ops(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        settings: &crate::capture::Settings,
+    ) -> Result<Vec<i64>> {
+        self.append_ops_from(ops, None, Some(settings))
     }
 
     /// `append_ops` for ops written from `cwd`, the label of the writer's working directory. A
@@ -4776,6 +4792,7 @@ impl Raw {
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
         cwd: Option<&str>,
+        settings: Option<&crate::capture::Settings>,
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
@@ -4786,10 +4803,17 @@ impl Raw {
                 !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
+            let (repo, imported) = (
+                body["repo"].as_str().unwrap_or_default(),
+                !body["source"].is_null(),
+            );
+            let labelled = |settings| crate::capture::exclusion_label("repo", repo, settings);
             if let Some(never) = &never
                 && *kind == OpKind::WorkState
                 && (never.covers(None, cwd)
-                    || never.covers_work_state(body["repo"].as_str().unwrap_or_default()))
+                    || never.covers_work_state(repo, imported)
+                    || imported
+                        && settings.is_some_and(|s| never.covers_work_state(&labelled(s), true)))
             {
                 return Err(NeverRecorded.into());
             }
@@ -4908,7 +4932,7 @@ impl Raw {
         )?;
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
-        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd)?[0])
+        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd, None)?[0])
     }
 
     /// `work_state_in` on this store.
@@ -8429,7 +8453,8 @@ mod tests {
 
     /// Slice 4a (Codex on #489): a work state write is refused inside its transaction once its
     /// repository, the repository of the claude-mem project an imported list is filed under, or
-    /// the folder it is written from is never recorded; elsewhere it is kept.
+    /// the folder it is written from is never recorded; elsewhere it is kept, and a list written
+    /// here is matched by its own key alone.
     #[test]
     fn a_work_state_write_is_refused_in_its_transaction_where_nothing_is_recorded() {
         let home = tempfile::tempdir().unwrap();
@@ -8458,13 +8483,40 @@ mod tests {
         assert!(refused(raw.append_ops(&imported("claude-mem:secret/wt"))));
         assert!(written(&mut raw, "github.com/o/open", Some("/x/privateer")).is_ok());
         assert!(raw.append_ops(&imported("claude-mem:open")).is_ok());
+        // A list written here by its own key alone, though that key has the shape of a claude-mem
+        // project's (`ssh://claude-mem:secret/x`).
+        assert!(written(&mut raw, "claude-mem:secret/x", None).is_ok());
         let lists = raw
             .ops_after(raw.device(), 0, 100)
             .unwrap()
             .into_iter()
             .filter(|o| o.kind == OpKind::WorkState)
             .count();
-        assert_eq!(lists, 2);
+        assert_eq!(lists, 3);
+    }
+
+    /// Slice 4a (Codex on #489): an imported list is refused inside its transaction also when its
+    /// project's name, labelled under the import's settings, is what an exclusion committed during
+    /// the import stored: a rule masks part of that name.
+    #[test]
+    fn an_imported_list_is_refused_by_an_exclusion_its_rules_mask() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'secret-[0-9]{4}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let stored = crate::capture::exclusion_label("repo", "github.com/o/secret-1234", &settings);
+        assert!(!stored.contains("secret-1234"), "{stored}");
+        raw.exclude_capture(("repo", &stored), false).unwrap();
+        let op = serde_json::json!({"repo": "claude-mem:secret-1234", "list": "plan",
+            "fields": {"task": "canary-4a"}, "clock": 1, "at": 1, "source": "claude-mem",
+            "source_id": "w1"});
+        let ops = [(OpKind::WorkState, op)];
+        let refused = raw.append_imported_ops(&ops, &settings).unwrap_err();
+        assert!(refused.is::<NeverRecorded>(), "{refused}");
     }
 
     /// docs/work-state.md L4: work state folds in its clock's order: a write on a copied store

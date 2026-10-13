@@ -261,7 +261,8 @@ fn work_state(
     stats: &mut Stats,
 ) -> Result<()> {
     let known = raw.work_state_keys(source)?;
-    // A list excluded after this read is refused by the append, which reads the list again.
+    // A list excluded after this read is refused by the append, which reads the list again and
+    // labels the project's name as this read does.
     let never = raw.capture_exclusions()?;
     let mut ops = Vec::new();
     each_row(
@@ -279,7 +280,7 @@ fn work_state(
             // Also as the list's labels hold it: a rule may mask part of the project's name.
             let named = repo(&project);
             let labelled = crate::capture::exclusion_label("repo", &named, settings);
-            if never.covers_work_state(&named) || never.covers_work_state(&labelled) {
+            if never.covers_work_state(&named, true) || never.covers_work_state(&labelled, true) {
                 stats.never_recorded += 1;
                 return Ok(());
             }
@@ -312,14 +313,14 @@ fn work_state(
     for op in ops {
         let size = op.1.to_string().len();
         if batch.len() == crate::raw::IMPORT_BATCH || bytes + size > crate::raw::MAX_BATCH_BYTES {
-            raw.append_ops(&std::mem::take(&mut batch))?;
+            raw.append_imported_ops(&std::mem::take(&mut batch), settings)?;
             bytes = 0;
         }
         bytes += size;
         batch.push(op);
     }
     if !batch.is_empty() {
-        raw.append_ops(&batch)?;
+        raw.append_imported_ops(&batch, settings)?;
     }
     Ok(())
 }

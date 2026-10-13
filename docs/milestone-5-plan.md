@@ -1354,9 +1354,12 @@ spec 6.1 の「記録しない」（owner decision 16・19、A28）。
 - **work state**: 除外された repo か folder の checkout からの書込み（MCP、docs/work-state.md）は断る。MCP
   の確認の後に除外が commit されても、`append_ops` が書込みの transaction の中で一覧を読み直し、work state の
   op の repo（取り込んだ一覧は claude-mem の project の名前の repo、D13）と書いた場所（MCP の cwd の label）
-  を見て断る（`NeverRecorded`）。claude-mem から取り込む work state も同じ規則で入れず、`never_recorded` と
-  数える（docs/claude-mem-import.md I6）。claude-mem が持ち続けるので、undo の後の取り込みでは入る（Codex
-  on #489）。
+  を見て断る（`NeverRecorded`）。project の名前で比べるのは取り込んだ一覧（op に `source` がある）だけで、
+  ここで書いた一覧は `work_state_in` が読むとおり自分の key だけで比べる（key が `claude-mem:<名前>/x` の形
+  でも）。claude-mem から取り込む work state も同じ規則で入れず、`never_recorded` と数える
+  （docs/claude-mem-import.md I6）。取り込みの append（`append_imported_ops`）は、取り込みの settings で
+  project の名前を gate した形とも transaction の中で比べる（取り込みの途中に、規則が名前の一部を伏せた除外が
+  commit されても断る）。claude-mem が持ち続けるので、undo の後の取り込みでは入る（Codex on #489）。
 - **CLI**: `oboete capture exclude [<repo>] [--folder <path>] [--undo]`。repo を省くと今の checkout の
   repo（`oboete exclude` と同じ label）。folder は絶対パスにして保存する。結果の一覧を表示する。repo を
   除外したとき、端末なら「すでに記録した分も忘れますか（既定: 残す）」と聞き、はいなら `forget --repo`
