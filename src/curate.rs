@@ -316,7 +316,7 @@ impl Reads {
 /// Each window of a pass holds a copy, so the lists are shared (OpenCodeReview on #304).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Reading {
-    /// The exclusion list the sessions come from, as `Raw::exclusions` read it.
+    /// The exclusion list the sessions come from, as `Raw::exclusions_now` read it.
     pub exclusions: std::sync::Arc<Vec<String>>,
     /// Each as `agent` NUL `session`, a window line's key.
     pub excluded: std::sync::Arc<std::collections::HashSet<String>>,
@@ -330,7 +330,7 @@ impl Reading {
     /// With the exclusion list and the deny-list as raw holds them now.
     pub fn now(raw: &Raw, reads: Reads) -> Result<Self> {
         let fence = raw.fence_count()?;
-        let exclusions = raw.exclusions()?;
+        let exclusions = raw.exclusions_now()?;
         let excluded = raw.sessions_in(&exclusions)?;
         Ok(Self {
             exclusions: exclusions.into(),

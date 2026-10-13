@@ -4878,6 +4878,34 @@ impl Raw {
         capture_exclusions_in(&self.conn)
     }
 
+    /// `exclusions`, with each repository label the records hold that the rules now read as one
+    /// never recorded, as a hook reads an event's: a repository excluded from capture after a rule
+    /// that masks its label is listed by the masked label, and its records from before the rule
+    /// hold the label unmasked (Codex on #489). The settings are read only while a repository is
+    /// never recorded; one that does not load sends nothing.
+    pub fn exclusions_now(&self) -> Result<Vec<String>> {
+        let (mut sent, never) = exclusion_sets(&self.conn)?;
+        if !never.repos.is_empty() {
+            let settings = crate::capture::Settings::load(&self.home)?;
+            let now = crate::capture::never_recorded(&never, &settings);
+            self.repo_index()?;
+            let mut st = self.conn.prepare(
+                "SELECT DISTINCT repo FROM records WHERE type = 'event' AND repo IS NOT NULL",
+            )?;
+            for label in st.query_map([], |r| r.get::<_, String>(0))? {
+                let label = label?;
+                if now
+                    .repos
+                    .contains(&crate::capture::exclusion_label("repo", &label, &settings))
+                {
+                    sent.insert(label);
+                }
+            }
+        }
+        sent.extend(never.repos);
+        Ok(sent.into_iter().collect())
+    }
+
     /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op
     /// this store holds, as a Lamport clock: it takes effect after each op its device had seen,
     /// whatever the clocks of the devices that wrote them. A copied store keeps its old device's
@@ -8372,6 +8400,33 @@ mod tests {
             CaptureExclusions::default()
         );
         assert_eq!(raw.exclusions().unwrap(), ["a"]);
+    }
+
+    /// Codex on #489: a repository never recorded under the label a rule now makes of it keeps its
+    /// records from before the rule, which hold the label unmasked, from every provider too.
+    #[test]
+    fn records_from_before_a_rule_are_not_sent_once_their_repository_is_never_recorded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let secret = "github.com/o/acme-482915";
+        raw.append(&Event {
+            repo: Some(secret.into()),
+            session: "old".into(),
+            ..test_event("Old work.")
+        })
+        .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let now = crate::capture::exclusion_label("repo", secret, &settings);
+        assert_ne!(now, secret);
+        raw.exclude_capture(("repo", &now), false).unwrap();
+        let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live).unwrap();
+        assert!(reading.excluded.contains("claude\0old"), "{reading:?}");
+        assert_eq!(raw.exclusions().unwrap(), [now]);
     }
 
     /// Slice 4a: an event of a repository or folder never recorded is refused by every append that
