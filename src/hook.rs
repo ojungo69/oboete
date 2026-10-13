@@ -8307,6 +8307,46 @@ mod tests {
         }
     }
 
+    /// Owner decision 43: the claude-mem import's prompts (`clip`) follow the switch: kept as
+    /// typed while redaction is off, masked by the bundled rules while it is on. Egress reads the
+    /// rules of the home `redact::set_home` names, the process's, so each runs in a child process.
+    #[test]
+    fn an_imported_prompt_follows_the_switch() {
+        const HOME: &str = "OBOETE_TEST_SWITCH_CLIP_HOME";
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let off = crate::redact::Rules::load(&home).unwrap().is_off();
+            let clipped = clip(&format!("deploy with {key}"));
+            assert_eq!(clipped.contains(&key), off, "{clipped}");
+            return;
+        }
+        let name = "hook::tests::an_imported_prompt_follows_the_switch";
+        for enabled in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(
+                home.path().join("config.toml"),
+                format!("[redaction]\nenabled = {enabled}\n"),
+            )
+            .unwrap();
+            let out = std::process::Command::new(std::env::args_os().next().unwrap())
+                .args(["--exact", name])
+                .env(HOME, home.path())
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.status.success() && said.contains("1 passed"),
+                "enabled {enabled}: {said}"
+            );
+        }
+    }
+
     #[test]
     fn secret_straddling_the_clip_boundary_is_masked() {
         let key = "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";
