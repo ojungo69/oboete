@@ -976,14 +976,21 @@ fn capture_exclude(
     let list = raw.capture_exclusions()?;
     drop(raw);
     match (undo, had) {
-        (true, true) => match (key, list.folder_around(&value)) {
+        (true, true) if key == "folder" => {
             // Taken off the list, a folder stays unrecorded while one around it is listed (Codex
-            // on #491).
-            ("folder", Some(around)) => println!(
-                "{value} is no longer excluded, but {around} around it is: nothing there is recorded"
-            ),
-            _ => println!("recorded again from now on: {value}"),
-        },
+            // on #491), or its repository is (CodeRabbit on #489).
+            let why = capture::not_recorded_why(&value, &list, &settings);
+            match (list.folder_around(&value), why) {
+                (Some(around), _) => println!(
+                    "{value} is no longer excluded, but {around} around it is: nothing there is recorded"
+                ),
+                (None, Some(why)) => {
+                    println!("{value} is no longer excluded, but nothing there is recorded: {why}")
+                }
+                (None, None) => println!("recorded again from now on: {value}"),
+            }
+        }
+        (true, true) => println!("recorded again from now on: {value}"),
         (true, false) => println!("{value} was not excluded"),
         (false, _) => println!("never recorded from now on: {value}"),
     }

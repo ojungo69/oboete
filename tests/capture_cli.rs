@@ -89,6 +89,8 @@ fn an_undo_after_a_new_rule_takes_the_stored_folder_back() {
 
 /// Codex on #489: two folders a rule added since reads alike: an undo by the name one was
 /// excluded under takes that one back, and one by a name of neither is refused, nothing changed.
+/// The rule still reads the one taken back as the other, so nothing there is recorded, and the
+/// undo says so (CodeRabbit on #489).
 #[test]
 fn an_undo_takes_back_the_folder_named_when_two_read_alike_now() {
     let home = tempfile::tempdir().unwrap();
@@ -128,7 +130,7 @@ fn an_undo_takes_back_the_folder_named_when_two_read_alike_now() {
     let one = one.to_string_lossy();
     assert!(
         out.contains(&format!(
-            "recorded again from now on: {}",
+            "{} is no longer excluded, but nothing there is recorded",
             two.to_string_lossy()
         )) && out.contains(&format!("never recorded: {one} (folder)")),
         "{out}"
@@ -216,6 +218,33 @@ fn an_undo_under_a_listed_folder_says_nothing_there_is_recorded() {
     let out = oboete(&["capture", "exclude", "--folder", &around, "--undo"]);
     assert!(
         out.contains(&format!("recorded again from now on: {around}")),
+        "{out}"
+    );
+}
+
+/// CodeRabbit on #489: a folder taken off the list in a repository that is never recorded is not
+/// said to be recorded again: the repository is named.
+#[test]
+fn an_undo_in_a_repository_never_recorded_says_nothing_there_is_recorded() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    std::fs::write(
+        cwd.path().join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:o/secret.git\n",
+    )
+    .unwrap();
+    let oboete = |args: &[&str]| run(home.path(), cwd.path(), args);
+    let folder = cwd.path().join("private").to_string_lossy().into_owned();
+    std::fs::create_dir(&folder).unwrap();
+    oboete(&["capture", "exclude"]);
+    oboete(&["capture", "exclude", "--folder", &folder]);
+    let out = oboete(&["capture", "exclude", "--folder", &folder, "--undo"]);
+    assert!(
+        out.contains(&format!(
+            "{folder} is no longer excluded, but nothing there is recorded"
+        )) && out.contains("its repository github.com/o/secret is excluded")
+            && !out.contains("recorded again"),
         "{out}"
     );
 }
