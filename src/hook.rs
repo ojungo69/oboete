@@ -87,8 +87,9 @@ fn run_io(
     let mut prompted: Option<Prompted> = None;
     let mut session = String::new();
     // A compaction flag this call took (Cursor's at a prompt, a Codex thread's at a tool call:
-    // Codex on #532), with its session, put back if its write fails: the manifest is then shown
-    // at the next one, once recording works again.
+    // Codex on #532, the Codex root's at a SessionStart that shows the manifest: CodeRabbit on
+    // #532), with its session, put back if its write fails: the manifest is then shown at the
+    // next one, once recording works again.
     let mut took_compaction: Option<(String, String)> = None;
     // X5: the note on the files Claude Code or Codex is about to read, as the answer's context;
     // Grok's read, whose note goes after what else the call shows.
@@ -181,9 +182,10 @@ fn run_io(
         // points stay taken then (the line is shown once per session, not at every call).
         injecting = injects(home, agent, event, &labels, &mut took);
         if injecting
+            && took.compacted
             && matches!(
                 (agent, event),
-                ("cursor", "UserPromptSubmit") | ("codex", "PostToolUse")
+                ("cursor", "UserPromptSubmit") | ("codex", "PostToolUse" | "SessionStart")
             )
         {
             took_compaction = Some((session_label(&labels).to_owned(), took.flag().to_owned()));
@@ -7073,6 +7075,49 @@ mod tests {
         conn.execute_batch("DROP TRIGGER refuse_tool").unwrap();
         let back = hook(&home, "codex", "PostToolUse", &payload(tool));
         assert!(back.contains("Parser errors go to stderr."), "{back}");
+    }
+
+    /// CodeRabbit on #532: the root's SessionStart that took its mark to show the manifest and
+    /// then failed its write puts the mark back, so the root's next tool call takes the manifest
+    /// once recording works again; a resume, which shows none, spends the mark as it would have,
+    /// and a start that took none puts none back.
+    #[test]
+    fn the_codex_roots_mark_comes_back_when_its_session_start_fails_its_write() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = |extra: Value| {
+            let mut v = json!({"session_id": "cx", "cwd": p.c});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v
+        };
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        let conn = Connection::open(home.join("raw.db")).unwrap();
+        for (source, back) in [("compact", true), ("resume", false), ("startup", false)] {
+            if source != "startup" {
+                let compact = payload(json!({"trigger": "auto"}));
+                assert_eq!(hook(&home, "codex", "PostCompact", &compact), "");
+            }
+            conn.execute_batch(
+                "CREATE TRIGGER refuse_start BEFORE INSERT ON records WHEN NEW.kind='start'
+                BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+            )
+            .unwrap();
+            let input = payload(json!({"source": source})).to_string();
+            let mut out = Vec::new();
+            assert!(run_io(&home, "codex", "SessionStart", input.as_bytes(), &mut out).is_err());
+            conn.execute_batch("DROP TRIGGER refuse_start").unwrap();
+            let next = hook(&home, "codex", "PostToolUse", &payload(tool.clone()));
+            assert_eq!(
+                next.contains("Parser errors go to stderr."),
+                back,
+                "{source}: {next}"
+            );
+        }
     }
 
     /// MUST-M10, spec 4.8: a claim an agent was shown that changed since is named at its next
