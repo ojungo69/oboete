@@ -16,7 +16,8 @@ forget fence and its hiding rules. The code is `src/mem_search.rs`.
   takes it; the checkout's repository when left out), `limit` (1 to 20, default 20), `maxDetails`
   (1 to 5, default 3), `depthBefore` and `depthAfter` (0 to 3, default 2), `continuation`,
   `selectedIds` (strings, or integers).
-- **Step 1, the index**: oboete's search of the repository, at most `limit` rows, each
+- **Step 1, the index**: oboete's search of the repository, at most `limit` rows (session starts
+  left out, as in the context), each
   `- [<id>] <title> · <kind> · <time> UTC`, the kind being claude-mem's: `observation` (a card, a
   claim, an imported document or a record), `summary` or `prompt`. The ids are those `get` takes
   (a claim's whole uid, a card's `<op seq>.<n>`, a summary's `S<op seq>`, an import's uid, a

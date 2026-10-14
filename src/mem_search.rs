@@ -519,6 +519,9 @@ impl Search<'_> {
         Ok(search::query(self.home, &q)?
             .hits
             .into_iter()
+            // A session start, which claude-mem has no kind for, is no row here, as it is none of
+            // the context's (Codex on #527).
+            .filter(|h| !(matches!(h.class, search::Class::Raw) && h.kind == "start"))
             .map(|h| {
                 let (kind, kind_of) = match (&h.class, h.kind.as_str()) {
                     (search::Class::Summary, _) => ("summary", None),

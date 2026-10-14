@@ -2257,6 +2257,34 @@ mod tests {
         assert!(context.contains(&format!("- [{imported}] ")), "{context}");
     }
 
+    /// Codex on #527: a session start, which claude-mem has no kind for, is no row of the index
+    /// though search finds it, so no step takes it.
+    #[test]
+    fn mem_search_leaves_session_starts_out() {
+        let (mut s, server, _, _) = quartz();
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "work".into(),
+            repo: Some("github.com/o/r".into()),
+            ts: 1_700_000_003_000,
+            ..crate::raw::test_event(r#"{"source": "zircon startup"}"#)
+        };
+        let seq = s.raw.append(&start).unwrap();
+        s.run();
+        let id = format!("{}:{seq}", s.raw.device());
+        let q = search::Query {
+            text: "zircon startup".into(),
+            repo: Some("github.com/o/r".into()),
+            raw: search::RawArm::Below,
+            limit: 20,
+            ..Default::default()
+        };
+        let hits = search::query(&server.home, &q).unwrap().hits;
+        assert!(hits.iter().any(|h| h.key == id), "{hits:?}");
+        let index = body(mem(&server, json!({"query": "zircon startup"})));
+        assert!(!index.contains(&id), "{index}");
+    }
+
     /// Codex on #527: a store that cannot be read while a project is resolved is no refusal of the
     /// caller's, and a config that cannot be read is no protocol error: both end in the generic
     /// failure, which names no path.
