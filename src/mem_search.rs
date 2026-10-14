@@ -556,7 +556,10 @@ impl Search<'_> {
             if search::get(self.home, &anchor.id)?.is_none() {
                 continue;
             }
-            let repo = Some(anchor.project.as_str()).filter(|p| !p.is_empty());
+            // The repository searched when there was one: an imported row's label names where it
+            // is stored, not the repository (Codex on #527); else the anchor's own.
+            let own = Some(anchor.project.as_str()).filter(|p| !p.is_empty());
+            let repo = o.repo.as_deref().or(own);
             let near = search::near(self.home, repo, &anchor.id, (o.depth_before, o.depth_after))?;
             let mut near: Vec<Row> = near
                 .into_iter()

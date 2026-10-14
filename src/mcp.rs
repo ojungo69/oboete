@@ -2318,6 +2318,28 @@ mod tests {
         );
     }
 
+    /// Codex on #527: an imported row chosen as an anchor keeps the repository searched around
+    /// it, not the label its history is stored under, so the native entries near it come.
+    #[test]
+    fn mem_search_keeps_the_repository_around_an_imported_anchor() {
+        let (mut s, server, _, card) = quartz();
+        let imported = s.imported(
+            "q2",
+            "r",
+            1_700_000_002_500,
+            "Zircon reader notes",
+            "The zircon reader was rewritten.",
+        );
+        s.run();
+        let first = body(mem(&server, json!({"query": "zircon reader notes"})));
+        assert!(first.contains(&format!("- [{imported}] ")), "{first}");
+        let context = body(mem(
+            &server,
+            json!({"continuation": continuation(&first), "selectedIds": [imported]}),
+        ));
+        assert!(context.contains(&format!("- [{card}] ")), "{context}");
+    }
+
     /// Codex on #527: a store that cannot be read while a project is resolved is no refusal of the
     /// caller's, and a config that cannot be read is no protocol error: both end in the generic
     /// failure, which names no path.

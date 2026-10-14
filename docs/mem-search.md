@@ -23,8 +23,9 @@ forget fence and its hiding rules. The code is `src/mem_search.rs`.
   (a claim's whole uid, a card's `<op seq>.<n>`, a summary's `S<op seq>`, an import's uid, a
   record's `<device>:<seq>`). A continuation follows, `ms_` and 24 base64url characters.
 - **Step 2, the context**: the continuation and at most `maxDetails` ids the index showed; for each,
-  the entries a timeline of its repository shows `depthBefore` and `depthAfter` around it (its
-  claude-mem history among them, filed under the project's claude-mem name), at most 7 an anchor
+  the entries a timeline of the repository searched (the anchor's own when the search had none)
+  shows `depthBefore` and `depthAfter` around it (its claude-mem history among them, filed under
+  the project's claude-mem name), at most 7 an anchor
   and 35 in all, session starts left out before the depths count (claude-mem has no kind for
   them); the anchor is always among them, as in claude-mem's timeline, also a record the timeline does not show (an
   agent's reply). Another continuation follows.
