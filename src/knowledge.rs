@@ -23,6 +23,7 @@ pub(crate) fn open_report(
     home: &Path,
     committed: &mut impl FnMut() -> Result<()>,
 ) -> Result<Connection> {
+    crate::raw::refuse_newer_home(home)?;
     let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("knowledge.db");
     crate::db::private(home, 0o700);

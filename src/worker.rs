@@ -1021,9 +1021,10 @@ fn serve(
     if before != held {
         return Ok(true);
     }
-    let replaced = || {
+    // Or stamped by a newer oboete since (docs/store-format.md): opened again, it is refused.
+    let replaced = |raw: &Raw| {
         let now = file_id(std::fs::metadata(home.join("raw.db")));
-        held.is_some() && now.is_some() && now != held
+        (held.is_some() && now.is_some() && now != held) || raw.newer_format()
     };
     let opened = if let Some(report) = report.as_deref_mut() {
         crate::backup::open_knowledge_report(home, holding.command.as_ref(), &mut |stage| {
@@ -1078,8 +1079,13 @@ fn serve(
         if gone(home, holding) {
             return false;
         }
+        // At every batch, not only at the backup deadline: a newer oboete's stamp stops the
+        // consumers at the next batch (docs/store-format.md; Codex on #503).
+        if raw.newer_format() {
+            return true;
+        }
         if Instant::now() >= *next_backup {
-            if replaced() {
+            if replaced(raw) {
                 return true;
             }
             report_backup(home, raw, report, false);
@@ -1117,7 +1123,7 @@ fn serve(
         }
         // The next phase round uses the pathname's current store. An end-of-round check
         // cannot cover a replacement that happened after it and before this first pass.
-        if crate::backup::restore_requested(home) || replaced() {
+        if crate::backup::restore_requested(home) || replaced(&raw) {
             return Ok(true);
         }
         // An embedding call that is out is work in flight: its answer is settled before the
@@ -1202,7 +1208,7 @@ fn serve(
         }
         // Every phase can start another round. A progressed embed or shortlist must not keep
         // the old raw handle while curation is idle or waiting (M5 F2).
-        if crate::backup::restore_requested(home) || replaced() {
+        if crate::backup::restore_requested(home) || replaced(&raw) {
             return Ok(true);
         }
         if again {
@@ -1254,7 +1260,7 @@ fn serve(
                         crate::executable::Change::Stay | crate::executable::Change::Replaced => {}
                     }
                 }
-                if crate::backup::restore_requested(home) || replaced() {
+                if crate::backup::restore_requested(home) || replaced(&raw) {
                     return Ok(true);
                 }
                 if yields && !calling(phases) && steps_aside(home, &raw, holding) {
@@ -1309,7 +1315,7 @@ fn serve(
         }
         // A zero-length wait has no polling check, and the file may have changed since the
         // last tick of a longer one. Reopen before backing up through the old connection.
-        if replaced() {
+        if replaced(&raw) {
             return Ok(true);
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
@@ -1322,7 +1328,7 @@ fn serve(
             return Err(Gone.into());
         }
         // A hook that asked before the release saw the lock held and started nothing.
-        let wanted = crate::backup::restore_requested(home) || replaced();
+        let wanted = crate::backup::restore_requested(home) || replaced(&raw);
         if !wanted && !behind(&raw, &k, consumers)? {
             return Ok(false);
         }
@@ -3939,6 +3945,49 @@ mod tests {
         ));
     }
 
+    /// docs/store-format.md: a worker whose raw.db a newer oboete stamps meanwhile opens it again
+    /// at its next round and stops on the refusal, rather than writing on through its handle or
+    /// restoring the file as damaged.
+    #[test]
+    fn a_worker_stops_when_a_newer_oboete_stamps_its_raw_db() {
+        fn stamp_newer(home: &Path) {
+            Connection::open(home.join("raw.db"))
+                .unwrap()
+                .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))
+                .unwrap();
+        }
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        let mut first = true;
+        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+            if std::mem::take(&mut first) {
+                BEFORE_ROUND.set(Some(stamp_newer));
+                Ok(Phase::Covered)
+            } else {
+                Ok(Phase::Idle)
+            }
+        };
+        let why = run_holding(
+            p,
+            0,
+            vec![Box::new(Seen)],
+            || {},
+            None,
+            curating(&mut phase),
+        )
+        .unwrap_err();
+        assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+        let stamped: i64 = Connection::open(p.join("raw.db"))
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stamped, raw::FORMAT + 1);
+    }
+
     /// A replacement during a batch cannot be exported through that batch's old connection
     /// at the scheduled backup boundary. The deadline is injected, never waited for.
     #[cfg(target_os = "linux")]
@@ -5202,6 +5251,47 @@ mod tests {
         fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// Stamps raw.db with a newer format in its first step (docs/store-format.md), counting steps.
+    struct StampsNewer(
+        std::path::PathBuf,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    );
+    impl Consumer for StampsNewer {
+        fn name(&self) -> &'static str {
+            "stamps-newer"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
+            if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Connection::open(self.0.join("raw.db"))?
+                    .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))?;
+            }
+            Ok((after + 1).min(raw.max_seq()?))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// docs/store-format.md (Codex on #503): a newer oboete's stamp made while a worker drains a
+    /// backlog stops it at the next batch, before the backup's deadline, not at the round's end.
+    #[test]
+    fn a_drain_stops_at_the_next_batch_once_a_newer_oboete_stamps_raw_db() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        {
+            let mut raw = raw::open(p).unwrap();
+            for text in ["a", "b", "c"] {
+                raw.append(&raw::test_event(text)).unwrap();
+            }
+        }
+        let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let consumers: Vec<Box<dyn Consumer>> =
+            vec![Box::new(StampsNewer(p.to_owned(), steps.clone()))];
+        let why = run_consumers(p, 0, consumers).unwrap_err();
+        assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+        assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// R3 within a drain: the rescan opens raw.db by its path in each step, so a home replaced
