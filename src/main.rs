@@ -33,6 +33,7 @@ mod knowledge;
 mod manifest;
 mod mcp;
 mod mem_search;
+mod memory_lookup;
 mod migrate;
 mod model_fetch;
 mod provider;

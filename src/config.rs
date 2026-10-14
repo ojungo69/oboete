@@ -991,6 +991,9 @@ pub struct Inject {
     /// How long the prompt point waits for the resident viewer's meaning side, counted from its
     /// read fence (G23, `PER_PROMPT_WAIT_MS`); past it, the full-text side's block.
     pub per_prompt_wait_ms: usize,
+    /// A lookup of an agent's own memory gets oboete's search of it (claude-mem 13.35's
+    /// `CLAUDE_MEM_MEMORY_SEARCH_HOOK_ENABLED`, docs/memory-lookup.md).
+    pub memory_lookup: bool,
     /// A claim shown in the session that changed since is named at the next prompt (spec 4.8).
     pub correction: bool,
     /// That block's size in characters (`CORRECTION_CHARS`).
@@ -1017,6 +1020,7 @@ impl Default for Inject {
             // Ten times the prompt hook's 95th percentile with the resident viewer on this PC's
             // WSL (docs/prompt-context.md, as built).
             per_prompt_wait_ms: 1_000,
+            memory_lookup: true,
             correction: true,
             correction_chars: 800,
         }

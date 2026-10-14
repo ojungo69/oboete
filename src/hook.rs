@@ -128,10 +128,19 @@ fn run_io(
         // Nothing is recorded here (the read's PostToolUse is), and a failure is no note: the
         // read goes on. Grok's read gets it beside what else its PreToolUse shows (below).
         if matches!((agent, event), ("claude" | "codex", "PreToolUse")) {
-            noted = file_notes(home, agent, &payload, &mut fence, NOTE_ROOM).unwrap_or_else(|e| {
-                eprintln!("oboete: no note on the file: {e:#}");
+            // claude-mem's bridge first (docs/memory-lookup.md): a lookup of the agent's own memory
+            // gets oboete's search of it, and then no file note.
+            noted = crate::memory_lookup::answer(home, &payload, NOTE_ROOM).unwrap_or_else(|e| {
+                eprintln!("oboete: no memory for the lookup: {e:#}");
                 None
             });
+            if noted.is_none() {
+                noted =
+                    file_notes(home, agent, &payload, &mut fence, NOTE_ROOM).unwrap_or_else(|e| {
+                        eprintln!("oboete: no note on the file: {e:#}");
+                        None
+                    });
+            }
             return Ok(());
         }
         // An OpenCode receipt acknowledges only hookstate: it is not a captured agent event.
@@ -4129,6 +4138,69 @@ mod tests {
     }
 
     /// X5 F7: a title cannot close the fence.
+    /// claude-mem 13.35's bridge (docs/memory-lookup.md): a native memory search gets oboete's
+    /// search of it in auto mode, words alone, in the fence after claude-mem's sentence and within
+    /// the note's room, a subagent's too; a call that is no lookup, and any with
+    /// `[inject] memory_lookup = false`, get nothing.
+    #[test]
+    fn a_native_memory_lookup_gets_oboetes_search_of_it() {
+        let mut p = Prompts::new(false);
+        let uid = p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let lookup =
+            json!({"tool_name": "memory_search", "tool_input": {"query": "canary deploys"}});
+        let got = p.hook("PreToolUse", "s1", lookup.clone());
+        assert!(
+            got.contains(crate::memory_lookup::LOOKUP)
+                && got.contains("Automatic search: index → context → selected details.")
+                && got.contains("Deploys wait for the canary."),
+            "{got}"
+        );
+        assert!(got.encode_utf16().count() <= NOTE_ROOM);
+        let mut sub = lookup.clone();
+        sub["agent_id"] = json!("helper");
+        assert!(p.hook("PreToolUse", "s1", sub).contains("Deploys wait"));
+        // The whole answer passes the egress gate as it is now: a rule added after the claim
+        // masks it.
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"canary\", regex = 'canary' }]\n",
+        )
+        .unwrap();
+        let masked = p.hook("PreToolUse", "s1", lookup.clone());
+        assert!(
+            !masked.is_empty() && !masked.contains("canary."),
+            "{masked}"
+        );
+        std::fs::remove_file(p.s.home.path().join("config.toml")).unwrap();
+        // A lookup no title answers gets the index, and no continuation, which no store would
+        // keep past the hook.
+        // ("anar" is in "canary" for the full-text index, and in no title's words.)
+        let unrelated = json!({"tool_name": "memory_search", "tool_input": {"query": "anar"}});
+        let index = p.hook("PreToolUse", "s1", unrelated);
+        assert!(
+            index.contains("These candidates need your relevance judgment.")
+                && !index.contains("Continue with:"),
+            "{index}"
+        );
+        // A muted claim is never injected, here neither.
+        crate::claims::mute(p.s.home.path(), &uid, true).unwrap();
+        let muted = p.hook("PreToolUse", "s1", lookup.clone());
+        assert!(!muted.contains(&uid[..12]), "{muted}");
+        let unrelated = json!({"tool_name": "memory_search", "tool_input": {"query": "anar"}});
+        let index = p.hook("PreToolUse", "s1", unrelated);
+        assert!(!index.contains(&uid[..12]), "{index}");
+        crate::claims::mute(p.s.home.path(), &uid, false).unwrap();
+        let other = json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"}});
+        assert_eq!(p.hook("PreToolUse", "s1", other), "");
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[inject]\nmemory_lookup = false\n",
+        )
+        .unwrap();
+        assert_eq!(p.hook("PreToolUse", "s1", lookup), "");
+    }
+
     #[test]
     fn a_title_cannot_close_the_file_notes_fence() {
         let mut r = Reads::new();

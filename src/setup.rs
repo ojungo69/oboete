@@ -28,7 +28,8 @@ const MCP_NAME: &str = "oboete";
 const CLAUDE_EVENTS: &[(&str, u32)] = &[
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
-    // Its reads only (`claude`'s matcher): the note on a file (docs/file-note.md F1).
+    // Its reads and memory lookups (`CLAUDE_READS`): the note on a file (docs/file-note.md F1),
+    // the bridge (docs/memory-lookup.md).
     ("PreToolUse", 5),
     ("PostToolUse", 5),
     ("PostToolUseFailure", 5),
@@ -40,7 +41,8 @@ const CLAUDE_EVENTS: &[(&str, u32)] = &[
 const CODEX_EVENTS: &[(&str, Option<&str>, u32, bool)] = &[
     ("SessionStart", Some("startup|clear|compact"), 10, true),
     ("UserPromptSubmit", None, 5, true),
-    // Its reads only: the note on a file (docs/file-note.md F1).
+    // Its reads and memory lookups: the note on a file (docs/file-note.md F1), the bridge
+    // (docs/memory-lookup.md).
     ("PreToolUse", Some(CODEX_READS), 5, true),
     ("PostToolUse", None, 5, false),
     ("Stop", None, 5, false),
@@ -48,8 +50,13 @@ const CODEX_EVENTS: &[(&str, Option<&str>, u32, bool)] = &[
     ("SessionEnd", None, 3, false),
 ];
 /// The tools a Codex read goes through, as claude-mem's Codex hooks match them (13.35.0): its
-/// shell, and an MCP server's read tools (`hook::read_paths` takes the files).
-pub(crate) const CODEX_READS: &str = r"^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$";
+/// shell, and an MCP server's read tools (`hook::read_paths` takes the files); and the native
+/// memory lookups its bridge answers (docs/memory-lookup.md).
+pub(crate) const CODEX_READS: &str = r"^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$|^Grep$|^Glob$|^memory_search$|^memory$|^mcp__.+__memory_search$";
+/// Claude Code's, as claude-mem's hooks match them: its reads (the note on a file) and the native
+/// memory lookups (Read, Bash, Grep and Glob of a memory folder, a memory search).
+pub(crate) const CLAUDE_READS: &str =
+    r"Read|^Bash$|^Grep$|^Glob$|^memory_search$|^memory$|^mcp__.+__memory_search$";
 /// Grok ignores SessionStart stdout, so PreToolUse is wired too: that is where context goes in.
 const GROK_EVENTS: &[(&str, u32)] = &[
     ("SessionStart", 5),
@@ -1571,15 +1578,15 @@ fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     Ok(vec![file.display().to_string()])
 }
 
-/// oboete's hook groups in Claude Code's settings, one an event; its `PreToolUse` is for reads
-/// only, which get the note on a file (docs/file-note.md F1).
+/// oboete's hook groups in Claude Code's settings, one an event; its `PreToolUse` is for reads,
+/// which get the note on a file (docs/file-note.md F1), and memory lookups (`CLAUDE_READS`).
 fn claude_groups(cmd: &HookCommand) -> Vec<(String, Value)> {
     CLAUDE_EVENTS
         .iter()
         .map(|(event, timeout)| {
             let mut group = json!({"hooks": [{"type": "command", "command": cmd.line("claude", event), "timeout": timeout}]});
             if *event == "PreToolUse" {
-                group["matcher"] = json!("Read");
+                group["matcher"] = json!(CLAUDE_READS);
             }
             (event.to_string(), group)
         })
@@ -5016,7 +5023,7 @@ mod tests {
         merge_groups(&mut root, claude_groups(&cmd));
         let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!((pre.len(), &pre[0]), (2, &user));
-        assert_eq!(pre[1]["matcher"], "Read");
+        assert_eq!(pre[1]["matcher"], CLAUDE_READS);
         let command = pre[1]["hooks"][0]["command"].as_str().unwrap();
         assert!(command.ends_with("hook claude PreToolUse"), "{command}");
         let others = claude_groups(&cmd);

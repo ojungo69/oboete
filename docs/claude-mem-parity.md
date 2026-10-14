@@ -92,6 +92,7 @@ each milestone and new features are added here.
 
 | # | Difference | Size |
 |---|---|---|
+| N5 | **An agent's own memory lookups answered from memory.** claude-mem 13.35 answers a native memory lookup (an agent's notes folder, its memory search) with its own search of the same words, beside the native result, on Claude Code and Codex. oboete had nothing there. Built with claude-mem's recognition and matchers, `mem_search` in auto mode on the words side, in the file note's room, and the same switch (docs/memory-lookup.md). Folders of claude-mem's watcher stay with row 44. | M |
 | N4 | **One guided memory search.** claude-mem 13.35 gives the agent `mem_search`: an index, the context around chosen entries and their details, in steps it cannot skip, each taking a short continuation, or all at once in auto mode. oboete had `search`, `timeline` and `get`, which teach the same order and do not hold to it. Built with the same name, arguments, steps and texts on oboete's readers; the older tools stay and say to prefer it (docs/mem-search.md). | M |
 | N3 | **The agent saves a note on purpose.** claude-mem 13.35 gives the agent `save_memory`, which stores a note that search finds and the session start never shows. oboete had no such tool (row 32). Built with the same name and arguments: the note is a document of its repository, through the capture gate, refused where nothing is recorded, labelled `note` in search (docs/tools.md, slice 4). | M |
 
