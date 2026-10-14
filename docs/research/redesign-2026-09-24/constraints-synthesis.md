@@ -2,7 +2,7 @@
 
 ## Short answer
 
-Yes. None is as large as the two you already caught, but three come from the same place:
+Yes. None is as large as the two previously identified issues, but three come from the same place:
 
 1. **Inherited latency numbers.** The 20 ms hook write, the "tens of ms" per-prompt search and the "strong GPU may rerank live in the hook" tier all come from the old design. The 8 ms figure behind 20 ms was measured under `synchronous=NORMAL` (the design now uses FULL). The per-prompt figure goes back to the old 300 ms budget, which contained a 150 ms Workers AI call inside the hook. The live-rerank tier puts computation back into the hook, which is what "hooks only read" removed.
 2. **"knowledge.db can be dropped and rebuilt from raw."** This is the TypeScript spec's rebuild promise. For AI-made claims it means paying for curation again and getting different claims. Today `rebuild` keeps only the op log received from other devices (options-draft.md:366), so the device's own claims are curated again.
@@ -19,7 +19,7 @@ We checked the rest of the structure and it holds:
 - typed claims with code gates
 - the worker computes ahead and hooks only read
 
-The two proposals that argued for live search in the hook (S4-2, S4-5) were refuted for the right reason: they would bring back the hook-compute shape you already caught.
+The two proposals that argued for live search in the hook (S4-2, S4-5) were refuted for the right reason: they would bring back the previously identified hook-compute shape.
 
 File:line references use the locations the skeptics verified. Where a proposal cited the wrong line, the verified one is used. Items marked *weak* survived the vote, but a skeptic's objection still stands, and I say which one.
 
@@ -290,13 +290,13 @@ Options:
 
 ### 3. Needs your decision
 
-**S3-5 / S9: subscription CLIs while you are working.** You approved this as part of section 3, but its premise is thin.
+**S3-5 / S9: subscription CLIs while you are working.** Section 3 includes this gate, but its premise is thin.
 - As written, it means:
   - If any hook fired in the last N minutes (N is unset), only free or local providers may curate.
   - Stop fires after every agent turn, so subscription curation in practice runs only after N minutes of silence.
   - Your default tier is subscription. Unless a free provider such as Groq is configured, claims wait until you pause. Manifests still sync at once, so resume on another device still works.
-- plan.md:34 records you saying your subscription quota "goes to waste", which argues against scarcity.
-- S9 is a SHOULD item, not one of the 23 MUST items, so decision 11 doesn't lock it. You approved it only as part of the section-3 text. Two skeptics treated it as locked, and that was wrong.
+- plan.md:34 does not establish quota scarcity as a requirement.
+- S9 is a SHOULD item, not one of the 23 MUST items, so decision 11 doesn't lock it. It appears in the section-3 text. Two skeptics treated it as locked, and that was wrong.
 - Options: keep the gate, or let subscription curation run while you work, up to about 20% of the daily cap.
 - **Recommendation:** keep the gate with N as a setting (default 10 minutes), and measure how long windows wait on a real heavy day. If they routinely wait an hour, drop the gate.
 
@@ -304,7 +304,7 @@ Options:
 
 ## Section 4: delivery and search
 
-You approved section 4 with "OK if truly no problems". These are the problems. Two parts of the text contradict the section's own principle ("vectors" in the pre-worker hook, and a live reranker in the hook). Grok gets one injection per session. And the shortlist is keyed by session.
+Section 4 has two parts that contradict its own principle ("vectors" in the pre-worker hook, and a live reranker in the hook). Grok gets one injection per session. And the shortlist is keyed by session.
 
 ### 1. Relax or replace now
 
@@ -350,7 +350,7 @@ You approved section 4 with "OK if truly no problems". These are the problems. T
 
 ### 2. Inherited constraints that are still right (checked)
 
-- **S4-2 / S4-5** A precomputed shortlist, not a live search of the whole corpus per prompt. The live-search alternatives put computation that grows with the corpus back into the hook, the shape you caught.
+- **S4-2 / S4-5** A precomputed shortlist, not a live search of the whole corpus per prompt. The live-search alternatives put computation that grows with the corpus back into the hook, the previously identified shape.
 - **S4-3** Refresh at Stop, every N events and on sync. Set N by measurement, instead of adding a topic-drift trigger with a second threshold to tune.
 - **S4-8** About 10 claims with bodies, then an index. claude-mem's index is also a count (CLAUDE_MEM_CONTEXT_OBSERVATIONS); a cap on each body's length does the rest.
 - **S4-9** Imports are never injected. This is your decision (search-sync-proposal §0/§6), and claude-mem's rows have no raw anchor. First count how many rows could have one before building a promotion path.

@@ -126,7 +126,7 @@ A copy of this text is at /tmp/claude-1000/-home-jura-projects-oboete/035bf06c-5
 
 ## 3. Owner questions
 
-1. **Device auth: hub-issued tokens, or Cloudflare Access service tokens as in proposal §4.4?** Settled 2026-09-25: hub-issued tokens, and no Access anywhere (RD/hub-platform.md). The owner asked for Access as the default if it were better and for other platforms if better; neither holds. The original arguments:
+1. **Device auth: hub-issued tokens versus Cloudflare Access service tokens in proposal §4.4.** Settled 2026-09-25: hub-issued tokens, and no Access anywhere (RD/hub-platform.md). Access and other platforms do not improve the overall fit. The original arguments:
    - For hub tokens:
      - Zero Trust onboarding asks for payment details even on the free plan (developers.cloudflare.com/cloudflare-one/setup/). That works against decision 8 on the basic multi-device path.
      - Access service tokens expire after the duration chosen when they are created.
@@ -159,4 +159,4 @@ Decided by Claude (the owner may overrule):
 
 - Zero Trust onboarding asks for payment details even on the Free plan (developers.cloudflare.com/cloudflare-one/setup/index.md, step 3: "If you chose the Zero Trust Free plan, this step is still needed but you will not be charged").
 - workerd allows the fts5 and fts5vocab modules (cloudflare/workerd src/workerd/util/sqlite.c++:1334-1341); trigram is a built-in FTS5 tokenizer, confirmed by one statement in the hub spike.
-- No WebSocket in the first release narrows MUST M19 (the WebSocket clause and its measure move to LATER); the owner approved the 23 MUST items as a set, so this is stated to the owner.
+- No WebSocket in the first release narrows MUST M19 (the WebSocket clause and its measure move to LATER); the 23 MUST items remain the design baseline, so this narrowing is explicit.

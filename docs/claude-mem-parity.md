@@ -1,7 +1,7 @@
 # claude-mem and oboete, feature by feature (2026-10-03)
 
-Owner decision 36: 「完成品が完全にclaude-memの上位互換なら今のoboeteを完成させたい」. This is the table that
-decision asks for, and decision 37 is what the owner chose from it.
+Owner decision 36: finish oboete as a complete superset of claude-mem. This table defines that
+comparison; decision 37 sets the scope based on it.
 
 ## How it was made
 
@@ -10,7 +10,7 @@ decision asks for, and decision 37 is what the owner chose from it.
   and the takeover plan, and given a status; each status was then checked by readers told to refute it.
 - 190 of the 225 differ in some way and were grouped into the 60 differences below. The other 35 are present in
   oboete (20) or do not apply to it (15).
-- The 32 differences the owner's choice turned on were checked a second time on both sides of the code, against
+- The 32 differences brought into scope by decision 37 were checked a second time on both sides of the code, against
   the plugin as installed on the owner's PC (13.28.0, built 2026-09-27) and the owner's own settings. That pass
   changed the statement of 18 of them; the rows below carry the corrected text. Rows 33 to 60 were not checked a second time, and
   their text is the first pass's.
@@ -22,7 +22,7 @@ decision asks for, and decision 37 is what the owner chose from it.
 
 The source at 039c6160 holds features the installed build does not: the sessions tab and session page, deleting
 from the page, joining and naming projects, a public address and allowed origins for the page, more provider
-options, `/handoff`. The owner chose the wider baseline (decision 37: 「開発中の機能も全部」), so they are in scope;
+options, `/handoff`. The baseline includes all features under development (decision 37), so they are in scope;
 the rows say which baseline a feature belongs to. Because that baseline moves, upstream's history is read again at
 each milestone and new features are added here.
 

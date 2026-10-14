@@ -4,7 +4,7 @@ Throwaway. Harness: `docs/spike/cli-judges/canary.py`. The judge code is `calib.
 
 ## Why
 
-The owner-decision panel (Task 8) stopped on rate limits: four of its five judges run on OpenCode Go, whose 5-hour usage window ran out (`429 GoUsageLimitError`, `Retry-After: 13809`), and Groq's free tier allows 8,000 tokens a minute. The owner asked to judge with the models of their grok and codex subscriptions too, with tools restricted (2026-09-26). Grok is excluded only as the summarizer, not as a judge (owner, same day).
+The owner-decision panel (Task 8) stopped on rate limits: four of its five judges run on OpenCode Go, whose 5-hour usage window ran out (`429 GoUsageLimitError`, `Retry-After: 13809`), and Groq's free tier allows 8,000 tokens a minute. Judge scope (2026-09-26): include grok and codex subscription models too, with tools restricted. Grok is excluded only as the summarizer, not as a judge (owner, same day).
 
 A proxy (omniroute, CLIProxyAPI) or pi is not needed: both CLIs can run one tool-less turn themselves, and pi had no provider logged in (`pi auth check`: every provider `not_ready`).
 

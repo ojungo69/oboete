@@ -359,7 +359,7 @@ General rules carried over from proposal §3.3: tune on the dev split (70%) only
 2. **Folder transport.** Whether a no-cloud transport (a shared folder) is wanted alongside the Cloudflare hub. It is how WSL and Windows would sync without the cloud, and how other users would get multi-device without Cloudflare.
 3. **Measurement budget for A.** Retain costs for the M1 sub-corpus: up to USD 5 on a paid API or 2 days of subscription cap, spent only if Phase 0 passes.
 4. **Worker lifecycle.** Accept a per-device worker started by hooks, with the always-on service decided by M5.
-## 11. Owner-facing corrections and open items added after the critic (2026-09-24 22:55)
+## 11. Owner-facing corrections and open items added after the critic (2026-09-24)
 
 - Owner corrections are stored as raw/op-log events (OwnerCorrection), so `oboete rebuild`, re-derivation and sync replay them; M3/M4 test that they survive.
 - Fully automatic curation: concurrent supersession from two devices resolves to the later `valid_from` automatically and is flagged in the viewer, never queued for approval. "Widen candidates" are dropped: global scope comes only from what the owner explicitly states (decision 13).

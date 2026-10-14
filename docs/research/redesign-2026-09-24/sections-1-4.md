@@ -2,7 +2,7 @@
 
 v1 (as first presented) is sections-1-4.v1.md. Changes come from constraints-synthesis.md (ids S<section>-<n>).
 
-Approved by the owner unless noted. Owner decisions: owner-decisions.md. Detail behind each item: options-draft.md §4 and §11, improvements-synthesis.md (M1-M23, S1-S9).
+Settled design unless noted. Owner decisions: owner-decisions.md. Detail behind each item: options-draft.md §4 and §11, improvements-synthesis.md (M1-M23, S1-S9).
 
 ## Section 1: overall shape (approved)
 
@@ -34,7 +34,7 @@ Approved by the owner unless noted. Owner decisions: owner-decisions.md. Detail 
 - Current = chain tips; concurrent conflicts resolved by (valid_from, device, seq) with a viewer flag and a clock-skew alarm; digests cite current claims and are not used when stale; re-derivation keeps uids (highest tier active); owner corrections are events targeted by uid and raw anchor that survive rebuild (S3-16); valid_from is the time of the anchoring raw event, not the curation time (S2-23); the none tier hides a directive followed by a negation.
 - Judge models (Jev and similar), both enabled only if evaluation shows a gain: (a) "shrink, never drop" selection of what the curator sees (deterministic rules first, judge for grey areas; user and assistant messages never filtered; shrinking recorded; enabled only if curator input shrinks by 30% or more while recall of decisions, lessons and fixes drops by 0.02 or less: proposal values, fixed before measuring); (b) veto-only check on decided/supersedes (can only make stricter). Which judge runs at which tier is decided by evaluation (candidates: a small local model, the curator double-checking, Jev, a classifier trained on the labels for role (b)); none = code gates only (S3-18).
 
-## Section 4: delivery and search (third version; owner: "OK if truly no problems")
+## Section 4: delivery and search (third version)
 
 - Principle: hooks only read; the worker computes ahead. The worker keeps per checkout a SessionStart packet (ranked current decisions, manifest, fresh digest) and per (session, checkout) a shortlist of about 50 relevant current claims, built in two stages (a provisional one from plain hybrid RRF, then the reranked, judge-scored one), refreshed at each Stop, every N events, when sync delivers new knowledge and when the session moves to another checkout (S4-6, S1-10). Sync is done by the worker; hooks never wait on the network and never embed a query.
 - Hook: reads the packet; per prompt, a light full-text match of the prompt over the shortlist plus a threshold, and a status check of each shortlist uid so a claim retracted since the refresh is never injected. Before the worker is up: full-text plus threshold, or the packet's ranked claims, and wake the worker (S4-6).
@@ -52,4 +52,4 @@ Approved by the owner unless noted. Owner decisions: owner-decisions.md. Detail 
 - S3-5 / S9, decided by Claude (owner may overrule): the gate applies to subscription CLIs only, because they share the quota the owner uses while coding; free APIs, local models and paid APIs (monthly cap) curate at any time. Default: a subscription CLI curates after 10 minutes without a hook (a setting); revisit if windows routinely wait over an hour.
 - S1-18 / S2-24, owner decision 2026-09-25: raw sync is a setup question, off by default; an encrypted off-device backup is decided later together with decision 9.
 
-Details accepted into the spec without owner input: the zstd dictionary (keep only if it saves 20% or more), SQLITE_BUSY as a doctor label, and the other checked items in constraints-synthesis.md.
+Claude design details included in the spec: the zstd dictionary (keep only if it saves 20% or more), SQLITE_BUSY as a doctor label, and the other checked items in constraints-synthesis.md.

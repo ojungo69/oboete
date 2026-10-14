@@ -2,7 +2,7 @@
 
 > Status 2026-09-26: adopted in part. PR #56 took grok out of the default chain, PR #58 moved the subscription curators to cheap models (claude `haiku`, codex `gpt-6-luna`) and added the shape check in the chain (§3.4 item 1). The owner already subscribes to OpenCode Go (owner decision 25 in `docs/spec.md`); the rest of §2.3 and §3.4 is specified in `docs/spec.md` for the redesign.
 
-This note answers owner decision 23 (RD/owner-decisions.md:32), items 1 and 3: "To research and adopt if possible: how claude-mem uses the Claude subscription, and OpenCode's free models and OpenCode Go models as providers." Item 2 (the grok subscription is no longer used for curation, judge or digest) needs no research. Its edits to the spec are listed in §4.
+This note answers owner decision 23 (RD/owner-decisions.md:32), items 1 and 3: research, and adopt where possible, how claude-mem uses the Claude subscription, and OpenCode's free models and OpenCode Go models as providers. Item 2 (the grok subscription is no longer used for curation, judge or digest) needs no research. Its edits to the spec are listed in §4.
 
 How it was made. Two researchers wrote notes. An independent verifier re-checked every claim against its source. Only verified claims are stated as facts here. Claims that failed verification are in §5 with the reason. Where I checked something myself while writing, it says "checked 2026-09-26 while writing".
 

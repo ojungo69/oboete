@@ -1,6 +1,6 @@
 # W6 guided first run and configuration recovery
 
-This slice follows step 2 of the owner-approved W6 plan, from main `0a3b1366`.
+This slice follows step 2 of the W6 plan, from main `0a3b1366`.
 The authority is spec.md §7.2, spec-webui.md and settings-coverage.md. Root is the
 only source writer. The installed v1, owner homes, claude-mem, held evaluations
 and PC cutover remain outside this work.

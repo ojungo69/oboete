@@ -1,13 +1,13 @@
-# Owner decisions for the redesign (2026-09-24 evening)
+# Owner decisions for the redesign (2026-09-24)
 
-Collected in a brainstorming interview; these override anything older (plan.md, search-sync proposal) where they conflict.
+These decisions override anything older (plan.md, search-sync proposal) where they conflict.
 
 1. Redesign from a blank slate. The previous design is suspected of being shaped by the TypeScript prototype, not in one part but overall.
 2. Extreme lightness is not a goal. Resident background processes are acceptable if they earn their place.
 3. Goals, equal weight: resume where work stopped (across sessions, agents, devices); keep the owner's decisions, preferences and past failures and never apply retracted ones; look up the past with accurate, evidenced answers.
 4. Curation is fully automatic. The owner never approves memories; the owner only corrects mistakes when noticing them.
 5. AI usage is user-selectable in tiers (none / free + local / subscription CLIs with a daily cap / paid APIs with a monthly cap). With no AI, recording and search still work; more AI means finer curation. The owner's own default is the subscription tier with paid APIs at most USD 5 per month.
-6. Devices: knowledge reaches other devices within a few minutes (Claude recommended, owner delegated). WSL and Windows native are the same PC and used side by side; the third device is an M1 iMac.
+6. Devices: knowledge reaches other devices within a few minutes (Claude, delegated; overrulable). WSL and Windows native are the same PC and used side by side; the third device is an M1 iMac.
 7. Raw work records (redacted) are kept forever, compressed, locally; individual items can be deleted.
 8. Public release is a first-class goal from the start: easy install for anyone is as important as the owner's own use. (Separately from the older rule "finish every feature before release".)
 9. Where an always-on server would live, and whether to archive raw records now, are postponed until the design is settled.
@@ -22,9 +22,9 @@ Unchanged earlier decisions that still hold: claude-mem is never stopped, delete
 13. No code signing at first: install by command (curl | sh, PowerShell) where no Mark-of-the-Web/quarantine warning is expected (to be confirmed on real machines before release); sign later if needed.
 14. Raw sync is chosen at setup (one question, off by default); an encrypted off-device backup of raw is decided later with decision 9.
 15. Subscription CLIs wait while the owner is working (they share the owner's quota); free, local and paid providers do not wait. Default 10 minutes without a hook, a setting (decided by Claude, owner may overrule).
-16. User settings added (decided by Claude, owner delegated): capture exclusion per repo or folder (not only sync exclusion); extra redaction rules and an allowlist for false positives (built-in rules cannot be removed); injection on/off and size per kind (SessionStart, per prompt, mid-session correction); raw retention period (default forever); capture detail (whether prompts are stored, tool output full or head+tail); backup location (the interval is set by measurement). Safety rules stay fixed: decision gates, the global-scope channel, data fencing, built-in redaction, deletion propagation.
+16. User settings added (Claude, delegated; overrulable): capture exclusion per repo or folder (not only sync exclusion); extra redaction rules and an allowlist for false positives (built-in rules cannot be removed); injection on/off and size per kind (SessionStart, per prompt, mid-session correction); raw retention period (default forever); capture detail (whether prompts are stored, tool output full or head+tail); backup location (the interval is set by measurement). Safety rules stay fixed: decision gates, the global-scope channel, data fencing, built-in redaction, deletion propagation.
 17. Sections 1-4 are settled as in sections-1-4.md (2026-09-25).
-18. Section 5 is settled as in section-5-revised.md (2026-09-25). The hub stays on Cloudflare (hub-platform.md). No Cloudflare Access anywhere: devices use hub-issued tokens, and the Claude app logs in through the Worker's own OAuth with a device-issued approval code (owner: "Access を使ってもあまり意味がないなら推奨で良い"). Zone mTLS on one of the owner's domains is optional hardening; the zone is chosen when the hub is built.
+18. Section 5 is settled as in section-5-revised.md (2026-09-25). The hub stays on Cloudflare (hub-platform.md). No Cloudflare Access anywhere: devices use hub-issued tokens, and the Claude app logs in through the Worker's own OAuth with a device-issued approval code. Zone mTLS on one of the owner's domains is optional hardening; the zone is chosen when the hub is built.
 19. Section 6 is settled as in section-6-revised.md (2026-09-25): four levels (never record, mute, withdraw, forget), forget irreversible with a preview and no trash, no app-level encryption in the first release, curator tools checked on every call. PR #51 (merged 8f3ab0a) took agy out of the default chain now.
 20. Raw deletion stopped now (decision 9's second half, 2026-09-25): PR #52 (merged 96cc106) keeps raw events after summarizing, with `sessions.observed_event_id` as the observe cursor.
 21. Section 7 is settled as in section-7-revised.md (2026-09-25). Subscription CLIs in public setup: explicit opt-in, off by default, with the policy quoted (option b). Linux arm64 and macOS x64 ship as "CI-verified only". No scheduled update check: `oboete update --check`, doctor's last-check line and GitHub Security Advisories.

@@ -1316,7 +1316,7 @@ egress の gate が今の規則で伏せる）。
 
 ### Slice 4 の決定（2026-10-13）
 
-Slice 3 の残り（3e-3 の保存期間）より先に、owner が切替前に挙げた「記録しない」を作る（spec 7.5、owner
+Slice 3 の残り（3e-3 の保存期間）より先に、切替の前提である「記録しない」を作る（spec 7.5、owner
 decision 27・34。保存期間は既定が無期限で、切替の前提にない）。設定画面の行（settings-coverage.md の
 「Stop recording a repository or folder」、W3）と setup の質問は 4b、mute のボタンと訂正の残り（#157・
 #160・#162）はその後。
@@ -1510,6 +1510,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 - [ ] Slice 6: 安全性・測定・独立レビュー
 
 未チェックの slice がある間、この段階は完了ではない。
+
+2026-10-14（owner decision 45）: 切り替えは Slice 3 の残り（3e-3 の保存期間）、withdraw、Slice 6 を待たない。切り替えの前に作るのは、Slice 4 の mute/unmute と owner の 2 台で起きうる訂正の修正（#157 から）、Slice 5 のうちそれを操作する画面まで。
 
 ### 第一 slice の実装・検証（2026-10-03、設計 v2）
 

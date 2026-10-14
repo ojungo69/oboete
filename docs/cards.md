@@ -6,8 +6,8 @@ the "recent sessions" section drafted as unit P9 of the takeover plan.
 
 ## Why
 
-The owner, 2026-10-03, after comparing what both tools show on the same sessions:
-「もうここまできたらほぼ丸パクリぐらい寄せて理想に近付けた方がいいんじゃない？」, confirmed as: claude-mem's
+Decision (owner, 2026-10-03): match claude-mem's user-facing memory model. The
+reference is claude-mem: its
 behaviour, look and prompts are the specification; its code is not ported; oboete's engine and its
 merits stay (no vector server, a chain of summarizers, masking, forget, several agents, the owner's
 decisions first). Both projects are Apache-2.0: `NOTICE` names the text taken (slice 2); the table

@@ -2,7 +2,7 @@
 
 > Status 2026-09-27: v1 PR #96 (a short system prompt for the claude and codex curators) merged; v1 PR #97 (a 429 cools down until the provider's reset, Groq low reasoning, opencode-go 150 s) in review. The rest is input to the milestone 3 plan (§7, §8).
 
-The owner asked on 2026-09-27: "要約プロバイダをちゃんと使えるようにしないと成立しない" (the product does not work unless the summarizing providers work). Keep a token limit only where it has a real reason. Research whether the way providers are wired in is right. Support Gemini for cost. Optimize summarizing on the subscriptions. The owner added that claude-mem and other OSS reach subscriptions through OAuth.
+Study requirements (2026-09-27): reliable summarizing providers are essential. Keep a token limit only where it has a real reason. Research whether the way providers are wired in is right. Support Gemini for cost. Optimize summarizing on the subscriptions. Examine subscription access through OAuth, including claude-mem and other OSS.
 
 This note continues `curator-providers-2026-09-25.md` (the claude-mem subscription path, OpenCode Zen and Go).
 
@@ -105,7 +105,7 @@ So "the OSS use OAuth" is true, but the safe form is the one oboete already has:
 
 ## 7. Next, in order
 
-On v1 (each small; the owner's request widens "v1 only for loss or safety" to provider reliability, reported to the owner):
+On v1 (each small; the v1 scope includes provider reliability alongside loss or safety):
 1. **Groq qwen3.8-27b** as a third free entry (`reasoning_effort: "none"`), after groq-20b. Config only.
 2. **Persisted provider state**: a `provider_state` table (`CREATE TABLE IF NOT EXISTS`), loaded by `Chain::new`. A provider whose cooldown has not passed is skipped without a call. Also: a circuit breaker after 3 consecutive invalid answers or timeouts (30 min), and 429 backoff that doubles up to 1 h when no reset is given. This is spec 3.1 (C1) for every provider, not only the subscriptions.
 3. **Usage columns** on `provider_calls` (`prompt_tokens`, `completion_tokens`, `cached_tokens`, `reasoning_tokens`; `ALTER TABLE ... ADD COLUMN`, nullable): from `usage` in OpenAI-compatible answers, claude's JSON result, and codex `--json` `turn.completed.usage`. Also the digits of a Groq 413.

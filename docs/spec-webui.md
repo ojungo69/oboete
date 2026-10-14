@@ -4,7 +4,7 @@
 
 This is a normative supplement to [spec.md](spec.md), tracked by [issue #94](https://github.com/ojungo69/oboete/issues/94). It records a requirement, not a claim that the UI is implemented. Read it with the base spec; for the user-facing configuration and management scope below, this later owner decision takes precedence over the older limited settings-page scope. All other owner decisions and safety requirements remain in force.
 
-Owner request: 「webuiから簡単に全部設定したいんだけどそれは仕様に入ってる？」. After the limited current scope and the proposed WebUI-complete requirement were explained, the owner approved: 「変更して」.
+Owner decision (2026-10-02): the local WebUI covers setup, all user-configurable settings and supported management operations.
 
 **After the initial installation and launch, users must be able to complete setup, all user-configurable settings, and supported management operations through the local WebUI without typing shell commands or editing configuration/key files.** External-service login, issuing an API token at its provider, and unavoidable OS permission prompts are exceptions, not reasons to move oboete's own setup outside the UI. Explain the external step, provide its entry point, and let the user return, resume, and verify the result. A raw TOML editor or a command to copy is not completion.
 
