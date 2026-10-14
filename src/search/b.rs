@@ -393,6 +393,132 @@ pub fn query_with(home: &Path, q: &Query, vector: Option<&[f32]>) -> Result<Answ
     search(home, q, Ask::Given(vector))
 }
 
+/// One document the meaning side found near a prompt (G23): a claim's uid, or a card's or a
+/// session summary's ID as `get` takes it, with its cosine to the prompt.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PromptHit {
+    pub key: String,
+    /// `claim`, `card` or `summary`.
+    pub kind: String,
+    pub cosine: f32,
+}
+
+/// The most `prompt_near` answers.
+const PROMPT_HITS: usize = 20;
+
+/// What `prompt_near` found, or why it has no vector.
+#[derive(Debug)]
+pub struct PromptNear {
+    pub vector: Vector,
+    pub hits: Vec<PromptHit>,
+}
+
+/// G23 (docs/prompt-context.md, decision 44): the claims, cards and session summaries of `repo`
+/// whose meaning is near `text`, at `shortlist::MEANING` or above, the nearest first; claims only
+/// under `claims::DECIDED_WHERE`, delivery's rule, before anything is kept. What the prompt hook
+/// asks the resident viewer: the reader's vector (D14), the local model loaded on the first prompt
+/// and kept, or Workers AI through the gate, within `QUERY_TIMEOUT`; an excluded repository's
+/// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
+/// itself, nor a reranker or a judge (spec 4.3, 4.10). Keys only: the hook reads and gates what it
+/// shows.
+pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
+    let nothing = |skip| {
+        Ok(PromptNear {
+            vector: Vector::Skipped(skip),
+            hits: Vec::new(),
+        })
+    };
+    if !crate::raw::exists(home) {
+        return nothing(VectorSkip::NoVectors);
+    }
+    let raw = crate::raw::open(home)?;
+    // Milestone 5 D5 (#439): no forget commits until the answer is built.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let k = crate::knowledge::open(home)?;
+    let active: Option<String> = k
+        .query_row(
+            "SELECT embedder FROM vec_generation WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let q = Query {
+        text: text.to_owned(),
+        repo: Some(repo.to_owned()),
+        caller: Some(repo.to_owned()),
+        ..Default::default()
+    };
+    if !local(home) && excluded_now(home, &raw, &q).unwrap_or(true) {
+        return nothing(VectorSkip::Excluded);
+    }
+    let near = match embedded(home, &raw, &q, active, QUERY_TIMEOUT, Caller::Reader)? {
+        Ok(near) => near,
+        Err(skip) => return nothing(skip),
+    };
+    let mut decided = k.prepare(&format!(
+        "SELECT 1 FROM active a WHERE a.uid = ?1 AND a.repo = ?2 AND {}",
+        claims::DECIDED_WHERE
+    ))?;
+    let mut hits = Vec::new();
+    let repos = [repo.to_owned()];
+    for (family, kind) in [("c", "claim"), ("o", "card"), ("s", "summary")] {
+        for (key, cosine) in near.knn_scored(&k, family, &repos, (None, None), None)? {
+            if cosine < crate::shortlist::MEANING {
+                break;
+            }
+            if family == "c" && !decided.exists(params![key, repo])? {
+                continue;
+            }
+            hits.push(PromptHit {
+                key,
+                kind: kind.into(),
+                cosine,
+            });
+        }
+    }
+    hits.sort_by(|a, b| b.cosine.total_cmp(&a.cosine));
+    // The hook takes 5 places at most; claude-mem caps a query at 20.
+    hits.truncate(PROMPT_HITS);
+    Ok(PromptNear {
+        vector: Vector::Used,
+        hits,
+    })
+}
+
+/// The prompt hook's full-text side over cards and session summaries (G23): the IDs of `repo`'s
+/// current ones whose stored text matches `text`, best first by words alone, at most `depth` of
+/// each, read by no reader (the hook reads what it keeps). A store whose consumers have not made
+/// a leg's index yet gives none of it.
+pub(crate) fn curated_words(
+    k: &Connection,
+    repo: &str,
+    text: &str,
+    depth: usize,
+) -> Result<Vec<(String, Class)>> {
+    let q = Query {
+        text: text.to_owned(),
+        repo: Some(repo.to_owned()),
+        caller: Some(repo.to_owned()),
+        ..Default::default()
+    };
+    let mut ids = Vec::new();
+    for (summaries, fts) in [(false, "cards_fts"), (true, "turns_fts")] {
+        if !crate::consumer::manifest::exists(k, "table", fts)? {
+            continue;
+        }
+        let class = || {
+            if summaries {
+                Class::Summary
+            } else {
+                Class::Card
+            }
+        };
+        let found = curated_fts(k, &q, summaries, depth, &mut |_| Ok(true))?;
+        ids.extend(found.into_iter().map(|id| (id, class())));
+    }
+    Ok(ids)
+}
+
 fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     if !crate::raw::exists(home) {
         return Ok(Answer {
@@ -1093,6 +1219,21 @@ impl Near {
         skip: Option<&str>,
         depth: usize,
     ) -> Result<Vec<String>> {
+        let mut scored = self.knn_scored(k, kind, repos, span, skip)?;
+        scored.truncate(depth);
+        Ok(scored.into_iter().map(|(key, _)| key).collect())
+    }
+
+    /// The bit index's candidates of `kind` scored in fp32 against the query, the nearest first,
+    /// each with its cosine (the vectors are unit length).
+    fn knn_scored(
+        &self,
+        k: &Connection,
+        kind: &str,
+        repos: &[String],
+        span: (Option<i64>, Option<i64>),
+        skip: Option<&str>,
+    ) -> Result<Vec<(String, f32)>> {
         let mut clauses = vec![
             "embedding MATCH vec_bit(?)".to_owned(),
             "k = ?".into(),
@@ -1151,8 +1292,7 @@ impl Near {
             }
         }
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        scored.truncate(depth);
-        Ok(scored.into_iter().map(|(key, _)| key).collect())
+        Ok(scored)
     }
 }
 
@@ -1186,7 +1326,7 @@ pub fn rrf(fts: &[String], vec: &[String]) -> Vec<String> {
 }
 
 /// `rrf` over any number of lists: ties keep the order of the first list a key is in.
-fn rrf_lists(lists: &[&[String]]) -> Vec<String> {
+pub(crate) fn rrf_lists(lists: &[&[String]]) -> Vec<String> {
     let mut score: HashMap<&str, f64> = HashMap::new();
     let mut order: Vec<&str> = Vec::new();
     for list in lists {
@@ -1794,62 +1934,17 @@ fn curated_leg(
     summaries: bool,
     near: Option<&Near>,
 ) -> Result<Vec<Hit>> {
-    let (table, fts, current, number) = if summaries {
-        ("turns", "turns_fts", "d.skipped = 0", "0")
-    } else {
-        ("cards", "cards_fts", "d.replaced_by IS NULL", "d.n")
-    };
     let read = |id: &str| curated_hit(raw, k, rules, terms, summaries, id);
     let mut hits = HashMap::new();
-    let mut order = Vec::new();
-    if let Some((mut clauses, mut args, by, by_args)) =
-        super::query_clauses(&q.text, fts, &["f.text"])
-    {
-        clauses.push(current.into());
-        type_clause(
-            q,
-            if summaries {
-                Class::Summary
-            } else {
-                Class::Card
-            },
-            if summaries { "'summary'" } else { "d.type" },
-            &mut clauses,
-            &mut args,
-        );
-        if let Some(repo) = q.searched() {
-            clauses.push("d.repo = ?".into());
-            args.push(Value::Text(repo.to_owned()));
-        }
-        super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
-        if let Some(session) = &q.skip_session {
-            clauses.push("COALESCE(d.session, '') <> ?".into());
-            args.push(Value::Text(session.clone()));
-        }
-        args.extend(by_args);
-        let sql = format!(
-            "SELECT d.device, d.op_seq, {number} FROM {fts} f JOIN {table} d ON d.rowid = f.rowid
-             WHERE {} ORDER BY {by}d.ts DESC, d.device, d.op_seq{}",
-            clauses.join(" AND "),
-            if summaries { "" } else { ", d.n" }
-        );
-        let mut st = k.prepare(&sql)?;
-        let mut rows = st.query(params_from_iter(args))?;
-        while order.len() < depth
-            && let Some(row) = rows.next()?
-        {
-            let (device, seq): (String, i64) = (row.get(0)?, row.get(1)?);
-            let id = if summaries {
-                format!("S{device}.{seq}")
-            } else {
-                format!("{device}.{seq}.{}", row.get::<_, i64>(2)?)
-            };
-            if let Some(hit) = read(&id)? {
-                hits.insert(id.clone(), hit);
-                order.push(id);
+    let mut order = curated_fts(k, q, summaries, depth, &mut |id| {
+        Ok(match read(id)? {
+            Some(hit) => {
+                hits.insert(id.to_owned(), hit);
+                true
             }
-        }
-    }
+            None => false,
+        })
+    })?;
     if let Some(near) = near {
         // The whole candidate pool, nearest first: a row its reader hides takes no place, so the
         // depth counts only the rows shown (Q3), as the full-text list's does.
@@ -1874,6 +1969,72 @@ fn curated_leg(
         .into_iter()
         .filter_map(|id| hits.remove(&id))
         .collect())
+}
+
+/// A curated leg's full-text side: `q`'s current cards, or session summaries, in bm25 order, each
+/// ID offered to `take` until `depth` of them were taken (one its reader hides takes no place).
+fn curated_fts(
+    k: &Connection,
+    q: &Query,
+    summaries: bool,
+    depth: usize,
+    take: &mut dyn FnMut(&str) -> Result<bool>,
+) -> Result<Vec<String>> {
+    let (table, fts, current, number) = if summaries {
+        ("turns", "turns_fts", "d.skipped = 0", "0")
+    } else {
+        ("cards", "cards_fts", "d.replaced_by IS NULL", "d.n")
+    };
+    let mut order = Vec::new();
+    let Some((mut clauses, mut args, by, by_args)) =
+        super::query_clauses(&q.text, fts, &["f.text"])
+    else {
+        return Ok(order);
+    };
+    clauses.push(current.into());
+    type_clause(
+        q,
+        if summaries {
+            Class::Summary
+        } else {
+            Class::Card
+        },
+        if summaries { "'summary'" } else { "d.type" },
+        &mut clauses,
+        &mut args,
+    );
+    if let Some(repo) = q.searched() {
+        clauses.push("d.repo = ?".into());
+        args.push(Value::Text(repo.to_owned()));
+    }
+    super::within(&mut clauses, &mut args, "d.ts", (q.since, q.until));
+    if let Some(session) = &q.skip_session {
+        clauses.push("COALESCE(d.session, '') <> ?".into());
+        args.push(Value::Text(session.clone()));
+    }
+    args.extend(by_args);
+    let sql = format!(
+        "SELECT d.device, d.op_seq, {number} FROM {fts} f JOIN {table} d ON d.rowid = f.rowid
+         WHERE {} ORDER BY {by}d.ts DESC, d.device, d.op_seq{}",
+        clauses.join(" AND "),
+        if summaries { "" } else { ", d.n" }
+    );
+    let mut st = k.prepare(&sql)?;
+    let mut rows = st.query(params_from_iter(args))?;
+    while order.len() < depth
+        && let Some(row) = rows.next()?
+    {
+        let (device, seq): (String, i64) = (row.get(0)?, row.get(1)?);
+        let id = if summaries {
+            format!("S{device}.{seq}")
+        } else {
+            format!("{device}.{seq}.{}", row.get::<_, i64>(2)?)
+        };
+        if take(&id)? {
+            order.push(id);
+        }
+    }
+    Ok(order)
 }
 
 /// A hit on one line, as the CLI prints it and MCP returns it: its key (a claim's first 12
@@ -4950,6 +5111,72 @@ mod tests {
     fn embedded_by(s: &Store, stub: &crate::embed::stub::Stub) {
         crate::embed_phase::fixture::config(s, stub);
         crate::embed_phase::fixture::embed_all(s);
+    }
+
+    /// G23 (#506 item 3): the meaning side of a prompt takes delivered claims only, under
+    /// `claims::DECIDED_WHERE` before anything is kept (a proposed open item of the same words takes
+    /// no place), and cards near the prompt, each with its cosine; what is far stays out. One query
+    /// goes to the embedder.
+    #[test]
+    fn prompt_near_keeps_delivered_claims_and_near_documents() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let decided = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        let seq = s.said("s", R, 2_000, "Parser errors go to stderr.");
+        let proposed = s.claim(
+            seq,
+            "Parser errors go to stderr.",
+            ("open item", "proposed", "user"),
+            &[],
+        );
+        let card = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors go to stderr"}]),
+            false,
+        )[0]
+        .clone();
+        s.decided(R, 3_000, "Lexer tokens are cached.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        let asked = stub.requests();
+        let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.").unwrap();
+        assert_eq!(near.vector, Vector::Used);
+        let found: Vec<(&str, &str)> = near
+            .hits
+            .iter()
+            .map(|h| (h.key.as_str(), h.kind.as_str()))
+            .collect();
+        let card = format!("{}.{card}", s.raw.device());
+        assert_eq!(
+            found,
+            [(decided.as_str(), "claim"), (card.as_str(), "card")]
+        );
+        assert!(!found.iter().any(|(k, _)| *k == proposed));
+        assert!(
+            near.hits
+                .iter()
+                .all(|h| h.cosine >= crate::shortlist::MEANING)
+        );
+        assert_eq!(stub.requests(), asked + 1);
+    }
+
+    /// G23 (row 30-2): a repository excluded from sending has its prompt embedded by no provider:
+    /// nothing is asked of the embedder and nothing is found.
+    #[test]
+    fn prompt_near_sends_no_prompt_of_an_excluded_repository() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        s.exclude(R);
+        s.run();
+        let asked = stub.requests();
+        let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.").unwrap();
+        assert_eq!(near.vector, Vector::Skipped(VectorSkip::Excluded));
+        assert!(near.hits.is_empty());
+        assert_eq!(stub.requests(), asked);
     }
 
     /// Task 6 (row 46-3, spec 8.2 M1): the question's own session leaves each leg in SQL before

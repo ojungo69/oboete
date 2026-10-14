@@ -38,6 +38,11 @@ pub const PLACES: usize = 3;
 /// The share of one text's trigrams a claim's body holds to be injected with it (D9): set by Task 8
 /// Step 11 on milestone 3's dev prompts (docs/milestone-4.md), tuned by Task 12b.
 pub const THRESHOLD: f64 = 0.53;
+/// The cosine to a prompt at which a document's meaning bears on it (G23's `T`,
+/// docs/prompt-context.md): set without model calls from milestone 4 D18's 50 no-answer dev
+/// questions against every active claim of their repositories in the dev home (5,306), the lowest
+/// at which at most 1 of them gets anything; the one evaluation (decision 34) sets it again.
+pub const MEANING: f32 = 0.67;
 /// A text's trigrams count as at least this many: a short prompt (`進めて`) tells no topic, and
 /// its one or two trigrams would match any claim holding them (Step 11).
 pub const MIN_GRAMS: usize = 10;
@@ -573,17 +578,31 @@ pub fn pick(
     texts: &[&str],
     threshold: f64,
 ) -> Result<Vec<Vec<crate::claims::Claim>>> {
-    let of: Vec<HashSet<String>> = texts
-        .iter()
-        .map(|t| grams(t, GRAMS))
-        .filter(|g| !g.is_empty())
-        .collect();
-    if of.is_empty() {
+    let words = Words::of(texts);
+    if words.0.is_empty() {
         return Ok(Vec::new());
     }
-    placed(raw, k, candidates, |c| {
-        of.iter().any(|g| share(g, &c.body) >= threshold)
-    })
+    placed(raw, k, candidates, |c| words.share(&c.body) >= threshold)
+}
+
+/// Each text's trigrams, as `pick` reads them, for anything else a prompt's block may take (G23).
+pub struct Words(Vec<HashSet<String>>);
+
+impl Words {
+    pub fn of(texts: &[&str]) -> Self {
+        Self(
+            texts
+                .iter()
+                .map(|t| grams(t, GRAMS))
+                .filter(|g| !g.is_empty())
+                .collect(),
+        )
+    }
+
+    /// The largest share of one text's trigrams that `body` holds.
+    pub fn share(&self, body: &str) -> f64 {
+        self.0.iter().map(|g| share(g, body)).fold(0.0, f64::max)
+    }
 }
 
 /// The units (D2) of the claims of `candidates` (uids, the best first) that `keep` keeps, each

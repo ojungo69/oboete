@@ -210,7 +210,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 
 - Hooks record agent events: prompt, tool call and output, assistant reply, compaction, end. Each event is redacted and appended to `raw.db` with a per-device sequence number.
 - Hook p95 of 20 ms or less is the provisional target. The final number is set by measurement M14 under synchronous=FULL (and fullfsync on macOS), on the slowest of the three machines, with 64 KB and 256 KB outputs (RD/constraints-synthesis.md S2-5) (set by measurement M14 at milestone 2).
-- Hooks never wait on AI.
+- Hooks never wait on AI. The prompt point's capped wait for the resident viewer, after the write, is 4.1's one exception (decision 44).
 - The hook path starts no async runtime and nothing of the viewer; hooks, the worker and MCP work the same whether the viewer runs or not (issue #53).
   - "No runtime on the hook path" means inside the hook process. The worker a hook starts is a separate process (Claude; overrulable).
 - The curator's own CLI sessions are not captured.
@@ -335,8 +335,8 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 ### 4.1 Principle: hooks only read, the worker computes ahead
 
 - The worker keeps per checkout the SessionStart packet's manifest, and per (session, checkout) a shortlist of about 50 relevant delivered claims. The packet's delivered decisions (3.4), global preferences, cards and session summaries are read at SessionStart from the indexes the worker keeps, together with the owner corrections the worker has not applied yet, so a claim the owner retracted since the worker's last run is never shown. They move into a packet the worker stores only if M22 shows the read pushing SessionStart past the read-hook line (Claude; overrulable). The worker keeps a shortlist only while per-prompt injection is on, only for a session with a live event in the last 30 minutes, and only from delivered decisions, preferences, lessons and owner-requested or accepted open items with status `decided` (owner-delegated decision, 2026-10-02, #320; amends A100). The shortlist is built in two stages: a provisional one from plain hybrid RRF, then the reranked, judge-scored one. It is refreshed at each Stop, every N events, when sync delivers new knowledge, and when the session moves to another checkout (RD/constraints-synthesis.md S4-6, S1-10).
-- Sync is done by the worker. Hooks never wait on the network and never embed a query.
-- The rule in three parts (owner decision 38). Never: a hook calls anything off the machine, a hook loads a model, a capture hook or SessionStart makes any call at all. Allowed: a hook reads what the resident worker stored, scores and texts a model made among them. Not now: the prompt hook asking the resident worker's local model; it needs a listener, a pipe per OS and a fallback, and is taken up only if a measured gap is left after the second part. Decision 44 replaces this third part: the prompt hook asks the resident viewer, its wait capped and failing open ([prompt-context.md](prompt-context.md)).
+- Sync is done by the worker. Hooks never embed a query, and no hook calls anything off the machine. Only the prompt hook waits on anything: up to `[inject] per_prompt_wait_ms`, from its read fence, for the resident viewer on this machine, whose answer may include one embedding of the prompt by a remote embedder (Workers AI) through the egress gate; every other hook, and the hook's own calls, never wait on the network (decision 44).
+- The rule in three parts (owner decision 38). Never: a hook calls anything off the machine, a hook loads a model, a capture hook or SessionStart makes any call at all. Allowed: a hook reads what the resident worker stored, scores and texts a model made among them. Not now: the prompt hook asking the resident worker's local model; it needs a listener, a pipe per OS and a fallback, and is taken up only if a measured gap is left after the second part. Decision 44 replaces this third part: the prompt hook asks the resident viewer, its wait capped and failing open, and the viewer's answer may include one remote embedding call within that wait ([prompt-context.md](prompt-context.md)).
 
 ### 4.2 What the hook does
 
@@ -345,6 +345,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
   - a light full-text match over the shortlist, plus a threshold, of the prompt and of a failure the session recorded since its previous prompt, so a lesson about that failure comes back mid-session (MUST-M21) (Claude; overrulable, A101);
   - a status check of each shortlist uid, so a claim retracted since the refresh is never injected.
 - Before the worker is up: full-text plus threshold, or the packet's ranked claims; and the hook wakes the worker (RD/constraints-synthesis.md S4-6).
+- Per prompt of 20 characters or more that the hook recorded with its text, while a resident viewer listens, the hook asks it for the meaning side first, on a thread of its own: the repository's delivered claims, cards and session summaries near the prompt at the meaning threshold `T`. Meanwhile it reads the words side: the claims above, and the repository's cards and session summaries whose line holds the full-text threshold's share of the prompt's trigrams. An answer later than `[inject] per_prompt_wait_ms` from the read fence is lost for that prompt (decision 44, [prompt-context.md](prompt-context.md)).
 
 ### 4.3 Hook latency
 
@@ -366,13 +367,13 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 - Imported memories (claude-mem ~150k and current oboete) are labelled imported.
 - They are for search and timeline only, with status unknown.
-- They are never injected or used as current, except in the per-prompt block, labelled imported with their status unknown (decision 44). History import does not imply live conversation ingestion or response-time context delivery; see [spec-client-runtime.md](spec-client-runtime.md).
+- They are never injected or used as current, except in the per-prompt block, labelled imported with their status unknown (decision 44), once the import maps each project to a repository explicitly ([prompt-context.md](prompt-context.md)). History import does not imply live conversation ingestion or response-time context delivery; see [spec-client-runtime.md](spec-client-runtime.md).
 
 ### 4.6 Per-prompt injection
 
 - Only delivered claims (3.4) are injected, never prompt text. A correction may name a claim that is no longer delivered (4.8).
 - Decision 44 adds cards, session summaries and imported history found by meaning or words, each above the threshold on its own side ([prompt-context.md](prompt-context.md)).
-- The threshold is calibrated on about 100 no-answer and 100 false-premise questions.
+- The threshold is calibrated on about 100 no-answer and 100 false-premise questions. Until that evaluation (decision 34), the meaning side's threshold `T` is the lowest cosine at which at most 1 of milestone 4 D18's 50 no-answer dev questions gets anything, set without model calls ([prompt-context.md](prompt-context.md)).
 - Per-prompt injection is on by default only if the one-sided 95% upper bound of irrelevant injections is 10% or less (decision 12 of 2026-09-23 (proposal:36), read strictly; RD/constraints-synthesis.md S4-10) (set by measurement Inject at milestone 4).
 - The user may turn it on before it passes this line (1.5) (Claude; overrulable).
 
@@ -1631,7 +1632,7 @@ Every row uses no real keys, no paid APIs and no owner data, only an isolated da
 | 55-4 | Under many simultaneous starts, the number of runners, waiters and retries stays bounded, and the same knowledge is never committed twice. | #55 test 4 | 3 | 1.1, 3.1 | applies | 1.1: "A worker per device". 3.1: "The checkpoint moves only in the same transaction as the window's knowledge." Bounded waiters and retries: now stated in 1.1 (B.2 #55 item 1). |
 | 55-5 | An abnormal exit of the lock holder, an embedding timeout, 429 or failure, and recovery after the budget runs out: no new record is lost, and the state and the way to resume can be seen. | #55 test 5 | 3 (lock holder's exit, spent budget); 4 (embedding timeout, 429, failure) | 1.1, 3.1, 7.6 | applies | Pending windows carry "a reason (failed, budget spent, cooldown, waiting for the owner) and a next_attempt_at" (3.1). Embedding states in doctor: now stated in 7.6 (B.2 #55 item 6). |
 | 55-6 | A document changed, deleted or re-indexed during processing never publishes an old vector. #46's and #50's deletion and generation consistency does not regress. | #55 test 6 | 4 (re-derivation), 5 (forget in flight) | 4.10, 6.2 | applies | 6.2 step 1: "Every write of derived rows (claims, digests, FTS, vectors) also checks the deny-list inside its own transaction". Tying a vector to its text is now stated in 4.10 (row 46-2; B.2 #46 item 2). |
-| 55-7 | While embeddings wait, hook writes, search over existing memory and curated results for another agent all work. Waiting time and resource use are measured before and after. | #55 test 7 | 4 | 1.1, 2.1, 4.1 | applies | 2.1: "Hooks never wait on AI." 4.1: "Hooks never wait on the network and never embed a query." |
+| 55-7 | While embeddings wait, hook writes, search over existing memory and curated results for another agent all work. Waiting time and resource use are measured before and after. | #55 test 7 | 4 | 1.1, 2.1, 4.1 | applies | 2.1: "Hooks never wait on AI." 4.1: "Hooks never embed a query, and no hook calls anything off the machine"; the prompt hook's capped wait for the resident viewer, whose answer may include one remote embedding, is the one exception (decision 44). |
 | 55-8 | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass. What was verified on WSL, Windows native and the M1 iMac and what was not is stated. | #55 test 8 | 4 | 1.1, 7.1 | applies | |
 
 #### Comment on #50 (2026-09-25): two evaluation candidates

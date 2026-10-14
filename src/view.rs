@@ -383,6 +383,16 @@ pub(crate) fn resident_line(home: &Path, port: u16) -> String {
     format!("page: not running: {why}; run `oboete view`")
 }
 
+/// G23: the resident viewer's port and token while it listens, for the prompt hook to ask it:
+/// it holds its lock, the outcome it wrote says it listens on the configured port, and its token
+/// file reads. A read-only status, as `resident_line`'s.
+pub(crate) fn resident_answering(home: &Path) -> Option<(u16, String)> {
+    let port = crate::config::view(home).ok()?.port.get();
+    let held = crate::worker::lock_held(&home.join("state/view.lock"));
+    resident_up(outcome(home).as_deref(), port, held).then_some(())?;
+    Some((port, file_token(home)?))
+}
+
 pub(crate) fn resident_up(outcome: Option<&str>, port: u16, held: bool) -> bool {
     held && outcome.map(str::trim) == Some(format!("listening {port}").as_str())
 }
@@ -1144,6 +1154,7 @@ impl Viewer {
             ("POST", "/api/maintenance/start") => (MAX_BODY, |v, b, _| v.maintenance_start(b)),
             ("POST", "/api/view/resident") => (MAX_BODY, |v, b, _| v.view_resident(b)),
             ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
+            ("POST", "/api/prompt-context") => (MAX_BODY, |v, b, _| v.prompt_context(b)),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -1151,7 +1162,11 @@ impl Viewer {
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case("x-oboete-token"))
             .map_or("", |(_, t)| t);
-        match self.save_gate(headers, cap) {
+        // The prompt hook is no browser and sends no Origin: its request reads as the page's
+        // search does, which needs none either, and the token header it carries is what a page of
+        // another site cannot send (a custom header needs a preflight, and OPTIONS is 405).
+        let browser = target != "/api/prompt-context";
+        match self.save_gate(headers, cap, browser) {
             Ok(len) => Head::Body(len, save, given.to_owned()),
             Err(r) => Head::Answer(r),
         }
@@ -1176,6 +1191,7 @@ impl Viewer {
         &self,
         headers: &[(&str, &str)],
         cap: usize,
+        browser: bool,
     ) -> std::result::Result<usize, Response> {
         // Exactly one: a request with two of these is no browser's.
         let only = |name: &str| {
@@ -1200,9 +1216,12 @@ impl Viewer {
         if !self.token_ok(only("x-oboete-token")) {
             return Err(Response::text(401, "missing or wrong token"));
         }
-        self.token_arrived();
+        // The prompt hook's request says nothing of the page: the opener page stays for it.
+        if browser {
+            self.token_arrived();
+        }
         let origin = only("origin").and_then(|o| o.strip_prefix("http://"));
-        if !self.host_ok(origin) {
+        if browser && !self.host_ok(origin) {
             return Err(Response::text(403, "a save comes from this viewer's page"));
         }
         // The media type itself, parameters aside: `application/jsonp` is not JSON.
@@ -1220,6 +1239,32 @@ impl Viewer {
             return Err(Response::text(413, "a save's body is over its cap"));
         }
         Ok(len)
+    }
+
+    /// G23 (docs/prompt-context.md): the meaning side of a prompt's block, for the prompt hook:
+    /// the keys near the prompt in its checkout's repository, with their cosines, and whether a
+    /// vector was made. The hook reads, gates and shows the documents itself.
+    fn prompt_context(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Asked {
+            repo: String,
+            prompt: String,
+        }
+        let asked = match serde_json::from_slice::<Asked>(body) {
+            Ok(a) if !a.repo.is_empty() && !a.prompt.trim().is_empty() => a,
+            _ => return Response::text(400, "a prompt context takes a repository and a prompt"),
+        };
+        match search::b::prompt_near(&self.home, &asked.repo, &asked.prompt) {
+            Ok(near) => Response::json(&json!({
+                "vector": match near.vector {
+                    search::b::Vector::Used => json!("used"),
+                    search::b::Vector::Skipped(s) => json!(s),
+                },
+                "hits": near.hits,
+            })),
+            Err(e) => failed(&e),
+        }
     }
 
     fn doctor(&self, body: &[u8]) -> Response {
@@ -5418,7 +5463,7 @@ curate = false
         // A settings save that is the first request with the token removes it too.
         let page = opener_page(&dir, 4321, url).unwrap();
         *v.opener.lock().unwrap() = Some(page.clone());
-        assert!(v.save_gate(&[HOST, TOKEN], MAX_BODY).is_err());
+        assert!(v.save_gate(&[HOST, TOKEN], MAX_BODY, true).is_err());
         assert!(!page.exists());
         std::fs::remove_file(other).unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -5817,6 +5862,48 @@ curate = false
         let after = v.route("GET", "/api/settings", &[HOST, TOKEN]);
         assert!(!String::from_utf8_lossy(&after.body).contains("canary"));
         assert_eq!(json_of(&after)["chain"][0]["key"], "ok");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// G23: the prompt hook's route takes the token as every other, but no Origin, which the hook
+    /// as no browser sends; a body without a repository or a prompt is refused; an answer says
+    /// whether a vector was made and what is near.
+    #[test]
+    fn the_prompt_context_route_takes_the_token_but_no_origin() {
+        let (dir, v) = viewer("prompt-context");
+        let ask = |headers: &[(&str, &str)], body: &Value| {
+            let body = serde_json::to_vec(body).unwrap();
+            let len = body.len().to_string();
+            let mut h = headers.to_vec();
+            h.extend([
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ]);
+            request(&v, "POST", "/api/prompt-context", &h, &body)
+        };
+        let asked = json!({"repo": "github.com/o/r", "prompt": "where do parser errors go"});
+        assert_eq!(ask(&[HOST], &asked).status, 401);
+        assert_eq!(
+            ask(&[HOST, TOKEN], &json!({"repo": "", "prompt": "x"})).status,
+            400
+        );
+        assert_eq!(
+            ask(
+                &[HOST, TOKEN],
+                &json!({"repo": "r", "prompt": "x", "more": 1})
+            )
+            .status,
+            400
+        );
+        // The hook's request is no browser's: the page `--open` handed the browser stays for it.
+        let opener = dir.join("opener.html");
+        std::fs::write(&opener, "page").unwrap();
+        *v.opener.lock().unwrap() = Some(opener.clone());
+        let answer = json_of(&ask(&[HOST, TOKEN], &asked));
+        assert_eq!(answer, json!({"vector": "no-vectors", "hits": []}));
+        assert!(opener.exists());
+        get(&v, "/api/settings");
+        assert!(!opener.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

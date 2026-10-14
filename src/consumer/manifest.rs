@@ -116,6 +116,9 @@ pub struct Start {
     pub cards: usize,
     /// The work state section, which comes before the manifest (docs/work-state.md L7).
     pub work: Option<crate::work_state::Section>,
+    /// The cards and session summaries its block shows, by ID and kind (G23): a prompt's block
+    /// does not show them again.
+    pub docs: Vec<(String, &'static str)>,
 }
 
 /// A claim shown to a session: a later injection need not repeat its body, and a correction names
@@ -216,11 +219,19 @@ pub fn text(
             Some(shown)
         })
         .collect();
+    let docs = (cards[..n].iter().map(|c| (c.id(raw.device()), "card")))
+        .chain(
+            sessions[..n_s]
+                .iter()
+                .map(|s| (s.id(raw.device()), "summary")),
+        )
+        .collect();
     Ok(Some(Start {
         text,
         shown,
         cards: n + n_s,
         work: None,
+        docs,
     }))
 }
 
@@ -923,6 +934,22 @@ pub(crate) fn body_line(
     line.append(crate::redact::flattened_with(
         &c.body, rules, CLIP, one_line,
     ));
+    line
+}
+
+/// G23: a card or a session summary as one line of a prompt's block, as `body_line` writes a
+/// claim: its date, what it is, its ID as `get` takes it, then its text on one line, cut to
+/// `CLIP` and gated.
+pub(crate) fn doc_line(
+    ts: i64,
+    what: &str,
+    id: &str,
+    text: &str,
+    rules: &crate::redact::Rules,
+) -> Mapped {
+    let mut line = Mapped::default();
+    line.push_str(&format!("- {} {what} {id}: ", &crate::db::utc(ts)[..10]));
+    line.append(crate::redact::flattened_with(text, rules, CLIP, one_line));
     line
 }
 
