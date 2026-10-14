@@ -4982,6 +4982,7 @@ mod tests {
             "timeline",
             "memory",
             "mcp__notion__search",
+            "mcp__notion__memory_search",
             "mcp__other__mem_search",
             "save_memory",
             "mcp__plugin_claude-mem_mcp-search__save_memory",

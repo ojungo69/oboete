@@ -544,10 +544,14 @@ fn codex_line(e: &mut Emitter, v: &Value) -> Result<()> {
                 .and_then(|a| serde_json::from_str(a).ok())
                 .unwrap_or_else(|| json!({"arguments": p["arguments"]}));
             let name = p["name"].as_str().unwrap_or("?");
-            // An MCP tool's name is its namespace's and its own together, as Codex names it to
-            // hooks (`ToolName`'s Display: `mcp__<server>__` then the tool).
+            // An MCP tool's name is its namespace's and its own joined by `__`, as Codex names it
+            // to hooks (`join_tool_name` in codex-rs/core/src/tools/handlers/mcp.rs).
             let name = match p["namespace"].as_str() {
-                Some(ns) if ns.starts_with("mcp__") => format!("{ns}{name}"),
+                Some(ns) if ns.starts_with("mcp__") => format!(
+                    "{}__{}",
+                    ns.trim_end_matches('_'),
+                    name.trim_start_matches('_')
+                ),
                 _ => name.to_owned(),
             };
             e.tool_use(call_id, &name, args, &ts, None);
@@ -2596,9 +2600,9 @@ mod tests {
     }
 
     /// claude-mem 13.35's `isRecursiveMemoryTool` on imported history: a rollout names an MCP
-    /// call by its namespace and its own name, which together are the name Codex gives hooks, so
-    /// a read of claude-mem's memory is kept without its output; Codex's own namespaced tools keep
-    /// their names.
+    /// call by its namespace and its own name, which joined by `__` are the name Codex gives hooks
+    /// (Codex on #523), so a read of claude-mem's memory is kept without its output; Codex's own
+    /// namespaced tools keep their names.
     #[test]
     fn a_codex_rollouts_mcp_call_is_named_as_codex_names_it_to_hooks() {
         let dir = tempfile::tempdir().unwrap();
@@ -2616,17 +2620,33 @@ mod tests {
         let lines = [
             json!({"timestamp": "2026-09-02T00:00:00.000Z", "type": "session_meta",
                    "payload": {"id": "66666666-6666-4666-8666-666666666666", "cwd": "/work"}}),
-            call("a", "mcp__mcp_search__", "search"),
+            call("a", "mcp__mcp_search", "search"),
             output("a"),
             call("b", "history", "search_contents"),
             output("b"),
+            call(
+                "c",
+                "mcp__codex_apps__codex_security_access",
+                "_get_tac_status",
+            ),
+            output("c"),
+            call("d", "mcp__mcp_search__", "timeline"),
+            output("d"),
         ];
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
         std::fs::write(&rollout, text).unwrap();
         let (v, _) = events(rollout.to_str().unwrap(), "codex");
         let tools: Vec<_> = v.iter().filter(|e| e["event"] == "PostToolUse").collect();
         let names: Vec<_> = tools.iter().map(|e| &e["payload"]["tool_name"]).collect();
-        assert_eq!(names, ["mcp__mcp_search__search", "search_contents"]);
+        assert_eq!(
+            names,
+            [
+                "mcp__mcp_search__search",
+                "search_contents",
+                "mcp__codex_apps__codex_security_access__get_tac_status",
+                "mcp__mcp_search__timeline"
+            ]
+        );
         let stored = |e: &Value| {
             let c = capture::imported(
                 "codex",

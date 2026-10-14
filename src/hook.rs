@@ -1710,6 +1710,11 @@ fn failed_call(
     let seq: i64 = taken(home, agent, session, "failed")?.trim().parse().ok()?;
     let e = crate::consumer::manifest::event(raw, raw.device(), seq).ok()??;
     let b: Value = serde_json::from_str(&e.body).ok()?;
+    // A mark an older version left on a read of stored memory is no failure of the work
+    // (Sourcery on #523).
+    if crate::curate::memory_read(b["tool"].as_str().unwrap_or(""), &b) {
+        return None;
+    }
     let input = b["input"].as_str().unwrap_or("");
     let ran = crate::consumer::manifest::what_ran(input);
     let text = redact::lines_with(
@@ -5026,6 +5031,20 @@ mod tests {
             "error": "failed"});
         p.hook("PostToolUseFailure", "a", bash);
         assert!(crate::hookstate::value(home, "claude", "a", "failed").is_some());
+        // A mark an older version left on the read: taken, and no failure for the prompt.
+        let rules = crate::redact::Rules::default();
+        let first = p.s.raw.after(p.s.raw.device(), 0, 10).unwrap();
+        let read_seq = first
+            .iter()
+            .find(|r| matches!(&r.item, crate::raw::Item::Event(e) if e.body.contains("mcp__oboete__search")))
+            .unwrap()
+            .seq;
+        crate::hookstate::update(home, "claude", "b", "failed", |_| {
+            Some(read_seq.to_string())
+        })
+        .unwrap();
+        assert_eq!(failed_call(home, &p.s.raw, "claude", "b", &rules), None);
+        assert_eq!(crate::hookstate::value(home, "claude", "b", "failed"), None);
         p.s.run();
         let k = crate::knowledge::open(home).unwrap();
         let fails: i64 = k
