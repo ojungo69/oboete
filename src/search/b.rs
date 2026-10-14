@@ -59,6 +59,9 @@ pub struct Query {
     /// answer written after it; a document with no session stays. Claims are not filtered: an
     /// evaluation home holds none (`trec_run`).
     pub skip_session: Option<String>,
+    /// `mem_search`'s (claude-mem has no kind for them): raw session starts take no place, each
+    /// leg leaving them out before its depth (Codex on #527).
+    pub no_starts: bool,
 }
 
 impl Query {
@@ -654,7 +657,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 q.searched(),
                 span,
                 q.skip_session.as_deref(),
-                q.types.as_ref().map(|f| f.clause(Class::Raw, "d.kind")),
+                raw_kinds(q),
                 depth,
             ),
         };
@@ -734,6 +737,16 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         hits = limit_units(hits, q.limit);
         Ok(Answer { hits, vector })
     })
+}
+
+/// The raw leg's kinds: the type filter's, and no session start for `no_starts`.
+fn raw_kinds(q: &Query) -> Option<(String, Vec<Value>)> {
+    let kinds = q.types.as_ref().map(|f| f.clause(Class::Raw, "d.kind"));
+    match (kinds, q.no_starts) {
+        (kinds, false) => kinds,
+        (None, true) => Some(("d.kind <> 'start'".into(), Vec::new())),
+        (Some((clause, args)), true) => Some((format!("({clause}) AND d.kind <> 'start'"), args)),
+    }
 }
 
 /// Apply the limit after ordering while keeping D2's claim units whole. Date order still
@@ -1176,15 +1189,16 @@ impl Near {
         } else {
             q.skip_session.as_deref()
         };
-        let candidates = if q.types.is_some() {
+        let starts_out = q.no_starts && family == "r";
+        let candidates = if q.types.is_some() || starts_out {
             CANDIDATES as usize
         } else {
             depth
         };
         let order = self.knn(k, family, &repos, (q.since, q.until), skip, candidates)?;
-        let Some(filter) = &q.types else {
+        if q.types.is_none() && !starts_out {
             return Ok(order);
-        };
+        }
         let mut kept = Vec::new();
         for key in order {
             let (class, kind): (Class, Option<String>) = match family {
@@ -1240,7 +1254,11 @@ impl Near {
                 }
                 _ => unreachable!("search vector family"),
             };
-            if kind.is_some_and(|kind| filter.accepts(&class, &kind)) {
+            let takes = |kind: &String| {
+                !(starts_out && kind == "start")
+                    && q.types.as_ref().is_none_or(|f| f.accepts(&class, kind))
+            };
+            if kind.is_some_and(|kind| takes(&kind)) {
                 kept.push(key);
                 if kept.len() == depth {
                     break;
@@ -2779,7 +2797,7 @@ pub fn timeline(
         (None, Some(page)) => page,
         (None, None) => (i64::MAX, String::new()),
     };
-    let mut before = others(&raw, &k, repo, true, from, &key, limit)?;
+    let mut before = others(&raw, &k, repo, (true, true), from, &key, limit)?;
     #[cfg(test)]
     if let Some(between) = BETWEEN.take() {
         between();
@@ -2788,7 +2806,7 @@ pub fn timeline(
         before.truncate(limit);
         return Ok(before);
     };
-    let mut after = others(&raw, &k, repo, false, at, "", limit)?;
+    let mut after = others(&raw, &k, repo, (false, true), at, "", limit)?;
     // Half on each side, and what one side cannot fill to the other (Codex on #306).
     let later = after.len().min(limit - before.len().min(limit - limit / 2));
     before.truncate(limit - later);
@@ -2805,7 +2823,7 @@ fn others(
     raw: &Raw,
     k: &Connection,
     repo: Option<&str>,
-    older: bool,
+    (older, starts): (bool, bool),
     at: i64,
     key: &str,
     limit: usize,
@@ -2824,7 +2842,7 @@ fn others(
            UNION ALL
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
                   COALESCE(d.session, ''), 'start'
-           FROM raw_docs d WHERE d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
+           FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
     let sql = if older {
         format!(
             "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
@@ -2849,7 +2867,8 @@ fn others(
                 at,
                 super::sql_limit(limit),
                 super::sql_limit(limit.saturating_mul(page)),
-                key
+                key,
+                starts
             ],
             |r| {
                 Ok((
@@ -2888,7 +2907,7 @@ fn others(
 }
 
 mod timeline;
-pub use timeline::{Around, timeline_text};
+pub use timeline::{Around, near, timeline_text};
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
 pub fn known(home: &Path, repo: &str) -> Result<bool> {
@@ -5331,6 +5350,66 @@ mod tests {
         assert!(shows("o", &card));
         assert!(shows("s", &asked));
         assert!(!shows("s", &bare));
+    }
+
+    /// A raw session start at `ts` whose text is `text`: its key.
+    fn session_start(s: &mut Store, ts: i64, text: &str) -> String {
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts,
+            ..crate::raw::test_event(&serde_json::json!({"source": text}).to_string())
+        };
+        let seq = s.raw.append(&start).unwrap();
+        s.key(seq)
+    }
+
+    /// Codex on #527: with `no_starts`, a session start takes no place in either raw leg before
+    /// its depth, the vector side's too; without it, search finds the start by both.
+    #[test]
+    fn no_starts_leaves_session_starts_out_of_both_raw_legs() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let start = session_start(&mut s, 1_000, "Parser errors go to stderr.");
+        s.run();
+        embedded_by(&s, &stub);
+        let q = |no_starts: bool, text: &str| Query {
+            text: text.into(),
+            repo: Some(R.into()),
+            raw: RawArm::Below,
+            limit: 10,
+            no_starts,
+            ..Default::default()
+        };
+        let keys = |q: &Query| -> Vec<String> {
+            let found = query(s.home.path(), q).unwrap();
+            assert_eq!(found.vector, Vector::Used);
+            found.hits.into_iter().map(|h| h.key).collect()
+        };
+        // Both legs find the start by its own words (the stub embeds the same text the same).
+        let text = "Parser errors go to stderr.";
+        assert!(keys(&q(false, text)).contains(&start));
+        assert!(!keys(&q(true, text)).contains(&start));
+    }
+
+    /// Codex on #527: session starts take no place in `near`'s depths: two just before the anchor
+    /// leave them to the claim behind them.
+    #[test]
+    fn near_counts_no_session_start_in_its_depths() {
+        let mut s = Store::new();
+        let older = s.decided(R, 1_000, "Older decision.", &[]);
+        session_start(&mut s, 2_000, "first start");
+        session_start(&mut s, 3_000, "second start");
+        let anchor = s.decided(R, 4_000, "Anchor decision.", &[]);
+        s.run();
+        let ids: Vec<String> = near(s.home.path(), Some(R), &anchor, (2, 0))
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(ids.contains(&older), "{ids:?}");
+        assert!(ids.contains(&anchor), "{ids:?}");
     }
 
     /// G23 (row 30-2): a repository excluded from sending has its prompt embedded by no provider:
