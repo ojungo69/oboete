@@ -5111,7 +5111,8 @@ function simpleSavedChain(f) {
 }
 
 let settingsMode = recall('oboete-settings-view', 'simple') === 'detailed' ? 'detailed' : 'simple';
-let simpleReceipt = null, simpleKeyName = null;
+// The monthly limit as typed, kept across redraws until it is saved (Codex on #512).
+let simpleReceipt = null, simpleKeyName = null, simpleCapDraft = null;
 
 function clearSimpleReceipt() {
   simpleReceipt = null;
@@ -5380,16 +5381,20 @@ function drawSimpleSettings(panel, f) {
     void simpleSettingsSave(button, body => { body.summary.curate = value; },
       (next, answer) => { next.summary = { ...next.summary, curate: answer.summary.curate }; }));
   const ready = chain.some(row => simpleProviderStatus(row, f.stopped) === 'ready');
-  const cap = input('number', String(f.savedSettings.paid_usd_per_month), '', 'paid_usd_per_month', () => {});
+  const cap = input('number', simpleCapDraft ?? String(f.savedSettings.paid_usd_per_month), '', 'paid_usd_per_month',
+    (v) => { simpleCapDraft = v; });
   cap.min = 0; cap.step = 'any'; cap.inputMode = 'decimal'; cap.dataset.simpleFocus = 'paid_usd_per_month';
   const saveCap = () => {
     const value = Number(cap.value);
     if (!cap.value.trim() || !Number.isFinite(value) || value < 0) {
       markInvalid('paid_usd_per_month'); setStatus(t('simple_limit_invalid'), true, lang); return;
     }
-    if (value === f.savedSettings.paid_usd_per_month || cap.disabled) return;
-    void simpleSettingsSave(cap, body => { body.paid_usd_per_month = value; },
-      (next, answer) => { next.paid_usd_per_month = String(answer.paid_usd_per_month); });
+    if (cap.disabled) return;
+    if (value === f.savedSettings.paid_usd_per_month) { simpleCapDraft = null; return; }
+    void simpleSettingsSave(cap, body => { body.paid_usd_per_month = value; }, (next, answer) => {
+      next.paid_usd_per_month = String(answer.paid_usd_per_month);
+      if (Number(simpleCapDraft) === answer.paid_usd_per_month) simpleCapDraft = null;
+    });
   };
   cap.addEventListener('blur', saveCap);
   cap.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); saveCap(); } });

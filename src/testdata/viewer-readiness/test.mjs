@@ -966,6 +966,12 @@ assert(text(panel).includes('保存しました'),'a saved receipt is beside the
 type(field('paid_usd_per_month'),'3.5');for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
 assert.equal(requests.at(-1).body.paid_usd_per_month,3.5);
 assert.equal(requests.at(-1).body.summary.language,'Japanese');
+type(field('paid_usd_per_month'),'4.25');ctx.ui.drawSettings();
+assert.equal(field('paid_usd_per_month').value,'4.25','a typed limit survives a redraw before it is saved');
+for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
+assert.equal(requests.at(-1).body.paid_usd_per_month,4.25);
+ctx.ui.drawSettings();
+assert.equal(field('paid_usd_per_month').value,'4.25','the saved limit shows once its draft is saved');
 change(field('inject.per_prompt'),true);await settle();
 assert.equal(requests.at(-1).body.inject.per_prompt,true);
 assert.equal(requests.at(-1).body.inject.session_start_chars,6000,'a switch keeps saved sizes');
