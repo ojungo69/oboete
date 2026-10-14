@@ -3434,9 +3434,12 @@ fn carried_corrections(
         if let (Some(uid), Some(first)) = (crate::claims::op_uid(c), op.evidence.first())
             && !window.contains(&uid)
         {
-            new.entry((first.device.clone(), first.seq))
-                .or_default()
-                .push(uid);
+            // A claim drafted twice (overlapping quotes, one uid, #125) is one new uid (Codex on
+            // #518).
+            let uids = new.entry((first.device.clone(), first.seq)).or_default();
+            if !uids.contains(&uid) {
+                uids.push(uid);
+            }
         }
     }
     let mut corrections = k.prepare(
@@ -9653,6 +9656,28 @@ curate = false
         assert_eq!(
             kinds,
             [pair("decision", "retracted"), pair("preference", "decided")]
+        );
+    }
+
+    /// #157 (Codex on #518): a replacement the answer drafts twice, its quotes overlapping, is
+    /// one new uid, and takes the withdrawal.
+    #[test]
+    fn a_replacement_drafted_twice_still_takes_the_withdrawal() {
+        let twice: Vec<Value> = ["c1", "c2"]
+            .into_iter()
+            .map(|id| {
+                let mut again = drafted(id, "proposed", "Use tabs", "Use tabs.");
+                again["kind"] = json!("preference");
+                again
+            })
+            .collect();
+        let (_home, kinds) = corrected_then_recurated(twice);
+        assert_eq!(
+            kinds,
+            [
+                pair("decision", "retracted"),
+                pair("preference", "retracted")
+            ]
         );
     }
 
