@@ -47,6 +47,7 @@ left with "—" there.
 |---|---|---|---|---|---|---|---|
 | Session start and per-prompt injection, on/off and size, the per-prompt wait for search by meaning; correction notes | 4.2, 4.4, 4.6, 4.8 | page | `[inject]` | the next session start or prompt | all | `settings.rs` `inject_settings_check_ranges_and_save_alone` | built |
 | Memory lookup bridge, on/off (claude-mem's `CLAUDE_MEM_MEMORY_SEARCH_HOOK_ENABLED`) | 4.2 | page (detailed) | `[inject] memory_lookup` | the next lookup | Claude Code, Codex | `settings.rs` `inject_settings_check_ranges_and_save_alone` | built |
+| Memory-use block at session start, on/off (claude-mem's `CLAUDE_MEM_MEMORY_INSTRUCTIONS_ENABLED`) | 4.11 | page (detailed) | `[inject] memory_instructions` | the next session start | all but Pi | `settings.rs` `inject_settings_check_ranges_and_save_alone` | built |
 | The terminal line at session start, on/off | parity 9 | page | `[inject] session_start_note` | the next session start | all | `settings.rs` `terminal_note_is_read_only_and_an_omitted_old_field_keeps_its_choice` | W3 |
 | Prompt storage, tool output detail | 2.3, 2.4 | page | `[capture]` | the next record | all | `settings.rs` `a_save_writes_only_what_changes`, `a_refused_save_leaves_the_file` | built |
 | Exclude a repository from curation and embedding, and take it back | 5.5 | page, saved-label selectors and exclusions without history | `oboete exclude`, `settings/privacy.rs` | the next eligible send | all | `settings/privacy.rs` `stored_repo_selectors_survive_rules_and_exclusions_without_history_can_be_undone` | W3 |

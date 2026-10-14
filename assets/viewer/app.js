@@ -1085,6 +1085,10 @@ const TEXT = {
     'When an agent looks through its own memory notes, also give what oboete remembers about it',
     'エージェントが自分のメモを調べるときに、oboete の記憶からも探して渡す',
   ],
+  memory_instructions_on: [
+    'At session start, tell the agent how to search and save memory',
+    'セッション開始時に、記憶の検索と保存の使い方をエージェントに伝える',
+  ],
   correction_on: [
     'Tell the agent at the next prompt when a decision it was given has changed',
     '渡した決定が変わったときは、次のプロンプトでエージェントに伝える',
@@ -4823,6 +4827,7 @@ function saveBody() {
         session_start_note: form.inject.session_start_note,
         per_prompt: form.inject.per_prompt,
         memory_lookup: form.inject.memory_lookup,
+        memory_instructions: form.inject.memory_instructions,
         correction: form.inject.correction,
         ...sizes,
       },
@@ -5580,6 +5585,7 @@ function drawSettings() {
         flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
         size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
         flag('memory_lookup', 'memory_lookup_on'),
+        flag('memory_instructions', 'memory_instructions_on'),
         flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
       el('section', 'capture-settings',
         el('h3', null, t('capture_h')),

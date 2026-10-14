@@ -574,7 +574,12 @@ impl Section {
 /// What a session start begins with while nothing is open, for the tests of what shows it.
 #[cfg(test)]
 pub fn nothing_open() -> String {
-    section(&[], 0, SECTION, &Rules::default()).text()
+    // The memory tools' use follows the rule (`[inject] memory_instructions`, on by default).
+    format!(
+        "{}\n{}",
+        section(&[], 0, SECTION, &Rules::default()).text(),
+        crate::mem_search::MEMORY_USE
+    )
 }
 
 /// The section for `entries` at `now`, at most `limit` UTF-16 units, its open lines as the egress

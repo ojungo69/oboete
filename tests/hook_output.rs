@@ -7,15 +7,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// What a session start shows while there is no memory and nothing open: the work state
-/// section alone (docs/work-state.md L7).
+/// section (docs/work-state.md L7) and the memory tools' use after it (claude-mem 13.35's block).
 fn only_the_work_state_section(out: &[u8]) -> serde_json::Value {
     let v: serde_json::Value = serde_json::from_slice(out).unwrap();
     let context = v["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap();
+    let (work, memory_use) = context
+        .split_once("\n# oboete memory use\n")
+        .expect(context);
     assert!(
-        context.starts_with("# Work state: your to-do lists and working state\n")
-            && context.ends_with("\n\nNothing open yet.")
+        work.starts_with("# Work state: your to-do lists and working state\n")
+            && work.ends_with("\n\nNothing open yet.")
+            && memory_use.contains("save_memory")
             && !context.contains("<oboete-memory>"),
         "{context}"
     );

@@ -119,6 +119,8 @@ pub struct Start {
     /// The cards and session summaries its block shows, by ID and kind (G23): a prompt's block
     /// does not show them again.
     pub docs: Vec<(String, &'static str)>,
+    /// The memory tools' use (`mem_search::MEMORY_USE`), after the work state's rule.
+    pub memory_use: bool,
 }
 
 /// A claim shown to a session: a later injection need not repeat its body, and a correction names
@@ -232,6 +234,7 @@ pub fn text(
         cards: n + n_s,
         work: None,
         docs,
+        memory_use: false,
     }))
 }
 

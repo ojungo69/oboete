@@ -200,6 +200,7 @@ pub fn show(home: &Path) -> Value {
             "per_prompt_chars": inject.per_prompt_chars,
             "per_prompt_wait_ms": inject.per_prompt_wait_ms,
             "memory_lookup": inject.memory_lookup,
+            "memory_instructions": inject.memory_instructions,
             "correction": inject.correction,
             "correction_chars": inject.correction_chars,
         },
@@ -543,8 +544,10 @@ struct InjectIn {
     per_prompt_chars: usize,
     /// Older pages omit it and keep its saved value (G23).
     per_prompt_wait_ms: Option<usize>,
-    /// Older pages omit the memory lookup's switch and keep its saved value.
+    /// Older pages omit the memory lookup's and the memory instructions' switches and keep their
+    /// saved values.
     memory_lookup: Option<bool>,
+    memory_instructions: Option<bool>,
     correction: bool,
     correction_chars: usize,
 }
@@ -777,10 +780,19 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
     {
         put(&mut doc, "inject", "session_start_note", note.into());
     }
-    if let Some(on) = i.memory_lookup
-        && on != inject.memory_lookup
-    {
-        put(&mut doc, "inject", "memory_lookup", on.into());
+    for (key, now, was) in [
+        ("memory_lookup", i.memory_lookup, inject.memory_lookup),
+        (
+            "memory_instructions",
+            i.memory_instructions,
+            inject.memory_instructions,
+        ),
+    ] {
+        if let Some(on) = now
+            && on != was
+        {
+            put(&mut doc, "inject", key, on.into());
+        }
     }
     for (key, now, was) in [
         ("session_start", i.session_start, inject.session_start),
@@ -2804,7 +2816,8 @@ mod tests {
         assert_eq!(
             shown["inject"],
             json!({"session_start": true, "session_start_note": true, "session_start_chars": 9000, "per_prompt": false,
-                "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "memory_lookup": true, "correction": true, "correction_chars": 800})
+                "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "memory_lookup": true,
+                "memory_instructions": true, "correction": true, "correction_chars": 800})
         );
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
         assert_eq!(shown["ranges"]["per_prompt_wait_ms"], json!([100, 3000]));
@@ -2854,6 +2867,15 @@ mod tests {
         });
         save_to(&home, &omitted).unwrap();
         assert!(!config::inject(home.path()).unwrap().memory_lookup);
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["inject"]["memory_instructions"] = json!(false)
+            }),
+        )
+        .unwrap();
+        assert!(!config::inject(home.path()).unwrap().memory_instructions);
         for (key, bad) in [
             ("per_prompt_chars", 499),
             ("per_prompt_wait_ms", 99),

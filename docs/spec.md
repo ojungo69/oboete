@@ -419,6 +419,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 ### 4.11 Work state
 
 - An agent keeps its to-do lists and the state of what it tracks with two MCP tools, `work_state_write` and `work_state_read`, claude-mem's names and behaviour (decision 40). Whatever is still open in the repository leads the session start, out of `[inject] session_start_chars`: the rule to use them, then the open lines inside a fence of their own (6.5). A write is a `work_state` op in raw.db's op log, gated as every stored string (2.2), never curated, embedded or searched. The mechanism, its tests and its limits: [work-state.md](work-state.md).
+- After the work state's rule the session start says how to use the memory tools: claude-mem 13.35's "memory use" block with oboete's name (`mem_search::MEMORY_USE`: search first with `mem_search`, save durable notes with `save_memory`, keep to-dos with `work_state_write`, separate verified facts from guesses, leave credentials out), out of `[inject] session_start_chars` and left out when what the work state leaves cannot hold it whole; `[inject] memory_instructions` turns it off (decision 45). Pi, which has no MCP client, gets neither.
 
 ### 4.12 Notes an agent saves
 

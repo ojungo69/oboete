@@ -363,6 +363,7 @@ fn run_io(
             failure.clone(),
             stopped.as_ref().map(crate::curate::Stopped::line),
             work.map(|w| w.rule.clone()),
+            memory_use(manifest.as_ref()),
         ]
         .into_iter()
         .flatten()
@@ -1192,6 +1193,9 @@ pub fn start_text_read(
     else {
         return Ok(None);
     };
+    // claude-mem 13.35's memory-use block goes where the work state's section goes: to the
+    // agents that have the memory tools, out of the same size (below).
+    let memory_use = work && inject.memory_instructions;
     // docs/work-state.md L7: the work state section first, out of the same size, which the
     // manifest is fitted to what it leaves of.
     let now = crate::db::now_ms();
@@ -1213,6 +1217,10 @@ pub fn start_text_read(
             &settings.rules,
         )
     });
+    // After the work state's section, when what it leaves of the size holds it whole.
+    let work_units = work.as_ref().map_or(0, |w| w.units());
+    let use_units = crate::mem_search::MEMORY_USE.encode_utf16().count() + 1;
+    let memory_use = memory_use && work_units + use_units <= inject.session_start_chars;
     // Milestone 5 D5 (#439): no forget commits until the manifest is built, for every reader of
     // it (a hook and `oboete inject` hold their own fence around this and what they record).
     let _read = store
@@ -1228,7 +1236,7 @@ pub fn start_text_read(
             &settings.rules,
             inject
                 .session_start_chars
-                .saturating_sub(work.as_ref().map_or(0, |w| w.units())),
+                .saturating_sub(work_units + if memory_use { use_units } else { 0 }),
             now,
         )?,
         None => None,
@@ -1239,13 +1247,16 @@ pub fn start_text_read(
     {
         between();
     }
-    Ok(match work {
+    // The memory tools' use does not depend on the work state: with neither the work state's
+    // section nor a manifest, it comes alone (Codex on #531).
+    let start = match work {
         Some(work) => Some(Start {
             work: Some(work),
             ..manifest.unwrap_or_default()
         }),
-        None => manifest,
-    })
+        None => manifest.or_else(|| memory_use.then(Start::default)),
+    };
+    Ok(start.map(|s| Start { memory_use, ..s }))
 }
 
 #[cfg(test)]
@@ -2514,6 +2525,13 @@ pub fn inject_json(home: &Path, cwd: &Path, session: Option<&str>) -> Value {
 /// The recording-failure line, why curation stopped (G22), the work state's rule and its open
 /// lines in their fence, then the manifest in its own: what SessionStart shows, as `oboete inject`
 /// prints it (OpenCode's context: CodeRabbit on #438) and the viewer's Context page shows it.
+/// claude-mem 13.35's memory-use block, when the session start carries it.
+fn memory_use(start: Option<&Start>) -> Option<String> {
+    start
+        .filter(|s| s.memory_use)
+        .map(|_| crate::mem_search::MEMORY_USE.to_owned())
+}
+
 pub fn joined(home: &Path, raw: Option<&crate::raw::Raw>, start: Option<&Start>) -> String {
     let work = start.and_then(|s| s.work.as_ref());
     let stopped = raw.and_then(|raw| {
@@ -2526,6 +2544,7 @@ pub fn joined(home: &Path, raw: Option<&crate::raw::Raw>, start: Option<&Start>)
         crate::failure::since(home).map(|f| crate::failure::line(f, kept_count(home))),
         stopped.as_ref().map(crate::curate::Stopped::line),
         work.map(|w| w.rule.clone()),
+        memory_use(start),
         work.and_then(|w| w.open.as_deref())
             .map(|o| crate::manifest::fence(crate::work_state::OPEN, o)),
         start
@@ -6495,7 +6514,10 @@ mod tests {
         let shown: serde_json::Map<String, Value> =
             serde_json::from_str(&crate::hookstate::value(&home, "grok", "g", "shown").unwrap())
                 .unwrap();
-        let lines = text.lines().filter(|l| l.contains(" decision")).count();
+        let lines = text
+            .lines()
+            .filter(|l| l.contains(" decision") && !crate::mem_search::MEMORY_USE.contains(*l))
+            .count();
         assert!((1..30).contains(&shown.len()), "{}", shown.len());
         assert_eq!(shown.len(), lines);
     }
@@ -6524,7 +6546,10 @@ mod tests {
         let shown: serde_json::Map<String, Value> =
             serde_json::from_str(&crate::hookstate::value(&home, "cursor", "cs", "shown").unwrap())
                 .unwrap();
-        let lines = text.lines().filter(|l| l.contains(" decision")).count();
+        let lines = text
+            .lines()
+            .filter(|l| l.contains(" decision") && !crate::mem_search::MEMORY_USE.contains(*l))
+            .count();
         assert!((1..30).contains(&shown.len()), "{}", shown.len());
         assert_eq!(shown.len(), lines);
         assert_eq!(hook(&home, "cursor", "SessionStart", &payload), "{}");
@@ -7019,7 +7044,7 @@ mod tests {
         };
         let text = start("a");
         let (rule, rest) = text.split_once("\n<oboete-memory>\n").unwrap();
-        assert_eq!(rule, RULE);
+        assert_eq!(rule, format!("{RULE}\n{}", crate::mem_search::MEMORY_USE));
         let (open, memory) = rest.split_once("\n</oboete-memory>\n\n").unwrap();
         assert_eq!(
             open,
@@ -7093,10 +7118,78 @@ mod tests {
         let text = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
+        // The memory tools' use stays: it does not depend on the work state.
         assert!(
-            text.starts_with("<oboete-memory>") && text.contains("earlier work"),
+            text.starts_with(&format!(
+                "{}\n<oboete-memory>",
+                crate::mem_search::MEMORY_USE
+            )) && text.contains("earlier work"),
             "{text}"
         );
+    }
+
+    /// Codex on #531: with no memory to show for the repository either, the memory tools' use
+    /// still comes when the work state cannot be read.
+    #[test]
+    fn a_work_state_that_cannot_be_read_keeps_the_memory_use_without_a_manifest() {
+        let dir = tmp("work-state-unread-bare");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let mut raw = crate::raw::open(&dir).unwrap();
+        let fields = json!({"phase": "rc2"});
+        raw.work_state(
+            &repo::key(&dir),
+            "release",
+            fields.as_object().unwrap(),
+            None,
+        )
+        .unwrap();
+        drop(raw);
+        Connection::open(dir.join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET body = 'not json' WHERE type = 'work_state'",
+                [],
+            )
+            .unwrap();
+        let payload = json!({"session_id": "a", "cwd": &*dir, "source": "startup"});
+        let out = hook(&dir, "claude", "SessionStart", &payload);
+        let v: Value = serde_json::from_str(&out).unwrap_or_default();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains(crate::mem_search::MEMORY_USE), "{out}");
+        assert!(!text.contains("<oboete-memory>"), "{text}");
+    }
+
+    /// claude-mem 13.35's memory-use block: after the work state's rule at a session start, out of
+    /// the same size; left out with `[inject] memory_instructions = false`, and when what the work
+    /// state leaves of the size cannot hold it whole.
+    #[test]
+    fn the_memory_use_block_follows_the_rule_within_the_size() {
+        let p = Prompts::new(false);
+        let home = p.s.home.path();
+        let start = |session: &str| {
+            let payload = json!({"session_id": session, "cwd": p.c, "source": "startup"});
+            let out = hook(home, "claude", "SessionStart", &payload);
+            let out: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        };
+        let use_block = crate::mem_search::MEMORY_USE;
+        let text = start("a");
+        assert!(
+            text.starts_with(crate::work_state::RULE) && text.contains(use_block),
+            "{text}"
+        );
+        let config = home.join("config.toml");
+        std::fs::write(&config, "[inject]\nmemory_instructions = false\n").unwrap();
+        assert!(!start("b").contains("# oboete memory use"));
+        std::fs::write(&config, "[inject]\nsession_start_chars = 1000\n").unwrap();
+        let small = start("c");
+        assert!(small.starts_with(crate::work_state::RULE), "{small}");
+        assert!(!small.contains("# oboete memory use"), "{small}");
     }
 
     /// docs/work-state.md L7: Cursor's cut leaves the work state section whole and cuts the
