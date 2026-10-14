@@ -204,6 +204,52 @@ list, count the cards and the summaries beside the claims, imported documents an
 8. A card and a summary the rules leave blank are sent once the rule goes; doctor counts them as
    `empty` until then.
 
+## Slice 4: save_memory
+
+claude-mem 13.35's `save_memory` (`src/servers/mcp-server.ts` and `src/services/worker/save-memory.ts`
+at v13.39.0), before the switch by decision 45. The agent saves a durable note, decision,
+correction or handoff on purpose; search finds it, and the session start never shows it.
+
+- **Arguments**: `text` (required), `title`, `project`, claude-mem's names. claude-mem's
+  `metadata` is not read (nothing in oboete reads provenance); a call that sends it is not refused.
+- **Where it goes**: the repository of the checkout the server runs in, or the one `project`
+  names: a directory, or a repository key oboete knows, as `search`'s `repo` takes it (anything
+  else is refused with `search`'s message).
+- **What is stored**: one document of source `oboete-note`, kind `note`, in raw.db's op log
+  (`Raw::append_note`), which the imported-documents consumer indexes as it indexes claude-mem's
+  history: no new op kind, so no change of the store's format. Title and text pass the capture
+  gate (`capture::note`): secrets masked (unless the switch is off, decision 43) and private
+  blocks taken out. A title left out is the text's first 60 characters on one line, and `...`
+  when there are more, as claude-mem's.
+- **Refused**: a text with nothing outside private blocks; a text or title over 64 KiB, or a
+  note whose op would be (claude-mem has no limit; oboete embeds what it keeps, and refusing says
+  so where clipping would not); a note where nothing is recorded, by the writer's folder or the
+  note's repository, also in the write's transaction, as a work state write is (slice 4a); a
+  note forget names.
+- **The same note again**: its uid is `oboete-note:` and 16 hex digits of a hash of its
+  repository, title and text, so a repeat answers the same uid and appends nothing once the
+  first is indexed (claude-mem's exact-repeat hash is its session, title and text).
+- **The answer**: `Saved memory <uid>: <title>. Repository: <repository>.`, once the worker has
+  indexed it (at most 10 seconds, as `oboete pref add` waits), else the same with "The worker
+  indexes it when it next runs". claude-mem answers `Saved memory #<id>: <title>. Project:
+  <project>.`
+- **Found**: `search` labels it `note` (claude-mem files it as an observation of type
+  `discovery`), `get` reads it whole "(saved by an agent)", `timeline` lists it with imported
+  documents. The session start never shows it (claude-mem's needs a concept, which a saved note
+  has none of); the per-prompt block takes it with imported history's slice (#506).
+- **The call itself**: capture keeps a `save_memory` call, bare or of oboete's or claude-mem's
+  server (claude-mem's `isExplicitMemoryWrite`), without its input and output, and the curator
+  sees its name alone: the note is not made a card or a claim a second time.
+- **Not a claim**: an agent wrote it, so it is never delivered as a decision; it is data inside
+  the fence wherever it is shown.
+
+Tests: `mcp::tests::a_saved_note_is_found_by_search_and_get_and_kept_once`,
+`a_saved_note_passes_the_gate_and_an_empty_or_huge_one_is_refused`,
+`a_note_goes_where_project_says_and_nowhere_never_recorded_or_forgotten`;
+`curate::tests::a_note_saved_to_memory_is_not_shown_to_the_curator`;
+`capture::tests::a_memory_read_is_stored_without_its_output` (a saved note's call too);
+`hook::tests::a_failed_memory_read_is_no_failure_of_the_work` (a failed save too).
+
 ## Differences from claude-mem, and why
 
 | claude-mem | oboete | Why |

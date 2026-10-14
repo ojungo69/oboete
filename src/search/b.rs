@@ -272,6 +272,8 @@ pub enum Label {
     QuoteOnly,
     /// From claude-mem, with no record behind it.
     Imported,
+    /// A note an agent saved (`save_memory`), with no record behind it.
+    Note,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1688,7 +1690,10 @@ fn imported_hit(
                 kind: r.get(0)?,
                 status: String::new(),
                 muted: false,
-                label: Label::Imported,
+                label: match uid.starts_with(&format!("{}:", crate::raw::NOTE_SOURCE)) {
+                    true => Label::Note,
+                    false => Label::Imported,
+                },
                 title: flat(&title),
                 snippet: redact::outbound_with(&super::snippet(&flat(&body), terms, WIDTH), rules),
                 read_tokens: None,
@@ -1899,6 +1904,7 @@ pub fn line(h: &Hit, all: bool, rules: &redact::Rules) -> String {
         Label::Citable => "citable",
         Label::QuoteOnly => "quote-only",
         Label::Imported => "imported",
+        Label::Note => "note",
     };
     let repo = match (&h.repo, all) {
         (Some(r), true) => format!(" [{}]", field(r)),
@@ -2488,8 +2494,12 @@ fn imported_text(k: &Connection, uid: &str) -> Result<Option<String>> {
         .optional()?;
     Ok(doc.map(|(source, kind, repo, ts, title, body)| {
         let title = redact::outbound(&title);
+        let from = match source == crate::raw::NOTE_SOURCE {
+            true => "saved by an agent".to_owned(),
+            false => format!("imported from {source}"),
+        };
         format!(
-            "{} {} {kind} {} (imported from {source})\n{title}{}\n{}\n",
+            "{} {} {kind} {} ({from})\n{title}{}\n{}\n",
             redact::outbound(uid),
             crate::db::utc(ts),
             redact::outbound(&repo),
@@ -2678,6 +2688,20 @@ mod timeline;
 pub use timeline::{Around, timeline_text};
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
+/// Whether `repo` is a repository key oboete has recorded under: claims or records of its own,
+/// not imported history found by a claude-mem project's name.
+pub fn recorded(home: &Path, repo: &str) -> Result<bool> {
+    let Some((_raw, k)) = stores(home)? else {
+        return Ok(false);
+    };
+    Ok(k.query_row(
+        "SELECT EXISTS (SELECT 1 FROM derivations WHERE repo = ?1)
+             OR EXISTS (SELECT 1 FROM raw_docs WHERE repo = ?1)",
+        [repo],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn known(home: &Path, repo: &str) -> Result<bool> {
     let Some((_raw, k)) = stores(home)? else {
         return Ok(false);

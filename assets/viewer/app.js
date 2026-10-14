@@ -844,6 +844,7 @@ const TEXT = {
   meta_delivered: ['delivered', '記憶として渡す対象'],
   meta_superseded: ['superseded', '置き換え済み'],
   meta_imported: ['imported', 'インポート済み'],
+  meta_note: ['note', 'エージェントのメモ'],
   meta_card: ['card', 'カード'],
   meta_summary: ['summary', '要約'],
   meta_raw: ['raw', '元の記録'],

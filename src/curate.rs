@@ -609,6 +609,9 @@ type Hidden = Option<Vec<(usize, usize)>>;
 /// The output a window shows for a read of stored memory.
 const MEMORY_READ: &str = " (a read of stored memory, not shown)";
 
+/// The input a window shows for a note saved to memory.
+const MEMORY_WRITE: &str = "(a note saved to memory, not shown)";
+
 /// claude-mem's retrieval tools (`RETRIEVAL_TOOLS`, src/shared/memory-retrieval-tools.ts at
 /// v13.39.0, Apache-2.0; NOTICE).
 const CLAUDE_MEM_READS: &[&str] = &[
@@ -645,29 +648,58 @@ pub(crate) fn memory_read(tool: &str, body: &Value) -> bool {
     if tool.starts_with("memory_") || matches!(tool.as_str(), "mem_search" | "get_summaries") {
         return true;
     }
-    // `mcp__<server>__<tool>` as Claude Code and Codex name it; `<server>.<tool>`, `/` or `:`.
-    let served = tool
-        .rsplit_once("__")
-        .or_else(|| tool.rsplit_once(['.', '/', ':']));
-    if let Some((server, name)) = served {
-        let cmem = [
-            "claude-mem",
-            "claude_mem",
-            "mcp-search",
-            "mcp_search",
-            "cmem",
-        ];
-        if cmem.iter().any(|s| server.contains(s)) && CLAUDE_MEM_READS.contains(&name)
-            || (server.contains("oboete") || server == "mcp") && OBOETE_READS.contains(&name)
-        {
-            return true;
-        }
+    if let Some((server, name)) = served(&tool)
+        && (claude_mem(server) && CLAUDE_MEM_READS.contains(&name)
+            || oboete(server) && OBOETE_READS.contains(&name))
+    {
+        return true;
     }
     // Only a shell runs a command: a Grep for "oboete search" read no memory.
     ["bash", "shell", "command", "exec", "terminal"]
         .iter()
         .any(|k| tool.contains(k))
         && runs_memory_read(&body["input"])
+}
+
+/// A note the agent saves to memory, as claude-mem's `isExplicitMemoryWrite` finds one (v13.39.0):
+/// a bare `save_memory`, or one of a server whose name says claude-mem; and oboete's own. The note
+/// is kept once, as the document `save_memory` writes: capture keeps the call without its input
+/// and output (`memory_write` in the stored body), and a window shows the call alone, so no
+/// curator makes the note a card or a claim again (claude-mem makes no observation of it).
+pub(crate) fn memory_write(tool: &str, body: &Value) -> bool {
+    if body.get("memory_write") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    let tool = tool.to_ascii_lowercase();
+    tool == "save_memory"
+        || served(&tool).is_some_and(|(server, name)| {
+            name == "save_memory" && (claude_mem(server) || oboete(server))
+        })
+}
+
+/// A tool's server and its own name: `mcp__<server>__<tool>` as Claude Code and Codex name it,
+/// `<server>__<tool>` as Grok does; `<server>.<tool>`, `/` or `:` (Cursor's `mcp:<tool>`).
+fn served(tool: &str) -> Option<(&str, &str)> {
+    tool.rsplit_once("__")
+        .or_else(|| tool.rsplit_once(['.', '/', ':']))
+}
+
+/// A server whose name says claude-mem, as claude-mem's `claudeMemToolName` reads one.
+fn claude_mem(server: &str) -> bool {
+    [
+        "claude-mem",
+        "claude_mem",
+        "mcp-search",
+        "mcp_search",
+        "cmem",
+    ]
+    .iter()
+    .any(|s| server.contains(s))
+}
+
+/// oboete's own server: its name, or Cursor's `mcp`, which names no server.
+fn oboete(server: &str) -> bool {
+    server.contains("oboete") || server == "mcp"
 }
 
 /// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
@@ -791,10 +823,11 @@ impl<'r> Prepared<'r> {
         let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
         let tool = body["tool"].as_str().unwrap_or("");
         let memory = e.kind == "tool" && memory_read(tool, &body);
+        let note = e.kind == "tool" && memory_write(tool, &body);
         let short = shrink && e.kind == "tool" && !OWNERS_WORDS.contains(&tool);
         let mut cut_input = false;
         // An owner directive is already a claim (`oboete pref add`): nothing for the curator.
-        let (long, json) = if memory || e.kind == "directive" {
+        let (long, json) = if memory || note || e.kind == "directive" {
             (None, None)
         } else {
             long_of(&e.kind, &body)
@@ -821,7 +854,10 @@ impl<'r> Prepared<'r> {
             "compaction" if long.is_some() => ("[compaction summary]".into(), Role::Other),
             "compaction" => ("[compaction]".into(), Role::Other),
             "tool" => {
-                let input = text(&body["input"]).unwrap_or_default();
+                let input = match note {
+                    true => String::new(),
+                    false => text(&body["input"]).unwrap_or_default(),
+                };
                 // Cut like a split event: a secret across the cut is found in the whole input.
                 let cap = if shrink {
                     SHORT_CHARS
@@ -833,7 +869,10 @@ impl<'r> Prepared<'r> {
                     .nth(cap)
                     .map_or(input.len(), |(i, _)| i);
                 cut_input = shrink && cut < input.len();
-                let input = crate::redact::outbound_part(&input, 0..cut, rules);
+                let input = match note {
+                    true => MEMORY_WRITE.to_owned(),
+                    false => crate::redact::outbound_part(&input, 0..cut, rules),
+                };
                 let failed = if body["failed"] == true {
                     " failed"
                 } else {
@@ -5074,6 +5113,47 @@ mod tests {
             "{}",
             w.text
         );
+    }
+
+    /// claude-mem's `isExplicitMemoryWrite`: a note saved to memory (`save_memory`, oboete's or
+    /// claude-mem's, and rows stored before capture blanked it) shows its call alone, so no curator
+    /// makes the note a card or a claim again; another server's `save_memory`-like tool is shown
+    /// whole.
+    #[test]
+    fn a_note_saved_to_memory_is_not_shown_to_the_curator() {
+        let (_h, mut raw, dev) = store();
+        let note = "Releases are tagged from main after the changelog review.";
+        let call = |name: &str| {
+            let input = serde_json::json!({"text": note}).to_string();
+            event(
+                "tool",
+                serde_json::json!({"tool": name, "input": input, "output": "Saved memory x.",
+                                   "failed": false}),
+            )
+        };
+        for name in [
+            "mcp__oboete__save_memory",
+            "oboete__save_memory",
+            "mcp__plugin_claude-mem_mcp-search__save_memory",
+            "save_memory",
+        ] {
+            raw.append(&call(name)).unwrap();
+        }
+        raw.append(&call("mcp__notion__save_page")).unwrap();
+        let w = next_window(&raw, &dev, 10_000, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.text.matches(note).count(), 1, "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_WRITE).count(), 4, "{}", w.text);
+        assert_eq!(w.text.matches("Saved memory x.").count(), 1, "{}", w.text);
+        for (name, saved) in [
+            ("mcp__mcp_search__save_memory", true),
+            ("MCP:save_memory", true),
+            ("mcp__other__save_memory", false),
+            ("mcp__oboete__search", false),
+        ] {
+            assert_eq!(memory_write(name, &Value::Null), saved, "{name}");
+        }
     }
 
     #[test]
