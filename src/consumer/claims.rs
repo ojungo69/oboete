@@ -577,7 +577,9 @@ fn activate(k: &Connection, uid: &str) -> Result<()> {
         .query_row(
             "SELECT d.op_device, d.op_seq,
                     COALESCE((SELECT x.body FROM corrections x WHERE x.uid = d.uid
-                              AND x.body IS NOT NULL
+                              AND x.body IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
+                                WHERE y.uid = x.uid AND y.op_device = x.op_device
+                                  AND y.body IS NOT NULL AND y.op_seq > x.op_seq)
                               ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
                              d.body) || char(10) || COALESCE(
                       (SELECT group_concat(quote, char(10)) FROM evidence e
@@ -1192,6 +1194,111 @@ mod tests {
             [passed[1]],
             "only the empty correction stays skipped"
         );
+    }
+
+    /// #162: of one device's corrections, the later in its op log wins even when its clock went
+    /// back between them (an NTP step, a resumed VM); between devices, the newer time wins.
+    #[test]
+    fn a_later_correction_with_an_earlier_clock_still_wins() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("r", 5, "Ship on Fridays.", &[]);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let anchor = crate::claims::active_one(&k, &uid).unwrap().unwrap();
+        s.correct(&uid, Some("retracted"), Some("Ship never."));
+        s.correct(&uid, Some("done"), Some("Ship on Fridays only."));
+        // The clock stepped back between the two: the first is stamped an hour after the second.
+        let raw = rusqlite::Connection::open(s.home.path().join("raw.db")).unwrap();
+        let first: i64 = raw
+            .query_row(
+                "SELECT MIN(op_seq) FROM ops WHERE type = 'correction'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        raw.execute(
+            "UPDATE ops SET ts = ts + 3600000 WHERE type = 'correction' AND op_seq = ?1",
+            [first],
+        )
+        .unwrap();
+        s.run();
+        let state = |k: &rusqlite::Connection| {
+            k.query_row(
+                "SELECT status, body FROM active WHERE uid = ?1",
+                [&uid],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(state(&k), ("done".into(), "Ship on Fridays only.".into()));
+        // The search row carries the same body.
+        let matches = |q: &str| -> i64 {
+            k.query_row(
+                "SELECT count(*) FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
+                 WHERE c.uid = ?1 AND claims_fts MATCH ?2",
+                params![uid, q],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            matches("\"Fridays only\""),
+            1,
+            "the search row has the later body"
+        );
+        assert_eq!(matches("never"), 0, "nor the earlier one");
+        // Another device's correction, stamped after both, wins: between devices, time orders.
+        let op = json!({
+            "uid": uid, "anchor": {"device": anchor.device, "seq": anchor.seq}, "status": "decided"
+        });
+        raw.execute(
+            "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+             VALUES('dev-z', 1, 'correction', ?1, ?2, 1)",
+            params![crate::db::now_ms() + 7_200_000, op.to_string()],
+        )
+        .unwrap();
+        s.run();
+        assert_eq!(state(&k).0, "decided");
+    }
+
+    /// #162: a knowledge.db whose `active` view still orders a device's corrections by its clock
+    /// gets the view that orders them by the op log.
+    #[test]
+    fn an_active_view_that_orders_by_the_clock_is_replaced() {
+        let mut s = crate::search::b::fixture::Store::new();
+        s.decided("r", 5, "Ship on Fridays.", &[]);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute_batch(
+            "DROP VIEW active;
+             CREATE VIEW active AS
+               SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from,
+                 d.anchor_device, d.anchor_seq,
+                 COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
+                           AND x.status IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          d.status) AS status,
+                 COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
+                           AND x.body IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          d.body) AS body,
+                 COALESCE((SELECT x.muted FROM corrections x WHERE x.uid = c.uid
+                           AND x.muted IS NOT NULL
+                           ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                          0) AS muted
+               FROM claims c JOIN derivations d
+                 ON d.op_device = c.op_device AND d.op_seq = c.op_seq;",
+        )
+        .unwrap();
+        crate::claims::schema(&k).unwrap();
+        let sql: String = k
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("y.op_seq > x.op_seq"), "{sql}");
     }
 
     #[test]
