@@ -20,6 +20,24 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// One detail's most (`details`).
 const DETAIL_BYTES: usize = 8 * 1024;
 
+/// claude-mem's `MEMORY_PLUGIN_INSTRUCTIONS` (src/shared/memory-instructions.ts at v13.39.0), with
+/// oboete's name and tools: what the session start says of the memory tools, after the work
+/// state's rule (`[inject] memory_instructions`). Left out: claude-mem's server notes, its hosted
+/// connector and its memory folder watcher, which oboete has not.
+pub const MEMORY_USE: &str = "# oboete memory use\n\
+    Model-facing tool replies must be concise purpose-specific text; keep structured envelopes and \
+    internal metadata out of model context. Select only evidence useful to the current question, \
+    and expand from index to context to relevant details only as needed.\n\
+    Use oboete for your own durable notes. When its save_memory tool is available, \
+    save_memory({text, title, project}) records preferences, corrections, decisions, and reusable \
+    lessons. Search first with mem_search({query, mode: \"auto\", project}) to avoid duplicate or \
+    conflicting notes. For guided research, use mode: \"guided\" and follow each returned \
+    continuation through mem-search steps 1, 2, and 3. Do not call a missing tool.\n\
+    Use work_state_write for to-do lists and changing work state when available. Keep durable \
+    notes concise, distinguish verified facts from guesses, and exclude credentials and private \
+    material the user asked you not to remember. Never assume a memory search was intercepted: \
+    call mem_search directly when its result is needed.";
+
 /// claude-mem's stop words (`STOP_WORDS`).
 const STOP_WORDS: &str = "a an and are as at be been by can did do for from had has have how i in is it last me memory my of on or our previous search session sessions that the their this to was we were what when where which who why with work you your";
 
