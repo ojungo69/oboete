@@ -230,7 +230,9 @@ correction or handoff on purpose; search finds it, and the session start never s
   note forget names.
 - **The same note again**: its uid is `oboete-note:` and 16 hex digits of a hash of its
   repository, title and text, so a repeat answers the same uid and appends nothing once the
-  first is indexed (claude-mem's exact-repeat hash is its session, title and text).
+  first is indexed and its op is still in the op log (claude-mem's exact-repeat hash is its
+  session, title and text). The op log decides, not the index: after a restore lost the op and
+  before the worker rewound the index, the note is appended again.
 - **The answer**: `Saved memory <uid>: <title>. Repository: <repository>.`, once the worker has
   indexed it (at most 10 seconds, as `oboete pref add` waits), else the same with "The worker
   indexes it when it next runs". claude-mem answers `Saved memory #<id>: <title>. Project:

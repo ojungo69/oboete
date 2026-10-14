@@ -496,19 +496,20 @@ impl Oboete {
         let read = (key.as_str(), Some(folder.as_str()));
         let k = crate::knowledge::open(&self.home).map_err(internal)?;
         crate::consumer::imported::schema(&k).map_err(internal)?;
-        let kept: bool = k
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM imported WHERE uid = ?1)",
-                [&doc.uid],
-                |r| r.get(0),
-            )
+        // The ops the index says hold this uid; the op log decides (`Raw::append_note`).
+        let held: Vec<(String, i64)> = k
+            .prepare("SELECT op_device, op_seq FROM imported WHERE uid = ?1")
+            .and_then(|mut st| {
+                st.query_map([&doc.uid], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            })
             .map_err(|e| internal(e.into()))?;
         let saved = format!(
             "Saved memory {}: {}. Repository: {repo}.",
             doc.uid,
             one_line(&doc.title)
         );
-        let seq = match raw.append_note(&doc, kept, &cwd, &settings, read) {
+        let seq = match raw.append_note(&doc, &held, &cwd, &settings, read) {
             Err(e) if e.is::<crate::raw::NeverRecorded>() => {
                 return failed(format!(
                     "nothing is recorded in {repo} or in this folder now: the note was not kept"

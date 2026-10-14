@@ -5335,12 +5335,15 @@ impl Raw {
     /// `save_memory` (claude-mem 13.35): an agent's note, `doc` of source `NOTE_SOURCE`, as this
     /// device's next op, under the fence a work state write takes (`work_state_under`): refused in
     /// its transaction (`NeverRecorded`) where the writer's place or the note's repository is
-    /// never recorded. Nothing is appended when forget names the note (D5), nor when it is `kept`
-    /// already (the same uid, so the same repository, title and text).
+    /// never recorded. Nothing is appended when forget names the note (D5), nor when one of the
+    /// ops knowledge.db says hold its uid (`held`, `(device, op_seq)`) is still in the op log (the
+    /// same uid, so the same repository, title and text): the op log, not the index, says it is
+    /// kept, so a restore that lost the op and has not rewound the index yet keeps no note away
+    /// (Codex on #525).
     pub fn append_note(
         &mut self,
         doc: &ImportDoc,
-        kept: bool,
+        held: &[(String, i64)],
         cwd: &str,
         settings: &crate::capture::Settings,
         read: (&str, Option<&str>),
@@ -5350,9 +5353,16 @@ impl Raw {
         if forgotten_uid(&self.conn, &doc.uid)? || denied(&self.conn, Some(&origin), &text)? {
             return Ok(Noted::Forgotten);
         }
-        if kept {
-            return Ok(Noted::Kept);
+        let mut in_log = self.conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq = ?2 AND type = 'import'
+                             AND json_extract(body, '$.uid') = ?3)",
+        )?;
+        for (device, seq) in held {
+            if in_log.query_row(params![device, seq, doc.uid], |r| r.get::<_, bool>(0))? {
+                return Ok(Noted::Kept);
+            }
         }
+        drop(in_log);
         let ops = [(OpKind::Import, serde_json::to_value(doc)?)];
         let seqs = self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?;
         Ok(Noted::Appended(seqs[0]))
@@ -9090,7 +9100,7 @@ mod tests {
         let open_place = ("github.com/o/open", Some("/w/open"));
         let refused = raw.append_note(
             &note("github.com/o/secret", "a"),
-            false,
+            &[],
             "/w/open",
             &settings,
             open_place,
@@ -9099,7 +9109,7 @@ mod tests {
         let below = ("github.com/o/open", Some("/w/private/sub"));
         let refused = raw.append_note(
             &note("github.com/o/open", "b"),
-            false,
+            &[],
             "/w/private/sub",
             &settings,
             below,
@@ -9112,20 +9122,25 @@ mod tests {
         };
         assert_eq!(raw.append_imports(vec![imported]).unwrap(), 1);
         let kept = note("github.com/o/open", "d");
-        assert!(matches!(
-            raw.append_note(&kept, false, "/w/open", &settings, open_place)
-                .unwrap(),
-            Noted::Appended(_)
-        ));
+        let device = raw.device().to_owned();
+        // An entry the op log no longer holds (a restore lost it) keeps nothing away.
+        let stale = [(device.clone(), 9_999)];
+        let Noted::Appended(seq) = raw
+            .append_note(&kept, &stale, "/w/open", &settings, open_place)
+            .unwrap()
+        else {
+            panic!("appended");
+        };
+        let held = [(device, seq)];
         assert_eq!(
-            raw.append_note(&kept, true, "/w/open", &settings, open_place)
+            raw.append_note(&kept, &held, "/w/open", &settings, open_place)
                 .unwrap(),
             Noted::Kept
         );
         let forget = serde_json::json!({"uid": kept.uid});
         raw.append_ops(&[(OpKind::Forget, forget)]).unwrap();
         assert_eq!(
-            raw.append_note(&kept, false, "/w/open", &settings, open_place)
+            raw.append_note(&kept, &[], "/w/open", &settings, open_place)
                 .unwrap(),
             Noted::Forgotten
         );
