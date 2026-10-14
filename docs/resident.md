@@ -112,10 +112,12 @@ pref never read the setting: they exit at idle as today.
 
 R3. **Idle in resident mode.** When the idle time passes, the worker does what it does today before
 an exit (backup, prune), but only when a round ran since the last idle step, and then keeps the lock
-and waits again: an idle time starts no round. No hook starts a resident worker again, so it is up
-for every wait of a phase, not only D10's short ones, and runs the phase again at the time the
-phase named; the idle step is taken within such a wait too. At every idle time it re-reads
-config.toml and checks its home:
+and waits again: an idle time starts no round, except for a consumer left behind with nothing new to
+wake the wait (a batch it put off, as the rescan does when the dispatch hold is busy): then it
+starts one, as an exit's last check would, but not once the worker is to leave. No hook starts a
+resident worker again, so it is up for every wait of a phase, not only D10's short ones, and runs
+the phase again at the time the phase named; the idle step is taken within such a wait too. At every
+idle time it re-reads config.toml and checks its home:
 - only a config.toml that loads and does not say `resident = true` ends it, and not while an
   embedding call is out: the call's answer is written first (R10), and no other call, a batch, a
   query or a window, is started before it leaves, even if the file says `resident = true` again

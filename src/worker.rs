@@ -1303,6 +1303,12 @@ fn serve(
                 }
                 departing = true;
             }
+            // A batch a consumer put off, with nothing new to wake this wait (the rescan when the
+            // dispatch hold is busy; Codex on #507), runs again here, as the exit's check below
+            // starts a round for it; not once the worker is to leave (R3).
+            if !departing && behind(&raw, &k, consumers)? {
+                break false;
+            }
             // A setting the owner changed is followed without a new record.
             let now = config_stamp(home);
             if now != config {
@@ -4769,6 +4775,122 @@ mod tests {
         std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
         worker.join().unwrap().unwrap();
         assert!(!running(p));
+    }
+
+    /// Codex on #507: a batch a consumer puts off (the rescan, when the dispatch hold is busy) is
+    /// run again by a resident worker at its idle time, with no new record to wake it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_runs_a_put_off_batch_again_at_its_idle_time() {
+        struct PutOff(bool);
+        impl Consumer for PutOff {
+            fn name(&self) -> &'static str {
+                "put-off"
+            }
+            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
+                if !std::mem::replace(&mut self.0, true) {
+                    return Ok(after);
+                }
+                Ok(raw
+                    .after(raw.device(), after, 100)?
+                    .last()
+                    .map_or(after, |r| r.seq))
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let at = p.to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let held = lock(&at)?;
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&at, 100, vec![Box::new(PutOff(false))], || {}, held, phases)
+        });
+        until("the put-off batch read", || {
+            knowledge::open(p)
+                .ok()
+                .and_then(|k| checkpoint::get(&k, "put-off", &device).ok())
+                == Some(1)
+        });
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    /// Codex on #507: a resident worker whose config.toml stops saying `resident = true` leaves at
+    /// its idle time even while a consumer keeps putting its batch off (R3): the batch put off does
+    /// not start a round before the switch is read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_turned_off_leaves_while_a_batch_stays_put_off() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct PutOff(Arc<AtomicBool>);
+        impl Consumer for PutOff {
+            fn name(&self) -> &'static str {
+                "put-off"
+            }
+            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
+                if !self.0.load(Ordering::SeqCst) {
+                    return Ok(after);
+                }
+                Ok(raw
+                    .after(raw.device(), after, 100)?
+                    .last()
+                    .map_or(after, |r| r.seq))
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let free = Arc::new(AtomicBool::new(false));
+        let left = Arc::new(AtomicBool::new(false));
+        let (at, consumer, exited) = (p.to_path_buf(), PutOff(free.clone()), left.clone());
+        let worker = std::thread::spawn(move || {
+            let held = lock(&at)?;
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            let before_exit = move || exited.store(true, Ordering::SeqCst);
+            run_holding(
+                &at,
+                100,
+                vec![Box::new(consumer)],
+                before_exit,
+                held,
+                phases,
+            )
+        });
+        // A few idle times pass with the batch put off each time.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!left.load(Ordering::SeqCst), "it left while resident");
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        until("the worker leaving resident mode", || {
+            left.load(Ordering::SeqCst)
+        });
+        free.store(true, Ordering::SeqCst);
+        worker.join().unwrap().unwrap();
     }
 
     /// R2: only `oboete worker` started with no `--idle-ms` follows `[worker] resident`. With one
