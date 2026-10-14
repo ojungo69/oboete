@@ -399,8 +399,10 @@ fn run_io(
         if let Some(m) = &manifest
             && agent != "opencode"
         {
-            // The cards' block ends the manifest: its documents count when it came whole.
-            let whole = kept.get(memory).copied().unwrap_or(0) >= m.text.len();
+            // A card or summary counts when its own line came: the block puts each on a line that
+            // begins with its ID, and a cut keeps whole lines (Codex on #521).
+            let end = kept.get(memory).copied().unwrap_or(0).min(m.text.len());
+            let docs = docs_that_came(&m.text[..m.text.floor_char_boundary(end)], &m.docs);
             remember(
                 home,
                 agent,
@@ -408,7 +410,7 @@ fn run_io(
                 m.shown.iter().filter(|s| {
                     s.range.end <= kept.get(memory).copied().unwrap_or(0) && came(&s.line)
                 }),
-                if whole { &m.docs } else { &[] },
+                &docs,
             );
         }
         let mut receipt = None;
@@ -2084,6 +2086,18 @@ fn note_side(home: &Path, side: &str) {
     if let Err(e) = kept {
         eprintln!("oboete: how the prompt was answered is not kept: {e}");
     }
+}
+
+/// The documents of `docs` whose own line `text` holds: the cards' block puts each card and summary
+/// on a line that begins with its ID, and a cut keeps whole lines.
+fn docs_that_came(text: &str, docs: &[(String, &'static str)]) -> Vec<(String, &'static str)> {
+    (docs.iter())
+        .filter(|(id, _)| {
+            let head = format!("{id} ");
+            text.lines().any(|l| l.starts_with(&head))
+        })
+        .cloned()
+        .collect()
 }
 
 /// What `note_side` kept: when, and how.
@@ -4486,6 +4500,24 @@ mod tests {
         );
         assert_eq!(r.asked().len(), 1);
         assert_eq!(last_side(p.s.home.path()).unwrap().1, "failed");
+    }
+
+    /// G23 (Codex on #521): where a cap cut the session start's cards, the shown set takes the
+    /// cards and summaries whose own lines came, and no ID that only appears inside another line.
+    #[test]
+    fn the_documents_whose_lines_came_are_remembered() {
+        let docs = [
+            ("412.0".to_owned(), "card"),
+            ("S415".to_owned(), "summary"),
+            ("413.0".to_owned(), "card"),
+            ("414.0".to_owned(), "card"),
+        ];
+        let text = "## Recent work\n412.0 10:00 🔴 Parser fix\nS415 Fix the parser (10:05)\n\
+                    - decided: see 413.0 for the details\n";
+        assert_eq!(
+            docs_that_came(text, &docs),
+            [("412.0".to_owned(), "card"), ("S415".to_owned(), "summary")]
+        );
     }
 
     /// G23: a prompt this call did not record with its text goes to no viewer (here
