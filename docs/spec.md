@@ -380,7 +380,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 ### 4.7 Compaction and resume
 
-- After compaction, open items and delivered claims (3.4) are re-injected (deduplicated). A Codex subagent thread, which Codex sends no SessionStart, takes the manifest back at its next tool call after its `PostCompact`, once, as that call's context, as claude-mem 13.39 does (decision 45); a mark the read fence keeps from being answered is given back for the next call. The root thread's SessionStart takes the root's mark.
+- After compaction, open items and delivered claims (3.4) are re-injected (deduplicated). A Codex subagent thread, which Codex sends no SessionStart, takes the manifest back at its next tool call after its `PostCompact`, once, as that call's context, as claude-mem 13.39 does (decision 45); a mark the read fence keeps from being answered, or whose call fails its write, is given back for the next call. The root thread's SessionStart takes the root's mark.
 - No double injection on resume.
 - A per-agent table records status: live-verified / implemented / unverified.
 

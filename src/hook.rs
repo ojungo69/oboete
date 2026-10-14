@@ -86,9 +86,10 @@ fn run_io(
     // is kept under.
     let mut prompted: Option<Prompted> = None;
     let mut session = String::new();
-    // Cursor's compaction flag this call took, put back if its write fails: the manifest is then
-    // shown at the next prompt, once recording works again.
-    let mut took_compaction: Option<String> = None;
+    // A compaction flag this call took (Cursor's at a prompt, a Codex thread's at a tool call:
+    // Codex on #532), with its session, put back if its write fails: the manifest is then shown
+    // at the next one, once recording works again.
+    let mut took_compaction: Option<(String, String)> = None;
     // X5: the note on the files Claude Code or Codex is about to read, as the answer's context;
     // Grok's read, whose note goes after what else the call shows.
     let mut noted: Option<String> = None;
@@ -179,8 +180,13 @@ fn run_io(
         // write fails, the point still carries the recording-failure line. Grok's and agy's
         // points stay taken then (the line is shown once per session, not at every call).
         injecting = injects(home, agent, event, &labels, &mut took);
-        if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
-            took_compaction = Some(session_label(&labels).to_owned());
+        if injecting
+            && matches!(
+                (agent, event),
+                ("cursor", "UserPromptSubmit") | ("codex", "PostToolUse")
+            )
+        {
+            took_compaction = Some((session_label(&labels).to_owned(), took.flag().to_owned()));
         }
         let settings = crate::capture::Settings::load(home)?;
         let mut store = match crate::raw::open_within(home, STORE_WAIT) {
@@ -326,8 +332,8 @@ fn run_io(
             Ok(_) => {}
             Err(e) => {
                 crate::failure::mark(home, crate::failure::classify(e), ended);
-                if let Some(session) = &took_compaction
-                    && let Err(e) = crate::hookstate::set(home, "cursor", session, "compacted")
+                if let Some((session, flag)) = &took_compaction
+                    && let Err(e) = crate::hookstate::set(home, agent, session, flag)
                 {
                     eprintln!("oboete: compaction not noted again: {e}");
                 }
@@ -7034,6 +7040,39 @@ mod tests {
                 .filter(|r| matches!(&r.item, crate::raw::Item::Event(e) if e.kind == "tool"))
                 .count();
         assert_eq!(tools, 6);
+    }
+
+    /// Codex on #532: a thread's tool call that took its mark and then failed its write puts the
+    /// mark back, so the thread's next tool call takes the manifest once recording works again.
+    #[test]
+    fn a_codex_threads_mark_comes_back_when_its_tool_call_fails_its_write() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = |extra: Value| {
+            let mut v = json!({"session_id": "cx", "cwd": p.c, "agent_id": "a"});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v
+        };
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        let compact = payload(json!({"trigger": "auto"}));
+        assert_eq!(hook(&home, "codex", "PostCompact", &compact), "");
+        let conn = Connection::open(home.join("raw.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_tool BEFORE INSERT ON records WHEN NEW.kind='tool'
+            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+        )
+        .unwrap();
+        let input = payload(tool.clone()).to_string();
+        let mut out = Vec::new();
+        assert!(run_io(&home, "codex", "PostToolUse", input.as_bytes(), &mut out).is_err());
+        conn.execute_batch("DROP TRIGGER refuse_tool").unwrap();
+        let back = hook(&home, "codex", "PostToolUse", &payload(tool));
+        assert!(back.contains("Parser errors go to stderr."), "{back}");
     }
 
     /// MUST-M10, spec 4.8: a claim an agent was shown that changed since is named at its next
