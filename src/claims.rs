@@ -127,17 +127,25 @@ const RECURATE: &str = "CREATE TABLE IF NOT EXISTS recurate(
   PRIMARY KEY (op_device, op_seq, from_seq)
 )";
 
-/// Each field uses the newest correction that sets it, over the active derivation.
+/// Each field uses the newest correction that sets it, over the active derivation: of one device's
+/// corrections the one later in its op log, whatever its clock says; between devices the newer
+/// time (#162).
 const ACTIVE: &str = "CREATE VIEW active AS
   SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from, d.anchor_device, d.anchor_seq,
     COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
-              AND x.status IS NOT NULL
+              AND x.status IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
+                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.status IS NOT NULL
+                  AND y.op_seq > x.op_seq)
               ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), d.status) AS status,
     COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
-              AND x.body IS NOT NULL
+              AND x.body IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
+                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.body IS NOT NULL
+                  AND y.op_seq > x.op_seq)
               ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), d.body) AS body,
     COALESCE((SELECT x.muted FROM corrections x WHERE x.uid = c.uid
-              AND x.muted IS NOT NULL
+              AND x.muted IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
+                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.muted IS NOT NULL
+                  AND y.op_seq > x.op_seq)
               ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), 0) AS muted
   FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq";
 
@@ -248,10 +256,12 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
         "SELECT count(*) = 0 FROM pragma_table_info('corrections') WHERE name = 'muted'",
         "ALTER TABLE corrections ADD COLUMN muted INTEGER",
     )?;
-    // CREATE VIEW IF NOT EXISTS would leave an older view in place.
+    // CREATE VIEW IF NOT EXISTS would leave an older view in place: one without `muted`, or one
+    // that ordered a device's own corrections by its clock (#162).
     migrate(
         k,
-        "SELECT count(*) = 0 FROM pragma_table_info('active') WHERE name = 'muted'",
+        "SELECT count(*) = 0 FROM sqlite_master WHERE type = 'view' AND name = 'active'
+           AND sql LIKE '%y.op_seq > x.op_seq%'",
         &format!("DROP VIEW IF EXISTS active; {ACTIVE}"),
     )
 }
