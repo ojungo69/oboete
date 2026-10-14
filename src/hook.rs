@@ -157,14 +157,20 @@ fn run_io(
         if (agent, event) == ("grok", "PreToolUse") {
             grok_read = Some(labels.clone());
         }
+        // claude-mem 13.39: Codex sends a subagent's thread no SessionStart, so a compaction marks
+        // its thread, whose next tool call takes the manifest back (the root's SessionStart
+        // takes the root's mark).
+        if agent == "codex" {
+            took.thread = codex_thread(&payload);
+        }
         if matches!(
             (agent, event),
-            ("cursor", "PreCompact") | ("grok", "PostCompact")
+            ("cursor", "PreCompact") | ("grok", "PostCompact") | ("codex", "PostCompact")
         ) {
             // Before the write: a compaction whose record fails still reinjects at the next
-            // prompt (Grok's next tool call). A flag that cannot be written costs that
+            // prompt (Grok's and Codex's next tool call). A flag that cannot be written costs that
             // reinjection, not the record.
-            if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), "compacted")
+            if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), took.flag())
             {
                 eprintln!("oboete: compaction not noted: {e}");
             }
@@ -519,6 +525,18 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
             took.compacted = crate::hookstate::take(home, agent, session, "compacted");
             took.compacted
         }
+        ("codex", "PostToolUse") => {
+            took.compacted = crate::hookstate::take(home, agent, session, took.flag());
+            took.compacted
+        }
+        // The root thread's compaction is answered here, whatever the source, as claude-mem's
+        // context handler clears its mark first.
+        ("codex", "SessionStart") => {
+            // Kept in `took`, so a call that cannot take its read fence gives the mark back for
+            // the root's next tool call.
+            took.compacted = crate::hookstate::take(home, agent, session, "compacted");
+            str_field(payload, &["source"]) != Some("resume")
+        }
         ("grok" | "agy" | "cursor", _) => false,
         (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
         _ => false,
@@ -531,9 +549,18 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
 struct Took {
     injected: bool,
     compacted: bool,
+    /// The thread's compaction flag (`codex_thread`).
+    thread: String,
 }
 
 impl Took {
+    fn flag(&self) -> &str {
+        match self.thread.as_str() {
+            "" => "compacted",
+            thread => thread,
+        }
+    }
+
     fn give_back(&self, home: &Path, agent: &str, session: &str) {
         if self.injected {
             crate::hookstate::take(home, agent, session, "injected");
@@ -541,10 +568,23 @@ impl Took {
         // Cursor starts a session once: its next prompt injects instead, as after a compaction
         // (Codex on #446).
         if ((self.injected && agent == "cursor") || self.compacted)
-            && let Err(e) = crate::hookstate::set(home, agent, session, "compacted")
+            && let Err(e) = crate::hookstate::set(home, agent, session, self.flag())
         {
             eprintln!("oboete: compaction not noted again: {e}");
         }
+    }
+}
+
+/// A Codex thread's compaction flag (claude-mem 13.39): a subagent's (`agent_id`) `compacted-`
+/// and 16 hex digits of its id's sha256, the root's `compacted`; an id over 128 characters
+/// names none, as claude-mem drops it.
+fn codex_thread(payload: &Value) -> String {
+    match payload["agent_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+    {
+        Some(id) => format!("compacted-{}", &crate::curate::sha256_hex(id)[..16]),
+        None => "compacted".into(),
     }
 }
 
@@ -5282,6 +5322,25 @@ mod tests {
                             "hook_event_name": "beforeSubmitPrompt", "prompt": "tidy the readme"});
         let out = hook(&home, "cursor", "UserPromptSubmit", &prompt);
         assert!(injected("cursor", &out).contains("Parser errors"), "{out}");
+        // A Codex root thread's compaction, answered by a SessionStart without the fence: the
+        // root's next tool call takes the manifest back (claude-mem 13.39).
+        let codex = |event: &str, extra: Value| {
+            let mut payload = json!({"session_id": "cx", "cwd": c});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hook(&home, "codex", event, &payload)
+        };
+        assert_eq!(codex("PostCompact", json!({"trigger": "auto"})), "");
+        let held = crate::dispatch::exclusive(&home).unwrap();
+        let out = codex("SessionStart", json!({"source": "compact"}));
+        drop(held);
+        assert!(!out.contains("Parser errors"), "{out}");
+        let tool =
+            json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": "a"});
+        assert!(codex("PostToolUse", tool.clone()).contains("Parser errors"));
+        assert_eq!(codex("PostToolUse", tool), "");
     }
 
     /// Codex on #446: agy's point after a checkpoint, taken by a call without the read fence, is
@@ -6919,6 +6978,62 @@ mod tests {
                 "{agent}"
             );
         }
+    }
+
+    /// claude-mem 13.39: a Codex compaction marks its thread; a subagent's thread, which Codex
+    /// sends no SessionStart, takes the manifest back at its next tool call, once, as
+    /// `PostToolUse` context; another thread's call takes nothing; the root's SessionStart takes
+    /// the root's mark, so its tool calls do not take the manifest again; every call is recorded.
+    #[test]
+    fn a_codex_thread_takes_the_manifest_back_at_its_next_tool_call_after_a_compaction() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let call = |event: &str, agent_id: Option<&str>, extra: Value| {
+            let mut payload = json!({"session_id": "cx", "cwd": p.c});
+            if let Some(id) = agent_id {
+                payload["agent_id"] = json!(id);
+            }
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hook(&home, "codex", event, &payload)
+        };
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        assert_eq!(call("PostToolUse", Some("a"), tool.clone()), "");
+        assert_eq!(
+            call("PostCompact", Some("a"), json!({"trigger": "auto"})),
+            ""
+        );
+        assert_eq!(call("PostToolUse", None, tool.clone()), "");
+        assert_eq!(call("PostToolUse", Some("b"), tool.clone()), "");
+        let back = call("PostToolUse", Some("a"), tool.clone());
+        let v: Value = serde_json::from_str(back.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert!(
+            v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("Parser errors go to stderr."),
+            "{back}"
+        );
+        assert_eq!(call("PostToolUse", Some("a"), tool.clone()), "");
+        // The root's compaction: its SessionStart answers it, and takes its mark.
+        assert_eq!(call("PostCompact", None, json!({"trigger": "auto"})), "");
+        let start = call("SessionStart", None, json!({"source": "compact"}));
+        assert!(start.contains("Parser errors go to stderr."), "{start}");
+        assert_eq!(call("PostToolUse", None, tool.clone()), "");
+        let tools =
+            p.s.raw
+                .after(p.s.raw.device(), 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|r| matches!(&r.item, crate::raw::Item::Event(e) if e.kind == "tool"))
+                .count();
+        assert_eq!(tools, 6);
     }
 
     /// MUST-M10, spec 4.8: a claim an agent was shown that changed since is named at its next
