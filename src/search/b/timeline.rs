@@ -77,6 +77,115 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let (before, after) = (before.min(MAX_DEPTH), after.min(MAX_DEPTH));
+    let Some(w) = window(home, repo, around, (before, after))? else {
+        return Ok(String::new());
+    };
+    if w.shown.is_empty() {
+        return Ok(match w.anchor {
+            Some(_) => format!(
+                "No context found around anchor ({before} records before, {after} records after)"
+            ),
+            None => String::new(),
+        });
+    }
+    let marked_entry = w.shown.iter().find(|e| Some(&e.id) == w.marked.as_ref());
+    let mut out = header(
+        w.anchor.as_deref(),
+        w.query.as_deref(),
+        marked_entry,
+        w.shown.len(),
+        (before, after),
+    );
+    render(
+        &mut out,
+        &w.shown,
+        w.marked.as_deref(),
+        cwd,
+        (&w.local, repo.is_none()),
+        tz,
+    );
+    Ok(out.join("\n"))
+}
+
+/// One entry around an anchor as mem_search's context takes it (docs/mem-search.md): what `get`
+/// takes, claude-mem's kind (`observation`, `summary` or `prompt`) and type, its repository, time
+/// and title, gated.
+#[derive(Debug, Clone)]
+pub struct Neighbor {
+    pub id: String,
+    pub kind: &'static str,
+    pub kind_of: Option<String>,
+    pub repo: Option<String>,
+    pub ts: i64,
+    pub title: String,
+}
+
+/// The entries `before` and `after` `anchor` that a timeline of `repo` shows, in its order; a
+/// session start, which claude-mem has no kind for, is left out. None around an anchor gone since
+/// it was shown (forgotten, or hidden as `get` hides it).
+pub fn near(
+    home: &Path,
+    repo: Option<&str>,
+    anchor: &str,
+    (before, after): (usize, usize),
+) -> Result<Vec<Neighbor>> {
+    if super::get(home, anchor)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let around = Around::Anchor(anchor.to_owned());
+    let Some(w) = window(
+        home,
+        repo,
+        around,
+        (before.min(MAX_DEPTH), after.min(MAX_DEPTH)),
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(w.shown
+        .iter()
+        .filter_map(|e| {
+            let (kind, kind_of) = match &e.what {
+                What::Card(c) => ("observation", c.kind.clone()),
+                What::Summary(_) => ("summary", None),
+                What::Prompt(..) => ("prompt", None),
+                What::Other(i) => match (i.class.as_str(), i.kind.as_str()) {
+                    ("start", _) => return None,
+                    ("imported", k @ ("summary" | "prompt")) => {
+                        (if k == "summary" { "summary" } else { "prompt" }, None)
+                    }
+                    (_, k) => ("observation", Some(k.to_owned())),
+                },
+            };
+            Some(Neighbor {
+                id: e.id.clone(),
+                kind,
+                kind_of,
+                repo: e.what.repo().map(str::to_owned),
+                ts: e.ts,
+                title: title(e),
+            })
+        })
+        .collect())
+}
+
+/// What a timeline shows (T2-T4) before it is rendered: its entries, what they are around, and
+/// the anchor's own entry when it has one. `None` when the stores are not made yet and there is no
+/// anchor.
+struct Window {
+    shown: Vec<Entry>,
+    anchor: Option<String>,
+    query: Option<String>,
+    marked: Option<String>,
+    local: String,
+}
+
+fn window(
+    home: &Path,
+    repo: Option<&str>,
+    around: Around,
+    (before, after): (usize, usize),
+) -> Result<Option<Window>> {
     // A query's anchor is found first, under search's own fence: a reader opens raw.db before it
     // takes the fence (#439).
     let (anchor, query, limit) = match around {
@@ -97,7 +206,7 @@ where
         if let Some(id) = anchor {
             anyhow::bail!("no document {id} to anchor on");
         }
-        return Ok(String::new());
+        return Ok(None);
     };
     // Milestone 5 D5 (#439): no forget commits until the answer is built.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
@@ -165,31 +274,13 @@ where
         let from = entries.len().saturating_sub(limit);
         entries.split_off(from)
     };
-    if shown.is_empty() {
-        return Ok(match anchor {
-            Some(_) => format!(
-                "No context found around anchor ({before} records before, {after} records after)"
-            ),
-            None => String::new(),
-        });
-    }
-    let marked_entry = shown.iter().find(|e| Some(&e.id) == marked.as_ref());
-    let mut out = header(
-        anchor.as_deref(),
-        query.as_deref(),
-        marked_entry,
-        shown.len(),
-        (before, after),
-    );
-    render(
-        &mut out,
-        &shown,
-        marked.as_deref(),
-        cwd,
-        (&local, repo.is_none()),
-        tz,
-    );
-    Ok(out.join("\n"))
+    Ok(Some(Window {
+        shown,
+        anchor,
+        query,
+        marked,
+        local,
+    }))
 }
 
 /// One kind's entries (T2) for the window, read by `read(older, n)` (at most `n` on that side of

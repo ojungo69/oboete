@@ -2888,7 +2888,7 @@ fn others(
 }
 
 mod timeline;
-pub use timeline::{Around, timeline_text};
+pub use timeline::{Around, near, timeline_text};
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
 pub fn known(home: &Path, repo: &str) -> Result<bool> {

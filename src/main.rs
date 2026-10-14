@@ -32,6 +32,7 @@ mod keyfile;
 mod knowledge;
 mod manifest;
 mod mcp;
+mod mem_search;
 mod migrate;
 mod model_fetch;
 mod provider;

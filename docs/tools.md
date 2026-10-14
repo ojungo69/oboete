@@ -204,6 +204,11 @@ list, count the cards and the summaries beside the claims, imported documents an
 8. A card and a summary the rules leave blank are sent once the rule goes; doctor counts them as
    `empty` until then.
 
+## mem_search
+
+claude-mem 13.35's guided search over these three tools' readers: [mem-search.md](mem-search.md).
+`search`, `timeline` and `get` stay, and their descriptions say to prefer it.
+
 ## Slice 4: save_memory
 
 claude-mem 13.35's `save_memory` (`src/servers/mcp-server.ts` and `src/services/worker/save-memory.ts`
