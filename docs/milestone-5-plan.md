@@ -1511,6 +1511,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 
 未チェックの slice がある間、この段階は完了ではない。
 
+2026-10-14（owner decision 45）: 切り替えは Slice 3 の残り（3e-3 の保存期間）、withdraw、Slice 6 を待たない。切り替えの前に作るのは、Slice 4 の mute/unmute と owner の 2 台で起きうる訂正の修正（#157 から）、Slice 5 のうちそれを操作する画面まで。
+
 ### 第一 slice の実装・検証（2026-10-03、設計 v2）
 
 設計 v1（journal）の実装を v2（D1）に置き換えた。`forget_jobs.step` は 1 のままで、物理 purge
