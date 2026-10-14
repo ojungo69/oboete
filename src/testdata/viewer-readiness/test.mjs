@@ -27,7 +27,7 @@ class Node {
   get childNodes(){return this.children;}
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
-  focus(){this.focused=true;}
+  focus(){this.focused=true;document.activeElement=this;}
   closest(selector){
     for(let node=this;node;node=node.parentElement){
       if(node.tagName===selector.toUpperCase()||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1)))return node;
@@ -48,6 +48,47 @@ const sourcePath=fs.realpathSync(process.argv[2]||new URL('../../../assets/viewe
 const source=fs.readFileSync(sourcePath,'utf8');
 vm.runInContext(source.replace('await start();',''),ctx,{filename:sourcePath});
 vm.runInContext('globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;}};',ctx);
+// The simple page uses the saved chain, including unavailable and disabled entries.
+{
+const simple=vm.runInContext('({status:simpleProviderStatus,models:simpleProviderModels,listed:catalogHasProvider,chain:simpleSavedChain,catalog:AI_CATALOG,mode:settingsMode})',ctx);
+assert.equal(simple.mode,'simple','Settings starts with the simple view');
+const row={name:'groq',key:'ok',on:true,effective_model:'openai/gpt-oss-20b',model_rule:'any'};
+assert.equal(simple.status(row,[]),'ready');
+assert.equal(simple.status({...row,key:'missing',on:false},['groq']),'missing','a missing key is explained before other states');
+assert.equal(simple.status({...row,key:'not-on-path'},['groq']),'not-installed');
+assert.equal(simple.status({...row,on:false},['groq']),'stopped','an owner stop retains its resume path');
+assert.equal(simple.status({...row,on:false},[]),'off');
+assert.equal(simple.status({...row,key:'unknown'},[]),'unknown','unknown installation is never ready');
+assert.equal(simple.status(row,null),'unknown','unreadable stops are never reported as ready');
+const preset={savedSettings:{chain:[{...row,key:'none'}]},providers:[{name:'groq',saved:{enabled:true,base_url:'https://api.groq.com/openai/v1'}}]};
+assert.equal(simple.chain(preset)[0].key,'missing','a newly added keyed preset still needs its key after reload');
+assert.equal(simple.status(simple.chain(preset)[0],[]),'missing');
+preset.providers[0].saved.base_url='http://127.0.0.1:11434/v1';
+assert.equal(simple.chain(preset)[0].key,'none','a custom keyless server stays keyless');
+preset.providers[0].saved.enabled=false;
+assert.equal(simple.status(simple.chain(preset)[0],[]),'off','native disabling remains distinct from a name overlay');
+const models=(value)=>Array.from(simple.models(value,['openai/gpt-oss-120b','openai/gpt-oss-20b','openai/gpt-oss-120b']));
+assert.deepEqual(models(row),['openai/gpt-oss-20b','openai/gpt-oss-120b'],'the effective model comes first, without duplicates');
+assert.deepEqual(models({...row,effective_model:'custom-owned-model'}),['custom-owned-model','openai/gpt-oss-120b','openai/gpt-oss-20b']);
+assert.deepEqual(models({...row,model_rule:'fixed'}),[],'priced models are edited together with their prices in detail');
+assert.deepEqual(Array.from(simple.models({...row,model_rule:'free',effective_model:'current:free'},
+  ['paid-model','other:free','misleading:free-extra','current:free'])),['current:free','other:free']);
+assert.deepEqual(Array.from(simple.models({...row,model_rule:'free',effective_model:'paid-model'},['other:free'])),['other:free']);
+assert.deepEqual(Array.from(simple.models({...row,effective_model:null},[])),[],'a CLI default needs no invented model name');
+assert(simple.listed({name:'groq'},[{name:'groq',on:false}]),'an off entry is already in the list');
+assert(!simple.listed({name:'groq'},[{name:'groq-20b'}]),'similar names are separate entries');
+assert(!simple.listed({name:''},[{name:''}]),'the custom server is never a duplicate');
+assert.equal(new Set(simple.catalog.filter(entry=>entry.name).map(entry=>entry.name)).size,simple.catalog.length-1);
+const remembered=[];
+ctx.localStorage.setItem=(key,value)=>remembered.push([key,value]);
+const switcher=vm.runInContext('settingsViewSwitch()',ctx);
+switcher.querySelectorAll('button')[1].click();
+assert.deepEqual(remembered.at(-1),['oboete-settings-view','detailed'],'the view choice uses remember');
+switcher.querySelectorAll('button')[0].click();
+assert.deepEqual(remembered.at(-1),['oboete-settings-view','simple']);
+}
+// Existing detailed-page checks continue to exercise the whole original page.
+vm.runInContext("settingsMode='detailed';",ctx);
 const text=node=>typeof node==='string'?node:(node?.children||[]).map(text).join(' ');
 const response=value=>({ok:true,status:200,json:async()=>value});
 const rows=(state)=>['claude','codex','grok','agy','opencode','pi','cursor'].map((agent,index)=>({
@@ -861,4 +902,119 @@ ctx.ui.setLang('ja');f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettin
 assert(text(panel).includes('意味での検索')&&text(section()).includes('このパソコンで処理'),'Japanese section');
 ctx.ui.setLang('en');
 console.log('PASS: the embedder is reviewed, agreed and run; its values and token');
+}
+
+// Simple controls save only their own change, using the existing whole-settings operation.
+{
+vm.runInContext("settingsMode='simple';globalThis.simpleUi={formOf,TEXT,embeddingDraft:()=>embeddingDraft,renderEmbedding};",ctx);
+const plain=value=>JSON.parse(JSON.stringify(value));
+const privacy={available:true,repositories:[],folders:[],rescan:{state:'idle',processed:null,total:null}};
+let saved={version:'simple-v1',first_run:true,resident_supported:true,worker:{resident:false},view:{port:17373},
+  summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:2,gemini:null,usd_this_month:0,
+  stopped:[],inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,
+    session_start_chars:6000,per_prompt_chars:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},
+  redaction:{enabled:true,extra_rules:[],allowlist:[]},privacy,backup:{dir:null},warnings:[],key_input:true,
+  embedding:{provider:'none',workers_ai:{account_id:null,key_file:'test-key.md',key:'missing',daily_requests:200,monthly_usd:1,
+    usd_this_month:0,requests_today:0},local:{unavailable:null,files:'not_downloaded',dir:'/tmp/oboete-test/models',held:0}},
+  ranges:{paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],daily_requests:[1,100000],
+    session_start_chars:[0,20000],per_prompt_chars:[0,5000],correction_chars:[0,2000],window_tokens:[0,100000],idle_minutes:[0,120]},
+  chain:[{name:'groq',on:true,key:'missing',effective_model:'openai/gpt-oss-120b',model_rule:'any',model:null,
+    daily_budget:null,timeout_s:null,differs:[]}],
+  providers:[{name:'groq',selector:{source:'builtin',index:0},saved:{enabled:true,kind:'openai',base_url:'https://api.groq.com/openai/v1',
+    model:'openai/gpt-oss-120b',limits:{}},effective:{on:true}}]};
+const requests=[];let refuseNext=false;
+ctx.fetch=(url,options)=>{
+  if(!options?.method){assert(url.startsWith('/api/privacy?'));return Promise.resolve(diagnosticResponse(privacy));}
+  const body=JSON.parse(options.body);requests.push({url,body});
+  assert.equal(url,'/api/settings','ordinary simple changes reuse the existing Settings write');
+  if(refuseNext){refuseNext=false;return Promise.resolve(diagnosticResponse({code:'write_failed'},500));}
+  const prior=saved.chain;
+  saved={...saved,...body,version:'simple-v'+(requests.length+1)};
+  // The response includes the same effective facts as GET /api/settings.
+  saved.chain=saved.chain.map(row=>({...prior.find(entry=>entry.name===row.name),...row,
+    effective_model:row.model||prior.find(entry=>entry.name===row.name).effective_model}));
+  return Promise.resolve(diagnosticResponse(plain(saved)));
+};
+let f=ctx.simpleUi.formOf(plain(saved));
+f.summary.language='Unsaved detailed language';f.inject.session_start_chars='7777';f.paid_usd_per_month='99';
+ctx.ui.setForm(f);ctx.ui.setView('settings');ctx.ui.setLang('ja');ctx.ui.drawSettings();
+assert.equal(panel.querySelectorAll('.simple-block').length,7,'all seven blocks are present');
+assert(text(panel).includes('要約に使える AI がまだない'),'an unusable home has a clear first action');
+assert(!panel.querySelector('form'),'simple settings have no competing whole-page save');
+assert(!text(panel).includes('4294967295'),'field ranges stay in detailed settings');
+assert(panel.querySelector('.simple-provider').querySelectorAll('input').some(node=>node.dataset.field==='providers.key'),
+  'the existing write-only key field is inline');
+const field=key=>panel.querySelectorAll('input').find(node=>node.dataset.simpleFocus===key);
+const type=(node,value)=>{node.value=value;for(const cb of node.listeners.input||[])cb({target:node});};
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+change(field('summary.curate'),true);await settle();
+assert.equal(requests.length,1);
+assert.equal(requests[0].body.summary.curate,true);
+assert.equal(requests[0].body.summary.language,'Japanese','autosave does not commit an unrelated detailed draft');
+assert.equal(requests[0].body.inject.session_start_chars,6000);
+assert.equal(requests[0].body.paid_usd_per_month,2);
+assert.equal(requests[0].body.worker,undefined,'a first simple save does not activate suggested resident mode');
+assert.equal(ctx.ui.getForm().summary.language,'Unsaved detailed language','unrelated drafts survive the saved response');
+assert.equal(ctx.ui.getForm().inject.session_start_chars,'7777');
+assert(text(panel).includes('保存しました'),'a saved receipt is beside the changed block');
+type(field('paid_usd_per_month'),'3.5');for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
+assert.equal(requests.at(-1).body.paid_usd_per_month,3.5);
+assert.equal(requests.at(-1).body.summary.language,'Japanese');
+change(field('inject.per_prompt'),true);await settle();
+assert.equal(requests.at(-1).body.inject.per_prompt,true);
+assert.equal(requests.at(-1).body.inject.session_start_chars,6000,'a switch keeps saved sizes');
+const before=requests.length;
+change(field('redaction.enabled'),false);
+assert.equal(requests.length,before,'turning masking off first opens its warning');
+let confirm=panel.querySelectorAll('button').find(node=>node.dataset.simpleFocus==='mask.confirm');
+assert(confirm&&text(panel).includes(ctx.simpleUi.TEXT.redaction_off_warning[1]));
+confirm.click();await settle();
+assert.equal(requests.length,before+1);
+assert.equal(requests.at(-1).body.redaction.enabled,false);
+change(field('redaction.enabled'),true);await settle();
+assert.equal(requests.at(-1).body.redaction.enabled,true);
+for(const language of ['ja','en']){
+  ctx.ui.setLang(language);ctx.ui.drawSettings();
+  for(const [key,pair] of Object.entries(ctx.simpleUi.TEXT).filter(([key])=>key.startsWith('simple_'))){
+    assert.equal(pair.length,2,`${key} is bilingual`);assert(pair.every(value=>typeof value==='string'&&value.length));
+  }
+  assert.equal(panel.querySelectorAll('.simple-block').length,7);
+}
+assert.equal(requests.filter(request=>request.url!=='/api/settings').length,0,'rendering never calls a provider');
+saved.chain.push({...saved.chain[0],name:'openrouter',effective_model:'nvidia/nemotron-3-super-120b-a12b:free',model_rule:'free'});
+saved.providers.push({...saved.providers[0],name:'openrouter',selector:{source:'builtin',index:1},
+  saved:{...saved.providers[0].saved,base_url:'https://openrouter.ai/api/v1'}});
+f=ctx.simpleUi.formOf(plain(saved));f.chain.reverse();ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual(panel.querySelectorAll('.simple-provider').map(node=>node.dataset.providerName),['groq','openrouter'],
+  'simple order follows saved settings even when a detailed order is pending');
+panel.querySelectorAll('button').find(node=>node.dataset.simpleFocus==='move:groq:1').click();await settle();
+assert.deepEqual(requests.at(-1).body.chain.map(row=>row.name),['openrouter','groq'],'the arrow changes the displayed saved order');
+const model=panel.querySelectorAll('select').find(node=>node.dataset.simpleFocus==='model:groq');
+model.value='openai/gpt-oss-20b';for(const cb of model.listeners.change)cb({target:model});await settle();
+assert.equal(requests.at(-1).body.chain.find(row=>row.name==='groq').model,'openai/gpt-oss-20b','a model pick uses the name overlay');
+saved.redaction.enabled=false;ctx.ui.setForm(ctx.simpleUi.formOf(plain(saved)));ctx.ui.drawSettings();
+refuseNext=true;change(field('redaction.enabled'),true);await settle();
+assert.equal(field('redaction.enabled').checked,false,'a failed save never claims that masking has been enabled');
+assert(panel.querySelectorAll('.simple-saved').every(node=>!text(node).trim()),'a failed change clears the previous saved receipt');
+const limitField=field('paid_usd_per_month');document.activeElement=limitField;
+ctx.simpleUi.embeddingDraft().focus='embedding:local';ctx.simpleUi.renderEmbedding();
+assert(document.activeElement===limitField,'embedding polling does not take focus from another setting');
+document.activeElement=null;
+ctx.simpleUi.embeddingDraft().focus=undefined;ctx.simpleUi.renderEmbedding();
+assert(document.activeElement===null,'a passive embedding read never focuses an unrelated unmarked control');
+// Entries that read one key file take the key once: the first of them shows the field, the
+// others say whose key they use.
+saved.redaction.enabled=true;
+saved.chain=[{name:'groq',on:true,key:'missing',key_file:'/k/GROQ_API_KEY.md',effective_model:'openai/gpt-oss-120b',model_rule:'any',
+  model:null,daily_budget:null,timeout_s:null,differs:[]},{name:'groq-20b',on:true,key:'missing',key_file:'/k/GROQ_API_KEY.md',
+  effective_model:'openai/gpt-oss-20b',model_rule:'any',model:null,daily_budget:null,timeout_s:null,differs:[]}];
+saved.providers=[saved.providers[0],{...saved.providers[0],name:'groq-20b',selector:{source:'builtin',index:1}}];
+ctx.ui.setForm(ctx.simpleUi.formOf(plain(saved)));ctx.ui.setLang('ja');ctx.ui.drawSettings();
+const rowOf=name=>panel.querySelectorAll('.simple-provider').find(node=>node.dataset.providerName===name);
+const keyInput=row=>row.querySelectorAll('input').some(node=>node.dataset.field==='providers.key');
+assert(keyInput(rowOf('groq')),'the first entry of a key file takes the key');
+assert(!keyInput(rowOf('groq-20b')),'a later entry of the same key file has no second key field');
+assert(text(rowOf('groq-20b')).includes('と同じキーを使います'),'a later entry says whose key it uses');
+vm.runInContext("settingsMode='detailed';",ctx);
+console.log('PASS: simple status/models/catalog, remembered view, seven JA/EN blocks, isolated autosaves and masking confirmation');
 }

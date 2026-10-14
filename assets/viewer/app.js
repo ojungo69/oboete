@@ -645,6 +645,81 @@ async function showStats() {
 const LANGS = ['en', 'ja'];
 // Each string in the languages of LANGS, in that order.
 const TEXT = {
+  simple_view: ['Simple settings', 'かんたん設定'],
+  simple_detailed: ['Detailed settings', '詳しい設定'],
+  simple_mode_label: ['Settings view', '設定の表示方法'],
+  simple_intro: ['Changes save automatically, and actions that send data or remove it ask you to confirm first.', '変更は自動で保存され、データの送信や削除を伴う操作では先に確認します。'],
+  simple_saved: ['Saved', '保存しました'],
+  simple_use: ['Use', '使う'],
+  simple_model_short: ['Model', 'モデル'],
+  simple_key_shared: ['Uses the same key as {name}; add it there.', '{name} と同じキーを使います。キーはそちらで登録してください。'],
+  simple_ai_h: ['AI for summaries', '要約に使う AI'],
+  simple_ai_desc: ['The enabled AI services are tried in this order and receive the records needed to write a summary.', 'オンにした AI がこの順番で使われ、要約に必要な記録が送られます。'],
+  simple_no_ai: ['No AI for summaries can be used yet; add a key below or add an AI.', '要約に使える AI がまだないため、下の一覧でキーを登録するか、AI を追加してください。'],
+  simple_curate: ['Create summaries', '記録を要約する'],
+  simple_status_missing: ['Needs an API key', 'API キーの登録が必要です'],
+  simple_status_not_installed: ['Not installed', 'インストールされていません'],
+  simple_status_stopped: ['Stopped', '停止しています'],
+  simple_status_off: ['Off', 'オフです'],
+  simple_status_ready: ['Ready to use', '利用できます'],
+  simple_status_unknown: ['Could not check availability', '利用できるか確認できません'],
+  simple_ai_on: ['Use {name}', '{name} を使う'],
+  simple_model: ['Model for {name}', '{name} のモデル'],
+  simple_model_default: ['The app’s default model', 'アプリの標準モデル'],
+  simple_other_model: ['Another model…', 'ほかのモデルを選ぶ…'],
+  simple_entry_detail: ['Details for {name}', '{name} の詳しい設定'],
+  simple_differs: ['These entries have different settings; check their details.', '同じ名前の接続先で設定が異なるため、詳しい設定をご確認ください。'],
+  simple_add_ai: ['Add AI', 'AI を追加する'],
+  simple_catalog_choose: ['Choose {name}', '{name} を選ぶ'],
+  simple_catalog_listed: ['Already in the list', '一覧に追加されています'],
+  simple_catalog_open: ['Find it in the list', '一覧で確認する'],
+  simple_add_save: ['Add this AI', 'この AI を追加する'],
+  simple_add_key: ['After adding an API service, register its key in the list.', 'API を使う接続先を追加したら、一覧でキーを登録してください。'],
+  simple_catalog_groq: ['Groq · GPT OSS 120B', 'Groq・GPT OSS 120B'],
+  simple_catalog_groq_20b: ['Groq · GPT OSS 20B', 'Groq・GPT OSS 20B'],
+  simple_catalog_groq_qwen: ['Groq · Qwen', 'Groq・Qwen'],
+  simple_catalog_openrouter: ['OpenRouter', 'OpenRouter'],
+  simple_catalog_nim: ['NVIDIA NIM', 'NVIDIA NIM'],
+  simple_catalog_opencode_go: ['OpenCode Go', 'OpenCode Go'],
+  simple_catalog_anthropic: ['Anthropic API', 'Anthropic API'],
+  simple_catalog_codex: ['Codex subscription', 'Codex のサブスクリプション'],
+  simple_catalog_claude: ['Claude subscription', 'Claude のサブスクリプション'],
+  simple_catalog_gemini: ['Gemini API', 'Gemini API'],
+  simple_catalog_custom: ['Another OpenAI-compatible server', 'ほかの OpenAI 互換サーバー'],
+  simple_gemini_warning: ['Gemini’s free service may use your input for training and human review.', 'Gemini の無料サービスでは、送った内容が学習や人による確認に使われることがあります。'],
+  simple_spending_h: ['Monthly limit on paid calls', '有料の AI に使う月額上限'],
+  simple_spending_desc: ['Paid summary calls stop when they reach this limit in US dollars.', '有料の要約に使う金額がこの米ドルの上限に達すると、有料の呼び出しを止めます。'],
+  simple_limit: ['Monthly limit (USD)', '月額上限（米ドル）'],
+  simple_spent: ['Used this month: {usd}', '今月の利用額：{usd}'],
+  simple_limit_invalid: ['Enter a valid amount of zero or more.', '0 以上の有効な金額を入力してください。'],
+  simple_search_h: ['Search by meaning', '意味で記憶を探す'],
+  simple_search_desc: ['Find related memories even when the words differ, with a review before changing how it works.', '言葉が違っても関連する記憶を探せるようにし、方法を変える前に内容を確認できます。'],
+  simple_search_none: ['Words only', '言葉が一致する記憶だけを探す'],
+  simple_search_none_desc: ['Searches the recorded words without AI.', 'AI を使わず、記録された言葉で探します。'],
+  simple_search_local: ['This computer', 'このパソコンで探す'],
+  simple_search_local_desc: ['Downloads a model to find related memories on this computer.', 'モデルをダウンロードし、このパソコンの中で関連する記憶を探します。'],
+  simple_search_workers: ['Workers AI', 'Workers AI で探す'],
+  simple_search_workers_desc: ['Sends search text and records to Cloudflare and may cost money.', '検索文や記録を Cloudflare に送り、費用がかかることがあります。'],
+  simple_search_review: ['Review this choice', 'この方法を確認する'],
+  simple_cancel: ['Cancel', 'キャンセル'],
+  simple_inject_h: ['What agents are given', 'エージェントに渡す記憶'],
+  simple_inject_desc: ['Share previous memories with your agent so you can continue without explaining them again.', '以前の記憶をエージェントに渡し、説明し直さずに続きを進められるようにします。'],
+  simple_session: ['Memories at the start of a session', 'セッションの開始時に記憶を渡す'],
+  simple_prompt: ['Related decisions with each prompt', '入力のたびに関連する決定を渡す'],
+  simple_never_h: ['Places never recorded', '記録しない場所'],
+  simple_never_desc: ['New activity in these repositories and folders is not recorded, while existing memories remain.', '指定したリポジトリやフォルダーでの新しい作業を記録せず、以前の記憶はそのまま残します。'],
+  simple_never_empty: ['No places are excluded from recording.', '記録しない場所は指定されていません。'],
+  simple_never_more: ['Choose a repository in detailed settings', '詳しい設定でリポジトリを選ぶ'],
+  simple_mask_h: ['Masking of secrets', '機密情報のマスキング'],
+  simple_mask_desc: ['Hide API keys and passwords in records, outgoing text and this page.', '記録や送信する内容、この画面に含まれる API キーやパスワードを隠します。'],
+  simple_mask_on: ['Mask secrets', '機密情報を隠す'],
+  simple_mask_confirm: ['Turn masking off', '確認してマスキングをオフにする'],
+  simple_agents_h: ['Agents', '接続するエージェント'],
+  simple_agents_desc: ['Check whether each agent is connected to record activity and receive memories.', '作業の記録と記憶の受け渡しのために、各エージェントが接続されているか確認できます。'],
+  simple_agent_connected: ['Connected', '接続されています'],
+  simple_agent_disconnected: ['Not connected', '接続されていません'],
+  simple_agent_partial: ['Check the connection', '接続の確認が必要です'],
+  simple_agent_connect: ['Connection settings for {name}', '{name} の接続設定'],
   timeline: ['Timeline', 'タイムライン'],
   records: ['Records', '記録'],
   context: ['Context', 'コンテキスト'],
@@ -2476,6 +2551,7 @@ function formOf(s) {
   const workers = s.embedding?.workers_ai;
   return {
     version: s.version,
+    savedSettings: s,
     saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
       worker: { resident: s.worker?.resident ?? false }, view: { port: s.view?.port } },
     firstRun: s.first_run === true,
@@ -2672,6 +2748,8 @@ function agentInventorySection() {
 
 function renderAgentInventory() {
   if(view!=='settings')return;
+  const simple = $('panel').querySelector('.simple-agent-inventory');
+  if (simple) { simple.replaceChildren(simpleAgents()); return; }
   const section=$('panel').querySelector('.agent-readiness');
   if(!section)return;
   const focused=section.contains(document.activeElement) && document.activeElement?.dataset.action==='agent_inventory.refresh';
@@ -3456,7 +3534,7 @@ function embeddingRun(d) {
 
 // The part the poll redraws: the choice, its review and the run. The Workers AI fields stay, so a
 // token being typed is not cleared.
-function embeddingChoice(f) {
+function embeddingChoice(f, simple = false) {
   const d = embeddingDraft, e = f.embedding;
   const locked = d.busy || Boolean(d.status?.active);
   const choice = d.choice ?? e.provider;
@@ -3492,6 +3570,7 @@ function embeddingChoice(f) {
   const local = e.local;
   const files = local.unavailable ? t(`embedding_unavailable_${local.unavailable}`)
     : t(`embedding_files_${local.files}`, { dir: local.dir, size: bytesText(local.held) });
+  if (simple) return simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, consent });
   return el('div', 'embedding-choice',
     el('label', 'field', el('span', null, t('embedding_choice')), pick,
       note(t('saved_value', { value: t(EMBEDDING_CHOICES[e.provider] || 'embedding_none') }))),
@@ -3509,9 +3588,16 @@ function renderEmbedding() {
   const block = $('panel').querySelector('.embedding-choice');
   if (!block) return;
   const focused = block.contains(document.activeElement) ? document.activeElement : null;
+  const simple = settingsMode === 'simple';
+  const unclaimed = !document.activeElement || document.activeElement === document.body;
+  const restore = simple ? focused?.dataset.simpleFocus || (unclaimed ? embeddingDraft.focus : null) : null;
+  // Keep focus through a disabled redraw only while this request owns it. A later poll or a
+  // user working in another block must not pull the keyboard back to the search choices.
+  if (simple) embeddingDraft.focus = embeddingDraft.busy || embeddingDraft.status?.active ? restore : null;
   const key = focused?.dataset.action ? ['action', focused.dataset.action]
     : focused?.dataset.field ? ['field', focused.dataset.field] : null;
-  block.replaceChildren(...embeddingChoice(form).childNodes);
+  block.replaceChildren(...embeddingChoice(form, simple).childNodes);
+  if (simple) { simpleFocus(restore); return; }
   const next = key && block.querySelector(`[data-${key[0]}="${key[1]}"]`);
   if (next && !next.disabled) next.focus({ preventScroll: true });
 }
@@ -3617,6 +3703,7 @@ async function reloadEmbedding() {
     if (!settings || settings.error || view !== 'settings') return false;
   } while (form !== mine);
   form = mergeProviderSettings(settings, mine, { op: 'embedding' });
+  if (embeddingDraft.status?.last?.phase === 'done') simpleReceipt = 'search';
   drawSettings();
   return true;
 }
@@ -3674,7 +3761,7 @@ async function embeddingAction(action) {
       return;
     }
     const { res, answer } = await memoryWrite('embedding', { choice, preview_key: reviewed.key, confirmed: true });
-    if (res.ok) d.status = answer;
+    if (res.ok) { d.status = answer; if (!answer.active) simpleReceipt = 'search'; }
     else {
       embeddingRefused(d, res, answer);
       d.status = await api('embedding').catch(() => null);
@@ -3762,9 +3849,14 @@ function privacySection(f) {
 
 // Slice 4b (spec 6.1): never record a repository or a folder of this device, or record it again,
 // through `oboete capture exclude`'s backend.
-function captureSection(f) {
+function captureSection(f, simple = false) {
   const state = f.privacy;
-  if (!state.available) return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('privacy_unavailable')));
+  if (!state.available) {
+    const section = simple ? simpleBlock('never', el('p', 'desc', t('privacy_unavailable')))
+      : el('section', null, el('h3', null, t('never_h')), el('p', 'desc', t('privacy_unavailable')));
+    section.className += ' never-record';
+    return section;
+  }
   const write = async (button, body, receipt) => {
     const fields = button.closest('.settings');
     fields.inert = true;
@@ -3778,6 +3870,7 @@ function captureSection(f) {
       // CodeRabbit on #491).
       if (body.folder_selector && answer.never_recorded === true) receipt = t('never_undone_covered');
       if (body.selector && body.undo && answer.never_recorded === true) receipt = t('never_undone_repo_covered');
+      if (simple) simpleReceipt = 'never';
       const refreshed = await refreshPrivacy(f);
       if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
     } catch {
@@ -3790,7 +3883,7 @@ function captureSection(f) {
     action.addEventListener('click', () => onClick(action));
     return el('li', null, el('p', 'text', label), el('p', 'desc', t(never ? 'never_on' : 'never_off')), action);
   };
-  const repos = (state.repositories || []).map((repo) => row(repo.label, repo.never_recorded, (action) =>
+  const repos = (state.repositories || []).filter(repo => !simple || repo.never_recorded).map((repo) => row(repo.label, repo.never_recorded, (action) =>
     write(action, { selector: repo.selector, undo: !!repo.never_recorded },
       t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label }))));
   const folders = (state.folders || []).map((folder) => row(folder.label, true, (action) =>
@@ -3799,10 +3892,24 @@ function captureSection(f) {
   const add = el('button', 'quiet small', t('never_folder_add'));
   add.type = 'button';
   add.addEventListener('click', () => {
+    if (add.disabled) return;
     // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
     if (!folder.value.trim()) { setStatus(t('capture_folder'), true, lang); return; }
     void write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
   });
+  if (simple) {
+    folder.dataset.simpleFocus = 'never.folder';
+    folder.addEventListener('blur', () => { if (folder.value.trim() && !add.disabled) add.click(); });
+    folder.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); if (!add.disabled) add.click(); }
+    });
+    const section = simpleBlock('never',
+      repos.length || folders.length ? el('ul', 'simple-places', ...repos, ...folders) : el('p', 'desc', t('simple_never_empty')),
+      el('label', 'field', el('span', null, t('never_folder_input')), folder), add,
+      detailedSettingsLink('simple_never_more', '.never-record'));
+    section.className += ' never-record';
+    return section;
+  }
   return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
     el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('privacy_none')),
     el('h4', null, t('never_folders_h')), folders.length ? el('ul', null, ...folders) : el('p', 'desc', t('never_folders_none')),
@@ -3964,7 +4071,8 @@ async function resumeProvider(name, button) {
     if (view !== 'settings' || form !== mine) return;
     if (res.ok) {
       mine.stopped = mine.stopped.filter((provider) => provider !== answer.provider);
-      state.replaceWith(stoppedState());
+      if (settingsMode === 'simple') { simpleReceipt = 'ai'; drawSettings(); }
+      else state.replaceWith(stoppedState());
       setStatus(t(answer.resumed ? 'resumed' : 'not_stopped'), false, lang);
       return;
     }
@@ -4074,6 +4182,7 @@ function providerValidation(draft) {
 function preserveSettingsDrafts(next, mine) {
   for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction']) next[key] = mine[key];
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
+  next.neverFolder = mine.neverFolder;
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
@@ -4155,6 +4264,7 @@ function mergeProviderSettings(answer, mine, action) {
   next.privacy = mine.privacy;
   next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
+  next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
   preserveProviderDrafts(next, mine, action);
   preserveCreatedSubscriptionDraft(next, mine, action);
   return next;
@@ -4228,6 +4338,7 @@ function providerOperationFailure(action, path, res, answer, fields, scope) {
 
 async function providerOperation(action, button, body = null, path = '') {
   const mine = form;
+  if (settingsMode === 'simple') clearSimpleReceipt();
   const fields = button.closest('.settings');
   const scope = button.closest('.provider-entry');
   button.disabled = true;
@@ -4238,8 +4349,14 @@ async function providerOperation(action, button, body = null, path = '') {
     if (current) return reloadProviderSettings(current);
     if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
     form = mergeProviderSettings(answer, mine, action);
+    if (settingsMode === 'simple') {
+      simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
+      if (path === '/key') simpleKeyName = null;
+      if (action.op === 'create' && action.entry.kind === 'openai') simpleKeyName = action.entry.name;
+    }
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
+    return true;
   } catch {
     if (currentSettings(mine)) {
       if (action.op === 'enabled') drawSettings();
@@ -4261,9 +4378,11 @@ function providerKeyField(provider) {
   i.autocapitalize = 'off';
   i.placeholder = t('key_placeholder');
   i.dataset.field = 'providers.key';
+  i.dataset.simpleFocus = `key:${provider.name}`;
   i.setAttribute('aria-label', t('key_label', { name: provider.name }));
   const save = el('button', 'small', t('key_save'));
   save.type = 'button';
+  save.dataset.simpleFocus = `key-save:${provider.name}`;
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
   i.addEventListener('keydown', (event) => {
@@ -4324,9 +4443,10 @@ async function previewProvider(provider, button, run = false) {
   }
 }
 
-function providerTestPreview(provider, preview) {
+function providerTestPreview(provider, preview, simple = false) {
   const run = el('button', 'small', t('provider_test_run'));
   run.type = 'button';
+  if (simple) run.dataset.simpleFocus = `test-run:${provider.name}`;
   run.disabled = !preview.ready;
   run.addEventListener('click', () => void previewProvider(provider, run, true));
   return el('div', 'test-preview',
@@ -4352,12 +4472,13 @@ function providerTestResult(result) {
     result.retry_at ? note(t('provider_test_retry', { time: new Date(result.retry_at).toLocaleString(lang) })) : null);
 }
 
-function providerTest(provider) {
+function providerTest(provider, simple = false) {
   const button = el('button', 'quiet small', t('provider_preview'));
   button.type = 'button';
+  if (simple) button.dataset.simpleFocus = `test:${provider.name}`;
   button.addEventListener('click', () => void previewProvider(provider, button));
-  const nodes = [note(t('provider_preview_desc')), button];
-  if (provider.preview) nodes.push(providerTestPreview(provider, provider.preview));
+  const nodes = [simple ? null : note(t('provider_preview_desc')), button];
+  if (provider.preview) nodes.push(providerTestPreview(provider, provider.preview, simple));
   if (provider.result) nodes.push(providerTestResult(provider.result));
   return el('div', 'provider-test', ...nodes);
 }
@@ -4701,24 +4822,28 @@ function markInvalid(field, root = document) {
   i.focus();
 }
 
-function applySavedSettings(answer, mine, current) {
+function applySavedSettings(answer, mine, current, simple = null) {
   // The resident viewer moved onto the saved port with a new token: the page goes on to the
   // address in the answer and reads nothing more from the old one, which no longer answers.
   const runtime = current ? null : answer.view_runtime;
   // An address on port 80 shows no port.
   const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
   if (moved && movePage(runtime.url || '')) return;
-  form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: 'settings' });
+  form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: simple ? 'simple' : 'settings' });
+  if (simple && !current && form) {
+    simple.adopt(form, answer);
+    simpleReceipt = simple.block;
+  }
   if (form) form.privacy = privacyUnavailable();
   drawSettings();
-  let status = current ? 'stale' : 'saved';
+  let status = current ? 'stale' : simple ? 'simple_saved' : 'saved';
   if (moved) status = 'view_lost';
   setStatus(t(status), Boolean(current) || moved, lang);
   if (form) void refreshPrivacy(form);
 }
 
-async function saveSettings(button) {
-  const { body, field } = saveBody();
+async function saveSettings(button, simple = null) {
+  const { body, field } = simple || saveBody();
   if (!body) {
     markInvalid(field);
     setStatus(t(field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
@@ -4746,7 +4871,7 @@ async function saveSettings(button) {
     // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
-      applySavedSettings(answer, mine, current);
+      applySavedSettings(answer, mine, current, simple);
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
@@ -4760,6 +4885,12 @@ async function saveSettings(button) {
   } finally {
     button.disabled = false;
     fields.inert = false;
+    if (simple && currentSettings(mine)) {
+      clearSimpleReceipt();
+      // Keep a refused amount available to correct; switches, models and arrows show the last
+      // saved state again, especially when masking could not be enabled.
+      if (button.type !== 'number') { mine.simpleMaskingOff = false; drawSettings(); }
+    }
   }
 }
 
@@ -4915,7 +5046,385 @@ function onboardingSection(f) {
     el('label','field',el('span',null,t('onboarding_search_phrase')),phrase),search);
 }
 
+// Catalog help, not validation: other models remain available in the detailed editor.
+// Sources: config.rs's built-ins and docs/research/{curator-providers-*,anthropic-messages-*}.
+// Key filenames describe the preset; registration still uses the existing managed key writer.
+const AI_CATALOG = [
+  { name: 'groq', label: 'simple_catalog_groq', kind: 'openai', base_url: 'https://api.groq.com/openai/v1', api: 'openai',
+    key_file: 'GROQ_API_KEY.md', subscription: false, timeout_s: 90, models: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+    limits: { max_request_tokens: 8000, daily_tokens: 40000 } },
+  { name: 'groq-20b', label: 'simple_catalog_groq_20b', kind: 'openai', base_url: 'https://api.groq.com/openai/v1', api: 'openai',
+    key_file: 'GROQ_API_KEY.md', subscription: false, timeout_s: 90, models: ['openai/gpt-oss-20b', 'openai/gpt-oss-120b'],
+    limits: { max_request_tokens: 8000, daily_tokens: 40000 } },
+  { name: 'groq-qwen', label: 'simple_catalog_groq_qwen', kind: 'openai', base_url: 'https://api.groq.com/openai/v1', api: 'openai',
+    key_file: 'GROQ_API_KEY.md', subscription: false, timeout_s: 90, models: ['qwen/qwen3.8-27b'],
+    limits: { max_request_tokens: 8000, daily_tokens: 40000 } },
+  { name: 'openrouter', label: 'simple_catalog_openrouter', kind: 'openai', base_url: 'https://openrouter.ai/api/v1', api: 'openai',
+    key_file: 'OPENROUTER_API_KEY.md', subscription: false, timeout_s: 90,
+    models: ['nvidia/nemotron-3-super-120b-a12b:free', 'qwen/qwen3.8-27b:free'] },
+  { name: 'nim', label: 'simple_catalog_nim', kind: 'openai', base_url: 'https://integrate.api.nvidia.com/v1', api: 'openai',
+    key_file: 'NVIDIA_NIM_KEY.md', subscription: false, timeout_s: 160, models: ['nvidia/nemotron-3-ultra-550b-a55b'] },
+  { name: 'opencode-go', label: 'simple_catalog_opencode_go', kind: 'openai', base_url: 'https://opencode.ai/zen/go/v1', api: 'openai',
+    key_file: 'OPENCODE_API_KEY.md', subscription: true, timeout_s: 150, models: ['glm-5.3-flash'] },
+  { name: 'anthropic', label: 'simple_catalog_anthropic', kind: 'openai', base_url: 'https://api.anthropic.com/v1', api: 'anthropic',
+    key_file: 'ANTHROPIC_API_KEY.md', subscription: false, timeout_s: 90, models: ['claude-haiku-5-5', 'claude-haiku-4-5-20251001'],
+    limits: { max_request_tokens: 100000, usd_per_mtok_in: 0.10, usd_per_mtok_out: 0.50 } },
+  { name: 'codex', label: 'simple_catalog_codex', kind: 'cli', cli: 'codex', base_url: '', api: null,
+    key_file: null, subscription: true, timeout_s: 300, models: ['gpt-6-luna'] },
+  { name: 'claude', label: 'simple_catalog_claude', kind: 'cli', cli: 'claude', base_url: '', api: null,
+    key_file: null, subscription: true, timeout_s: 300, models: ['haiku', 'sonnet'] },
+  { name: 'gemini', label: 'simple_catalog_gemini', kind: 'openai', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai', api: 'openai',
+    key_file: 'GEMINI_API_KEY.md', subscription: false, timeout_s: 90, models: ['gemini-3.1-flash-lite'],
+    limits: { usd_per_mtok_in: 0.25, usd_per_mtok_out: 1.50 } },
+  { name: '', label: 'simple_catalog_custom', kind: 'openai', base_url: '', api: 'openai',
+    key_file: null, subscription: false, models: [] },
+];
+
+function simpleProviderStatus(row, stopped) {
+  if (row.key === 'missing') return 'missing';
+  if (row.key === 'not-on-path') return 'not-installed';
+  if (Array.isArray(stopped) && stopped.includes(row.name)) return 'stopped';
+  if (row.on === false) return 'off';
+  if (row.on !== true || !Array.isArray(stopped) || !['ok', 'none', 'on-path'].includes(row.key)) return 'unknown';
+  return 'ready';
+}
+
+function simpleProviderModels(row, models) {
+  if (!['any', 'free'].includes(row.model_rule)) return [];
+  return [...new Set([row.effective_model, ...models].filter(model => typeof model === 'string' && model
+    && (row.model_rule !== 'free' || model.endsWith(':free'))))];
+}
+
+function catalogHasProvider(entry, chain) {
+  return Boolean(entry.name) && chain.some(row => row.name === entry.name);
+}
+
+function simpleSavedChain(f) {
+  return f.savedSettings.chain.map(row => {
+    const entry = AI_CATALOG.find(entry => entry.name === row.name);
+    const providers = f.providers.filter(provider => provider.name === row.name);
+    // A newly added HTTP entry has no key path until managed registration. For a keyed preset
+    // that still needs a key, including after reloading; a custom keyless server stays keyless.
+    const key = row.key === 'none' && entry?.key_file && providers[0]?.saved.base_url === entry.base_url ? 'missing' : row.key;
+    return { ...row, key, on: row.on && providers.some(provider => provider.saved.enabled) };
+  });
+}
+
+let settingsMode = recall('oboete-settings-view', 'simple') === 'detailed' ? 'detailed' : 'simple';
+let simpleReceipt = null, simpleKeyName = null;
+
+function clearSimpleReceipt() {
+  simpleReceipt = null;
+  for (const receipt of $('panel').querySelectorAll('.simple-saved')) receipt.replaceChildren();
+}
+
+function simpleFocus(key) {
+  if (typeof key !== 'string' || !key) return;
+  const controls = $('panel').querySelectorAll('button, input, select');
+  const keys = [key];
+  if (key?.startsWith('move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
+  if (/^(resume|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
+  if (key?.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
+  if (key === 'mask.confirm') keys.push('redaction.enabled');
+  if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
+  if (key === 'catalog.save' && simpleKeyName) keys.push(`key:${simpleKeyName}`);
+  const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
+  next?.focus({ preventScroll: true });
+}
+
+function settingsViewSwitch() {
+  const buttons = ['simple', 'detailed'].map(mode => {
+    const button = el('button', 'quiet', t(mode === 'simple' ? 'simple_view' : 'simple_detailed'));
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(settingsMode === mode));
+    button.dataset.simpleFocus = `mode:${mode}`;
+    button.addEventListener('click', () => {
+      settingsMode = mode;
+      remember('oboete-settings-view', mode);
+      drawSettings();
+      simpleFocus(`mode:${mode}`);
+    });
+    return button;
+  });
+  const group = el('div', 'settings-view-switch', ...buttons);
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', t('simple_mode_label'));
+  return group;
+}
+
+function detailedSettingsLink(key, selector, vars = {}, provider = null) {
+  const button = el('button', 'quiet small simple-link', t(key, vars));
+  button.type = 'button';
+  button.addEventListener('click', () => {
+    if (provider) { provider.editing = true; groupOpen.set('providers', true); }
+    settingsMode = 'detailed';
+    remember('oboete-settings-view', settingsMode);
+    drawSettings();
+    const target = provider ? [...$('panel').querySelectorAll('.provider-entry')]
+      .find(node => node.dataset.selector === selectorKey(provider.selector)) : $('panel').querySelector(selector);
+    for (let details = target?.closest('details'); details; details = details.parentElement?.closest('details')) details.open = true;
+    if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView?.({ block: 'start' }); }
+  });
+  return button;
+}
+
+function simpleBlock(name, ...children) {
+  const receipt = el('span', 'simple-saved', simpleReceipt === name ? t('simple_saved') : '');
+  receipt.setAttribute('role', 'status');
+  const section = el('section', 'simple-block', el('div', 'simple-block-heading',
+    el('h3', null, t(`simple_${name}_h`)), receipt), el('p', 'desc', t(`simple_${name}_desc`)), ...children);
+  section.dataset.simpleBlock = name;
+  return section;
+}
+
+// Required whole-settings fields come from the saved response. A simple change must not also
+// commit a detailed draft, or a fresh home's suggested resident choice.
+function simpleSettingsSave(button, change, adopt) {
+  clearSimpleReceipt();
+  const s = form.savedSettings;
+  const body = JSON.parse(JSON.stringify({ version: form.version, summary: s.summary,
+    paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini, inject: s.inject, capture: s.capture,
+    chain: s.chain.map(row => ({ name: row.name, on: row.on, daily_budget: row.daily_budget,
+      timeout_s: row.timeout_s, model: row.model })) }));
+  change(body);
+  return saveSettings(button, { body, adopt, block: button.closest('.simple-block').dataset.simpleBlock });
+}
+
+function simpleToggle(value, key, label, save, visible = label) {
+  const control = checkbox(value, next => save(control, next));
+  control.dataset.simpleFocus = key;
+  control.setAttribute('role', 'switch');
+  control.setAttribute('aria-label', label);
+  return el('label', 'check simple-toggle', control, visible);
+}
+
+function simpleChainSave(button, name, key, value) {
+  return simpleSettingsSave(button, body => { body.chain.find(row => row.name === name)[key] = value; },
+    (next, answer) => { next.chain.find(row => row.name === name).edit[key] = answer.chain.find(row => row.name === name)[key] ?? ''; });
+}
+
+async function simpleProviderToggle(name, on, button) {
+  // A native entry can be disabled independently of its name overlay. Reuse its own on/off
+  // operation before lifting the name's off switch, so a built-in such as Anthropic can be used.
+  if (on && !form.providers.some(provider => provider.name === name && provider.saved.enabled)) {
+    const provider = form.providers.find(provider => provider.name === name);
+    if (!provider || !await providerOperation({ op: 'enabled', selector: provider.selector, enabled: true }, button)) return;
+    button = [...$('panel').querySelectorAll('input')].find(node => node.dataset.simpleFocus === `on:${name}`);
+  }
+  if (button && form.chain.find(row => row.name === name)?.on !== on) await simpleChainSave(button, name, 'on', on);
+}
+
+function simpleLabel(name) {
+  const catalog = AI_CATALOG.find(entry => entry.name === name);
+  return catalog ? t(catalog.label) : name;
+}
+
+function simpleProviderRow(f, row, index) {
+  const label = simpleLabel(row.name);
+  const catalog = AI_CATALOG.find(entry => entry.name === row.name);
+  // Entries that read one key file (Groq's three) take the key on the first of them.
+  const keyOwner = row.key_file ? f.chain.find(other => other.key_file === row.key_file) : null;
+  const providers = f.providers.filter(provider => provider.name === row.name);
+  const provider = providers[0];
+  const on = row.on;
+  const status = simpleProviderStatus({ ...row, on }, f.stopped);
+  const arrows = [-1, 1].map(direction => {
+    const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
+    button.type = 'button';
+    button.setAttribute('aria-label', `${t(direction < 0 ? 'up' : 'down')}: ${label}`);
+    button.dataset.simpleFocus = `move:${row.name}:${direction}`;
+    const to = index + direction;
+    button.disabled = to < 0 || to >= f.chain.length;
+    button.addEventListener('click', () => void simpleSettingsSave(button, body => {
+      [body.chain[index], body.chain[to]] = [body.chain[to], body.chain[index]];
+    }, (next, answer) => {
+      const rows = new Map(next.chain.map(entry => [entry.name, entry]));
+      next.chain = answer.chain.map(entry => rows.get(entry.name));
+    }));
+    return button;
+  });
+  const detail = () => detailedSettingsLink('simple_entry_detail', '.provider-entries', { name: label }, provider);
+  const models = simpleProviderModels(row, catalog?.models || []);
+  let model = el('p', 'simple-model', row.effective_model ?? t('simple_model_default'));
+  if (row.model_rule !== 'fixed') {
+    const select = el('select', null, ...models.map(model => {
+      const option = el('option', null, model); option.value = model; return option;
+    }));
+    if (!models.includes(row.effective_model)) {
+      const current = el('option', null, row.effective_model ?? t('simple_model_default'));
+      current.value = ''; current.disabled = true; select.append(current);
+    }
+    const other = el('option', null, t('simple_other_model')); other.value = '__other'; select.append(other);
+    select.value = models.includes(row.effective_model) ? row.effective_model : '';
+    select.dataset.field = `chain.${row.name}.model`;
+    select.dataset.simpleFocus = `model:${row.name}`;
+    select.addEventListener('change', () => {
+      if (select.value === '__other') detail().click();
+      else void simpleChainSave(select, row.name, 'model', select.value);
+    });
+    select.setAttribute('aria-label', t('simple_model', { name: label }));
+    model = el('label', 'field simple-model', el('span', null, t('simple_model_short')), select);
+  }
+  let resume = null;
+  if (f.stopped?.includes(row.name)) {
+    resume = el('button', 'quiet small', t('resume'));
+    resume.type = 'button'; resume.setAttribute('aria-label', t('resume_label', { name: label }));
+    resume.dataset.simpleFocus = `resume:${row.name}`;
+    resume.addEventListener('click', () => void resumeProvider(row.name, resume));
+  }
+  const item = el('li', 'simple-provider',
+    el('div', 'simple-provider-heading', el('h4', null, label),
+      el('span', `simple-state ${status}`, t(`simple_status_${status.replaceAll('-', '_')}`))),
+    el('div', 'simple-provider-controls',
+      simpleToggle(on, `on:${row.name}`, t('simple_ai_on', { name: label }),
+        (button, value) => void simpleProviderToggle(row.name, value, button), t('simple_use')),
+      el('div', 'move', ...arrows)),
+    model, row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
+    keyOwner && keyOwner.name !== row.name && row.key === 'missing'
+      ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
+      : provider && (row.key === 'missing' || simpleKeyName === row.name)
+        ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported'))) : null,
+    resume, provider ? providerTest(provider, true) : null, detail());
+  item.dataset.providerName = row.name;
+  return item;
+}
+
+function simpleCatalog(f) {
+  const rows = AI_CATALOG.map(entry => {
+    const listed = catalogHasProvider(entry, f.chain);
+    const choose = el('button', 'quiet small', t(listed ? 'simple_catalog_open' : 'simple_catalog_choose', { name: t(entry.label) }));
+    choose.type = 'button';
+    choose.addEventListener('click', () => {
+      if (listed) {
+        const row = [...$('panel').querySelectorAll('.simple-provider')].find(row => row.dataset.providerName === entry.name);
+        row?.scrollIntoView?.({ block: 'center' }); simpleFocus(`on:${entry.name}`); return;
+      }
+      f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0] });
+      f.simpleCatalog = entry;
+      if (!entry.name) { detailedSettingsLink('simple_detailed', '.new-provider').click(); return; }
+      drawSettings(); simpleFocus('catalog.save');
+    });
+    return el('li', null, el('strong', null, t(entry.label)), listed ? note(t('simple_catalog_listed')) : null, choose);
+  });
+  const catalog = el('details', 'simple-catalog', el('summary', null, t('simple_add_ai')), el('ul', null, ...rows));
+  if (!f.newProvider || !f.simpleCatalog?.name) return catalog;
+  const draft = f.newProvider, entry = f.simpleCatalog;
+  const save = el('button', 'small', t('simple_add_save'));
+  save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
+  save.addEventListener('click', () => {
+    if (providerValidation(draft)) { detailedSettingsLink('simple_detailed', '.new-provider').click(); return; }
+    void providerOperation({ op: 'create', entry: providerBody(draft) }, save);
+  });
+  const cancel = el('button', 'quiet small', t('simple_cancel'));
+  cancel.type = 'button'; cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; drawSettings(); });
+  return el('div', null, catalog, el('div', 'simple-add', el('h4', null, t(entry.label)),
+    el('p', 'desc', draft.base_url || t('simple_model_default')), el('p', null, draft.model),
+    entry.name === 'gemini' ? el('p', 'desc', t('simple_gemini_warning')) : null,
+    draft.kind === 'openai' ? el('p', 'desc', t('simple_add_key')) : null, el('div', 'actions', save, cancel)));
+}
+
+function simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, consent }) {
+  preview.dataset.simpleFocus = 'embedding.preview';
+  start.dataset.simpleFocus = 'embedding.start';
+  consent.dataset.simpleFocus = 'embedding.confirmed';
+  const choices = [['none', 'none'], ['local', 'local'], ['workers-ai', 'workers']].map(([value, key]) => {
+    const radio = el('input'); radio.type = 'radio'; radio.name = 'simple-embedding'; radio.value = value;
+    radio.checked = choice === value; radio.disabled = locked; radio.dataset.field = 'embedding.choice';
+    radio.dataset.simpleFocus = `embedding:${value}`;
+    radio.addEventListener('change', () => {
+      embeddingDraft.choice = value; embeddingDraft.preview = null; embeddingDraft.confirmed = false;
+      void embeddingAction('preview');
+    });
+    return el('label', 'simple-search-option', radio,
+      el('span', null, el('strong', null, t(`simple_search_${key}`)), el('span', 'note', t(`simple_search_${key}_desc`))));
+  });
+  const cancel = el('button', 'quiet', t('simple_cancel'));
+  cancel.type = 'button'; cancel.disabled = locked;
+  cancel.dataset.simpleFocus = 'embedding.cancel';
+  cancel.addEventListener('click', () => {
+    embeddingDraft.choice = null; embeddingDraft.preview = null; embeddingDraft.confirmed = false;
+    embeddingDraft.error = null; renderEmbedding(); simpleFocus(`embedding:${f.embedding.provider}`);
+  });
+  preview.textContent = t('simple_search_review');
+  const saved = { none: 'none', local: 'local', 'workers-ai': 'workers' }[f.embedding.provider];
+  return el('div', 'embedding-choice', ...choices,
+    choice !== f.embedding.provider ? note(t('saved_value', { value: t(`simple_search_${saved}`) })) : null,
+    reviewed ? embeddingConsent(embeddingDraft.preview.consent) : null,
+    reviewed ? el('label', 'check', consent, t('embedding_confirm')) : null,
+    reviewed ? el('div', 'actions', start, cancel) : null,
+    !reviewed && choice !== f.embedding.provider ? el('div', 'actions', preview, cancel) : null,
+    choice === 'workers-ai' ? detailedSettingsLink('simple_detailed', '.workers-ai') : null,
+    embeddingRun(embeddingDraft), embeddingDraft.error ? el('p', 'error', embeddingMessage(embeddingDraft.error)) : null);
+}
+
+function simpleAgents() {
+  const rows = ['claude', 'codex', 'grok'].map(id => {
+    const row = agentInventory.report?.agents?.find(row => row.agent === id);
+    const components = [row?.capture, row?.mcp];
+    const connected = components.every(part => part?.state === 'registered' && part.matches_current === true)
+      && (id !== 'codex' || ['matching', 'not_applicable'].includes(row?.trust));
+    const disconnected = components.every(part => ['missing', 'disabled'].includes(part?.state));
+    const key = agentInventory.loading ? 'agent_inventory_loading' : !row || agentInventory.error ? 'simple_status_unknown'
+      : connected ? 'simple_agent_connected' : disconnected ? 'simple_agent_disconnected' : 'simple_agent_partial';
+    const name = t(`agent_inventory_agent_${id}`);
+    return el('li', null, el('strong', null, name), el('span', 'desc', t(key)),
+      detailedSettingsLink('simple_agent_connect', '.agent-setup', { name }));
+  });
+  return el('ul', 'simple-agents', ...rows);
+}
+
+function drawSimpleSettings(panel, f) {
+  const chain = simpleSavedChain(f);
+  const curate = simpleToggle(f.savedSettings.summary.curate, 'summary.curate', t('simple_curate'), (button, value) =>
+    void simpleSettingsSave(button, body => { body.summary.curate = value; },
+      (next, answer) => { next.summary = { ...next.summary, curate: answer.summary.curate }; }));
+  const ready = chain.some(row => simpleProviderStatus(row, f.stopped) === 'ready');
+  const cap = input('number', String(f.savedSettings.paid_usd_per_month), '', 'paid_usd_per_month', () => {});
+  cap.min = 0; cap.step = 'any'; cap.inputMode = 'decimal'; cap.dataset.simpleFocus = 'paid_usd_per_month';
+  const saveCap = () => {
+    const value = Number(cap.value);
+    if (!cap.value.trim() || !Number.isFinite(value) || value < 0) {
+      markInvalid('paid_usd_per_month'); setStatus(t('simple_limit_invalid'), true, lang); return;
+    }
+    if (value === f.savedSettings.paid_usd_per_month || cap.disabled) return;
+    void simpleSettingsSave(cap, body => { body.paid_usd_per_month = value; },
+      (next, answer) => { next.paid_usd_per_month = String(answer.paid_usd_per_month); });
+  };
+  cap.addEventListener('blur', saveCap);
+  cap.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); saveCap(); } });
+  const inject = ['session_start', 'per_prompt'].map(key => simpleToggle(f.savedSettings.inject[key], `inject.${key}`,
+    t(key === 'session_start' ? 'simple_session' : 'simple_prompt'), (button, value) =>
+      void simpleSettingsSave(button, body => { body.inject[key] = value; },
+        (next, answer) => { next.inject = { ...next.inject, [key]: answer.inject[key] }; })));
+  const masking = simpleToggle(f.savedSettings.redaction?.enabled !== false && !f.simpleMaskingOff,
+    'redaction.enabled', t('simple_mask_on'), (button, value) => {
+      if (!value) { f.simpleMaskingOff = true; drawSettings(); simpleFocus('mask.confirm'); }
+      else { f.simpleMaskingOff = false; saveMask(button, true); }
+    });
+  const saveMask = (button, enabled) => void simpleSettingsSave(button, body => {
+    body.redaction = { ...f.savedSettings.redaction, enabled };
+  }, (next, answer) => { next.redaction = { ...next.redaction, enabled: answer.redaction.enabled }; });
+  const confirm = el('button', 'quiet', t('simple_mask_confirm'));
+  confirm.type = 'button'; confirm.dataset.simpleFocus = 'mask.confirm';
+  confirm.addEventListener('click', () => saveMask(confirm, false));
+  const cancel = el('button', 'quiet', t('simple_cancel'));
+  cancel.type = 'button'; cancel.addEventListener('click', () => { f.simpleMaskingOff = false; drawSettings(); simpleFocus('redaction.enabled'); });
+  panel.append(el('p', 'lead', t('simple_intro')),
+    !ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
+    simpleBlock('ai', curate, el('ol', 'simple-providers', ...chain.map((row, i) => simpleProviderRow(f, row, i))), simpleCatalog(f)),
+    simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
+      el('p', 'spend', f.usd_this_month === null ? t('spend_unavailable') : t('simple_spent', { usd: usdValue(f.usd_this_month) })))),
+    f.embedding ? simpleBlock('search', embeddingChoice(f, true)) : null,
+    simpleBlock('inject', ...inject), captureSection(f, true),
+    simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
+      el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
+    simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents())));
+}
+
 function drawSettings() {
+  const focused = document.activeElement?.dataset.simpleFocus;
+  if (document.activeElement && document.activeElement !== document.body
+    && !document.activeElement.closest('.embedding-choice')) embeddingDraft.focus = null;
   const pick = el('select', null, ...LANGS.map((l) => {
     const o = el('option', null, l === 'ja' ? '日本語' : 'English');
     o.value = l;
@@ -4937,6 +5446,13 @@ function drawSettings() {
     return;
   }
   const f = form;
+  panel.append(settingsViewSwitch());
+  if (settingsMode === 'simple') {
+    drawSimpleSettings(panel, f);
+    drawIn(panel);
+    if (focused) simpleFocus(focused);
+    return;
+  }
   const saved = (value) => note(t('saved_value', { value }));
   const resident = checkbox(f.worker.resident, (v) => { f.worker.resident = v; });
   resident.dataset.field = 'worker.resident';

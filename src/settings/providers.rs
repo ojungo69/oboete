@@ -468,7 +468,45 @@ fn edit(table: &mut dyn TableLike, old: &Provider, new: &Provider) -> Result<(),
 }
 
 fn create(path: &Path, doc: &mut DocumentMut, entry: Draft) -> Result<(), Refusal> {
-    let new = entry.checked(None)?;
+    let mut new = entry.checked(None)?;
+    // A catalog preset needs the built-in's protocol fields (for example Go's session header).
+    // Match the full connection before inheriting only these non-secret transport defaults;
+    // keys still require managed registration, and every posted owner setting stays as given.
+    let defaults = config::from_text(path, "").map_err(|_| invalid())?;
+    for builtin in defaults.providers {
+        if let (
+            Provider::Openai {
+                name,
+                base_url,
+                api,
+                model,
+                headers,
+                extra,
+                retry_429,
+                ..
+            },
+            Provider::Openai {
+                name: preset_name,
+                base_url: preset_url,
+                api: preset_api,
+                model: preset_model,
+                headers: preset_headers,
+                extra: preset_extra,
+                retry_429: preset_retry,
+                ..
+            },
+        ) = (&mut new, builtin)
+            && *name == preset_name
+            && *base_url == preset_url
+            && *api == preset_api
+            && *model == preset_model
+        {
+            *headers = preset_headers;
+            *extra = preset_extra;
+            *retry_429 = preset_retry;
+            break;
+        }
+    }
     let raw = base(path, doc)?;
     let virtual_entry =
         if new.name() == "gemini" && !raw.providers.iter().any(|p| p.name() == "gemini") {
@@ -892,6 +930,105 @@ mod tests {
         json!({"kind": "cli", "name": name, "enabled": enabled, "cli": "claude", "model": model,
             "timeout_s": 90, "limits": {"max_request_tokens": null, "daily_tokens": null,
                 "usd_per_mtok_in": 0.0, "usd_per_mtok_out": 0.0, "max_output_tokens": 4000}})
+    }
+
+    #[test]
+    fn catalog_creation_keeps_builtin_transport_but_uses_managed_keys_and_posted_limits() {
+        for name in ["opencode-go", "nim", "anthropic", "groq"] {
+            let home = home("providers = []\n");
+            let path = home.path().join("config.toml");
+            let builtin = config::from_text(&path, "")
+                .unwrap()
+                .providers
+                .into_iter()
+                .find(|provider| provider.name() == name)
+                .unwrap();
+            let Provider::Openai {
+                base_url,
+                api,
+                model,
+                headers,
+                extra,
+                retry_429,
+                ..
+            } = &builtin
+            else {
+                panic!("an HTTP preset");
+            };
+            let mut entry = http(name, base_url);
+            entry["api"] = serde_json::to_value(api).unwrap();
+            entry["model"] = json!(model);
+            entry["enabled"] = json!(false);
+            entry["subscription"] = json!(name == "opencode-go");
+            if name == "opencode-go" {
+                entry["daily_budget"] = Value::Null;
+            }
+            entry["limits"]["usd_per_mtok_in"] = json!(0.25);
+            for changed in [
+                None,
+                Some("name"),
+                Some("base_url"),
+                Some("api"),
+                Some("model"),
+            ] {
+                let mut candidate = entry.clone();
+                if let Some(field) = changed {
+                    candidate[field] = match field {
+                        "base_url" => json!("https://example.invalid/v1"),
+                        "api" => json!(if *api == config::Api::Anthropic {
+                            "openai"
+                        } else {
+                            "anthropic"
+                        }),
+                        _ => json!("synthetic-other"),
+                    };
+                }
+                send(home.path(), json!({"op": "create", "entry": candidate})).unwrap();
+                let loaded =
+                    config::from_text(&path, &std::fs::read_to_string(&path).unwrap()).unwrap();
+                let Provider::Openai {
+                    key_file,
+                    headers: actual_headers,
+                    extra: actual_extra,
+                    retry_429: actual_retry,
+                    enabled,
+                    limits,
+                    timeout_s,
+                    daily_budget,
+                    subscription,
+                    ..
+                } = loaded.providers.last().unwrap()
+                else {
+                    panic!("created HTTP entry");
+                };
+                if changed.is_none() {
+                    assert_eq!(actual_headers, headers, "{name}");
+                    assert_eq!(actual_extra, extra, "{name}");
+                    assert_eq!(actual_retry, retry_429, "{name}");
+                } else {
+                    assert!(actual_headers.is_empty(), "{name}: {changed:?}");
+                    assert!(actual_extra.is_empty());
+                    assert!(!actual_retry);
+                }
+                assert!(
+                    key_file.is_none(),
+                    "keys still require managed registration"
+                );
+                assert!(!enabled);
+                assert_eq!(*timeout_s, 30);
+                assert_eq!(
+                    *daily_budget,
+                    if name == "opencode-go" {
+                        None
+                    } else {
+                        Some(20)
+                    }
+                );
+                assert_eq!(*subscription, name == "opencode-go");
+                assert_eq!(limits.usd_per_mtok_in, 0.25);
+                assert!(!home.path().join("providers.db").exists());
+            }
+        }
     }
 
     #[test]
