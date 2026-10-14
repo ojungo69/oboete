@@ -1657,6 +1657,12 @@ fn prompt_point(
         );
     }
     let not_shown = |key: &String| !shown.get(key).is_some_and(|e| e["body"] == true);
+    // What the session was shown, which the viewer leaves out before it cuts its answer.
+    let was_shown: Vec<&String> = (shown.iter())
+        .filter(|(_, e)| e["body"] == true)
+        .map(|(key, _)| key)
+        .take(SHOWN_SENT)
+        .collect();
     let picks = match (inject.per_prompt, prompt) {
         (false, _) => Vec::new(),
         (true, None) => turn_picks(raw, &k, &turn, rules, &not_shown)?,
@@ -1672,7 +1678,7 @@ fn prompt_point(
                 deadline: started
                     + Duration::from_millis(inject.per_prompt_wait_ms.try_into().unwrap_or(0)),
             };
-            prompt_picks(&asking, prompt, sendable, &not_shown)?
+            prompt_picks(&asking, prompt, sendable, &not_shown, &was_shown)?
         }
     };
     if keeping {
@@ -1810,6 +1816,7 @@ fn prompt_picks(
     prompt: &str,
     sendable: bool,
     not_shown: &dyn Fn(&String) -> bool,
+    was_shown: &[&String],
 ) -> Result<Vec<Pick>> {
     use crate::shortlist;
     let rules = &a.settings.rules;
@@ -1818,7 +1825,8 @@ fn prompt_picks(
     let branch = branch.unwrap_or_default();
     let text = strip_blocks(prompt, true);
     let long = text.chars().count() >= ASKS_FROM;
-    let asked = (long && sendable).then(|| ask_resident(a.home, &repo, &text, a.deadline));
+    let asked =
+        (long && sendable).then(|| ask_resident(a.home, &repo, &text, was_shown, a.deadline));
     let failure = failed_call(a.home, a.raw, a.agent, a.label, rules);
     let texts: Vec<&str> = [Some(text.as_str()), failure.as_deref()]
         .into_iter()
@@ -2001,6 +2009,10 @@ fn fused(words: Vec<Doc>, near: Vec<Doc>) -> Vec<Doc> {
         .collect()
 }
 
+/// The most shown keys a prompt sends the viewer: the newest session start shows about 70, and
+/// each prompt at most `PROMPT_PLACES` more.
+const SHOWN_SENT: usize = crate::search::b::PROMPT_SHOWN;
+
 /// G23: the resident viewer asked for the meaning side of `text` in `repo` on a thread of its
 /// own, its answer on the channel, never waited for past `deadline`; `None` when no resident
 /// viewer listens (`view::resident_answering`).
@@ -2008,13 +2020,19 @@ fn ask_resident(
     home: &Path,
     repo: &str,
     text: &str,
+    shown: &[&String],
     deadline: std::time::Instant,
 ) -> Option<std::sync::mpsc::Receiver<(String, Vec<crate::search::b::PromptHit>)>> {
     let (port, token) = crate::view::resident_answering(home)?;
     // The viewer gates the prompt and then cuts it to what it embeds: twice that leaves the gate
     // the words around the cut.
     let prompt: String = text.chars().take(2 * crate::embed::PROMPT_CHARS).collect();
-    let body = serde_json::to_vec(&json!({"repo": repo, "prompt": prompt})).ok()?;
+    let mut asked = json!({"repo": repo, "prompt": prompt});
+    // What the session was shown takes no place in the viewer's answer (Codex on #521).
+    if !shown.is_empty() {
+        asked["shown"] = json!(shown);
+    }
+    let body = serde_json::to_vec(&asked).ok()?;
     let (send, answer) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if let Some(answer) = post_prompt(port, &token, &body, deadline) {
@@ -4450,6 +4468,15 @@ mod tests {
         assert!(!text.contains(&"f".repeat(12)), "{text}");
         assert_eq!(r.asked(), [json!({"repo": p.repo, "prompt": prompt})]);
         assert_eq!(last_side(p.s.home.path()).unwrap().1, "meaning");
+        // The next prompt sends what the session was shown, for the viewer to leave out.
+        p.prompt("s1", "and where does it go when the stream is closed");
+        let asked = r.asked();
+        assert!(
+            asked[1]["shown"]
+                .as_array()
+                .is_some_and(|keys| keys.contains(&json!(card))),
+            "{asked:?}"
+        );
     }
 
     /// G23 (docs/prompt-context.md step 5): an answer past `[inject] per_prompt_wait_ms` is lost

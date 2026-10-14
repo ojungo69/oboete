@@ -1250,12 +1250,23 @@ impl Viewer {
         struct Asked {
             repo: String,
             prompt: String,
+            /// The keys the session was shown, which take no place in the answer.
+            #[serde(default)]
+            shown: Vec<String>,
         }
         let asked = match serde_json::from_slice::<Asked>(body) {
-            Ok(a) if !a.repo.is_empty() && !a.prompt.trim().is_empty() => a,
+            Ok(a)
+                if !a.repo.is_empty()
+                    && !a.prompt.trim().is_empty()
+                    && a.shown.len() <= search::b::PROMPT_SHOWN
+                    && a.shown.iter().all(|k| k.len() <= 256) =>
+            {
+                a
+            }
             _ => return Response::text(400, "a prompt context takes a repository and a prompt"),
         };
-        match search::b::prompt_near(&self.home, &asked.repo, &asked.prompt) {
+        let shown = asked.shown.into_iter().collect();
+        match search::b::prompt_near(&self.home, &asked.repo, &asked.prompt, &shown) {
             Ok(near) => Response::json(&json!({
                 "vector": match near.vector {
                     search::b::Vector::Used => json!("used"),

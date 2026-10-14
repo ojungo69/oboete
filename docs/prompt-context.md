@@ -93,7 +93,9 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   The request names the repository; the viewer has no use for the branch.
 - **The viewer** (`search::b::prompt_near`) embeds as a search does and answers keys and cosines
   only, the 20 nearest: delivered claims (under `DECIDED_WHERE` and with no link ending them, as
-  `claims::delivered_one` reads them, before anything is kept), cards
+  `claims::delivered_one` reads them, and none an owner's change the worker has not applied yet
+  touches, before anything is kept), none the session was shown (the hook sends the keys of what
+  it was shown, at most 2,000), cards
   and summaries at `T` or above. The hook reads each through its reader and gates its line. No
   reranker or judge exists in the code; this route calls neither, and #336's, once built, stay
   out of it (spec 4.3). The route takes the viewer's token as every route does but no Origin: the
@@ -170,7 +172,10 @@ resident viewer keeps its token (`keyfile::private_fs`, #281):
   (`a_late_answer_leaves_the_words_side_within_the_wait`); a request the viewer fails is told
   from a late one (`a_failed_answer_is_told_from_a_late_one`).
 - A card or summary its reader hides takes no place, in the viewer's 20 nor in the words side's
-  depth (`search::b::tests::a_document_no_reader_shows_takes_no_place`).
+  depth (`search::b::tests::a_document_no_reader_shows_takes_no_place`); nor a summary without a
+  request (`a_summary_without_a_request_takes_no_place`), nor what the session was shown, whose
+  keys the hook sends (`prompt_near_keeps_delivered_claims_and_near_documents`,
+  `hook::tests::the_prompt_point_takes_the_resident_viewers_meaning_side`).
 - A prompt not recorded with its text, or under 20 characters, is sent nowhere
   (`a_prompt_not_recorded_whole_or_too_short_asks_nothing`).
 - No resident viewer: the words side, over cards and summaries too, after the decisions, each line

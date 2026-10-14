@@ -405,6 +405,8 @@ pub struct PromptHit {
 
 /// The most `prompt_near` answers.
 const PROMPT_HITS: usize = 20;
+/// The most keys of what the session was shown that `prompt_near` takes.
+pub const PROMPT_SHOWN: usize = 2_000;
 
 /// What `prompt_near` found, or why it has no vector.
 #[derive(Debug)]
@@ -422,7 +424,12 @@ pub struct PromptNear {
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
 /// itself, nor a reranker or a judge (spec 4.3, 4.10). Keys only: the hook reads and gates what it
 /// shows.
-pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
+pub fn prompt_near(
+    home: &Path,
+    repo: &str,
+    text: &str,
+    shown: &std::collections::HashSet<String>,
+) -> Result<PromptNear> {
     let nothing = |skip| {
         Ok(PromptNear {
             vector: Vector::Skipped(skip),
@@ -462,6 +469,9 @@ pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
     ))?;
     // Whether a reader shows a document needs no rule: the hook gates what it shows.
     let rules = redact::Rules::default();
+    // A claim an owner's change the worker has not applied yet touches is left out by the hook
+    // (`shortlist::placed`), so here too.
+    let pending = claims::Pending::read(&raw, &k)?;
     let mut hits = Vec::new();
     let repos = [repo.to_owned()];
     for (family, kind) in [("c", "claim"), ("o", "card"), ("s", "summary")] {
@@ -471,15 +481,18 @@ pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
             }
             // Delivery's rule whole, links too, and a document's reader, before the cut: what the
             // hook would leave out would take a place it then leaves empty (Codex on #521).
-            let shown = match family {
+            // What the session was shown already, as the hook names it, takes no place either.
+            let shows = match family {
                 "c" => {
-                    decided.exists(params![key, repo])?
+                    !shown.contains(&key)
+                        && decided.exists(params![key, repo])?
                         && claims::delivered_one(&k, &key)?.is_some()
+                        && !pending.touches(&k, &key)?
                 }
-                "o" => crate::cards::get(&k, &raw, &key, &rules)?.is_some(),
-                _ => crate::turns::get(&k, &raw, &key, &rules)?.is_some(),
+                _ => shows_doc(&k, &raw, family, &key, &rules)?
+                    .is_some_and(|id| !shown.contains(&id)),
             };
-            if !shown {
+            if !shows {
                 continue;
             }
             hits.push(PromptHit {
@@ -495,6 +508,25 @@ pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
     Ok(PromptNear {
         vector: Vector::Used,
         hits,
+    })
+}
+
+/// The ID the prompt hook shows the card (`o`) or session summary (`s`) `key` by, when it shows
+/// it: its reader shows it, and a summary has a request, by which the block names it (Codex on
+/// #521).
+fn shows_doc(
+    k: &Connection,
+    raw: &Raw,
+    family: &str,
+    key: &str,
+    rules: &redact::Rules,
+) -> Result<Option<String>> {
+    let local = raw.device();
+    Ok(match family {
+        "o" => crate::cards::get(k, raw, key, rules)?.map(|c| c.id(local)),
+        _ => crate::turns::get(k, raw, key, rules)?
+            .filter(|s| !s.row.trim().is_empty())
+            .map(|s| s.id(local)),
     })
 }
 
@@ -5165,13 +5197,20 @@ mod tests {
         s.run();
         embedded_by(&s, &stub);
         let asked = stub.requests();
-        let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.").unwrap();
+        let near = prompt_near(
+            s.home.path(),
+            R,
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(near.vector, Vector::Used);
         let found: Vec<(&str, &str)> = near
             .hits
             .iter()
             .map(|h| (h.key.as_str(), h.kind.as_str()))
             .collect();
+        let short = card.clone();
         let card = format!("{}.{card}", s.raw.device());
         assert_eq!(
             found,
@@ -5184,6 +5223,24 @@ mod tests {
                 .all(|h| h.cosine >= crate::shortlist::MEANING)
         );
         assert_eq!(stub.requests(), asked + 1);
+        // What the session was shown, by the IDs the hook shows them by, takes no place.
+        let shown = [decided.clone(), short].into_iter().collect();
+        let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.", &shown).unwrap();
+        assert!(near.hits.is_empty(), "{:?}", near.hits);
+        // Nor a claim an owner's change the worker has not applied yet touches.
+        s.correct(&decided, None, Some("Parser errors go to the log."));
+        let near = prompt_near(
+            s.home.path(),
+            R,
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            !near.hits.iter().any(|h| h.key == decided),
+            "{:?}",
+            near.hits
+        );
     }
 
     /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no
@@ -5218,7 +5275,8 @@ mod tests {
             seq: gone,
         };
         crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
-        let near = prompt_near(&home, R, "Parser errors go to stderr.").unwrap();
+        let near =
+            prompt_near(&home, R, "Parser errors go to stderr.", &Default::default()).unwrap();
         let hidden_key = format!("{device}.{hidden}");
         assert!(
             !near.hits.iter().any(|h| h.key == hidden_key),
@@ -5239,6 +5297,40 @@ mod tests {
         assert!(taken.iter().any(|id| id.ends_with(&shown)), "{taken:?}");
     }
 
+    /// G23 (Codex on #521): the viewer counts a session summary only when it has a request, by
+    /// which the hook's block names it; a card, while its reader shows it.
+    #[test]
+    fn a_summary_without_a_request_takes_no_place() {
+        let mut s = Store::new();
+        let seq = s.said("s", R, 2_000, "Parser work.");
+        let card = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors go to stderr"}]),
+            false,
+        )[0]
+        .clone();
+        let turn = |request: &str| {
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+                "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+                "fields": {"request": request, "learned": "Parser errors go to stderr."},
+                "skipped": false})
+        };
+        let asked = s.turn(turn("Fix the parser"));
+        let bare = s.turn(turn(""));
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let rules = redact::Rules::default();
+        let shows = |family: &str, key: &str| {
+            shows_doc(&k, &s.raw, family, key, &rules)
+                .unwrap()
+                .is_some()
+        };
+        assert!(shows("o", &card));
+        assert!(shows("s", &asked));
+        assert!(!shows("s", &bare));
+    }
+
     /// G23 (row 30-2): a repository excluded from sending has its prompt embedded by no provider:
     /// nothing is asked of the embedder and nothing is found.
     #[test]
@@ -5251,7 +5343,13 @@ mod tests {
         s.exclude(R);
         s.run();
         let asked = stub.requests();
-        let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.").unwrap();
+        let near = prompt_near(
+            s.home.path(),
+            R,
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(near.vector, Vector::Skipped(VectorSkip::Excluded));
         assert!(near.hits.is_empty());
         assert_eq!(stub.requests(), asked);
