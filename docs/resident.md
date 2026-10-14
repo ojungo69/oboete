@@ -345,7 +345,7 @@ left as a setting to add before a public release.
   token again only on the owner's click; every store opened with `PRAGMA journal_size_limit` (about
   8 MB) if R11 shows a `-wal` file that stays large.
 
-## Limits to state in the docs (the owner's words are in the review result, `verdict.limits`)
+## Limits to state in the docs (their wording is in the review result, `verdict.limits`)
 
 - WSL does not separate Linux users: a program under the dogfood user can reach the owner's files
   through Windows, token or not. Untrusted programs belong in another distribution, not another
