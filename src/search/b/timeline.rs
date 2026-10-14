@@ -77,7 +77,7 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let (before, after) = (before.min(MAX_DEPTH), after.min(MAX_DEPTH));
-    let Some(w) = window(home, repo, around, (before, after))? else {
+    let Some(w) = window(home, repo, (around, true), (before, after))? else {
         return Ok(String::new());
     };
     if w.shown.is_empty() {
@@ -121,8 +121,9 @@ pub struct Neighbor {
 }
 
 /// The entries `before` and `after` `anchor` that a timeline of `repo` shows, in its order; a
-/// session start, which claude-mem has no kind for, is left out. None around an anchor gone since
-/// it was shown (forgotten, or hidden as `get` hides it).
+/// session start, which claude-mem has no kind for, is left out before the depths are counted
+/// (Codex on #527). None around an anchor gone since it was shown (forgotten, or hidden as `get`
+/// hides it).
 pub fn near(
     home: &Path,
     repo: Option<&str>,
@@ -136,7 +137,7 @@ pub fn near(
     let Some(w) = window(
         home,
         repo,
-        around,
+        (around, false),
         (before.min(MAX_DEPTH), after.min(MAX_DEPTH)),
     )?
     else {
@@ -144,27 +145,26 @@ pub fn near(
     };
     Ok(w.shown
         .iter()
-        .filter_map(|e| {
+        .map(|e| {
             let (kind, kind_of) = match &e.what {
                 What::Card(c) => ("observation", c.kind.clone()),
                 What::Summary(_) => ("summary", None),
                 What::Prompt(..) => ("prompt", None),
                 What::Other(i) => match (i.class.as_str(), i.kind.as_str()) {
-                    ("start", _) => return None,
                     ("imported", k @ ("summary" | "prompt")) => {
                         (if k == "summary" { "summary" } else { "prompt" }, None)
                     }
                     (_, k) => ("observation", Some(k.to_owned())),
                 },
             };
-            Some(Neighbor {
+            Neighbor {
                 id: e.id.clone(),
                 kind,
                 kind_of,
                 repo: e.what.repo().map(str::to_owned),
                 ts: e.ts,
                 title: title(e),
-            })
+            }
         })
         .collect())
 }
@@ -183,7 +183,7 @@ struct Window {
 fn window(
     home: &Path,
     repo: Option<&str>,
-    around: Around,
+    (around, starts): (Around, bool),
     (before, after): (usize, usize),
 ) -> Result<Option<Window>> {
     // A query's anchor is found first, under search's own fence: a reader opens raw.db before it
@@ -223,7 +223,7 @@ fn window(
     };
     let window = |read: &dyn Fn(bool, usize) -> Result<Vec<Entry>>| gather(read, at, depths);
     let mut entries = window(&|older, n| {
-        Ok(others(&raw, &k, repo, older, at, "", n)?
+        Ok(others(&raw, &k, repo, (older, starts), at, "", n)?
             .into_iter()
             .map(|i| Entry {
                 ts: i.when,

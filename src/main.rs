@@ -566,6 +566,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 },
                 limit: limit.min(100),
                 skip_session: None,
+                no_starts: false,
             };
             let answer = search::b::query_cli(&home, &q, vectors)?;
             if let search::b::Vector::Skipped(why) = answer.vector

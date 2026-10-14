@@ -17,16 +17,16 @@ forget fence and its hiding rules. The code is `src/mem_search.rs`.
   (1 to 5, default 3), `depthBefore` and `depthAfter` (0 to 3, default 2), `continuation`,
   `selectedIds` (strings, or integers).
 - **Step 1, the index**: oboete's search of the repository, at most `limit` rows (session starts
-  left out, as in the context), each
+  left out before the limit counts, as in the context), each
   `- [<id>] <title> · <kind> · <time> UTC`, the kind being claude-mem's: `observation` (a card, a
   claim, an imported document or a record), `summary` or `prompt`. The ids are those `get` takes
   (a claim's whole uid, a card's `<op seq>.<n>`, a summary's `S<op seq>`, an import's uid, a
   record's `<device>:<seq>`). A continuation follows, `ms_` and 24 base64url characters.
 - **Step 2, the context**: the continuation and at most `maxDetails` ids the index showed; for each,
   the entries a timeline of its repository shows `depthBefore` and `depthAfter` around it (its
-  claude-mem history among them, filed under the project's claude-mem name), at most
-  7 an anchor and 35 in all, session starts left out (claude-mem has no kind for them); the anchor
-  is always among them, as in claude-mem's timeline, also a record the timeline does not show (an
+  claude-mem history among them, filed under the project's claude-mem name), at most 7 an anchor
+  and 35 in all, session starts left out before the depths count (claude-mem has no kind for
+  them); the anchor is always among them, as in claude-mem's timeline, also a record the timeline does not show (an
   agent's reply). Another continuation follows.
 - **Step 3, the details**: the continuation and at most `maxDetails` ids the context showed, no
   prompt among them; `get`'s text of each, cut to 8 KiB and marked when cut. The search ends.

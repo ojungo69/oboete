@@ -258,6 +258,7 @@ impl Oboete {
             raw: search::RawArm::Below,
             limit: a.limit.unwrap_or(10).min(MAX_LIMIT),
             skip_session: None,
+            no_starts: false,
         };
         let answer = search::query(&self.home, &q).map_err(internal)?;
         let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
@@ -2283,6 +2284,38 @@ mod tests {
         assert!(hits.iter().any(|h| h.key == id), "{hits:?}");
         let index = body(mem(&server, json!({"query": "zircon startup"})));
         assert!(!index.contains(&id), "{index}");
+    }
+
+    /// Codex on #527: a session start ranked first takes no place in the index's limit: the
+    /// record behind it fills it.
+    #[test]
+    fn mem_search_counts_no_session_start_in_its_limit() {
+        let (mut s, server, _, _) = quartz();
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "work".into(),
+            repo: Some("github.com/o/r".into()),
+            ts: 1_700_000_004_000,
+            ..crate::raw::test_event(r#"{"source": "zircon zircon zircon"}"#)
+        };
+        let started = s.raw.append(&start).unwrap();
+        let reply = s.event(
+            "reply",
+            "work",
+            ("github.com/o/r", "main"),
+            1_700_000_003_000,
+            json!({"text": "The zircon importer keeps its cache in the target folder."}),
+        );
+        s.run();
+        let index = body(mem(&server, json!({"query": "zircon", "limit": 1})));
+        assert!(
+            index.contains(&format!("- [{}:{reply}] ", s.raw.device())),
+            "{index}"
+        );
+        assert!(
+            !index.contains(&format!("{}:{started}", s.raw.device())),
+            "{index}"
+        );
     }
 
     /// Codex on #527: a store that cannot be read while a project is resolved is no refusal of the
