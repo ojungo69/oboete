@@ -346,6 +346,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
   - a status check of each shortlist uid, so a claim retracted since the refresh is never injected.
 - Before the worker is up: full-text plus threshold, or the packet's ranked claims; and the hook wakes the worker (RD/constraints-synthesis.md S4-6).
 - Per prompt of 20 characters or more that the hook recorded with its text, while a resident viewer listens, the hook asks it for the meaning side first, on a thread of its own: the repository's delivered claims, cards and session summaries near the prompt at the meaning threshold `T`. Meanwhile it reads the words side: the claims above, and the repository's cards and session summaries whose line holds the full-text threshold's share of the prompt's trigrams. An answer later than `[inject] per_prompt_wait_ms` from the read fence is lost for that prompt (decision 44, [prompt-context.md](prompt-context.md)).
+- When Claude Code or Codex looks up its own memory (its notes folder, a native memory search), the hook's `PreToolUse` answers with `mem_search` in auto mode on the lookup's words, on the words side alone, before the file note and in its room, as claude-mem 13.35's bridge does (decision 45; `[inject] memory_lookup`, on by default): [memory-lookup.md](memory-lookup.md).
 
 ### 4.3 Hook latency
 

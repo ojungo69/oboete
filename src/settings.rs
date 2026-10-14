@@ -199,6 +199,7 @@ pub fn show(home: &Path) -> Value {
             "per_prompt": inject.per_prompt,
             "per_prompt_chars": inject.per_prompt_chars,
             "per_prompt_wait_ms": inject.per_prompt_wait_ms,
+            "memory_lookup": inject.memory_lookup,
             "correction": inject.correction,
             "correction_chars": inject.correction_chars,
         },
@@ -542,6 +543,8 @@ struct InjectIn {
     per_prompt_chars: usize,
     /// Older pages omit it and keep its saved value (G23).
     per_prompt_wait_ms: Option<usize>,
+    /// Older pages omit the memory lookup's switch and keep its saved value.
+    memory_lookup: Option<bool>,
     correction: bool,
     correction_chars: usize,
 }
@@ -773,6 +776,11 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
         && note != inject.session_start_note
     {
         put(&mut doc, "inject", "session_start_note", note.into());
+    }
+    if let Some(on) = i.memory_lookup
+        && on != inject.memory_lookup
+    {
+        put(&mut doc, "inject", "memory_lookup", on.into());
     }
     for (key, now, was) in [
         ("session_start", i.session_start, inject.session_start),
@@ -2796,7 +2804,7 @@ mod tests {
         assert_eq!(
             shown["inject"],
             json!({"session_start": true, "session_start_note": true, "session_start_chars": 9000, "per_prompt": false,
-                "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "correction": true, "correction_chars": 800})
+                "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "memory_lookup": true, "correction": true, "correction_chars": 800})
         );
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
         assert_eq!(shown["ranges"]["per_prompt_wait_ms"], json!([100, 3000]));
@@ -2832,6 +2840,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config::inject(home.path()).unwrap().per_prompt_wait_ms, 800);
+        // The memory lookup's switch saves alone; a page that omits it keeps it.
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["memory_lookup"] = json!(false)),
+        )
+        .unwrap();
+        assert!(!config::inject(home.path()).unwrap().memory_lookup);
+        let shown = show(home.path());
+        let omitted = posted(&shown, |v| {
+            v["inject"].as_object_mut().unwrap().remove("memory_lookup");
+        });
+        save_to(&home, &omitted).unwrap();
+        assert!(!config::inject(home.path()).unwrap().memory_lookup);
         for (key, bad) in [
             ("per_prompt_chars", 499),
             ("per_prompt_wait_ms", 99),

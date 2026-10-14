@@ -49,7 +49,8 @@ Read in the installed plugin, 13.29.0 (`hooks/hooks.json`, and the bundled handl
 
 ## What oboete does
 
-F1. **Where.** Claude Code: `PreToolUse` with the matcher `Read`, which `oboete setup` adds beside
+F1. **Where.** Claude Code: `PreToolUse` with claude-mem's matcher (`setup::CLAUDE_READS`: `Read`,
+and since 13.35 the memory lookups of docs/memory-lookup.md too), which `oboete setup` adds beside
 the user's own hooks. It is a read hook: it records nothing (the read's `PostToolUse` does).
 Grok: its `PreToolUse`, already wired for context, when the tool is its file read, `read_file`,
 whose path is `target_file` (the probe in the `oboete-dogfood` user, Grok 1.0.40, 2026-10-11: the

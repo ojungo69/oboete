@@ -1081,6 +1081,10 @@ const TEXT = {
   prompt_side_failed: ['The last prompt ({time}) took what its words match alone: the resident viewer did not answer.', '直近のプロンプト({time})は言葉の一致だけでした。常駐の画面が応答しませんでした。'],
   prompt_side_loading: ['The last prompt ({time}) took what its words match alone while the local model was loading; the next ones use it.', '直近のプロンプト({time})はモデルの読み込み中だったため言葉の一致だけでした。次からは使います。'],
   prompt_side_other: ['The last prompt ({time}) took what its words match alone ({why}).', '直近のプロンプト({time})は言葉の一致だけでした({why})。'],
+  memory_lookup_on: [
+    'When an agent looks through its own memory notes, also give what oboete remembers about it',
+    'エージェントが自分のメモを調べるときに、oboete の記憶からも探して渡す',
+  ],
   correction_on: [
     'Tell the agent at the next prompt when a decision it was given has changed',
     '渡した決定が変わったときは、次のプロンプトでエージェントに伝える',
@@ -4818,6 +4822,7 @@ function saveBody() {
         session_start: form.inject.session_start,
         session_start_note: form.inject.session_start_note,
         per_prompt: form.inject.per_prompt,
+        memory_lookup: form.inject.memory_lookup,
         correction: form.inject.correction,
         ...sizes,
       },
@@ -5574,6 +5579,7 @@ function drawSettings() {
         el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
         flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
         size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
+        flag('memory_lookup', 'memory_lookup_on'),
         flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
       el('section', 'capture-settings',
         el('h3', null, t('capture_h')),

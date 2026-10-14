@@ -196,6 +196,10 @@ pub struct Search<'a> {
     /// The egress gate's rules as they are now: each title and detail passes it whole before it
     /// is cut, so no cut leaves part of a secret the gate no longer finds.
     pub rules: &'a crate::redact::Rules,
+    /// A hook's search (the memory lookup bridge, docs/memory-lookup.md): the words side alone, no
+    /// query embedded (decision 38); no continuation, which no store would keep past the hook; and
+    /// no muted claim, since its answer is injected (spec 6.1).
+    pub hook: bool,
 }
 
 impl Search<'_> {
@@ -389,7 +393,7 @@ impl Search<'_> {
         details: Vec<Detail>,
     ) -> Answer {
         // A continuation the store cannot keep is none: the answer then ends the search.
-        let continuation = next.and_then(|state| {
+        let continuation = next.filter(|_| !self.hook).and_then(|state| {
             let token = cursor()?;
             let mut cursors = self.cursors.lock().unwrap_or_else(|e| e.into_inner());
             cursors.put(token.clone(), state, self.now).ok()?;
@@ -519,9 +523,14 @@ impl Search<'_> {
             no_starts: true,
             ..Default::default()
         };
-        Ok(search::query(self.home, &q)?
+        let answer = match self.hook {
+            true => search::query_with(self.home, &q, None)?,
+            false => search::query(self.home, &q)?,
+        };
+        Ok(answer
             .hits
             .into_iter()
+            .filter(|h| !(self.hook && h.muted))
             .map(|h| {
                 let (kind, kind_of) = match (&h.class, h.kind.as_str()) {
                     (search::Class::Summary, _) => ("summary", None),
@@ -596,6 +605,19 @@ impl Search<'_> {
                     .into_iter()
                     .filter(|r| repo.is_some() || r.project == anchor.project),
             );
+        }
+        if self.hook {
+            let k = rusqlite::Connection::open_with_flags(
+                self.home.join("knowledge.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let mut kept = Vec::new();
+            for row in rows {
+                if !crate::claims::muted(&k, &row.id)? {
+                    kept.push(row);
+                }
+            }
+            rows = kept;
         }
         Ok(index_rows(rows, 35))
     }
@@ -992,6 +1014,7 @@ mod tests {
             now: 0,
             repo: scope,
             rules: &crate::redact::Rules::default(),
+            hook: false,
         };
         let detail = |id: &str| Detail {
             row: row(id, "observation", "t"),
