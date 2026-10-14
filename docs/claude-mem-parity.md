@@ -88,6 +88,12 @@ each milestone and new features are added here.
 |---|---|---|
 | N2 | **An older binary run on a newer home.** claude-mem 13.36 stamps its database with the newest schema that wrote it and refuses changes from an older build. oboete had no such stamp: an older binary run against a home a newer one wrote would write with the older meaning. Built in docs/store-format.md: raw.db carries the home's format, and every open of it refuses a newer one. | M |
 
+### Before the switch (added 2026-10-14, decision 45, from claude-mem 13.35)
+
+| # | Difference | Size |
+|---|---|---|
+| N3 | **The agent saves a note on purpose.** claude-mem 13.35 gives the agent `save_memory`, which stores a note that search finds and the session start never shows. oboete had no such tool (row 32). Built with the same name and arguments: the note is a document of its repository, through the capture gate, refused where nothing is recorded, labelled `note` in search (docs/tools.md, slice 4). | M |
+
 ### After the switch, first
 
 | # | Difference | Size |
@@ -131,7 +137,7 @@ each milestone and new features are added here.
 | 27 | **Setting for a worker run by an outside process manager.** claude-mem has a setting that tells hooks never to start the background process, for people who run it under a container or service manager. oboete has only an undocumented environment variable for this. | S |
 | 29 | **Small recording differences: image-only prompts, duplicate prompts, prompt numbers, subagent type.** claude-mem records an image-only prompt as a placeholder, drops a prompt delivered twice within 10 seconds, numbers prompts within a session and stores the subagent's type. oboete skips image-only prompts, stores a double delivery twice, has no prompt number and stores only the subagent's id. | S |
 | 30 | **Ranking by how often a memory was confirmed again.** claude-mem can keep the days on which a memory was confirmed again and rank by them, when a setting is turned on. oboete has no such history; it brings older items in by word match with current work. | M |
-| 32 | **Saving a memory on purpose, and reloading the context, from the agent.** claude-mem lets a tool or the agent save a note on purpose and fetch the start-of-session context for any project. In oboete only a global preference can be added by hand, and the agent has no tool to save a note or reload the context. | M |
+| 32 | **Reloading the context from the agent.** claude-mem lets the agent fetch the start-of-session context for any project. oboete's agent has no tool for it. Saving a note on purpose is built (N3). | M |
 | 33 | **Agents oboete does not support at all (OpenClaw, Kimi, Windsurf, Oh My Pi, Copilot CLI, Goose, Roo, Warp).** claude-mem installs into these tools. oboete supports seven coding agents and none of these, so their sessions would not be recorded and would get no memory. | L |
 | 36 | **Connecting a new tool by writing a transcript watch config.** claude-mem lets the user describe a new tool's transcript format in a config file, with examples and commands to create, check and run it. In oboete a new format has to be built into the program. | L |
 | 38 | **Copying memory between machines over SSH without a cloud account.** claude-mem's repository has a script that pushes, pulls and compares memory between two machines over SSH. oboete has nothing like it; its planned sync always goes through the owner's Cloudflare hub. | M |

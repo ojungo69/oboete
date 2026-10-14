@@ -548,7 +548,7 @@ fn correction_recorded(
     let device = raw.device().to_owned();
     drop(raw);
     // A search or a SessionStart right after never shows the old claim.
-    if let Err(cause) = applied(home, &k, &device, &seqs, "correction") {
+    if let Err(cause) = applied(home, &k, &device, &seqs, ("correction", "claims")) {
         return Ok(OwnerReceipt::Pending {
             uid: uid.to_owned(),
             reason: PendingReason::Application,
@@ -582,15 +582,15 @@ fn correction_recorded(
     })
 }
 
-/// The owner's ops `seqs`, applied before the command returns: by this process or by the worker
-/// already running (which wakes on the new op). At most 10 seconds, else an error that says the
-/// `what` is recorded.
-fn applied(
+/// The owner's ops `seqs`, applied by `consumer` before the command returns: by this process or
+/// by the worker already running (which wakes on the new op). At most 10 seconds, else an error
+/// that says the `what` is recorded.
+pub(crate) fn applied(
     home: &std::path::Path,
     k: &Connection,
     device: &str,
     seqs: &[i64],
-    what: &str,
+    (what, consumer): (&str, &str),
 ) -> Result<()> {
     crate::worker::run_once(home)?;
     let at = seqs.last().copied().unwrap_or(0);
@@ -599,7 +599,7 @@ fn applied(
         let got = crate::knowledge::checkpoint::get_in(
             k,
             crate::knowledge::checkpoint::OPS,
-            "claims",
+            consumer,
             device,
         )?;
         Ok(got >= at)
@@ -704,7 +704,7 @@ pub(crate) fn pref_add_recorded(
     };
     let device = raw.device().to_owned();
     drop(raw);
-    if let Err(cause) = applied(home, &k, &device, &seqs, "preference") {
+    if let Err(cause) = applied(home, &k, &device, &seqs, ("preference", "claims")) {
         return Ok(OwnerReceipt::Pending {
             uid,
             reason: PendingReason::Application,

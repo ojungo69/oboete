@@ -359,6 +359,20 @@ pub struct ImportDoc {
     pub body: String,
 }
 
+/// The source of a note an agent saved (`save_memory`): its uid is `oboete-note:<id>`.
+pub const NOTE_SOURCE: &str = "oboete-note";
+
+/// What `append_note` did.
+#[derive(Debug, PartialEq)]
+pub enum Noted {
+    /// Appended as this op.
+    Appended(i64),
+    /// Already kept: nothing appended.
+    Kept,
+    /// Forget names it: nothing appended.
+    Forgotten,
+}
+
 /// Documents per `append_imports` append (D5), and the most records an `append_imported` takes.
 pub const IMPORT_BATCH: usize = 500;
 
@@ -5102,7 +5116,11 @@ impl Raw {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
-        let lists = ops.iter().any(|(kind, _)| *kind == OpKind::WorkState);
+        // An agent's own writes: its work state, and the notes it saves (`append_note`).
+        let fenced = |kind: OpKind, body: &serde_json::Value| {
+            kind == OpKind::WorkState || kind == OpKind::Import && body["source"] == NOTE_SOURCE
+        };
+        let lists = ops.iter().any(|(kind, body)| fenced(*kind, body));
         let never = lists.then(|| capture_exclusions_in(&tx)).transpose()?;
         let now = never
             .as_ref()
@@ -5113,13 +5131,15 @@ impl Raw {
                 !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
+            // A list imported from claude-mem is matched by its project's name too; a note, by its
+            // repository's key alone.
             let (repo, imported) = (
                 body["repo"].as_str().unwrap_or_default(),
-                !body["source"].is_null(),
+                *kind == OpKind::WorkState && !body["source"].is_null(),
             );
             let labelled = |settings| crate::capture::exclusion_label("repo", repo, settings);
             if let Some(never) = &never
-                && *kind == OpKind::WorkState
+                && fenced(*kind, body)
                 && (never.refuses(now.as_ref(), (None, cwd), read)
                     || never.covers_work_state(repo, imported)
                     || now
@@ -5310,6 +5330,42 @@ impl Raw {
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
         let ops = [(OpKind::WorkState, op)];
         Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0])
+    }
+
+    /// `save_memory` (claude-mem 13.35): an agent's note, `doc` of source `NOTE_SOURCE`, as this
+    /// device's next op, under the fence a work state write takes (`work_state_under`): refused in
+    /// its transaction (`NeverRecorded`) where the writer's place or the note's repository is
+    /// never recorded. Nothing is appended when forget names the note (D5), nor when one of the
+    /// ops knowledge.db says hold its uid (`held`, `(device, op_seq)`) is still in the op log (the
+    /// same uid, so the same repository, title and text): the op log, not the index, says it is
+    /// kept, so a restore that lost the op and has not rewound the index yet keeps no note away
+    /// (Codex on #525).
+    pub fn append_note(
+        &mut self,
+        doc: &ImportDoc,
+        held: &[(String, i64)],
+        cwd: &str,
+        settings: &crate::capture::Settings,
+        read: (&str, Option<&str>),
+    ) -> Result<Noted> {
+        let text = format!("{}\n{}", doc.title, doc.body);
+        let origin = crate::forget::origin(&doc.source, &doc.source_id);
+        if forgotten_uid(&self.conn, &doc.uid)? || denied(&self.conn, Some(&origin), &text)? {
+            return Ok(Noted::Forgotten);
+        }
+        let mut in_log = self.conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq = ?2 AND type = 'import'
+                             AND json_extract(body, '$.uid') = ?3)",
+        )?;
+        for (device, seq) in held {
+            if in_log.query_row(params![device, seq, doc.uid], |r| r.get::<_, bool>(0))? {
+                return Ok(Noted::Kept);
+            }
+        }
+        drop(in_log);
+        let ops = [(OpKind::Import, serde_json::to_value(doc)?)];
+        let seqs = self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?;
+        Ok(Noted::Appended(seqs[0]))
     }
 
     /// `work_state_in` on this store.
@@ -9015,6 +9071,78 @@ mod tests {
             raw.append_captured(&labelled, &[], &settings, elsewhere)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    /// `save_memory`: a note asks in its transaction what a work state write asks, of its own
+    /// repository's key and of the writer's folder as read; a note forget names, or one already
+    /// kept, appends nothing.
+    #[test]
+    fn a_note_asks_in_its_transaction_what_a_work_state_write_asks() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let note = |repo: &str, id: &str| ImportDoc {
+            uid: format!("{NOTE_SOURCE}:{id}"),
+            source: NOTE_SOURCE.into(),
+            source_id: id.into(),
+            kind: "note".into(),
+            repo: repo.into(),
+            session: "note".into(),
+            ts: 1,
+            title: "Title".into(),
+            body: "Body.".into(),
+        };
+        raw.exclude_capture(("repo", "github.com/o/secret"), false)
+            .unwrap();
+        raw.exclude_capture(("folder", "/w/private"), false)
+            .unwrap();
+        let open_place = ("github.com/o/open", Some("/w/open"));
+        let refused = raw.append_note(
+            &note("github.com/o/secret", "a"),
+            &[],
+            "/w/open",
+            &settings,
+            open_place,
+        );
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        let below = ("github.com/o/open", Some("/w/private/sub"));
+        let refused = raw.append_note(
+            &note("github.com/o/open", "b"),
+            &[],
+            "/w/private/sub",
+            &settings,
+            below,
+        );
+        assert!(refused.unwrap_err().is::<NeverRecorded>());
+        // An imported document of the same repository is no note: the import is not fenced so.
+        let imported = ImportDoc {
+            source: "claude-mem:abc".into(),
+            ..note("github.com/o/secret", "c")
+        };
+        assert_eq!(raw.append_imports(vec![imported]).unwrap(), 1);
+        let kept = note("github.com/o/open", "d");
+        let device = raw.device().to_owned();
+        // An entry the op log no longer holds (a restore lost it) keeps nothing away.
+        let stale = [(device.clone(), 9_999)];
+        let Noted::Appended(seq) = raw
+            .append_note(&kept, &stale, "/w/open", &settings, open_place)
+            .unwrap()
+        else {
+            panic!("appended");
+        };
+        let held = [(device, seq)];
+        assert_eq!(
+            raw.append_note(&kept, &held, "/w/open", &settings, open_place)
+                .unwrap(),
+            Noted::Kept
+        );
+        let forget = serde_json::json!({"uid": kept.uid});
+        raw.append_ops(&[(OpKind::Forget, forget)]).unwrap();
+        assert_eq!(
+            raw.append_note(&kept, &[], "/w/open", &settings, open_place)
+                .unwrap(),
+            Noted::Forgotten
         );
     }
 

@@ -208,8 +208,10 @@ fn run_io(
         let failed = events.iter().rev().find(|(_, e)| {
             e.kind == "tool"
                 && serde_json::from_str::<Value>(&e.body).is_ok_and(|b| {
+                    let tool = b["tool"].as_str().unwrap_or("");
                     b["failed"] == true
-                        && !crate::curate::memory_read(b["tool"].as_str().unwrap_or(""), &b)
+                        && !crate::curate::memory_read(tool, &b)
+                        && !crate::curate::memory_write(tool, &b)
                 })
         });
         if let Some((seq, _)) = failed {
@@ -1710,9 +1712,10 @@ fn failed_call(
     let seq: i64 = taken(home, agent, session, "failed")?.trim().parse().ok()?;
     let e = crate::consumer::manifest::event(raw, raw.device(), seq).ok()??;
     let b: Value = serde_json::from_str(&e.body).ok()?;
-    // A mark an older version left on a read of stored memory is no failure of the work
-    // (Sourcery on #523).
-    if crate::curate::memory_read(b["tool"].as_str().unwrap_or(""), &b) {
+    // A mark an older version left on a read of stored memory, or a save of a note, is no
+    // failure of the work (Sourcery on #523).
+    let tool = b["tool"].as_str().unwrap_or("");
+    if crate::curate::memory_read(tool, &b) || crate::curate::memory_write(tool, &b) {
         return None;
     }
     let input = b["input"].as_str().unwrap_or("");
@@ -5016,9 +5019,10 @@ mod tests {
         assert!(p.prompt("c", "anything new").contains("Kilo migrations"));
     }
 
-    /// claude-mem 13.35 (`isRecursiveMemoryTool`): a failed read of stored memory is no failure of
-    /// the work: the session keeps no failed call for its next prompt, and the manifest makes no
-    /// fact of it; a failed command still is both.
+    /// claude-mem 13.35 (`isRecursiveMemoryTool`, `isExplicitMemoryWrite`): a failed read of
+    /// stored memory, or a failed save of a note, is no failure of the work: the session keeps no
+    /// failed call for its next prompt, and the manifest makes no fact of it; a failed command
+    /// still is both.
     #[test]
     fn a_failed_memory_read_is_no_failure_of_the_work() {
         let p = Prompts::new(true);
@@ -5026,6 +5030,9 @@ mod tests {
         let read = json!({"tool_name": "mcp__oboete__search", "tool_input": {"query": "x"},
             "error": "store busy"});
         p.hook("PostToolUseFailure", "a", read);
+        let save = json!({"tool_name": "mcp__oboete__save_memory", "tool_input": {"text": "x"},
+            "error": "store busy"});
+        p.hook("PostToolUseFailure", "a", save);
         assert_eq!(crate::hookstate::value(home, "claude", "a", "failed"), None);
         let bash = json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"},
             "error": "failed"});

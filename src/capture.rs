@@ -403,11 +403,16 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
                 }
             }
             // A read of stored memory keeps its call and not its output, which repeats memory
-            // (claude-mem stores nothing of it).
+            // (claude-mem stores nothing of it); a note saved to memory keeps neither its input
+            // nor its output, the note being kept once, as its document.
             let tool = body["tool"].as_str().unwrap_or("").to_owned();
             if crate::curate::memory_read(&tool, &body) {
                 body["output"] = json!("");
                 body["memory_read"] = json!(true);
+            } else if crate::curate::memory_write(&tool, &body) {
+                body["input"] = json!("");
+                body["output"] = json!("");
+                body["memory_write"] = json!(true);
             }
             ("tool", body)
         }
@@ -580,6 +585,18 @@ pub fn directive(text: &str, ts: i64, settings: &Settings) -> Captured {
     c.event.cwd = None;
     (c.event.branch, c.event.head, c.event.gitdir) = (None, None, None);
     c
+}
+
+/// A note an agent saves (`save_memory`): its title and text through the same gate as every
+/// stored string, a closed opt-out block taken out of each first. Its caller refuses a text over
+/// `MAX_FIELD_BYTES`, so the gate cuts none.
+pub fn note(title: &str, text: &str, settings: &Settings) -> (String, String) {
+    let mut gate = Gate::new(settings);
+    let cap = gate.cap;
+    (
+        gate.text("title", &without_blocks(title, false), cap),
+        gate.text("text", &without_blocks(text, false), cap),
+    )
 }
 
 /// A work state write's list name and fields (docs/work-state.md L5) through the same gate as
@@ -981,6 +998,12 @@ mod tests {
         let other = call("mcp__notion__search");
         assert!(other["output"].as_str().unwrap().contains("Use tabs"));
         assert_eq!(other.get("memory_read"), None);
+        // A note saved to memory keeps neither: it is kept once, as its document.
+        let saved = call("mcp__oboete__save_memory");
+        assert_eq!(
+            (&saved["input"], &saved["output"], &saved["memory_write"]),
+            (&json!(""), &json!(""), &json!(true))
+        );
     }
 
     /// Slice 4a (A28): a checkout's `.oboete.toml` may only stop recording: its `capture` key alone
