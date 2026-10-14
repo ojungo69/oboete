@@ -20,9 +20,10 @@ switches to.
 
 - **One number for the home**: `raw::FORMAT`, 1 in this slice, kept as raw.db's
   `PRAGMA user_version` (raw.db has never set it, so every store so far reads 0). raw.db is the
-  store of record, and every process opens it before it reads knowledge.db or providers.db
-  (search, the hooks, the worker, the MCP server, the viewer, doctor and the commands: forget's
-  deny rows and the tombstones are there), so one check covers the home. knowledge.db's
+  store of record, and nearly every process opens it before it reads knowledge.db or
+  providers.db (forget's deny rows and the tombstones are there); the opens of knowledge.db and
+  providers.db read raw.db's stamp first too, as doctor's provider lines and `oboete resume`
+  open providers.db alone. So one stamp covers the home. knowledge.db's
   `user_version` stays its own migration marker (1: `turns_fts` holds the summaries' notes, #403).
 - **When it moves**: a release raises `FORMAT` when an older binary would mishandle anything it
   writes: raw.db's schema or the meaning of its rows and ops, knowledge.db's or providers.db's, a
@@ -35,7 +36,9 @@ switches to.
   the file (its journal mode included), and refuses a value above `FORMAT` with a typed error,
   `raw::NewerFormat { found }`: "raw.db was written by a newer oboete (format 2; this one reads up
   to 1): update oboete". The writable open (`open_within_report`, under every `raw::open`) and
-  `raw::read_only` both check. A refused open changes no byte of the file.
+  `raw::read_only` both check, and so do the opens of knowledge.db and providers.db
+  (`raw::refuse_newer_home`, before they create or change anything). A refused open changes no
+  byte of the file.
 - The writable open raises a lower value to `FORMAT` before its schema and migrations, in an
   IMMEDIATE transaction that reads it again, so that of two binaries opening together the newer
   one's stamp stays and the older one refuses it before it migrates anything. A raw.db already at

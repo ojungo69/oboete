@@ -112,6 +112,7 @@ CREATE INDEX IF NOT EXISTS turn_pending_session ON turn_pending(device, agent, s
 /// The viewer's ledger reads never create a database or run a schema upgrade. An absent
 /// ledger is different from one that cannot be read: only the former means no spend yet.
 pub fn read_only(home: &Path) -> Result<Option<Connection>> {
+    crate::raw::refuse_newer_home(home)?;
     let path = home.join("providers.db");
     match std::fs::metadata(&path) {
         Ok(_) => {}
@@ -133,6 +134,7 @@ pub(crate) fn open_report(
     home: &Path,
     committed: &mut impl FnMut(&'static str),
 ) -> Result<Connection> {
+    crate::raw::refuse_newer_home(home)?;
     let deadline = std::time::Instant::now() + crate::db::OPEN_WRITE_WAIT;
     let path = home.join("providers.db");
     crate::db::private(home, 0o700);

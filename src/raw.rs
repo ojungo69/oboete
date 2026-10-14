@@ -1509,6 +1509,25 @@ impl std::fmt::Display for NewerFormat {
 
 impl std::error::Error for NewerFormat {}
 
+/// docs/store-format.md: the home's format read from raw.db without opening it as a store, for an
+/// open of another store that may come first (doctor's provider lines, `oboete resume`; Codex on
+/// #503). Only a newer format refuses: a raw.db missing or damaged leaves the other stores to open.
+pub(crate) fn refuse_newer_home(home: &Path) -> Result<()> {
+    let file = path(home);
+    if !file.exists() {
+        return Ok(());
+    }
+    let read = || -> Result<i64> {
+        let conn = Connection::open_with_flags(&file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(OPEN_WAIT)?;
+        format_of(&conn)
+    };
+    match read() {
+        Err(e) if e.is::<NewerFormat>() => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// The format `conn`'s raw.db was last written with, refused when it is newer than this binary's.
 fn format_of(conn: &Connection) -> Result<i64> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -7914,6 +7933,31 @@ mod tests {
         }));
         let e = open(p).err().expect("refused");
         assert!(e.is::<NewerFormat>(), "{e:#}");
+    }
+
+    /// Codex on #503: the other stores' opens read the home's format first, so a command that opens
+    /// providers.db or knowledge.db before raw.db (`oboete resume`, doctor's provider lines)
+    /// creates or changes neither in a home a newer oboete wrote.
+    #[test]
+    fn the_other_stores_refuse_a_home_a_newer_oboete_wrote() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        drop(open(p).unwrap());
+        Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch(&format!("PRAGMA user_version = {}", FORMAT + 1))
+            .unwrap();
+        let refused = [
+            crate::providers_db::open(p).err(),
+            crate::providers_db::read_only(p).err(),
+            crate::knowledge::open(p).err(),
+        ];
+        for e in refused {
+            let e = e.expect("refused");
+            assert!(e.is::<NewerFormat>(), "{e:#}");
+        }
+        assert!(!p.join("providers.db").exists());
+        assert!(!p.join("knowledge.db").exists());
     }
 
     /// Codex on #458: a copy's sidecars are named on its path's own bytes, which need not be
