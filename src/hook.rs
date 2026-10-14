@@ -207,7 +207,10 @@ fn run_io(
         // MUST-M21 (D9): the session's last failed call, which its next prompt is matched against.
         let failed = events.iter().rev().find(|(_, e)| {
             e.kind == "tool"
-                && serde_json::from_str::<Value>(&e.body).is_ok_and(|b| b["failed"] == true)
+                && serde_json::from_str::<Value>(&e.body).is_ok_and(|b| {
+                    b["failed"] == true
+                        && !crate::curate::memory_read(b["tool"].as_str().unwrap_or(""), &b)
+                })
         });
         if let Some((seq, _)) = failed {
             let kept = crate::hookstate::update(home, agent, &session, "failed", |_| {
@@ -5006,6 +5009,33 @@ mod tests {
         assert_eq!(p.prompt("c", "anything new"), "");
         std::fs::remove_file(p.s.home.path().join("config.toml")).unwrap();
         assert!(p.prompt("c", "anything new").contains("Kilo migrations"));
+    }
+
+    /// claude-mem 13.35 (`isRecursiveMemoryTool`): a failed read of stored memory is no failure of
+    /// the work: the session keeps no failed call for its next prompt, and the manifest makes no
+    /// fact of it; a failed command still is both.
+    #[test]
+    fn a_failed_memory_read_is_no_failure_of_the_work() {
+        let p = Prompts::new(true);
+        let home = p.s.home.path();
+        let read = json!({"tool_name": "mcp__oboete__search", "tool_input": {"query": "x"},
+            "error": "store busy"});
+        p.hook("PostToolUseFailure", "a", read);
+        assert_eq!(crate::hookstate::value(home, "claude", "a", "failed"), None);
+        let bash = json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"},
+            "error": "failed"});
+        p.hook("PostToolUseFailure", "a", bash);
+        assert!(crate::hookstate::value(home, "claude", "a", "failed").is_some());
+        p.s.run();
+        let k = crate::knowledge::open(home).unwrap();
+        let fails: i64 = k
+            .query_row(
+                "SELECT count(*) FROM manifest_facts WHERE fact = 'fail'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fails, 1);
     }
 
     /// MUST-M21 (D9): a lesson SessionStart showed only as an index line comes back with its body

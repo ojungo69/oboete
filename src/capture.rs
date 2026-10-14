@@ -402,6 +402,13 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
                     body[key] = clean(v);
                 }
             }
+            // A read of stored memory keeps its call and not its output, which repeats memory
+            // (claude-mem stores nothing of it).
+            let tool = body["tool"].as_str().unwrap_or("").to_owned();
+            if crate::curate::memory_read(&tool, &body) {
+                body["output"] = json!("");
+                body["memory_read"] = json!(true);
+            }
             ("tool", body)
         }
         "Stop" => {
@@ -953,6 +960,28 @@ fn resolve(common: &Path, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// claude-mem 13.35's `isRecursiveMemoryTool`: a read of stored memory keeps its call and not
+    /// its output; another server's tool of the same name keeps both.
+    #[test]
+    fn a_memory_read_is_stored_without_its_output() {
+        let s = Settings::load(tempfile::tempdir().unwrap().path()).unwrap();
+        let call = |tool: &str| {
+            let payload = json!({"session_id": "s", "cwd": "/tmp", "tool_name": tool,
+                "tool_input": {"query": "tabs"}, "tool_response": "Use tabs (decided)."});
+            let c = &events("claude", "PostToolUse", &payload, 1, &s)[0];
+            serde_json::from_str::<Value>(&c.event.body).unwrap()
+        };
+        let read = call("mcp__oboete__search");
+        assert_eq!(
+            (&read["output"], &read["memory_read"]),
+            (&json!(""), &json!(true))
+        );
+        assert!(read["input"].as_str().unwrap().contains("tabs"));
+        let other = call("mcp__notion__search");
+        assert!(other["output"].as_str().unwrap().contains("Use tabs"));
+        assert_eq!(other.get("memory_read"), None);
+    }
 
     /// Slice 4a (A28): a checkout's `.oboete.toml` may only stop recording: its `capture` key alone
     /// is read, and a file that cannot be read, is not TOML or holds another `capture` stops it

@@ -754,8 +754,10 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         }
         "reply" => add("reply", "")?,
         "end" => add("end", "")?,
-        // An interrupted call returned nothing: neither a failure nor the fix of one.
+        // An interrupted call returned nothing: neither a failure nor the fix of one. Nor is a
+        // read of stored memory any of the work's facts.
         "tool" if body.get("interrupted").and_then(Value::as_bool) == Some(true) => {}
+        "tool" if crate::curate::memory_read(str_at(&body, "tool"), &body) => {}
         "tool" => {
             // Every success, not only one after a failure of its call: a tombstone can change a
             // failure's key later, and the build pairs them then.
