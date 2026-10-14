@@ -62,18 +62,20 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
    The one evaluation sets both thresholds, with the false-premise questions, by the same line.
    `[inject] per_prompt` stays off by default until then (4.6); the owner turns it on, as the
    owner has claude-mem's on.
-5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the whole prompt
-   point, from the hook's read fence to the block, not the viewer's answer alone. The hook builds
-   the words side (as now but over the same kinds: the full-text index of claims, cards, summaries
-   and imports, with the same 0.53 cut) while it waits for the viewer, so a late or missing
-   answer leaves a block that is already built. The default comes from measurement, before the
+5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the hook's wait
+   for the viewer, counted from the hook's read fence, not from the request, so the time the
+   words side takes counts against it. The hook builds the words side (as now but over the same
+   kinds: the full-text index of claims, cards, summaries and imports, with the same 0.53 cut)
+   while it waits for the viewer, so a late or missing answer leaves a block that is already
+   built. The hook's own reads are local and not cut at the deadline, as the prompt point's reads
+   were not before; they are measured (As built). The default comes from measurement, before the
    code merges: the prompt point's time (the fence, the viewer's answer with its query vector
    within 1.2 s, the search, the lines) on this PC's WSL with the local model, set so that its
    95th percentile fits, and not above claude-mem's 2 s for Codex unless the measurement says so.
    The iMac's measurement waits for resident mode there (#506). No resident viewer, no answer
    by the deadline, or an error: the words side's block. A meaning answer that comes late is lost
    for that prompt; this is the known cost.
-6. **Fail-open.** Nothing on this path blocks the prompt past the deadline, and it writes no
+6. **Fail-open.** Nothing on this path waits for the viewer past the deadline, and it writes no
    memory and no index: the answer is read, gated (`outbound`, as every block), fenced and shown.
    What it writes is what a search and a prompt point write now: a query sent to a provider is
    reserved and settled in `providers.db` (the embedding budget), and what is shown joins the
@@ -119,11 +121,11 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   home (5,307 claims and 2,691 cards embedded by the local bge-m3), the resident viewer warm, 47
   questions of the dev pool sent as the hook sends them, with claude-mem's own processes running
   as they do. The viewer's answer: p50 70 ms, p95 88 ms, max 101 ms. The whole prompt hook: p50
-  86 ms, p95 103 ms, max 116 ms with it; p50 24 ms, p95 37 ms with the words side alone; p50
-  19 ms, p95 24 ms on `main` before this change. A model the viewer dropped loads in about 2 s,
-  the viewer answering at once without a vector meanwhile. The default leaves ten times the 95th
-  percentile, for a busier machine and a larger store (the bit index's scan grows with it), and
-  stays under claude-mem's 2 s for Codex.
+  86 ms, p95 103 ms, max 116 ms with it; p50 24 ms, p95 37 ms, max 71 ms with the words side
+  alone; p50 19 ms, p95 24 ms on `main` before this change. A model the viewer dropped loads in
+  about 2 s, the viewer answering at once without a vector meanwhile. The default leaves ten
+  times the 95th percentile, for a busier machine and a larger store (the bit index's scan grows
+  with it), and stays under claude-mem's 2 s for Codex.
 - **Doctor and the page.** Doctor's per-prompt line says whether a resident viewer answers now, and
   how the last prompt that could ask took its block (`state/prompt-side`: in time, after the wait,
   no viewer, or the viewer's reason for no vector); the settings page shows the same under the
@@ -157,7 +159,8 @@ page's injection section (the wait, and which side answered last).
 
 ## Tests
 
-As built (the first slice):
+As built (the first slice). The three tests with a stand-in viewer run on Linux only, where the
+resident viewer keeps its token (`keyfile::private_fs`, #281):
 
 - The hook asks only a viewer that is up, with the checkout's repository; what it finds near in
   meaning joins the block; a claim it names that is not delivered stays out

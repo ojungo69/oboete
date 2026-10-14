@@ -4309,20 +4309,21 @@ mod tests {
         );
     }
 
+    /// A token as the viewer writes one: 32 lower-case hex digits. The resident viewer keeps one
+    /// only on Linux (`keyfile::private_fs`, #281), so elsewhere no prompt asks it.
+    #[cfg(target_os = "linux")]
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
     /// A stand-in for the resident viewer at a port of its own (G23): the home's resident state
     /// says it listens, its lock is held, and each request it takes is kept; it answers `hits`
     /// after `delay`.
-    /// A token as the viewer writes one: 32 lower-case hex digits.
-    #[cfg(unix)]
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     struct Resident {
         asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
         _lock: std::fs::File,
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     impl Resident {
         fn start(home: &Path, wait_ms: u64, hits: Value, delay: Duration) -> Self {
             use std::os::unix::fs::PermissionsExt;
@@ -4397,7 +4398,7 @@ mod tests {
     /// G23: the resident viewer is asked with the checkout's repository and the prompt, and what
     /// it finds near in meaning joins the block though its words do not bear on the prompt; a
     /// claim it names that is not delivered stays out.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_prompt_point_takes_the_resident_viewers_meaning_side() {
         let mut p = Prompts::new(true);
@@ -4418,7 +4419,7 @@ mod tests {
 
     /// G23 (docs/prompt-context.md step 5): an answer past `[inject] per_prompt_wait_ms` is lost
     /// for the prompt, whose block is the words side's, built meanwhile, within the wait.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_late_answer_leaves_the_words_side_within_the_wait() {
         let mut p = Prompts::new(true);
@@ -4444,7 +4445,7 @@ mod tests {
 
     /// G23: a prompt this call did not record with its text goes to no viewer (here
     /// `store_prompts = false`), nor does one under 20 characters.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_prompt_not_recorded_whole_or_too_short_asks_nothing() {
         let mut p = Prompts::new(true);

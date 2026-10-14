@@ -988,9 +988,8 @@ pub struct Inject {
     pub per_prompt: bool,
     /// Their block's size in characters (`PER_PROMPT_CHARS`).
     pub per_prompt_chars: usize,
-    /// How long the prompt point may take, from its read fence to its block, while it waits for
-    /// the resident viewer's meaning side (G23, `PER_PROMPT_WAIT_MS`); past it, the full-text
-    /// side's block.
+    /// How long the prompt point waits for the resident viewer's meaning side, counted from its
+    /// read fence (G23, `PER_PROMPT_WAIT_MS`); past it, the full-text side's block.
     pub per_prompt_wait_ms: usize,
     /// A claim shown in the session that changed since is named at the next prompt (spec 4.8).
     pub correction: bool,
@@ -1895,14 +1894,16 @@ model = { gone = "m" }
             (
                 d.per_prompt,
                 d.per_prompt_chars,
+                d.per_prompt_wait_ms,
                 d.correction,
                 d.correction_chars
             ),
-            (false, 1_500, true, 800)
+            (false, 1_500, 1_000, true, 800)
         );
         for (key, low, high) in [
             ("session_start_chars", 1_000, 9_000),
             ("per_prompt_chars", 500, 6_000),
+            ("per_prompt_wait_ms", 100, 3_000),
             ("correction_chars", 300, 3_000),
         ] {
             for (value, ok) in [
