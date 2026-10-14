@@ -27,6 +27,10 @@ const APP_CSS: &str = include_str!("../assets/viewer/app.css");
 const MAX_HEAD: usize = 16 * 1024;
 /// A settings save's body; the page's is under 2 KB.
 const MAX_BODY: usize = 16 * 1024;
+/// The prompt hook's body: the prompt (at most twice `embed::PROMPT_CHARS` characters) and the
+/// keys the session was shown (at most `search::b::PROMPT_SHOWN` of at most 256 bytes each, a
+/// claim's 64), with room for JSON's quotes and escapes (Codex on #521).
+const PROMPT_BODY: usize = 1024 * 1024;
 /// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
 /// version always fit.
 const MAX_KEY_BODY: usize = 1024;
@@ -1154,7 +1158,7 @@ impl Viewer {
             ("POST", "/api/maintenance/start") => (MAX_BODY, |v, b, _| v.maintenance_start(b)),
             ("POST", "/api/view/resident") => (MAX_BODY, |v, b, _| v.view_resident(b)),
             ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
-            ("POST", "/api/prompt-context") => (MAX_BODY, |v, b, _| v.prompt_context(b)),
+            ("POST", "/api/prompt-context") => (PROMPT_BODY, |v, b, _| v.prompt_context(b)),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -5913,6 +5917,16 @@ curate = false
         let answer = json_of(&ask(&[HOST, TOKEN], &asked));
         assert_eq!(answer, json!({"vector": "no-vectors", "hits": []}));
         assert!(opener.exists());
+        // A long session's shown set fits: as many claims' keys as the hook sends.
+        let shown: Vec<String> = (0..crate::search::b::PROMPT_SHOWN)
+            .map(|i| format!("{i:064x}"))
+            .collect();
+        let long = json!({"repo": "github.com/o/r", "prompt": "x".repeat(2_000), "shown": shown});
+        assert_eq!(ask(&[HOST, TOKEN], &long).status, 200);
+        let mut more = shown.clone();
+        more.push("f".repeat(64));
+        let over = json!({"repo": "github.com/o/r", "prompt": "x", "shown": more});
+        assert_eq!(ask(&[HOST, TOKEN], &over).status, 400);
         get(&v, "/api/settings");
         assert!(!opener.exists());
         std::fs::remove_dir_all(&dir).ok();
