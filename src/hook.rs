@@ -425,8 +425,11 @@ fn run_io(
         // not found, so its claim may be shown again, never counted as shown unseen (as
         // `consumer::manifest::text` does after its gate).
         let came = |l: &str| text.lines().any(|t| t == l);
+        // A Codex subagent's manifest after its compaction leaves the session's shown set the
+        // root's: only the root has prompts, where the set is read (Codex on #532).
         if let Some(m) = &manifest
             && agent != "opencode"
+            && !took.thread.starts_with("compacted-")
         {
             // A card or summary counts when its own line came: the block puts each on a line that
             // begins with its ID, and a cut keeps whole lines (Codex on #521).
@@ -7075,6 +7078,43 @@ mod tests {
         conn.execute_batch("DROP TRIGGER refuse_tool").unwrap();
         let back = hook(&home, "codex", "PostToolUse", &payload(tool));
         assert!(back.contains("Parser errors go to stderr."), "{back}");
+    }
+
+    /// Codex on #532: a subagent's manifest after its compaction leaves the session's shown set as
+    /// the root's SessionStart left it, which the root's prompts read.
+    #[test]
+    fn a_codex_subagents_manifest_leaves_the_roots_shown_set() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let c = p.c.clone();
+        let call = |event: &str, agent_id: Option<&str>, extra: Value| {
+            let mut payload = json!({"session_id": "cx", "cwd": c});
+            if let Some(id) = agent_id {
+                payload["agent_id"] = json!(id);
+            }
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hook(&home, "codex", event, &payload)
+        };
+        let start = call("SessionStart", None, json!({"source": "startup"}));
+        assert!(start.contains("Parser errors go to stderr."), "{start}");
+        let root = shown_set(&home, "codex", "cx");
+        assert_eq!(root.len(), 1, "{root:?}");
+        p.decided(2, "Logs rotate daily.", &[]);
+        p.s.run();
+        assert_eq!(
+            call("PostCompact", Some("a"), json!({"trigger": "auto"})),
+            ""
+        );
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        let back = call("PostToolUse", Some("a"), tool);
+        assert!(back.contains("Logs rotate daily."), "{back}");
+        assert_eq!(shown_set(&home, "codex", "cx"), root);
     }
 
     /// CodeRabbit on #532: the root's SessionStart that took its mark to show the manifest and
