@@ -415,7 +415,8 @@ pub struct PromptNear {
 
 /// G23 (docs/prompt-context.md, decision 44): the claims, cards and session summaries of `repo`
 /// whose meaning is near `text`, at `shortlist::MEANING` or above, the nearest first; claims only
-/// under `claims::DECIDED_WHERE`, delivery's rule, before anything is kept. What the prompt hook
+/// under delivery's rule (`claims::DECIDED_WHERE`, and no link ending them: `delivered_one`),
+/// before anything is kept. What the prompt hook
 /// asks the resident viewer: the reader's vector (D14), the local model loaded on the first prompt
 /// and kept, or Workers AI through the gate, within `QUERY_TIMEOUT`; an excluded repository's
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
@@ -466,7 +467,12 @@ pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
             if cosine < crate::shortlist::MEANING {
                 break;
             }
-            if family == "c" && !decided.exists(params![key, repo])? {
+            // Delivery's rule whole, links too, before the cut: a claim a link ended would take
+            // a place the hook then leaves empty (Codex on #521).
+            if family == "c"
+                && (!decided.exists(params![key, repo])?
+                    || claims::delivered_one(&k, &key)?.is_none())
+            {
                 continue;
             }
             hits.push(PromptHit {
@@ -5137,6 +5143,21 @@ mod tests {
         )[0]
         .clone();
         s.decided(R, 3_000, "Lexer tokens are cached.", &[]);
+        // A decided lesson a later one ended (a link ends a lesson): not delivered, so no hit.
+        let seq = s.said("s", R, 4_000, "Parser errors go to stderr.");
+        let ended = s.claim(
+            seq,
+            "Parser errors go to stderr.",
+            ("lesson", "decided", "user"),
+            &[],
+        );
+        let later = s.said("s", R, 5_000, "Lexer tokens are cached twice.");
+        s.claim(
+            later,
+            "Lexer tokens are cached twice.",
+            ("lesson", "decided", "user"),
+            &[&ended],
+        );
         s.run();
         embedded_by(&s, &stub);
         let asked = stub.requests();

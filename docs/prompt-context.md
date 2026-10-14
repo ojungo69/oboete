@@ -92,7 +92,8 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   that holds its lock and says it listens on the configured port (`view::resident_answering`).
   The request names the repository; the viewer has no use for the branch.
 - **The viewer** (`search::b::prompt_near`) embeds as a search does and answers keys and cosines
-  only, the 20 nearest: delivered claims (under `DECIDED_WHERE`, before anything is kept), cards
+  only, the 20 nearest: delivered claims (under `DECIDED_WHERE` and with no link ending them, as
+  `claims::delivered_one` reads them, before anything is kept), cards
   and summaries at `T` or above. The hook reads each through its reader and gates its line. No
   reranker or judge exists in the code; this route calls neither, and #336's, once built, stay
   out of it (spec 4.3). The route takes the viewer's token as every route does but no Origin: the
@@ -175,7 +176,8 @@ resident viewer keeps its token (`keyfile::private_fs`, #281):
   session start showed is not shown again, and a summary's card shows its sentence once
   (`a_card_the_session_start_showed_is_not_shown_again`); a store without the documents' indexes
   still gets its decisions (`a_store_without_the_document_indexes_still_gets_its_decisions`).
-- The viewer keeps delivered claims only, before anything is kept, and documents at `T`
+- The viewer keeps delivered claims only, a decided lesson a later one ended among those left
+  out, before anything is kept, and documents at `T`
   (`search::b::tests::prompt_near_keeps_delivered_claims_and_near_documents`); an excluded
   repository's prompt goes to no remote embedder (`prompt_near_sends_no_prompt_of_an_excluded_repository`);
   the route takes the token and no Origin and leaves the opener page
