@@ -1015,6 +1015,10 @@ const keyInput=row=>row.querySelectorAll('input').some(node=>node.dataset.field=
 assert(keyInput(rowOf('groq')),'the first entry of a key file takes the key');
 assert(!keyInput(rowOf('groq-20b')),'a later entry of the same key file has no second key field');
 assert(text(rowOf('groq-20b')).includes('と同じキーを使います'),'a later entry says whose key it uses');
+// A detailed order still unsaved does not move the key field: the rows follow the saved chain.
+f=ctx.simpleUi.formOf(plain(saved));f.chain.reverse();ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(keyInput(rowOf('groq')),'the first saved entry keeps the key field under a pending detailed order');
+assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later entry no key field');
 vm.runInContext("settingsMode='detailed';",ctx);
 console.log('PASS: simple status/models/catalog, remembered view, seven JA/EN blocks, isolated autosaves and masking confirmation');
 }

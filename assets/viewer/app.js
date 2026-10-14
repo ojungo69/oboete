@@ -5223,7 +5223,8 @@ function simpleProviderRow(f, row, index) {
   const label = simpleLabel(row.name);
   const catalog = AI_CATALOG.find(entry => entry.name === row.name);
   // Entries that read one key file (Groq's three) take the key on the first of them.
-  const keyOwner = row.key_file ? f.chain.find(other => other.key_file === row.key_file) : null;
+  // From the saved chain the rows are drawn in, not a detailed order still unsaved (Codex on #512).
+  const keyOwner = row.key_file ? f.savedSettings.chain.find(other => other.key_file === row.key_file) : null;
   const providers = f.providers.filter(provider => provider.name === row.name);
   const provider = providers[0];
   const on = row.on;
