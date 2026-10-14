@@ -17,8 +17,10 @@ switches to.
 
 ## The stamp
 
-- **One number for the home**: `raw::FORMAT`, 1 in this slice, kept as raw.db's
-  `PRAGMA user_version` (raw.db has never set it, so every store so far reads 0). raw.db is the
+- **One number for the home**: `raw::FORMAT`, kept as raw.db's
+  `PRAGMA user_version` (raw.db had never set it, so every store before reads 0). It was 1 in this
+  slice; #443 raised it to 2, as an older binary would ignore a kept file's partial write-back
+  offset (docs/unwritten.md U3) and append that part again. raw.db is the
   store of record, and nearly every process opens it before it reads knowledge.db or
   providers.db (forget's deny rows and the tombstones are there); the opens of knowledge.db and
   providers.db read raw.db's stamp first too, as doctor's provider lines and `oboete resume`
@@ -33,8 +35,8 @@ switches to.
 
 - Every open of raw.db reads `user_version` right after its connection, before anything writes
   the file (its journal mode included), and refuses a value above `FORMAT` with a typed error,
-  `raw::NewerFormat { found }`: "raw.db was written by a newer oboete (format 2; this one reads up
-  to 1): update oboete". The writable open (`open_within_report`, under every `raw::open`) and
+  `raw::NewerFormat { found }`: "raw.db was written by a newer oboete (format 3; this one reads up
+  to 2): update oboete". The writable open (`open_within_report`, under every `raw::open`) and
   `raw::read_only` both check, and so do the opens of knowledge.db and providers.db
   (`raw::refuse_newer_home`, before they create or change anything). A refused open changes no
   byte of the file.

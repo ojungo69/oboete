@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 const DIR: &str = "unwritten";
 /// U5: nothing more is kept once the files hold this much.
 const BOUND: u64 = 64 << 20;
-/// U3: the files one hook call writes back, the oldest first.
+/// U3: the files one hook call visits, the oldest first.
 const PER_CALL: usize = 16;
+/// #443: serialized event bytes (ledger and labels included) one call writes back. Leave time
+/// for the hook's own keep and marker within the shortest, 3 s, deadline after a 2 s store wait.
+const BYTE_BUDGET: usize = 256 << 10;
 /// U5: how long a keep waits for the one in progress: a SessionEnd hook has 3 s in all, and the
 /// store's wait takes 2 of them (Codex on #440).
 pub(crate) const KEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
@@ -116,10 +119,13 @@ thread_local! {
     /// files written back.
     pub(crate) static FAILS: std::cell::Cell<Option<(usize, std::os::raw::c_int)>> =
         const { std::cell::Cell::new(None) };
+    /// A killed call after the part's durable commit, before any kept-file cleanup.
+    static STOP_AFTER_PART: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// U3, U4: the oldest kept files, `PER_CALL` at most, each appended in one transaction (an event
-/// that names no session named for this device) and removed after its commit. One that cannot be
+/// U3, U4: the oldest kept files, `PER_CALL` at most and `BYTE_BUDGET` bytes across their parts.
+/// Each part and its consumed offset commit together; a completed file is removed afterwards.
+/// An event that names no session is named for this device. One that cannot be
 /// read, or that raw refuses, goes to `bad/`; a busy or failing store stops it, the files kept.
 /// How many were written back, also beside the error that stopped it (Greptile and Codex on
 /// #440).
@@ -143,8 +149,8 @@ fn write_back_counting(
     if !dir.is_dir() {
         return Ok(());
     }
-    // One call at a time: two calls at once would append a file twice. The other's own events
-    // go first then, the kept ones at its next call.
+    // One call at a time: two calls at once would append a file twice. The other keeps its own
+    // events behind what remains (hook::record).
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -155,7 +161,11 @@ fn write_back_counting(
         Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
+    let mut used = 0;
     for path in files(&dir)?.into_iter().take(PER_CALL) {
+        if used >= BYTE_BUDGET {
+            break;
+        }
         let bytes = std::fs::read(&path).ok();
         let kept = bytes
             .as_deref()
@@ -165,9 +175,6 @@ fn write_back_counting(
             set_aside(&dir, &path)?;
             continue;
         };
-        for c in &mut kept.events {
-            c.event.session = crate::hook::own_session(std::mem::take(&mut c.event.session), raw);
-        }
         #[cfg(test)]
         if let Some((after, code)) = FAILS.get()
             && after == *written
@@ -176,16 +183,67 @@ fn write_back_counting(
             let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
             return Err(e.into());
         }
-        // #454: the file's hash (its keep's random id within) is kept in the transaction that writes
-        // its events, so a file left behind by a call stopped before this removal is removed next
-        // time, not written again. A file kept before the id has none: two such files of one
-        // payload in one millisecond hold the same bytes, so its hash names no one keep and is not
-        // kept (Greptile, Codex, CodeRabbit on #460); left behind, it is written again, as before.
+        // #454: the file's hash (its keep's random id within) is its receipt and names its
+        // offset. A file kept before the id has none, and two of them can hold the same bytes:
+        // it is written whole, as before #443, with no receipt or offset, and written again if
+        // left behind (#460).
         let hash = kept.id.is_some().then(|| crate::forget::hash(&bytes));
-        match raw.append_kept(&kept.events, &kept.ruleset, hash.as_deref(), settings) {
+        let from = match &hash {
+            Some(hash) => raw.kept_progress(hash, kept.events.len())?,
+            None => 0,
+        };
+        anyhow::ensure!(
+            from <= kept.events.len(),
+            "kept offset is past the file's end"
+        );
+        if from == kept.events.len() {
+            std::fs::remove_file(&path)?;
+            continue;
+        }
+        let mut through = from;
+        for c in &mut kept.events[from..] {
+            c.event.session = crate::hook::own_session(std::mem::take(&mut c.event.session), raw);
+            let size = serde_json::to_vec(c)?.len();
+            // An event is indivisible. Admit the first even above the budget to avoid leaving
+            // it first forever; the capture cap is per field, not per whole event.
+            if hash.is_some() && used > 0 && size > BYTE_BUDGET.saturating_sub(used) {
+                break;
+            }
+            used += size;
+            through += 1;
+            if hash.is_some() && used >= BYTE_BUDGET {
+                break;
+            }
+        }
+        if through == from {
+            break;
+        }
+        let complete = through == kept.events.len();
+        let progress = hash.as_deref().map(|hash| crate::raw::KeptProgress {
+            hash,
+            from,
+            through,
+            complete,
+        });
+        match raw.append_kept(
+            &kept.events[from..through],
+            &kept.ruleset,
+            progress,
+            settings,
+        ) {
             Ok(appended) => {
-                std::fs::remove_file(&path)?;
                 *written += usize::from(appended);
+                #[cfg(test)]
+                if STOP_AFTER_PART.replace(false) {
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted).into());
+                }
+                if complete {
+                    std::fs::remove_file(&path)?;
+                } else {
+                    // The oldest file still has events: later files and this call's own events
+                    // must remain behind it, even if the next event did not fit the spare bytes.
+                    break;
+                }
             }
             // Not the store failing (busy, full, damaged): raw refused these events.
             Err(e)
@@ -305,6 +363,159 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn large_prompt(ts: i64) -> Captured {
+        let mut c = prompt("kept", ts);
+        // The body has two fields within capture's per-field cap, plus the prompt.
+        c.event.body = json!({
+            "prompt": "kept",
+            "input": "x".repeat(64 << 10),
+            "output": "y".repeat(64 << 10),
+        })
+        .to_string();
+        c
+    }
+
+    /// #443, U3: a call commits one bounded part, and keeps its own events behind the rest.
+    #[test]
+    fn a_large_kept_file_is_written_in_parts_before_the_calls_own_events() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let settings = crate::capture::Settings::default();
+        // Six events of just over half the 256 KiB budget: only one fits in each part.
+        let large: Vec<_> = (1..=6).map(large_prompt).collect();
+        keep(h, &large, settings.rules.version()).unwrap();
+        let mut raw = crate::raw::open(h).unwrap();
+        for call in 1..=6 {
+            let mut failed = 0;
+            let mut back = 0;
+            let recorded = crate::hook::record(
+                h,
+                &mut raw,
+                "claude",
+                "UserPromptSubmit",
+                &json!({"session_id": "s", "cwd": "/w", "prompt": "own"}),
+                100 + call,
+                &settings,
+                &mut failed,
+                &mut back,
+            )
+            .unwrap();
+            assert_eq!(failed, 0);
+            if call < 6 {
+                assert_eq!(back, 1, "one part committed by call {call}");
+                assert!(recorded.events.is_empty(), "own events overtook the rest");
+                let times: Vec<_> = events(&raw).iter().map(|e| e.ts).collect();
+                assert_eq!(times, (1..=call).collect::<Vec<_>>());
+                assert_eq!(counts(h).unwrap(), (call as usize + 1, 0));
+            }
+        }
+        assert_eq!(counts(h).unwrap(), (0, 0));
+        let records = raw.after(raw.device(), 0, 100).unwrap();
+        let seqs: Vec<_> = records.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, (1..=12).collect::<Vec<_>>());
+        let times: Vec<_> = events(&raw).iter().map(|e| e.ts).collect();
+        assert_eq!(times, [1, 2, 3, 4, 5, 6, 101, 102, 103, 104, 105, 106]);
+    }
+
+    /// #443: the byte budget is shared by files, and an indivisible event above it still advances.
+    #[test]
+    fn the_byte_budget_covers_all_files_and_admits_an_oversized_first_event() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let settings = crate::capture::Settings::default();
+        for ts in 1..=3 {
+            keep(h, &[large_prompt(ts)], "r").unwrap();
+        }
+        let mut raw = crate::raw::open(h).unwrap();
+        for call in 1..=3 {
+            assert_eq!(written(write_back(h, &mut raw, &settings)), 1);
+            assert_eq!(counts(h).unwrap(), (3 - call, 0));
+            assert_eq!(
+                events(&raw).iter().map(|e| e.ts).collect::<Vec<_>>(),
+                (1..=call as i64).collect::<Vec<_>>()
+            );
+        }
+        let mut oversized = large_prompt(4);
+        let mut body: serde_json::Value = serde_json::from_str(&oversized.event.body).unwrap();
+        body["extra"] = json!("z".repeat(256 << 10));
+        oversized.event.body = body.to_string();
+        keep(h, &[oversized], "r").unwrap();
+        keep(h, &[prompt("later", 5)], "r").unwrap();
+        assert_eq!(written(write_back(h, &mut raw, &settings)), 1);
+        assert_eq!(counts(h).unwrap(), (1, 0));
+        assert_eq!(
+            events(&raw).iter().map(|e| e.ts).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(written(write_back(h, &mut raw, &settings)), 1);
+        assert_eq!(
+            events(&raw).iter().map(|e| e.ts).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+    }
+
+    /// #443: rows and progress survive or roll back together, on either side of commit.
+    #[test]
+    fn a_killed_part_neither_duplicates_nor_loses_events() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let settings = crate::capture::Settings::default();
+        keep(h, &(1..=3).map(large_prompt).collect::<Vec<_>>(), "r").unwrap();
+        let file = files(&h.join(DIR)).unwrap().pop().unwrap();
+        let original = std::fs::read(&file).unwrap();
+        let mut raw = crate::raw::open(h).unwrap();
+        // A stop between inserting the rows and recording progress must roll both back.
+        // This also catches moving the rows' commit ahead of the progress statement.
+        let conn = rusqlite::Connection::open(h.join("raw.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER stop_part BEFORE INSERT ON unwritten_progress
+                 BEGIN SELECT RAISE(ABORT, 'stopped before progress'); END;",
+        )
+        .unwrap();
+        let (n, back) = write_back(h, &mut raw, &settings);
+        assert_eq!(n, 0);
+        assert!(back.is_err());
+        assert!(
+            events(&raw).is_empty(),
+            "part committed without its progress"
+        );
+        conn.execute_batch("DROP TRIGGER stop_part;").unwrap();
+        drop(conn);
+        // The existing commit seam kills the transaction with both rows and progress
+        // staged. Neither may land.
+        crate::crash::at(1);
+        let (n, back) = write_back(h, &mut raw, &settings);
+        crate::crash::off();
+        assert_eq!(n, 0);
+        assert!(back.is_err());
+        drop(raw);
+        let mut raw = crate::raw::open(h).unwrap();
+        assert!(events(&raw).is_empty());
+        // Stop on the other side of the same commit, with the whole file still present.
+        STOP_AFTER_PART.set(true);
+        let (n, back) = write_back(h, &mut raw, &settings);
+        assert_eq!(n, 1);
+        assert!(back.is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        drop(raw);
+        let mut raw = crate::raw::open(h).unwrap();
+        assert_eq!(events(&raw).iter().map(|e| e.ts).collect::<Vec<_>>(), [1]);
+        for (n, last) in [(2, false), (3, true)] {
+            assert_eq!(written(write_back(h, &mut raw, &settings)), 1);
+            assert_eq!(
+                events(&raw).iter().map(|e| e.ts).collect::<Vec<_>>(),
+                (1..=n).collect::<Vec<_>>()
+            );
+            assert_eq!(counts(h).unwrap(), (usize::from(!last), 0));
+        }
+        let records = raw.after(raw.device(), 0, 100).unwrap();
+        assert_eq!(records.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(
+            events(&raw).iter().map(|e| e.ts).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
     }
 
     /// Codex on #440: a spool that cannot be listed is an error, not an empty one: it may hide

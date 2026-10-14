@@ -117,6 +117,8 @@ CREATE TABLE IF NOT EXISTS forget_jobs(
 -- transaction that wrote its events: a file a call left behind after that commit is removed, never
 -- written again. Not a name: they start again from 0 once the directory is empty.
 CREATE TABLE IF NOT EXISTS unwritten_written(hash TEXT PRIMARY KEY, at INTEGER NOT NULL);
+-- #443: the consumed event offset of an unfinished kept file, committed with each part's rows.
+CREATE TABLE IF NOT EXISTS unwritten_progress(hash TEXT PRIMARY KEY, next_event INTEGER NOT NULL);
 -- Milestone 5 slice 3b (D3): each page of a scope's forget, by its kind (`session`, `repo`,
 -- `range`), its key (a session's or a repository's hash), the device a repository's or a time
 -- range's forget is bound to, a time range's times, and when it was registered: a record of that
@@ -610,6 +612,14 @@ struct Named {
     ts: Option<i64>,
     source: String,
     sample: Option<String>,
+}
+
+/// #443: a part's durable consumed range; denied events advance it too.
+pub(crate) struct KeptProgress<'a> {
+    pub hash: &'a str,
+    pub from: usize,
+    pub through: usize,
+    pub complete: bool,
 }
 
 pub struct Raw {
@@ -1487,7 +1497,7 @@ impl std::error::Error for Restoring {}
 
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
 /// writes anything an older binary would mishandle, in any store or a backup segment.
-pub(crate) const FORMAT: i64 = 1;
+pub(crate) const FORMAT: i64 = 2;
 
 /// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
 /// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
@@ -4064,30 +4074,35 @@ impl Raw {
         Ok(Some(seq))
     }
 
-    /// The events one hook call kept when its write failed (docs/unwritten.md U3), with their
-    /// ledger rows and the kept file's `hash` when it has one, in one transaction: all of them or
-    /// none. False, and nothing appended, when that file was written back before (#454: a call
-    /// stopped between that commit and the file's removal left it behind). What is never recorded
+    /// The consumed offset of a kept file. A completed file's receipt also covers receipts
+    /// written before partial write-back (#454).
+    pub(crate) fn kept_progress(&self, hash: &str, total: usize) -> Result<usize> {
+        kept_progress_in(&self.conn, hash, total)
+    }
+
+    /// One part of a kept call (docs/unwritten.md U3), its ledger and consumed offset, in one
+    /// FULL-synchronous transaction: all of them or none. False when already committed. The
+    /// final part records the whole file's receipt (#454) and removes its partial offset.
+    /// What is never recorded
     /// is also matched as labelled under `settings` now, as the hook's own check does (slice 4a,
     /// Codex on #489).
     pub fn append_kept(
         &mut self,
         events: &[crate::capture::Captured],
         ruleset: &str,
-        hash: Option<&str>,
+        progress: Option<KeptProgress<'_>>,
         settings: &crate::capture::Settings,
     ) -> Result<bool> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         format_of(&tx)?;
-        if let Some(hash) = hash
-            && tx.execute(
-                "INSERT OR IGNORE INTO unwritten_written(hash, at) VALUES(?1, ?2)",
-                params![hash, crate::db::now_ms()],
-            )? == 0
-        {
-            return Ok(false);
+        if let Some(p) = &progress {
+            let next = kept_progress_in(&tx, p.hash, p.through)?;
+            if next >= p.through {
+                return Ok(false);
+            }
+            anyhow::ensure!(next == p.from, "kept file's consumed offset changed");
         }
         let never = capture_exclusions_in(&tx)?;
         let now = crate::capture::never_recorded(&never, settings);
@@ -4101,6 +4116,21 @@ impl Raw {
                 && !never.refuses(Some(&now), labels, None)
             {
                 insert_event(&tx, &self.device, &c.event, &c.ledger, ruleset)?;
+            }
+        }
+        if let Some(p) = progress {
+            if p.complete {
+                tx.execute(
+                    "INSERT INTO unwritten_written(hash, at) VALUES(?1, ?2)",
+                    params![p.hash, crate::db::now_ms()],
+                )?;
+                tx.execute("DELETE FROM unwritten_progress WHERE hash=?1", [p.hash])?;
+            } else {
+                tx.execute(
+                    "INSERT INTO unwritten_progress(hash, next_event) VALUES(?1, ?2)
+                     ON CONFLICT(hash) DO UPDATE SET next_event=excluded.next_event",
+                    params![p.hash, i64::try_from(p.through)?],
+                )?;
             }
         }
         tx.commit()?;
@@ -7628,6 +7658,21 @@ fn next_seq(tx: &rusqlite::Transaction, device: &str) -> Result<i64> {
         [device],
         |r| r.get(0),
     )?)
+}
+
+/// A completed file takes precedence over its unfinished offset, including pre-#443 receipts.
+fn kept_progress_in(conn: &Connection, hash: &str, total: usize) -> Result<usize> {
+    use rusqlite::OptionalExtension;
+    let next: i64 = conn
+        .query_row(
+            "SELECT ?2 FROM unwritten_written WHERE hash=?1
+             UNION ALL SELECT next_event FROM unwritten_progress WHERE hash=?1 LIMIT 1",
+            params![hash, i64::try_from(total)?],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    Ok(usize::try_from(next)?)
 }
 
 /// `e` and its ledger rows as `device`'s next seq, inside a write transaction.
