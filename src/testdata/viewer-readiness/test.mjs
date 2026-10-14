@@ -714,6 +714,12 @@ assert.equal(apiUi.providerBody(draft).api,'openai','the user may still choose t
 assert.equal(apiUi.providerEdit('b',{kind:'openai',api:'anthropic',limits:{}}).api,'anthropic','a saved choice is kept');
 const cli=apiUi.providerEdit('c',{kind:'cli',cli:'claude',limits:{}});
 assert.equal(apiUi.providerBody(cli).api,undefined,'a CLI entry sends no API');
+// An AI added from the simple view's catalog keeps its built-in's calls a day (config.rs's
+// presets: Gemini's 30 keeps a paid key within the monthly cap), not the generic default.
+for(const [name,cap] of [['gemini',30],['groq',200],['groq-20b',200],['groq-qwen',200],['nim',500]]){
+  const entry=vm.runInContext('AI_CATALOG',ctx).find(e=>e.name===name);
+  assert.equal(apiUi.providerBody(apiUi.providerEdit(entry.name,{...entry,model:entry.models[0]})).daily_budget,cap,`${name} keeps its cap`);
+}
 assert.equal(apiUi.providerEditor(cli,null,new Node('article')).querySelectorAll('select').length,0);
 ctx.ui.setLang('ja');
 editor=apiUi.providerEditor(apiUi.providerEdit('a',{kind:'openai',limits:{}}),null,new Node('article'));

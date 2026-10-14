@@ -77,7 +77,8 @@ first; English says the same.
 
 A table in the page (`assets/viewer/app.js`), with no new backend: per provider its label in both
 languages, its kind (an HTTP API or a CLI), URL, API, key file name, whether it is a subscription,
-and its models, recommended first. The providers and models are the ones oboete already ships
+its calls a day where oboete's built-in entry caps them (Gemini's 30 keeps a paid key within the
+monthly cap), and its models, recommended first. The providers and models are the ones oboete already ships
 (`provider.rs`'s built-in entries) and the ones its research notes name
 (`docs/research/curator-providers-*.md`, `docs/research/anthropic-messages-2026-10-09.md`), plus
 another OpenAI-compatible server with no preset. A list of models goes stale, so it is a help, not a
