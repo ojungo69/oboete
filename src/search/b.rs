@@ -5226,7 +5226,7 @@ mod tests {
         // What the session was shown, by the IDs the hook shows them by, takes no place.
         let shown = [decided.clone(), short].into_iter().collect();
         let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.", &shown).unwrap();
-        assert!(near.hits.is_empty(), "{:?}", near.hits);
+        assert_eq!(near.hits.len(), 0);
         // Nor a claim an owner's change the worker has not applied yet touches.
         s.correct(&decided, None, Some("Parser errors go to the log."));
         let near = prompt_near(
@@ -5236,11 +5236,7 @@ mod tests {
             &Default::default(),
         )
         .unwrap();
-        assert!(
-            !near.hits.iter().any(|h| h.key == decided),
-            "{:?}",
-            near.hits
-        );
+        assert!(!near.hits.iter().any(|h| h.key == decided));
     }
 
     /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no
@@ -5278,11 +5274,7 @@ mod tests {
         let near =
             prompt_near(&home, R, "Parser errors go to stderr.", &Default::default()).unwrap();
         let hidden_key = format!("{device}.{hidden}");
-        assert!(
-            !near.hits.iter().any(|h| h.key == hidden_key),
-            "{:?}",
-            near.hits
-        );
+        assert!(!near.hits.iter().any(|h| h.key == hidden_key));
         let k = crate::knowledge::open(&home).unwrap();
         let rules = redact::Rules::default();
         let mut taken = Vec::new();
