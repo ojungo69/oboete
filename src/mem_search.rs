@@ -412,7 +412,7 @@ impl Search<'_> {
     /// continuation stands, else the longest detail is halved (claude-mem's bound, on the text
     /// the agent reads). The continuation's state keeps the rows the index kept.
     fn bounded(&self, mut answer: Answer) -> Result<Answer, Refused> {
-        while render(&answer).len() > RESPONSE_BYTES {
+        while delivered(&answer) > RESPONSE_BYTES {
             if answer.continuation.is_some() && answer.index.len() > 1 {
                 answer.index.pop();
                 answer.reason = Some("index_truncated");
@@ -801,6 +801,12 @@ fn index_line(row: &Row, project: bool) -> String {
 }
 
 /// The answer's text (`renderProgressiveSearchResult`).
+/// The size of what the MCP server hands back for `answer` (`mcp::text`): gated and fenced, the
+/// fence quoting each closing tag inside, so the bound counts what the agent gets (Codex on #527).
+fn delivered(answer: &Answer) -> usize {
+    search::fenced(&crate::redact::outbound(&render(answer))).len()
+}
+
 fn render(a: &Answer) -> String {
     let phase = match a.step {
         1 => "index",
@@ -989,21 +995,36 @@ mod tests {
             content: "x".repeat(DETAIL_BYTES),
             truncated: false,
         };
-        let answer = Answer {
+        let answer = |details: Vec<Detail>| Answer {
             auto: false,
             step: 3,
             project: None,
             reason: None,
             index: Vec::new(),
-            details: (0..10).map(|i| detail(&i.to_string())).collect(),
+            details,
             continuation: None,
             max_details: 5,
             trace: Vec::new(),
         };
-        let bounded = search.bounded(answer).unwrap();
+        let bounded = search
+            .bounded(answer((0..10).map(|i| detail(&i.to_string())).collect()))
+            .unwrap();
         assert!(render(&bounded).len() <= RESPONSE_BYTES);
         assert!(bounded.details.iter().any(|d| d.truncated));
         assert!(render(&bounded).contains("[Detail shortened to fit the memory budget.]"));
+        // What the fence quotes grows past the bound though the text does not (Codex on #527).
+        let closing = "</oboete-memory".repeat(DETAIL_BYTES / 15);
+        let quoted = answer(
+            (0..5)
+                .map(|i| Detail {
+                    content: closing.clone(),
+                    ..detail(&i.to_string())
+                })
+                .collect(),
+        );
+        assert!(render(&quoted).len() <= RESPONSE_BYTES);
+        assert!(delivered(&quoted) > RESPONSE_BYTES);
+        assert!(delivered(&search.bounded(quoted).unwrap()) <= RESPONSE_BYTES);
         assert_eq!(short_text("aé", 2), "a");
     }
 }

@@ -37,13 +37,15 @@ forget fence and its hiding rules. The code is `src/mem_search.rs`.
   No model is called beyond the search's own query embedding. With no title to go by, the answer
   is step 1's index and a continuation, for the caller to judge.
 - **Refused**, in claude-mem's words and as an error: a skipped step (an id the step before did not
-  show, `selectedIds` without a continuation), too many ids, options changed on a continuation, a
-  continuation unknown, of another scope, or 15 minutes old, a bad argument. `selectedIds: []`
+  show, `selectedIds` without a continuation), too many ids, options changed on a continuation (an
+  option repeated must equal what the first call kept, its query and project trimmed, as claude-mem
+  compares them), a continuation unknown, of another scope, or 15 minutes old, a bad argument. `selectedIds: []`
   ends the search. Any other failure says "Memory retrieval failed. Retry the query.", a store
   that cannot be read while `project` is resolved and a config that cannot be read too: a store's
   error may name its paths or its SQL, as claude-mem says of its backend's.
 - **Continuations** live in the server's memory, at most 1,024 and 8 MiB, the oldest given up
-  first, each for 15 minutes. One `oboete mcp` serves one agent session, so a continuation is
+  first, for 15 minutes from the search's index: step 2's continuation keeps step 1's deadline,
+  as claude-mem's does. One `oboete mcp` serves one agent session, so a continuation is
   never shared with another process: no signature is needed, and none survives the server's end,
   as none of claude-mem's survives its worker's restart.
 - **Bounds**: an answer is at most 64 KiB as the agent reads it; over that the index loses its last
