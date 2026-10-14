@@ -27,6 +27,11 @@ const APP_CSS: &str = include_str!("../assets/viewer/app.css");
 const MAX_HEAD: usize = 16 * 1024;
 /// A settings save's body; the page's is under 2 KB.
 const MAX_BODY: usize = 16 * 1024;
+/// The prompt hook's body: the prompt (at most twice `embed::PROMPT_CHARS` characters), the
+/// session's agent and name, and the keys of a manifest shown at the prompt (at most
+/// `search::b::PROMPT_SHOWN` of at most 256 bytes each, a claim's 64), with room for JSON's quotes
+/// and escapes (Codex on #521).
+const PROMPT_BODY: usize = 1024 * 1024;
 /// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
 /// version always fit.
 const MAX_KEY_BODY: usize = 1024;
@@ -381,6 +386,16 @@ pub(crate) fn resident_line(home: &Path, port: u16) -> String {
         _ => "it has not started".to_owned(),
     };
     format!("page: not running: {why}; run `oboete view`")
+}
+
+/// G23: the resident viewer's port and token while it listens, for the prompt hook to ask it:
+/// it holds its lock, the outcome it wrote says it listens on the configured port, and its token
+/// file reads. A read-only status, as `resident_line`'s.
+pub(crate) fn resident_answering(home: &Path) -> Option<(u16, String)> {
+    let port = crate::config::view(home).ok()?.port.get();
+    let held = crate::worker::lock_held(&home.join("state/view.lock"));
+    resident_up(outcome(home).as_deref(), port, held).then_some(())?;
+    Some((port, file_token(home)?))
 }
 
 pub(crate) fn resident_up(outcome: Option<&str>, port: u16, held: bool) -> bool {
@@ -1144,6 +1159,7 @@ impl Viewer {
             ("POST", "/api/maintenance/start") => (MAX_BODY, |v, b, _| v.maintenance_start(b)),
             ("POST", "/api/view/resident") => (MAX_BODY, |v, b, _| v.view_resident(b)),
             ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
+            ("POST", "/api/prompt-context") => (PROMPT_BODY, |v, b, _| v.prompt_context(b)),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -1151,7 +1167,11 @@ impl Viewer {
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case("x-oboete-token"))
             .map_or("", |(_, t)| t);
-        match self.save_gate(headers, cap) {
+        // The prompt hook is no browser and sends no Origin: its request reads as the page's
+        // search does, which needs none either, and the token header it carries is what a page of
+        // another site cannot send (a custom header needs a preflight, and OPTIONS is 405).
+        let browser = target != "/api/prompt-context";
+        match self.save_gate(headers, cap, browser) {
             Ok(len) => Head::Body(len, save, given.to_owned()),
             Err(r) => Head::Answer(r),
         }
@@ -1176,6 +1196,7 @@ impl Viewer {
         &self,
         headers: &[(&str, &str)],
         cap: usize,
+        browser: bool,
     ) -> std::result::Result<usize, Response> {
         // Exactly one: a request with two of these is no browser's.
         let only = |name: &str| {
@@ -1200,9 +1221,12 @@ impl Viewer {
         if !self.token_ok(only("x-oboete-token")) {
             return Err(Response::text(401, "missing or wrong token"));
         }
-        self.token_arrived();
+        // The prompt hook's request says nothing of the page: the opener page stays for it.
+        if browser {
+            self.token_arrived();
+        }
         let origin = only("origin").and_then(|o| o.strip_prefix("http://"));
-        if !self.host_ok(origin) {
+        if browser && !self.host_ok(origin) {
             return Err(Response::text(403, "a save comes from this viewer's page"));
         }
         // The media type itself, parameters aside: `application/jsonp` is not JSON.
@@ -1220,6 +1244,63 @@ impl Viewer {
             return Err(Response::text(413, "a save's body is over its cap"));
         }
         Ok(len)
+    }
+
+    /// G23 (docs/prompt-context.md): the meaning side of a prompt's block, for the prompt hook:
+    /// the keys near the prompt in its checkout's repository, with their cosines, and whether a
+    /// vector was made. The hook reads, gates and shows the documents itself.
+    fn prompt_context(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Asked {
+            repo: String,
+            prompt: String,
+            /// The agent and session whose stored shown set takes no place in the answer.
+            #[serde(default)]
+            agent: Option<String>,
+            #[serde(default)]
+            session: Option<String>,
+            /// The keys of a manifest the hook shows in this call, before it stores them.
+            #[serde(default)]
+            shown: Vec<String>,
+        }
+        let asked = match serde_json::from_slice::<Asked>(body) {
+            Ok(a)
+                if !a.repo.is_empty()
+                    && !a.prompt.trim().is_empty()
+                    && a.agent
+                        .as_deref()
+                        .is_none_or(|g| crate::setup::AGENTS.contains(&g))
+                    && a.session
+                        .as_deref()
+                        .is_none_or(|s| (1..=512).contains(&s.len()))
+                    && a.shown.len() <= search::b::PROMPT_SHOWN
+                    && a.shown.iter().all(|k| k.len() <= 256) =>
+            {
+                a
+            }
+            _ => return Response::text(400, "a prompt context takes a repository and a prompt"),
+        };
+        let mut shown: std::collections::HashSet<String> = asked.shown.into_iter().collect();
+        if let (Some(agent), Some(session)) = (&asked.agent, &asked.session) {
+            let stored = crate::hook::shown_set(&self.home, agent, session);
+            shown.extend(
+                stored
+                    .into_iter()
+                    .filter(|(_, e)| e["body"] == true)
+                    .map(|(key, _)| key),
+            );
+        }
+        match search::b::prompt_near(&self.home, &asked.repo, &asked.prompt, &shown) {
+            Ok(near) => Response::json(&json!({
+                "vector": match near.vector {
+                    search::b::Vector::Used => json!("used"),
+                    search::b::Vector::Skipped(s) => json!(s),
+                },
+                "hits": near.hits,
+            })),
+            Err(e) => failed(&e),
+        }
     }
 
     fn doctor(&self, body: &[u8]) -> Response {
@@ -5418,7 +5499,7 @@ curate = false
         // A settings save that is the first request with the token removes it too.
         let page = opener_page(&dir, 4321, url).unwrap();
         *v.opener.lock().unwrap() = Some(page.clone());
-        assert!(v.save_gate(&[HOST, TOKEN], MAX_BODY).is_err());
+        assert!(v.save_gate(&[HOST, TOKEN], MAX_BODY, true).is_err());
         assert!(!page.exists());
         std::fs::remove_file(other).unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -5818,6 +5899,116 @@ curate = false
         assert!(!String::from_utf8_lossy(&after.body).contains("canary"));
         assert_eq!(json_of(&after)["chain"][0]["key"], "ok");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// G23: the prompt hook's route takes the token as every other, but no Origin, which the hook
+    /// as no browser sends; a body without a repository or a prompt is refused; an answer says
+    /// whether a vector was made and what is near.
+    #[test]
+    fn the_prompt_context_route_takes_the_token_but_no_origin() {
+        let (dir, v) = viewer("prompt-context");
+        let ask = |headers: &[(&str, &str)], body: &Value| {
+            let body = serde_json::to_vec(body).unwrap();
+            let len = body.len().to_string();
+            let mut h = headers.to_vec();
+            h.extend([
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ]);
+            request(&v, "POST", "/api/prompt-context", &h, &body)
+        };
+        let asked = json!({"repo": "github.com/o/r", "prompt": "where do parser errors go"});
+        assert_eq!(ask(&[HOST], &asked).status, 401);
+        assert_eq!(
+            ask(&[HOST, TOKEN], &json!({"repo": "", "prompt": "x"})).status,
+            400
+        );
+        assert_eq!(
+            ask(
+                &[HOST, TOKEN],
+                &json!({"repo": "r", "prompt": "x", "more": 1})
+            )
+            .status,
+            400
+        );
+        // The hook's request is no browser's: the page `--open` handed the browser stays for it.
+        let opener = dir.join("opener.html");
+        std::fs::write(&opener, "page").unwrap();
+        *v.opener.lock().unwrap() = Some(opener.clone());
+        let answer = json_of(&ask(&[HOST, TOKEN], &asked));
+        assert_eq!(answer, json!({"vector": "no-vectors", "hits": []}));
+        assert!(opener.exists());
+        // The most keys the route takes fit its body.
+        let shown: Vec<String> = (0..crate::search::b::PROMPT_SHOWN)
+            .map(|i| format!("{i:064x}"))
+            .collect();
+        let long = json!({"repo": "github.com/o/r", "prompt": "x".repeat(2_000), "shown": shown});
+        assert_eq!(ask(&[HOST, TOKEN], &long).status, 200);
+        let mut more = shown.clone();
+        more.push("f".repeat(64));
+        let over = json!({"repo": "github.com/o/r", "prompt": "x", "shown": more});
+        assert_eq!(ask(&[HOST, TOKEN], &over).status, 400);
+        get(&v, "/api/settings");
+        assert!(!opener.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// G23 (Codex on #521): the viewer leaves out what the hook's session was shown by reading the
+    /// session's stored set itself, whatever its size; only what was shown with its body counts,
+    /// and only that session's. An agent it does not know, or a session of no or too many bytes,
+    /// is refused.
+    #[test]
+    fn the_prompt_context_route_reads_the_sessions_shown_set() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let decided = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let ask = |session: Value| {
+            let mut body = json!({"repo": R, "prompt": "Parser errors go to stderr."});
+            body.as_object_mut()
+                .unwrap()
+                .extend(session.as_object().unwrap().clone());
+            let body = serde_json::to_vec(&body).unwrap();
+            let len = body.len().to_string();
+            let h = [
+                HOST,
+                TOKEN,
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            request(&v, "POST", "/api/prompt-context", &h, &body)
+        };
+        let found = |session: Value| -> Vec<String> {
+            let answer = json_of(&ask(session));
+            let hits = answer["hits"].as_array().unwrap().iter();
+            hits.map(|h| h["key"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let alone = vec![decided.clone()];
+        let s1 = json!({"agent": "claude", "session": "s1"});
+        assert_eq!(found(s1.clone()), alone);
+        let store = |body: bool| {
+            crate::hookstate::update(s.home.path(), "claude", "s1", "shown", |_| {
+                Some(json!({decided.clone(): {"fp": "f", "body": body}}).to_string())
+            })
+            .unwrap()
+        };
+        store(false);
+        assert_eq!(found(s1.clone()), alone);
+        store(true);
+        assert!(found(s1.clone()).is_empty());
+        assert_eq!(found(json!({"agent": "claude", "session": "s2"})), alone);
+        assert_eq!(found(json!({})), alone);
+        for refused in [
+            json!({"agent": "nobody", "session": "s1"}),
+            json!({"agent": "claude", "session": ""}),
+            json!({"agent": "claude", "session": "s".repeat(513)}),
+        ] {
+            assert_eq!(ask(refused).status, 400);
+        }
     }
 
     /// W4: the embedder's run is a read with the token and no query; a viewer that ran nothing

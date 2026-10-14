@@ -189,6 +189,8 @@ pub fn show(home: &Path) -> Value {
         "paid_usd_per_month": cfg.paid_usd_per_month,
         "gemini": cfg.gemini.map(gemini_place),
         "usd_this_month": spend,
+        // G23: how the last prompt that could ask the resident viewer took its block.
+        "prompt_side": crate::hook::last_side(home).map(|(at, side)| json!({"at": at, "side": side})),
         "stopped": stopped,
         "inject": {
             "session_start": inject.session_start,
@@ -196,6 +198,7 @@ pub fn show(home: &Path) -> Value {
             "session_start_chars": inject.session_start_chars,
             "per_prompt": inject.per_prompt,
             "per_prompt_chars": inject.per_prompt_chars,
+            "per_prompt_wait_ms": inject.per_prompt_wait_ms,
             "correction": inject.correction,
             "correction_chars": inject.correction_chars,
         },
@@ -230,6 +233,7 @@ pub fn show(home: &Path) -> Value {
             "paid_usd_per_month": [0, null],
             "session_start_chars": range(config::SESSION_START_CHARS),
             "per_prompt_chars": range(config::PER_PROMPT_CHARS),
+            "per_prompt_wait_ms": range(config::PER_PROMPT_WAIT_MS),
             "correction_chars": range(config::CORRECTION_CHARS),
             "daily_budget": [BUDGET.start(), BUDGET.end()],
             "daily_requests": [BUDGET.start(), BUDGET.end()],
@@ -536,6 +540,8 @@ struct InjectIn {
     session_start_chars: usize,
     per_prompt: bool,
     per_prompt_chars: usize,
+    /// Older pages omit it and keep its saved value (G23).
+    per_prompt_wait_ms: Option<usize>,
     correction: bool,
     correction_chars: usize,
 }
@@ -789,6 +795,11 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
             inject.per_prompt_chars,
         ),
         (
+            "per_prompt_wait_ms",
+            i.per_prompt_wait_ms.unwrap_or(inject.per_prompt_wait_ms),
+            inject.per_prompt_wait_ms,
+        ),
+        (
             "correction_chars",
             i.correction_chars,
             inject.correction_chars,
@@ -993,6 +1004,12 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
             "inject.per_prompt_chars",
             i.per_prompt_chars,
             config::PER_PROMPT_CHARS,
+        ),
+        (
+            "inject.per_prompt_wait_ms",
+            i.per_prompt_wait_ms
+                .unwrap_or(*config::PER_PROMPT_WAIT_MS.start()),
+            config::PER_PROMPT_WAIT_MS,
         ),
         (
             "inject.correction_chars",
@@ -2779,25 +2796,47 @@ mod tests {
         assert_eq!(
             shown["inject"],
             json!({"session_start": true, "session_start_note": true, "session_start_chars": 9000, "per_prompt": false,
-                "per_prompt_chars": 1500, "correction": true, "correction_chars": 800})
+                "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "correction": true, "correction_chars": 800})
         );
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
+        assert_eq!(shown["ranges"]["per_prompt_wait_ms"], json!([100, 3000]));
         assert_eq!(shown["ranges"]["correction_chars"], json!([300, 3000]));
         save_to(
             &home,
             &posted(&shown, |v| {
                 v["inject"]["per_prompt"] = json!(true);
+                v["inject"]["per_prompt_wait_ms"] = json!(800);
                 v["inject"]["correction_chars"] = json!(1200);
             }),
         )
         .unwrap();
         assert_eq!(
             file(&home).as_deref(),
-            Some("[inject]\nper_prompt = true\ncorrection_chars = 1200\n")
+            Some(
+                "[inject]\nper_prompt = true\nper_prompt_wait_ms = 800\ncorrection_chars = 1200\n"
+            )
         );
         let i = config::inject(home.path()).unwrap();
-        assert!(i.per_prompt && i.correction_chars == 1_200);
-        for (key, bad) in [("per_prompt_chars", 499), ("correction_chars", 3_001)] {
+        assert!(i.per_prompt && i.correction_chars == 1_200 && i.per_prompt_wait_ms == 800);
+        // A page from before G23 sends no wait: the saved one stays.
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["inject"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("per_prompt_wait_ms");
+                v["inject"]["per_prompt"] = json!(false);
+            }),
+        )
+        .unwrap();
+        assert_eq!(config::inject(home.path()).unwrap().per_prompt_wait_ms, 800);
+        for (key, bad) in [
+            ("per_prompt_chars", 499),
+            ("per_prompt_wait_ms", 99),
+            ("correction_chars", 3_001),
+        ] {
             let shown = show(home.path());
             let r = save_to(&home, &posted(&shown, |v| v["inject"][key] = json!(bad))).unwrap_err();
             assert_eq!(

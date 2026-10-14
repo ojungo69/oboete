@@ -62,28 +62,88 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
    The one evaluation sets both thresholds, with the false-premise questions, by the same line.
    `[inject] per_prompt` stays off by default until then (4.6); the owner turns it on, as the
    owner has claude-mem's on.
-5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the whole prompt
-   point, from the hook's read fence to the block, not the viewer's answer alone. The hook builds
-   the words side (as now but over the same kinds: the full-text index of claims, cards, summaries
-   and imports, with the same 0.53 cut) while it waits for the viewer, so a late or missing
-   answer leaves a block that is already built. The default comes from measurement, before the
+5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the hook's wait
+   for the viewer, counted from the hook's read fence, not from the request, so the time the
+   words side takes counts against it. The hook builds the words side (as now but over the same
+   kinds: the full-text index of claims, cards, summaries and imports, with the same 0.53 cut)
+   while it waits for the viewer, so a late or missing answer leaves a block that is already
+   built. The hook's own reads are local and not cut at the deadline, as the prompt point's reads
+   were not before; they are measured (As built). The default comes from measurement, before the
    code merges: the prompt point's time (the fence, the viewer's answer with its query vector
-   within 1.2 s, the search, the lines) on the owner's two machines, this PC with the local model
-   and the iMac with Workers AI, set so that the slower machine's 95th percentile fits, and not
-   above claude-mem's 2 s for Codex unless the measurement says so. No resident viewer, no answer
+   within 1.2 s, the search, the lines) on this PC's WSL with the local model, set so that its
+   95th percentile fits, and not above claude-mem's 2 s for Codex unless the measurement says so.
+   The iMac's measurement waits for resident mode there (#506). No resident viewer, no answer
    by the deadline, or an error: the words side's block. A meaning answer that comes late is lost
    for that prompt; this is the known cost.
-6. **Fail-open.** Nothing on this path blocks the prompt past the deadline, and it writes no
+6. **Fail-open.** Nothing on this path waits for the viewer past the deadline, and it writes no
    memory and no index: the answer is read, gated (`outbound`, as every block), fenced and shown.
    What it writes is what a search and a prompt point write now: a query sent to a provider is
    reserved and settled in `providers.db` (the embedding budget), and what is shown joins the
    session's shown set, so it is not shown again. The hook latency lines (milestone 2's write
    line, milestone 4's read line) are measured again with it.
 
+## As built (the first slice)
+
+- **What.** Claims, cards and session summaries. Imported history waits for the next slice: #506
+  wants it only through an explicit mapping of the import's projects to repositories, and the
+  import reads a project by its name (docs/claude-mem-import.md I5).
+- **What is sent.** Only a prompt this call recorded with its text (a repository never recorded,
+  or `store_prompts = false`, keeps its prompt), of 20 characters or more, and only to a viewer
+  that holds its lock and says it listens on the configured port (`view::resident_answering`).
+  The request names the repository; the viewer has no use for the branch.
+- **The viewer** (`search::b::prompt_near`) embeds as a search does and answers keys and cosines
+  only, the 20 nearest: delivered claims (under `DECIDED_WHERE` and with no link ending them, as
+  `claims::delivered_one` reads them, and none an owner's change the worker has not applied yet
+  touches, before anything is kept), none the session was shown (the viewer reads the session's
+  stored shown set, which the hook names by its agent and session, whatever its size; a prompt
+  that shows the manifest, which replaces that set, sends the manifest's keys instead), cards
+  and summaries at `T` or above. The hook reads each through its reader and gates its line. No
+  reranker or judge exists in the code; this route calls neither, and #336's, once built, stay
+  out of it (spec 4.3). The route takes the viewer's token as every route does but no Origin: the
+  hook is no browser. It reads as the page's search does (a GET with the token and no Origin), a
+  page of another site cannot send the token header (a custom header needs a preflight, and
+  OPTIONS is 405), and it leaves the page `--open` handed the browser in place.
+- **Order.** Decisions first, as before (`shortlist::PLACES` units, from the shortlist or
+  `delivered_ranked`, with the claims the viewer found), then cards and summaries: the words list
+  (by the share of the prompt's trigrams their line holds) and the meaning list (by cosine) fused
+  by reciprocal rank (`search::b::rrf_lists`), 5 places in all. A short prompt still gets the
+  claims its words match, as before (`shortlist::MIN_GRAMS`). Each line is dated with the
+  document's ID, which `get` takes: `- <date> <type> card <id>: <title>: <first sentence>` (a
+  summary's card, whose title is that sentence, once), `- <date> session summary <id>:
+  <request>`; the block is "Memory that may bear on this prompt".
+- **Shown set.** A card's or a summary's entry carries `"kind"`, and the correction pass skips it
+  (#506 item 1). The cards and summaries the session start's block showed join the set too, so a
+  prompt does not show them again; a compaction's manifest replaces the set, as before. Grok's turn
+  keeps each pick with its kind (a list of uids kept before reads as claims).
+- **`T` = 0.67**, measured without model calls on 2026-10-14 with the local bge-m3 (`oboete
+  embed-spike`, the production loader and gate): the 50 no-answer dev questions against every
+  active claim of their repository in the dev home (5,306), the lowest cosine at which at most 1 of
+  the 50 gets anything (1 does, at 0.68). Against the delivered claims alone (53) it would be 0.64,
+  too few to stand for a store's cards and summaries. At 0.67, 22 of the 42 false-premise
+  questions with claims in their repository get one, which the one evaluation judges.
+- **The wait** defaults to 1,000 ms, measured on 2026-10-14 on this PC's WSL: a copy of the dev
+  home (5,307 claims and 2,691 cards embedded by the local bge-m3), the resident viewer warm, 47
+  questions of the dev pool sent as the hook sends them, with claude-mem's own processes running
+  as they do. The viewer's answer: p50 70 ms, p95 88 ms, max 101 ms. The whole prompt hook: p50
+  86 ms, p95 103 ms, max 116 ms with it; p50 24 ms, p95 37 ms, max 71 ms with the words side
+  alone; p50 19 ms, p95 24 ms on `main` before this change. A model the viewer dropped loads in
+  about 2 s, the viewer answering at once without a vector meanwhile. The default leaves ten
+  times the 95th percentile, for a busier machine and a larger store (the bit index's scan grows
+  with it), and stays under claude-mem's 2 s for Codex.
+- **Doctor and the page.** Doctor's per-prompt line says whether a resident viewer answers now, and
+  how the last prompt that could ask took its block (`state/prompt-side`: in time, after the wait,
+  a request the viewer failed before the wait was over, no viewer, or the viewer's reason for no
+  vector); the settings page shows the same under the wait, in both languages.
+- **The reader's model.** The viewer drops its model after 10 minutes without a search
+  (`READER_IDLE`) and loads it again on the next query in about 2 s, past `QUERY_TIMEOUT`: the
+  first prompt after such a pause takes words alone and starts the load, and the next ones take
+  meaning. Keeping the model loaded would hold about 2.5 GB at all times.
+
 ## Where it does not reach yet
 
 - The resident worker and viewer are Linux only for now (`view::resident_home`). On the iMac the
-  block is the words side alone until resident mode is built there; doctor says which side ran.
+  block is the words side alone until resident mode is built there; doctor says so.
+- Imported history, until the import maps its projects to repositories explicitly (#506).
 - A Workers AI embedding is made for each prompt that asks (the iMac, once resident): it counts
   in the embedding budget and its daily cap, as search queries do, and doctor shows the count.
 
@@ -103,12 +163,39 @@ page's injection section (the wait, and which side answered last).
 
 ## Tests
 
-- The hook asks the viewer only when it is up; the request names the checkout's repository,
-  which scopes the search; a repository excluded from sending gets the words side and no query is
-  sent; the answer is gated and fenced; nothing below either threshold is shown; nothing already
-  shown is shown again.
-- A viewer that answers after the deadline: the block is the words side's, built meanwhile, and
-  the prompt point ends within the deadline.
-- No resident viewer (the iMac today): the words side, over cards, summaries and imports too.
-- A prompt under 20 characters or an envelope asks nothing; imported records carry their label.
-- The measurements above: answer times on both machines; `T` from the no-answer questions.
+As built (the first slice). The three tests with a stand-in viewer run on Linux only, where the
+resident viewer keeps its token (`keyfile::private_fs`, #281):
+
+- The hook asks only a viewer that is up, with the checkout's repository; what it finds near in
+  meaning joins the block; a claim it names that is not delivered stays out
+  (`hook::tests::the_prompt_point_takes_the_resident_viewers_meaning_side`).
+- An answer past the wait: the words side's block, within the wait
+  (`a_late_answer_leaves_the_words_side_within_the_wait`); a request the viewer fails is told
+  from a late one (`a_failed_answer_is_told_from_a_late_one`).
+- A card or summary its reader hides takes no place, in the viewer's 20 nor in the words side's
+  depth (`search::b::tests::a_document_no_reader_shows_takes_no_place`); nor a summary without a
+  request (`a_summary_without_a_request_takes_no_place`), nor what the session was shown, which
+  the viewer reads from the session's stored set, or a manifest shown at the prompt sends
+  (`prompt_near_keeps_delivered_claims_and_near_documents`,
+  `view::tests::the_prompt_context_route_reads_the_sessions_shown_set`,
+  `hook::tests::the_prompt_point_takes_the_resident_viewers_meaning_side`,
+  `a_prompt_that_shows_the_manifest_sends_its_keys`). On the words side, only a line at the
+  threshold takes one of the depth's places (`a_card_short_of_the_threshold_takes_no_place_in_the_depth`).
+- A prompt not recorded with its text, or under 20 characters, is sent nowhere
+  (`a_prompt_not_recorded_whole_or_too_short_asks_nothing`).
+- No resident viewer: the words side, over cards and summaries too, after the decisions, each line
+  dated with its ID, joining the shown set with its kind (`a_prompt_gets_the_cards_and_summaries_its_words_bear_on`);
+  the correction pass names neither (`a_card_shown_at_a_prompt_draws_no_correction`); what the
+  session start showed is not shown again, and a summary's card shows its sentence once
+  (`a_card_the_session_start_showed_is_not_shown_again`); a store without the documents' indexes
+  still gets its decisions (`a_store_without_the_document_indexes_still_gets_its_decisions`).
+- The viewer keeps delivered claims only, a decided lesson a later one ended among those left
+  out, before anything is kept, and documents at `T`
+  (`search::b::tests::prompt_near_keeps_delivered_claims_and_near_documents`); an excluded
+  repository's prompt goes to no remote embedder (`prompt_near_sends_no_prompt_of_an_excluded_repository`);
+  the route takes the token and no Origin and leaves the opener page
+  (`view::tests::the_prompt_context_route_takes_the_token_but_no_origin`).
+- The wait on the settings page and in config.toml, kept when an older page omits it
+  (`settings::tests::inject_settings_check_ranges_and_save_alone`).
+- The measurements above: `T` from the no-answer questions; the viewer's answer and the prompt
+  hook's time on this PC's WSL.

@@ -705,7 +705,7 @@ const TEXT = {
   simple_inject_h: ['What agents are given', 'エージェントに渡す記憶'],
   simple_inject_desc: ['Share previous memories with your agent so you can continue without explaining them again.', '以前の記憶をエージェントに渡し、説明し直さずに続きを進められるようにします。'],
   simple_session: ['Memories at the start of a session', 'セッションの開始時に記憶を渡す'],
-  simple_prompt: ['Related decisions with each prompt', '入力のたびに関連する決定を渡す'],
+  simple_prompt: ['Related decisions, cards and summaries with each prompt', '入力のたびに関連する決定・カード・要約を渡す'],
   simple_never_h: ['Places never recorded', '記録しない場所'],
   simple_never_desc: ['New activity in these repositories and folders is not recorded, while existing memories remain.', '指定したリポジトリやフォルダーでの新しい作業を記録せず、以前の記憶はそのまま残します。'],
   simple_never_empty: ['No places are excluded from recording.', '記録しない場所は指定されていません。'],
@@ -1070,10 +1070,17 @@ const TEXT = {
   session_note_desc: ['A short notice with no stored text. This changes at the next session start.', '保存した本文を含まない短い案内です。次のセッション開始から反映されます。'],
   inject_chars: ['Size in characters ({min} to {max})', '大きさ(文字数、{min}〜{max})'],
   per_prompt_on: [
-    'Also give the decisions that match each prompt (off until it has been measured)',
-    'プロンプトごとに、関係する決定も渡す(測定が済むまでは切)',
+    'Also give the decisions, cards and session summaries that match each prompt in words or meaning (off until it has been measured)',
+    'プロンプトごとに、言葉や意味が近い決定・カード・セッションの要約も渡す(測定が済むまでは切)',
   ],
   per_prompt_chars: ['Their size in characters ({min} to {max})', 'その大きさ(文字数、{min}〜{max})'],
+  per_prompt_wait_ms: ['How long each prompt waits for search by meaning, in milliseconds ({min} to {max}); past it, what its words match is used', '各プロンプトで意味の検索を待つ上限(ミリ秒、{min}〜{max})。過ぎたら言葉の一致だけを使います'],
+  prompt_side_meaning: ['The last prompt ({time}) also took search by meaning.', '直近のプロンプト({time})は意味の検索も使いました。'],
+  prompt_side_no_viewer: ['The last prompt ({time}) took what its words match alone: no resident viewer was answering.', '直近のプロンプト({time})は言葉の一致だけでした。常駐の画面が応答していません。'],
+  prompt_side_late: ['The last prompt ({time}) took what its words match alone: search by meaning answered after the wait.', '直近のプロンプト({time})は言葉の一致だけでした。意味の検索が待ち時間に間に合いませんでした。'],
+  prompt_side_failed: ['The last prompt ({time}) took what its words match alone: the resident viewer did not answer.', '直近のプロンプト({time})は言葉の一致だけでした。常駐の画面が応答しませんでした。'],
+  prompt_side_loading: ['The last prompt ({time}) took what its words match alone while the local model was loading; the next ones use it.', '直近のプロンプト({time})はモデルの読み込み中だったため言葉の一致だけでした。次からは使います。'],
+  prompt_side_other: ['The last prompt ({time}) took what its words match alone ({why}).', '直近のプロンプト({time})は言葉の一致だけでした({why})。'],
   correction_on: [
     'Tell the agent at the next prompt when a decision it was given has changed',
     '渡した決定が変わったときは、次のプロンプトでエージェントに伝える',
@@ -2530,7 +2537,16 @@ function maintenanceStatus(run) {
 
 let preferenceDraft = { text: '', confirmed: false, result: null };
 // `[inject]`'s sizes, each checked against the range the server states for it.
-const SIZES = ['session_start_chars', 'per_prompt_chars', 'correction_chars'];
+const SIZES = ['session_start_chars', 'per_prompt_chars', 'per_prompt_wait_ms', 'correction_chars'];
+
+/** G23: how the last prompt that could ask search by meaning took its block, or nothing. */
+function promptSide(side) {
+  if (!side) return null;
+  const time = new Date(side.at).toLocaleString(lang);
+  const key = { meaning: 'prompt_side_meaning', 'no-viewer': 'prompt_side_no_viewer', late: 'prompt_side_late',
+    failed: 'prompt_side_failed', loading: 'prompt_side_loading' }[side.side];
+  return note(key ? t(key, { time }) : t('prompt_side_other', { time, why: side.side }));
+}
 
 function formOf(s) {
   if (s.error) return null;
@@ -2565,6 +2581,7 @@ function formOf(s) {
     paid_usd_per_month: String(s.paid_usd_per_month),
     gemini: s.gemini ?? 'none',
     usd_this_month: s.usd_this_month,
+    prompt_side: s.prompt_side ?? null,
     stopped: s.stopped,
     inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
@@ -5556,6 +5573,7 @@ function drawSettings() {
         flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
         el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
         flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
+        size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
         flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
       el('section', 'capture-settings',
         el('h3', null, t('capture_h')),

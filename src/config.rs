@@ -988,6 +988,9 @@ pub struct Inject {
     pub per_prompt: bool,
     /// Their block's size in characters (`PER_PROMPT_CHARS`).
     pub per_prompt_chars: usize,
+    /// How long the prompt point waits for the resident viewer's meaning side, counted from its
+    /// read fence (G23, `PER_PROMPT_WAIT_MS`); past it, the full-text side's block.
+    pub per_prompt_wait_ms: usize,
     /// A claim shown in the session that changed since is named at the next prompt (spec 4.8).
     pub correction: bool,
     /// That block's size in characters (`CORRECTION_CHARS`).
@@ -998,6 +1001,9 @@ pub struct Inject {
 pub const SESSION_START_CHARS: std::ops::RangeInclusive<usize> =
     1_000..=crate::consumer::manifest::CAP;
 pub const PER_PROMPT_CHARS: std::ops::RangeInclusive<usize> = 500..=6_000;
+/// Within the 5 seconds `oboete setup` gives each agent's prompt hook, with room for the rest of
+/// the hook (its record, its read fence, the block).
+pub const PER_PROMPT_WAIT_MS: std::ops::RangeInclusive<usize> = 100..=3_000;
 pub const CORRECTION_CHARS: std::ops::RangeInclusive<usize> = 300..=3_000;
 
 impl Default for Inject {
@@ -1008,6 +1014,9 @@ impl Default for Inject {
             session_start_chars: crate::consumer::manifest::CAP,
             per_prompt: false,
             per_prompt_chars: 1_500,
+            // Ten times the prompt hook's 95th percentile with the resident viewer on this PC's
+            // WSL (docs/prompt-context.md, as built).
+            per_prompt_wait_ms: 1_000,
             correction: true,
             correction_chars: 800,
         }
@@ -1054,6 +1063,11 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
             SESSION_START_CHARS,
         ),
         ("per_prompt_chars", i.per_prompt_chars, PER_PROMPT_CHARS),
+        (
+            "per_prompt_wait_ms",
+            i.per_prompt_wait_ms,
+            PER_PROMPT_WAIT_MS,
+        ),
         ("correction_chars", i.correction_chars, CORRECTION_CHARS),
     ] {
         anyhow::ensure!(
@@ -1880,14 +1894,16 @@ model = { gone = "m" }
             (
                 d.per_prompt,
                 d.per_prompt_chars,
+                d.per_prompt_wait_ms,
                 d.correction,
                 d.correction_chars
             ),
-            (false, 1_500, true, 800)
+            (false, 1_500, 1_000, true, 800)
         );
         for (key, low, high) in [
             ("session_start_chars", 1_000, 9_000),
             ("per_prompt_chars", 500, 6_000),
+            ("per_prompt_wait_ms", 100, 3_000),
             ("correction_chars", 300, 3_000),
         ] {
             for (value, ok) in [

@@ -2894,11 +2894,36 @@ pub fn doctor(home: &Path) -> Result<()> {
                 println!("injection: off, no manifest is shown to an agent");
             }
             match i.per_prompt {
+                // G23: which side a prompt's block can take, now.
                 true => println!(
-                    "per-prompt injection: on, up to {} characters a prompt",
-                    i.per_prompt_chars
+                    "per-prompt injection: on, up to {} characters a prompt; {}",
+                    i.per_prompt_chars,
+                    if crate::view::resident_answering(home).is_some() {
+                        format!(
+                            "meaning from the resident viewer within {} ms, else words alone",
+                            i.per_prompt_wait_ms
+                        )
+                    } else {
+                        "words alone: no resident viewer answers, which meaning needs".to_owned()
+                    }
                 ),
                 false => println!("per-prompt injection: off"),
+            }
+            if i.per_prompt
+                && let Some((at, side)) = crate::hook::last_side(home)
+            {
+                let how = match side.as_str() {
+                    "meaning" => "search by meaning answered in time".to_owned(),
+                    "no-viewer" => "words alone: no resident viewer answered".to_owned(),
+                    "late" => "words alone: search by meaning answered after the wait".to_owned(),
+                    "failed" => "words alone: the resident viewer did not answer".to_owned(),
+                    "loading" => "words alone: the local model was loading".to_owned(),
+                    other => format!("words alone: no vector ({other})"),
+                };
+                println!(
+                    "  the last prompt that could ask ({}): {how}",
+                    crate::db::utc(at)
+                );
             }
             match i.correction {
                 true => println!(
