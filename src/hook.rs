@@ -1657,12 +1657,20 @@ fn prompt_point(
         );
     }
     let not_shown = |key: &String| !shown.get(key).is_some_and(|e| e["body"] == true);
-    // What the session was shown, which the viewer leaves out before it cuts its answer.
-    let was_shown: Vec<&String> = (shown.iter())
-        .filter(|(_, e)| e["body"] == true)
-        .map(|(key, _)| key)
-        .take(SHOWN_SENT)
-        .collect();
+    // What the session was shown, which the viewer leaves out before it cuts its answer (Codex on
+    // #521): a manifest this call shows replaces the stored set, so its keys go with the request
+    // (a manifest's few, within `SHOWN_SENT`); otherwise the viewer reads the stored set itself,
+    // whatever its size.
+    let was_shown = match manifest {
+        Some(_) => WasShown::Keys(
+            (shown.iter())
+                .filter(|(_, e)| e["body"] == true)
+                .map(|(key, _)| key.as_str())
+                .take(SHOWN_SENT)
+                .collect(),
+        ),
+        None => WasShown::Session(agent, label),
+    };
     let picks = match (inject.per_prompt, prompt) {
         (false, _) => Vec::new(),
         (true, None) => turn_picks(raw, &k, &turn, rules, &not_shown)?,
@@ -1816,7 +1824,7 @@ fn prompt_picks(
     prompt: &str,
     sendable: bool,
     not_shown: &dyn Fn(&String) -> bool,
-    was_shown: &[&String],
+    was_shown: &WasShown,
 ) -> Result<Vec<Pick>> {
     use crate::shortlist;
     let rules = &a.settings.rules;
@@ -1920,9 +1928,9 @@ fn docs_by_words(
 ) -> Result<Vec<Doc>> {
     use crate::search::b::Class;
     let words = crate::shortlist::Words::of(&[text]);
-    let mut read = Vec::new();
-    // Only a document its reader shows, and not shown yet, takes one of the `DOC_DEPTH` places
-    // (Codex on #521).
+    let mut kept = Vec::new();
+    // Only a document its reader shows, not shown yet, whose line holds the threshold's share of
+    // the prompt takes one of the `DOC_DEPTH` places (Codex on #521).
     crate::search::b::curated_words(k, repo, text, DOC_DEPTH, &mut |key, class| {
         let kind = match class {
             Class::Card => Kind::Card,
@@ -1931,19 +1939,16 @@ fn docs_by_words(
         };
         Ok(match read_doc(raw, k, kind, key, rules)? {
             Some(d) if not_shown(&d.key) => {
-                read.push(d);
-                true
+                let share = words.share(&d.words);
+                let takes = share >= crate::shortlist::THRESHOLD;
+                if takes {
+                    kept.push((share, d));
+                }
+                takes
             }
             _ => false,
         })
     })?;
-    let mut kept = Vec::new();
-    for d in read {
-        let share = words.share(&d.words);
-        if share >= crate::shortlist::THRESHOLD {
-            kept.push((share, d));
-        }
-    }
     kept.sort_by(|a, b| b.0.total_cmp(&a.0));
     Ok(kept.into_iter().map(|(_, d)| d).collect())
 }
@@ -2013,6 +2018,13 @@ fn fused(words: Vec<Doc>, near: Vec<Doc>) -> Vec<Doc> {
 /// each prompt at most `PROMPT_PLACES` more.
 const SHOWN_SENT: usize = crate::search::b::PROMPT_SHOWN;
 
+/// What a prompt's session was shown, as the viewer is told it: the keys of a manifest shown in
+/// this call, or the agent and session whose stored set the viewer reads.
+enum WasShown<'a> {
+    Keys(Vec<&'a str>),
+    Session(&'a str, &'a str),
+}
+
 /// G23: the resident viewer asked for the meaning side of `text` in `repo` on a thread of its
 /// own, its answer on the channel, never waited for past `deadline`; `None` when no resident
 /// viewer listens (`view::resident_answering`).
@@ -2020,7 +2032,7 @@ fn ask_resident(
     home: &Path,
     repo: &str,
     text: &str,
-    shown: &[&String],
+    shown: &WasShown,
     deadline: std::time::Instant,
 ) -> Option<std::sync::mpsc::Receiver<(String, Vec<crate::search::b::PromptHit>)>> {
     let (port, token) = crate::view::resident_answering(home)?;
@@ -2028,9 +2040,13 @@ fn ask_resident(
     // the words around the cut.
     let prompt: String = text.chars().take(2 * crate::embed::PROMPT_CHARS).collect();
     let mut asked = json!({"repo": repo, "prompt": prompt});
-    // What the session was shown takes no place in the viewer's answer (Codex on #521).
-    if !shown.is_empty() {
-        asked["shown"] = json!(shown);
+    match shown {
+        WasShown::Keys(keys) if keys.is_empty() => {}
+        WasShown::Keys(keys) => asked["shown"] = json!(keys),
+        WasShown::Session(agent, session) => {
+            asked["agent"] = json!(agent);
+            asked["session"] = json!(session);
+        }
     }
     let body = serde_json::to_vec(&asked).ok()?;
     let (send, answer) = std::sync::mpsc::channel();
@@ -2373,7 +2389,7 @@ fn corrections(
 
 /// The session's shown set (Step 5): each claim's entry, its body's fingerprint and whether its
 /// body was shown.
-fn shown_set(home: &Path, agent: &str, session: &str) -> serde_json::Map<String, Value> {
+pub(crate) fn shown_set(home: &Path, agent: &str, session: &str) -> serde_json::Map<String, Value> {
     let value = crate::hookstate::value(home, agent, session, "shown");
     if agent == "opencode" {
         opencode_shown(value.as_deref()).entries
@@ -4233,6 +4249,24 @@ mod tests {
         kinds
     }
 
+    /// G23 (Codex on #521): a card whose line falls short of the threshold takes no place in the
+    /// words side's depth: `DOC_DEPTH` cards that come first (they hold the prompt's short word)
+    /// but bear too little on it leave the place to the one that bears on it.
+    #[test]
+    fn a_card_short_of_the_threshold_takes_no_place_in_the_depth() {
+        let mut p = Prompts::new(true);
+        for i in 0..DOC_DEPTH {
+            work(&mut p, 2, &format!("Step {i}: 42 parse notes"), "", "");
+        }
+        let (card, _) = work(&mut p, 1, "Parser errors go to stderr", "", "");
+        let text = p.prompt("s1", "where do parser errors go, stderr or 42");
+        assert!(
+            text.contains(&format!("bugfix card {card}: Parser errors go to stderr")),
+            "{text}"
+        );
+        assert!(!text.contains("parse notes"), "{text}");
+    }
+
     /// G23 (docs/prompt-context.md): with no resident viewer, the words side takes the cards and
     /// session summaries whose line holds the threshold's share of the prompt's trigrams, after
     /// the decisions, each dated with its ID, and they join the shown set with their kind: the
@@ -4466,17 +4500,48 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains(&"f".repeat(12)), "{text}");
-        assert_eq!(r.asked(), [json!({"repo": p.repo, "prompt": prompt})]);
+        let session = json!({"repo": p.repo, "prompt": prompt, "agent": "claude", "session": "s1"});
+        assert_eq!(r.asked(), [session]);
         assert_eq!(last_side(p.s.home.path()).unwrap().1, "meaning");
-        // The next prompt sends what the session was shown, for the viewer to leave out.
-        p.prompt("s1", "and where does it go when the stream is closed");
+        // The next prompt names the session, whose stored set the viewer reads and leaves out
+        // (Codex on #521): it holds the card shown with its body, and no key goes with the request.
+        let next = "and where does it go when the stream is closed";
+        p.prompt("s1", next);
+        let next = json!({"repo": p.repo, "prompt": next, "agent": "claude", "session": "s1"});
+        assert_eq!(r.asked()[1], next);
+        assert_eq!(
+            shown_set(p.s.home.path(), "claude", "s1")[&card]["body"],
+            true
+        );
+    }
+
+    /// G23 (Codex on #521): a prompt that shows the manifest (Cursor's, after a compaction) sends
+    /// the keys the manifest shows, which replace the session's stored set, and no session for the
+    /// viewer to read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_prompt_that_shows_the_manifest_sends_its_keys() {
+        let mut p = Prompts::new(true);
+        let decided = p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path();
+        let r = Resident::start(home, 2_000, json!([]), Duration::ZERO);
+        crate::hookstate::set(home, "cursor", "cs", "compacted").unwrap();
+        let prompt = json!({"conversation_id": "cs", "workspace_roots": [p.c],
+                            "hook_event_name": "beforeSubmitPrompt",
+                            "prompt": "where should the parser's errors end up when we quit"});
+        let out = hook(home, "cursor", "UserPromptSubmit", &prompt);
+        assert!(injected("cursor", &out).contains("Parser errors"), "{out}");
         let asked = r.asked();
+        assert_eq!(asked.len(), 1, "{asked:?}");
         assert!(
-            asked[1]["shown"]
+            asked[0]["shown"]
                 .as_array()
-                .is_some_and(|keys| keys.contains(&json!(card))),
+                .is_some_and(|keys| keys.contains(&json!(decided))),
             "{asked:?}"
         );
+        assert!(asked[0].get("agent").is_none(), "{asked:?}");
+        assert!(asked[0].get("session").is_none(), "{asked:?}");
     }
 
     /// G23 (docs/prompt-context.md step 5): an answer past `[inject] per_prompt_wait_ms` is lost

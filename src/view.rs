@@ -27,9 +27,10 @@ const APP_CSS: &str = include_str!("../assets/viewer/app.css");
 const MAX_HEAD: usize = 16 * 1024;
 /// A settings save's body; the page's is under 2 KB.
 const MAX_BODY: usize = 16 * 1024;
-/// The prompt hook's body: the prompt (at most twice `embed::PROMPT_CHARS` characters) and the
-/// keys the session was shown (at most `search::b::PROMPT_SHOWN` of at most 256 bytes each, a
-/// claim's 64), with room for JSON's quotes and escapes (Codex on #521).
+/// The prompt hook's body: the prompt (at most twice `embed::PROMPT_CHARS` characters), the
+/// session's agent and name, and the keys of a manifest shown at the prompt (at most
+/// `search::b::PROMPT_SHOWN` of at most 256 bytes each, a claim's 64), with room for JSON's quotes
+/// and escapes (Codex on #521).
 const PROMPT_BODY: usize = 1024 * 1024;
 /// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
 /// version always fit.
@@ -1254,7 +1255,12 @@ impl Viewer {
         struct Asked {
             repo: String,
             prompt: String,
-            /// The keys the session was shown, which take no place in the answer.
+            /// The agent and session whose stored shown set takes no place in the answer.
+            #[serde(default)]
+            agent: Option<String>,
+            #[serde(default)]
+            session: Option<String>,
+            /// The keys of a manifest the hook shows in this call, before it stores them.
             #[serde(default)]
             shown: Vec<String>,
         }
@@ -1262,6 +1268,12 @@ impl Viewer {
             Ok(a)
                 if !a.repo.is_empty()
                     && !a.prompt.trim().is_empty()
+                    && a.agent
+                        .as_deref()
+                        .is_none_or(|g| crate::setup::AGENTS.contains(&g))
+                    && a.session
+                        .as_deref()
+                        .is_none_or(|s| (1..=512).contains(&s.len()))
                     && a.shown.len() <= search::b::PROMPT_SHOWN
                     && a.shown.iter().all(|k| k.len() <= 256) =>
             {
@@ -1269,7 +1281,16 @@ impl Viewer {
             }
             _ => return Response::text(400, "a prompt context takes a repository and a prompt"),
         };
-        let shown = asked.shown.into_iter().collect();
+        let mut shown: std::collections::HashSet<String> = asked.shown.into_iter().collect();
+        if let (Some(agent), Some(session)) = (&asked.agent, &asked.session) {
+            let stored = crate::hook::shown_set(&self.home, agent, session);
+            shown.extend(
+                stored
+                    .into_iter()
+                    .filter(|(_, e)| e["body"] == true)
+                    .map(|(key, _)| key),
+            );
+        }
         match search::b::prompt_near(&self.home, &asked.repo, &asked.prompt, &shown) {
             Ok(near) => Response::json(&json!({
                 "vector": match near.vector {
@@ -5917,7 +5938,7 @@ curate = false
         let answer = json_of(&ask(&[HOST, TOKEN], &asked));
         assert_eq!(answer, json!({"vector": "no-vectors", "hits": []}));
         assert!(opener.exists());
-        // A long session's shown set fits: as many claims' keys as the hook sends.
+        // The most keys the route takes fit its body.
         let shown: Vec<String> = (0..crate::search::b::PROMPT_SHOWN)
             .map(|i| format!("{i:064x}"))
             .collect();
@@ -5930,6 +5951,64 @@ curate = false
         get(&v, "/api/settings");
         assert!(!opener.exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// G23 (Codex on #521): the viewer leaves out what the hook's session was shown by reading the
+    /// session's stored set itself, whatever its size; only what was shown with its body counts,
+    /// and only that session's. An agent it does not know, or a session of no or too many bytes,
+    /// is refused.
+    #[test]
+    fn the_prompt_context_route_reads_the_sessions_shown_set() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let decided = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let ask = |session: Value| {
+            let mut body = json!({"repo": R, "prompt": "Parser errors go to stderr."});
+            body.as_object_mut()
+                .unwrap()
+                .extend(session.as_object().unwrap().clone());
+            let body = serde_json::to_vec(&body).unwrap();
+            let len = body.len().to_string();
+            let h = [
+                HOST,
+                TOKEN,
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            request(&v, "POST", "/api/prompt-context", &h, &body)
+        };
+        let found = |session: Value| -> Vec<String> {
+            let answer = json_of(&ask(session));
+            let hits = answer["hits"].as_array().unwrap().iter();
+            hits.map(|h| h["key"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let alone = vec![decided.clone()];
+        let s1 = json!({"agent": "claude", "session": "s1"});
+        assert_eq!(found(s1.clone()), alone);
+        let store = |body: bool| {
+            crate::hookstate::update(s.home.path(), "claude", "s1", "shown", |_| {
+                Some(json!({decided.clone(): {"fp": "f", "body": body}}).to_string())
+            })
+            .unwrap()
+        };
+        store(false);
+        assert_eq!(found(s1.clone()), alone);
+        store(true);
+        assert!(found(s1.clone()).is_empty());
+        assert_eq!(found(json!({"agent": "claude", "session": "s2"})), alone);
+        assert_eq!(found(json!({})), alone);
+        for refused in [
+            json!({"agent": "nobody", "session": "s1"}),
+            json!({"agent": "claude", "session": ""}),
+            json!({"agent": "claude", "session": "s".repeat(513)}),
+        ] {
+            assert_eq!(ask(refused).status, 400);
+        }
     }
 
     /// W4: the embedder's run is a read with the token and no query; a viewer that ran nothing
