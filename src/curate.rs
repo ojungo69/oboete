@@ -3321,43 +3321,64 @@ fn recurate_window_checked(
         .collect();
     // A claim that quotes an excluded session's record, in this window or elsewhere, was not
     // shown to the curator whole, which says nothing of it (D13, Codex on #304).
+    let held = anchored_in(k, w)?;
+    // Every claim the window holds, those left out below too: none is a new uid (#157).
+    let window: std::collections::HashSet<String> =
+        held.iter().map(|(uid, _)| uid.clone()).collect();
     let mut anchored = Vec::new();
-    for (uid, c) in anchored_in(k, w)? {
+    for (uid, c) in held {
         // Nor is a forgotten one restated or retracted (milestone 5 D5): its op would be refused.
         if !quotes_excluded(raw, k, &w.reading.excluded, &uid)? && !raw.forgotten(&uid)? {
             anchored.push((uid, c));
         }
     }
     restate(k, &anchored, &given, &mut claims)?;
+    // The unsettled drafts of the window the answer no longer gives: those it retracts.
+    anchored.retain(|(uid, c)| {
+        matches!(c.status.as_str(), "proposed" | "unverified") && !given.contains(uid)
+    });
+    let carried = carried_corrections(raw, k, &window, &anchored, &claims)?;
     let recipe = op["provider"].as_str().unwrap_or("").to_owned();
-    let retracted: Vec<Value> = anchored
+    let retracted: Vec<(String, Value)> = anchored
         .into_iter()
-        .filter(|(_, c)| matches!(c.status.as_str(), "proposed" | "unverified"))
-        .filter(|(uid, _)| !given.contains(uid))
         .enumerate()
-        .map(|(i, (_, mut c))| {
+        .map(|(i, (uid, mut c))| {
             (c.id, c.status, c.recipe) =
                 (format!("r{}", i + 1), "retracted".into(), recipe.clone());
             (c.supersedes, c.why, c.tainted) = (Vec::new(), String::new(), false);
-            serde_json::to_value(c)
+            serde_json::to_value(c).map(|c| (uid, c))
         })
         .collect::<serde_json::Result<_>>()?;
-    // Within one append's caps, window op and claims first: a retraction left out leaves an
-    // unsettled draft as it was, and the span still leaves the queue.
+    // Within one append's caps, window op, claims and carried corrections first: a retraction
+    // left out leaves an unsettled draft as it was, and the span still leaves the queue.
     let (mut room, mut bytes) = (
-        crate::raw::MAX_BATCH_OPS.saturating_sub(1 + claims.len()),
+        crate::raw::MAX_BATCH_OPS.saturating_sub(1 + claims.len() + carried.len()),
         crate::raw::MAX_BATCH_BYTES
             .saturating_sub(crate::raw::MAX_OP_BYTES)
-            .saturating_sub(claims.iter().map(|c| c.to_string().len()).sum()),
+            .saturating_sub(
+                claims
+                    .iter()
+                    .chain(carried.iter().map(|(_, c)| c))
+                    .map(|c| c.to_string().len())
+                    .sum(),
+            ),
     );
-    let retracted: Vec<Value> = retracted
+    let retracted: Vec<(String, Value)> = retracted
         .into_iter()
-        .take_while(|r| {
+        .take_while(|(_, r)| {
             let size = r.to_string().len();
             let fits = room > 0 && size <= bytes;
             (room, bytes) = (room.saturating_sub(1), bytes.saturating_sub(size));
             fits
         })
+        .collect();
+    // A correction follows only a retraction the caps let in: one left out keeps its claim.
+    let kept: std::collections::HashSet<&str> =
+        retracted.iter().map(|(uid, _)| uid.as_str()).collect();
+    let carried: Vec<Value> = carried
+        .into_iter()
+        .filter(|(from, _)| kept.contains(from.as_str()))
+        .map(|(_, c)| c)
         .collect();
     let counts = (claims.len(), retracted.len());
     op["recurate"] = true.into();
@@ -3380,13 +3401,102 @@ fn recurate_window_checked(
     ops.extend(
         claims
             .into_iter()
-            .chain(retracted)
+            .chain(retracted.into_iter().map(|(_, c)| c))
             .map(|c| (OpKind::Claim, c)),
     );
+    ops.extend(carried.into_iter().map(|c| (OpKind::Correction, c)));
     // Milestone 5 D1 rule 12: `ListChanged` after a forget since the window was cut.
     validate()?;
     raw.append_ops_fenced(&ops, w.reading.fence)?;
     Ok(Ok(counts))
+}
+
+/// #157: the owner's withdrawal of each claim the recuration retracts (`retracting`), its last
+/// status `retracted` or its last mute on, again for the one new uid (not one of the `window`'s)
+/// the answer derives on the same record instead (another kind, or a first quote in another
+/// sentence of that record), so the replacement stays withdrawn as the owner left the claim; each
+/// with the uid it came from. A decision, a done, a wording or an unmute stays with the claim the
+/// owner gave it: the replacement's words are the curator's. With several new uids on that record,
+/// or none, nothing is carried, nor onto a uid already in the store. A settled claim is never
+/// retracted, so its correction stays with it (#261's restatements).
+fn carried_corrections(
+    raw: &Raw,
+    k: &Connection,
+    window: &std::collections::HashSet<String>,
+    retracting: &[(String, crate::claims::ClaimOp)],
+    claims: &[Value],
+) -> Result<Vec<(String, Value)>> {
+    let mut new: std::collections::HashMap<(String, i64), Vec<String>> = Default::default();
+    for c in claims {
+        let Ok(op) = serde_json::from_value::<crate::claims::ClaimOp>(c.clone()) else {
+            continue;
+        };
+        if let (Some(uid), Some(first)) = (crate::claims::op_uid(c), op.evidence.first())
+            && !window.contains(&uid)
+        {
+            // A claim drafted twice (overlapping quotes, one uid, #125) is one new uid (Codex on
+            // #518).
+            let uids = new.entry((first.device.clone(), first.seq)).or_default();
+            if !uids.contains(&uid) {
+                uids.push(uid);
+            }
+        }
+    }
+    let mut corrections = k.prepare(
+        "SELECT status, muted FROM corrections WHERE uid = ?1 ORDER BY ts, op_device, op_seq",
+    )?;
+    // A uid already in the store, a claim or an owner's change of one, is no replacement.
+    let mut known = k.prepare(
+        "SELECT 1 FROM claims WHERE uid = ?1 UNION ALL SELECT 1 FROM corrections WHERE uid = ?1",
+    )?;
+    // Read only when a correction may be carried.
+    let pending = if retracting.is_empty() || new.is_empty() {
+        crate::claims::Pending::default()
+    } else {
+        crate::claims::Pending::read(raw, k)?
+    };
+    let mut carried = Vec::new();
+    for (uid, c) in retracting {
+        let Some(first) = c.evidence.first() else {
+            continue;
+        };
+        let Some([to]) = new
+            .get(&(first.device.clone(), first.seq))
+            .map(Vec::as_slice)
+        else {
+            continue;
+        };
+        // The owner's own changes win: none is carried onto a claim already in the store, nor
+        // while the worker has an owner's change of either claim to apply.
+        if pending.touches(k, uid)? || pending.touches(k, to)? || known.exists([to])? {
+            continue;
+        }
+        let (mut status, mut muted) = (None, None);
+        for row in corrections.query_map([uid], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<bool>>(1)?))
+        })? {
+            let (s, m) = row?;
+            (status, muted) = (s.or(status), m.or(muted));
+        }
+        // Only a withdrawal follows: the replacement's words are the curator's, which the owner
+        // never saw (the commit's security review).
+        let (status, muted) = (status.filter(|s| s == "retracted"), muted.filter(|&m| m));
+        if status.is_none() && muted.is_none() {
+            continue;
+        }
+        let op = crate::claims::CorrectionOp {
+            uid: to.clone(),
+            anchor: crate::claims::Anchor {
+                device: first.device.clone(),
+                seq: first.seq,
+            },
+            status,
+            body: None,
+            muted,
+        };
+        carried.push((uid.clone(), serde_json::to_value(op)?));
+    }
+    Ok(carried)
 }
 
 /// Adds, to each settled claim of a recuration's answer that restates a settled claim of the
@@ -9336,6 +9446,257 @@ curate = false
         let shown: Vec<String> = active(&k).into_iter().map(|(b, _)| b).collect();
         assert_eq!(shown, ["Use tabs", "log to stderr"]);
         assert_ne!(uid_of(&k, "Use tabs"), uid_of(&k, "log to stderr"));
+    }
+
+    /// A first curation of the claim "Use tabs.", its retraction by the owner, and a recuration
+    /// of the window from `again`; the claims as (kind, status).
+    fn corrected_then_recurated(again: Vec<Value>) -> (tempfile::TempDir, Vec<(String, String)>) {
+        let first = vec![drafted("c1", "proposed", "Use tabs", "Use tabs.")];
+        changed_then_recurated(first, &retract, again)
+    }
+
+    fn retract(home: &std::path::Path, uid: &str) {
+        crate::claims::correct(home, uid, Some("retracted"), None).unwrap();
+    }
+
+    /// `first` curated, the owner's `change` of the claim "Use tabs.", and the window recurated
+    /// from `again`.
+    fn changed_then_recurated(
+        first: Vec<Value>,
+        change: &dyn Fn(&std::path::Path, &str),
+        again: Vec<Value>,
+    ) -> (tempfile::TempDir, Vec<(String, String)>) {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt("Use tabs.")).unwrap();
+        let answers = std::cell::RefCell::new(vec![answer(first), answer(again)]);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answers.borrow_mut().remove(0),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        change(home.path(), &uid_of(&k, "Use tabs."));
+        consume(&raw, &mut k);
+        let span = Span::records(1, 1);
+        let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &Reading::default()).unwrap();
+        recurate_window(&mut raw, &k, &db, &rules, &summary, &mut chain, &w[0], None)
+            .unwrap()
+            .unwrap();
+        consume(&raw, &mut k);
+        let kinds = kind_statuses(&k);
+        (home, kinds)
+    }
+
+    fn kind_statuses(k: &Connection) -> Vec<(String, String)> {
+        k.prepare("SELECT kind, status FROM active ORDER BY kind")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn pair(kind: &str, status: &str) -> (String, String) {
+        (kind.into(), status.into())
+    }
+
+    /// #157: an owner's correction follows its claim to the one new uid a recuration derives on
+    /// the same record (here the same words as another kind), and a rebuild from the op log,
+    /// with no provider call, gives the same.
+    #[test]
+    fn a_recuration_that_changes_a_claims_kind_keeps_the_owner_correction() {
+        let mut again = drafted("c1", "proposed", "Use tabs", "Use tabs.");
+        again["kind"] = json!("preference");
+        let (home, kinds) = corrected_then_recurated(vec![again]);
+        let expected = [
+            pair("decision", "retracted"),
+            pair("preference", "retracted"),
+        ];
+        assert_eq!(kinds, expected);
+        crate::worker::rebuild(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        assert_eq!(kind_statuses(&k), expected);
+    }
+
+    /// #157 (the commit's security reviews): only the owner's withdrawal follows the claim to its
+    /// replacement, by the owner's last change: a retraction or a mute. A decision, a done, a
+    /// wording, or a retraction the owner took back stays with the claim the owner changed, since
+    /// the replacement's words are the curator's, which the owner never saw.
+    #[test]
+    fn only_the_owners_withdrawal_follows_the_replacement() {
+        type Change = Box<dyn Fn(&std::path::Path, &str)>;
+        let correct = |status: Option<&'static str>, body: Option<&'static str>| -> Change {
+            Box::new(move |home, uid| crate::claims::correct(home, uid, status, body).unwrap())
+        };
+        let cases: Vec<(Change, (&str, bool))> = vec![
+            (correct(Some("retracted"), None), ("retracted", false)),
+            (
+                Box::new(|home, uid| crate::claims::mute(home, uid, true).unwrap()),
+                ("proposed", true),
+            ),
+            (correct(Some("decided"), None), ("proposed", false)),
+            (
+                correct(Some("decided"), Some("Tabs, width 4.")),
+                ("proposed", false),
+            ),
+            (correct(None, Some("Tabs, width 4.")), ("proposed", false)),
+            (correct(Some("done"), None), ("proposed", false)),
+            (
+                Box::new(|home, uid| {
+                    retract(home, uid);
+                    crate::claims::correct(home, uid, Some("proposed"), None).unwrap();
+                }),
+                ("proposed", false),
+            ),
+        ];
+        for (change, (status, muted)) in cases {
+            let mut again = drafted("c1", "proposed", "Use tabs", "Prefer tabs.");
+            again["kind"] = json!("preference");
+            let first = vec![drafted("c1", "proposed", "Use tabs", "Use tabs.")];
+            let (home, _) = changed_then_recurated(first, &*change, vec![again]);
+            let k = crate::knowledge::open(home.path()).unwrap();
+            let uid = uid_of(&k, "Prefer tabs.");
+            let row: (String, String) = k
+                .query_row(
+                    "SELECT status, body FROM active WHERE uid = ?1",
+                    [&uid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let shown = (row.0.as_str(), crate::claims::muted(&k, &uid).unwrap());
+            assert_eq!((shown, row.1.as_str()), ((status, muted), "Prefer tabs."));
+        }
+    }
+
+    /// #157 (the commit's security reviews): a correction is carried only onto a new uid: not onto
+    /// a claim the owner changed, applied by the worker or waiting for it, nor onto one already in
+    /// the store, such as the owner's own preference.
+    #[test]
+    fn a_correction_is_not_carried_onto_a_claim_the_owner_changed() {
+        for owners in ["correction", "claim"] {
+            carried_onto_the_owners(owners);
+        }
+    }
+
+    fn carried_onto_the_owners(owners: &str) {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        raw.append(&prompt("Use tabs.")).unwrap();
+        let first = answer(vec![drafted("c1", "proposed", "Use tabs", "Use tabs.")]);
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: first.clone(),
+                ..answered("fake")
+            })
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        consume(&raw, &mut k);
+        let old = uid_of(&k, "Use tabs.");
+        crate::claims::correct(home.path(), &old, Some("retracted"), None).unwrap();
+        consume(&raw, &mut k);
+        let span = Span::records(1, 1);
+        let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &Reading::default()).unwrap();
+        let retracting: Vec<_> = anchored_in(&k, &w[0]).unwrap();
+        let mut replacement = retracting[0].1.clone();
+        replacement.kind = "preference".into();
+        let first = replacement.evidence[0].clone();
+        let new = crate::claims::uid("preference", &first);
+        let window = std::collections::HashSet::from([old.clone()]);
+        let claims = [serde_json::to_value(&replacement).unwrap()];
+        let carried = |raw: &Raw, k: &Connection| {
+            let carried = carried_corrections(raw, k, &window, &retracting, &claims).unwrap();
+            carried
+                .into_iter()
+                .map(|(from, c)| (from, c["uid"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(carried(&raw, &k), [(old.clone(), json!(new))]);
+        if owners == "claim" {
+            // The owner's own claim of that uid, as `oboete pref add` writes one.
+            let op = crate::claims::preference_op(first);
+            raw.append_ops(&[(OpKind::Claim, serde_json::to_value(op).unwrap())])
+                .unwrap();
+        } else {
+            let change = crate::claims::CorrectionOp {
+                uid: new,
+                anchor: crate::claims::Anchor {
+                    device: first.device,
+                    seq: first.seq,
+                },
+                status: Some("decided".into()),
+                body: None,
+                muted: None,
+            };
+            raw.append_ops(&[(OpKind::Correction, serde_json::to_value(change).unwrap())])
+                .unwrap();
+            assert_eq!(carried(&raw, &k), []);
+        }
+        consume(&raw, &mut k);
+        assert_eq!(carried(&raw, &k), []);
+    }
+
+    /// #157: a claim the window holds and the answer gives again is no new uid: the correction
+    /// of a claim retracted beside it on the same record is not carried onto it.
+    #[test]
+    fn a_correction_is_not_carried_onto_a_claim_the_window_keeps() {
+        let mut kept = drafted("c2", "decided", "Use tabs", "Prefer tabs.");
+        kept["kind"] = json!("preference");
+        let first = vec![
+            drafted("c1", "proposed", "Use tabs", "Use tabs."),
+            kept.clone(),
+        ];
+        let (_home, kinds) = changed_then_recurated(first, &retract, vec![kept]);
+        assert_eq!(
+            kinds,
+            [pair("decision", "retracted"), pair("preference", "decided")]
+        );
+    }
+
+    /// #157 (Codex on #518): a replacement the answer drafts twice, its quotes overlapping, is
+    /// one new uid, and takes the withdrawal.
+    #[test]
+    fn a_replacement_drafted_twice_still_takes_the_withdrawal() {
+        let twice: Vec<Value> = ["c1", "c2"]
+            .into_iter()
+            .map(|id| {
+                let mut again = drafted(id, "proposed", "Use tabs", "Use tabs.");
+                again["kind"] = json!("preference");
+                again
+            })
+            .collect();
+        let (_home, kinds) = corrected_then_recurated(twice);
+        assert_eq!(
+            kinds,
+            [
+                pair("decision", "retracted"),
+                pair("preference", "retracted")
+            ]
+        );
+    }
+
+    /// #157: with two new uids on the record, the correction is carried to neither.
+    #[test]
+    fn a_correction_is_not_carried_when_two_new_claims_share_the_anchor() {
+        let mut preference = drafted("c1", "proposed", "Use tabs", "Use tabs.");
+        preference["kind"] = json!("preference");
+        let mut fact = drafted("c2", "proposed", "Use tabs", "The code uses tabs.");
+        fact["kind"] = json!("repo fact");
+        let (_home, kinds) = corrected_then_recurated(vec![preference, fact]);
+        assert_eq!(
+            kinds,
+            [
+                pair("decision", "retracted"),
+                pair("preference", "proposed"),
+                pair("repo fact", "proposed")
+            ]
+        );
     }
 
     /// Task 11: a recuration's answer replaces its window's unsettled claims: one anchored in the
