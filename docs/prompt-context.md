@@ -129,8 +129,8 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   with it), and stays under claude-mem's 2 s for Codex.
 - **Doctor and the page.** Doctor's per-prompt line says whether a resident viewer answers now, and
   how the last prompt that could ask took its block (`state/prompt-side`: in time, after the wait,
-  no viewer, or the viewer's reason for no vector); the settings page shows the same under the
-  wait, in both languages.
+  a request the viewer failed before the wait was over, no viewer, or the viewer's reason for no
+  vector); the settings page shows the same under the wait, in both languages.
 - **The reader's model.** The viewer drops its model after 10 minutes without a search
   (`READER_IDLE`) and loads it again on the next query in about 2 s, past `QUERY_TIMEOUT`: the
   first prompt after such a pause takes words alone and starts the load, and the next ones take
@@ -167,7 +167,10 @@ resident viewer keeps its token (`keyfile::private_fs`, #281):
   meaning joins the block; a claim it names that is not delivered stays out
   (`hook::tests::the_prompt_point_takes_the_resident_viewers_meaning_side`).
 - An answer past the wait: the words side's block, within the wait
-  (`a_late_answer_leaves_the_words_side_within_the_wait`).
+  (`a_late_answer_leaves_the_words_side_within_the_wait`); a request the viewer fails is told
+  from a late one (`a_failed_answer_is_told_from_a_late_one`).
+- A card or summary its reader hides takes no place, in the viewer's 20 nor in the words side's
+  depth (`search::b::tests::a_document_no_reader_shows_takes_no_place`).
 - A prompt not recorded with its text, or under 20 characters, is sent nowhere
   (`a_prompt_not_recorded_whole_or_too_short_asks_nothing`).
 - No resident viewer: the words side, over cards and summaries too, after the decisions, each line

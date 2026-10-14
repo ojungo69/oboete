@@ -1077,6 +1077,7 @@ const TEXT = {
   prompt_side_meaning: ['The last prompt ({time}) also took search by meaning.', '直近のプロンプト({time})は意味の検索も使いました。'],
   prompt_side_no_viewer: ['The last prompt ({time}) took what its words match alone: no resident viewer was answering.', '直近のプロンプト({time})は言葉の一致だけでした。常駐の画面が応答していません。'],
   prompt_side_late: ['The last prompt ({time}) took what its words match alone: search by meaning answered after the wait.', '直近のプロンプト({time})は言葉の一致だけでした。意味の検索が待ち時間に間に合いませんでした。'],
+  prompt_side_failed: ['The last prompt ({time}) took what its words match alone: the resident viewer did not answer.', '直近のプロンプト({time})は言葉の一致だけでした。常駐の画面が応答しませんでした。'],
   prompt_side_loading: ['The last prompt ({time}) took what its words match alone while the local model was loading; the next ones use it.', '直近のプロンプト({time})はモデルの読み込み中だったため言葉の一致だけでした。次からは使います。'],
   prompt_side_other: ['The last prompt ({time}) took what its words match alone ({why}).', '直近のプロンプト({time})は言葉の一致だけでした({why})。'],
   correction_on: [
@@ -2542,7 +2543,7 @@ function promptSide(side) {
   if (!side) return null;
   const time = new Date(side.at).toLocaleString(lang);
   const key = { meaning: 'prompt_side_meaning', 'no-viewer': 'prompt_side_no_viewer', late: 'prompt_side_late',
-    loading: 'prompt_side_loading' }[side.side];
+    failed: 'prompt_side_failed', loading: 'prompt_side_loading' }[side.side];
   return note(key ? t(key, { time }) : t('prompt_side_other', { time, why: side.side }));
 }
 

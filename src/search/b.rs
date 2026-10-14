@@ -460,6 +460,8 @@ pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
         "SELECT 1 FROM active a WHERE a.uid = ?1 AND a.repo = ?2 AND {}",
         claims::DECIDED_WHERE
     ))?;
+    // Whether a reader shows a document needs no rule: the hook gates what it shows.
+    let rules = redact::Rules::default();
     let mut hits = Vec::new();
     let repos = [repo.to_owned()];
     for (family, kind) in [("c", "claim"), ("o", "card"), ("s", "summary")] {
@@ -467,12 +469,17 @@ pub fn prompt_near(home: &Path, repo: &str, text: &str) -> Result<PromptNear> {
             if cosine < crate::shortlist::MEANING {
                 break;
             }
-            // Delivery's rule whole, links too, before the cut: a claim a link ended would take
-            // a place the hook then leaves empty (Codex on #521).
-            if family == "c"
-                && (!decided.exists(params![key, repo])?
-                    || claims::delivered_one(&k, &key)?.is_none())
-            {
+            // Delivery's rule whole, links too, and a document's reader, before the cut: what the
+            // hook would leave out would take a place it then leaves empty (Codex on #521).
+            let shown = match family {
+                "c" => {
+                    decided.exists(params![key, repo])?
+                        && claims::delivered_one(&k, &key)?.is_some()
+                }
+                "o" => crate::cards::get(&k, &raw, &key, &rules)?.is_some(),
+                _ => crate::turns::get(&k, &raw, &key, &rules)?.is_some(),
+            };
+            if !shown {
                 continue;
             }
             hits.push(PromptHit {
@@ -500,29 +507,26 @@ pub(crate) fn curated_words(
     repo: &str,
     text: &str,
     depth: usize,
-) -> Result<Vec<(String, Class)>> {
+    take: &mut dyn FnMut(&str, Class) -> Result<bool>,
+) -> Result<()> {
     let q = Query {
         text: text.to_owned(),
         repo: Some(repo.to_owned()),
         caller: Some(repo.to_owned()),
         ..Default::default()
     };
-    let mut ids = Vec::new();
     for (summaries, fts) in [(false, "cards_fts"), (true, "turns_fts")] {
         if !crate::consumer::manifest::exists(k, "table", fts)? {
             continue;
         }
-        let class = || {
-            if summaries {
-                Class::Summary
-            } else {
-                Class::Card
-            }
+        let class = if summaries {
+            Class::Summary
+        } else {
+            Class::Card
         };
-        let found = curated_fts(k, &q, summaries, depth, &mut |_| Ok(true))?;
-        ids.extend(found.into_iter().map(|id| (id, class())));
+        curated_fts(k, &q, summaries, depth, &mut |id| take(id, class.clone()))?;
     }
-    Ok(ids)
+    Ok(())
 }
 
 fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
@@ -5180,6 +5184,59 @@ mod tests {
                 .all(|h| h.cosine >= crate::shortlist::MEANING)
         );
         assert_eq!(stub.requests(), asked + 1);
+    }
+
+    /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no
+    /// place in the viewer's answer, nor in the words side's depth, where only what the caller
+    /// takes counts.
+    #[test]
+    fn a_document_no_reader_shows_takes_no_place() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let gone = s.said("s", R, 2_000, "Parser errors go to stderr.");
+        let hidden = s.cards(
+            gone,
+            gone,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors go to stderr"}]),
+            false,
+        )[0]
+        .clone();
+        let kept = s.said("s", R, 3_000, "Parser notes.");
+        let shown = s.cards(
+            kept,
+            kept,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors in the log"}]),
+            false,
+        )[0]
+        .clone();
+        s.run();
+        embedded_by(&s, &stub);
+        let device = s.raw.device().to_owned();
+        let home = s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: device.clone(),
+            seq: gone,
+        };
+        crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
+        let near = prompt_near(&home, R, "Parser errors go to stderr.").unwrap();
+        let hidden_key = format!("{device}.{hidden}");
+        assert!(
+            !near.hits.iter().any(|h| h.key == hidden_key),
+            "{:?}",
+            near.hits
+        );
+        let k = crate::knowledge::open(&home).unwrap();
+        let rules = redact::Rules::default();
+        let mut taken = Vec::new();
+        curated_words(&k, R, "Parser errors go to stderr", 1, &mut |id, _| {
+            let readable = crate::cards::get(&k, &s.raw, id, &rules)?.is_some();
+            if readable {
+                taken.push(id.to_owned());
+            }
+            Ok(readable)
+        })
+        .unwrap();
+        assert!(taken.iter().any(|id| id.ends_with(&shown)), "{taken:?}");
     }
 
     /// G23 (row 30-2): a repository excluded from sending has its prompt embedded by no provider:

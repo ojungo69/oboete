@@ -2916,6 +2916,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                     "meaning" => "search by meaning answered in time".to_owned(),
                     "no-viewer" => "words alone: no resident viewer answered".to_owned(),
                     "late" => "words alone: search by meaning answered after the wait".to_owned(),
+                    "failed" => "words alone: the resident viewer did not answer".to_owned(),
                     "loading" => "words alone: the local model was loading".to_owned(),
                     other => format!("words alone: no vector ({other})"),
                 };

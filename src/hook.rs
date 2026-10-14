@@ -1853,6 +1853,14 @@ fn prompt_picks(
                     note_side(a.home, if vector == "used" { "meaning" } else { &vector });
                     hits
                 }
+                // The request ends at the deadline too, by its own socket timeouts: one that ended
+                // before it failed (the viewer went, or refused it), and is not late (Codex on #521).
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                    if std::time::Instant::now() < a.deadline =>
+                {
+                    note_side(a.home, "failed");
+                    Vec::new()
+                }
                 Err(_) => {
                     note_side(a.home, "late");
                     Vec::new()
@@ -1902,18 +1910,27 @@ fn docs_by_words(
 ) -> Result<Vec<Doc>> {
     use crate::search::b::Class;
     let words = crate::shortlist::Words::of(&[text]);
-    let mut kept = Vec::new();
-    for (key, class) in crate::search::b::curated_words(k, repo, text, DOC_DEPTH)? {
+    let mut read = Vec::new();
+    // Only a document its reader shows, and not shown yet, takes one of the `DOC_DEPTH` places
+    // (Codex on #521).
+    crate::search::b::curated_words(k, repo, text, DOC_DEPTH, &mut |key, class| {
         let kind = match class {
             Class::Card => Kind::Card,
             Class::Summary => Kind::Summary,
-            _ => continue,
+            _ => return Ok(false),
         };
-        let Some(d) = read_doc(raw, k, kind, &key, rules)? else {
-            continue;
-        };
+        Ok(match read_doc(raw, k, kind, key, rules)? {
+            Some(d) if not_shown(&d.key) => {
+                read.push(d);
+                true
+            }
+            _ => false,
+        })
+    })?;
+    let mut kept = Vec::new();
+    for d in read {
         let share = words.share(&d.words);
-        if share >= crate::shortlist::THRESHOLD && not_shown(&d.key) {
+        if share >= crate::shortlist::THRESHOLD {
             kept.push((share, d));
         }
     }
@@ -4375,6 +4392,10 @@ mod tests {
                     kept.lock()
                         .unwrap()
                         .push(serde_json::from_str(&body).unwrap());
+                    // `null` hits: the viewer fails the request, closing it unanswered.
+                    if hits.is_null() {
+                        continue;
+                    }
                     std::thread::sleep(delay);
                     let answer = json!({"vector": "used", "hits": hits}).to_string();
                     let _ = conn.write_all(
@@ -4441,6 +4462,30 @@ mod tests {
         assert!(!text.contains(&card), "{text}");
         assert_eq!(r.asked().len(), 1);
         assert_eq!(last_side(p.s.home.path()).unwrap().1, "late");
+    }
+
+    /// G23 (Codex on #521): a viewer that fails the request before the wait is over is told from
+    /// one that answers late.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_answer_is_told_from_a_late_one() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "The output goes to stderr when we quit.", &[]);
+        p.s.run();
+        let r = Resident::start(p.s.home.path(), 2_000, Value::Null, Duration::ZERO);
+        let start = std::time::Instant::now();
+        let text = p.prompt("s1", "where does the output go when we quit");
+        assert!(
+            start.elapsed() < Duration::from_millis(1_500),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            text.contains("decision: The output goes to stderr when we quit."),
+            "{text}"
+        );
+        assert_eq!(r.asked().len(), 1);
+        assert_eq!(last_side(p.s.home.path()).unwrap().1, "failed");
     }
 
     /// G23: a prompt this call did not record with its text goes to no viewer (here
