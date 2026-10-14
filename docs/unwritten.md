@@ -25,23 +25,35 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   Cursor's SessionEnd recovery, which counts the turns raw already holds, is not run, so those
   turns are not recovered by that call. agy's step claims stay taken: the kept event is that step.
 - **U3. Written back.** By the next hook call whose store opens, before its own events, so the
-  seqs follow the events' times: the oldest 16 files a call, each in one transaction with its
-  ledger rows, the file removed after the commit. One call at a time (a lock beside the files):
-  two at once would append a file twice. While older files remain after a call's write-back (more
-  than 16 queued, or another call writing them back), the call keeps its own events behind them
-  instead of appending them, so the seqs keep the events' order; it appends them only when they
+  seqs follow the events' times: a call visits at most the oldest 16 files and writes at most
+  **256 KiB of serialized events**, including their labels and ledger rows, across all files.
+  This leaves time for the hook's own keep and marker inside the shortest 3 s timeout after the
+  store's 2 s wait (#443). Parts end at event boundaries. The first event is admitted even when
+  larger than 256 KiB, so every call with a writable store can advance: the capture cap is per
+  field, not per whole event. Each part commits with its ledger rows and consumed event offset
+  in raw.db (`unwritten_progress`), under synchronous=FULL; no offset becomes durable before
+  its rows. An event refused by forget or capture exclusion still advances the offset. The
+  file stays whole, in its existing format, until its final part commits, then is removed.
+  Reading and decoding the file still reads the whole file, up to U5's bound; the byte budget
+  limits the rows and ledger written, rather than that decode. One call at a time (a lock beside
+  the files): two at once would append a part twice. While older files remain after a call's
+  write-back (a partial file, more than 16 queued, or another call writing them back), the call
+  keeps its own events behind them instead of appending them, so the seqs keep the events' order;
+  it appends them only when they
   cannot be kept, and an agy step they claimed stays claimed then (the append may still write it;
   only events whose last chance failed give their step back). The file's content hash is kept in
-  raw.db (`unwritten_written`) in the transaction that writes its events, so a file left behind
+  raw.db (`unwritten_written`) in the transaction that writes its final part, so a file left behind
   by a call stopped between the commit and the removal is removed by the next write-back, not
   written again (#454; not its name, which starts again from 0 once the directory empties). Each
   keep puts a random id in its file, so the hash names that keep alone: two calls in one
   millisecond with one payload keep the same events, and both are written. A file kept before
   the id has none, and two of them can hold the same bytes: its hash is not kept, so it is
-  written, and if left behind, written again (#460). A
-  raw.db put back from an older copy lost those hashes too, and may write such a file again: a
-  duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's events behind
-  the files and fails, so the marker is set and the worker is asked to restore the store; any
+  written whole, in one transaction, as before #443, and if left behind, written again (#460).
+  Only a file with an id is written in parts. Existing whole-file receipts are still read, and
+  raw.db format 2 keeps an older binary from ignoring a partial offset (docs/store-format.md).
+  A raw.db put back from an older copy lost those hashes and offsets too, and may write such a
+  file again: a duplicate, never a loss. A write-back that finds raw.db damaged keeps the call's
+  events behind the files and fails, so the marker is set and the worker is asked to restore the store; any
   other store error stops the write-back and the call goes on, the files written back before it
   counted as the call's write (the marker is cleared, the worker started). When the call's own
   append fails after the write-back, the marker is set and the worker is started all the same,
@@ -80,3 +92,7 @@ says recording failed, and nothing brings them back. This keeps them and writes 
 4. An agy prompt whose append fails is recorded once: kept and written back, or, when it cannot
    be kept, captured by the next hook through the step claim given back. One that cannot be kept
    behind older files and is appended is recorded once too.
+5. A file several times the byte budget advances one part per call. Its seqs follow the events'
+   order, and each call's own events wait behind the remaining parts.
+6. A call stopped at a part's commit boundary neither duplicates nor loses that part on retry;
+   its rows, ledger and consumed offset commit together.
