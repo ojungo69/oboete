@@ -543,7 +543,18 @@ fn codex_line(e: &mut Emitter, v: &Value) -> Result<()> {
                 .as_str()
                 .and_then(|a| serde_json::from_str(a).ok())
                 .unwrap_or_else(|| json!({"arguments": p["arguments"]}));
-            e.tool_use(call_id, p["name"].as_str().unwrap_or("?"), args, &ts, None);
+            let name = p["name"].as_str().unwrap_or("?");
+            // An MCP tool's name is its namespace's and its own joined by `__`, as Codex names it
+            // to hooks (`join_tool_name` in codex-rs/core/src/tools/handlers/mcp.rs).
+            let name = match p["namespace"].as_str() {
+                Some(ns) if ns.starts_with("mcp__") => format!(
+                    "{}__{}",
+                    ns.trim_end_matches('_'),
+                    name.trim_start_matches('_')
+                ),
+                _ => name.to_owned(),
+            };
+            e.tool_use(call_id, &name, args, &ts, None);
             Ok(())
         }
         (Some("response_item"), Some("custom_tool_call")) => {
@@ -2586,6 +2597,79 @@ mod tests {
         assert_eq!(v[6]["payload"]["tool_input"]["cmd"], "sleep 100");
         assert_eq!(v[6]["payload"]["interrupted"], true);
         assert_eq!(v[7]["payload"]["prompt"], "Try again with 100ms");
+    }
+
+    /// claude-mem 13.35's `isRecursiveMemoryTool` on imported history: a rollout names an MCP
+    /// call by its namespace and its own name, which joined by `__` are the name Codex gives hooks
+    /// (Codex on #523), so a read of claude-mem's memory is kept without its output; Codex's own
+    /// namespaced tools keep their names.
+    #[test]
+    fn a_codex_rollouts_mcp_call_is_named_as_codex_names_it_to_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let call = |id: &str, namespace: &str, name: &str| {
+            json!({"timestamp": "2026-09-02T00:00:01.000Z", "type": "response_item",
+                   "payload": {"type": "function_call", "call_id": id, "namespace": namespace,
+                               "name": name, "arguments": "{\"query\":\"tabs\"}"}})
+        };
+        let output = |id: &str| {
+            json!({"timestamp": "2026-09-02T00:00:02.000Z", "type": "response_item",
+                   "payload": {"type": "function_call_output", "call_id": id,
+                               "output": "Use tabs (decided)."}})
+        };
+        let lines = [
+            json!({"timestamp": "2026-09-02T00:00:00.000Z", "type": "session_meta",
+                   "payload": {"id": "66666666-6666-4666-8666-666666666666", "cwd": "/work"}}),
+            call("a", "mcp__mcp_search", "search"),
+            output("a"),
+            call("b", "history", "search_contents"),
+            output("b"),
+            call(
+                "c",
+                "mcp__codex_apps__codex_security_access",
+                "_get_tac_status",
+            ),
+            output("c"),
+            call("d", "mcp__mcp_search__", "timeline"),
+            output("d"),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&rollout, text).unwrap();
+        let (v, _) = events(rollout.to_str().unwrap(), "codex");
+        let tools: Vec<_> = v.iter().filter(|e| e["event"] == "PostToolUse").collect();
+        let names: Vec<_> = tools.iter().map(|e| &e["payload"]["tool_name"]).collect();
+        assert_eq!(
+            names,
+            [
+                "mcp__mcp_search__search",
+                "search_contents",
+                "mcp__codex_apps__codex_security_access__get_tac_status",
+                "mcp__mcp_search__timeline"
+            ]
+        );
+        let stored = |e: &Value| {
+            let c = capture::imported(
+                "codex",
+                "PostToolUse",
+                &e["payload"],
+                1,
+                "/work",
+                Some("/work"),
+                &Settings::default(),
+            );
+            serde_json::from_str::<Value>(&c[0].event.body).unwrap()
+        };
+        let read = stored(tools[0]);
+        assert_eq!(
+            (&read["output"], &read["memory_read"]),
+            (&json!(""), &json!(true))
+        );
+        assert!(
+            stored(tools[1])["output"]
+                .as_str()
+                .unwrap()
+                .contains("Use tabs")
+        );
     }
 
     /// #273: a rollout another agent started (`codex exec` here) says its prompts are the

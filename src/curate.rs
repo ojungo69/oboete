@@ -609,22 +609,65 @@ type Hidden = Option<Vec<(usize, usize)>>;
 /// The output a window shows for a read of stored memory.
 const MEMORY_READ: &str = " (a read of stored memory, not shown)";
 
-/// A read of stored memory: a tool of oboete's own MCP server, `oboete search|get|timeline` run
-/// as a command, or a claude-mem tool. Its output repeats what memory holds, retracted and
-/// finished items too, and a curator reading it would make them current again, so a window shows
-/// the call and not the output (claude-mem's `isRecursiveMemoryTool` skips them too).
-fn memory_read(tool: &str, body: &Value) -> bool {
+/// claude-mem's retrieval tools (`RETRIEVAL_TOOLS`, src/shared/memory-retrieval-tools.ts at
+/// v13.39.0, Apache-2.0; NOTICE).
+const CLAUDE_MEM_READS: &[&str] = &[
+    "mem_search",
+    "search",
+    "timeline",
+    "get_observations",
+    "get_summaries",
+    "get_tool_uses",
+    "session_start_context",
+    "observation_search",
+    "observation_context",
+    "memory_search",
+    "memory_context",
+];
+
+/// oboete's own retrieval tools.
+const OBOETE_READS: &[&str] = &["search", "get", "timeline", "mem_search"];
+
+/// A read of stored memory, as claude-mem's `isRecursiveMemoryTool` finds one (v13.39.0): a bare
+/// `mem_search`, `get_summaries` or `memory_*` tool, or a retrieval tool of a server whose name
+/// says claude-mem (`claude-mem`, `claude_mem`, `mcp-search`, `mcp_search`, `cmem`); and oboete's
+/// own: a retrieval tool of a server named oboete (Cursor names one `MCP:<tool>`, without its
+/// server), or `oboete search|get|timeline` run as a command. Its output repeats what memory
+/// holds, retracted and finished items too, and a curator reading it would make them current
+/// again: capture keeps the call and not the output (`memory_read` in the stored body), and a
+/// window shows the call alone. Other tools of either server (work state, saving, code reading)
+/// are recorded as any tool is, as claude-mem records them.
+pub(crate) fn memory_read(tool: &str, body: &Value) -> bool {
+    if body.get("memory_read") == Some(&Value::Bool(true)) {
+        return true;
+    }
     let tool = tool.to_ascii_lowercase();
-    tool.contains("oboete")
-        || tool.contains("claude-mem")
-        || tool.contains("claude_mem")
-        // Cursor names an MCP tool without its server (`MCP:<tool>`): oboete's three by name.
-        || matches!(tool.as_str(), "mcp:search" | "mcp:get" | "mcp:timeline")
-        // Only a shell runs a command: a Grep for "oboete search" read no memory.
-        || ["bash", "shell", "command", "exec", "terminal"]
-            .iter()
-            .any(|k| tool.contains(k))
-            && runs_memory_read(&body["input"])
+    if tool.starts_with("memory_") || matches!(tool.as_str(), "mem_search" | "get_summaries") {
+        return true;
+    }
+    // `mcp__<server>__<tool>` as Claude Code and Codex name it; `<server>.<tool>`, `/` or `:`.
+    let served = tool
+        .rsplit_once("__")
+        .or_else(|| tool.rsplit_once(['.', '/', ':']));
+    if let Some((server, name)) = served {
+        let cmem = [
+            "claude-mem",
+            "claude_mem",
+            "mcp-search",
+            "mcp_search",
+            "cmem",
+        ];
+        if cmem.iter().any(|s| server.contains(s)) && CLAUDE_MEM_READS.contains(&name)
+            || (server.contains("oboete") || server == "mcp") && OBOETE_READS.contains(&name)
+        {
+            return true;
+        }
+    }
+    // Only a shell runs a command: a Grep for "oboete search" read no memory.
+    ["bash", "shell", "command", "exec", "terminal"]
+        .iter()
+        .any(|k| tool.contains(k))
+        && runs_memory_read(&body["input"])
 }
 
 /// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
@@ -4908,6 +4951,51 @@ mod tests {
             assert_eq!(seen.matches(l.as_str()).count(), 1, "{l}");
         }
         assert!(seen.contains("[user] thanks"));
+    }
+
+    /// claude-mem's own cases for `isRecursiveMemoryTool` (tests/shared/memory-retrieval-tools.test.ts
+    /// at v13.39.0), oboete's tools as Claude Code, Codex, Grok and Cursor name them, and the tools
+    /// of either server that are no read of memory.
+    #[test]
+    fn a_memory_read_is_told_by_claude_mems_rule_and_oboetes_tools() {
+        let none = Value::Null;
+        for read in [
+            "mem_search",
+            "get_summaries",
+            "memory_search",
+            "memory_x",
+            "mcp__mcp_search__mem_search",
+            "mcp__mcp-search__get_observations",
+            "mcp__plugin_claude-mem_mcp-search__mem_search",
+            "mcp__claude_mem_remote__get_summaries",
+            "mcp__cmem__timeline",
+            "mcp__oboete__search",
+            "mcp__oboete__get",
+            "mcp__oboete__mem_search",
+            "oboete__timeline",
+            "MCP:get",
+        ] {
+            assert!(memory_read(read, &none), "{read}");
+        }
+        for not in [
+            "search",
+            "timeline",
+            "memory",
+            "mcp__notion__search",
+            "mcp__notion__memory_search",
+            "mcp__other__mem_search",
+            "save_memory",
+            "mcp__plugin_claude-mem_mcp-search__save_memory",
+            "mcp__plugin_claude-mem_mcp-search__smart_unfold",
+            "mcp__mcp_search__work_state_write",
+            "mcp__plugin_claude-mem_mcp-search__build_corpus",
+            "mcp__oboete__work_state_read",
+            "oboete__work_state_write",
+            "Read",
+        ] {
+            assert!(!memory_read(not, &none), "{not}");
+        }
+        assert!(memory_read("Bash", &json!({"memory_read": true})));
     }
 
     /// A read of stored memory (oboete's own tools, or claude-mem's) shows its call and not its
