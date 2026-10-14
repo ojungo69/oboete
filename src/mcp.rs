@@ -199,21 +199,25 @@ impl Oboete {
 
     /// `None` = every repository. Models send `null` and `""` for arguments they mean to leave
     /// out. `repo` is a directory or a repository key the stores know (as results show it);
-    /// anything else is an error, not a scope that matches nothing.
-    fn scope(&self, all: Option<bool>, repo: Option<&str>) -> Result<Option<String>, String> {
+    /// anything else is the caller's error (the inner `Err`), not a scope that matches nothing. A
+    /// store that cannot be read is the outer error, which no tool shows the model as its own
+    /// (Codex on #527).
+    fn scope(
+        &self,
+        all: Option<bool>,
+        repo: Option<&str>,
+    ) -> anyhow::Result<Result<Option<String>, String>> {
         if all == Some(true) {
-            return Ok(None);
+            return Ok(Ok(None));
         }
-        match repo.filter(|r| !r.is_empty()) {
+        Ok(match repo.filter(|r| !r.is_empty()) {
             None => Ok(Some(repo::key(&self.cwd))),
             Some(r) if Path::new(r).is_dir() => Ok(Some(repo::key(Path::new(r)))),
-            Some(r) if search::known(&self.home, r).map_err(|e| format!("{e:#}"))? => {
-                Ok(Some(r.to_string()))
-            }
+            Some(r) if search::known(&self.home, r)? => Ok(Some(r.to_string())),
             Some(r) => Err(format!(
                 "repo {r:?} is neither a directory nor a repository oboete knows: pass a repository's path or key"
             )),
-        }
+        })
     }
 
     #[tool(
@@ -222,7 +226,7 @@ impl Oboete {
         annotations(read_only_hint = true)
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
-        let repo = match self.scope(a.all, a.repo.as_deref()) {
+        let repo = match self.scope(a.all, a.repo.as_deref()).map_err(internal)? {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
@@ -302,7 +306,7 @@ impl Oboete {
         &self,
         Parameters(a): Parameters<TimelineArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let repo = match self.scope(a.all, a.repo.as_deref()) {
+        let repo = match self.scope(a.all, a.repo.as_deref()).map_err(internal)? {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
@@ -408,8 +412,17 @@ impl Oboete {
         &self,
         Parameters(a): Parameters<crate::mem_search::Args>,
     ) -> Result<CallToolResult, ErrorData> {
+        // A store's error may name its paths or its SQL, a config's its path: only contract errors
+        // are shown, as claude-mem shows them (Codex on #527).
+        let generic = || {
+            failed(crate::mem_search::failure(
+                "Memory retrieval failed. Retry the query.",
+            ))
+        };
         let repo = |project: Option<&str>| self.scope(None, project);
-        let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
+        let Ok(rules) = crate::redact::Rules::load(&self.home) else {
+            return generic();
+        };
         let search = crate::mem_search::Search {
             home: &self.home,
             scope: repo::key(&self.cwd),
@@ -421,11 +434,7 @@ impl Oboete {
         match search.run(&a) {
             Ok(Ok(answer)) => text(answer),
             Ok(Err(refused)) => failed(refused),
-            // A store's error may name its paths or its SQL: only contract errors are shown, as
-            // claude-mem shows them.
-            Err(_) => failed(crate::mem_search::failure(
-                "Memory retrieval failed. Retry the query.",
-            )),
+            Err(_) => generic(),
         }
     }
 
@@ -2225,6 +2234,56 @@ mod tests {
             detail.contains("The zircon importer keeps a cache."),
             "{detail}"
         );
+    }
+
+    /// CodeRabbit on #527: the context of a repository's anchor holds its claude-mem history,
+    /// which the timeline files under the project's claude-mem name.
+    #[test]
+    fn mem_search_keeps_imported_history_in_its_context() {
+        let (mut s, server, _, card) = quartz();
+        let imported = s.imported(
+            "q1",
+            "r",
+            1_700_000_002_500,
+            "Quartz reader notes",
+            "The quartz reader was rewritten.",
+        );
+        s.run();
+        let first = body(mem(&server, json!({"query": "quartz parser"})));
+        let context = body(mem(
+            &server,
+            json!({"continuation": continuation(&first), "selectedIds": [card]}),
+        ));
+        assert!(context.contains(&format!("- [{imported}] ")), "{context}");
+    }
+
+    /// Codex on #527: a store that cannot be read while a project is resolved is no refusal of the
+    /// caller's, and a config that cannot be read is no protocol error: both end in the generic
+    /// failure, which names no path.
+    #[test]
+    fn mem_search_hides_a_store_error_behind_its_failure() {
+        let (_s, server, _, _) = quartz();
+        let failing = crate::mem_search::Search {
+            home: &server.home,
+            scope: repo::key(&server.cwd),
+            cursors: &server.cursors,
+            now: crate::db::now_ms(),
+            repo: &|_| Err(anyhow::anyhow!("no such table in /home/x/knowledge.db")),
+            rules: &crate::redact::Rules::default(),
+        };
+        let args: crate::mem_search::Args =
+            serde_json::from_value(json!({"query": "quartz parser", "project": "github.com/o/r"}))
+                .unwrap();
+        assert!(failing.run(&args).is_err());
+        std::fs::write(server.home.join("config.toml"), "[redaction\n").unwrap();
+        let answer = mem(&server, json!({"query": "quartz parser"}));
+        assert_eq!(answer.is_error, Some(true));
+        let text = body(answer);
+        assert!(
+            text.contains("Memory retrieval failed. Retry the query."),
+            "{text}"
+        );
+        assert!(!text.contains("config.toml"), "{text}");
     }
 
     fn save(

@@ -22,7 +22,8 @@ forget fence and its hiding rules. The code is `src/mem_search.rs`.
   (a claim's whole uid, a card's `<op seq>.<n>`, a summary's `S<op seq>`, an import's uid, a
   record's `<device>:<seq>`). A continuation follows, `ms_` and 24 base64url characters.
 - **Step 2, the context**: the continuation and at most `maxDetails` ids the index showed; for each,
-  the entries a timeline of its repository shows `depthBefore` and `depthAfter` around it, at most
+  the entries a timeline of its repository shows `depthBefore` and `depthAfter` around it (its
+  claude-mem history among them, filed under the project's claude-mem name), at most
   7 an anchor and 35 in all, session starts left out (claude-mem has no kind for them); the anchor
   is always among them, as in claude-mem's timeline, also a record the timeline does not show (an
   agent's reply). Another continuation follows.
@@ -37,7 +38,8 @@ forget fence and its hiding rules. The code is `src/mem_search.rs`.
 - **Refused**, in claude-mem's words and as an error: a skipped step (an id the step before did not
   show, `selectedIds` without a continuation), too many ids, options changed on a continuation, a
   continuation unknown, of another scope, or 15 minutes old, a bad argument. `selectedIds: []`
-  ends the search. Any other failure says "Memory retrieval failed. Retry the query.": a store's
+  ends the search. Any other failure says "Memory retrieval failed. Retry the query.", a store
+  that cannot be read while `project` is resolved and a config that cannot be read too: a store's
   error may name its paths or its SQL, as claude-mem says of its backend's.
 - **Continuations** live in the server's memory, at most 1,024 and 8 MiB, the oldest given up
   first, each for 15 minutes. One `oboete mcp` serves one agent session, so a continuation is

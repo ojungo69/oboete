@@ -182,7 +182,7 @@ struct Answer {
 }
 
 /// A `project` as the repository it names (`None`, every repository), or why it names none.
-pub type Scope<'a> = &'a dyn Fn(Option<&str>) -> Result<Option<String>, String>;
+pub type Scope<'a> = &'a dyn Fn(Option<&str>) -> anyhow::Result<Result<Option<String>, String>>;
 
 /// One call: the server's home, the scope its continuations belong to (the checkout's
 /// repository), the repository a search with no `project` covers, and the time.
@@ -301,7 +301,7 @@ impl Search<'_> {
             Ok(o) => o,
             Err(r) => return Ok(Err(r)),
         };
-        options.repo = match (self.repo)(options.project.as_deref()) {
+        options.repo = match (self.repo)(options.project.as_deref())? {
             Ok(repo) => repo,
             Err(m) => return Ok(refuse("invalid_input", m)),
         };
@@ -582,10 +582,13 @@ impl Search<'_> {
                     }
                 }
             }
+            // `near` keeps to the anchor's repository, its claude-mem history filed under the
+            // project's name included (CodeRabbit on #527); an anchor of no repository reads
+            // every one, of which only entries of none are its own.
             rows.extend(
                 index_rows(near, 7)
                     .into_iter()
-                    .filter(|r| r.project == anchor.project),
+                    .filter(|r| repo.is_some() || r.project == anchor.project),
             );
         }
         Ok(index_rows(rows, 35))
@@ -969,7 +972,7 @@ mod tests {
     fn an_answer_is_bounded_as_claude_mems_is() {
         let home = tempfile::tempdir().unwrap();
         let cursors = std::sync::Mutex::new(Cursors::default());
-        let scope: Scope = &|_| Ok(None);
+        let scope: Scope = &|_| Ok(Ok(None));
         let search = Search {
             home: home.path(),
             scope: "s".into(),
