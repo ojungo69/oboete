@@ -1289,12 +1289,6 @@ fn serve(
                 report_backup(home, &raw, report, false);
                 crate::hookstate::prune(home, crate::hookstate::KEEP);
             }
-            // A batch a consumer put off, with nothing new to wake this wait (the rescan when the
-            // dispatch hold is busy; Codex on #507), runs again here, as the exit's check below
-            // starts a round for it.
-            if behind(&raw, &k, consumers)? {
-                break false;
-            }
             // Only a config.toml that loads and does not say `resident = true` ends it: one the
             // owner is still editing leaves it as it is. A call that is out is settled first.
             if crate::config::worker(home).is_ok_and(|w| !w.resident) {
@@ -1302,6 +1296,12 @@ fn serve(
                     break true;
                 }
                 departing = true;
+            }
+            // A batch a consumer put off, with nothing new to wake this wait (the rescan when the
+            // dispatch hold is busy; Codex on #507), runs again here, as the exit's check below
+            // starts a round for it; not once the worker is to leave (R3).
+            if !departing && behind(&raw, &k, consumers)? {
+                break false;
             }
             // A setting the owner changed is followed without a new record.
             let now = config_stamp(home);
@@ -4776,6 +4776,71 @@ mod tests {
                 == Some(1)
         });
         std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    /// Codex on #507: a resident worker whose config.toml stops saying `resident = true` leaves at
+    /// its idle time even while a consumer keeps putting its batch off (R3): the batch put off does
+    /// not start a round before the switch is read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_turned_off_leaves_while_a_batch_stays_put_off() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct PutOff(Arc<AtomicBool>);
+        impl Consumer for PutOff {
+            fn name(&self) -> &'static str {
+                "put-off"
+            }
+            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
+                if !self.0.load(Ordering::SeqCst) {
+                    return Ok(after);
+                }
+                Ok(raw
+                    .after(raw.device(), after, 100)?
+                    .last()
+                    .map_or(after, |r| r.seq))
+            }
+            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+        let free = Arc::new(AtomicBool::new(false));
+        let left = Arc::new(AtomicBool::new(false));
+        let (at, consumer, exited) = (p.to_path_buf(), PutOff(free.clone()), left.clone());
+        let worker = std::thread::spawn(move || {
+            let held = lock(&at)?;
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            let before_exit = move || exited.store(true, Ordering::SeqCst);
+            run_holding(
+                &at,
+                100,
+                vec![Box::new(consumer)],
+                before_exit,
+                held,
+                phases,
+            )
+        });
+        // A few idle times pass with the batch put off each time.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!left.load(Ordering::SeqCst), "it left while resident");
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        until("the worker leaving resident mode", || {
+            left.load(Ordering::SeqCst)
+        });
+        free.store(true, Ordering::SeqCst);
         worker.join().unwrap().unwrap();
     }
 
