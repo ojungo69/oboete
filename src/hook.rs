@@ -1247,12 +1247,14 @@ pub fn start_text_read(
     {
         between();
     }
+    // The memory tools' use does not depend on the work state: with neither the work state's
+    // section nor a manifest, it comes alone (Codex on #531).
     let start = match work {
         Some(work) => Some(Start {
             work: Some(work),
             ..manifest.unwrap_or_default()
         }),
-        None => manifest,
+        None => manifest.or_else(|| memory_use.then(Start::default)),
     };
     Ok(start.map(|s| Start { memory_use, ..s }))
 }
@@ -7124,6 +7126,39 @@ mod tests {
             )) && text.contains("earlier work"),
             "{text}"
         );
+    }
+
+    /// Codex on #531: with no memory to show for the repository either, the memory tools' use
+    /// still comes when the work state cannot be read.
+    #[test]
+    fn a_work_state_that_cannot_be_read_keeps_the_memory_use_without_a_manifest() {
+        let dir = tmp("work-state-unread-bare");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let mut raw = crate::raw::open(&dir).unwrap();
+        let fields = json!({"phase": "rc2"});
+        raw.work_state(
+            &repo::key(&dir),
+            "release",
+            fields.as_object().unwrap(),
+            None,
+        )
+        .unwrap();
+        drop(raw);
+        Connection::open(dir.join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET body = 'not json' WHERE type = 'work_state'",
+                [],
+            )
+            .unwrap();
+        let payload = json!({"session_id": "a", "cwd": &*dir, "source": "startup"});
+        let out = hook(&dir, "claude", "SessionStart", &payload);
+        let v: Value = serde_json::from_str(&out).unwrap_or_default();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains(crate::mem_search::MEMORY_USE), "{out}");
+        assert!(!text.contains("<oboete-memory>"), "{text}");
     }
 
     /// claude-mem 13.35's memory-use block: after the work state's rule at a session start, out of
