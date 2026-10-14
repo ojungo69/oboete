@@ -332,10 +332,21 @@ mod tests {
                 r#"{{"prompt":"deploy {key} now"}}"#
             )))
             .unwrap();
-        // A reader holds dispatch past the step's wait, then lets it go.
+        // A reader holds dispatch until the step has waited for it past its wait, then lets it go:
+        // the first attempt is busy whatever the machine's speed (Codex on #507).
         let reader = crate::dispatch::Admission::shared(p).unwrap();
+        crate::dispatch::blocked(p); // no earlier wait is this step's
+        let at = p.to_owned();
         let released = std::thread::spawn(move || {
-            std::thread::sleep(HOLD_WAIT * 3);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !crate::dispatch::blocked(&at) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the step never waited"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            std::thread::sleep(HOLD_WAIT * 2);
             drop(reader);
         });
         worker::run_once(p).unwrap();
