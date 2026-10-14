@@ -411,9 +411,9 @@ impl Oboete {
                 "a note's text and title are at most {cap} bytes each"
             ));
         }
-        // A note goes to a repository by its key: a project's directory, or a key oboete has
-        // recorded under. A bare claude-mem project name names no key, and the note would be
-        // found from no checkout.
+        // A note goes to a repository by its key: a project's directory, or a key search knows
+        // (`host/owner/name`, or an imported `claude-mem:<project>`). A bare claude-mem project
+        // name is no key: a note filed under it would be found from no checkout.
         let (repo, settings, target) = match a.project.as_deref().map(str::trim) {
             None | Some("") => {
                 let (repo, settings) = self.checkout()?;
@@ -424,14 +424,17 @@ impl Oboete {
                 let (_, repo, _) = crate::capture::checkout(&json!({"cwd": p}), &settings);
                 (repo, settings, Some(p.to_owned()))
             }
-            Some(p) if search::recorded(&self.home, p).map_err(internal)? => {
+            Some(p)
+                if (p.contains('/') || p.starts_with("claude-mem:"))
+                    && search::known(&self.home, p).map_err(internal)? =>
+            {
                 let settings = crate::capture::Settings::load(&self.home).map_err(internal)?;
                 let repo = crate::capture::exclusion_label("repo", p, &settings);
                 (repo, settings, None)
             }
             Some(p) => {
                 return failed(format!(
-                    "project {p:?} is neither a directory nor a repository oboete has recorded: pass the repository's path, or its key as results show it (e.g. github.com/owner/name)"
+                    "project {p:?} is neither a directory nor a repository key oboete knows: pass the repository's path, or its key as results show it (e.g. github.com/owner/name)"
                 ));
             }
         };
@@ -2020,6 +2023,28 @@ mod tests {
         let named = save(&server, "Lost too.", None, Some("free-mem"));
         assert_eq!(named.is_error, Some(true));
         assert!(body(named).contains("neither a directory nor a repository"));
+        // A repository key search knows through that history alone takes a note, which search
+        // of that key finds.
+        let keyed = body(save(
+            &server,
+            "Free-mem pins its toolchain.",
+            None,
+            Some("github.com/o/free-mem"),
+        ));
+        assert!(
+            keyed.contains("Repository: github.com/o/free-mem."),
+            "{keyed}"
+        );
+        let found = body(
+            server
+                .search(Parameters(args(
+                    "toolchain",
+                    None,
+                    Some("github.com/o/free-mem"),
+                )))
+                .unwrap(),
+        );
+        assert!(found.contains("Free-mem pins its toolchain"), "{found}");
         // A directory excluded from recording takes no note, whatever the writer's place.
         let closed = s.home.path().join("closed");
         std::fs::create_dir_all(&closed).unwrap();
@@ -2055,7 +2080,7 @@ mod tests {
         let excluded = save(&server, "Never kept.", None, None);
         assert_eq!(excluded.is_error, Some(true));
         assert!(body(excluded).contains("oboete capture exclude"));
-        assert_eq!(notes(&s), 2);
+        assert_eq!(notes(&s), 3);
     }
 
     /// Slice 4a: a checkout never recorded keeps no work state either: the write is refused with

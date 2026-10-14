@@ -213,8 +213,10 @@ correction or handoff on purpose; search finds it, and the session start never s
 - **Arguments**: `text` (required), `title`, `project`, claude-mem's names. claude-mem's
   `metadata` is not read (nothing in oboete reads provenance); a call that sends it is not refused.
 - **Where it goes**: the repository of the checkout the server runs in, or the one `project`
-  names: a directory, or a repository key oboete knows, as `search`'s `repo` takes it (anything
-  else is refused with `search`'s message).
+  names: a directory (its own `.oboete.toml` and the folders excluded around it are read too), or
+  a repository key `search` knows (`host/owner/name`, or an imported `claude-mem:<project>`). A
+  bare claude-mem project name is refused: a note filed under it would be found from no
+  checkout.
 - **What is stored**: one document of source `oboete-note`, kind `note`, in raw.db's op log
   (`Raw::append_note`), which the imported-documents consumer indexes as it indexes claude-mem's
   history: no new op kind, so no change of the store's format. Title and text pass the capture

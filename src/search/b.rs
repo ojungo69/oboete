@@ -2688,20 +2688,6 @@ mod timeline;
 pub use timeline::{Around, timeline_text};
 
 /// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
-/// Whether `repo` is a repository key oboete has recorded under: claims or records of its own,
-/// not imported history found by a claude-mem project's name.
-pub fn recorded(home: &Path, repo: &str) -> Result<bool> {
-    let Some((_raw, k)) = stores(home)? else {
-        return Ok(false);
-    };
-    Ok(k.query_row(
-        "SELECT EXISTS (SELECT 1 FROM derivations WHERE repo = ?1)
-             OR EXISTS (SELECT 1 FROM raw_docs WHERE repo = ?1)",
-        [repo],
-        |r| r.get(0),
-    )?)
-}
-
 pub fn known(home: &Path, repo: &str) -> Result<bool> {
     let Some((_raw, k)) = stores(home)? else {
         return Ok(false);
