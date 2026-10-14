@@ -2736,13 +2736,14 @@ impl Drop for FinishChild<'_> {
 #[cfg(any(unix, windows))]
 #[test]
 fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     const PROMPT: &[u8] = b"synthetic expected confirmation: ";
-    let timeout = if cfg!(windows) {
-        Duration::from_secs(20)
-    } else {
-        Duration::from_secs(2)
-    };
+    // On a loaded Windows runner a PowerShell child has written nothing within 20 s. The eof and
+    // panic children end the wait as soon as they write, so only a child that never starts
+    // reaches START; the stall child marks `ready` once both pipes are written, so STALL times
+    // the stall alone.
+    const START: Duration = Duration::from_secs(120);
+    const STALL: Duration = Duration::from_secs(2);
     for mode in ["stall", "eof", "panic"] {
         let home = tempfile::tempdir().unwrap();
         let mut child = finish_fixture_command(mode)
@@ -2759,7 +2760,7 @@ fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
         if mode == "panic" {
             let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut held = FinishChild::new(&mut child, PROMPT);
-                held.wait_for_prompt(timeout).unwrap();
+                held.wait_for_prompt(START).unwrap();
                 panic!("synthetic failure while holding the finish child");
             }));
             let failed = failed.expect_err("the synthetic panic did not run");
@@ -2769,6 +2770,16 @@ fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
             );
         } else {
             let mut held = FinishChild::new(&mut child, PROMPT);
+            let timeout = if mode == "stall" {
+                let started = Instant::now();
+                while !home.path().join("ready").exists() {
+                    assert!(started.elapsed() < START, "the stall child did not start");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                STALL
+            } else {
+                START
+            };
             let failed = held.wait_for_prompt(timeout).unwrap_err();
             assert!(failed.contains("synthetic wrong prompt"), "{failed}");
             assert!(failed.contains("synthetic child stderr"), "{failed}");
@@ -2793,7 +2804,7 @@ fn finish_fixture_command(mode: &str) -> Command {
             "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2"
         }
         "stall" => {
-            "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2; IFS= read -r answer"
+            "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2; : > ready; IFS= read -r answer"
         }
         _ => panic!("unknown synthetic child mode"),
     };
@@ -2812,7 +2823,7 @@ fn finish_fixture_command(mode: &str) -> Command {
             "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr')"
         }
         "stall" => {
-            "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr'); [void][Console]::In.ReadLine()"
+            "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr'); [IO.File]::WriteAllText('ready', ''); [void][Console]::In.ReadLine()"
         }
         _ => panic!("unknown synthetic child mode"),
     };
