@@ -2,8 +2,8 @@
 
 Plan of the slice that widens what reaches the agent at each prompt, written before the code, as
 the other slices' notes are. Decision 40 widened delivery at each prompt to cards and session
-summaries found by meaning (G23 of the 13.34.2 comparison); the owner's answers of 2026-10-13
-(decision 44, below) settle when and how.
+summaries found by meaning (G23 of the 13.34.2 comparison); decision 44 (2026-10-13, below)
+settles when and how.
 
 ## What claude-mem does (13.37.0)
 
@@ -89,11 +89,10 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
 
 ## Decision 44
 
-The owner's answers, in their words, and the correction made at the owner's request are spec
-decision 44: at prompt submit the hook asks the resident viewer (replacing decision 38's "Not now"
-for it); imported history may appear in the per-prompt block (an exception to 4.5); cards,
-summaries and imported history join claims, each above the threshold, and the block is empty when
-nothing passes.
+Spec decision 44: at prompt submit the hook asks the resident viewer (replacing decision 38's
+"Not now" for it); imported history may appear in the per-prompt block (an exception to 4.5);
+cards, summaries and imported history join claims, each above the threshold, and the block is
+empty when nothing passes.
 
 ## Spec changes
 
