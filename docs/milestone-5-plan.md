@@ -1316,7 +1316,7 @@ egress の gate が今の規則で伏せる）。
 
 ### Slice 4 の決定（2026-10-13）
 
-Slice 3 の残り（3e-3 の保存期間）より先に、owner が切替前に挙げた「記録しない」を作る（spec 7.5、owner
+Slice 3 の残り（3e-3 の保存期間）より先に、切替の前提である「記録しない」を作る（spec 7.5、owner
 decision 27・34。保存期間は既定が無期限で、切替の前提にない）。設定画面の行（settings-coverage.md の
 「Stop recording a repository or folder」、W3）と setup の質問は 4b、mute のボタンと訂正の残り（#157・
 #160・#162）はその後。

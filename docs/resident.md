@@ -3,10 +3,10 @@
 The design of this unit, written before its code (2026-10-03) and kept up to date as the slices
 land. Rules are numbered R1 to R13; the code cites them.
 
-Owner decision 36 (2026-10-03): 「常駐を標準にしたい」 and, for the switch, 「画面もいつでも開ける
-(Recommended)」: the worker stays up, and the browser page opens from a bookmark. The bot adapter and
+Owner decision 36 (2026-10-03): the worker is resident by default and the viewer is always reachable
+at the switch. The worker stays up, and the browser page opens from a bookmark. The bot adapter and
 the local HTTP API for other clients stay after the switch (decision 33). Spec text: 1.8, 6.6, A111,
-A112 (PR #342). Owner wish 7: 「軽さ: 上限数値は不要。メモリ食い潰しバグが無いこと。」
+A112 (PR #342). Owner wish 7: no fixed memory cap; memory must not grow without bound.
 
 Scope of this unit: Linux and WSL (the first switch is WSL only). Windows native and macOS keep
 today's behaviour until their own unit.
@@ -321,7 +321,7 @@ page say "rebuilding" for good.
 
 ## Owner decision: what the bookmark's token may do
 
-Asked on 2026-10-03 and answered the same day: the bookmark does everything the page does, saves
+Decision (owner, 2026-10-03): the bookmark does everything the page does, saves
 of settings and keys included (spec 6.6, spec-webui.md). In a resident home the token is permanent,
 so whoever learns it can also change settings and replace API keys from this machine until
 `oboete view --new-token` is run. On the owner's PC a program able to read the bookmark can already
@@ -450,7 +450,7 @@ left as a setting to add before a public release.
 - Detached processes start in the home; the resident viewer holds no checkout (R1, R8).
 - The memory check runs in cycles and can fail (R11); the WSL survival check moved to the
   rehearsal with the owner, since it decides only the shortcut.
-- Doctor and stats lines (R13). The bookmark's rights were put to the owner.
+- Doctor and stats lines (R13). The bookmark's rights follow the owner decision above.
 
 ## Found while building
 

@@ -301,7 +301,7 @@ Refuted findings, with a note where useful:
 - **inherited-6:** the Public row stays Japanese-only on purpose (RD/constraints-synthesis.md:374-377, settled in sections 1-4). English is M21's job, and M21 now has a stated N and error rates.
 - **validity-7:** no change. M2 and M4 are deterministic, not scored by the judge, and M6 already carries a +0.10 margin.
 
-I decided these myself, without asking:
+Claude design decisions:
 - the test-split budget and the Holm correction;
 - the final set's definition;
 - every N above, and where the English questions come from;

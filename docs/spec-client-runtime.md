@@ -1,6 +1,6 @@
 # 外部クライアント・会話runtimeの契約（レビュー用ドラフト）
 
-2026-10-02、ownerがモデルとruntimeの分離、source identity、非Git scope、権限と非同期配送の分離という4点の方向を「じゃあそうして」と承認したことを受けた仕様補足。**実装前のレビュー用**であり、dot、noteMan/Grok Bot、Hermesやremote MCPが動作するという宣言ではない。具体的なAPI、保存スキーマ、製品の採用は後続実装の検証対象。
+2026-10-02の決定に基づき、モデルとruntimeの分離、source identity、非Git scope、権限と非同期配送の分離という4点を定める仕様補足。**実装前のレビュー用**であり、dot、noteMan/Grok Bot、Hermesやremote MCPが動作するという宣言ではない。具体的なAPI、保存スキーマ、製品の採用は後続実装の検証対象。
 
 この文書は `spec.md` §2/§3/§4/§5.13 の外部クライアントへの適用を明確にする。既存のowner決定、Rust/SQLiteのlocal-first、安価なprovider chain、milestone順序、§6の保護・削除を維持する。runtime bot adapterは後続段階、remote serviceはmilestone 6。これらを [#340](https://github.com/ojungo69/oboete/pull/340) の新たな完了条件にしない。WebUIは [#94](https://github.com/ojungo69/oboete/issues/94) / [#338](https://github.com/ojungo69/oboete/pull/338) を再利用し、別の設定・保持システムを作らない。
 
@@ -78,7 +78,7 @@ remote clientの初期権限は **read-only**。§5.13のOAuth、device-issued a
 
 ## 6. Live capture と host recall adapter
 
-2026-10-02、ownerが追加の改善と常時HTTPサービスの方向を「それらも追加してほしい」と承認した。以下も実装前の仕様レビューであり、インストールや起動の承認・実施ではない。
+2026-10-02の決定として、追加の改善と常時HTTPサービスを設計対象に含める。以下も実装前の仕様レビューであり、インストールや起動の承認・実施ではない。
 
 比較したclaude-memは `039c6160f0ff26e9fab37cae7f50b994ba68f7ff`。[Grok Bot資料](https://github.com/thedotmack/claude-mem/blob/039c6160f0ff26e9fab37cae7f50b994ba68f7ff/docs/public/grok-bot/index.mdx)、[Installer](https://github.com/thedotmack/claude-mem/blob/039c6160f0ff26e9fab37cae7f50b994ba68f7ff/src/services/integrations/GrokBotInstaller.ts)、[IndexWriter](https://github.com/thedotmack/claude-mem/blob/039c6160f0ff26e9fab37cae7f50b994ba68f7ff/src/services/integrations/GrokBotIndexWriter.ts) に、JSONL watcher → worker/observer → MCP search と、hostが読むrolling INDEXへの経路がある。Grok Build CLIとは別で、allowlist付きawareness-push pilotもINDEXとは別である。これは比較元の確認であり、ownerのnoteMan実機の対応証拠ではない。
 
@@ -167,5 +167,5 @@ previewは対象・件数・推定size・含む個人情報と削除状態を示
 
 - 既存：identity #321、false task/provenance #320/#167、accepted decision #255/#244、correction #157/#162、総resource #317、HTTP境界 #53、WebUI #94/#338、M5 forget、M6 remote read/sync。scopeを広げるissue本文変更や重複issueを作らない。
 - 順序：既存M3/M4の品質・注入を進め、M5のforget/securityを満たしてからlive bot/local serviceを隔離dogfoodで実装・検証する。M6 remote/syncは既存順序。local serviceはremote必須依存ではなく、remote書込を前倒ししない。MCP fallbackは既存§4.10のfollow-up、exportは低優先。#340は作業中にmain `6225150661472d2be9c54aa62802bcaab648f772` へmergeされたが、どれもその既存範囲や後続作業の追加blockerにしない。既存adapterのtested/live-unverified区別を維持する。
-- ownerの順序（2026-10-03）：「ボット連携(noteMan など)と常時動く HTTP サーバーは、いつ作りますか？」に「PC切り替えの後 (Recommended)」。live bot adapter（#344）と任意local HTTP（#345）は、ownerのPCが新しいoboeteへ切り替わった後（spec.md §7.5）、milestone 6より前に作る（owner決定33）。切り替え時点でつなぐagentはClaude Code・Codex・Grok CLIの3つで、bot hostは含めない。
+- 実装順序（owner、2026-10-03）：live bot adapter（#344）と任意local HTTP（#345）は、ownerのPCが新しいoboeteへ切り替わった後（spec.md §7.5）、milestone 6より前に作る（owner決定33）。切り替え時点でつなぐagentはClaude Code・Codex・Grok CLIの3つで、bot hostは含めない。
 - 残る判断：noteManの正確なruntime/API/version/path/権限と話者保証、stable revision/cursor、host配送確認点、API schema/token保管、viewerとのlistener統合、OS service方式、計測budgetとexport format。未確認製品に能力を付与しない。#320のowner判断は別途必要。

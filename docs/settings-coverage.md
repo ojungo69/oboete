@@ -6,7 +6,7 @@ test. This is that matrix, kept with the work. It is not a second source of conf
 settings are config.toml's and the operations the CLI's, through the same typed backend
 (`src/settings.rs`, one validation and one atomic, stale-checked write).
 
-Owner, 2026-10-03: the settings page is complete at the switch (「設定画面は切り替え時に全部」), and
+Owner, 2026-10-03: the settings page is complete at the switch, and
 sync and the cloud come after it. So every row below is built before the switch, except those of
 "Sync and devices", which follow milestone 6, and the updater, which milestone 7 builds (7.3); until
 then the page shows the installed version and says the update is not built, as spec-webui.md asks

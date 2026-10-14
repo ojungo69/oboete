@@ -2,8 +2,8 @@
 
 Source: a study of 2026-10-03 (28 readers: facts with sources, 40 ideas, 8 picks each given to a skeptic). Its full
 result is kept outside the repository (`../oboete-work/takeover-2026-10-02/clef-study-result.json`).
-The owner asked (2026-10-03): 「判断は任せる。使い所が他にないかも検討して。あと、フックに入れない決まりに
-重大な理由がないならそこも見直して。それと、clef-flashは量子化なら全然低vramでも動くよ」.
+Study scope (2026-10-03): assess further uses of Clef/Clef-flash and reconsider the hook restriction
+if it lacks a substantial basis; include quantized Clef-flash deployments with low VRAM.
 
 ## 1. Jev and Clef in the spec
 
@@ -61,7 +61,7 @@ Reasons that are serious:
 - A hook process cannot load a model itself (bge-m3: 2.1 to 2.5 s and 1.79 GB per process).
 
 Reasons that no longer hold:
-- "Nothing runs between hooks": the owner made the worker resident (decision 36).
+- "Nothing runs between hooks": the worker is resident (decision 36).
 - Agent hook timeouts and the old 300 ms budget: the spec already dropped them.
 
 Recommendation: keep the rule and say it in three parts.
@@ -74,7 +74,7 @@ Recommendation: keep the rule and say it in three parts.
 
 ## 4. Running it locally
 
-The owner is right that quantized Clef-flash runs in little VRAM: third parties ran FP8 (12.2 GB)
+Quantized Clef-flash runs in little VRAM: third parties ran FP8 (12.2 GB)
 and NVFP4 (9.2 GB) on an RTX 5070 Ti 16 GB and a 4-bit EXL3 build (8.4 GB) on an RTX 4090; MLX
 4-bit peaked at 5.9 GB on an M2 with 24 GB (2.9 s an item). Limits today: all of these are
 third-party builds (vLLM plugin in Docker, ExLlamaV3, MLX); the common GGUF files leave out the

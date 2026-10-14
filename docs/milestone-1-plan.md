@@ -1747,7 +1747,7 @@ git add docs/eval/label.py docs/eval/test_label.py && git commit -m "eval: the o
 
 ## Task 6: B3, the judge-trust gate
 
-Rewritten 2026-09-26 (owner decision 29, spec 8.1). The owner does not grade these pairs: the owner found the memories too English and technical to judge. A panel of judges from six model makers grades them instead, and the judge under test (`claude-sonnet-5`, whose pool grades D2 used) is trusted by its agreement with the others. The first version of this task (owner against judge) is in git history (PR #64); its draw and key are kept.
+Rewritten 2026-09-26 (owner decision 29, spec 8.1). The owner does not grade these English, technical memories. A panel of judges from six model makers grades them instead, and the judge under test (`claude-sonnet-5`, whose pool grades D2 used) is trusted by its agreement with the others. The first version of this task (owner against judge) is in git history (PR #64); its draw and key are kept.
 
 Rule (spec 8.1; Claude; overrulable, in the note):
 - Pairs: the 50 already drawn by `calib.py draw` (`labels/tasks/calib-50.jsonl`, key `labels/calib-50.key.jsonl`): dev questions only, 25 graded relevant (2-3), 12 graded 1 and 13 graded 0, one pair per question, each shown as the judge saw it (4,000 characters, 1,200 for older grades).

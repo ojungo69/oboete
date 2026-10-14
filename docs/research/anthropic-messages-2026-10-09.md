@@ -1,7 +1,7 @@
 # Anthropic's Messages API as a curator entry (2026-10-09)
 
-The owner, 2026-10-09: 「anthropicが毎月無料クレジットを配ってくれるので候補に入る」 (Anthropic gives the
-account monthly credits, so it belongs among the candidates). This note records what the entry
+The Messages API is a curator candidate (2026-10-09), including for configurations with free monthly
+credits. This note records what the entry
 (`api = "anthropic"` on a `kind = "openai"` entry, and `anthropic` in the default chain, off until
 the user turns it on) rests on.
 Every fact below was read on 2026-10-09 from Anthropic's own pages, named with each. No call was

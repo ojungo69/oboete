@@ -1,6 +1,6 @@
 # The viewer's look
 
-On 2026-10-09 the owner said the page is too plain ("簡素すぎる") and that they dislike its design, and asked that oboete beat claude-mem's weakest points, complex settings and low extensibility. This note records the design the page follows since then: what changed and why, its tokens, and what is left for later. It changes how the page looks and is laid out, not what it does: the API, the views' behaviour, the texts' meaning and the page's security rules (spec 6.6, [spec-webui.md](spec-webui.md)) are unchanged.
+Design direction (owner, 2026-10-09): improve the viewer's visual quality, simplify settings and make oboete easier to extend than claude-mem. This note records the design the page follows since then: what changed and why, its tokens, and what is left for later. It changes how the page looks and is laid out, not what it does: the API, the views' behaviour, the texts' meaning and the page's security rules (spec 6.6, [spec-webui.md](spec-webui.md)) are unchanged.
 
 ## Direction
 

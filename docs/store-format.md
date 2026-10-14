@@ -1,11 +1,10 @@
 # A home written by a newer oboete is refused
 
 Plan of the slice that adds a format stamp to the home and refuses it in an older binary, written
-before the code, as the other slices' notes are. It comes from the comparison with claude-mem
-13.37.0 the owner asked for on 2026-10-13 ("what else from claude-mem is practical"): claude-mem
-13.36 stamps the newest schema that wrote its database and refuses persistent changes from an
-older binary. oboete has no such guard: spec 7.3 plans a check only inside the updater (its step
-2), and nothing stops a binary run directly.
+before the code, as the other slices' notes are. It comes from a comparison with claude-mem 13.37.0
+(2026-10-13): claude-mem 13.36 stamps the newest schema that wrote its database and refuses
+persistent changes from an older binary. oboete has no such guard: spec 7.3 plans a check only
+inside the updater (its step 2), and nothing stops a binary run directly.
 
 ## Why before the switch
 

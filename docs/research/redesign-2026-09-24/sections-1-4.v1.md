@@ -1,6 +1,6 @@
-# Design B, sections 1-4 as presented to the owner (2026-09-25)
+# Design B, sections 1-4 initial version (2026-09-25)
 
-Approved by the owner unless noted. Owner decisions: owner-decisions.md. Detail behind each item: options-draft.md §4 and §11, improvements-synthesis.md (M1-M23, S1-S9).
+Settled design unless noted. Owner decisions: owner-decisions.md. Detail behind each item: options-draft.md §4 and §11, improvements-synthesis.md (M1-M23, S1-S9).
 
 ## Section 1: overall shape (approved)
 
@@ -26,7 +26,7 @@ Approved by the owner unless noted. Owner decisions: owner-decisions.md. Detail 
 - Current = chain tips; concurrent conflicts resolved by (valid_from, device, seq) with a viewer flag and a clock-skew alarm; digests cite current claims and are not used when stale; re-derivation keeps uids (highest tier active); owner corrections are events that survive rebuild; the none tier hides a directive followed by a negation.
 - Judge models (Jev and similar), both enabled only if evaluation shows a gain: (a) "shrink, never drop" selection of what the curator sees (deterministic rules first, judge for grey areas; user and assistant messages never filtered; shrinking recorded); (b) veto-only check on decided/supersedes (can only make stricter). Tier mapping: none = code gates only; free/local = small local model; subscription = curator double-check; paid = Jev.
 
-## Section 4: delivery and search (third version; owner: "OK if truly no problems")
+## Section 4: delivery and search (third version)
 
 - Principle: hooks only read; the worker computes ahead. The worker keeps per checkout a SessionStart packet (ranked current decisions, manifest, fresh digest) and per session a shortlist of about 50 relevant current claims (reranked, judge-scored), refreshed at each Stop, every N events and when sync delivers new knowledge. Sync is done by the worker; hooks never wait on the network.
 - Hook: reads the packet; per prompt, a light search of the prompt over the shortlist plus a threshold (tens of ms). Before the worker is up: fast path (hybrid FTS + vectors + threshold) and wake the worker.

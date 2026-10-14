@@ -12,13 +12,13 @@ It supplements the existing Rust CI and SonarCloud checks; it does not approve o
 ## Provider setup
 
 The primary is DeepSeek V4.1 Flash through OpenRouter (`deepseek/deepseek-v4.1-flash`),
-served first by DeepSeek's own API with the owner's DeepSeek key, which the owner
-registered in OpenRouter as a BYOK key (owner, 2026-09-29: "if OpenCodeReview is
-slow, use DeepSeek from OpenRouter, where I registered BYOK"), and by the model's
-other providers on OpenRouter when that fails (owner, 2026-09-30: "ほかの会社も使っていいよ",
-other companies may be used too). The fallback is the
-same model on NVIDIA NIM (`deepseek-ai/deepseek-v4.1-flash`), which costs nothing.
-Both use `high` reasoning effort (the owner lowered it from `max` on 2026-09-28).
+served first by DeepSeek's own API with the owner's DeepSeek key, registered
+in OpenRouter as a BYOK key (owner, 2026-09-29). If that endpoint fails,
+other OpenRouter providers may serve the model
+(owner, 2026-09-30). The fallback is the same model on NVIDIA NIM
+(`deepseek-ai/deepseek-v4.1-flash`),
+which costs nothing.
+Both use `high` reasoning effort instead of `max` (owner, 2026-09-28).
 OCR's separate review effort is at its maximum, `high` (three review rounds); OCR
 does not accept `max` for that setting.
 
@@ -34,7 +34,7 @@ does not accept `max` for that setting.
   ([BYOK with provider ordering](https://openrouter.ai/docs/guides/overview/auth/byok)).
   So a call goes to DeepSeek with the owner's key while it answers, then to
   DeepSeek on OpenRouter's key, then to another provider; the last two spend
-  OpenRouter credits (about USD 10 were left on 2026-09-30). Without `order`
+  OpenRouter credits. Without `order`
   (2026-09-30, 07:45Z to 12:55Z), a call the owner's key did not serve went to the
   other providers balanced by price: 8 probes with that value at 13:05Z went to
   InferenceNet, Relace, Phala and Wafer, none to DeepSeek. The primary attempts of
@@ -152,12 +152,12 @@ example), but not a fault of the model itself. It is tried only once.
   US$0.15 to 0.18 for the largest PR), or from OpenRouter credits for the calls
   another provider serves when that key fails (Routing, above), and a run on every
   push came to an estimated
-  US$20 to 60 a month. The owner chose on
-  2026-09-29 to review a PR when it opens and after the push taken as its last,
+  US$20 to 60 a month. The policy as of
+  2026-09-29 is to review a PR when it opens and after the push taken as its last,
   run by hand, as CodeRabbit is. While Codex or cubic cannot review (a usage
   limit), run it after each push instead.
-- On 2026-10-02 the OpenRouter account had USD 2.19 of its USD 49 credits left,
-  and the owner chose to run reviews only by hand, at a decisive moment: the
+- Since 2026-10-02, reviews run only by hand (owner),
+  at a decisive moment: the
   final head of a PR in security scope or with a large change of behaviour, when
   the other review lanes leave it thin. The review at a PR's opening is off: the
   `pull_request_target` trigger is removed and its conditions are kept, so adding

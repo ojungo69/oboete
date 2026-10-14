@@ -36,7 +36,7 @@ At September's rate (the copy measured in #317), with tool output out:
 
 Tool output is not searched (spec, owner decision 42). A tool record stays in raw.db with its `raw_docs` row, and `get` returns it by its key; neither `raw_fts` nor the vectors take it in, and the search over records reads no tool record, the short-word scan included. claude-mem does the same: its full-text tables are its observations, session summaries and memory items, its vectors are its observations, session summaries and prompts, and the tool input and output it keeps (`tool_uses`) are returned only by id (`get_tool_uses`, 13.34.2 and 13.35.0). What a tool output holds reaches search through the cards and summaries curated from it.
 
-The other choices shown to the owner, and why not:
+The other choices, and why not:
 
 - All of it, about 3 GB a month of index and vectors: the growth #317 was opened for.
 - The last 30 days: the index stays near a month's size, but a day's tool output leaves it every day, and a contentless-delete table's bm25 totals keep counting each deleted row until `oboete rebuild` (docs/spike/raw-index-copy.md), so it needs a periodic rebuild as well as a setting.
