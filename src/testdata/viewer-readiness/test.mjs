@@ -847,6 +847,19 @@ assert.equal(w4.saveBody().field,'embedding.monthly_usd');
 type(field('embedding.monthly_usd'),'1');type(field('embedding.daily_requests'),'100001');
 assert.equal(w4.saveBody().field,'embedding.daily_requests');
 assert.equal(w4.formOf(settings({embedding:undefined})).embedding,null,'an older viewer shows no section');
+// The simple view appends no absent part: the page showed "null" under its lead wherever a summary
+// service was ready, and where an older viewer sends no search section.
+{
+  vm.runInContext("settingsMode='simple';",ctx);
+  const ready={chain:[{name:'groq',key:'ok',on:true,effective_model:'openai/gpt-oss-20b',model_rule:'any'}],
+    providers:[{name:'groq',saved:{enabled:true}}],stopped:[]};
+  for(const [label,s] of [['ready',settings(ready)],['no search section',settings({embedding:undefined})]]){
+    f=w4.formOf(s);ctx.ui.setForm(f);ctx.ui.drawSettings();
+    const parts=panel.querySelector('.settings').children;
+    assert(parts.length>3&&parts.every(part=>part!==null&&part!==undefined),`simple view, ${label}: no absent part`);
+  }
+  vm.runInContext("settingsMode='detailed';",ctx);
+}
 f=w4.formOf(settings({embedding:embedding({workers_ai:{...embedding().workers_ai,account_id:'ACCT',daily_requests:500000,monthly_usd:0}})}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.deepEqual(plain(w4.saveBody().body.embedding),{daily_requests:500000,monthly_usd:0},'values config.toml has pass as they are');
