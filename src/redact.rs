@@ -2458,6 +2458,10 @@ extra_rules = [
             let (masked, _) = scan(&text, &rules);
             assert!(!masked.contains(&low), "{masked}");
         }
+        // The value whole, a `:` in it too (CodeRabbit on #543).
+        let tail = format!("{}{}", ":b1b1c2c2", "a3a3b1b1"); // split: scanners
+        let (masked, _) = scan(&format!("BOT_TOKEN={low}{tail} next"), &rules);
+        assert_eq!(masked, "BOT_TOKEN=[REDACTED] next");
         // Names that only look alike, short values, and values read from a variable stay.
         for text in [
             "max_tokens: 4000",

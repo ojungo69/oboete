@@ -55,7 +55,7 @@ keywords = ["basic"]
 [[rules]]
 id = "secret-assignment"
 description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=), however plain: generic-api-key passes over one whose entropy is 3.5 or below (#541)"
-regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*["']?([A-Za-z0-9+/=_.~-]{16,})'''
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*["']?([^\s"'`<>;,(){}\[\]$\\]{16,})'''
 keywords = ["secret", "token", "passw", "key", "credential"]
 entropy = 2.0
 # As generic-api-key's own: a value of letters only names something (process.env.SECRET), and a

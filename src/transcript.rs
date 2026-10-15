@@ -1488,6 +1488,71 @@ mod tests {
         out
     }
 
+    /// #541: what the import stores is what its capture masked, and the rescan the worker runs
+    /// after it finds nothing new: a numbered `.env` listing as a Bash result (a plain value after
+    /// `*_SECRET=`, and escaped line breaks that would join a URL to a later `@`), and a read of
+    /// code that builds a PEM.
+    #[test]
+    fn an_import_leaves_the_rescan_nothing_to_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("claude/projects");
+        std::fs::create_dir_all(root.join("-w")).unwrap();
+        // split: scanners
+        let low = format!("{}{}", "a3a3b1b1c2c2a3a3", "b1b1c2c2a3a3b1b1");
+        let high = format!("{}{}", "e4b1c9a27f3d8b05", "a6e2c7d94f1b3a58");
+        let listing = format!(
+            "10:ACCESS_TEAM_DOMAIN=https://team.example.test\n11:ACCESS_AUD={high}{high}\n\
+             15:BOT_CHANNEL_ID=1234567890\n17:BOT_CHANNEL_SECRET={low}\n\
+             18:BOT_ACCOUNT_ID=@123abcde"
+        );
+        let pem = "  return `-----BEGIN PRIVATE KEY-----\\n${b64.match(/.{1,64}/g)!.join(\"\\n\")}\\n-----END PRIVATE KEY-----`;";
+        let lines: Vec<String> = [
+            json!({"type": "user", "message": {"role": "user", "content": "look"}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "grep -n = .env"}}]}}),
+            json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": listing}]}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "/w/a.test.ts"}}]}}),
+            json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": pem}]},
+                "toolUseResult": {"type": "text", "file": {"filePath": "/w/a.test.ts", "content": pem}}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "done"}]}}),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut v)| {
+            v["sessionId"] = json!("s541");
+            v["cwd"] = json!("/w");
+            v["timestamp"] = json!(format!("2026-09-01T00:00:{i:02}.000Z"));
+            v.to_string()
+        })
+        .collect();
+        std::fs::write(root.join("-w/s541.jsonl"), lines.join("\n") + "\n").unwrap();
+        let home = dir.path().join("home");
+        import(&home, &[("claude", root.as_path())], true, &mut Vec::new()).unwrap();
+        let stored = records(&home);
+        assert_eq!(stored.iter().filter(|e| e.kind == "tool").count(), 2);
+        for e in &stored {
+            assert!(
+                !e.body.contains(&low) && !e.body.contains(&high),
+                "{}",
+                e.body
+            );
+        }
+        crate::worker::run_once(&home).unwrap();
+        let tombstones: i64 = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM records WHERE type = 'tombstone' AND target_offset IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstones, 0);
+    }
+
     #[test]
     fn only_lines_before_the_sessions_first_raw_record_are_imported() {
         for (agent, session, cut, total) in [
