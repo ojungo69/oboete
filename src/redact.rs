@@ -1123,14 +1123,16 @@ fn literals(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// Task 7's rescan: `ranges` of a stored body, field by field as capture scanned it, as byte
-/// ranges of the body.
+/// ranges of the body. Capture scanned each field's string as decoded, not the escapes the body
+/// stores it with: in those, `\n` joins lines and a pattern then matches across them (#541).
 pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
     literals(body)
         .into_iter()
         .flat_map(|(s, e)| {
-            ranges(&body[s..e], rules)
+            let (field, at) = unescaped(&body[s..e]);
+            ranges(&field, rules)
                 .into_iter()
-                .map(move |(a, b)| (s + a, s + b))
+                .map(move |(a, b)| (s + at[a], s + at[b]))
         })
         .collect()
 }
@@ -2404,6 +2406,70 @@ extra_rules = [
             serde_json::json!({ "output": serde_json::json!({ "stdout": masked }).to_string() })
                 .to_string();
         assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+    }
+
+    /// #541: a tool's output as capture stores it gives the rescan nothing new, whatever escapes
+    /// the stored body adds: a listing whose escaped line breaks would join a URL to a later `@`
+    /// (uri-userinfo-password), and code whose template reads as a PEM block only at the stored,
+    /// longer length (private-key's 64 characters between its lines).
+    #[test]
+    fn a_rescan_finds_nothing_new_in_a_captured_tool_output() {
+        let settings = crate::capture::Settings::default();
+        // split: scanners
+        let aud = format!(
+            "{}{}",
+            "9f2c7e1a4b8d3f60c5e2a7b9d1f43e8c", "57d0b2e94a1c6f38e7b5d2a09c4f1e63"
+        );
+        let secret = format!("{}{}", "e4b1c9a27f3d8b05", "a6e2c7d94f1b3a58");
+        let listing = [
+            "10:ACCESS_TEAM_DOMAIN=https://team.example.test".to_owned(),
+            format!("11:ACCESS_AUD={aud}"),
+            "15:BOT_CHANNEL_ID=1234567890".to_owned(),
+            format!("17:BOT_CHANNEL_SECRET={secret}"),
+            "18:BOT_ACCOUNT_ID=@123abcde".to_owned(),
+        ]
+        .join("\n");
+        let pem = "  return `-----BEGIN PRIVATE KEY-----\\n${b64.match(/.{1,64}/g)!.join(\"\\n\")}\\n-----END PRIVATE KEY-----`;";
+        let file = serde_json::json!({"type": "text", "file": {"filePath": "/w/a.test.ts", "content": pem}});
+        for response in [serde_json::json!(listing), file] {
+            let payload = serde_json::json!({"session_id": "s", "tool_name": "Bash",
+                "tool_input": {"command": "x"}, "tool_response": response});
+            let body = crate::capture::events("claude", "PostToolUse", &payload, 1, &settings)
+                .remove(0)
+                .event
+                .body;
+            assert!(!body.contains(&secret) && !body.contains(&aud), "{body}");
+            assert_eq!(field_ranges(&body, &Rules::default()), vec![], "{body}");
+        }
+    }
+
+    /// #541: a value assigned to a name that says it is a secret is masked however plain the
+    /// value is: generic-api-key passes over a hex value whose entropy is 3.5 or below.
+    #[test]
+    fn a_secret_assignment_is_masked_however_plain_its_value() {
+        let rules = Rules::default();
+        let low = format!("{}{}", "a3a3b1b1c2c2a3a3", "b1b1c2c2a3a3b1b1"); // split: scanners
+        for text in [
+            format!("BOT_CHANNEL_SECRET={low}"),
+            format!("17:BOT_CHANNEL_SECRET={low}\n18:BOT_ACCOUNT_ID=@123abcde"),
+            format!("{{\"client_secret\": \"{low}\"}}"),
+            format!("export DB_PASSWORD='{low}'"),
+        ] {
+            let (masked, _) = scan(&text, &rules);
+            assert!(!masked.contains(&low), "{masked}");
+        }
+        // Names that only look alike, short values, and values read from a variable stay.
+        for text in [
+            "max_tokens: 4000",
+            "tokenizer = AutoTokenizer.from_pretrained(name)",
+            "API_KEY=${API_KEY}",
+            "SECRET_LENGTH=32",
+            "password = os.environ[\"DB_PASSWORD\"]",
+            "CLIENT_SECRET=process.env.MY_APP_SECRET",
+            "DB_PASSWORD=example0123456789abcd",
+        ] {
+            assert_eq!(scan(text, &rules).0, text);
+        }
     }
 
     #[test]
