@@ -2674,8 +2674,9 @@ pub fn doctor(home: &Path) -> Result<()> {
                 let shown = counts
                     .each_ref()
                     .map(|c| c.as_ref().map_or("unreadable".into(), i64::to_string));
+                // #542: v1's lines say so, or they read as the home's own.
                 println!(
-                    "  sessions {} | raw events {} | observations {} | summaries {}",
+                    "  v1 (kept until `oboete migrate --finish`): sessions {} | raw events {} | observations {} | summaries {}",
                     shown[0], shown[1], shown[2], shown[3]
                 );
                 let rows: Vec<String> = crate::migrate::legacy_call_rows_in(&conn)?
@@ -2691,7 +2692,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                     })
                     .collect();
                 if !rows.is_empty() {
-                    println!("  last provider calls:");
+                    println!("  v1's last provider calls:");
                     for r in rows {
                         println!("    {r}");
                     }
@@ -2719,7 +2720,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                 let db = crate::providers_db::open(home)?;
                 let rows = crate::providers_db::last_calls(&db, 5)?;
                 if !rows.is_empty() {
-                    println!("  last curation calls (providers.db):");
+                    println!("  last provider calls (providers.db):");
                     for r in rows {
                         println!("    {r}");
                     }

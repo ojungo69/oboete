@@ -58,7 +58,8 @@ fn doctor_reports_past_a_store_it_cannot_read() {
 }
 
 /// The legacy oboete.db section counts each of its tables, and a readable store is healthy and
-/// left as it was (doctor opens it read only, spec 7.4).
+/// left as it was (doctor opens it read only, spec 7.4). Its lines, v1's calls among them, say
+/// they are v1's (#542).
 #[test]
 fn doctor_counts_the_tables_of_a_legacy_store() {
     let home = tempfile::tempdir().unwrap();
@@ -71,7 +72,8 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
              CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
              CREATE TABLE observations(id INTEGER); CREATE TABLE summaries(id INTEGER);
              CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER, provider TEXT,
-               outcome TEXT, ms INTEGER, detail TEXT);",
+               outcome TEXT, ms INTEGER, detail TEXT);
+             INSERT INTO provider_calls VALUES(1, 1000, 'v1-embedder', 'ok', 12, NULL);",
         )
         .unwrap();
     let bytes = std::fs::read(&db).unwrap();
@@ -82,12 +84,49 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("sessions 0 | raw events 0 | observations 0 | summaries 0"),
+        text.contains(
+            "v1 (kept until `oboete migrate --finish`): sessions 0 | raw events 0 | observations 0 | summaries 0"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("v1's last provider calls:\n    v1-embedder ok 12ms"),
         "{text}"
     );
     assert!(!text.contains("cannot read oboete.db"), "{text}");
     assert!(text.contains("v1 events not migrated yet: 0"), "{text}");
     assert_eq!(std::fs::read(&db).unwrap(), bytes);
+}
+
+/// #542: doctor shows the home's own provider calls from providers.db, whatever their role, with
+/// no v1 store beside them.
+#[test]
+fn doctor_shows_the_homes_own_provider_calls() {
+    let home = tempfile::tempdir().unwrap();
+    let oboete = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .args(["--home", &home.path().to_string_lossy()])
+            .args(args)
+            .env("OBOETE_NO_SPAWN", "1")
+            .output()
+            .unwrap()
+    };
+    // `resume` opens providers.db, which makes its tables.
+    oboete(&["resume", "groq"]);
+    rusqlite::Connection::open(home.path().join("providers.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO provider_calls(ts, provider, role, outcome, ms) VALUES(1, 'invented', 'summary', 'ok', 7)",
+            [],
+        )
+        .unwrap();
+    let text = String::from_utf8_lossy(&oboete(&["doctor"]).stdout).into_owned();
+    assert!(!home.path().join("oboete.db").exists());
+    assert!(
+        text.contains("last provider calls (providers.db):\n    invented summary ok 7ms"),
+        "{text}"
+    );
+    assert!(!text.contains("v1's last provider calls"), "{text}");
 }
 
 /// #94: doctor prints `[inject]` as it applies, an entry `[chain]` turns off, and `[chain]`'s
