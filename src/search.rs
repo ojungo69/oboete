@@ -984,6 +984,73 @@ mod tests {
         assert_eq!(seqs("quiver"), [2]);
     }
 
+    /// docs/retention.md: an expired record keeps its labels' row and where its session started,
+    /// in a rebuild and when a range tombstone from before is read again, and is found by no
+    /// search; a forget of it takes the row.
+    #[test]
+    fn an_expired_record_keeps_where_its_session_started() {
+        use crate::worker::Consumer;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let repo = "github.com/o/one";
+        let event = |ts: i64, text: &str| crate::raw::Event {
+            session: "a".into(),
+            repo: Some(repo.into()),
+            ts,
+            ..crate::raw::test_event(text)
+        };
+        let first = raw.append(&event(1_000, "amber lantern")).unwrap();
+        raw.append(&event(2_000, "amber quiver")).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(crate::raw::Target::Range {
+            device: device.clone(),
+            seq: first,
+            offset: 0,
+            length: 2,
+        })
+        .unwrap();
+        raw.expire_for_test(&[first]);
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(crate::consumer::fts::Fts)];
+        // Read as a rebuild reads it: the expired record, then the tombstone before it expired.
+        let mut k = crate::knowledge::open(p).unwrap();
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        let start = |k: &Connection| -> (String, i64) {
+            k.query_row(
+                "SELECT repo, seq FROM session_start WHERE session = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(start(&k), (repo.to_owned(), first));
+        let docs: i64 = k
+            .query_row("SELECT COUNT(*) FROM raw_docs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(docs, 2);
+        let seqs = |q: &str| {
+            raw_search(p, q, None)
+                .iter()
+                .map(|h| h.seq)
+                .collect::<Vec<_>>()
+        };
+        assert!(seqs("lantern").is_empty());
+        assert_eq!(seqs("quiver"), [first + 1]);
+        // A forget of the expired record: its session starts at its next record.
+        raw.append_tombstone(crate::raw::Target::Record { device, seq: first })
+            .unwrap();
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        assert_eq!(start(&k), (repo.to_owned(), first + 1));
+        let docs: Vec<i64> = k
+            .prepare("SELECT seq FROM raw_docs")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(docs, [first + 1]);
+    }
+
     #[test]
     fn a_record_tombstone_hides_it_and_a_range_tombstone_masks_only_its_range() {
         use crate::raw::{Item, Target};

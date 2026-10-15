@@ -4005,6 +4005,137 @@ mod tests {
         }
     }
 
+    /// docs/retention.md: a forget of a record whose text expired names it by its labels (it stays
+    /// an event to forget's selection), hides it at once, and its purge makes its row and its
+    /// backup line Removed, labels and all.
+    #[test]
+    fn a_forget_of_an_expired_record_removes_its_labels() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let gone = s.said("s", "github.com/o/r", 1_000, "Expired words.");
+        s.said("s", "github.com/o/r", 2_000, "Kept words.");
+        s.raw.expire_for_test(&[gone]);
+        let home = s.home.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        let device = s.raw.device().to_owned();
+        let kind_of = |home: &Path| -> String {
+            segment_text(&segments_of(home, false)[0])
+                .lines()
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+                .find(|v| v["seq"] == gone)
+                .unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(kind_of(&home), "expired");
+        let target = Target::Record {
+            device: device.clone(),
+            seq: gone,
+        };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        assert!(matches!(
+            s.raw.after(&device, gone - 1, 1).unwrap()[0].item,
+            raw::Item::Removed
+        ));
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!(purged.records, 1);
+        let row: (String, Option<String>, Option<String>, Option<i64>) =
+            rusqlite::Connection::open(home.join("raw.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT type, session, repo, expired FROM records WHERE seq = ?1",
+                    [gone],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+        assert_eq!(row, ("removed".into(), None, None, None));
+        assert_eq!(kind_of(&home), "removed");
+    }
+
+    /// docs/retention.md: a copy of raw.db set aside by a binary before retention has no
+    /// `expired` column; a purge still rewrites its forgotten record, and keeps the copy.
+    #[test]
+    fn a_copy_from_before_retention_is_rewritten_not_removed() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let gone = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Old {RECORD_CANARY}."),
+        );
+        s.said("s", "github.com/o/r", 2_000, "Kept words.");
+        let home = s.home.path().to_owned();
+        let device = s.raw.device().to_owned();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        rusqlite::Connection::open(&copy)
+            .unwrap()
+            .execute_batch("ALTER TABLE records DROP COLUMN expired")
+            .unwrap();
+        let target = Target::Record {
+            device: device.clone(),
+            seq: gone,
+        };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        assert_eq!((purged.copies, purged.copies_removed), (1, 0));
+        let kind: String = rusqlite::Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT type FROM records WHERE seq = ?1", [gone], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kind, "removed");
+    }
+
+    /// docs/retention.md: a forgotten record whose text expired gives nothing to compare a claim
+    /// with, so every claim its window kept counts as a copy of it, and a later window shown one
+    /// loses its text too.
+    #[test]
+    fn a_forgotten_expired_record_makes_its_windows_claims_copies() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {BATCH_CANARY} mode.");
+        let (deploys, tests) = ("Deploys run on Fridays.", "Tests run on CI.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, deploys);
+        let r3 = s.said("s", "github.com/o/r", 3_000, tests);
+        let c2 = claim_op(&device, &[(r2, deploys)], "Deploys run weekly.");
+        let u2 = raw::op_uid(c2.0, &c2.1).unwrap();
+        let c3 = claim_op(&device, &[(r3, tests)], "Tests run on CI.");
+        s.raw
+            .append_ops(&[window_op(r1, r2, "Its span.", json!({})), c2])
+            .unwrap();
+        let w2 = s
+            .raw
+            .append_ops(&[
+                window_op(r3, r3, "It showed the claim.", json!({"candidates": [u2]})),
+                c3,
+            ])
+            .unwrap();
+        s.run();
+        s.raw.expire_for_test(&[r1]);
+        let home = s.home.path().to_owned();
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        let after = op_bodies(&home);
+        assert!(after[&w2[0]]["forgotten"].is_string(), "{}", after[&w2[0]]);
+        assert!(after[&w2[1]]["forgotten"].is_string(), "{}", after[&w2[1]]);
+    }
+
     /// Slice 3d-4 (Codex on #481): what a window was shown of a claim it named is every wording of
     /// it: the body the owner's correction gave a claim quoting the forgotten record, and each
     /// wording windows gave a copied claim's uid. A claim that repeated 32 bytes of either is

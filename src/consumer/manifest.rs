@@ -670,6 +670,7 @@ impl Consumer for Manifest {
         for r in &recs {
             match &r.item {
                 Item::Event(e) => facts(k, device, r.seq, e)?,
+                Item::Expired(e) => label_facts(k, device, r.seq, e)?,
                 Item::Tombstone(
                     Target::Record { device: d, seq } | Target::Range { device: d, seq, .. },
                 ) => {
@@ -694,8 +695,15 @@ impl Consumer for Manifest {
                         "DELETE FROM manifest_facts WHERE device = ?1 AND seq = ?2",
                         params![d, seq],
                     )?;
-                    if let Some(e) = event(raw, d, *seq)? {
-                        facts(k, d, *seq, &e)?;
+                    match raw
+                        .after(d, seq - 1, 1)?
+                        .into_iter()
+                        .find(|r| r.seq == *seq)
+                        .map(|r| r.item)
+                    {
+                        Some(Item::Event(e)) => facts(k, d, *seq, &e)?,
+                        Some(Item::Expired(e)) => label_facts(k, d, *seq, &e)?,
+                        _ => {}
                     }
                 }
                 Item::Removed => {}
@@ -733,6 +741,46 @@ impl Consumer for Manifest {
         )?;
         Ok(())
     }
+}
+
+/// docs/retention.md: the facts an expired record's labels give (its text gave the others, and it
+/// is gone), and its checkout marked for a rebuild, as `facts` marks it.
+fn label_facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
+    if !crate::raw::is_live(&e.source) {
+        return Ok(());
+    }
+    let Some(repo) = e.repo.as_deref() else {
+        return Ok(());
+    };
+    let kinds: &[&str] = match e.kind.as_str() {
+        kind @ ("prompt" | "reply" | "end") => &["event", kind],
+        _ => &["event"],
+    };
+    let branch = e.branch.as_deref().unwrap_or("");
+    for fact in kinds {
+        k.execute(
+            "INSERT INTO manifest_facts(device, seq, repo, branch, session, ts, fact, label)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, '')",
+            params![device, seq, repo, branch, e.session, e.ts, fact],
+        )?;
+    }
+    dirty(k, device, repo, branch)
+}
+
+/// Every checkout of `repo` marked for a rebuild, `branch`'s among them.
+fn dirty(k: &Connection, device: &str, repo: &str, branch: &str) -> Result<()> {
+    // Owner directives and other sessions are the repo's, not the branch's: every checkout of
+    // the repo is built again, so its text depends on the records, not on the order they came.
+    k.execute(
+        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device) VALUES(?1, ?2, ?3)",
+        params![repo, branch, device],
+    )?;
+    k.execute(
+        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+         SELECT repo, branch, device FROM manifests WHERE repo = ?1 AND device = ?2",
+        params![repo, device],
+    )?;
+    Ok(())
 }
 
 /// The facts of one event, and its checkout marked for a rebuild. Events without a repo label
@@ -789,18 +837,7 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         }
         _ => {}
     }
-    // Owner directives and other sessions are the repo's, not the branch's: every checkout of
-    // the repo is built again, so its text depends on the records, not on the order they came.
-    k.execute(
-        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device) VALUES(?1, ?2, ?3)",
-        params![repo, branch, device],
-    )?;
-    k.execute(
-        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
-         SELECT repo, branch, device FROM manifests WHERE repo = ?1 AND device = ?2",
-        params![repo, device],
-    )?;
-    Ok(())
+    dirty(k, device, repo, branch)
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -2393,6 +2430,48 @@ extra_rules = [
         worker::run_once(home.path()).unwrap();
         let text = manifest(home.path()).0;
         assert!(text.contains("look at it"), "{text}"); // as a rebuild of raw now gives
+    }
+
+    /// docs/retention.md: an expired record gives the facts its labels give (an event, a prompt)
+    /// and none its text gave (the owner's line), and its checkout is built again.
+    #[test]
+    fn an_expired_record_gives_its_labels_facts() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let event = Event {
+            repo: Some("github.com/o/r".into()),
+            branch: Some("main".into()),
+            ..raw::test_event(&serde_json::json!({"prompt": "Always use tabs."}).to_string())
+        };
+        let seq = store.append(&event).unwrap();
+        let facts = |k: &Connection| -> Vec<String> {
+            k.prepare("SELECT fact FROM manifest_facts WHERE seq = ?1 ORDER BY fact")
+                .unwrap()
+                .query_map([seq], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let mut consumers: Vec<Box<dyn worker::Consumer>> =
+            vec![Box::new(Manifest::new(home.path()))];
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        worker::drain(&store, &mut k, &mut consumers).unwrap();
+        assert!(facts(&k).contains(&"owner".to_owned()), "{:?}", facts(&k));
+        store.expire_for_test(&[seq]);
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        worker::drain(&store, &mut k, &mut consumers).unwrap();
+        assert_eq!(facts(&k), ["event", "prompt"]);
+        // Its checkout was marked, so a rebuild with only expired records still builds its text.
+        let built: i64 = k
+            .query_row(
+                "SELECT COUNT(*) FROM manifests WHERE repo = 'github.com/o/r' AND branch = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(built, 1);
     }
 
     #[test]

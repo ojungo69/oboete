@@ -276,16 +276,19 @@ fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {
     };
     // A home made before tool output stayed out still holds its row: it goes too.
     k.execute("DELETE FROM raw_fts WHERE rowid = ?1", [rowid])?;
-    match texts(raw, device, &[seq])?.pop() {
-        Some((_, text)) => {
+    let now = raw.at(device, &[seq])?.into_iter().next().map(|r| r.item);
+    match now {
+        Some(Item::Event(e)) => {
             if indexed(&kind) {
                 k.execute(
                     "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
-                    params![rowid, text],
+                    params![rowid, text(&e.body)],
                 )?;
             }
         }
-        None => {
+        // docs/retention.md: an expired record keeps its labels' row; only its text goes.
+        Some(Item::Expired(_)) => {}
+        _ => {
             k.execute("DELETE FROM raw_docs WHERE rowid = ?1", [rowid])?;
             if let Some(session) = session {
                 started(k, &session)?;
@@ -304,8 +307,11 @@ impl Consumer for Fts {
         schema(k)?;
         let recs = raw.after(raw.device(), after, BATCH)?;
         for r in &recs {
-            let e = match &r.item {
-                Item::Event(e) => e,
+            let (e, text) = match &r.item {
+                Item::Event(e) => (e, true),
+                // docs/retention.md: an expired record keeps its labels and where its session
+                // started (#506's mapping); it has no text to index.
+                Item::Expired(e) => (e, false),
                 // D8: the target indexed again as raw returns it now (masked, or gone).
                 Item::Tombstone(
                     Target::Record { device, seq } | Target::Range { device, seq, .. },
@@ -334,10 +340,10 @@ impl Consumer for Fts {
                     params![e.session, repo, e.ts, r.device, r.seq],
                 )?;
             }
-            if indexed(&e.kind) {
+            if text && indexed(&e.kind) {
                 k.execute(
                     "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
-                    params![rowid, text(&e.body)],
+                    params![rowid, self::text(&e.body)],
                 )?;
             }
         }

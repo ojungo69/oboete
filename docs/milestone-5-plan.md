@@ -1253,6 +1253,11 @@ curate の raw（checkpoint の上、pending の window、v1 の取り込み）�
 - 証拠の record が期限切れの claim の status（3d-3 の support が期限切れのとき proposed に戻すか）。
 - 期限切れを読み手がどう見分けるか（tombstone も deny もない Removed の行で推すか、専用の行の種類か）。
 
+決めたこと（docs/retention.md、Claude; overrulable）: 期限切れの record は event の行のまま、ラベル・ledger・
+出所を残し、本文を空にして `expired` 列に時刻を入れる（目印は「あるもの」で見分ける）。status は支えの
+record が期限切れでも保つ。引用は `raw expired` と出して本文は見せない。session か curate の window を
+共有する record のまとまりごとに丸ごと期限切れにする。3 本の PR（読み手、期限切れの処理、設定画面）。
+
 #### 3e-4: 規則が変わった後の op の文（#478）
 
 3e-1 の purge が伏せ字を及ぼすのは、伏せた record から作られた op（時刻と出所で辿れる claim・window・

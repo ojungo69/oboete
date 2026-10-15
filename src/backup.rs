@@ -1424,7 +1424,8 @@ fn purged_record_line(line: &str, origins: &raw::ForgottenOrigins, masks: &raw::
         return Line::Unknown(None);
     };
     match v["type"].as_str() {
-        Some("event") => {}
+        // docs/retention.md: an expired record is forgotten as an event is.
+        Some("event" | "expired") => {}
         Some("removed" | "tombstone") => return Line::Kept,
         _ => return Line::Unknown(None),
     }
@@ -1481,17 +1482,21 @@ fn masked_record_line(v: &mut serde_json::Value, masks: &raw::Masks) -> bool {
     let Some((ts, ranges)) = masks.get(&(device.to_owned(), seq)) else {
         return false;
     };
-    let Some(body) = v["body"]
-        .as_str()
-        .filter(|_| ts.is_none_or(|ts| v["ts"] == ts))
-    else {
+    if !ts.is_none_or(|ts| v["ts"] == ts) {
         return false;
-    };
-    let now = ranges.iter().fold(body.to_owned(), |t, &(offset, length)| {
-        raw::masked(&t, offset, length)
-    });
-    let mut changed = now != body;
-    v["body"] = now.into();
+    }
+    let mut changed = false;
+    // docs/retention.md: an expired line has no body left to mask; its ledger's fields go as any
+    // masked record's.
+    if let Some(body) = v["body"].as_str() {
+        let now = ranges.iter().fold(body.to_owned(), |t, &(offset, length)| {
+            raw::masked(&t, offset, length)
+        });
+        changed = now != body;
+        v["body"] = now.into();
+    } else if v["type"] != "expired" {
+        return false;
+    }
     for row in v["ledger"].as_array_mut().into_iter().flatten() {
         if row["field"] != "~tombstoned" {
             row["field"] = "~tombstoned".into();

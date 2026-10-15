@@ -98,6 +98,7 @@ impl Consumer for Claims {
             if op.body["forgotten"].is_string()
                 && op.body["outcome"] == "curated"
                 && let Some(span) = crate::curate::op_span(&op.body)
+                && !raw.holds_expired(&op.device, span.from, span.to)?
             {
                 k.execute(
                     "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
@@ -302,10 +303,14 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
     // The anchor event gives the claim its time and repository (spec 3.4).
     let mut anchor = None;
     for e in &c.evidence {
-        match live(raw, e)? {
-            Some(event) if anchor.is_none() => anchor = Some(event),
-            Some(_) => {}
-            None => {
+        match quote(raw, e)? {
+            // docs/retention.md: an expired record's quote stands on the op's kept quote, and its
+            // labels give the claim its repository and time.
+            Quote::Reads(event) | Quote::Expired(event) if anchor.is_none() => {
+                anchor = Some(*event)
+            }
+            Quote::Reads(_) | Quote::Expired(_) => {}
+            Quote::Gone => {
                 // Masked or removed after curation: its window is sent again (Task 11), as
                 // `Anchors` does for a claim it drops, so a rebuild queues the same windows.
                 queue(raw, k, &op.device, op.op_seq, e)?;
@@ -373,19 +378,34 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
     }))
 }
 
-/// The event `e` anchors on, when its quote still reads verbatim there as `Raw::after` returns
-/// it: a tombstoned record reads as nothing and a masked range as its mask, so a secret masked
-/// after curation does not come back through a claim (spec 6.4).
-pub(crate) fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>> {
+/// What a quote's record holds now, as `Raw::after` returns it.
+pub(crate) enum Quote {
+    /// The event, its quote verbatim there.
+    Reads(Box<crate::raw::Event>),
+    /// An expired record no tombstone hides (docs/retention.md): its labels. The claim stands on
+    /// the quote its op keeps, which no reader shows: the words around it are gone, so a rule that
+    /// needs them could not hide it.
+    Expired(Box<crate::raw::Event>),
+    /// Nothing: a tombstoned record reads as nothing and a masked range as its mask, so a secret
+    /// masked after curation does not come back through a claim (spec 6.4).
+    Gone,
+}
+
+pub(crate) fn quote(raw: &Raw, e: &Evidence) -> Result<Quote> {
     let record = raw
         .after(&e.device, e.seq - 1, 1)?
         .into_iter()
         .find(|r| r.seq == e.seq);
-    let Some(Item::Event(event)) = record.map(|r| r.item) else {
-        return Ok(None);
+    let event = match record.map(|r| r.item) {
+        Some(Item::Event(event)) => event,
+        // A mask over it cannot be read against its text any more: expiry waits for every mask's
+        // purge, which rewrites the claim ops of a masked record's window first (docs/retention.md,
+        // "Masks come first").
+        Some(Item::Expired(labels)) => return Ok(Quote::Expired(labels)),
+        _ => return Ok(Quote::Gone),
     };
     let (Ok(start), Ok(len)) = (usize::try_from(e.offset), usize::try_from(e.length)) else {
-        return Ok(None);
+        return Ok(Quote::Gone);
     };
     let reads = crate::curate::long_text(&event)
         .and_then(|long| {
@@ -393,7 +413,19 @@ pub(crate) fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>>
                 .map(|q| q == e.quote)
         })
         .unwrap_or(false);
-    Ok(reads.then_some(*event))
+    Ok(if reads {
+        Quote::Reads(event)
+    } else {
+        Quote::Gone
+    })
+}
+
+/// The event `e` anchors on, when its quote still reads verbatim there (`Quote::Reads`).
+pub(crate) fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>> {
+    Ok(match quote(raw, e)? {
+        Quote::Reads(event) => Some(*event),
+        _ => None,
+    })
 }
 
 /// Whether one of `records` is still there, a mask over part of it or not (#167): a status stands
@@ -408,7 +440,8 @@ pub(crate) fn supported<'a>(
             .after(device, seq - 1, 1)?
             .into_iter()
             .find(|r| r.seq == seq);
-        if record.is_some_and(|r| matches!(r.item, Item::Event(_))) {
+        // docs/retention.md: an expired record is still the record the status stood on.
+        if record.is_some_and(|r| matches!(r.item, Item::Event(_) | Item::Expired(_))) {
             return Ok(true);
         }
     }
@@ -449,6 +482,10 @@ pub(crate) fn queue(
         Some((from, to)) => (op_device, from, to),
         None => (e.device.as_str(), e.seq, e.seq),
     };
+    // docs/retention.md: a window with an expired record cannot be curated again.
+    if raw.holds_expired(device, from, to)? {
+        return Ok(());
+    }
     // Once per op: an op queued already, whole or in the parts a recuration left, stays so.
     k.execute(
         "INSERT INTO recurate(device, from_seq, to_seq, op_device, op_seq)
@@ -500,7 +537,7 @@ impl Consumer for Anchors {
                     .collect::<rusqlite::Result<_>>()?;
                 let mut dead = None;
                 for e in &quotes {
-                    if live(raw, e)?.is_none() {
+                    if matches!(quote(raw, e)?, Quote::Gone) {
                         dead = Some(e);
                         break;
                     }
@@ -730,6 +767,82 @@ mod tests {
         let pending = crate::claims::Pending::read(&raw, &k).unwrap();
         let uid = crate::claims::uid("decision", &c.evidence[0]);
         assert!(!pending.touches(&k, &uid).unwrap());
+    }
+
+    /// docs/retention.md: a claim stands on the quote of a record whose text expired, through a
+    /// rebuild (its repository and time from the record's labels, its status from its support),
+    /// and through a mask of its other quote's record outside that quote; a forget of the
+    /// expired record takes it.
+    #[test]
+    fn a_claim_on_an_expired_record_stands_until_a_forget_takes_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        let old = "Use tabs in the Go files.";
+        let new = "Deploy with token hunter2 from the CI.";
+        let a = raw.append(&event(old, 5)).unwrap();
+        let b = raw.append(&event(new, 6)).unwrap();
+        let mut c = claim(
+            "c",
+            "decision",
+            "Use tabs; deploy from the CI.",
+            vec![
+                quote(&device, a, old, "Use tabs", 0),
+                quote(&device, b, new, "Deploy with", 0),
+            ],
+        );
+        c.support = vec![crate::claims::Support {
+            device: device.clone(),
+            seq: a,
+        }];
+        raw.append_ops(&[op(&c)]).unwrap();
+        raw.expire_for_test(&[a]);
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(bodies(&k), ["Use tabs; deploy from the CI."]);
+        let (repo, from, status): (String, i64, String) = k
+            .query_row(
+                "SELECT repo, valid_from, status FROM derivations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((repo.as_str(), from, status.as_str()), ("r", 5, "decided"));
+        // A range is of the stored body.
+        let body = event(new, 6).body;
+        raw.append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: b,
+            offset: body.find("hunter2").unwrap() as i64,
+            length: 7,
+        })
+        .unwrap();
+        run(&raw, &mut k);
+        assert_eq!(bodies(&k), ["Use tabs; deploy from the CI."]);
+        assert_eq!(count(&k, "recurate"), 0);
+        raw.append_tombstone(Target::Record {
+            device: device.clone(),
+            seq: a,
+        })
+        .unwrap();
+        run(&raw, &mut k);
+        assert!(bodies(&k).is_empty());
+        // The window of a record that expired is never queued: it cannot be curated again.
+        assert_eq!(count(&k, "recurate"), 0);
+        // Nor is a curated window a forget took the text of, while it holds an expired record;
+        // one that holds none is.
+        let forgotten = |from: i64, to: i64| {
+            (
+                raw::OpKind::Window,
+                json!({"from_seq": from, "to_seq": to, "outcome": "curated", "forgotten": "j"}),
+            )
+        };
+        raw.append_ops(&[forgotten(a, b)]).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(count(&k, "recurate"), 0);
+        raw.append_ops(&[forgotten(b, b)]).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(count(&k, "recurate"), 1);
     }
 
     /// #249: the claims a window takes as its own are those quoted in its records on its device:

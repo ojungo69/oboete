@@ -2805,20 +2805,29 @@ fn adapt(
             return Ok(vec![(event.into(), p)]);
         }
         let counts = raw.prompt_counts(agent, &session)?;
-        let mut nth = std::collections::HashMap::new();
-        let mut events = Vec::new();
+        // The turns as capture would store their prompts. The gate may strip private blocks,
+        // redact, cap, or omit the prompt. Compare the body it stores, not transcript bytes;
+        // harness envelopes are not recovered turns.
+        let mut turns = Vec::new();
         for (prompt, answer) in cursor_turns(Path::new(path)) {
             let mut turn = p.clone();
             turn["prompt"] = json!(prompt);
-            // The gate may strip private blocks, redact, cap, or omit the prompt. Compare the
-            // body it stores, not transcript bytes; harness envelopes are not recovered turns.
             let captured = crate::capture::events(agent, "UserPromptSubmit", &turn, 0, settings);
-            let Some(c) = captured.first().filter(|c| c.event.kind == "prompt") else {
-                continue;
-            };
-            let n = nth.entry(c.event.body.clone()).or_insert(0);
+            if let Some(c) = captured.first().filter(|c| c.event.kind == "prompt") {
+                turns.push((c.event.body.clone(), turn, answer));
+            }
+        }
+        // docs/retention.md: a session's expired prompts are its first ones, and their text, by
+        // which a turn is matched, is gone: that many of the transcript's first turns are passed
+        // over, so none of them is recorded again (a transcript with fewer turns than that, cut
+        // or another one, recovers nothing).
+        let expired = raw.expired_prompts(agent, &session)?;
+        let mut nth = std::collections::HashMap::new();
+        let mut events = Vec::new();
+        for (body, mut turn, answer) in turns.into_iter().skip(expired) {
+            let n = nth.entry(body.clone()).or_insert(0);
             *n += 1;
-            if *n <= counts.get(&c.event.body).copied().unwrap_or(0) {
+            if *n <= counts.get(&body).copied().unwrap_or(0) {
                 continue;
             }
             events.push(("UserPromptSubmit".into(), turn.clone()));
@@ -7954,6 +7963,65 @@ mod tests {
             stored.iter().filter(|(kind, _)| kind == "prompt").count(),
             4
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// docs/retention.md: a Cursor session whose recovered turns expired passes them over at its
+    /// next SessionEnd (their text, by which a turn is matched, is gone), and recovers only a
+    /// turn the transcript added since.
+    #[test]
+    fn a_cursor_session_recovers_no_expired_turn_and_a_new_one() {
+        let dir = tmp("cursor-expired");
+        let payloads = cursor_fixture(&dir);
+        let transcript = dir.join("transcript.jsonl");
+        let turn = |q: &str, a: &str| {
+            [
+                json!({"role":"user","message":{"content":[{"type":"text","text":q}]}}),
+                json!({"role":"assistant","message":{"content":[{"type":"text","text":a}]}}),
+            ]
+        };
+        let mut lines = vec![json!({"type":"metadata","metadata":{"overview":"x"}})];
+        lines.extend(turn("Say hi.", "Hi."));
+        lines.extend(turn("Name the file.", "notes.md"));
+        let write = |lines: &[Value]| {
+            let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+            std::fs::write(&transcript, body.join("\n") + "\n").unwrap();
+        };
+        write(&lines);
+        let mut end = payloads["SessionEnd"].clone();
+        end["transcript_path"] = json!(transcript);
+        assert_eq!(hook(&dir, "cursor", "SessionEnd", &end), "{}");
+        let prompts = || -> Vec<Value> {
+            recorded(&dir, "cursor", "cursor-session")
+                .into_iter()
+                .filter(|e| e.kind == "prompt")
+                .map(|e| serde_json::from_str(&e.body).unwrap())
+                .collect()
+        };
+        assert_eq!(prompts().len(), 2);
+        let raw = crate::raw::open(&dir).unwrap();
+        let seqs: Vec<i64> = raw
+            .after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.seq)
+            .collect();
+        raw.expire_for_test(&seqs);
+        drop(raw);
+        assert!(prompts().is_empty());
+        assert_eq!(hook(&dir, "cursor", "SessionEnd", &end), "{}");
+        assert!(prompts().is_empty());
+        lines.extend(turn("And now?", "Done."));
+        write(&lines);
+        assert_eq!(hook(&dir, "cursor", "SessionEnd", &end), "{}");
+        assert_eq!(prompts(), [json!({"prompt": "And now?"})]);
+        // A transcript with fewer turns than the session's expired prompts cannot be lined up:
+        // nothing is recovered from it.
+        let mut cut = vec![lines[0].clone()];
+        cut.extend(turn("Something else.", "Ok."));
+        write(&cut);
+        assert_eq!(hook(&dir, "cursor", "SessionEnd", &end), "{}");
+        assert_eq!(prompts(), [json!({"prompt": "And now?"})]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

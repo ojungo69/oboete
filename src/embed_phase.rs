@@ -1692,6 +1692,17 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             };
             // raw.db's text as it is now (#317).
             let Some((_, text)) = crate::consumer::fts::texts(raw, device, &[seq])?.pop() else {
+                // docs/retention.md: an expired record has no text to send; its mark keeps it out
+                // of the queue and the backlog.
+                if raw.holds_expired(device, seq, seq)? {
+                    k.execute(
+                        "INSERT INTO vector_keys(embedder, kind, key, src_sha, skipped)
+                         VALUES (?1, 'r', ?2, NULL, 'expired')
+                         ON CONFLICT(kind, key, embedder) DO UPDATE SET src_sha = NULL,
+                           skipped = 'expired'",
+                        params![embedder, key],
+                    )?;
+                }
                 return Ok(None);
             };
             Ok(Some(Read {
@@ -2562,6 +2573,33 @@ mod tests {
             .into_iter()
             .find(|(_, k, _)| k == key)
             .and_then(|(.., why)| why)
+    }
+
+    /// docs/retention.md: a record whose text expired is sent to no embedder; its mark keeps it
+    /// out of the queue and the backlog, and a carry's list of records it takes no vector of names
+    /// it.
+    #[test]
+    fn an_expired_record_is_marked_and_never_sent() {
+        let mut s = Store::new();
+        let stub = Stub::start();
+        config(&s, &stub);
+        let gone = s.said("s", R, 1_000, "the expired lantern words");
+        let kept = s.said("s", R, 2_000, "the kept harbor words");
+        s.raw.expire_for_test(&[gone]);
+        s.run();
+        embed_all(&s);
+        let key = |seq: i64| format!("{}:{seq}", s.raw.device());
+        assert_eq!(skipped(&s, &key(gone)).as_deref(), Some("expired"));
+        assert_eq!(skipped(&s, &key(kept)), None);
+        let sent: Vec<String> = stub.texts().into_iter().flatten().collect();
+        assert!(sent.iter().any(|t| t.contains("harbor")), "{sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("lantern")), "{sent:?}");
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        assert_eq!(
+            doctor_facts_in(&k, crate::embed::EMBEDDER).records.unwrap(),
+            0
+        );
+        assert!(s.raw.forgotten_record_keys().unwrap().contains(&key(gone)));
     }
 
     /// Row 30-1 (D13): nothing of an excluded repository reaches the embedder: its claims, a claim
