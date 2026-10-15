@@ -54,12 +54,16 @@ keywords = ["basic"]
 
 [[rules]]
 id = "secret-assignment"
-description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=), however plain: generic-api-key passes over one whose entropy is 3.5 or below (#541)"
-regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*["']?([^\s"'`<>;,(){}\[\]$\\]{16,})'''
+description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or quoted with a $ or ; in it (#541)"
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`<>;,(){}\[\]$\\]{8,}))'''
 keywords = ["secret", "token", "passw", "key", "credential"]
-entropy = 2.0
-# No allowlist: a value of letters only can be a passphrase, a dotted one a token, and one with a
-# placeholder word a password in use. A reference or a placeholder masked costs little.
+# A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
+# it left as written), however short. An unquoted one up to a space, a quote or backtick, a
+# bracket, `;`, `,`, `$` or `\`, where code goes on (`max_output_tokens:10000}),`, `${API_KEY}`),
+# from 8 characters, the shortest password most systems take: shorter, it is mostly a number or a
+# type (`max_tokens: 4096`, `password: String`). No entropy gate and no allowlist: a weak password
+# is plain, a passphrase letters only, a token dotted, and a default in use reads as a placeholder;
+# a reference or a placeholder masked costs little.
 
 [[rules]]
 id = "uri-userinfo-password"

@@ -2412,7 +2412,9 @@ extra_rules = [
     /// #541: a tool's output as capture stores it gives the rescan nothing new, whatever escapes
     /// the stored body adds: a listing whose escaped line breaks would join a URL to a later `@`
     /// (uri-userinfo-password), and code whose template reads as a PEM block only at the stored,
-    /// longer length (private-key's 64 characters between its lines).
+    /// longer length (private-key's 64 characters between its lines). A tool's own JSON is stored
+    /// flattened, one string: a secret's name stays beside a value past the 256 bytes a structured
+    /// field pairs with its key (Codex on #543).
     #[test]
     fn a_rescan_finds_nothing_new_in_a_captured_tool_output() {
         let settings = crate::capture::Settings::default();
@@ -2432,14 +2434,19 @@ extra_rules = [
         .join("\n");
         let pem = "  return `-----BEGIN PRIVATE KEY-----\\n${b64.match(/.{1,64}/g)!.join(\"\\n\")}\\n-----END PRIVATE KEY-----`;";
         let file = serde_json::json!({"type": "text", "file": {"filePath": "/w/a.test.ts", "content": pem}});
-        for response in [serde_json::json!(listing), file] {
+        let long = "ab".repeat(150);
+        let structured = serde_json::json!({"client_secret": long.clone()});
+        for response in [serde_json::json!(listing), file, structured] {
             let payload = serde_json::json!({"session_id": "s", "tool_name": "Bash",
                 "tool_input": {"command": "x"}, "tool_response": response});
             let body = crate::capture::events("claude", "PostToolUse", &payload, 1, &settings)
                 .remove(0)
                 .event
                 .body;
-            assert!(!body.contains(&secret) && !body.contains(&aud), "{body}");
+            assert!(
+                !body.contains(&secret) && !body.contains(&aud) && !body.contains(&long),
+                "{body}"
+            );
             assert_eq!(field_ranges(&body, &Rules::default()), vec![], "{body}");
         }
     }
@@ -2478,13 +2485,52 @@ extra_rules = [
         let tail = format!("{}{}", ":b1b1c2c2", "a3a3b1b1"); // split: scanners
         let (masked, _) = scan(&format!("BOT_TOKEN={low}{tail} next"), &rules);
         assert_eq!(masked, "BOT_TOKEN=[REDACTED] next");
-        // Names that only look alike, short values, and values read from a variable stay.
+        // A quoted value whole, whatever punctuation it holds; an unquoted one with the marks a
+        // password takes; two characters repeated; a short one (Codex on #543). split: scanners
+        let punct = "Abcd1234".to_owned() + "$Efgh;5678,(x)[y]{z}<w>!";
+        let marks = "Abcd1234".to_owned() + "!Efgh@5678#%^&*x";
+        let flat = "0011".repeat(4);
+        for (text, masked) in [
+            (
+                format!("export DB_PASSWORD='{punct}'"),
+                "export DB_PASSWORD='[REDACTED]'",
+            ),
+            (
+                format!("{{\"db_password\": \"{punct}\"}}"),
+                "{\"db_password\": \"[REDACTED]\"}",
+            ),
+            (
+                format!("DB_PASSWORD={marks} next"),
+                "DB_PASSWORD=[REDACTED] next",
+            ),
+            (
+                format!("{{\"password\": \"Ab\\\"{flat}\"}}"),
+                "{\"password\": \"[REDACTED]\"}",
+            ),
+            (format!("DB_PASSWORD={flat}"), "DB_PASSWORD=[REDACTED]"),
+            (
+                "{\"password\": \"admin\"}".to_owned(),
+                "{\"password\": \"[REDACTED]\"}",
+            ),
+            ("PGPASSWORD=postgres".to_owned(), "PGPASSWORD=[REDACTED]"),
+            // A quote that does not close on its line
+            (
+                format!("DB_PASSWORD=\"{flat}\nnext"),
+                "DB_PASSWORD=\"[REDACTED]\nnext",
+            ),
+        ] {
+            assert_eq!(scan(&text, &rules).0, masked);
+        }
+        // Names that only look alike, an empty value, unquoted ones under 8 characters, and
+        // unquoted code that goes on (a variable, a call's argument) stay.
         for text in [
             "max_tokens: 4000",
             "tokenizer = AutoTokenizer.from_pretrained(name)",
-            "API_KEY=${API_KEY}",
             "SECRET_LENGTH=32",
-            "password = os.environ[\"DB_PASSWORD\"]",
+            "password: String,",
+            "{\"password\": \"\"}",
+            "API_KEY=${API_KEY}",
+            "tools.exec_command({cmd: x, max_output_tokens:10000}),",
         ] {
             assert_eq!(scan(text, &rules).0, text);
         }
