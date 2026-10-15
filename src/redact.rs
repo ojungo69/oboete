@@ -2485,10 +2485,12 @@ extra_rules = [
         let tail = format!("{}{}", ":b1b1c2c2", "a3a3b1b1"); // split: scanners
         let (masked, _) = scan(&format!("BOT_TOKEN={low}{tail} next"), &rules);
         assert_eq!(masked, "BOT_TOKEN=[REDACTED] next");
-        // A quoted value whole, whatever punctuation it holds; an unquoted one with the marks a
-        // password takes; two characters repeated; a short one (Codex on #543). split: scanners
+        // A value whole, whatever punctuation it holds, quoted or not, with a delimiter at an
+        // unquoted one's end left as the code's; two characters repeated; a short quoted one
+        // (Codex on #543). split: scanners
         let punct = "Abcd1234".to_owned() + "$Efgh;5678,(x)[y]{z}<w>!";
         let marks = "Abcd1234".to_owned() + "!Efgh@5678#%^&*x";
+        let early = "Ab(".to_owned() + "cd1234567890";
         let flat = "0011".repeat(4);
         for (text, masked) in [
             (
@@ -2504,15 +2506,27 @@ extra_rules = [
                 "DB_PASSWORD=[REDACTED] next",
             ),
             (
+                format!("DB_PASSWORD={punct} next"),
+                "DB_PASSWORD=[REDACTED] next",
+            ),
+            (format!("DB_PASSWORD={early}"), "DB_PASSWORD=[REDACTED]"),
+            (
+                format!("DB_PASSWORD={marks}; next"),
+                "DB_PASSWORD=[REDACTED]; next",
+            ),
+            (
                 format!("{{\"password\": \"Ab\\\"{flat}\"}}"),
                 "{\"password\": \"[REDACTED]\"}",
             ),
             (format!("DB_PASSWORD={flat}"), "DB_PASSWORD=[REDACTED]"),
             (
-                "{\"password\": \"admin\"}".to_owned(),
+                format!("{{\"password\": \"{}\"}}", "ad".to_owned() + "min"),
                 "{\"password\": \"[REDACTED]\"}",
             ),
-            ("PGPASSWORD=postgres".to_owned(), "PGPASSWORD=[REDACTED]"),
+            (
+                format!("PGPASSWORD={}", "post".to_owned() + "gres"),
+                "PGPASSWORD=[REDACTED]",
+            ),
             // A quote that does not close on its line
             (
                 format!("DB_PASSWORD=\"{flat}\nnext"),
@@ -2522,7 +2536,7 @@ extra_rules = [
             assert_eq!(scan(&text, &rules).0, masked);
         }
         // Names that only look alike, an empty value, unquoted ones under 8 characters, and
-        // unquoted code that goes on (a variable, a call's argument) stay.
+        // unquoted code that goes on (a variable, a call's argument up to its brackets) stay.
         for text in [
             "max_tokens: 4000",
             "tokenizer = AutoTokenizer.from_pretrained(name)",
