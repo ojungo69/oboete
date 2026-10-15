@@ -60,3 +60,14 @@ A preview, which writes nothing, against a copy of the migrated raw.db: Claude C
 ## Final check
 
 On the tree of main 342bec4, with #535 merged (a release built with `--features local-embed` before the merge, from the same tree): a fresh copy of the owner's v1 store, 174,228 events by then, migrated in 144 s (295 repositories, 9,793 documents); claude-mem imported in 54 s with the same counts; the worker done in 247 s (peak 85 MB). doctor: `quick_check` and integrity ok, embeddings off, no line asking for `forget --continue`, and no range tombstone. A live Codex session got the SessionStart work-state block, the memory-lookup answer after reading its memory file, and `mem_search`, `save_memory` and `search`, which found the saved note first. The settings page's simple view, in Japanese and in English, shows no `null`.
+
+## The switch on this PC
+
+Run on 2026-10-15 after the final check, with this configuration: curation on, Anthropic's Messages API (Haiku 5.5) first in the chain and the other entries after it, per-prompt injection on, and bge-m3 on this machine (decision 46).
+
+- v1's store of 174,305 events: `migrate` 150 s; `import transcripts` 577 s (Claude Code 6,303 files and 283,488 events, Codex 2,373 files and 117,163 events); `import claude-mem` 51 s; `worker --idle-ms 0` 765 s (peak 97 MB). raw.db 3.95 GB, knowledge.db 1.52 GB.
+- The rescan tombstoned 9 ranges in 6 imported transcript records: one secret the import's capture had missed, and 8 false positives on code (#541). `forget --continue` then wrote the masks into the rows (596 s), and doctor's line went.
+- Hooks switched by rename (the old binary kept as `oboete-v1`) and `setup` for the three agents (Claude Code 8 hooks, Codex 7 with trust 7/7, Grok 8); `migrate` again imported the 45 events v1 wrote meanwhile.
+- `setup --embeddings local`: bge-m3 and ONNX Runtime downloaded in 33 s. The resident worker then embeds the backlog, about 295,000 imported documents and records, at about 0.4 s each: about a day and a half.
+- A new Claude Code session got oboete's SessionStart blocks (the work state, the memory use, the manifest) beside claude-mem's.
+- Not built yet: imported history in the per-prompt block (decision 44 (b)). G23's first slice delivers claims, cards and session summaries; imported history waits for #506's mapping of the import's projects to repositories (docs/prompt-context.md, "As built"). While claude-mem runs, its own per-prompt block brings that history.
