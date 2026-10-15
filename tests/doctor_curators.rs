@@ -71,6 +71,9 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
              INSERT INTO meta VALUES('device_id', 'd1');
              CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
              CREATE TABLE observations(id INTEGER); CREATE TABLE summaries(id INTEGER);
+             INSERT INTO sessions VALUES('a'), ('b');
+             INSERT INTO events VALUES(1), (2), (3);
+             INSERT INTO observations VALUES(1);
              CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER, provider TEXT,
                outcome TEXT, ms INTEGER, detail TEXT);
              INSERT INTO provider_calls VALUES(1, 1000, 'v1-embedder', 'ok', 12, NULL);",
@@ -83,18 +86,26 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains(
-            "v1 (kept until `oboete migrate --finish`): sessions 0 | raw events 0 | observations 0 | summaries 0"
-        ),
-        "{text}"
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let at = |start: &str| {
+        lines
+            .iter()
+            .position(|l| l.starts_with(start))
+            .unwrap_or_else(|| panic!("no {start:?} line in {text}"))
+    };
+    assert_eq!(
+        lines[at("  v1 (")],
+        "  v1 (kept until `oboete migrate --finish`): sessions 2 | raw events 3 | observations 1 | summaries 0"
     );
-    assert!(
-        text.contains("v1's last provider calls:\n    v1-embedder ok 12ms"),
-        "{text}"
+    assert_eq!(
+        lines[at("  v1's last provider calls:") + 1],
+        "    v1-embedder ok 12ms"
     );
     assert!(!text.contains("cannot read oboete.db"), "{text}");
-    assert!(text.contains("v1 events not migrated yet: 0"), "{text}");
+    assert_eq!(
+        lines[at("  v1 events not migrated yet:")],
+        "  v1 events not migrated yet: 3 (`oboete migrate` imports them)"
+    );
     assert_eq!(std::fs::read(&db).unwrap(), bytes);
 }
 
@@ -122,10 +133,12 @@ fn doctor_shows_the_homes_own_provider_calls() {
         .unwrap();
     let text = String::from_utf8_lossy(&oboete(&["doctor"]).stdout).into_owned();
     assert!(!home.path().join("oboete.db").exists());
-    assert!(
-        text.contains("last provider calls (providers.db):\n    invented summary ok 7ms"),
-        "{text}"
-    );
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let header = lines
+        .iter()
+        .position(|l| *l == "  last provider calls (providers.db):")
+        .unwrap_or_else(|| panic!("no providers.db calls in {text}"));
+    assert_eq!(lines[header + 1], "    invented summary ok 7ms");
     assert!(!text.contains("v1's last provider calls"), "{text}");
 }
 
