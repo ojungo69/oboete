@@ -58,7 +58,8 @@ fn doctor_reports_past_a_store_it_cannot_read() {
 }
 
 /// The legacy oboete.db section counts each of its tables, and a readable store is healthy and
-/// left as it was (doctor opens it read only, spec 7.4).
+/// left as it was (doctor opens it read only, spec 7.4). Its lines, v1's calls among them, say
+/// they are v1's (#542).
 #[test]
 fn doctor_counts_the_tables_of_a_legacy_store() {
     let home = tempfile::tempdir().unwrap();
@@ -70,8 +71,12 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
              INSERT INTO meta VALUES('device_id', 'd1');
              CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
              CREATE TABLE observations(id INTEGER); CREATE TABLE summaries(id INTEGER);
+             INSERT INTO sessions VALUES('a'), ('b');
+             INSERT INTO events VALUES(1), (2), (3);
+             INSERT INTO observations VALUES(1);
              CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER, provider TEXT,
-               outcome TEXT, ms INTEGER, detail TEXT);",
+               outcome TEXT, ms INTEGER, detail TEXT);
+             INSERT INTO provider_calls VALUES(1, 1000, 'v1-embedder', 'ok', 12, NULL);",
         )
         .unwrap();
     let bytes = std::fs::read(&db).unwrap();
@@ -81,13 +86,60 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("sessions 0 | raw events 0 | observations 0 | summaries 0"),
-        "{text}"
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let at = |start: &str| {
+        lines
+            .iter()
+            .position(|l| l.starts_with(start))
+            .unwrap_or_else(|| panic!("no {start:?} line in {text}"))
+    };
+    assert_eq!(
+        lines[at("  v1 (")],
+        "  v1 (kept until `oboete migrate --finish`): sessions 2 | raw events 3 | observations 1 | summaries 0"
+    );
+    assert_eq!(
+        lines[at("  v1's last provider calls:") + 1],
+        "    v1-embedder ok 12ms"
     );
     assert!(!text.contains("cannot read oboete.db"), "{text}");
-    assert!(text.contains("v1 events not migrated yet: 0"), "{text}");
+    assert_eq!(
+        lines[at("  v1 events not migrated yet:")],
+        "  v1 events not migrated yet: 3 (`oboete migrate` imports them)"
+    );
     assert_eq!(std::fs::read(&db).unwrap(), bytes);
+}
+
+/// #542: doctor shows the home's own provider calls from providers.db, whatever their role, with
+/// no v1 store beside them.
+#[test]
+fn doctor_shows_the_homes_own_provider_calls() {
+    let home = tempfile::tempdir().unwrap();
+    let oboete = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .args(["--home", &home.path().to_string_lossy()])
+            .args(args)
+            .env("OBOETE_NO_SPAWN", "1")
+            .output()
+            .unwrap()
+    };
+    // `resume` opens providers.db, which makes its tables.
+    oboete(&["resume", "groq"]);
+    rusqlite::Connection::open(home.path().join("providers.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO provider_calls(ts, provider, role, outcome, ms) VALUES(1, 'invented', 'summary', 'ok', 7)",
+            [],
+        )
+        .unwrap();
+    let text = String::from_utf8_lossy(&oboete(&["doctor"]).stdout).into_owned();
+    assert!(!home.path().join("oboete.db").exists());
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let header = lines
+        .iter()
+        .position(|l| *l == "  last provider calls (providers.db):")
+        .unwrap_or_else(|| panic!("no providers.db calls in {text}"));
+    assert_eq!(lines[header + 1], "    invented summary ok 7ms");
+    assert!(!text.contains("v1's last provider calls"), "{text}");
 }
 
 /// #94: doctor prints `[inject]` as it applies, an entry `[chain]` turns off, and `[chain]`'s
