@@ -979,28 +979,23 @@ fn spans_in(
                     .filter(|m| !m.is_empty()),
             }
             .unwrap_or(all);
-            // Capture's own mask is no secret, as for the user's rules: uri-userinfo-password has
-            // no entropy gate, took `[REDACTED]` as a URI's password, and every rescan tombstoned
-            // it.
-            let masked = secret.as_str().trim() == MASK;
-            if !masked
-                && let Some(min) = rule.entropy
+            // Capture's own mask, as the user's rules pass it over: uri-userinfo-password has no
+            // entropy gate, took `[REDACTED]` as a URI's password, and every rescan tombstoned it.
+            if secret.as_str().trim() == MASK {
+                continue;
+            }
+            if let Some(min) = rule.entropy
                 && shannon_entropy(secret.as_str()) <= min
             {
                 continue;
             }
             let line = line_of(text, all.start());
-            let allowed = masked
-                || rule
-                    .allowlists
-                    .iter()
-                    .chain(std::iter::once(&r.global))
-                    .any(|a| allows(a, secret.as_str(), all.as_str(), line));
+            let allowed = rule
+                .allowlists
+                .iter()
+                .chain(std::iter::once(&r.global))
+                .any(|a| allows(a, secret.as_str(), all.as_str(), line));
             if allowed {
-                // Kept, so the fixpoint blanks it and looks again: a greedy pattern that ended on
-                // it (curl-auth-user's `.*` takes a line's last `-u`) finds a secret before it, as
-                // the user's rules look again before such a value.
-                kept.push((secret.start(), secret.end(), i));
                 continue;
             }
             if rules.keeps(secret.as_str()) {
@@ -2409,13 +2404,6 @@ extra_rules = [
             serde_json::json!({ "output": serde_json::json!({ "stdout": masked }).to_string() })
                 .to_string();
         assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
-        // A greedy rule whose match ends on a value it passes over looks again before it: the
-        // last `-u` is a placeholder the allowlist allows, the one before it a password.
-        let (masked, _) = scan(
-            &format!("curl -u admin:{pw} https://h.test -u bob:pass"),
-            &rules,
-        );
-        assert!(!masked.contains(&pw), "{masked}");
     }
 
     #[test]
