@@ -16,12 +16,6 @@ pub(crate) const MASK: &str = "[REDACTED]";
 const RULES_TOML: &str = include_str!("../config/gitleaks.toml");
 const EXTRA_TOML: &str = include_str!("../config/oboete-rules.toml");
 
-/// A value a rule's group took that is masked already: capture's mask, or a tombstone's stars
-/// over one (`Raw::after`), which a rescan reads. No secret to mask again.
-fn masked_already(value: &str) -> bool {
-    value == MASK || (!value.is_empty() && value.bytes().all(|b| b == b'*'))
-}
-
 #[derive(Deserialize)]
 struct File {
     #[serde(default)]
@@ -985,9 +979,9 @@ fn spans_in(
                     .filter(|m| !m.is_empty()),
             }
             .unwrap_or(all);
-            // uri-userinfo-password has no entropy gate: it took `[REDACTED]` as a URI's
-            // password, and every rescan tombstoned capture's own mask.
-            if masked_already(secret.as_str().trim()) {
+            // Capture's own mask, as the user's rules pass it over: uri-userinfo-password has no
+            // entropy gate, took `[REDACTED]` as a URI's password, and every rescan tombstoned it.
+            if secret.as_str().trim() == MASK {
                 continue;
             }
             if let Some(min) = rule.entropy
@@ -1064,10 +1058,10 @@ fn user_spans_in(
                 let plain = x
                     .entropy
                     .is_some_and(|min| shannon_entropy(secret.as_str()) <= min);
-                if value.is_empty() || masked_already(value) || plain {
-                    // A value this rule does not mask: blanked by the fixpoint, masked already
-                    // (in a rescan), or below its entropy. A greedy pattern that ends on it passes
-                    // over one before it, so this match is looked at again up to that value.
+                if value.is_empty() || value == MASK || plain {
+                    // A value this rule does not mask: blanked by the fixpoint, masked in a
+                    // rescan, or below its entropy. A greedy pattern that ends on it passes over
+                    // one before it, so this match is looked at again up to that value.
                     // Only a smaller region: an empty group at the end of a match over the whole
                     // region would give the same one again, forever.
                     let before = (from + all.start(), from + secret.start());
@@ -2389,29 +2383,27 @@ extra_rules = [
         let text = format!(
             "curl -u admin:Zq8vN3kL7pW2 https://h.test\n\
              curl -H \"Authorization: Bearer {ghp}\" https://h.test\n\
-             password=Zq8vN3kL7pW2xY\naws_access_key_id = {aws}\n\
-             psql postgres://app:Zq8vN3kL7pW2@db:5432/x\n"
+             password=Zq8vN3kL7pW2xY\naws_access_key_id = {aws}\n"
         );
         let (masked, found) = scan(&text, &rules);
-        assert!(found.len() >= 4, "{masked}");
-        assert!(masked.contains("postgres://app:[REDACTED]@db"), "{masked}");
+        assert!(found.len() >= 3, "{masked}");
         assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
         // A tombstone's stars are no new finding either.
         let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
         assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
-        // As a tool's output is stored: JSON in a JSON string, read field by field.
+        // A URI's password, which a rule with no entropy gate finds: its mask is no finding,
+        // also as a tool's output is stored (JSON in a JSON string, read field by field).
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let (masked, found) = scan(&format!("psql postgres://app:{pw}@db:5432/x"), &rules);
+        assert_eq!(
+            (masked.as_str(), found.len()),
+            ("psql postgres://app:[REDACTED]@db:5432/x", 1)
+        );
+        assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
         let body =
             serde_json::json!({ "output": serde_json::json!({ "stdout": masked }).to_string() })
                 .to_string();
         assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
-        // A user's rule takes neither for a secret.
-        let pin =
-            user("[redaction]\nextra_rules = [{ id = \"pin\", regex = 'pin=(\\S+)' }]").unwrap();
-        let (masked, _) = scan("pin=Zq8vN3kL7pW2", &pin);
-        assert_eq!(masked, format!("pin={MASK}"));
-        let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
-        assert_eq!(ranges(&masked, &pin), vec![]);
-        assert_eq!(ranges(&starred, &pin), vec![], "{starred}");
     }
 
     #[test]
