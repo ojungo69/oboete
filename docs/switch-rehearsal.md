@@ -56,3 +56,7 @@ A114 on a copy of the evaluation import (the new binary rewrites a copied home's
 ## Transcript import at the owner's scale
 
 A preview, which writes nothing, against a copy of the migrated raw.db: Claude Code 6,278 files, 6,228 sessions, 369,985 events, 1.43 GB; Codex 2,373 files, 2,352 sessions, 137,167 events, 1.38 GB. The preview took 695 s (peak 202 MB).
+
+## Final check
+
+On the tree of main 342bec4, with #535 merged (a release built with `--features local-embed` before the merge, from the same tree): a fresh copy of the owner's v1 store, 174,228 events by then, migrated in 144 s (295 repositories, 9,793 documents); claude-mem imported in 54 s with the same counts; the worker done in 247 s (peak 85 MB). doctor: `quick_check` and integrity ok, embeddings off, no line asking for `forget --continue`, and no range tombstone. A live Codex session got the SessionStart work-state block, the memory-lookup answer after reading its memory file, and `mem_search`, `save_memory` and `search`, which found the saved note first. The settings page's simple view, in Japanese and in English, shows no `null`.
