@@ -979,6 +979,11 @@ fn spans_in(
                     .filter(|m| !m.is_empty()),
             }
             .unwrap_or(all);
+            // Capture's own mask, as the user's rules pass it over: uri-userinfo-password has no
+            // entropy gate, took `[REDACTED]` as a URI's password, and every rescan tombstoned it.
+            if secret.as_str().trim() == MASK {
+                continue;
+            }
             if let Some(min) = rule.entropy
                 && shannon_entropy(secret.as_str()) <= min
             {
@@ -2386,6 +2391,19 @@ extra_rules = [
         // A tombstone's stars are no new finding either.
         let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
         assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
+        // A URI's password, which a rule with no entropy gate finds: its mask is no finding,
+        // also as a tool's output is stored (JSON in a JSON string, read field by field).
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let (masked, found) = scan(&format!("psql postgres://app:{pw}@db:5432/x"), &rules);
+        assert_eq!(
+            (masked.as_str(), found.len()),
+            ("psql postgres://app:[REDACTED]@db:5432/x", 1)
+        );
+        assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+        let body =
+            serde_json::json!({ "output": serde_json::json!({ "stdout": masked }).to_string() })
+                .to_string();
+        assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
     }
 
     #[test]

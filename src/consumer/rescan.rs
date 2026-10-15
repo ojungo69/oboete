@@ -109,6 +109,25 @@ impl Consumer for Rescan {
                     .map(move |(start, end)| (seq, start, end))
             })
             .collect();
+        // A range a tombstone of the record masks already reads as stars (`Raw::after`), which a
+        // rule with no entropy gate takes for a password: no second tombstone (Codex on #535).
+        let found: Vec<_> = if found.is_empty() {
+            found
+        } else {
+            let masks = raw.masks()?;
+            found
+                .into_iter()
+                .filter(|&(seq, start, end)| {
+                    !masks
+                        .get(&(device.to_owned(), seq))
+                        .is_some_and(|(_, ranges)| {
+                            ranges.iter().any(|&(offset, length)| {
+                                offset as usize <= start && end <= (offset + length) as usize
+                            })
+                        })
+                })
+                .collect()
+        };
         #[cfg(test)]
         if let Some(meanwhile) = BEFORE_TOMBSTONES.take() {
             meanwhile();
@@ -398,6 +417,31 @@ mod tests {
             body(&raw, seq),
             r#"{"prompt":"deploy ***********","cwd":"/r"}"#
         );
+    }
+
+    /// A value a tombstone masks reads as stars (`Raw::after`), which a user's rule can take for a
+    /// secret again: when the rules change, the rescan reads it again and adds no second tombstone
+    /// over it (Codex on #535).
+    #[test]
+    fn a_tombstoned_value_is_not_tombstoned_again_when_the_rules_change() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let pin = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        raw.append(&raw::test_event(&format!(
+            r#"{{"prompt":"pin={pin} here"}}"#
+        )))
+        .unwrap();
+        let rule = r#"{ id = "pin", regex = 'pin=(\S+)' }"#;
+        let rules = |more: &str| format!("[redaction]\nextra_rules = [{rule}{more}]\n");
+        std::fs::write(p.join("config.toml"), rules("")).unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 1);
+        assert!(!body(&raw, 1).contains(&pin), "{}", body(&raw, 1));
+        let acme = r#", { id = "acme", regex = 'acme-[0-9]{6}' }"#;
+        std::fs::write(p.join("config.toml"), rules(acme)).unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 1);
     }
 
     #[test]
