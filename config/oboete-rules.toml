@@ -53,6 +53,20 @@ keywords = ["basic"]
 # No entropy gate: after "Authorization: Basic" even a weak credential is one.
 
 [[rules]]
+id = "secret-assignment"
+description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
+keywords = ["secret", "token", "passw", "key", "credential"]
+# A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
+# it left as written), however short. An unquoted one runs to a space, a quote or backtick, or a
+# backslash (an escape in a flattened tool field): a bracket, `;`, `,` or `$` inside it is the
+# value's, one at either end the code's (`max_output_tokens:10000}),`, `${API_KEY}`, a mask
+# already there). It is taken from 8 characters, the shortest password most systems take: shorter,
+# it is mostly a number or a type (`max_tokens: 4096`, `password: String`). No entropy gate and no
+# allowlist: a weak password is plain, a passphrase letters only, a token dotted, and a default in
+# use reads as a placeholder; a reference or a placeholder masked costs little.
+
+[[rules]]
 id = "uri-userinfo-password"
 description = "Password in a URI's userinfo (postgres://user:pass@host); a user with no password is left"
 regex = '''(?i)\b[a-z][a-z0-9+.-]{1,20}://[^\s:/?#@"'`]*:([^\s/?#@"'`]+)@'''

@@ -1123,14 +1123,16 @@ fn literals(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// Task 7's rescan: `ranges` of a stored body, field by field as capture scanned it, as byte
-/// ranges of the body.
+/// ranges of the body. Capture scanned each field's string as decoded, not the escapes the body
+/// stores it with: in those, `\n` joins lines and a pattern then matches across them (#541).
 pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
     literals(body)
         .into_iter()
         .flat_map(|(s, e)| {
-            ranges(&body[s..e], rules)
+            let (field, at) = unescaped(&body[s..e]);
+            ranges(&field, rules)
                 .into_iter()
-                .map(move |(a, b)| (s + a, s + b))
+                .map(move |(a, b)| (s + at[a], s + at[b]))
         })
         .collect()
 }
@@ -1690,10 +1692,11 @@ mod tests {
             redact("api_key = \"aaaaaaaaaaaaaaaaaaaa\""),
             "api_key = \"aaaaaaaaaaaaaaaaaaaa\""
         );
-        // Stopwords in the value are allowed through (gitleaks' generic allowlist).
+        // generic-api-key passes a value with a stopword over (gitleaks' generic allowlist), and
+        // secret-assignment, which has none, masks it (#543).
         assert_eq!(
             redact("token = \"example_token_value_123\""),
-            "token = \"example_token_value_123\""
+            "token = \"[REDACTED]\""
         );
         assert_eq!(
             redact("Authorization: Bearer ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g ok"),
@@ -2404,6 +2407,147 @@ extra_rules = [
             serde_json::json!({ "output": serde_json::json!({ "stdout": masked }).to_string() })
                 .to_string();
         assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+    }
+
+    /// #541: a tool's output as capture stores it gives the rescan nothing new, whatever escapes
+    /// the stored body adds: a listing whose escaped line breaks would join a URL to a later `@`
+    /// (uri-userinfo-password), and code whose template reads as a PEM block only at the stored,
+    /// longer length (private-key's 64 characters between its lines). A tool's own JSON is stored
+    /// flattened, one string: a secret's name stays beside a value past the 256 bytes a structured
+    /// field pairs with its key (Codex on #543).
+    #[test]
+    fn a_rescan_finds_nothing_new_in_a_captured_tool_output() {
+        let settings = crate::capture::Settings::default();
+        // split: scanners
+        let aud = format!(
+            "{}{}",
+            "9f2c7e1a4b8d3f60c5e2a7b9d1f43e8c", "57d0b2e94a1c6f38e7b5d2a09c4f1e63"
+        );
+        let secret = format!("{}{}", "e4b1c9a27f3d8b05", "a6e2c7d94f1b3a58");
+        let listing = [
+            "10:ACCESS_TEAM_DOMAIN=https://team.example.test".to_owned(),
+            format!("11:ACCESS_AUD={aud}"),
+            "15:BOT_CHANNEL_ID=1234567890".to_owned(),
+            format!("17:BOT_CHANNEL_SECRET={secret}"),
+            "18:BOT_ACCOUNT_ID=@123abcde".to_owned(),
+        ]
+        .join("\n");
+        let pem = "  return `-----BEGIN PRIVATE KEY-----\\n${b64.match(/.{1,64}/g)!.join(\"\\n\")}\\n-----END PRIVATE KEY-----`;";
+        let file = serde_json::json!({"type": "text", "file": {"filePath": "/w/a.test.ts", "content": pem}});
+        let long = "ab".repeat(150);
+        let structured = serde_json::json!({"client_secret": long.clone()});
+        for response in [serde_json::json!(listing), file, structured] {
+            let payload = serde_json::json!({"session_id": "s", "tool_name": "Bash",
+                "tool_input": {"command": "x"}, "tool_response": response});
+            let body = crate::capture::events("claude", "PostToolUse", &payload, 1, &settings)
+                .remove(0)
+                .event
+                .body;
+            assert!(
+                !body.contains(&secret) && !body.contains(&aud) && !body.contains(&long),
+                "{body}"
+            );
+            assert_eq!(field_ranges(&body, &Rules::default()), vec![], "{body}");
+        }
+    }
+
+    /// #541: a value assigned to a name that says it is a secret is masked however plain the
+    /// value is: generic-api-key passes over a hex value whose entropy is 3.5 or below.
+    #[test]
+    fn a_secret_assignment_is_masked_however_plain_its_value() {
+        let rules = Rules::default();
+        let low = format!("{}{}", "a3a3b1b1c2c2a3a3", "b1b1c2c2a3a3b1b1"); // split: scanners
+        // A passphrase of letters only, and a default that is in use (the security review of #543):
+        // generic-api-key's allowlists pass both over. split: scanners
+        let phrase = "Correct".to_owned() + "HorseBatteryStaple";
+        let default = "change".to_owned() + "me-in-production";
+        let reference = "process.env.".to_owned() + "MY_APP_SECRET";
+        let example = "example".to_owned() + "0123456789abcd";
+        for (text, value) in [
+            (format!("BOT_CHANNEL_SECRET={low}"), &low),
+            (
+                format!("17:BOT_CHANNEL_SECRET={low}\n18:BOT_ACCOUNT_ID=@123abcde"),
+                &low,
+            ),
+            (format!("{{\"client_secret\": \"{low}\"}}"), &low),
+            (format!("export DB_PASSWORD='{low}'"), &low),
+            (format!("DB_PASSWORD={phrase}"), &phrase),
+            (format!("POSTGRES_PASSWORD={default}"), &default),
+            // Nothing passes over a value assigned to a secret's name, not a dotted reference nor a
+            // placeholder: either can be the secret itself (the security reviews of #543).
+            (format!("CLIENT_SECRET={reference}"), &reference),
+            (format!("DB_PASSWORD={example}"), &example),
+        ] {
+            let (masked, _) = scan(&text, &rules);
+            assert!(!masked.contains(value.as_str()), "{masked}");
+        }
+        // The value whole, a `:` in it too (CodeRabbit on #543).
+        let tail = format!("{}{}", ":b1b1c2c2", "a3a3b1b1"); // split: scanners
+        let (masked, _) = scan(&format!("BOT_TOKEN={low}{tail} next"), &rules);
+        assert_eq!(masked, "BOT_TOKEN=[REDACTED] next");
+        // A value whole, whatever punctuation it holds, quoted or not, with a delimiter at an
+        // unquoted one's end left as the code's; two characters repeated; a short quoted one
+        // (Codex on #543). split: scanners
+        let punct = "Abcd1234".to_owned() + "$Efgh;5678,(x)[y]{z}<w>!";
+        let marks = "Abcd1234".to_owned() + "!Efgh@5678#%^&*x";
+        let early = "Ab(".to_owned() + "cd1234567890";
+        let flat = "0011".repeat(4);
+        for (text, masked) in [
+            (
+                format!("export DB_PASSWORD='{punct}'"),
+                "export DB_PASSWORD='[REDACTED]'",
+            ),
+            (
+                format!("{{\"db_password\": \"{punct}\"}}"),
+                "{\"db_password\": \"[REDACTED]\"}",
+            ),
+            (
+                format!("DB_PASSWORD={marks} next"),
+                "DB_PASSWORD=[REDACTED] next",
+            ),
+            (
+                format!("DB_PASSWORD={punct} next"),
+                "DB_PASSWORD=[REDACTED] next",
+            ),
+            (format!("DB_PASSWORD={early}"), "DB_PASSWORD=[REDACTED]"),
+            (
+                format!("DB_PASSWORD={marks}; next"),
+                "DB_PASSWORD=[REDACTED]; next",
+            ),
+            (
+                format!("{{\"password\": \"Ab\\\"{flat}\"}}"),
+                "{\"password\": \"[REDACTED]\"}",
+            ),
+            (format!("DB_PASSWORD={flat}"), "DB_PASSWORD=[REDACTED]"),
+            (
+                format!("{{\"password\": \"{}\"}}", "ad".to_owned() + "min"),
+                "{\"password\": \"[REDACTED]\"}",
+            ),
+            (
+                format!("PGPASSWORD={}", "post".to_owned() + "gres"),
+                "PGPASSWORD=[REDACTED]",
+            ),
+            // A quote that does not close on its line
+            (
+                format!("DB_PASSWORD=\"{flat}\nnext"),
+                "DB_PASSWORD=\"[REDACTED]\nnext",
+            ),
+        ] {
+            assert_eq!(scan(&text, &rules).0, masked);
+        }
+        // Names that only look alike, an empty value, unquoted ones under 8 characters, and
+        // unquoted code that goes on (a variable, a call's argument up to its brackets) stay.
+        for text in [
+            "max_tokens: 4000",
+            "tokenizer = AutoTokenizer.from_pretrained(name)",
+            "SECRET_LENGTH=32",
+            "password: String,",
+            "{\"password\": \"\"}",
+            "API_KEY=${API_KEY}",
+            "tools.exec_command({cmd: x, max_output_tokens:10000}),",
+        ] {
+            assert_eq!(scan(text, &rules).0, text);
+        }
     }
 
     #[test]
