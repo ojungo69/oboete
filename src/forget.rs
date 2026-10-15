@@ -4136,6 +4136,36 @@ mod tests {
         assert!(after[&w2[1]]["forgotten"].is_string(), "{}", after[&w2[1]]);
     }
 
+    /// docs/retention.md (CodeRabbit on #551): the rows decide whether a window a forget took the
+    /// text of is queued again, at the forget's own rebuild. While a record of it is still expired
+    /// it is not; once forgets took every expired one, it is, as any forgotten window is.
+    #[test]
+    fn a_forgotten_window_is_queued_once_it_holds_no_expired_record() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said("s", "github.com/o/r", 1_000, "First words.");
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Second words.");
+        let w = s
+            .raw
+            .append_ops(&[window_op(r1, r2, "Its span.", json!({}))])
+            .unwrap();
+        s.run();
+        s.raw.expire_for_test(&[r1, r2]);
+        let home = s.home.path().to_owned();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        for (seq, want) in [(r1, Vec::new()), (r2, w)] {
+            let target = Target::Record {
+                device: device.clone(),
+                seq,
+            };
+            start(&home, &preview(&home, target).unwrap()).unwrap();
+            assert_eq!(purge(&home).unwrap().unwrap().records, 1);
+            assert_eq!(queued(&home), want, "{seq}");
+        }
+    }
+
     /// Slice 3d-4 (Codex on #481): what a window was shown of a claim it named is every wording of
     /// it: the body the owner's correction gave a claim quoting the forgotten record, and each
     /// wording windows gave a copied claim's uid. A claim that repeated 32 bytes of either is

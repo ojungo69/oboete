@@ -396,16 +396,16 @@ pub(crate) fn quote(raw: &Raw, e: &Evidence) -> Result<Quote> {
         .after(&e.device, e.seq - 1, 1)?
         .into_iter()
         .find(|r| r.seq == e.seq);
+    let (Ok(start), Ok(len)) = (usize::try_from(e.offset), usize::try_from(e.length)) else {
+        return Ok(Quote::Gone);
+    };
     let event = match record.map(|r| r.item) {
         Some(Item::Event(event)) => event,
         // A mask over it cannot be read against its text any more: expiry waits for every mask's
-        // purge, which rewrites the claim ops of a masked record's window first (docs/retention.md,
-        // "Masks come first").
-        Some(Item::Expired(labels)) => return Ok(Quote::Expired(labels)),
+        // purge, which rewrites the claim ops of a masked record's window first, and for every
+        // quote of its records to read (docs/retention.md, rule 8). Its place is still checked.
+        Some(Item::Expired(labels)) if len == e.quote.len() => return Ok(Quote::Expired(labels)),
         _ => return Ok(Quote::Gone),
-    };
-    let (Ok(start), Ok(len)) = (usize::try_from(e.offset), usize::try_from(e.length)) else {
-        return Ok(Quote::Gone);
     };
     let reads = crate::curate::long_text(&event)
         .and_then(|long| {
@@ -843,6 +843,27 @@ mod tests {
         raw.append_ops(&[forgotten(b, b)]).unwrap();
         run(&raw, &mut k);
         assert_eq!(count(&k, "recurate"), 1);
+    }
+
+    /// CodeRabbit on #551: an expired quote is held to what its place says without the text.
+    #[test]
+    fn an_expired_quote_whose_place_cannot_hold_it_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        let text = "Use tabs in the Go files.";
+        let a = raw.append(&event(text, 5)).unwrap();
+        let e = quote(&device, a, text, "Use tabs", 0);
+        raw.expire_for_test(&[a]);
+        assert!(matches!(super::quote(&raw, &e).unwrap(), Quote::Expired(_)));
+        let negative = Evidence {
+            offset: -1,
+            ..e.clone()
+        };
+        let short = Evidence { length: 3, ..e };
+        for bad in [negative, short] {
+            assert!(matches!(super::quote(&raw, &bad).unwrap(), Quote::Gone));
+        }
     }
 
     /// #249: the claims a window takes as its own are those quoted in its records on its device:

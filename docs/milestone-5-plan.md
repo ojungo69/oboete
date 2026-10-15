@@ -1255,8 +1255,9 @@ curate の raw（checkpoint の上、pending の window、v1 の取り込み）�
 
 決めたこと（docs/retention.md、Claude; overrulable）: 期限切れの record は event の行のまま、ラベル・ledger・
 出所を残し、本文を空にして `expired` 列に時刻を入れる（目印は「あるもの」で見分ける）。status は支えの
-record が期限切れでも保つ。引用は `raw expired` と出して本文は見せない。session か curate の window を
-共有する record のまとまりごとに丸ごと期限切れにする。3 本の PR（読み手、期限切れの処理、設定画面）。
+record が期限切れでも保つ。引用は `raw expired` と出して本文は見せない。curate の window（重なる再 curate
+の window と合わせたもの）ごとに丸ごと期限切れにし、その中の directive と v1 の touch の行は期限切れに
+しない。3 本の PR（読み手、期限切れの処理、設定画面）。
 
 #### 3e-4: 規則が変わった後の op の文（#478）
 

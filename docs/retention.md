@@ -83,6 +83,14 @@ A window expires as a whole once all of these hold. (Claude; overrulable)
    stays (it waits, or is not past the period) stays too. So a session's expired records are
    always its first ones, which Cursor's recovery relies on (below).
 7. No rescan mask is owed (`Raw::masks_owed`): see "Claims stay".
+8. Every quote of one of its records reads (`Quote::Reads`), in every claim op in raw whose
+   evidence names it, whichever window's batch wrote the op (a recuration's, or a later window's
+   that carried a claim), the ops a forget or a mask rewrote aside. An expired quote stands on
+   the quote its op keeps, with no text left to check it against, so an op whose derivation was
+   refused because its quote stopped reading (a record's text rendered another way by a later
+   binary, say) would make its claim in the next rebuild; a recuration of its window writes new
+   ops and leaves that one in raw. Such a window keeps its text instead. This PC's store has none
+   (2026-10-16: every skipped claim op is a forgotten one).
 
 An `oboete pref add` directive (`kind = 'directive'`, the owner's own words and a preference's
 only evidence) and a v1 `touch` row (labels only) never expire, and do not keep their window from
@@ -147,7 +155,9 @@ expired (an expired row no tombstone hides), or it is gone (forgotten, masked ov
 - **Derivation** (`consumer::claims::derive`, which a rebuild and a rewind run again) and
   **Anchors** (which checks every quote of a claim another record's tombstone touches): an
   expired quote stands, on the quote the claim op keeps; the claim's repository and time come
-  from the expired row's labels. Only a gone quote drops the claim and queues its window.
+  from the expired row's labels. Only a gone quote drops the claim and queues its window; an
+  expired quote whose offset or length cannot hold it (negative, or a length not the quote's
+  bytes) is gone. Which quotes read before the text goes is rule 8's.
 - **Masks come first**: whether a rescan's mask covers an expired record's quote cannot be told
   any more (the text it is read against is gone), so expiry never runs ahead of a mask. A mask's
   purge rewrites the claim ops of the masked record's window, the ones whose quote it covers among
@@ -172,7 +182,10 @@ expired (an expired row no tombstone hides), or it is gone (forgotten, masked ov
   "records 120-180 hold raw that expired under [retention]: only their claims' kept quotes remain,
   so they cannot be curated again" (spec 6.2, RD/issue50.md:75).
 - No window that holds an expired record is queued for recuration, by `queue` or by the Claims
-  consumer's forgotten-window queue.
+  consumer's forgotten-window queue. The rows decide, at a forget's own rebuild and at any later
+  one alike (a forget's purge rewrites the rows before its rebuild): a window whose expired
+  records a forget took every one of holds none any more, only text that never expires
+  (directives, v1 touches) and Removed rows, and is queued as any forgotten window is.
 - A forget of a record in an expired window still rewrites what forget rewrites (the window's
   summary, the claims of its batch, slice 3d), and nothing can curate the window again to give the
   rest back: forget's guarantee comes first. Forget also finds the claims that copied a forgotten
@@ -246,7 +259,8 @@ and the backups. R2 holds nothing until milestone 6.
    carries, gaps, manifest, `hide`, Cursor's recovery, forget's copy finding and its segment
    rewrite), the `expired` backup line and its restore. Nothing writes an expired row yet but the
    tests.
-2. **The pass**: the setting, the windows and their eligibility, `expiry_owed`, its file and the
+2. **The pass**: the setting, the windows and their eligibility (rule 8's scan of every claim
+   op's quotes among them), `expiry_owed`, its file and the
    five steps, restore's application of the owed file, the copies' sweep, the worker's look,
    doctor, the spec's amendments (6.2, A55, section 8's line, 7.5's rollback note).
 3. **The page**.
@@ -259,7 +273,8 @@ and the backups. R2 holds nothing until milestone 6.
   on the expired record included; a claim quoting an expired and a live record survives a mask
   of the live one outside its quote; a forget registered on an expired record hides it at once
   (`hide`, `cite`, the claim, support), its purge removes it, and its segments' line becomes a
-  removed one; `recurate` refuses and no queue takes an expired window; the vector queue, the
+  removed one, and a window whose every expired record forgets took is queued again; `recurate`
+  refuses and no queue takes an expired window; the vector queue, the
   backlog and both carries pass it; Cursor's recovery records nothing again for a session with an
   expired record; restore of an `expired` line, and an older binary's refusal of it and of
   format 3.
@@ -271,7 +286,8 @@ and the backups. R2 holds nothing until milestone 6.
   was shown takes that window's summary and claims, through a rebuild.
 - The pass (A31, A55): a window with a record above the checkpoint, a parked v1 or transcript
   record, an excluded record, a failed or refused span, a queued span, an unasked or kept-back
-  turn, a newest record inside the period, or a record of a session still waiting, stays whole; a
+  turn, a newest record inside the period, a record of a session still waiting, or a record a
+  claim op quotes where its quote no longer reads (rule 8), stays whole; a
   directive stays; a finished window past the period expires whole; a window of imported records
   only, once recurated, expires; a record captured in a window's session just before the boundary
   keeps the window, and one just after does not.
