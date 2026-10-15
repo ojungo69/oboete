@@ -172,16 +172,22 @@ a document it cannot map stays search-only.
   imported prompts (a prompt's text is never injected, 4.6, and claude-mem's per-prompt search
   reads observations only), and nothing forgotten.
 - **By meaning only.** The viewer (`search::b::prompt_near`) searches the imported vectors'
-  knowledge partition (`k`, which holds no prompt) filed under `repo` itself and under the
-  projects that hold a document of a session that started in `repo` (`claude-mem:<project>`; 8 ms
-  to list on this PC's store), and keeps a hit at `T` only when its newest row maps to `repo`
-  (`consumer::imported::maps`) and its reader shows it (`consumer::imported::prompt_line`). The
-  hook's words side does not read imported history: on this PC's store an English prompt's
-  trigrams match nearly every imported document (about 250,000 of 263,207), and ranking them took
-  0.6 to 1.0 s for prompts of 48 to 141 characters, which the prompt hook cannot spend; keeping
-  only the prompt's rarest trigrams, one of which every document over the threshold must hold,
-  still left 40,000 to 50,000 candidates to read. claude-mem's own per-prompt search is by meaning
-  only. So imported history and notes come only while the resident viewer answers with a vector.
+  knowledge partition (`k`, which holds no prompt), kept inside the KNN to the sessions that map to
+  `repo` (and `NOTE_SESSION` when a note was saved there), so a project's documents of other
+  sessions take none of its candidates: on this PC's store, 65 repositories have imported history
+  mapped to them, and in 45 of them it is under 1% of what their projects hold. The bit index
+  checks a session list row by row, about 1.2 ms a session at 248,608 vectors against about 110 ms
+  for a scan by project, so a repository past `SESSION_FILTER` (128) sessions is searched by the
+  projects its documents are filed under (`claude-mem:<project>`) instead: on this PC's store only
+  this repository is, with 192 sessions whose documents are 99.7% of its projects'. Either way a
+  hit at `T` is kept only when its newest row maps to `repo` (`consumer::imported::maps`) and its
+  reader shows it (`consumer::imported::prompt_line`). The hook's words side does not read imported
+  history: on this PC's store an English prompt's trigrams match nearly every imported document
+  (about 250,000 of 263,207), and ranking them took 0.6 to 1.0 s for prompts of 48 to 141
+  characters, which the prompt hook cannot spend; keeping only the prompt's rarest trigrams, one of
+  which every document over the threshold must hold, still left 40,000 to 50,000 candidates to
+  read. claude-mem's own per-prompt search is by meaning only. So imported history and notes come
+  only while the resident viewer answers with a vector.
 - **The line**, labelled imported with its status unknown (spec 4.5): `- <date> imported <kind>
   (status unknown) <uid>: <title>: <first sentence>`, a summary by its body's first sentence (its
   request); an agent's note as `- <date> note <uid>: <title>: <first sentence>`, the longer alone
@@ -197,17 +203,18 @@ a document it cannot map stays search-only.
 - **The viewer's answer** with imported history, measured on 2026-10-15 on a copy of this PC's
   store with the resident viewer warm, 25 invented prompts in English and Japanese asked twice from
   a checkout of this repository, whose sessions map 61,761 imported documents. As the store stood,
-  with 20,666 of its 248,608 imported vectors made (the local model was still making the rest):
-  the viewer's answer p50 90 ms, p95 146 ms, max 263 ms (52, 90 and 125 ms on `main` 873b7c9),
-  and the whole prompt hook p50 103 ms, p95 119 ms (58 and 74 ms on `main`); 18 of the 50 prompts
-  got a block, with 46 imported lines. With the imported partition filled to its full size by
-  random vectors, for the time alone: the viewer's answer p50 167 ms, p95 239 ms, max 396 ms, and
-  the hook p50 180 ms, p95 232 ms. The viewer's answers and the hooks were timed in separate runs,
-  the answers from a client that opens a connection for each. The bit index's scan of the imported partition takes about 110
-  ms at that size whatever the repository filter (sqlite-vec reads every row of a partition), so a
-  repository to which no imported document and no note maps skips it. The wait's default of 1,000
-  ms stays: four times the 95th percentile at full size, and the imported history grows only by a
-  later import.
+  with 20,666 of its 248,608 imported vectors made (the local model was still making the rest): the
+  viewer's answer p50 90 ms, p95 146 ms, max 263 ms (52, 90 and 125 ms on `main` 873b7c9), and the
+  whole prompt hook p50 103 ms, p95 119 ms (58 and 74 ms on `main`); 18 of the 50 prompts got a
+  block, with 46 imported lines. With the imported partition filled to its full size by random
+  vectors, for the time alone: the viewer's answer p50 167 ms, p95 239 ms, max 396 ms, and the hook
+  p50 180 ms, p95 232 ms. The viewer's answers and the hooks were timed in separate runs, the
+  answers from a client that opens a connection for each. The bit index's scan of the imported
+  partition takes about 110 ms at that size whatever the repository filter (sqlite-vec reads every
+  row of a partition), so a repository to which no imported document and no note maps skips it.
+  This repository is searched by its projects; one of fewer sessions by its session list, which
+  costs about 1.2 ms a session. The wait's default of 1,000 ms stays: four times the 95th
+  percentile at full size, and the imported history grows only by a later import.
 
 ## Where it does not reach yet
 
@@ -279,10 +286,16 @@ The second slice:
 - Imported history reaches a prompt only through its session (#506's acceptance test): history
   imported from a project named `payments` reaches neither `a/payments` nor `b/payments` while
   oboete recorded none of its sessions; once one session started in each, each checkout gets that
-  session's documents only, and a session never recorded goes to neither, a v1 document filed
-  under the checkout's repository included; an agent's note reaches the repository it was saved in; a prompt, a forgotten document and one the session was shown
-  take no place; a store without `session_start` gets no imported history
+  session's documents only, and a session never recorded goes to neither, a v1 document filed under
+  the checkout's repository included; an agent's note reaches the repository it was saved in; a
+  prompt, a forgotten document and one the session was shown take no place; a store without
+  `session_start` gets no imported history
   (`search::b::tests::imported_history_reaches_a_prompt_only_through_its_session`).
+- 401 documents of a session never recorded, nearer the prompt than the repository's own one and
+  more than the KNN's 400 candidates, do not crowd it out
+  (`search::b::tests::a_repositorys_imported_history_is_not_crowded_out_by_other_sessions`); past
+  128 sessions the projects' scan still keeps to the mapping
+  (`a_repository_of_many_sessions_keeps_to_its_mapping`).
 - `session_start` keeps each session's first record as records come, an older one read later, a
   rewind and a forget, and fills a store from before it; each record's text keeps its own row in
   the raw index (`search::tests::session_start_keeps_where_each_session_started`).
@@ -292,5 +305,5 @@ The second slice:
 - In the hook: the viewer's imported hit joins the block with its line, the shown set with its
   kind, is not shown again nor corrected, and Grok's turn keeps it
   (`hook::tests::imported_history_the_viewer_finds_joins_the_block`).
-- Mutation check: 14 mutants of the mapping, the table's upkeep, the reader, the scan's skip and
-  the hook's kind, each failed by one of these tests.
+- Mutation check: 16 mutants of the mapping, the table's upkeep, the reader, the KNN's filter,
+  the scan's skip and the hook's kind, each failed by one of these tests.

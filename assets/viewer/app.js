@@ -705,7 +705,7 @@ const TEXT = {
   simple_inject_h: ['What agents are given', 'エージェントに渡す記憶'],
   simple_inject_desc: ['Share previous memories with your agent so you can continue without explaining them again.', '以前の記憶をエージェントに渡し、説明し直さずに続きを進められるようにします。'],
   simple_session: ['Memories at the start of a session', 'セッションの開始時に記憶を渡す'],
-  simple_prompt: ['Related decisions, cards, summaries and imported history with each prompt', '入力のたびに関連する決定・カード・要約・取り込み履歴を渡す'],
+  simple_prompt: ['Related decisions, cards, summaries, notes and imported history with each prompt', '入力のたびに関連する決定・カード・要約・メモ・取り込み履歴を渡す'],
   simple_never_h: ['Places never recorded', '記録しない場所'],
   simple_never_desc: ['New activity in these repositories and folders is not recorded, while existing memories remain.', '指定したリポジトリやフォルダーでの新しい作業を記録せず、以前の記憶はそのまま残します。'],
   simple_never_empty: ['No places are excluded from recording.', '記録しない場所は指定されていません。'],

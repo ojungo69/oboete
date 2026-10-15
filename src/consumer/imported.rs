@@ -26,9 +26,9 @@ pub fn schema(k: &Connection) -> Result<()> {
            body TEXT NOT NULL, UNIQUE (op_device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS imported_uid ON imported(uid);
-         -- #506: a repository's prompts read the documents of the sessions that started in it,
-         -- and the projects they are filed under from the index alone.
-         CREATE INDEX IF NOT EXISTS imported_session ON imported(session, repo);
+         -- #506: a repository's prompts read the sessions that started in it and the projects
+         -- their documents are filed under, prompts left out, from the index alone.
+         CREATE INDEX IF NOT EXISTS imported_session ON imported(session, repo, kind);
          CREATE VIRTUAL TABLE IF NOT EXISTS imported_fts
            USING fts5(text, tokenize='trigram', content='', contentless_delete=1);",
     )?;

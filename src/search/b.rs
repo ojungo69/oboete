@@ -480,19 +480,27 @@ pub fn prompt_near(
     let pending = claims::Pending::read(&raw, &k)?;
     let mut hits = Vec::new();
     let own = [repo.to_owned()];
-    let projects = imported_projects(&k, repo)?;
-    for (family, kind, repos) in [
-        ("c", "claim", &own[..]),
-        ("o", "card", &own[..]),
-        ("s", "summary", &own[..]),
-        // Imported history's knowledge partition, which holds no prompt (#506).
-        ("k", "imported", &projects[..]),
+    // #506: imported history inside the KNN by the sessions that map to `repo`, so the documents
+    // of a project's other sessions take none of its candidates (Codex on #547); past
+    // `SESSION_FILTER` of them, by the projects their documents are filed under. `maps` keeps
+    // each hit to the mapping either way.
+    let sessions = imported_sessions(&k, repo)?;
+    let imported = match sessions.len() > SESSION_FILTER {
+        true => ("repo", imported_projects(&k, repo)?),
+        false => ("session", sessions),
+    };
+    for (family, kind, filter) in [
+        ("c", "claim", ("repo", &own[..])),
+        ("o", "card", ("repo", &own[..])),
+        ("s", "summary", ("repo", &own[..])),
+        // Imported history's knowledge partition, which holds no prompt.
+        ("k", "imported", (imported.0, &imported.1[..])),
     ] {
-        // No repository would be every repository.
-        if repos.is_empty() {
+        // No value would be every document.
+        if filter.1.is_empty() {
             continue;
         }
-        for (key, cosine) in near.knn_scored(&k, family, repos, (None, None), None)? {
+        for (key, cosine) in near.knn_scored(&k, family, filter, (None, None), None)? {
             if cosine < crate::shortlist::MEANING {
                 break;
             }
@@ -552,28 +560,47 @@ fn shows_doc(
     })
 }
 
-/// #506: where `prompt_near` looks for `repo`'s imported history, as the vectors file it
-/// (`embed_phase::vec_repo`): `repo` when an agent's note was saved there, and the projects that
-/// hold a document of a session that started in `repo`. No project is read by its name. Empty
-/// when nothing maps, so the scan of every imported vector (about 110 ms at 250,000) is not paid
-/// for nothing, and before the consumers made the tables it reads.
-fn imported_projects(k: &Connection, repo: &str) -> Result<Vec<String>> {
+/// The most sessions `prompt_near` hands the bit index for a repository's imported history. It
+/// checks such a list row by row: on this PC's store (2026-10-15, 248,608 imported vectors) about
+/// 1.2 ms a session against about 110 ms for the scan by project, so a list this long costs half
+/// as much again as that scan. Past it, the projects' scan: the one repository of that store past
+/// it holds 99.7% of the documents filed under its projects.
+const SESSION_FILTER: usize = 128;
+
+/// #506: the sessions whose imported documents may reach `repo`'s prompts: each that started in
+/// `repo` (`session_start`) with a document that is no prompt, and `NOTE_SESSION` when an agent
+/// saved a note in `repo`. No project is read by its name. Empty when nothing maps, so the scan of
+/// the imported vectors is not paid for nothing, and before the consumers made the tables it
+/// reads.
+fn imported_sessions(k: &Connection, repo: &str) -> Result<Vec<String>> {
     use crate::consumer::manifest::exists;
     if !exists(k, "table", "imported")? || !exists(k, "table", "session_start")? {
         return Ok(Vec::new());
     }
-    let mut projects = Vec::new();
-    // An agent's notes, kept under `NOTE_SESSION`, which `imported(session, repo)` finds.
+    let mut sessions: Vec<String> = k
+        .prepare(
+            "SELECT DISTINCT i.session FROM session_start s JOIN imported i ON i.session = s.session
+             WHERE s.repo = ?1 AND i.kind <> 'prompt'",
+        )?
+        .query_map([repo], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     if k.query_row(
         "SELECT EXISTS(SELECT 1 FROM imported WHERE session = ?1 AND repo = ?2)",
         params![crate::raw::NOTE_SESSION, repo],
         |r| r.get(0),
     )? {
-        projects.push(repo.to_owned());
+        sessions.push(crate::raw::NOTE_SESSION.to_owned());
     }
+    Ok(sessions)
+}
+
+/// #506: the projects `repo`'s mapped imported documents are filed under, as the vectors file them
+/// (`embed_phase::vec_repo`), and `repo` itself, where its notes are.
+fn imported_projects(k: &Connection, repo: &str) -> Result<Vec<String>> {
+    let mut projects = vec![repo.to_owned()];
     let mut st = k.prepare(
         "SELECT DISTINCT i.repo FROM session_start s JOIN imported i ON i.session = s.session
-         WHERE s.repo = ?1",
+         WHERE s.repo = ?1 AND i.kind <> 'prompt'",
     )?;
     for project in st.query_map([repo], |r| r.get::<_, String>(0))? {
         let project = crate::embed_phase::vec_repo("k", &project?).to_owned();
@@ -1330,18 +1357,19 @@ impl Near {
         skip: Option<&str>,
         depth: usize,
     ) -> Result<Vec<String>> {
-        let mut scored = self.knn_scored(k, kind, repos, span, skip)?;
+        let mut scored = self.knn_scored(k, kind, ("repo", repos), span, skip)?;
         scored.truncate(depth);
         Ok(scored.into_iter().map(|(key, _)| key).collect())
     }
 
     /// The bit index's candidates of `kind` scored in fp32 against the query, the nearest first,
-    /// each with its cosine (the vectors are unit length).
+    /// each with its cosine (the vectors are unit length), kept to the documents whose `column`
+    /// (`repo` or `session`) is one of `values` (none for every one) inside the KNN.
     fn knn_scored(
         &self,
         k: &Connection,
         kind: &str,
-        repos: &[String],
+        (column, values): (&str, &[String]),
         span: (Option<i64>, Option<i64>),
         skip: Option<&str>,
     ) -> Result<Vec<(String, f32)>> {
@@ -1364,9 +1392,12 @@ impl Near {
         if kind != "i" {
             args.push(Value::Text(kind.to_owned()));
         }
-        if !repos.is_empty() {
-            clauses.push(format!("repo IN ({})", vec!["?"; repos.len()].join(", ")));
-            args.extend(repos.iter().cloned().map(Value::Text));
+        if !values.is_empty() {
+            clauses.push(format!(
+                "{column} IN ({})",
+                vec!["?"; values.len()].join(", ")
+            ));
+            args.extend(values.iter().cloned().map(Value::Text));
         }
         super::within(&mut clauses, &mut args, "ts", span);
         // A document with no session is indexed with '', which stays.
@@ -5405,6 +5436,95 @@ mod tests {
         k.execute_batch("DROP TABLE session_start").unwrap();
         assert_eq!(near(a, &none), Vec::<String>::new());
         assert_eq!(near(b, &none), Vec::<String>::new());
+    }
+
+    /// #506 (Codex on #547): a project's documents of other sessions take none of the bit index's
+    /// candidates from the sessions that map to the repository. 401 documents of a session oboete
+    /// never recorded sit nearer the prompt than the one document of a session that started in
+    /// `a/payments`, more than the KNN's `CANDIDATES`; the repository still gets its own.
+    #[test]
+    fn a_repositorys_imported_history_is_not_crowded_out_by_other_sessions() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let a = "example.com/a/payments";
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: String, session: &str, title: &str, body: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id,
+            kind: "decision".into(),
+            repo: crate::import::repo("payments"),
+            session: session.into(),
+            ts: 1_000,
+            title: title.into(),
+            body: body.into(),
+        };
+        let mut docs: Vec<_> = (0..=CANDIDATES)
+            .map(|i| doc(format!("x{i}"), "cm-lost", "", text))
+            .collect();
+        docs.push(doc(
+            "own".into(),
+            "cm-a",
+            "Gateway",
+            "Payments retry on a gateway timeout, twice.",
+        ));
+        s.raw.append_imports(docs).unwrap();
+        s.said("cm-a", a, 500, "Work on the payment gateway.");
+        s.run();
+        embedded_by(&s, &stub);
+        let near = prompt_near(s.home.path(), a, text, &Default::default()).unwrap();
+        let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, ["claude-mem:test:own"]);
+    }
+
+    /// #506: past `SESSION_FILTER` sessions the bit index is asked by the projects their documents
+    /// are filed under, and each hit is still kept to the mapping: near documents of a session
+    /// oboete never recorded, of one that started in another checkout, and v1's document filed
+    /// under the repository from a session never recorded take no place.
+    #[test]
+    fn a_repository_of_many_sessions_keeps_to_its_mapping() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let (a, b) = ("example.com/a/payments", "example.com/b/payments");
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: String, session: String, body: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id,
+            kind: "decision".into(),
+            repo: crate::import::repo("payments"),
+            session,
+            ts: 1_000,
+            title: String::new(),
+            body: body.into(),
+        };
+        let mut docs: Vec<_> = (0..=SESSION_FILTER)
+            .map(|i| {
+                doc(
+                    format!("far{i}"),
+                    format!("cm-{i}"),
+                    "Lexer tokens are cached.",
+                )
+            })
+            .collect();
+        docs.push(doc("own".into(), "cm-0".into(), text));
+        docs.push(doc("lost".into(), "cm-lost".into(), text));
+        docs.push(doc("elsewhere".into(), "cm-b".into(), text));
+        docs.push(crate::raw::ImportDoc {
+            source: "oboete-v1".into(),
+            repo: a.into(),
+            ..doc("filed".into(), "v1-lost".into(), text)
+        });
+        s.raw.append_imports(docs).unwrap();
+        for i in 0..=SESSION_FILTER {
+            s.said(&format!("cm-{i}"), a, 500, "Work on the payment gateway.");
+        }
+        s.said("cm-b", b, 500, "Work on the payment gateway.");
+        s.run();
+        embedded_by(&s, &stub);
+        let near = prompt_near(s.home.path(), a, text, &Default::default()).unwrap();
+        let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, ["claude-mem:test:own"]);
     }
 
     /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no
