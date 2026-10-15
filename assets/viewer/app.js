@@ -5443,7 +5443,8 @@ function drawSimpleSettings(panel, f) {
   confirm.addEventListener('click', () => saveMask(confirm, false));
   const cancel = el('button', 'quiet', t('simple_cancel'));
   cancel.type = 'button'; cancel.addEventListener('click', () => { f.simpleMaskingOff = false; drawSettings(); simpleFocus('redaction.enabled'); });
-  panel.append(el('p', 'lead', t('simple_intro')),
+  // `append` writes an absent part as the text "null": leave it out, as the detailed page does.
+  panel.append(...present([el('p', 'lead', t('simple_intro')),
     !ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
     simpleBlock('ai', curate, el('ol', 'simple-providers', ...chain.map((row, i) => simpleProviderRow(f, row, i))), simpleCatalog(f)),
     simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
@@ -5452,7 +5453,7 @@ function drawSimpleSettings(panel, f) {
     simpleBlock('inject', ...inject), captureSection(f, true),
     simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
       el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
-    simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents())));
+    simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents()))]));
 }
 
 function drawSettings() {
