@@ -2449,14 +2449,23 @@ extra_rules = [
     fn a_secret_assignment_is_masked_however_plain_its_value() {
         let rules = Rules::default();
         let low = format!("{}{}", "a3a3b1b1c2c2a3a3", "b1b1c2c2a3a3b1b1"); // split: scanners
-        for text in [
-            format!("BOT_CHANNEL_SECRET={low}"),
-            format!("17:BOT_CHANNEL_SECRET={low}\n18:BOT_ACCOUNT_ID=@123abcde"),
-            format!("{{\"client_secret\": \"{low}\"}}"),
-            format!("export DB_PASSWORD='{low}'"),
+        // A passphrase of letters only, and a default that is in use (the security review of #543):
+        // generic-api-key's allowlists pass both over. split: scanners
+        let phrase = "Correct".to_owned() + "HorseBatteryStaple";
+        let default = "change".to_owned() + "me-in-production";
+        for (text, value) in [
+            (format!("BOT_CHANNEL_SECRET={low}"), &low),
+            (
+                format!("17:BOT_CHANNEL_SECRET={low}\n18:BOT_ACCOUNT_ID=@123abcde"),
+                &low,
+            ),
+            (format!("{{\"client_secret\": \"{low}\"}}"), &low),
+            (format!("export DB_PASSWORD='{low}'"), &low),
+            (format!("DB_PASSWORD={phrase}"), &phrase),
+            (format!("POSTGRES_PASSWORD={default}"), &default),
         ] {
             let (masked, _) = scan(&text, &rules);
-            assert!(!masked.contains(&low), "{masked}");
+            assert!(!masked.contains(value.as_str()), "{masked}");
         }
         // The value whole, a `:` in it too (CodeRabbit on #543).
         let tail = format!("{}{}", ":b1b1c2c2", "a3a3b1b1"); // split: scanners

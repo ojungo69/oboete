@@ -58,11 +58,11 @@ description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_
 regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*["']?([^\s"'`<>;,(){}\[\]$\\]{16,})'''
 keywords = ["secret", "token", "passw", "key", "credential"]
 entropy = 2.0
-# As generic-api-key's own: a value of letters only names something (process.env.SECRET), and a
-# placeholder says it is one.
+# Narrower than generic-api-key's own: a dotted reference names a value (process.env.SECRET), and
+# a placeholder word says it is one. A value of letters only is masked: a passphrase can be one.
 [[rules.allowlists]]
-regexes = ['''^[a-zA-Z_.-]+$''']
-stopwords = ["example", "sample", "placeholder", "dummy", "changeme", "xxxx"]
+regexes = ['''^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$''']
+stopwords = ["example", "sample", "placeholder", "dummy", "xxxx"]
 
 [[rules]]
 id = "uri-userinfo-password"
