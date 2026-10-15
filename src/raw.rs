@@ -361,6 +361,8 @@ pub struct ImportDoc {
 
 /// The source of a note an agent saved (`save_memory`): its uid is `oboete-note:<id>`.
 pub const NOTE_SOURCE: &str = "oboete-note";
+/// The session a note is kept under: none of an agent's, so no session start maps it (#506).
+pub const NOTE_SESSION: &str = "note";
 
 /// What `append_note` did.
 #[derive(Debug, PartialEq)]

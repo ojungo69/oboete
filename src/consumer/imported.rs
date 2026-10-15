@@ -1,7 +1,7 @@
 //! Milestone 4 Task 3 (D5): the imported documents consumer. It reads the op log of every device
 //! that has ops and keeps each `import` op's document in knowledge.db, keyed by the op that brought
 //! it, with a trigram index over its title and body. Curation reads records, never these ops, and
-//! nothing injects them.
+//! only the per-prompt block injects them (#506, `prompt_line`).
 
 use crate::raw::{ImportDoc, OpKind, Raw};
 use crate::worker::Consumer;
@@ -26,6 +26,9 @@ pub fn schema(k: &Connection) -> Result<()> {
            body TEXT NOT NULL, UNIQUE (op_device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS imported_uid ON imported(uid);
+         -- #506: a repository's prompts read the documents of the sessions that started in it,
+         -- and the projects they are filed under from the index alone.
+         CREATE INDEX IF NOT EXISTS imported_session ON imported(session, repo);
          CREATE VIRTUAL TABLE IF NOT EXISTS imported_fts
            USING fts5(text, tokenize='trigram', content='', contentless_delete=1);",
     )?;
@@ -100,6 +103,74 @@ impl Consumer for Imported {
         }
         Ok(())
     }
+}
+
+/// #506 (docs/prompt-context.md, the second slice): whether imported document `uid` belongs to
+/// `repo`'s prompts, by its newest row: a document of a session that started in `repo`
+/// (`session_start`, oboete's first record of it), or an agent's note saved in `repo`, which has no
+/// session of an agent's. Never by a project's name, which two checkouts may share, nor by the
+/// repository a document is filed under (v1's documents are, and map through their sessions).
+pub(crate) fn maps(k: &Connection, uid: &str, repo: &str) -> Result<bool> {
+    Ok(k.prepare_cached(
+        "SELECT 1 FROM imported i
+         WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = ?1)
+           AND (i.session = ?3 AND i.repo = ?2 OR EXISTS (
+             SELECT 1 FROM session_start s WHERE s.session = i.session AND s.repo = ?2))",
+    )?
+    .exists(params![uid, repo, crate::raw::NOTE_SESSION])?)
+}
+
+/// #506 (spec 4.5, 4.12): imported document `uid` as a prompt's block names it, by its newest
+/// row, when it may take a place there: its time, what it is (`note` for an agent's note, else
+/// `imported <kind> (status unknown)`) and its words, its title and its body's first sentence (the
+/// longer alone when one starts with the other, as a note saved without a title is titled with its
+/// text's start, `mcp::untitled`). None for a prompt (a prompt's text is never injected, 4.6), a
+/// forgotten document (milestone 5 D5), or one with no words.
+pub(crate) fn prompt_line(
+    k: &Connection,
+    raw: &Raw,
+    uid: &str,
+) -> Result<Option<(i64, String, String)>> {
+    use rusqlite::OptionalExtension;
+    let row = k
+        .query_row(
+            "SELECT source, kind, ts, title, body FROM imported WHERE uid = ?1
+             ORDER BY rowid DESC LIMIT 1",
+            [uid],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((source, kind, ts, title, body)) = row else {
+        return Ok(None);
+    };
+    if kind == "prompt" || raw.forgotten(uid)? {
+        return Ok(None);
+    }
+    let (title, first) = (title.trim(), crate::cards::first_sentence(body.trim()));
+    let stem = title.trim_end_matches("...");
+    let words = if first.starts_with(stem) {
+        first
+    } else if stem.starts_with(&first) {
+        title.to_owned()
+    } else {
+        format!("{title}: {first}")
+    };
+    if words.trim().is_empty() {
+        return Ok(None);
+    }
+    let what = match source == crate::raw::NOTE_SOURCE {
+        true => "note".to_owned(),
+        false => format!("imported {kind} (status unknown)"),
+    };
+    Ok(Some((ts, what, words)))
 }
 
 #[cfg(test)]
@@ -189,5 +260,69 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    /// #506: how a prompt's block names an imported document, by its newest row: an observation
+    /// by its title and its body's first sentence, labelled imported with its status unknown; a
+    /// summary by its body's first sentence (its request); a note saved without a title by its
+    /// text's start once. A prompt, and a forgotten document, take no place.
+    #[test]
+    fn a_prompt_names_an_imported_document_by_its_newest_row() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let kind = |id: &str, kind: &str, title: &str, body: &str| ImportDoc {
+            kind: kind.into(),
+            ..doc(id, title, body)
+        };
+        let untitled = "Use tabs in Makefiles. Make needs them.";
+        raw.append_imports(vec![
+            doc("o1", "Old title", "Old text."),
+            doc(
+                "o1",
+                "Gateway retries",
+                "Payments retry on a timeout.\n- three times",
+            ),
+            kind(
+                "s1",
+                "summary",
+                "",
+                "Request: Fix the retry.\nLearned: It was the clock.",
+            ),
+            kind("p1", "prompt", "", "Why does the payment fail?"),
+            ImportDoc {
+                source: crate::raw::NOTE_SOURCE.into(),
+                ..kind("n1", "note", untitled, untitled)
+            },
+            doc("o2", "Forgotten", "Gone."),
+        ])
+        .unwrap();
+        raw.append_ops(&[(
+            OpKind::Forget,
+            serde_json::json!({"uid": "claude-mem:abc:o2"}),
+        )])
+        .unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        Imported.step(&raw, &k, &device, 0).unwrap();
+        let line = |uid: &str| prompt_line(&k, &raw, uid).unwrap();
+        let at = |what: &str, words: &str| Some((1_000, what.to_owned(), words.to_owned()));
+        assert_eq!(
+            line("claude-mem:abc:o1"),
+            at(
+                "imported decision (status unknown)",
+                "Gateway retries: Payments retry on a timeout."
+            )
+        );
+        assert_eq!(
+            line("claude-mem:abc:s1"),
+            at(
+                "imported summary (status unknown)",
+                "Request: Fix the retry."
+            )
+        );
+        assert_eq!(line("claude-mem:abc:n1"), at("note", untitled));
+        assert_eq!(line("claude-mem:abc:p1"), None);
+        assert_eq!(line("claude-mem:abc:o2"), None);
+        assert_eq!(line("claude-mem:abc:none"), None);
     }
 }

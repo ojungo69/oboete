@@ -398,12 +398,12 @@ pub fn query_with(home: &Path, q: &Query, vector: Option<&[f32]>) -> Result<Answ
     search(home, q, Ask::Given(vector))
 }
 
-/// One document the meaning side found near a prompt (G23): a claim's uid, or a card's or a
-/// session summary's ID as `get` takes it, with its cosine to the prompt.
+/// One document the meaning side found near a prompt (G23): a claim's uid, a card's or a session
+/// summary's ID as `get` takes it, or an imported document's uid, with its cosine to the prompt.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PromptHit {
     pub key: String,
-    /// `claim`, `card` or `summary`.
+    /// `claim`, `card`, `summary` or `imported`.
     pub kind: String,
     pub cosine: f32,
 }
@@ -420,10 +420,11 @@ pub struct PromptNear {
     pub hits: Vec<PromptHit>,
 }
 
-/// G23 (docs/prompt-context.md, decision 44): the claims, cards and session summaries of `repo`
-/// whose meaning is near `text`, at `shortlist::MEANING` or above, the nearest first; claims only
-/// under delivery's rule (`claims::DECIDED_WHERE`, and no link ending them: `delivered_one`),
-/// before anything is kept. What the prompt hook
+/// G23 (docs/prompt-context.md, decision 44): the claims, cards, session summaries and imported
+/// history of `repo` whose meaning is near `text`, at `shortlist::MEANING` or above, the nearest
+/// first; claims only under delivery's rule (`claims::DECIDED_WHERE`, and no link ending them:
+/// `delivered_one`), and imported documents only through the mapping of #506
+/// (`consumer::imported::maps`), before anything is kept. What the prompt hook
 /// asks the resident viewer: the reader's vector (D14), the local model loaded on the first prompt
 /// and kept, or Workers AI through the gate, within `QUERY_TIMEOUT`; an excluded repository's
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
@@ -478,9 +479,20 @@ pub fn prompt_near(
     // (`shortlist::placed`), so here too.
     let pending = claims::Pending::read(&raw, &k)?;
     let mut hits = Vec::new();
-    let repos = [repo.to_owned()];
-    for (family, kind) in [("c", "claim"), ("o", "card"), ("s", "summary")] {
-        for (key, cosine) in near.knn_scored(&k, family, &repos, (None, None), None)? {
+    let own = [repo.to_owned()];
+    let projects = imported_projects(&k, repo)?;
+    for (family, kind, repos) in [
+        ("c", "claim", &own[..]),
+        ("o", "card", &own[..]),
+        ("s", "summary", &own[..]),
+        // Imported history's knowledge partition, which holds no prompt (#506).
+        ("k", "imported", &projects[..]),
+    ] {
+        // No repository would be every repository.
+        if repos.is_empty() {
+            continue;
+        }
+        for (key, cosine) in near.knn_scored(&k, family, repos, (None, None), None)? {
             if cosine < crate::shortlist::MEANING {
                 break;
             }
@@ -493,6 +505,11 @@ pub fn prompt_near(
                         && decided.exists(params![key, repo])?
                         && claims::delivered_one(&k, &key)?.is_some()
                         && !pending.touches(&k, &key)?
+                }
+                "k" => {
+                    !shown.contains(&key)
+                        && crate::consumer::imported::maps(&k, &key, repo)?
+                        && crate::consumer::imported::prompt_line(&k, &raw, &key)?.is_some()
                 }
                 _ => shows_doc(&k, &raw, family, &key, &rules)?
                     .is_some_and(|id| !shown.contains(&id)),
@@ -533,6 +550,38 @@ fn shows_doc(
             .filter(|s| !s.row.trim().is_empty())
             .map(|s| s.id(local)),
     })
+}
+
+/// #506: where `prompt_near` looks for `repo`'s imported history, as the vectors file it
+/// (`embed_phase::vec_repo`): `repo` when an agent's note was saved there, and the projects that
+/// hold a document of a session that started in `repo`. No project is read by its name. Empty
+/// when nothing maps, so the scan of every imported vector (about 110 ms at 250,000) is not paid
+/// for nothing, and before the consumers made the tables it reads.
+fn imported_projects(k: &Connection, repo: &str) -> Result<Vec<String>> {
+    use crate::consumer::manifest::exists;
+    if !exists(k, "table", "imported")? || !exists(k, "table", "session_start")? {
+        return Ok(Vec::new());
+    }
+    let mut projects = Vec::new();
+    // An agent's notes, kept under `NOTE_SESSION`, which `imported(session, repo)` finds.
+    if k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM imported WHERE session = ?1 AND repo = ?2)",
+        params![crate::raw::NOTE_SESSION, repo],
+        |r| r.get(0),
+    )? {
+        projects.push(repo.to_owned());
+    }
+    let mut st = k.prepare(
+        "SELECT DISTINCT i.repo FROM session_start s JOIN imported i ON i.session = s.session
+         WHERE s.repo = ?1",
+    )?;
+    for project in st.query_map([repo], |r| r.get::<_, String>(0))? {
+        let project = crate::embed_phase::vec_repo("k", &project?).to_owned();
+        if !projects.contains(&project) {
+            projects.push(project);
+        }
+    }
+    Ok(projects)
 }
 
 /// The prompt hook's full-text side over cards and session summaries (G23): the IDs of `repo`'s
@@ -5266,6 +5315,96 @@ mod tests {
         )
         .unwrap();
         assert!(!near.hits.iter().any(|h| h.key == decided));
+    }
+
+    /// #506 (acceptance test): imported history reaches a prompt only through an explicit mapping,
+    /// never by its project's name. History imported from a project named `payments`, and two
+    /// checkouts `a/payments` and `b/payments`: while oboete recorded none of its sessions, neither
+    /// gets it; once oboete recorded a session starting in `a/payments`, only `a/payments` gets
+    /// that session's documents, and `b/payments` those of the session that started there; a
+    /// session oboete never recorded goes to neither, a v1 document filed under the checkout's
+    /// repository included. An agent's note reaches the repository it was saved in. A prompt, a forgotten document and one the session was shown take no place, and a
+    /// store whose records were not read since the mapping came gets no imported history.
+    #[test]
+    fn imported_history_reaches_a_prompt_only_through_its_session() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let (a, b) = ("example.com/a/payments", "example.com/b/payments");
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: &str, kind: &str, session: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id.into(),
+            kind: kind.into(),
+            repo: crate::import::repo("payments"),
+            session: session.into(),
+            ts: 1_000,
+            title: "Gateway retries".into(),
+            body: text.into(),
+        };
+        let note = crate::raw::ImportDoc {
+            uid: format!("{}:n1", crate::raw::NOTE_SOURCE),
+            source: crate::raw::NOTE_SOURCE.into(),
+            repo: b.into(),
+            ..doc("n1", "note", crate::raw::NOTE_SESSION)
+        };
+        // v1's documents are filed under a repository: they too map through their sessions.
+        let v1 = |id: &str, session: &str| crate::raw::ImportDoc {
+            source: "oboete-v1".into(),
+            repo: a.into(),
+            ..doc(id, "decision", session)
+        };
+        s.raw
+            .append_imports(vec![
+                doc("o1", "decision", "cm-a"),
+                doc("p1", "prompt", "cm-a"),
+                doc("o2", "decision", "cm-a"),
+                doc("o3", "decision", "cm-b"),
+                doc("o4", "decision", "cm-lost"),
+                v1("v1", "cm-a"),
+                v1("v2", "v1-lost"),
+                note.clone(),
+            ])
+            .unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let none = Default::default();
+        let home = s.home.path().to_owned();
+        let near = |repo: &str, shown: &std::collections::HashSet<String>| {
+            let near = prompt_near(&home, repo, text, shown).unwrap();
+            assert_eq!(near.vector, Vector::Used);
+            let mut keys: Vec<String> = near
+                .hits
+                .into_iter()
+                .map(|h| {
+                    assert_eq!(h.kind, "imported");
+                    h.key
+                })
+                .collect();
+            keys.sort();
+            keys
+        };
+        let uid = |id: &str| format!("claude-mem:test:{id}");
+        assert_eq!(near(a, &none), Vec::<String>::new());
+        assert_eq!(near(b, &none), std::slice::from_ref(&note.uid));
+        // oboete records two of its sessions, one starting in each checkout.
+        s.said("cm-a", a, 500, "Work on the payment gateway.");
+        s.said("cm-b", b, 500, "Work on the payment gateway.");
+        s.raw
+            .append_ops(&[(
+                crate::raw::OpKind::Forget,
+                serde_json::json!({"uid": uid("o2")}),
+            )])
+            .unwrap();
+        s.run();
+        assert_eq!(near(a, &none), [uid("o1"), uid("v1")]);
+        assert_eq!(near(b, &none), [uid("o3"), note.uid.clone()]);
+        let shown = [uid("o1"), uid("v1")].into_iter().collect();
+        assert_eq!(near(a, &shown), Vec::<String>::new());
+        let k = crate::knowledge::open(&home).unwrap();
+        k.execute_batch("DROP TABLE session_start").unwrap();
+        assert_eq!(near(a, &none), Vec::<String>::new());
+        assert_eq!(near(b, &none), Vec::<String>::new());
     }
 
     /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no

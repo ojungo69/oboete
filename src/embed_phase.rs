@@ -1963,7 +1963,7 @@ fn gated(r: &Read, rules: &crate::redact::Rules) -> String {
 
 /// The repository the index files a document under: an import's claude-mem project, its worktree
 /// sessions' (`claude-mem:<name>/…`) included, so a search of one repository finds them all.
-fn vec_repo<'a>(kind: &str, repo: &'a str) -> &'a str {
+pub(crate) fn vec_repo<'a>(kind: &str, repo: &'a str) -> &'a str {
     match (kind, repo.strip_prefix("claude-mem:")) {
         ("k" | "p", Some(rest)) => rest
             .find('/')

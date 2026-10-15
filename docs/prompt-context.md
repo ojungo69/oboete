@@ -48,10 +48,11 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
 3. **What.** The repository's delivered claims, current cards, session summaries and imported
    history (decision 44's second answer), ranked as search ranks them: meaning and words fused
    (reciprocal rank fusion, spec 4.10; nDCG@10 0.545 against claude-mem's 0.244 on the owner's
-   questions, decision 36). At most 5 (claude-mem's number), within `per_prompt_chars`, each as
-   one dated line: a claim as now, a card by its title and the first sentence of its narrative, a
-   summary by its request, an imported record labelled imported with its status unknown. Nothing already
-   shown in the session (the shown set, as now). The prompt's own text is never injected.
+   questions, decision 36); imported history by meaning only, as the second slice found (below). At
+   most 5 (claude-mem's number), within `per_prompt_chars`, each as one dated line: a claim as now,
+   a card by its title and the first sentence of its narrative, a summary by its request, an
+   imported record labelled imported with its status unknown. Nothing already shown in the session
+   (the shown set, as now). The prompt's own text is never injected.
 4. **Below the threshold, nothing.** Each candidate passes on either side: its words' share of
    the prompt at today's 0.53, or its meaning's cosine to the prompt at `T`. Unlike claude-mem, a
    prompt nothing bears on gets nothing: text that does not bear on the prompt costs the agent's
@@ -62,19 +63,20 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
    The one evaluation sets both thresholds, with the false-premise questions, by the same line.
    `[inject] per_prompt` stays off by default until then (4.6); the owner turns it on, as the
    owner has claude-mem's on.
-5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the hook's wait
-   for the viewer, counted from the hook's read fence, not from the request, so the time the
-   words side takes counts against it. The hook builds the words side (as now but over the same
-   kinds: the full-text index of claims, cards, summaries and imports, with the same 0.53 cut)
-   while it waits for the viewer, so a late or missing answer leaves a block that is already
-   built. The hook's own reads are local and not cut at the deadline, as the prompt point's reads
-   were not before; they are measured (As built). The default comes from measurement, before the
-   code merges: the prompt point's time (the fence, the viewer's answer with its query vector
-   within 1.2 s, the search, the lines) on this PC's WSL with the local model, set so that its
-   95th percentile fits, and not above claude-mem's 2 s for Codex unless the measurement says so.
-   The iMac's measurement waits for resident mode there (#506). No resident viewer, no answer
-   by the deadline, or an error: the words side's block. A meaning answer that comes late is lost
-   for that prompt; this is the known cost.
+5. **One deadline for the prompt point.** `[inject] per_prompt_wait_ms` bounds the hook's wait for
+   the viewer, counted from the hook's read fence, not from the request, so the time the words side
+   takes counts against it. The hook builds the words side (as now but over the same kinds: the
+   full-text index of claims, cards, summaries and imports, with the same 0.53 cut; imports left
+   out as built, the second slice) while it waits for the viewer, so a late or missing answer
+   leaves a block that is already built. The hook's own reads are local and not cut at the
+   deadline, as the prompt point's reads were not before; they are measured (As built). The default
+   comes from measurement, before the code merges: the prompt point's time (the fence, the viewer's
+   answer with its query vector within 1.2 s, the search, the lines) on this PC's WSL with the
+   local model, set so that its 95th percentile fits, and not above claude-mem's 2 s for Codex
+   unless the measurement says so. The iMac's measurement waits for resident mode there, and oboete
+   goes on the iMac when agents are used there (decision 47). No resident viewer, no answer by the
+   deadline, or an error: the words side's block. A meaning answer that comes late is lost for that
+   prompt; this is the known cost.
 6. **Fail-open.** Nothing on this path waits for the viewer past the deadline, and it writes no
    memory and no index: the answer is read, gated (`outbound`, as every block), fenced and shown.
    What it writes is what a search and a prompt point write now: a query sent to a provider is
@@ -84,9 +86,9 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
 
 ## As built (the first slice)
 
-- **What.** Claims, cards and session summaries. Imported history waits for the next slice: #506
-  wants it only through an explicit mapping of the import's projects to repositories, and the
-  import reads a project by its name (docs/claude-mem-import.md I5).
+- **What.** Claims, cards and session summaries. Imported history came with the second slice
+  (below): #506 wants it only through an explicit mapping of the import's documents to
+  repositories, and the import reads a project by its name (docs/claude-mem-import.md I5).
 - **What is sent.** Only a prompt this call recorded with its text (a repository never recorded,
   or `store_prompts = false`, keeps its prompt), of 20 characters or more, and only to a viewer
   that holds its lock and says it listens on the configured port (`view::resident_answering`).
@@ -139,11 +141,81 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   first prompt after such a pause takes words alone and starts the load, and the next ones take
   meaning. Keeping the model loaded would hold about 2.5 GB at all times.
 
+## As built (the second slice: imported history, #506)
+
+#506 asks that an imported document reach a checkout's block only through an explicit mapping to
+the checkout's repository, never because the checkout's last path component is the project's name;
+a document it cannot map stays search-only.
+
+- **The mapping is the session.** The import keeps each document's session, the agent's own id
+  (`content_session_id` for claude-mem: `import::Sink::put`). A document maps to the repository
+  its session started in: the repository of oboete's first record of that session (the earliest by
+  time, then device and seq, with a repository), whatever recorded it, a hook or an import of
+  transcripts or of v1. A session oboete never recorded maps nowhere, and its documents stay
+  search-only. No project name is read, so `a/payments` and `b/payments` each get the history of
+  the sessions that started in them, and a project's sessions that started elsewhere go where they
+  started. v1's documents, which the migration files under a repository, map through their
+  sessions too. An agent's note (spec 4.12), which has no session of an agent's, maps to the
+  repository it was saved in. Measured on this PC's store on 2026-10-15: of its 248,608 imported
+  documents that are not prompts, 153,544 (62%) have a session oboete recorded (9,067 of v1's
+  9,069), and every recorded session's first record has a repository.
+- **Where it is kept.** knowledge.db's `session_start(session, repo, ts, device, seq)`: the Fts
+  consumer, which keeps `raw_docs` (a row per live record, with its session and repository), keeps
+  each session's first row there as it reads records, an older record read later included, and
+  works it out again from `raw_docs` for a session whose first record a forget or a rewind takes
+  away. A store from before this slice fills it from `raw_docs` once, with the indexes
+  `raw_docs(session, ts, device, seq)` and `imported(session, repo)`, made by the first process
+  that opens the store with this version: on this PC's store (575,931 records, 5,787 sessions) the
+  fill takes 0.5 s and the indexes 2.3 s and 3.5 s. Until the consumers have made the table, a
+  prompt gets no imported history.
+- **Which documents.** Imported observations and session summaries, and agents' notes; not
+  imported prompts (a prompt's text is never injected, 4.6, and claude-mem's per-prompt search
+  reads observations only), and nothing forgotten.
+- **By meaning only.** The viewer (`search::b::prompt_near`) searches the imported vectors'
+  knowledge partition (`k`, which holds no prompt) filed under `repo` itself and under the
+  projects that hold a document of a session that started in `repo` (`claude-mem:<project>`; 8 ms
+  to list on this PC's store), and keeps a hit at `T` only when its newest row maps to `repo`
+  (`consumer::imported::maps`) and its reader shows it (`consumer::imported::prompt_line`). The
+  hook's words side does not read imported history: on this PC's store an English prompt's
+  trigrams match nearly every imported document (about 250,000 of 263,207), and ranking them took
+  0.6 to 1.0 s for prompts of 48 to 141 characters, which the prompt hook cannot spend; keeping
+  only the prompt's rarest trigrams, one of which every document over the threshold must hold,
+  still left 40,000 to 50,000 candidates to read. claude-mem's own per-prompt search is by meaning
+  only. So imported history and notes come only while the resident viewer answers with a vector.
+- **The line**, labelled imported with its status unknown (spec 4.5): `- <date> imported <kind>
+  (status unknown) <uid>: <title>: <first sentence>`, a summary by its body's first sentence (its
+  request); an agent's note as `- <date> note <uid>: <title>: <first sentence>`, the longer alone
+  when one starts with the other (a note saved without a title is titled with its text's start).
+  The uid is the one `get` takes. It joins the shown set with the kind `imported` (the correction
+  pass skips it, as a card) and Grok's kept picks with that kind. The block's lead names notes and
+  imported history and says imported history's status is unknown.
+- **Order.** Claims first, as before; then cards, summaries and imported documents in the same
+  fused lists, 5 places in all.
+- **Search is unchanged.** Its scope by the project's name (`import::imported_repos`,
+  docs/claude-mem-import.md I5) stays: search and timeline find a repository's imported documents
+  by name, and only the per-prompt block asks for the session.
+- **The viewer's answer** with imported history, measured on 2026-10-15 on a copy of this PC's
+  store with the resident viewer warm, 25 invented prompts in English and Japanese asked twice from
+  a checkout of this repository, whose sessions map 61,761 imported documents. As the store stood,
+  with 20,666 of its 248,608 imported vectors made (the local model was still making the rest):
+  the viewer's answer p50 90 ms, p95 146 ms, max 263 ms (52, 90 and 125 ms on `main` 873b7c9),
+  and the whole prompt hook p50 103 ms, p95 119 ms (58 and 74 ms on `main`); 18 of the 50 prompts
+  got a block, with 46 imported lines. With the imported partition filled to its full size by
+  random vectors, for the time alone: the viewer's answer p50 167 ms, p95 239 ms, max 396 ms, and
+  the hook p50 180 ms, p95 232 ms. The viewer's answers and the hooks were timed in separate runs,
+  the answers from a client that opens a connection for each. The bit index's scan of the imported partition takes about 110
+  ms at that size whatever the repository filter (sqlite-vec reads every row of a partition), so a
+  repository to which no imported document and no note maps skips it. The wait's default of 1,000
+  ms stays: four times the 95th percentile at full size, and the imported history grows only by a
+  later import.
+
 ## Where it does not reach yet
 
 - The resident worker and viewer are Linux only for now (`view::resident_home`). On the iMac the
   block is the words side alone until resident mode is built there; doctor says so.
-- Imported history, until the import maps its projects to repositories explicitly (#506).
+- Imported history whose session oboete never recorded (#506): search finds it, the block does
+  not.
+- Imported history and notes by words (the second slice): the block takes them by meaning only.
 - A Workers AI embedding is made for each prompt that asks (the iMac, once resident): it counts
   in the embedding budget and its daily cap, as search queries do, and doctor shows the count.
 
@@ -160,6 +232,8 @@ With this note: decision 44, and pointers to it in 4.1, 4.5 and 4.6. With the co
 prompt hook's steps), 4.6 (the two-sided threshold and `T`'s provisional calibration), the
 `[inject] per_prompt_wait_ms` key, the parity table (row 31: per-prompt hints), and the settings
 page's injection section (the wait, and which side answered last).
+With the second slice: 4.2, 4.5, 4.6 and 4.12 say how imported history and notes reach the
+block, and by meaning only.
 
 ## Tests
 
@@ -199,3 +273,24 @@ resident viewer keeps its token (`keyfile::private_fs`, #281):
   (`settings::tests::inject_settings_check_ranges_and_save_alone`).
 - The measurements above: `T` from the no-answer questions; the viewer's answer and the prompt
   hook's time on this PC's WSL.
+
+The second slice:
+
+- Imported history reaches a prompt only through its session (#506's acceptance test): history
+  imported from a project named `payments` reaches neither `a/payments` nor `b/payments` while
+  oboete recorded none of its sessions; once one session started in each, each checkout gets that
+  session's documents only, and a session never recorded goes to neither, a v1 document filed
+  under the checkout's repository included; an agent's note reaches the repository it was saved in; a prompt, a forgotten document and one the session was shown
+  take no place; a store without `session_start` gets no imported history
+  (`search::b::tests::imported_history_reaches_a_prompt_only_through_its_session`).
+- `session_start` keeps each session's first record as records come, an older one read later, a
+  rewind and a forget, and fills a store from before it; each record's text keeps its own row in
+  the raw index (`search::tests::session_start_keeps_where_each_session_started`).
+- The line: an observation by its title and first sentence, a summary by its request, a note
+  saved without a title once, none for a prompt or a forgotten document
+  (`consumer::imported::tests::a_prompt_names_an_imported_document_by_its_newest_row`).
+- In the hook: the viewer's imported hit joins the block with its line, the shown set with its
+  kind, is not shown again nor corrected, and Grok's turn keeps it
+  (`hook::tests::imported_history_the_viewer_finds_joins_the_block`).
+- Mutation check: 14 mutants of the mapping, the table's upkeep, the reader, the scan's skip and
+  the hook's kind, each failed by one of these tests.
