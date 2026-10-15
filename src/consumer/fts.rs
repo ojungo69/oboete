@@ -26,7 +26,49 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            USING fts5(text, tokenize='trigram', content='', contentless_delete=1);
          -- The repositories each session touched: derived, so a rewind cannot leave one behind.
          CREATE VIEW IF NOT EXISTS session_repos AS
-           SELECT DISTINCT session, repo FROM raw_docs WHERE repo IS NOT NULL;",
+           SELECT DISTINCT session, repo FROM raw_docs WHERE repo IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS raw_docs_session ON raw_docs(session, ts, device, seq);",
+    )?;
+    if !crate::consumer::manifest::exists(k, "table", "session_start")? {
+        // #506: where each session started, which maps an imported document to the repository
+        // whose prompts it may reach (docs/prompt-context.md, the second slice). A store that has
+        // read records already fills it from them, in the same transaction as the table; another
+        // process may have filled it since the check, so a row it has stays.
+        let tx = if k.is_autocommit() {
+            Some(k.unchecked_transaction()?)
+        } else {
+            None
+        };
+        k.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_start(
+               session TEXT PRIMARY KEY, repo TEXT NOT NULL, ts INTEGER NOT NULL,
+               device TEXT NOT NULL, seq INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS session_start_repo ON session_start(repo);
+             INSERT OR IGNORE INTO session_start(session, repo, ts, device, seq)
+               SELECT session, repo, ts, device, seq FROM (
+                 SELECT session, repo, ts, device, seq, row_number() OVER (
+                   PARTITION BY session ORDER BY ts, device, seq
+                 ) AS n
+                 FROM raw_docs WHERE session IS NOT NULL AND repo IS NOT NULL
+               ) WHERE n = 1;",
+        )?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+
+/// #506: `session`'s first row with a repository, by time, then device and seq, kept in
+/// `session_start`, after a row of it came or went.
+fn started(k: &Connection, session: &str) -> Result<()> {
+    k.execute("DELETE FROM session_start WHERE session = ?1", [session])?;
+    k.execute(
+        "INSERT INTO session_start(session, repo, ts, device, seq)
+         SELECT session, repo, ts, device, seq FROM raw_docs
+         WHERE session = ?1 AND repo IS NOT NULL ORDER BY ts, device, seq LIMIT 1",
+        [session],
     )?;
     Ok(())
 }
@@ -216,11 +258,17 @@ pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
 /// One indexed record's text replaced by what `Raw::after` returns for it now; its row removed
 /// when that is no event. Nothing for a record this index never held.
 fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {
-    let Some((rowid, kind)) = k
+    let Some((rowid, kind, session)) = k
         .query_row(
-            "SELECT rowid, kind FROM raw_docs WHERE device = ?1 AND seq = ?2",
+            "SELECT rowid, kind, session FROM raw_docs WHERE device = ?1 AND seq = ?2",
             params![device, seq],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()?
     else {
@@ -239,6 +287,9 @@ fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {
         }
         None => {
             k.execute("DELETE FROM raw_docs WHERE rowid = ?1", [rowid])?;
+            if let Some(session) = session {
+                started(k, &session)?;
+            }
         }
     }
     crate::embed_phase::touched(Some(raw), k, "r", &format!("{device}:{seq}"))
@@ -268,10 +319,25 @@ impl Consumer for Fts {
                 "INSERT INTO raw_docs(device, seq, kind, ts, repo, session) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![r.device, r.seq, e.kind, e.ts, e.repo, e.session],
             )?;
+            // The text's row is the record's, read before `session_start` makes a row of its own.
+            let rowid = k.last_insert_rowid();
+            // #506: the session's first row with a repository; an import of older records can
+            // come after newer ones.
+            if let Some(repo) = &e.repo {
+                k.execute(
+                    "INSERT INTO session_start(session, repo, ts, device, seq) VALUES(?1,?2,?3,?4,?5)
+                     ON CONFLICT(session) DO UPDATE SET
+                       repo = excluded.repo, ts = excluded.ts, device = excluded.device,
+                       seq = excluded.seq
+                     WHERE (excluded.ts, excluded.device, excluded.seq)
+                       < (session_start.ts, session_start.device, session_start.seq)",
+                    params![e.session, repo, e.ts, r.device, r.seq],
+                )?;
+            }
             if indexed(&e.kind) {
                 k.execute(
-                    "INSERT INTO raw_fts(rowid, text) VALUES(last_insert_rowid(), ?1)",
-                    [text(&e.body)],
+                    "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
+                    params![rowid, text(&e.body)],
                 )?;
             }
         }
@@ -284,6 +350,13 @@ impl Consumer for Fts {
             .prepare("SELECT seq FROM raw_docs WHERE device = ?1 AND seq > ?2")?
             .query_map(params![device, to], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        let sessions: Vec<String> = k
+            .prepare(
+                "SELECT DISTINCT session FROM raw_docs
+                 WHERE device = ?1 AND seq > ?2 AND session IS NOT NULL",
+            )?
+            .query_map(params![device, to], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         k.execute(
             "DELETE FROM raw_fts WHERE rowid IN (SELECT rowid FROM raw_docs WHERE device = ?1 AND seq > ?2)",
             params![device, to],
@@ -292,6 +365,9 @@ impl Consumer for Fts {
             "DELETE FROM raw_docs WHERE device = ?1 AND seq > ?2",
             params![device, to],
         )?;
+        for session in sessions {
+            started(k, &session)?;
+        }
         for seq in seqs {
             // Its row is gone: no text is read.
             crate::embed_phase::touched(None, k, "r", &format!("{device}:{seq}"))?;

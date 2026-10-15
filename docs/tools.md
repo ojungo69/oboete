@@ -245,7 +245,8 @@ correction or handoff on purpose; search finds it, and the session start never s
 - **Found**: `search` labels it `note` (claude-mem files it as an observation of type
   `discovery`), `get` reads it whole "(saved by an agent)", `timeline` lists it with imported
   documents. The session start never shows it (claude-mem's needs a concept, which a saved note
-  has none of); the per-prompt block takes it with imported history's slice (#506).
+  has none of); the per-prompt block takes a note saved in the calling repository, by meaning,
+  with imported history (#506, docs/prompt-context.md).
 - **The call itself**: capture keeps a `save_memory` call, bare or of oboete's or claude-mem's
   server (claude-mem's `isExplicitMemoryWrite`), without its input and output, and the curator
   sees its name alone: the note is not made a card or a claim a second time.

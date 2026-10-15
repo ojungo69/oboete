@@ -497,7 +497,7 @@ impl Oboete {
             source_id: id,
             kind: "note".into(),
             repo: repo.clone(),
-            session: "note".into(),
+            session: crate::raw::NOTE_SESSION.into(),
             ts: crate::db::now_ms(),
             title,
             body,

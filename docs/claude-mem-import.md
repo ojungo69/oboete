@@ -9,7 +9,8 @@ and 37). Until now it imports into evaluation homes only (`--eval-store`, docs/p
 
 docs/pr-b.md kept the import out of the everyday store because 160,000 rows that no repository's
 injection could find would have come in before repositories mapped onto claude-mem's project
-names. Since then imported documents are never injected (spec 4.5), and search finds a
+names. Since then imported documents are injected only through the session they were recorded in,
+never by a project's name (spec 4.5, #506), and search finds a
 repository's imported documents by name: those of the claude-mem project its key ends in, and of
 that project's worktree sessions (`imported_repos`, milestone 4 Task 4). Work state needs the same
 rule and nothing more.

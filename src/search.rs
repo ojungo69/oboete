@@ -915,6 +915,75 @@ mod tests {
         assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
     }
 
+    /// #506: `session_start` keeps each session's first record with a repository, by time, then
+    /// device and seq, as the records are read: an older record read later (an import of
+    /// transcripts after the hooks' records) moves it, and a rewind or a forget that takes the
+    /// first record away gives it to the next. A store from before the table fills it from the
+    /// records it read. Each record's text keeps its own row in the raw index, though the table
+    /// makes rows between.
+    #[test]
+    fn session_start_keeps_where_each_session_started() {
+        use crate::worker::Consumer;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let event = |session: &str, repo: &str, ts: i64, text: &str| crate::raw::Event {
+            session: session.into(),
+            repo: Some(repo.into()),
+            ts,
+            ..crate::raw::test_event(text)
+        };
+        let (one, two) = ("github.com/o/one", "github.com/o/two");
+        raw.append(&event("a", one, 2_000, "amber lantern"))
+            .unwrap();
+        raw.append(&event("a", two, 3_000, "amber quiver")).unwrap();
+        raw.append(&event("b", two, 4_000, "cobalt zephyr"))
+            .unwrap();
+        let mut k = crate::knowledge::open(p).unwrap();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(crate::consumer::fts::Fts)];
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        let starts = |k: &Connection| -> Vec<(String, String, i64)> {
+            k.prepare("SELECT session, repo, seq FROM session_start ORDER BY session")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let row = |session: &str, repo: &str, seq: i64| (session.to_owned(), repo.to_owned(), seq);
+        assert_eq!(starts(&k), [row("a", one, 1), row("b", two, 3)]);
+        let seqs = |q: &str| {
+            raw_search(p, q, None)
+                .iter()
+                .map(|h| h.seq)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seqs("zephyr"), [3]);
+        raw.append(&event("b", one, 1_000, "cobalt harbor"))
+            .unwrap();
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        assert_eq!(starts(&k), [row("a", one, 1), row("b", one, 4)]);
+        // A restore that lost the earlier record: the rewind gives b back its first one.
+        drop(raw);
+        let c = Connection::open(p.join("raw.db")).unwrap();
+        c.execute("DELETE FROM records WHERE seq > 3", []).unwrap();
+        drop(c);
+        let mut raw = crate::raw::open(p).unwrap();
+        crate::knowledge::checkpoint::rewind(&raw, &k, &mut consumers).unwrap();
+        assert_eq!(starts(&k), [row("a", one, 1), row("b", two, 3)]);
+        // a's first record forgotten: a started where its next record was.
+        let device = raw.device().to_owned();
+        raw.append_tombstone(crate::raw::Target::Record { device, seq: 1 })
+            .unwrap();
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        assert_eq!(starts(&k), [row("a", two, 2), row("b", two, 3)]);
+        // A store from before the table: the same rows, from the records it read.
+        k.execute_batch("DROP TABLE session_start").unwrap();
+        crate::consumer::fts::schema(&k).unwrap();
+        assert_eq!(starts(&k), [row("a", two, 2), row("b", two, 3)]);
+        assert_eq!(seqs("quiver"), [2]);
+    }
+
     #[test]
     fn a_record_tombstone_hides_it_and_a_range_tombstone_masks_only_its_range() {
         use crate::raw::{Item, Target};
