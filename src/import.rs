@@ -63,8 +63,9 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
     }
 }
 
-/// The newest claude-mem schema the import reads all of: 13.35.0's (docs/claude-mem-import.md I2).
-const NEWEST_SCHEMA: i64 = 64;
+/// The newest claude-mem schema the import reads all of: 13.39.0's (docs/claude-mem-import.md I2).
+/// v65 (13.36.0) only recomputes `observations.title_norm_key`, which the import does not read.
+const NEWEST_SCHEMA: i64 = 65;
 
 /// `settings` gates the work state rows as a write's (docs/work-state.md L5).
 pub fn claude_mem(
@@ -1028,21 +1029,60 @@ mod tests {
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
     #[test]
-    fn a_database_newer_than_v64_is_refused_with_nothing_written() {
+    fn a_database_newer_than_v65_is_refused_with_nothing_written() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("claude-mem.db");
         claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
         Connection::open(&src)
             .unwrap()
-            .execute("INSERT INTO schema_versions VALUES(3, 65, '')", [])
+            .execute_batch(
+                "INSERT INTO schema_versions VALUES(3, 65, '');
+                 INSERT INTO schema_versions VALUES(4, 66, '');",
+            )
             .unwrap();
         let mut raw = crate::raw::open(dir.path()).unwrap();
         let said = claude_mem(&mut raw, &src, &Default::default())
             .err()
             .unwrap()
             .to_string();
-        assert!(said.contains("v65") && said.contains("v64"), "{said}");
+        assert!(said.contains("v66") && said.contains("v65"), "{said}");
         assert!(docs(&raw).is_empty() && work_ops(&raw).is_empty());
+    }
+
+    /// I2: 13.36.0's v65, which only recomputes `observations.title_norm_key`, comes in as v64
+    /// does.
+    #[test]
+    fn a_v65_database_comes_in_as_v64_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (v64, v65) = (dir.path().join("v64.db"), dir.path().join("v65.db"));
+        claude_mem_v64(&v64, "2025-12-14T16:09:58.769Z");
+        claude_mem_v64(&v65, "2025-12-14T16:09:58.769Z");
+        Connection::open(&v65)
+            .unwrap()
+            .execute_batch(
+                "ALTER TABLE observations ADD COLUMN title_norm_key TEXT;
+                 UPDATE observations SET title_norm_key = lower(title);
+                 INSERT INTO schema_versions VALUES(3, 65, '2026-10-13T00:22:16.544Z');",
+            )
+            .unwrap();
+        let import = |src: &Path, home: &Path| {
+            std::fs::create_dir(home).unwrap();
+            let mut raw = crate::raw::open(home).unwrap();
+            let stats = claude_mem(&mut raw, src, &Default::default()).unwrap();
+            let docs: Vec<_> = docs(&raw)
+                .into_iter()
+                .map(|d| (d.source_id, d.repo, d.body))
+                .collect();
+            (
+                stats.observations,
+                stats.summaries,
+                stats.prompts,
+                stats.work_state,
+                docs,
+            )
+        };
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        assert_eq!(import(&v65, &b), import(&v64, &a));
     }
 
     /// Test 2: what is read is found by its columns, whatever version the log names: an older

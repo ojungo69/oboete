@@ -19,11 +19,14 @@ rule and nothing more.
 I1. **Where.** Without `--eval-store` the import goes into the home given, the default one
 included. `--eval-store` keeps its meaning, an evaluation home: it still refuses the default home.
 
-I2. **Which databases.** claude-mem's schema from 13.28.0 (migrations to v52) to 13.35.0 (v64).
+I2. **Which databases.** claude-mem's schema from 13.28.0 (migrations to v52) to 13.39.0 (v65).
 The importer reads what it finds by table and column (`PRAGMA table_info`), not by version number:
-another claude-mem draft (#4341) also numbers a migration v61. A database whose `schema_versions`
-names a version above 64 is refused, with nothing imported: a newer claude-mem may keep what this
-import would leave behind (open PR #4569 adds v65 and v66). The message names both versions.
+another claude-mem draft (#4341) also numbers a migration v61. v65 (13.36.0,
+`refreshUnicodeTitleNormKeys`) only recomputes `observations.title_norm_key`, the key claude-mem
+finds a duplicate title by, which the import does not read; 13.36.0 to 13.39.0 change no other
+table or column. A database whose `schema_versions` names a version above 65 is refused, with
+nothing imported: a newer claude-mem may keep what this import would leave behind. The message
+names both versions.
 
 I3. **What comes in.** As before: observations (the title; the narrative, then each fact), session
 summaries and prompts, as import ops, gated on the way in, each once (by source id). Two changes:
@@ -66,7 +69,8 @@ from the local model on this PC and from Workers AI on the iMac (decision 35's e
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,
-   `work_state_entries`) both import; one naming v65 is refused with nothing written.
+   `work_state_entries`) both import; one at v65 comes in as at v64; one naming v66 is refused
+   with nothing written.
 2. A table is found by its columns, whatever version row names it.
 3. Notes come in as the last line; a merged project's rows come in under the project they were
    merged into.
