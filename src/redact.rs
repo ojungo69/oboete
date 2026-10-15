@@ -1692,10 +1692,11 @@ mod tests {
             redact("api_key = \"aaaaaaaaaaaaaaaaaaaa\""),
             "api_key = \"aaaaaaaaaaaaaaaaaaaa\""
         );
-        // Stopwords in the value are allowed through (gitleaks' generic allowlist).
+        // generic-api-key passes a value with a stopword over (gitleaks' generic allowlist), and
+        // secret-assignment, which has none, masks it (#543).
         assert_eq!(
             redact("token = \"example_token_value_123\""),
-            "token = \"example_token_value_123\""
+            "token = \"[REDACTED]\""
         );
         assert_eq!(
             redact("Authorization: Bearer ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g ok"),
@@ -2453,6 +2454,8 @@ extra_rules = [
         // generic-api-key's allowlists pass both over. split: scanners
         let phrase = "Correct".to_owned() + "HorseBatteryStaple";
         let default = "change".to_owned() + "me-in-production";
+        let reference = "process.env.".to_owned() + "MY_APP_SECRET";
+        let example = "example".to_owned() + "0123456789abcd";
         for (text, value) in [
             (format!("BOT_CHANNEL_SECRET={low}"), &low),
             (
@@ -2463,6 +2466,10 @@ extra_rules = [
             (format!("export DB_PASSWORD='{low}'"), &low),
             (format!("DB_PASSWORD={phrase}"), &phrase),
             (format!("POSTGRES_PASSWORD={default}"), &default),
+            // Nothing passes over a value assigned to a secret's name, not a dotted reference nor a
+            // placeholder: either can be the secret itself (the security reviews of #543).
+            (format!("CLIENT_SECRET={reference}"), &reference),
+            (format!("DB_PASSWORD={example}"), &example),
         ] {
             let (masked, _) = scan(&text, &rules);
             assert!(!masked.contains(value.as_str()), "{masked}");
@@ -2478,8 +2485,6 @@ extra_rules = [
             "API_KEY=${API_KEY}",
             "SECRET_LENGTH=32",
             "password = os.environ[\"DB_PASSWORD\"]",
-            "CLIENT_SECRET=process.env.MY_APP_SECRET",
-            "DB_PASSWORD=example0123456789abcd",
         ] {
             assert_eq!(scan(text, &rules).0, text);
         }
