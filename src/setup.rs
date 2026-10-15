@@ -44,7 +44,9 @@ const CODEX_EVENTS: &[(&str, Option<&str>, u32, bool)] = &[
     // Its reads and memory lookups: the note on a file (docs/file-note.md F1), the bridge
     // (docs/memory-lookup.md).
     ("PreToolUse", Some(CODEX_READS), 5, true),
-    ("PostToolUse", None, 5, false),
+    // After a compaction, a subagent thread's next tool call takes the manifest back (claude-mem
+    // 13.39): the answer must reach the model whole (`additionalContextLimit`).
+    ("PostToolUse", None, 5, true),
     ("Stop", None, 5, false),
     ("PostCompact", None, 5, false),
     ("SessionEnd", None, 3, false),
@@ -5062,6 +5064,10 @@ mod tests {
             codex_trust_hash("PreToolUse", Some(CODEX_READS), handler),
         );
         assert!(delta.fresh.contains(&row), "{delta:?}");
+        // claude-mem 13.39: a subagent thread's next tool call after a compaction takes the
+        // manifest back, whole.
+        let post = &root["hooks"]["PostToolUse"][0]["hooks"][0];
+        assert_eq!(post["additionalContextLimit"], 0);
     }
 
     #[test]

@@ -86,9 +86,11 @@ fn run_io(
     // is kept under.
     let mut prompted: Option<Prompted> = None;
     let mut session = String::new();
-    // Cursor's compaction flag this call took, put back if its write fails: the manifest is then
-    // shown at the next prompt, once recording works again.
-    let mut took_compaction: Option<String> = None;
+    // A compaction flag this call took (Cursor's at a prompt, a Codex thread's at a tool call:
+    // Codex on #532, the Codex root's at a SessionStart that shows the manifest: CodeRabbit on
+    // #532), with its session, put back if its write fails: the manifest is then shown at the
+    // next one, once recording works again.
+    let mut took_compaction: Option<(String, String)> = None;
     // X5: the note on the files Claude Code or Codex is about to read, as the answer's context;
     // Grok's read, whose note goes after what else the call shows.
     let mut noted: Option<String> = None;
@@ -157,14 +159,20 @@ fn run_io(
         if (agent, event) == ("grok", "PreToolUse") {
             grok_read = Some(labels.clone());
         }
+        // claude-mem 13.39: Codex sends a subagent's thread no SessionStart, so a compaction marks
+        // its thread, whose next tool call takes the manifest back (the root's SessionStart
+        // takes the root's mark).
+        if agent == "codex" {
+            took.thread = codex_thread(&payload);
+        }
         if matches!(
             (agent, event),
-            ("cursor", "PreCompact") | ("grok", "PostCompact")
+            ("cursor", "PreCompact") | ("grok", "PostCompact") | ("codex", "PostCompact")
         ) {
             // Before the write: a compaction whose record fails still reinjects at the next
-            // prompt (Grok's next tool call). A flag that cannot be written costs that
+            // prompt (Grok's and Codex's next tool call). A flag that cannot be written costs that
             // reinjection, not the record.
-            if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), "compacted")
+            if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), took.flag())
             {
                 eprintln!("oboete: compaction not noted: {e}");
             }
@@ -173,8 +181,14 @@ fn run_io(
         // write fails, the point still carries the recording-failure line. Grok's and agy's
         // points stay taken then (the line is shown once per session, not at every call).
         injecting = injects(home, agent, event, &labels, &mut took);
-        if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
-            took_compaction = Some(session_label(&labels).to_owned());
+        if injecting
+            && took.compacted
+            && matches!(
+                (agent, event),
+                ("cursor", "UserPromptSubmit") | ("codex", "PostToolUse" | "SessionStart")
+            )
+        {
+            took_compaction = Some((session_label(&labels).to_owned(), took.flag().to_owned()));
         }
         let settings = crate::capture::Settings::load(home)?;
         let mut store = match crate::raw::open_within(home, STORE_WAIT) {
@@ -320,8 +334,8 @@ fn run_io(
             Ok(_) => {}
             Err(e) => {
                 crate::failure::mark(home, crate::failure::classify(e), ended);
-                if let Some(session) = &took_compaction
-                    && let Err(e) = crate::hookstate::set(home, "cursor", session, "compacted")
+                if let Some((session, flag)) = &took_compaction
+                    && let Err(e) = crate::hookstate::set(home, agent, session, flag)
                 {
                     eprintln!("oboete: compaction not noted again: {e}");
                 }
@@ -411,8 +425,11 @@ fn run_io(
         // not found, so its claim may be shown again, never counted as shown unseen (as
         // `consumer::manifest::text` does after its gate).
         let came = |l: &str| text.lines().any(|t| t == l);
+        // A Codex subagent's manifest after its compaction leaves the session's shown set the
+        // root's: only the root has prompts, where the set is read (Codex on #532).
         if let Some(m) = &manifest
             && agent != "opencode"
+            && !took.thread.starts_with("compacted-")
         {
             // A card or summary counts when its own line came: the block puts each on a line that
             // begins with its ID, and a cut keeps whole lines (Codex on #521).
@@ -519,6 +536,18 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
             took.compacted = crate::hookstate::take(home, agent, session, "compacted");
             took.compacted
         }
+        ("codex", "PostToolUse") => {
+            took.compacted = crate::hookstate::take(home, agent, session, took.flag());
+            took.compacted
+        }
+        // The root thread's compaction is answered here, whatever the source, as claude-mem's
+        // context handler clears its mark first.
+        ("codex", "SessionStart") => {
+            // Kept in `took`, so a call that cannot take its read fence gives the mark back for
+            // the root's next tool call.
+            took.compacted = crate::hookstate::take(home, agent, session, "compacted");
+            str_field(payload, &["source"]) != Some("resume")
+        }
         ("grok" | "agy" | "cursor", _) => false,
         (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
         _ => false,
@@ -531,9 +560,18 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
 struct Took {
     injected: bool,
     compacted: bool,
+    /// The thread's compaction flag (`codex_thread`).
+    thread: String,
 }
 
 impl Took {
+    fn flag(&self) -> &str {
+        match self.thread.as_str() {
+            "" => "compacted",
+            thread => thread,
+        }
+    }
+
     fn give_back(&self, home: &Path, agent: &str, session: &str) {
         if self.injected {
             crate::hookstate::take(home, agent, session, "injected");
@@ -541,10 +579,23 @@ impl Took {
         // Cursor starts a session once: its next prompt injects instead, as after a compaction
         // (Codex on #446).
         if ((self.injected && agent == "cursor") || self.compacted)
-            && let Err(e) = crate::hookstate::set(home, agent, session, "compacted")
+            && let Err(e) = crate::hookstate::set(home, agent, session, self.flag())
         {
             eprintln!("oboete: compaction not noted again: {e}");
         }
+    }
+}
+
+/// A Codex thread's compaction flag (claude-mem 13.39): a subagent's (`agent_id`) `compacted-`
+/// and 16 hex digits of its id's sha256, the root's `compacted`; an id over 128 characters
+/// names none, as claude-mem drops it.
+fn codex_thread(payload: &Value) -> String {
+    match payload["agent_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+    {
+        Some(id) => format!("compacted-{}", &crate::curate::sha256_hex(id)[..16]),
+        None => "compacted".into(),
     }
 }
 
@@ -5282,6 +5333,25 @@ mod tests {
                             "hook_event_name": "beforeSubmitPrompt", "prompt": "tidy the readme"});
         let out = hook(&home, "cursor", "UserPromptSubmit", &prompt);
         assert!(injected("cursor", &out).contains("Parser errors"), "{out}");
+        // A Codex root thread's compaction, answered by a SessionStart without the fence: the
+        // root's next tool call takes the manifest back (claude-mem 13.39).
+        let codex = |event: &str, extra: Value| {
+            let mut payload = json!({"session_id": "cx", "cwd": c});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hook(&home, "codex", event, &payload)
+        };
+        assert_eq!(codex("PostCompact", json!({"trigger": "auto"})), "");
+        let held = crate::dispatch::exclusive(&home).unwrap();
+        let out = codex("SessionStart", json!({"source": "compact"}));
+        drop(held);
+        assert!(!out.contains("Parser errors"), "{out}");
+        let tool =
+            json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": "a"});
+        assert!(codex("PostToolUse", tool.clone()).contains("Parser errors"));
+        assert_eq!(codex("PostToolUse", tool), "");
     }
 
     /// Codex on #446: agy's point after a checkpoint, taken by a call without the read fence, is
@@ -6917,6 +6987,175 @@ mod tests {
             assert!(
                 start("compact").contains("Parser errors go to stderr."),
                 "{agent}"
+            );
+        }
+    }
+
+    /// claude-mem 13.39: a Codex compaction marks its thread; a subagent's thread, which Codex
+    /// sends no SessionStart, takes the manifest back at its next tool call, once, as
+    /// `PostToolUse` context; another thread's call takes nothing; the root's SessionStart takes
+    /// the root's mark, so its tool calls do not take the manifest again; every call is recorded.
+    #[test]
+    fn a_codex_thread_takes_the_manifest_back_at_its_next_tool_call_after_a_compaction() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let call = |event: &str, agent_id: Option<&str>, extra: Value| {
+            let mut payload = json!({"session_id": "cx", "cwd": p.c});
+            if let Some(id) = agent_id {
+                payload["agent_id"] = json!(id);
+            }
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hook(&home, "codex", event, &payload)
+        };
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        assert_eq!(call("PostToolUse", Some("a"), tool.clone()), "");
+        assert_eq!(
+            call("PostCompact", Some("a"), json!({"trigger": "auto"})),
+            ""
+        );
+        assert_eq!(call("PostToolUse", None, tool.clone()), "");
+        assert_eq!(call("PostToolUse", Some("b"), tool.clone()), "");
+        let back = call("PostToolUse", Some("a"), tool.clone());
+        let v: Value = serde_json::from_str(back.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert!(
+            v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("Parser errors go to stderr."),
+            "{back}"
+        );
+        assert_eq!(call("PostToolUse", Some("a"), tool.clone()), "");
+        // The root's compaction: its SessionStart answers it, and takes its mark.
+        assert_eq!(call("PostCompact", None, json!({"trigger": "auto"})), "");
+        let start = call("SessionStart", None, json!({"source": "compact"}));
+        assert!(start.contains("Parser errors go to stderr."), "{start}");
+        assert_eq!(call("PostToolUse", None, tool.clone()), "");
+        let tools =
+            p.s.raw
+                .after(p.s.raw.device(), 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|r| matches!(&r.item, crate::raw::Item::Event(e) if e.kind == "tool"))
+                .count();
+        assert_eq!(tools, 6);
+    }
+
+    /// Codex on #532: a thread's tool call that took its mark and then failed its write puts the
+    /// mark back, so the thread's next tool call takes the manifest once recording works again.
+    #[test]
+    fn a_codex_threads_mark_comes_back_when_its_tool_call_fails_its_write() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = |extra: Value| {
+            let mut v = json!({"session_id": "cx", "cwd": p.c, "agent_id": "a"});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v
+        };
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        let compact = payload(json!({"trigger": "auto"}));
+        assert_eq!(hook(&home, "codex", "PostCompact", &compact), "");
+        let conn = Connection::open(home.join("raw.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_tool BEFORE INSERT ON records WHEN NEW.kind='tool'
+            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+        )
+        .unwrap();
+        let input = payload(tool.clone()).to_string();
+        let mut out = Vec::new();
+        assert!(run_io(&home, "codex", "PostToolUse", input.as_bytes(), &mut out).is_err());
+        conn.execute_batch("DROP TRIGGER refuse_tool").unwrap();
+        let back = hook(&home, "codex", "PostToolUse", &payload(tool));
+        assert!(back.contains("Parser errors go to stderr."), "{back}");
+    }
+
+    /// Codex on #532: a subagent's manifest after its compaction leaves the session's shown set as
+    /// the root's SessionStart left it, which the root's prompts read.
+    #[test]
+    fn a_codex_subagents_manifest_leaves_the_roots_shown_set() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let c = p.c.clone();
+        let call = |event: &str, agent_id: Option<&str>, extra: Value| {
+            let mut payload = json!({"session_id": "cx", "cwd": c});
+            if let Some(id) = agent_id {
+                payload["agent_id"] = json!(id);
+            }
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hook(&home, "codex", event, &payload)
+        };
+        let start = call("SessionStart", None, json!({"source": "startup"}));
+        assert!(start.contains("Parser errors go to stderr."), "{start}");
+        let root = shown_set(&home, "codex", "cx");
+        assert_eq!(root.len(), 1, "{root:?}");
+        p.decided(2, "Logs rotate daily.", &[]);
+        p.s.run();
+        assert_eq!(
+            call("PostCompact", Some("a"), json!({"trigger": "auto"})),
+            ""
+        );
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        let back = call("PostToolUse", Some("a"), tool);
+        assert!(back.contains("Logs rotate daily."), "{back}");
+        assert_eq!(shown_set(&home, "codex", "cx"), root);
+    }
+
+    /// CodeRabbit on #532: the root's SessionStart that took its mark to show the manifest and
+    /// then failed its write puts the mark back, so the root's next tool call takes the manifest
+    /// once recording works again; a resume, which shows none, spends the mark as it would have,
+    /// and a start that took none puts none back.
+    #[test]
+    fn the_codex_roots_mark_comes_back_when_its_session_start_fails_its_write() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = |extra: Value| {
+            let mut v = json!({"session_id": "cx", "cwd": p.c});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v
+        };
+        let tool = json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                          "tool_response": "a.rs"});
+        let conn = Connection::open(home.join("raw.db")).unwrap();
+        for (source, back) in [("compact", true), ("resume", false), ("startup", false)] {
+            if source != "startup" {
+                let compact = payload(json!({"trigger": "auto"}));
+                assert_eq!(hook(&home, "codex", "PostCompact", &compact), "");
+            }
+            conn.execute_batch(
+                "CREATE TRIGGER refuse_start BEFORE INSERT ON records WHEN NEW.kind='start'
+                BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+            )
+            .unwrap();
+            let input = payload(json!({"source": source})).to_string();
+            let mut out = Vec::new();
+            assert!(run_io(&home, "codex", "SessionStart", input.as_bytes(), &mut out).is_err());
+            conn.execute_batch("DROP TRIGGER refuse_start").unwrap();
+            let next = hook(&home, "codex", "PostToolUse", &payload(tool.clone()));
+            assert_eq!(
+                next.contains("Parser errors go to stderr."),
+                back,
+                "{source}: {next}"
             );
         }
     }
