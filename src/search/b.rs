@@ -1838,25 +1838,30 @@ fn claim_hit(raw: &Raw, k: &Connection, c: &Claim, class: Class, terms: &[String
     })
 }
 
-/// Whether raw holds record `key` (`device:seq`) as an event: not one a tombstone removed.
+/// Whether raw holds record `key` (`device:seq`) as an event: not one a tombstone removed. One
+/// whose text expired is still held: a session start's entry is its labels (docs/retention.md).
 fn held(raw: &Raw, key: &str) -> Result<bool> {
     let Some((device, seq)) = key.rsplit_once(':') else {
         return Ok(false);
     };
     let seq: i64 = seq.parse().unwrap_or(0);
-    Ok(raw
-        .after(device, seq - 1, 1)?
-        .first()
-        .is_some_and(|r| r.seq == seq && matches!(r.item, crate::raw::Item::Event(_))))
+    Ok(raw.after(device, seq - 1, 1)?.first().is_some_and(|r| {
+        r.seq == seq
+            && matches!(
+                r.item,
+                crate::raw::Item::Event(_) | crate::raw::Item::Expired(_)
+            )
+    }))
 }
 
-/// Whether raw.db holds record `seq` of `device`: a claim anchored there is citable (MUST-M13).
+/// Whether raw.db holds record `seq` of `device`: a claim anchored there is citable (MUST-M13),
+/// unless its text expired (docs/retention.md), when only the claim is left to read.
 fn on_this_device(raw: &Raw, device: &str, seq: i64) -> Result<bool> {
     Ok(seq >= 1
         && raw
             .after(device, seq - 1, 1)?
             .first()
-            .is_some_and(|r| r.seq == seq))
+            .is_some_and(|r| r.seq == seq && !matches!(r.item, crate::raw::Item::Expired(_))))
 }
 
 /// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
@@ -2262,6 +2267,8 @@ enum Named {
     Imported(String),
     /// A record by `device:seq`.
     Record(String, Box<crate::raw::Event>),
+    /// A record whose text expired (docs/retention.md), by `device:seq`, with its labels.
+    Expired(String, Box<crate::raw::Event>),
 }
 
 fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
@@ -2309,6 +2316,7 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
         .filter(|r| r.seq == seq);
     Ok(match record.map(|r| r.item) {
         Some(crate::raw::Item::Event(e)) => Some(Named::Record(id.to_owned(), e)),
+        Some(crate::raw::Item::Expired(e)) => Some(Named::Expired(id.to_owned(), e)),
         _ => None,
     })
 }
@@ -2365,6 +2373,9 @@ fn get_in(home: &Path, raw: &Raw, k: &Connection, id: &str) -> Result<Option<Str
             text
         }
         Some(Named::Record(id, e)) => Some(record_text(&id, &e)),
+        Some(Named::Expired(id, _)) => Some(format!(
+            "{id}: raw expired: retention removed its text ([retention] in config.toml)\n"
+        )),
     })
 }
 
@@ -2515,6 +2526,8 @@ pub struct Quote {
     /// The record it quotes: `device:seq`.
     pub key: String,
     pub text: String,
+    /// Its record's text expired (docs/retention.md): `text` says so, the quote is not shown.
+    pub expired: bool,
 }
 
 /// A derivation of a claim (its `tier` and `recipe`) or an owner's correction (neither); a field
@@ -2589,9 +2602,11 @@ fn claim_view(raw: &Raw, k: &Connection, uid: String) -> Result<Option<ClaimView
     let quotes = active_quotes(k, &uid)?
         .iter()
         .map(|e| {
+            let (text, expired) = quote_text(raw, e)?;
             Ok(Quote {
                 key: format!("{}:{}", e.device, e.seq),
-                text: quote_text(raw, e)?,
+                text,
+                expired,
             })
         })
         .collect::<Result<_>>()?;
@@ -2724,10 +2739,12 @@ pub fn cite(home: &Path, uids: &[String]) -> Result<Vec<serde_json::Value>> {
             let evidence = active_quotes(&k, uid)?
                 .iter()
                 .map(|e| {
+                    let (quote, expired) = quote_text(&raw, e)?;
                     Ok(serde_json::json!({
                         "device": e.device, "seq": e.seq, "offset": e.offset,
-                        "length": e.length, "quote": quote_text(&raw, e)?,
+                        "length": e.length, "quote": quote,
                         "live": crate::consumer::claims::live(&raw, e)?.is_some(),
+                        "expired": expired,
                     }))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -2762,18 +2779,28 @@ fn active_quotes(k: &Connection, uid: &str) -> Result<Vec<claims::Evidence>> {
     Ok(quotes.collect::<Result<_, _>>()?)
 }
 
-/// A quote as the gate shows it inside its record, with the words around it
-/// (`redact::outbound_quote`), so a rule added since that needs them hides it there too; the mask
-/// when it no longer reads verbatim in the record, whose derivation Anchors drops next.
-fn quote_text(raw: &Raw, e: &claims::Evidence) -> Result<String> {
-    let long = crate::consumer::claims::live(raw, e)?.and_then(|ev| crate::curate::long_text(&ev));
-    Ok(
-        match (long, usize::try_from(e.offset), usize::try_from(e.length)) {
-            (Some(long), Ok(start), Ok(len)) => redact::outbound_quote(&long, start..start + len),
-            _ => redact::MASK.to_owned(),
-        },
-    )
+/// What a reader shows for a quote: the quote as the gate shows it inside its record, with the
+/// words around it (`redact::outbound_quote`), so a rule added since that needs them hides it
+/// there too; the mask when it no longer reads verbatim in the record, whose derivation Anchors
+/// drops next; `raw expired` and no quote when its record's text expired (docs/retention.md):
+/// the words around it are gone, so a rule that needs them could not hide it. Then whether it
+/// expired.
+fn quote_text(raw: &Raw, e: &claims::Evidence) -> Result<(String, bool)> {
+    use crate::consumer::claims::Quote;
+    let long = match crate::consumer::claims::quote(raw, e)? {
+        Quote::Reads(event) => crate::curate::long_text(&event),
+        Quote::Expired(_) => return Ok((EXPIRED_QUOTE.to_owned(), true)),
+        Quote::Gone => None,
+    };
+    let text = match (long, usize::try_from(e.offset), usize::try_from(e.length)) {
+        (Some(long), Ok(start), Ok(len)) => redact::outbound_quote(&long, start..start + len),
+        _ => redact::MASK.to_owned(),
+    };
+    Ok((text, false))
 }
+
+/// What a quote whose record's text expired reads (spec 6.2).
+pub(crate) const EXPIRED_QUOTE: &str = "raw expired";
 
 fn imported_text(k: &Connection, uid: &str) -> Result<Option<String>> {
     let doc = k
@@ -3027,7 +3054,7 @@ fn time_of(raw: &Raw, k: &Connection, id: &str) -> Result<i64> {
             [uid],
             |r| r.get(0),
         )?,
-        Some(Named::Record(_, e)) => e.ts,
+        Some(Named::Record(_, e) | Named::Expired(_, e)) => e.ts,
     })
 }
 
@@ -4483,7 +4510,7 @@ mod tests {
     }
 
     /// Codex on #306: a session start removed from raw is left out of the timeline before the
-    /// worker has removed it from the index, as `get` leaves it out.
+    /// worker has removed it from the index, as `get` leaves it out; one whose text expired stays.
     #[test]
     fn a_removed_session_start_leaves_the_timeline_at_once() {
         let mut s = Store::new();
@@ -4501,13 +4528,21 @@ mod tests {
             device: s.raw.device().to_owned(),
             seq: started,
         };
+        // docs/retention.md: one whose text expired stays, as its entry is its labels.
+        s.raw.expire_for_test(&[started]);
+        let keys = || -> Vec<String> {
+            timeline(s.home.path(), Some(R), None, None, 10)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.key)
+                .collect()
+        };
+        assert_eq!(
+            keys(),
+            [first.clone(), format!("{}:{started}", s.raw.device())]
+        );
         s.raw.append_tombstone(target).unwrap();
-        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 10)
-            .unwrap()
-            .into_iter()
-            .map(|i| i.key)
-            .collect();
-        assert_eq!(keys, [first]);
+        assert_eq!(keys(), [first]);
     }
 
     /// Codex on #306: an anchor near the oldest end leaves its unused half to the newer side, so
@@ -6307,6 +6342,78 @@ mod tests {
         assert!(
             out.status.success() && printed.contains("1 passed"),
             "{printed}"
+        );
+    }
+
+    /// docs/retention.md: a quote whose record's text expired reads `raw expired` and is not
+    /// shown, in the claim's view, `get` and `cite`; the claim is quote-only, and `get` of the
+    /// record says its raw expired.
+    #[test]
+    fn an_expired_quote_is_withheld_and_said() {
+        use crate::claims::{ClaimOp, Evidence};
+        let mut s = Store::new();
+        let text = "Use the blue deploy key K-7731 for staging.";
+        let seq = s.said("s", R, 1_000, text);
+        let event = crate::raw::Event {
+            kind: "prompt".into(),
+            ..crate::raw::test_event(&serde_json::json!({ "prompt": text }).to_string())
+        };
+        let long = crate::curate::long_text(&event).unwrap();
+        let quote = "blue deploy key K-7731";
+        let evidence = Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: long.find(quote).unwrap() as i64,
+            length: quote.len() as i64,
+            sentence: 0,
+            quote: quote.into(),
+            claim_at: None,
+        };
+        let uid = crate::claims::uid("decision", &evidence);
+        let op = ClaimOp {
+            id: "c".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Staging deploys use the blue key.".into(),
+            evidence: vec![evidence],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+            support: Vec::new(),
+        };
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op).unwrap())])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        assert!(!claim(&home, &uid).unwrap().unwrap().quotes[0].expired);
+        s.raw.expire_for_test(&[seq]);
+        let view = claim(&home, &uid).unwrap().unwrap();
+        assert_eq!(view.label, "quote-only");
+        assert_eq!(
+            (view.quotes[0].text.as_str(), view.quotes[0].expired),
+            (EXPIRED_QUOTE, true)
+        );
+        let key = format!("{}:{seq}", s.raw.device());
+        let text = get(&home, &uid).unwrap().unwrap();
+        assert!(text.contains(&format!("- {key}: raw expired")), "{text}");
+        assert!(!text.contains("K-7731"), "{text}");
+        let record = get(&home, &key).unwrap().unwrap();
+        assert!(record.contains("raw expired"), "{record}");
+        let cited = cite(&home, std::slice::from_ref(&uid)).unwrap();
+        assert_eq!(cited[0]["label"], "quote-only");
+        let quote = &cited[0]["evidence"][0];
+        assert_eq!(
+            (&quote["quote"], &quote["live"], &quote["expired"]),
+            (
+                &serde_json::json!(EXPIRED_QUOTE),
+                &serde_json::json!(false),
+                &serde_json::json!(true)
+            )
         );
     }
 

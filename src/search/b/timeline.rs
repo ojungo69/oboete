@@ -388,6 +388,8 @@ fn anchored(
             e.ts,
             matches!(e.kind.as_str(), "prompt" | "start").then_some(key),
         ),
+        // docs/retention.md: its time anchors the timeline; it has no entry of its own.
+        Some(Named::Expired(_, e)) => (e.ts, None),
     })
 }
 

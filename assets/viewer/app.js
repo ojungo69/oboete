@@ -176,8 +176,10 @@ function claimLinks(heading, uids) {
 
 async function claimPanel(uid, existing = null) {
   const c = await api('claim', { id: uid });
-  const quotes = c.quotes.map((q) => el('li', null,
-    el('p', 'text', q.text), fullText(q.key, q.key)));
+  // docs/retention.md: a quote whose record's text expired is not shown, nor its record offered.
+  const quotes = c.quotes.map((q) => (q.expired
+    ? el('li', null, word('p', 'text pending', 'quote_expired'), el('span', 'meta', q.key))
+    : el('li', null, el('p', 'text', q.text), fullText(q.key, q.key))));
   const history = c.history.map((change) => el('li', null,
     el('div', 'meta', localTime(change.ts),
       change.tier === null && change.recipe === null ? word('span', null, 'owner_correction') : null,
@@ -777,6 +779,7 @@ const TEXT = {
   later_claim: ['Later claim: ', '後の主張: '],
   evidence_quotes: ['Evidence quotes', '根拠となる引用'],
   no_evidence: ['No evidence quotes.', '根拠となる引用はありません。'],
+  quote_expired: ['Raw expired: the record\'s text was removed after its retention period, so the quote is not shown.', '元の記録は保存期間を過ぎて本文が削除されたため、引用は表示できません。'],
   supersedes: ['Supersedes', '置き換えた主張'],
   ended_by: ['Ended by', 'この主張を終了させた主張'],
   none: ['None.', 'ありません。'],

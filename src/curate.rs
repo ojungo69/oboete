@@ -2150,6 +2150,16 @@ fn recuration_plan(
     // are curated.
     let mut plan = Vec::new();
     for span in spans {
+        // docs/retention.md (spec 6.2): what expired cannot be read to be curated again, and a
+        // recuration of the rest would retract the claims the expired part gave.
+        if raw.holds_expired(&device, span.from, span.to)? {
+            anyhow::bail!(
+                "records {}-{} hold raw that expired under [retention]: only their claims' kept \
+                 quotes remain, so they cannot be curated again",
+                span.from,
+                span.to
+            );
+        }
         let windows = span_windows(raw, &span, summary.cut(), rules, &reading)?;
         // A recuration covers its span whole, so records it would set aside would leave their
         // parking unread (D6).
@@ -8364,6 +8374,29 @@ mod tests {
         assert!(recurate(home.path(), other, false).is_err());
         let queued = recurate(home.path(), Again::Queued, false).unwrap();
         assert_eq!(queued, "nothing to curate again\n");
+    }
+
+    /// docs/retention.md (spec 6.2): `oboete recurate` refuses a span that holds a record whose
+    /// text expired, and says only the kept quotes remain.
+    #[test]
+    fn recurate_refuses_an_expired_span() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _) = open(home.path());
+        raw.append(&prompt("We use tabs.")).unwrap();
+        raw.append(&prompt("We use spaces in YAML.")).unwrap();
+        let op = json!({"from_seq": 1, "from_offset": null, "to_seq": 2, "to_offset": null,
+            "outcome": "curated", "elided": []});
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+        raw.expire_for_test(&[1]);
+        let device = raw.device().to_owned();
+        drop(raw);
+        let span = |from, to| Again::Span(device.clone(), Span::records(from, to));
+        let error = recurate(home.path(), span(1, 2), false).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("records 1-2 hold raw that expired under [retention]"),
+            "{error:#}"
+        );
+        assert!(recurate(home.path(), span(2, 2), false).is_ok());
     }
 
     /// #94: `oboete recurate` plans with the chain `[chain]` leaves: a paid entry turned off is

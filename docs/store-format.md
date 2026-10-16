@@ -30,6 +30,12 @@ switches to.
   writes: raw.db's schema or the meaning of its rows and ops, knowledge.db's or providers.db's, a
   backup segment's lines. A change an older binary reads correctly (a column it ignores, an index)
   does not raise it. The release notes say when it moved.
+- **A format a home earns** (3, raw retention, docs/retention.md): `FORMAT` is the newest a binary
+  reads and `raw::OPEN_FORMAT` what its open stamps; they differ when only some homes hold what an
+  older binary would mishandle. Retention's binary reads up to 3 and stamps 2 on open, so a home
+  whose retention never ran still opens in the binary before it; the first expiry batch raises
+  the home to 3 in the transaction that commits it, and a restore that brings back an expired
+  record, or a raw.db copy rewritten with one, is stamped 3 too. A stamp is never lowered.
 
 ## The refusal
 
@@ -40,10 +46,12 @@ switches to.
   `raw::read_only` both check, and so do the opens of knowledge.db and providers.db
   (`raw::refuse_newer_home`, before they create or change anything). A refused open changes no
   byte of the file.
-- The writable open raises a lower value to `FORMAT` before its schema and migrations, in an
-  IMMEDIATE transaction that reads it again, so that of two binaries opening together the newer
-  one's stamp stays and the older one refuses it before it migrates anything. A raw.db already at
-  `FORMAT` is not written: a hook's open stays read-only when the schema is complete, as now.
+- The writable open raises a lower value to `raw::OPEN_FORMAT` (equal to `FORMAT` until
+  retention, 2 since) before its schema and migrations, in an IMMEDIATE transaction that reads it
+  again, so that of two binaries opening together the newer one's stamp stays and the older one
+  refuses it before it migrates anything. A raw.db already at `OPEN_FORMAT` or above is not
+  written for it, and its stamp is never lowered: a hook's open stays read-only when the schema is
+  complete, as now.
 - The open reads it once more before it returns its handle (a newer binary may have stamped the
   file while this one migrated it), and each append of records or ops (captured events, kept
   events, imports, tombstones, ops) reads it in its own transaction: a handle opened before a
@@ -88,9 +96,11 @@ switches to.
 - A raw.db at `FORMAT + 1`, without a column this binary's migration adds back: the writable open
   and `raw::read_only` refuse with `NewerFormat`, and the file's bytes are as they were
   (`raw::tests::a_raw_db_a_newer_oboete_wrote_is_refused_and_left_as_it_was`).
-- A raw.db at 0 (every store so far): the first writable open stamps `FORMAT`, a second writes
-  nothing, and a handle sees a stamp made after it opened
-  (`raw::tests::a_raw_db_from_before_the_stamp_gets_it_once`).
+- A raw.db at 0 (every store so far): the first writable open stamps `OPEN_FORMAT`, a second
+  writes nothing, one at 3 stays 3, and a handle sees a stamp made after it opened
+  (`raw::tests::a_raw_db_from_before_the_stamp_gets_it_once`). A restore of segments with an
+  expired record's line is 3, and one without stays at `OPEN_FORMAT`
+  (`raw::tests::an_expired_record_keeps_its_labels_and_crosses_a_restore`).
 - A hook against a newer raw.db records nothing, keeps its event and marks `newer`, which the next
   SessionStart's line names (`hook::tests::a_home_a_newer_oboete_wrote_is_not_written_and_the_next_session_start_says_so`);
   the class and its line (`failure::tests`).

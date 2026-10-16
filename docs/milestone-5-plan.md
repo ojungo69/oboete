@@ -1249,9 +1249,15 @@ preference は伏せた文で残るはずが、消えていた。
 spec 6.2 の Retention（owner decision 16、既定は無期限）: 設定の鍵（`config.toml` と設定画面）、期限を
 過ぎた自分の端末の raw の行・その backup segment を 3e-1 と同じ書換えで消す（tombstone を作らない）、未
 curate の raw（checkpoint の上、pending の window、v1 の取り込み）は残す、claim の証拠は `raw expired`、
-期限切れの span の `oboete recurate` は拒否。PR で決めること:
-- 証拠の record が期限切れの claim の status（3d-3 の support が期限切れのとき proposed に戻すか）。
-- 期限切れを読み手がどう見分けるか（tombstone も deny もない Removed の行で推すか、専用の行の種類か）。
+期限切れの span の `oboete recurate` は拒否。PR で決めることだった 2 点（証拠の record が期限切れの claim の
+status を 3d-3 の support が期限切れのとき proposed に戻すか、期限切れを読み手がどう見分けるか）は、下の
+とおり決めた。
+
+決めたこと（docs/retention.md、Claude; overrulable）: 期限切れの record は event の行のまま、ラベル・ledger・
+出所を残し、本文を空にして `expired` 列に時刻を入れる（目印は「あるもの」で見分ける）。status は支えの
+record が期限切れでも保つ。引用は `raw expired` と出して本文は見せない。curate の window（重なる再 curate
+の window と合わせたもの）ごとに丸ごと期限切れにし、その中の directive と v1 の touch の行は期限切れに
+しない。3 本の PR（読み手、期限切れの処理、設定画面）。
 
 #### 3e-4: 規則が変わった後の op の文（#478）
 

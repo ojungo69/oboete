@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS records (
   original_bytes INTEGER,      -- set when head-and-tail cut the body
   target_device TEXT, target_seq INTEGER, target_offset INTEGER, target_length INTEGER,
   deny_origin TEXT,            -- a forget control's stable denial, even without its target
+  expired INTEGER,             -- an event whose text retention removed: when (docs/retention.md)
   PRIMARY KEY (device, seq)
 );
 -- D8: a read finds the tombstones of the records it returns by their target.
@@ -201,6 +202,9 @@ pub enum Item {
     /// (written from milestone 2 Task 7 on).
     Removed,
     Tombstone(Target),
+    /// An event whose text retention removed (docs/retention.md): its labels, with an empty body.
+    /// A whole-record tombstone makes it `Removed` as it makes an event.
+    Expired(Box<Event>),
 }
 
 /// A record as it leaves `raw.rs`; `Raw::after` is the only way out.
@@ -441,7 +445,8 @@ fn record_derived_uids(conn: &Connection) -> Result<std::collections::HashMap<St
 
 /// Each forgotten record's vector key (`<device>:<seq>`, kind 'r'): a carry takes no vector of
 /// one (slice 3c), nor of a record a rescan masked, whose vector may be of its text before the mask
-/// (slice 3e-1). No forgotten record in a store a writer of forget never opened.
+/// (slice 3e-1), nor of one whose text expired (docs/retention.md). No forgotten record in a store
+/// a writer of forget never opened.
 fn forgotten_record_keys(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let tables: bool = conn.query_row(
         "SELECT COUNT(*) = 2 FROM sqlite_master
@@ -449,15 +454,27 @@ fn forgotten_record_keys(conn: &Connection) -> Result<std::collections::HashSet<
         [],
         |r| r.get(0),
     )?;
-    let masked = "SELECT target_device || ':' || target_seq FROM records
-                  WHERE type = 'tombstone' AND target_offset IS NOT NULL";
+    let expired: bool = conn.query_row(
+        "SELECT COUNT(*) = 1 FROM pragma_table_info('records') WHERE name = 'expired'",
+        [],
+        |r| r.get(0),
+    )?;
+    let mut masked = "SELECT target_device || ':' || target_seq FROM records
+                  WHERE type = 'tombstone' AND target_offset IS NOT NULL"
+        .to_owned();
+    if expired {
+        masked.push_str(
+            " UNION SELECT device || ':' || seq FROM records
+              WHERE type = 'event' AND expired IS NOT NULL",
+        );
+    }
     let sql = if tables {
         format!(
             "SELECT o.device || ':' || o.seq FROM denied_records d
              JOIN import_origins o ON o.origin = d.origin UNION {masked}"
         )
     } else {
-        masked.to_owned()
+        masked
     };
     Ok(conn
         .prepare(&sql)?
@@ -1346,16 +1363,16 @@ fn open_within_report(
     conn.execute_batch("PRAGMA secure_delete=ON;")?;
     // Stamped before the schema and the migrations, read again under the write lock: of two
     // binaries opening together, the newer one's stamp stays, and the older one refuses it before
-    // it migrates anything.
-    if format < FORMAT
+    // it migrates anything. A stamp is never lowered.
+    if format < OPEN_FORMAT
         && crate::db::retry_busy(&conn, deadline, || {
             let tx = rusqlite::Transaction::new_unchecked(
                 &conn,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
-            let raised = format_of(&tx)? < FORMAT;
+            let raised = format_of(&tx)? < OPEN_FORMAT;
             if raised {
-                tx.execute_batch(&format!("PRAGMA user_version = {FORMAT}"))?;
+                tx.execute_batch(&format!("PRAGMA user_version = {OPEN_FORMAT}"))?;
             }
             tx.commit()?;
             Ok(raised)
@@ -1404,6 +1421,11 @@ fn open_within_report(
     }
     if crate::db::ensure_column_until(&mut conn, "records", "deny_origin", "TEXT", deadline)
         .context("migrate forget control identity")?
+    {
+        committed("stores_changed")?;
+    }
+    if crate::db::ensure_column_until(&mut conn, "records", "expired", "INTEGER", deadline)
+        .context("migrate retention")?
     {
         committed("stores_changed")?;
     }
@@ -1512,8 +1534,17 @@ impl std::fmt::Display for Restoring {
 impl std::error::Error for Restoring {}
 
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
-/// writes anything an older binary would mishandle, in any store or a backup segment.
-pub(crate) const FORMAT: i64 = 2;
+/// writes anything an older binary would mishandle, in any store or a backup segment. The newest
+/// this binary reads.
+pub(crate) const FORMAT: i64 = 3;
+
+/// What an open stamps, below `FORMAT` while a home holds nothing only a newer binary reads: 3
+/// comes with the first expiry batch (docs/retention.md), so a home whose retention never ran
+/// still opens in the binary before it.
+pub(crate) const OPEN_FORMAT: i64 = 2;
+
+/// The format of a home with an expired record, or an expiry batch begun (docs/retention.md).
+pub(crate) const EXPIRED_FORMAT: i64 = 3;
 
 /// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
 /// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
@@ -1692,7 +1723,7 @@ impl Raw {
                 break;
             };
             for r in batch.into_iter().filter(|r| r.seq <= to) {
-                if !matches!(r.item, Item::Event(_) | Item::Removed) {
+                if !matches!(r.item, Item::Event(_) | Item::Removed | Item::Expired(_)) {
                     continue;
                 }
                 match self.named(device, &r)? {
@@ -3016,8 +3047,10 @@ impl Raw {
             self.current()?;
             let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
             {
+                // docs/retention.md: an expired record forgotten is no longer expired. A copy set
+                // aside by an older binary has no such column, so only the live store's row says.
                 let mut removed = tx.prepare(&format!(
-                    "UPDATE records SET {REMOVED_ROW}
+                    "UPDATE records SET {REMOVED_ROW}, expired = NULL
                      WHERE device = ?1 AND seq = ?2 AND type = 'event' AND EXISTS (
                        SELECT 1 FROM import_origins o JOIN denied_records d ON d.origin = o.origin
                        WHERE o.device = records.device AND o.seq = records.seq)"
@@ -3356,8 +3389,17 @@ impl Raw {
         }
         let mut copied = Vec::new();
         if !kept.is_empty() {
-            let mut shown =
-                self.stored_texts(&w.device, &judge.shown_records(&w.device, w.ts, &w.body))?;
+            let seqs = judge.shown_records(&w.device, w.ts, &w.body);
+            let mut shown = self.stored_texts(&w.device, &seqs)?;
+            // docs/retention.md: a forgotten record whose text expired gives nothing to compare
+            // with, so every claim the window kept counts as a copy of it.
+            let mut blind = false;
+            for seq in &seqs {
+                if self.holds_expired(&w.device, *seq, *seq)? {
+                    blind = true;
+                    break;
+                }
+            }
             let named = items(&w.body["candidates"])
                 .iter()
                 .chain(items(&w.body["carried"]));
@@ -3377,7 +3419,7 @@ impl Raw {
                 );
             }
             for (uid, ts, body) in kept {
-                if repeats(&claim_text(&body, false), &shown) {
+                if blind || repeats(&claim_text(&body, false), &shown) {
                     // Each wording a window gave the uid, not the first one's (Codex on #481).
                     let texts = said.entry(uid.clone()).or_default();
                     for text in claim_text(&body, true) {
@@ -3789,16 +3831,22 @@ impl Raw {
             let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
             for ((device, seq), (_, ranges)) in batch {
                 use rusqlite::OptionalExtension;
-                let row: Option<(Vec<u8>, String)> = tx
+                let row: Option<(Vec<u8>, String, Option<i64>)> = tx
                     .query_row(
-                        "SELECT body, enc FROM records
+                        "SELECT body, enc, expired FROM records
                          WHERE device = ?1 AND seq = ?2 AND type = 'event'",
                         params![device, seq],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
                     .optional()?;
-                let Some((body, enc)) = row else { continue };
-                if let Some((body, enc)) = masked_row(body, &enc, ranges)? {
+                let Some((body, enc, expired)) = row else {
+                    continue;
+                };
+                // docs/retention.md: an expired record has no body left to mask; its ledger's
+                // fields go as any masked record's.
+                if expired.is_none()
+                    && let Some((body, enc)) = masked_row(body, &enc, ranges)?
+                {
                     rewritten += tx.execute(
                         "UPDATE records SET body = ?1, enc = ?2 WHERE device = ?3 AND seq = ?4",
                         params![body, enc, device, seq],
@@ -3820,7 +3868,8 @@ impl Raw {
     pub(crate) fn rows_hold_masks(&self) -> Result<bool> {
         use rusqlite::OptionalExtension;
         let mut st = self.conn.prepare_cached(
-            "SELECT body, enc FROM records WHERE device = ?1 AND seq = ?2 AND type = 'event'",
+            "SELECT body, enc FROM records WHERE device = ?1 AND seq = ?2 AND type = 'event'
+               AND expired IS NULL",
         )?;
         for ((device, seq), (_, ranges)) in self.masks()? {
             let row: Option<(Vec<u8>, String)> = st
@@ -4615,8 +4664,48 @@ impl Raw {
         Ok(repo.filter(|_| repos == 1))
     }
 
+    /// docs/retention.md: `seqs` of this device expired as the expiry writes them, and the home
+    /// stamped with the format that reads them.
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self, seqs: &[i64]) {
+        for seq in seqs {
+            self.conn
+                .execute(
+                    "UPDATE records SET enc = 'plain', body = X'', original_bytes = NULL,
+                       expired = ?3
+                     WHERE device = ?1 AND seq = ?2 AND type = 'event'",
+                    params![self.device, seq, crate::db::now_ms()],
+                )
+                .unwrap();
+        }
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))
+            .unwrap();
+    }
+
+    /// docs/retention.md: whether one of `device`'s records `from` to `to` expired.
+    pub(crate) fn holds_expired(&self, device: &str, from: i64, to: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
+               AND type = 'event' AND expired IS NOT NULL)",
+            params![device, from, to],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// docs/retention.md: how many of `agent`'s `session`'s prompts expired.
+    pub(crate) fn expired_prompts(&self, agent: &str, session: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM records WHERE type = 'event' AND kind = 'prompt' AND agent = ?1
+               AND session = ?2 AND expired IS NOT NULL",
+            params![agent, session],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a
-    /// session), from the row alone: no body is read.
+    /// session), from the row alone: no body is read. An expired record's are its labels too.
     pub fn session_key(&self, device: &str, seq: i64) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
         let labels: Option<(Option<String>, Option<String>)> = self
@@ -4894,7 +4983,7 @@ impl Raw {
 /// The columns `record` reads, in its order.
 const RECORD: &str = "device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, \
                       cwd, source, body, original_bytes, \
-                      target_device, target_seq, target_offset, target_length, enc";
+                      target_device, target_seq, target_offset, target_length, enc, expired";
 
 /// A `records` row, its body decompressed, as `Raw::after` reads it before the masks.
 fn record(r: &rusqlite::Row) -> rusqlite::Result<Record> {
@@ -4912,6 +5001,21 @@ fn record(r: &rusqlite::Row) -> rusqlite::Result<Record> {
             },
             None => Target::Record { device, seq },
         })
+    } else if r.get::<_, Option<i64>>(20)?.is_some() {
+        Item::Expired(Box::new(Event {
+            ts: r.get(3)?,
+            kind: r.get(4)?,
+            agent: r.get(5)?,
+            session: r.get(6)?,
+            repo: r.get(7)?,
+            branch: r.get(8)?,
+            head: r.get(9)?,
+            gitdir: r.get(10)?,
+            cwd: r.get(11)?,
+            source: r.get(12)?,
+            body: String::new(),
+            original_bytes: None,
+        }))
     } else {
         let mut body: Vec<u8> = r.get(13)?;
         // Task 10: no reader sees `enc`.
@@ -4990,6 +5094,16 @@ impl Raw {
                     v["kind"] = serde_json::json!(kind);
                     v["ts"] = serde_json::json!(ts);
                 }
+                // When retention removed its text: a restore keeps it.
+                if matches!(r.item, Item::Expired(_)) {
+                    v["expired"] = self
+                        .conn
+                        .prepare_cached(
+                            "SELECT expired FROM records WHERE device = ?1 AND seq = ?2",
+                        )?
+                        .query_row(params![r.device, r.seq], |x| x.get::<_, i64>(0))?
+                        .into();
+                }
                 // A tombstone's time, by which a purge judges what was made before it (Codex on
                 // #480): a restore keeps it.
                 if matches!(r.item, Item::Tombstone(_)) {
@@ -5006,7 +5120,7 @@ impl Raw {
                 // An imported record keeps its origin, and a tombstone of a forgotten one the
                 // deny row, so a restore from the segments alone forgets it again (D1 rule 14).
                 let extra = match &r.item {
-                    Item::Event(_) | Item::Removed => self.origin_of(&r.device, r.seq)?.map(|(origin, session, ambiguous)| {
+                    Item::Event(_) | Item::Removed | Item::Expired(_) => self.origin_of(&r.device, r.seq)?.map(|(origin, session, ambiguous)| {
                         (
                             "import_identity",
                             serde_json::json!({ "origin": origin, "session": session, "ambiguous": ambiguous }),
@@ -5884,12 +5998,14 @@ impl Raw {
             let Some(r) = recs.iter_mut().find(|r| r.seq == seq) else {
                 continue;
             };
-            let Item::Event(e) = &mut r.item else {
-                continue; // a tombstone of a tombstone hides nothing
-            };
-            match (offset, length) {
-                (Some(o), Some(l)) => e.body = masked(&e.body, o, l),
-                _ => r.item = Item::Removed,
+            match &mut r.item {
+                Item::Event(e) => match (offset, length) {
+                    (Some(o), Some(l)) => e.body = masked(&e.body, o, l),
+                    _ => r.item = Item::Removed,
+                },
+                // docs/retention.md: a forget wins over an expiry; a range has no text left to mask.
+                Item::Expired(_) if offset.is_none() => r.item = Item::Removed,
+                _ => {} // a tombstone of a tombstone hides nothing
             }
         }
         Ok(())
@@ -5922,7 +6038,8 @@ impl Raw {
                 .conn
                 .prepare(
                     "SELECT seq, length(body) FROM records WHERE device = ?1 AND seq > ?2
-                       AND seq <= ?3 AND type = 'event' AND enc = 'plain' ORDER BY seq LIMIT ?4",
+                       AND seq <= ?3 AND type = 'event' AND enc = 'plain' AND expired IS NULL
+                       ORDER BY seq LIMIT ?4",
                 )?
                 .query_map(params![device, from, through, COMPRESS_BATCH as i64], |r| {
                     Ok((r.get(0)?, r.get(1)?))
@@ -5990,6 +6107,13 @@ fn line(r: &Record, ledger: Vec<serde_json::Value>) -> String {
             "body": e.body, "original_bytes": e.original_bytes, "ledger": ledger,
         }),
         Item::Removed => serde_json::json!({"device": r.device, "seq": r.seq, "type": "removed"}),
+        // docs/retention.md: its own type, which a binary before retention refuses to restore.
+        Item::Expired(e) => serde_json::json!({
+            "device": r.device, "seq": r.seq, "type": "expired", "ts": e.ts, "kind": e.kind,
+            "agent": e.agent, "session": e.session, "repo": e.repo, "branch": e.branch,
+            "head": e.head, "gitdir": e.gitdir, "cwd": e.cwd, "source": e.source,
+            "ledger": ledger,
+        }),
         Item::Tombstone(t) => {
             let (device, seq, offset, length) = match t {
                 Target::Record { device, seq } => (device, seq, None, None),
@@ -6037,8 +6161,9 @@ impl Rebuild {
         anyhow::ensure!(!path.exists(), "{} exists", path.display());
         let conn = Connection::open(path)?;
         conn.execute_batch(&schema_for_file(&conn, path)?)?;
-        // The rebuild is this binary's: its format (docs/store-format.md).
-        conn.execute_batch(&format!("PRAGMA user_version = {FORMAT}"))?;
+        // The rebuild is this binary's: the format an open stamps, raised by a line only a newer
+        // binary reads (docs/store-format.md).
+        conn.execute_batch(&format!("PRAGMA user_version = {OPEN_FORMAT}"))?;
         // A staging file is fresh, but the history rebuilt into it is not proof of a fresh home.
         conn.execute("DELETE FROM meta WHERE key='home_id_proven'", [])?;
         crate::db::ensure_device(&conn, path)?;
@@ -6133,24 +6258,34 @@ impl Rebuild {
                         i("original_bytes")
                     ],
                 )?;
-                for l in v["ledger"].as_array().into_iter().flatten() {
-                    let ls = |k: &str| l.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
-                    let li = |k: &str| l.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
-                    self.conn.execute(
-                        "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
-                         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            device,
-                            seq,
-                            ls("field"),
-                            ls("rule"),
-                            li("offset"),
-                            li("length"),
-                            li("ts"),
-                            ls("ruleset")
-                        ],
-                    )?;
-                }
+                self.ledger(device, seq, &v)?;
+            }
+            Some("expired") => {
+                // docs/retention.md: an event whose text retention removed, labels and ledger
+                // kept; the home it is restored into is of the format that reads it.
+                self.conn.execute(
+                    "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch,
+                       head, gitdir, cwd, source, enc, body, expired)
+                     VALUES(?1, ?2, 'event', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'plain', X'', ?13)",
+                    params![
+                        device,
+                        seq,
+                        i("ts").unwrap_or(0),
+                        s("kind").unwrap_or(""),
+                        s("agent").unwrap_or(""),
+                        s("session").unwrap_or(""),
+                        s("repo"),
+                        s("branch"),
+                        s("head"),
+                        s("gitdir"),
+                        s("cwd"),
+                        s("source").unwrap_or(""),
+                        i("expired").unwrap_or(1),
+                    ],
+                )?;
+                self.ledger(device, seq, &v)?;
+                self.conn
+                    .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
             }
             Some("removed") => {
                 // Restore only a complete explicitly carried triple. A legacy or malformed
@@ -6219,7 +6354,7 @@ impl Rebuild {
         }
         // A removed record keeps only its validated native hashes: subsequent backup
         // generations still associate the tombstone's denial without restoring any body.
-        if matches!(s("type"), Some("event" | "removed"))
+        if matches!(s("type"), Some("event" | "removed" | "expired"))
             && let Some(identity) = v.get("import_identity")
         {
             let origin = identity["origin"].as_str().context("import origin")?;
@@ -6231,6 +6366,29 @@ impl Rebuild {
             self.conn.execute(
                 "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous) VALUES(?1, ?2, ?3, ?4, ?5)",
                 params![device, seq, origin, session, i64::from(identity["ambiguous"].as_bool().unwrap_or(true))],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A backup line's ledger rows.
+    fn ledger(&self, device: &str, seq: i64, v: &serde_json::Value) -> Result<()> {
+        for l in v["ledger"].as_array().into_iter().flatten() {
+            let ls = |k: &str| l.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
+            let li = |k: &str| l.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+            self.conn.execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    device,
+                    seq,
+                    ls("field"),
+                    ls("rule"),
+                    li("offset"),
+                    li("length"),
+                    li("ts"),
+                    ls("ruleset")
+                ],
             )?;
         }
         Ok(())
@@ -7968,13 +8126,20 @@ mod tests {
     }
 
     /// docs/store-format.md: a raw.db from before the stamp gets it at its first writable open,
-    /// and an open of a stamped one writes nothing for it.
+    /// and an open of a stamped one writes nothing for it. An open stamps the format the binary
+    /// before retention reads, and never lowers one an expiry raised (docs/retention.md).
     #[test]
     fn a_raw_db_from_before_the_stamp_gets_it_once() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let raw = open(p).unwrap();
-        assert_eq!(format_in(&raw), FORMAT);
+        assert_eq!(format_in(&raw), OPEN_FORMAT);
+        raw.conn
+            .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))
+            .unwrap();
+        drop(raw);
+        let raw = open(p).unwrap();
+        assert_eq!(format_in(&raw), EXPIRED_FORMAT);
         raw.conn.execute_batch("PRAGMA user_version = 0").unwrap();
         drop(raw);
         let mut changed = Vec::new();
@@ -7983,7 +8148,10 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!((format_in(&raw), changed), (FORMAT, vec!["stores_changed"]));
+        assert_eq!(
+            (format_in(&raw), changed),
+            (OPEN_FORMAT, vec!["stores_changed"])
+        );
         assert!(!raw.newer_format());
         let mut changed = Vec::new();
         let again = open_report(p, None, &mut |stage| {
@@ -7991,7 +8159,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!((format_in(&again), changed), (FORMAT, vec![]));
+        assert_eq!((format_in(&again), changed), (OPEN_FORMAT, vec![]));
         // A newer binary stamps it while this handle is open: the handle says so, and appends
         // neither an event nor an op (CodeRabbit on #503).
         again
@@ -8018,6 +8186,140 @@ mod tests {
         assert!(refused(
             raw.append_imported(&[imported("after")], "", None)
                 .unwrap_err()
+        ));
+    }
+
+    /// docs/retention.md: an expired record reads as its labels with no text and stays an event to
+    /// the label queries; a range tombstone leaves it, a whole one hides it as `Removed`; it
+    /// crosses a backup as a line of its own type, which restores it, labels and ledger kept, into
+    /// a raw.db of the format that reads it, while a restore with none stays at the open's format.
+    #[test]
+    fn an_expired_record_keeps_its_labels_and_crosses_a_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = open(p).unwrap();
+        let mut e = test_event("the expired canary words");
+        (e.repo, e.ts) = (Some("github.com/o/r".into()), 1_000);
+        let gone = raw.append(&e).unwrap();
+        let kept = raw.append(&test_event("kept words")).unwrap();
+        let mut imported = test_event("the imported canary words");
+        (imported.source, imported.session) = ("transcript".into(), "t".into());
+        let identity = ImportIdentity {
+            origin: crate::forget::origin("synthetic", "imported"),
+            session: crate::forget::session(&imported.agent, &imported.session),
+            ambiguous: None,
+            unverified: false,
+        };
+        let other = raw
+            .append_imported_origins(
+                &[crate::capture::Captured {
+                    event: imported,
+                    ledger: Vec::new(),
+                }],
+                std::slice::from_ref(&identity),
+                "",
+                None,
+            )
+            .unwrap()[0];
+        raw.conn
+            .execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'session', 'r', 0, 1, 0, 'v')",
+                params![raw.device(), gone],
+            )
+            .unwrap();
+        let device = raw.device().to_owned();
+        let rebuilt = |name: &str, lines: &[(i64, String)]| -> Connection {
+            let path = p.join(name);
+            let mut rebuild = Rebuild::new(&path, &device).unwrap();
+            for (_, l) in lines {
+                rebuild.add(l).unwrap();
+            }
+            rebuild.finish().unwrap();
+            Connection::open(&path).unwrap()
+        };
+        let version = |c: &Connection| -> i64 {
+            c.query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            version(&rebuilt(
+                "plain.db",
+                &raw.export_lines(0, usize::MAX).unwrap()
+            )),
+            OPEN_FORMAT
+        );
+        raw.expire_for_test(&[gone, other]);
+        let read = raw.after(&device, 0, 10).unwrap();
+        let Item::Expired(labels) = &read[0].item else {
+            panic!("{:?}", read[0].item)
+        };
+        assert_eq!(
+            (labels.body.as_str(), labels.repo.as_deref(), labels.ts),
+            ("", Some("github.com/o/r"), 1_000)
+        );
+        assert!(matches!(read[1].item, Item::Event(_)));
+        assert_eq!(
+            raw.session_key(&device, gone).unwrap().as_deref(),
+            Some("claude\u{0}s")
+        );
+        assert!(raw.holds_expired(&device, gone, kept).unwrap());
+        assert!(!raw.holds_expired(&device, kept, kept).unwrap());
+        let lines = raw.export_lines(0, usize::MAX).unwrap();
+        assert!(lines[0].1.contains(r#""type":"expired""#), "{}", lines[0].1);
+        assert!(
+            lines.iter().all(|(_, l)| !l.contains("canary")),
+            "{lines:?}"
+        );
+        assert!(lines[2].1.contains("import_identity"), "{}", lines[2].1);
+        let c = rebuilt("expired.db", &lines);
+        assert_eq!(version(&c), EXPIRED_FORMAT);
+        let origin: String = c
+            .query_row(
+                "SELECT origin FROM import_origins WHERE seq = ?1",
+                [other],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(origin, identity.origin);
+        let row: (String, Option<String>, Vec<u8>, Option<i64>, i64) = c
+            .query_row(
+                "SELECT type, repo, body, expired,
+                   (SELECT COUNT(*) FROM ledger WHERE seq = records.seq)
+                 FROM records WHERE seq = ?1",
+                [gone],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                row.0.as_str(),
+                row.1.as_deref(),
+                row.2.len(),
+                row.3.is_some(),
+                row.4
+            ),
+            ("event", Some("github.com/o/r"), 0, true, 1)
+        );
+        raw.append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: gone,
+            offset: 0,
+            length: 3,
+        })
+        .unwrap();
+        assert!(matches!(
+            raw.after(&device, gone - 1, 1).unwrap()[0].item,
+            Item::Expired(_)
+        ));
+        raw.append_tombstone(Target::Record {
+            device: device.clone(),
+            seq: gone,
+        })
+        .unwrap();
+        assert!(matches!(
+            raw.after(&device, gone - 1, 1).unwrap()[0].item,
+            Item::Removed
         ));
     }
 
@@ -8552,7 +8854,7 @@ mod tests {
             .into_iter()
             .map(|rec| match rec.item {
                 Item::Event(e) => e.body,
-                Item::Removed | Item::Tombstone(_) => unreachable!(),
+                Item::Removed | Item::Tombstone(_) | Item::Expired(_) => unreachable!(),
             })
             .collect();
         assert_eq!(bodies.len(), 100);
