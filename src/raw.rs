@@ -5899,17 +5899,17 @@ impl Raw {
 
     /// D9: the time of this device's newest record a hook wrote, walking down from the top past
     /// tombstones, imports and replays, which never say the owner is at work.
-    /// The kind of this device's newest hook record: whether its last turn has ended (its reply,
-    /// or the session's end), so the window that holds it need not wait.
-    pub fn last_hook_kind(&self) -> Result<Option<String>> {
+    /// The seq and kind of this device's newest hook record: whether its last turn has ended
+    /// (its reply, or the session's end), so the window that holds it need not wait.
+    pub fn last_hook_record(&self) -> Result<Option<(i64, String)>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
-                "SELECT kind FROM records WHERE device = ?1 AND type = 'event' AND source = 'hook'
+                "SELECT seq, kind FROM records WHERE device = ?1 AND type = 'event' AND source = 'hook'
                  ORDER BY seq DESC LIMIT 1",
                 [&self.device],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
     }

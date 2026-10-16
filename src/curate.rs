@@ -1518,12 +1518,13 @@ pub fn run_phase(
         Err(_) => Some(crate::db::now_ms() + idle),
     };
     // A turn that ended is curated at once: when the newest hook record is a reply or a session's
-    // end, nothing of that turn is to come, and its cards are ready for the next prompt instead of
-    // after the idle wait, as claude-mem's observer makes them while the work goes on
-    // (docs/curation-timing.md).
+    // end and this window holds it, nothing of that turn is to come, and its cards are ready for
+    // the next prompt instead of after the idle wait, as claude-mem's observer makes them while
+    // the work goes on (docs/curation-timing.md). One appended after the window was read, or past
+    // where the window stops, waits for the window that holds it (Codex on #557).
     let ended = |raw: &Raw| {
-        let kind = raw.last_hook_kind().ok().flatten();
-        matches!(kind.as_deref(), Some("reply" | "end"))
+        let last = raw.last_hook_record().ok().flatten();
+        last.is_some_and(|(seq, kind)| seq <= w.to_seq && matches!(kind.as_str(), "reply" | "end"))
     };
     let now = crate::db::now_ms();
     if !w.full
@@ -6775,8 +6776,8 @@ mod tests {
     }
 
     /// A window goes at once when the newest hook record ends a turn (its reply, or the session's
-    /// end), not after the idle wait (docs/curation-timing.md); one a later prompt follows still
-    /// waits.
+    /// end) and the window holds it, not after the idle wait (docs/curation-timing.md); one a
+    /// later prompt follows still waits, and so does one past where the window stops.
     #[test]
     fn a_window_that_ends_a_turn_goes_at_once() {
         let calls = Cell::new(0);
@@ -6817,6 +6818,30 @@ mod tests {
                 "{last}"
             );
         }
+        // A reply the window does not hold, here past an imported record where the window stops
+        // (as one appended after the window was read would be), does not send it (Codex on #557).
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&at(prompt("Build the parser."))).unwrap();
+        raw.append(&Event {
+            source: "transcript".into(),
+            ..at(prompt("An imported turn."))
+        })
+        .unwrap();
+        raw.append(&at(event("reply", json!({"assistant": "Built."}))))
+            .unwrap();
+        calls.set(0);
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!(
+            (phase, calls.get()),
+            (
+                Phase::Waiting {
+                    until: ts + 600_000,
+                    up: true
+                },
+                0
+            )
+        );
         // A reply a later prompt follows in the same window: the turn going on waits.
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
