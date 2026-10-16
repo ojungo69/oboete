@@ -281,8 +281,13 @@ the backups, and knowledge.db, which is built again. R2 holds nothing until mile
 - doctor: `retention: forever` or `retention: N days (a window expires once curated and past
   it; last look <time>, M records expired)`, a batch begun and not finished, and a wrong table
   as a failure.
-- The settings page (its own PR): the key in the detailed view's privacy group, in English and
-  Japanese.
+- The settings page (part 3): "How long raw records are kept" in the detailed view's privacy
+  group, in English and Japanese: "Keep forever" (the default, which leaves no `days` key) or a
+  day count from 1 to 36,500, counted from each record's own time (so records already older go at
+  the next look), and what stays, the daily look, the rebuild's few minutes and that removed text
+  does not come back. An older page that sends no `retention` leaves the table as it is; a
+  `retention` without `days` is refused, not read as forever. An unsaved period survives a
+  provider or key operation, as the other drafts do.
 
 ## Pull requests
 
@@ -295,7 +300,7 @@ the backups, and knowledge.db, which is built again. R2 holds nothing until mile
    op's quotes among them), `expiry_owed`, its file and the
    five steps, restore's application of the owed file, the copies' sweep, the worker's look,
    doctor, the spec's amendments (6.2, A55, section 8's line, 7.5's rollback note).
-3. **The page**.
+3. **The page**: the key on the settings page, above.
 
 ## Tests
 
