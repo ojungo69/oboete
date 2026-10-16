@@ -2882,8 +2882,9 @@ extra_rules = [
             },
             None,
         );
-        assert!(text.contains(" ● Ours\n"), "{text}");
-        assert!(!text.contains("The subagent's"), "{text}");
+        // The packet holds uids: not printed (CodeQL on #561).
+        assert!(text.contains(" ● Ours\n"));
+        assert!(!text.contains("The subagent's"));
     }
 
     /// docs/cards.md S1, S4: the repository's cards, as claude-mem's block, after the owner's

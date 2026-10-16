@@ -267,10 +267,10 @@ tool calls whose hook or transcript names an `agent_id`, beside session starts a
 cards are marked when they are kept (`cards.subagent`). Search and the page still show them. A
 window that mixes the main agent's records with a subagent's keeps its cards at session start;
 claude-mem judges each tool call alone, while oboete's cards are made a window at a time. Cards
-kept before the mark get it from the cards consumer, the newest first, 200 a step. In this PC's
-week to 2026-10-17, 2,753 of the 4,986 tool calls Claude Code's hooks recorded were a subagent's,
-and 1,117 of the week's 1,830 cards came from 694 windows (of 1,124) that are a subagent's work
-alone.
+kept before the mark get it from the cards consumer at its first step after the change. In this
+PC's week to 2026-10-17, 2,753 of the 4,986 tool calls Claude Code's hooks recorded were a
+subagent's, and 1,117 of the week's 1,830 cards came from 694 windows (of 1,124) that are a
+subagent's work alone.
 
 S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem's block alone
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).

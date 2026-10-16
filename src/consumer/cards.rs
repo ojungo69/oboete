@@ -11,8 +11,6 @@ pub struct Cards;
 
 /// Ops per step, one knowledge.db transaction each.
 const BATCH: usize = 500;
-/// Cards kept before their subagent mark, marked per step (`mark`).
-const MARKS: i64 = 200;
 impl Consumer for Cards {
     fn name(&self) -> &'static str {
         "cards"
@@ -189,24 +187,16 @@ fn replace(k: &Connection, device: &str, op_seq: i64, op: &serde_json::Value) ->
     Ok(())
 }
 
-/// Parity row X1: the cards kept before `cards.subagent` get it, the newest first, at most
-/// `MARKS` windows a step, so session start leaves out a subagent's work in what it shows first.
+/// Parity row X1: the cards kept before `cards.subagent` get it, all at the first step after the
+/// change, since a worker that has caught up steps again only when an op comes (Codex on #561).
 fn mark(raw: &Raw, k: &Connection) -> Result<()> {
     let windows: Vec<(String, i64, i64, i64)> = k
         .prepare(
-            "SELECT device, op_seq, from_seq, to_seq FROM cards WHERE subagent IS NULL
-             ORDER BY ts DESC LIMIT ?1",
+            "SELECT DISTINCT device, op_seq, from_seq, to_seq FROM cards WHERE subagent IS NULL",
         )?
-        .query_map([MARKS], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut seen = std::collections::HashSet::new();
     for (device, op_seq, from, to) in windows {
-        // A window's cards are marked together.
-        if !seen.insert((device.clone(), op_seq)) {
-            continue;
-        }
         let subagent = raw.subagent_only(&device, from, to)?;
         k.execute(
             "UPDATE cards SET subagent = ?3 WHERE device = ?1 AND op_seq = ?2",

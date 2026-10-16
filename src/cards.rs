@@ -160,7 +160,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     }
     // Parity row X1: 1 for a card of a window that is a subagent's work alone
     // (`Raw::subagent_only`), 0 for another; none for one kept before, until the cards consumer
-    // marks it (`consumer::cards::mark`), the newest first.
+    // marks it (`consumer::cards::mark`).
     crate::claims::migrate(
         k,
         "SELECT count(*) = 0 FROM pragma_table_info('cards') WHERE name = 'subagent'",
