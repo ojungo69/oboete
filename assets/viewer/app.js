@@ -1110,7 +1110,7 @@ const TEXT = {
   retention_forever_value: ['forever', 'いつまでも'],
   retention_days_value: ['{days} days', '{days} 日'],
   retention_day_value: ['{days} day', '{days} 日'],
-  retention_note: ['The worker checks once a day. Each time it removes text, it builds the search index again, which takes a few minutes; searching the memory may be unavailable meanwhile. Removed text cannot be brought back.', 'ワーカーは 1 日に 1 回確認します。本文を消すたびに検索の索引を作り直すため数分かかり、その間は記憶の検索が使えないことがあります。消した本文は元に戻せません。'],
+  retention_note: ['The worker checks once a week. Each time it removes text, it builds the search index again, which takes a few minutes; searching the memory may be unavailable meanwhile. Removed text cannot be brought back.', 'ワーカーは週に 1 回確認します。本文を消すたびに検索の索引を作り直すため数分かかり、その間は記憶の検索が使えないことがあります。消した本文は元に戻せません。'],
   backup_h: ['Backup location', 'バックアップの保存先'],
   backup_dir: ['Directory', 'ディレクトリ'],
   backup_default: ['Default: backups inside the memory home', '既定: 記憶の保存先にある backups'],

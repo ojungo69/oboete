@@ -174,7 +174,7 @@ As built (part 2):
   dir`, which every backup remembers in `state/backup-dirs`, one JSON string a line, as a
   location may hold a newline (Codex on #552). A location given up before this version is not
   known (spec 6.3).
-- A new batch begins at most once a day (`state/retention-look`), however often
+- A new batch begins at most once a week (`state/retention-look`, decision 49), however often
   `forget --continue` runs for a forget or a mask; an owed batch is finished at every pass.
 
 ## Claims stay
@@ -263,10 +263,10 @@ expired (an expired row no tombstone hides), or it is gone (forgotten, masked ov
   forever. A value out of range, or not a whole number of days, makes the table wrong: no new
   batch is taken (owed rows still finish) and doctor says so (`config::retention`). The hooks
   ignore the table (`CaptureConfig`), so a wrong one never stops capture.
-- The worker looks at most once a day, as it looks for a forget left unfinished
-  (`forget::continue_due`), and every 10 minutes while rows are owed: it starts
-  `oboete forget --continue`, which runs the pass after forget's own work, under the same purge
-  lock and the worker lock (the resident worker steps aside, as for a purge).
+- The worker looks at most once a week (decision 49: each batch builds knowledge.db again), where
+  it looks for a forget left unfinished (`forget::continue_due`), and every 10 minutes while rows
+  are owed: it starts `oboete forget --continue`, which runs the pass after forget's own work,
+  under the same purge lock and the worker lock (the resident worker steps aside, as for a purge).
 
 ## What it does not remove
 
@@ -284,7 +284,7 @@ the backups, and knowledge.db, which is built again. R2 holds nothing until mile
 - The settings page (part 3): "How long raw records are kept" in the detailed view's privacy
   group, in English and Japanese: "Keep forever" (the default, which leaves no `days` key) or a
   day count from 1 to 36,500, counted from each record's own time (so records already older go at
-  the next look), and what stays, the daily look, the rebuild's few minutes and that removed text
+  the next look), and what stays, the weekly look, the rebuild's few minutes and that removed text
   does not come back. An older page that sends no `retention` leaves the table as it is; a
   `retention` without `days`, or a null one, is refused, not read as forever or as left out. An
   unsaved period survives a
