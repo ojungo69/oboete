@@ -24,6 +24,9 @@ const TOOL_INPUT_CHARS: usize = 2_000;
 /// Task 12's shrink (`[summary] shrink`, docs/spike/m3-dev.md): a tool's input shown up to this,
 /// and an output longer than twice this shown as its head and its tail of this many characters.
 const SHORT_CHARS: usize = 300;
+/// An output larger than a window shows at most this many characters of its head, and as many of
+/// its tail, fewer when the window holds less (parity row 20, docs/curation-timing.md).
+const ELIDED_CHARS: usize = 8_000;
 /// Tools whose output is the owner's own words (an answer to a question, a plan approved or sent
 /// back): a shrink never shortens their output. Their input is cut like any tool's.
 const OWNERS_WORDS: [&str; 4] = [
@@ -501,7 +504,7 @@ pub(crate) fn window_at(
                 // split (an `AskUserQuestion` too: its answers are the owner's words), and the next
                 // window starts where this part stops.
                 if matches!(piece.role, Role::Tool { .. }) {
-                    piece = prepared.elided(r.seq);
+                    piece = prepared.elided(r.seq, budget.saturating_sub(used + heading));
                     elided.push(r.seq);
                     // Covered whole: the window is full only when an event of its kind follows
                     // it, as a live one before imported records waits (Codex on #304).
@@ -959,6 +962,12 @@ impl<'r> Prepared<'r> {
 
     /// Its text from byte `from` of its long text to `to` (its end when none), through the gate.
     fn piece(&self, seq: i64, from: i64, to: Option<i64>) -> Piece {
+        self.kept(seq, from, to, self.short.then_some(SHORT_CHARS))
+    }
+
+    /// `piece`, a long output shown as its head and its tail of `keep` characters each when it is
+    /// longer than twice that.
+    fn kept(&self, seq: i64, from: i64, to: Option<i64>, keep: Option<usize>) -> Piece {
         let mut text = self.head.clone();
         let (mut source, mut shortened) = (None, self.cut_input);
         if let Some((long, hidden)) = &self.long {
@@ -969,13 +978,12 @@ impl<'r> Prepared<'r> {
             };
             text.push(' ');
             // The head and the tail of a long output; the gates still read the whole of it.
-            let middle = self.short.then(|| {
+            let middle = keep.and_then(|n| {
                 let chars = || long[start..end].char_indices().map(|(i, _)| start + i);
-                let head = chars().nth(SHORT_CHARS)?;
-                let tail = chars().nth_back(SHORT_CHARS - 1)?;
+                let head = chars().nth(n)?;
+                let tail = chars().nth_back(n - 1)?;
                 (head < tail).then_some((head, tail))
             });
-            let middle = middle.flatten();
             match middle {
                 Some((head, tail)) => {
                     let left = long[head..tail].chars().count();
@@ -1026,13 +1034,21 @@ impl<'r> Prepared<'r> {
         }
     }
 
-    /// A tool call whose output is larger than a window: its line, and the output's size only.
-    fn elided(&self, seq: i64) -> Piece {
-        let bytes = self.long.as_ref().map_or(0, |(l, _)| l.len());
-        let text = format!("{} ({bytes} bytes of output, seen, elided)", self.head);
-        Piece {
-            turn: false,
-            ..self.with(seq, 0, None, text)
+    /// A tool call whose output is larger than a window: its line, and the output's head and tail
+    /// with what lies between left out, as many characters of each as fit in `room` tokens, up to
+    /// `ELIDED_CHARS`, as claude-mem's observer keeps a long output's head and tail (parity row
+    /// 20). The gates read the whole output, as for the shrink.
+    fn elided(&self, seq: i64, room: u32) -> Piece {
+        let mut keep = ELIDED_CHARS;
+        loop {
+            let piece = self.kept(seq, 0, None, Some(keep));
+            if piece.tokens <= room || keep <= SHORT_CHARS {
+                return Piece {
+                    turn: false,
+                    ..piece
+                };
+            }
+            keep /= 2;
         }
     }
 
@@ -5230,7 +5246,36 @@ mod tests {
             (w.from_seq, w.to_seq, w.to_offset, w.elided.clone()),
             (1, 1, None, vec![1])
         );
-        assert!(w.text.contains("(5000 bytes of output, seen, elided)") && !w.text.contains("yyy"));
+        // Its head and tail as fit in the window, what lies between left out (parity row 20).
+        assert!(w.text.contains(" characters not shown ...] "), "{}", w.text);
+        assert!(!w.text.contains(&"y".repeat(600)), "{}", w.text);
+        assert!(crate::budget::estimate(&w.text) <= 300, "{}", w.text);
+    }
+
+    /// Parity row 20: an output larger than the window reaches the curator as its head and its
+    /// tail, up to `ELIDED_CHARS` each, the middle left out; at most one window's worth.
+    #[test]
+    fn an_elided_output_shows_its_head_and_tail() {
+        let (_h, mut raw, dev) = store();
+        let output = format!(
+            "HEADMARK {} MIDDLEMARK {} TAILMARK",
+            "a".repeat(12_000),
+            "b".repeat(12_000)
+        );
+        raw.append(&tool(&output)).unwrap();
+        raw.append(&prompt("next")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.elided, vec![1]);
+        assert!(
+            w.text.contains("HEADMARK") && w.text.contains("TAILMARK"),
+            "{}",
+            w.text
+        );
+        assert!(!w.text.contains("MIDDLEMARK"));
+        assert!(w.text.contains(" characters not shown ...] "));
+        assert!(crate::budget::estimate(&w.text) <= WINDOW_TOKENS);
     }
 
     #[test]
