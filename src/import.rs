@@ -36,6 +36,9 @@ pub struct Stats {
     pub never_recorded: u64,
     /// claude-mem's exclusion patterns added as patterns never recorded (parity row 14, I8).
     pub exclusions: u64,
+    /// claude-mem's exclusion patterns oboete does not take (over 256 bytes, or with a control
+    /// character): the folders they name are recorded, and the import says so.
+    pub exclusions_refused: u64,
 }
 
 struct Session {
@@ -91,8 +94,10 @@ pub fn claude_mem(
         );
     }
     let source = source_name(&src)?;
+    let (added, refused) = exclusions(raw, path)?;
     let mut stats = Stats {
-        exclusions: exclusions(raw, path)?,
+        exclusions: added,
+        exclusions_refused: refused,
         ..Stats::default()
     };
     // A row claude-mem merged into another project is read under that one (I3).
@@ -262,9 +267,11 @@ pub fn claude_mem(
 
 /// I8 (parity row 14): claude-mem's exclusion patterns, `CLAUDE_MEM_EXCLUDED_PROJECTS` in the
 /// `settings.json` beside its database, each added as a pattern never recorded unless an exclusion
-/// op ever named it, so one taken back here is not added again. None when the file or the key is
-/// missing or unreadable: what claude-mem keeps is imported all the same.
-fn exclusions(raw: &mut Raw, db: &Path) -> Result<u64> {
+/// op ever named it, so one taken back here is not added again; and how many oboete does not take,
+/// which a line names, since the folders they name are recorded (the commit's security review).
+/// None when the file or the key is missing or unreadable: what claude-mem keeps is imported all
+/// the same.
+fn exclusions(raw: &mut Raw, db: &Path) -> Result<(u64, u64)> {
     let read = db
         .parent()
         .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
@@ -273,12 +280,14 @@ fn exclusions(raw: &mut Raw, db: &Path) -> Result<u64> {
         .as_ref()
         .and_then(|v| v["CLAUDE_MEM_EXCLUDED_PROJECTS"].as_str())
     else {
-        return Ok(0);
+        return Ok((0, 0));
     };
     let mut named = raw.patterns_ever_named()?;
-    let mut added = 0;
-    for given in list.split(',') {
+    let (mut added, mut refused) = (0, 0);
+    // An empty entry is none, as claude-mem reads the list.
+    for given in list.split(',').filter(|g| !g.trim().is_empty()) {
         let Ok(pattern) = crate::capture::pattern(given) else {
+            refused += 1;
             continue;
         };
         // A pattern the list repeats comes in once (Codex on #563).
@@ -287,7 +296,14 @@ fn exclusions(raw: &mut Raw, db: &Path) -> Result<u64> {
             added += 1;
         }
     }
-    Ok(added)
+    if refused > 0 {
+        eprintln!(
+            "oboete: {refused} of claude-mem's exclusion patterns are not brought over (over 256 \
+             bytes, or with a control character), so the folders they name are recorded: add \
+             each with `oboete capture exclude --pattern` in a form of at most 256 bytes"
+        );
+    }
+    Ok((added, refused))
 }
 
 /// I4: claude-mem's work state rows as work state ops, oldest first, under their project as an
@@ -1371,17 +1387,16 @@ mod tests {
                 .exclusions,
             0
         );
+        let long = "x".repeat(257);
         let settings = serde_json::json!({
-            "CLAUDE_MEM_EXCLUDED_PROJECTS": "secret-a, ~/private/** ,, secret-b, secret-a",
+            "CLAUDE_MEM_EXCLUDED_PROJECTS":
+                format!("secret-a, ~/private/** ,, secret-b, secret-a, {long}"),
             "CLAUDE_MEM_MODEL": "unrelated",
         });
         std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();
-        assert_eq!(
-            claude_mem(&mut raw, &src, &Default::default())
-                .unwrap()
-                .exclusions,
-            3
-        );
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        // One oboete does not take is counted, never dropped unsaid (the commit's security review).
+        assert_eq!((stats.exclusions, stats.exclusions_refused), (3, 1));
         let patterns = raw.capture_exclusions().unwrap().patterns;
         assert_eq!(
             Vec::from_iter(patterns),

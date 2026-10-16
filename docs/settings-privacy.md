@@ -134,8 +134,8 @@ over 256 bytes (a folder's name is at most 255 on the common file systems, and a
 the pattern's length times the path's) or one with a control character is refused before any
 write. Taking one back says nothing about whether another entry still covers a place, since a
 pattern names no one place.
-`oboete import claude-mem` brings claude-mem's own patterns over once (docs/claude-mem-import.md
-I8).
+`oboete import claude-mem` brings claude-mem's own patterns over once, and says how many it
+refuses (docs/claude-mem-import.md I8).
 
 The first-run guide says to name such places before their next session and
 offers a button to this section.

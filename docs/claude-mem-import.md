@@ -74,7 +74,11 @@ I8. **Exclusions (parity row 14).** claude-mem's exclusion patterns, the comma-s
 never recorded (docs/settings-privacy.md, Never record), before any row, each one only if no
 exclusion op ever named it: one taken back on the page or with `--undo` is not added again by a
 later import. A database with no settings beside it, or settings without the key, imports as
-before. The import's line counts them (`exclusions`).
+before. The import's line counts them (`exclusions`). An empty entry is none, as claude-mem reads
+the list; a pattern oboete refuses (over 256 bytes, or with a control character) is not brought
+over, and since the folders it names are then recorded, the line counts it
+(`exclusions_refused`) and a warning on standard error says so by its count alone, to add a
+shorter form with `oboete capture exclude --pattern`.
 
 ## Tests
 
