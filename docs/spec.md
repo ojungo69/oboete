@@ -1099,7 +1099,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
   - Today's code has no hub sync, so nothing is lost while the hub waits.
   - Once the hub is on, rolling a device back to the old design only stops that device's sync. What it pushed stays valid, and forget from any device reaches it.
 - **Dogfood**: the dogfood user migrates a copy of the owner's old store and syncs through its own test hub, never the owner's. The copy is deleted when the dogfood run ends.
-- **Rollback**: put the previous binary back at the hooks' path. The new version never writes the old store, so it is intact.
+- **Rollback**: until `oboete migrate --finish`, put the previous binary back at the hooks' path. The new version never writes the old store, so it is intact. Once `--finish` has deleted the old files (WSL: 2026-10-17), there is no old design to go back to: a rollback puts an earlier release of this design back, by the same rename, with step 4's note on `[retention]`.
   - Put it back by renaming a copy over the path (`install -m 755 <old> <dir>/.oboete.swap && mv -f <dir>/.oboete.swap <dir>/oboete`), not by copying over it: while the resident worker and viewer run the new binary, a copy over it fails with `Text file busy`. After the rename both exit within a minute (the switch rehearsal of 2026-10-15, [switch-rehearsal.md](switch-rehearsal.md)).
 - **claude-mem**: it keeps running unchanged next to oboete, and both inject at SessionStart as they do today. The public docs say running both is supported and that each injects its own block.
 
