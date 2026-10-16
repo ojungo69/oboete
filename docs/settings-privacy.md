@@ -130,8 +130,10 @@ claude-mem reads the last part alone, so a session started below an excluded pro
 recorded either; letter case is ignored where the platform ignores it, as for a folder. Each event
 is checked by its working folder as read and as labelled, against the patterns as given and as the
 rules now read them, as folders are. A pattern is stored trimmed, else as given; an empty one, one
-over 4,096 bytes or one with a control character is refused before any write. Taking one back says
-nothing about whether another entry still covers a place, since a pattern names no one place.
+over 256 bytes (a folder's name is at most 255 on the common file systems, and a match costs
+the pattern's length times the path's) or one with a control character is refused before any
+write. Taking one back says nothing about whether another entry still covers a place, since a
+pattern names no one place.
 `oboete import claude-mem` brings claude-mem's own patterns over once (docs/claude-mem-import.md
 I8).
 

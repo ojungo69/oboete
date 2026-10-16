@@ -1173,7 +1173,7 @@ const TEXT = {
   never_undone_covered: ['This folder is no longer excluded, but nothing there is recorded yet: another exclusion, or its checkout’s .oboete.toml, still covers it.', 'このフォルダーの除外は外しましたが、別の除外かチェックアウトの .oboete.toml がまだ当てはまるため、ここはまだ記録しません。'],
   capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
   folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
-  capture_pattern: ['Enter a folder name or a pattern of at most 4,096 bytes.', 'フォルダー名かパターンを入力してください (4,096 バイトまで)。'],
+  capture_pattern: ['Enter a folder name or a pattern of at most 256 bytes.', 'フォルダー名かパターンを入力してください (256 バイトまで)。'],
   pattern_not_found: ['This name or pattern is no longer in the list. Reload its state.', 'この名前やパターンは一覧にありません。状態を再読み込みしてください。'],
   never_patterns_h: ['Folder names and patterns', 'フォルダー名とパターン'],
   never_patterns_desc: ['A name such as my-secret-project stops recording in every folder of that name and inside one. A pattern works as in claude-mem: * stands for any characters within one folder name, ** for any folders, ? for one character, and a leading ~ for your home folder.', 'my-secret-project のような名前を入れると、その名前のフォルダーとその中では記録しません。パターンは claude-mem と同じ書き方です。* はフォルダー名の中の任意の文字、** は任意の階層、? は 1 文字、先頭の ~ はホームフォルダーを表します。'],
