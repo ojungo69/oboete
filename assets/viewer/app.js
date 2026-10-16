@@ -1103,6 +1103,14 @@ const TEXT = {
   tool_output: ['Output of tools', 'ツールの出力'],
   tool_full: ['Keep it whole (the start and end when very long)', 'すべて残す(非常に長いときは先頭と末尾)'],
   tool_head_tail: ['Keep only the start and end', '先頭と末尾だけ残す'],
+  retention_h: ['How long raw records are kept', '元の記録を残す期間'],
+  retention_desc: ['The text of a raw record (your prompts, the replies and tool output) is removed once it is older than this many days, counted from the record\'s own time (for imported history, the original time), and curation and the session summaries are done with it. Records that are already older are removed at the next check. Claims, cards and session summaries stay, and a record not curated yet is kept until it is.', '元の記録 (入力したプロンプト、応答、ツールの出力) の本文は、記録の日時 (取り込んだ履歴は元の日時) からこの日数を過ぎ、記録の要約とセッションの要約が済んだものから削除されます。すでにこの日数を過ぎている記録は、次の確認で削除されます。主張・カード・セッションの要約は残り、まだ要約していない記録は要約が済むまで残します。'],
+  retention_forever: ['Keep forever (the default)', 'いつまでも残す (既定)'],
+  retention_days: ['Days to keep ({min} to {max})', '残す日数 ({min}〜{max})'],
+  retention_forever_value: ['forever', 'いつまでも'],
+  retention_days_value: ['{days} days', '{days} 日'],
+  retention_day_value: ['{days} day', '{days} 日'],
+  retention_note: ['The worker checks once a day. Each time it removes text, it builds the search index again, which takes a few minutes; searching the memory may be unavailable meanwhile. Removed text cannot be brought back.', 'ワーカーは 1 日に 1 回確認します。本文を消すたびに検索の索引を作り直すため数分かかり、その間は記憶の検索が使えないことがあります。消した本文は元に戻せません。'],
   backup_h: ['Backup location', 'バックアップの保存先'],
   backup_dir: ['Directory', 'ディレクトリ'],
   backup_default: ['Default: backups inside the memory home', '既定: 記憶の保存先にある backups'],
@@ -2597,6 +2605,7 @@ function formOf(s) {
     inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
     backup: { dir: s.backup?.dir ?? null, edit: text(s.backup?.dir), reset: false },
+    retention: { days: s.retention?.days ?? null, edit: text(s.retention?.days), forever: (s.retention?.days ?? null) === null },
     redaction: { enabled: s.redaction?.enabled !== false, rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
     privacy: s.privacy || privacyUnavailable(),
     preference: preferenceDraft,
@@ -4032,6 +4041,27 @@ function preferenceSection(f) {
     draft.result?.uid ? claimLink(draft.result.uid) : null, draft.result && draft.result.state !== 'applied' ? next : null);
 }
 
+// docs/retention.md: a raw record's text goes once it is older than the period, by its own time, and
+// curation and the session summaries are done with it; forever unless a day count is set.
+function retentionSection(f) {
+  const r = f.retention;
+  const [least, most] = f.ranges.retention_days;
+  const days = input('number', r.edit, '', 'retention.days', (v) => { r.edit = v; });
+  [days.min, days.max] = [least, most];
+  days.disabled = r.forever;
+  const forever = checkbox(r.forever, (v) => { r.forever = v; days.disabled = v; });
+  forever.dataset.field = 'retention.forever';
+  let value = t('retention_forever_value');
+  if (r.days !== null) value = t(r.days === 1 ? 'retention_day_value' : 'retention_days_value', { days: r.days.toLocaleString('en-US') });
+  return el('section', 'retention',
+    el('h3', null, t('retention_h')),
+    el('p', 'desc', t('retention_desc')),
+    el('label', 'check', forever, t('retention_forever')),
+    el('label', 'field', el('span', null, t('retention_days', { min: least.toLocaleString('en-US'), max: most.toLocaleString('en-US') })), days,
+      note(t('saved_value', { value }))),
+    el('p', 'desc', t('retention_note')));
+}
+
 function checkbox(checked, onChange) {
   const c = el('input');
   c.type = 'checkbox';
@@ -4209,7 +4239,7 @@ function providerValidation(draft) {
 // and name-group edits stay local. Physical selectors are remapped only by the operation's raw
 // index changes, never by the first entry with a matching name.
 function preserveSettingsDrafts(next, mine) {
-  for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction']) next[key] = mine[key];
+  for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction', 'retention']) next[key] = mine[key];
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.neverFolder = mine.neverFolder;
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
@@ -4772,6 +4802,10 @@ function saveBody() {
   const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
   const port = whole(form.view.port, ...form.ranges.view_port);
   if (Number.isNaN(port)) return { field: 'view.port' };
+  // docs/retention.md: a day count in range, or null for forever; sent only when it changed.
+  const period = form.retention;
+  const days = period.forever ? null : whole(period.edit, ...form.ranges.retention_days);
+  if (Number.isNaN(days)) return { field: 'retention.days' };
   const sizes = {};
   for (const key of SIZES) {
     sizes[key] = whole(form.inject[key], ...form.ranges[key]);
@@ -4836,6 +4870,7 @@ function saveBody() {
       },
       capture: { store_prompts: form.capture.store_prompts, tool_output: form.capture.tool_output },
       ...(!form.backup.reset && form.backup.edit === (form.backup.dir ?? '') ? {} : { backup: { dir: form.backup.reset ? null : form.backup.edit || null } }),
+      ...(days === period.days ? {} : { retention: { days } }),
       redaction: redaction.value,
       ...(embedding ? { embedding } : {}),
       chain,
@@ -5605,7 +5640,7 @@ function drawSettings() {
       el('section', null,
         el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState())),
     settingsGroup('search', Boolean(embeddingDraft.status?.active), embeddingSection(f)),
-    settingsGroup('privacy', false, redactionSection(f), privacySection(f), captureSection(f)),
+    settingsGroup('privacy', false, redactionSection(f), privacySection(f), captureSection(f), retentionSection(f)),
     settingsGroup('computer', f.firstRun,
       el('section', null,
         el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),

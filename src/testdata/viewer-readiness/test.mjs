@@ -577,9 +577,10 @@ const settings=(mode,extra={})=>({version:'v1',first_run:false,resident_supporte
   summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:0,gemini:null,usd_this_month:0,
   stopped:null,inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,session_start_chars:6000,
     per_prompt_chars:1500,per_prompt_wait_ms:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},backup:{dir:null},
+  retention:{days:null},
   redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:null,
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
-    idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535]},
+    idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],retention_days:[1,36500]},
   view_runtime:{port:17373,mode},...extra});
 vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft};',ctx);
 const {w6}=ctx;
@@ -681,6 +682,34 @@ ctx.ui.setLang('ja');f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.
 assert(text(section()).includes('古いブックマーク')&&text(panel).includes('常駐の画面のポート'),'Japanese page address');
 ctx.ui.setLang('en');
 console.log('PASS: page address, moves, new token and the resident page from a foreground run');
+
+// docs/retention.md: how long raw records are kept, in the privacy group; forever by default, and
+// a period sent only when it changed.
+f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('How long raw records are kept')&&text(panel).includes('Saved: forever'),'the retention section, forever');
+assert.equal(field('retention.days').disabled,true,'no day count while kept forever');
+assert.equal(w6.saveBody().body.retention,undefined,'an unchanged period is not sent');
+const tick=(node,v)=>{node.checked=v;for(const cb of node.listeners.change||[])cb({target:node});};
+const typeIn=(node,v)=>{node.value=v;for(const cb of node.listeners.input||[])cb({target:node});};
+tick(field('retention.forever'),false);
+assert.equal(field('retention.days').disabled,false,'unticking Keep forever opens the day count');
+typeIn(field('retention.days'),'30');
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.retention)),{days:30});
+for(const bad of ['0','36501','1.5','']){f.retention.edit=bad;assert.equal(w6.saveBody().field,'retention.days',`period ${bad} refused before sending`);}
+f=w6.formOf(settings('resident',{retention:{days:30}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('Saved: 30 days'),'a saved period');
+assert.equal(field('retention.days').value,'30');
+assert.equal(w6.saveBody().body.retention,undefined,'an unchanged period is not sent');
+tick(field('retention.forever'),true);
+assert.equal(field('retention.days').disabled,true,'ticking Keep forever closes it');
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.retention)),{days:null},'forever is sent as null');
+f=w6.formOf(settings('resident',{retention:{days:1}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('Saved: 1 day')&&!text(panel).includes('Saved: 1 days'),'one day');
+f=w6.formOf(settings('resident',{retention:{days:30}}));
+ctx.ui.setLang('ja');ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('元の記録を残す期間')&&text(panel).includes('保存済み: 30 日'),'Japanese retention section');
+ctx.ui.setLang('en');
+console.log('PASS: the retention period');
 }
 
 // The owner, 2026-10-09: an HTTP entry's API, chosen in its editor and saved as `api`.
@@ -763,7 +792,7 @@ const settings=(extra={})=>({version:'v1',first_run:false,resident_supported:tru
   redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:true,
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
     idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],
-    daily_requests:[1,100000]},
+    daily_requests:[1,100000],retention_days:[1,36500]},
   view_runtime:{port:17373,mode:'foreground'},embedding:embedding(),...extra});
 const posted=[];let answers=[];let settingsGets=0;let settingsAnswer=null;let runStatus=null;
 ctx.fetch=(url,options)=>{
@@ -936,7 +965,7 @@ let saved={version:'simple-v1',first_run:true,resident_supported:true,worker:{re
   embedding:{provider:'none',workers_ai:{account_id:null,key_file:'test-key.md',key:'missing',daily_requests:200,monthly_usd:1,
     usd_this_month:0,requests_today:0},local:{unavailable:null,files:'not_downloaded',dir:'/tmp/oboete-test/models',held:0}},
   ranges:{paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],daily_requests:[1,100000],
-    session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[0,100000],idle_minutes:[0,120]},
+    session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[0,100000],idle_minutes:[0,120],retention_days:[1,36500]},
   chain:[{name:'groq',on:true,key:'missing',effective_model:'openai/gpt-oss-120b',model_rule:'any',model:null,
     daily_budget:null,timeout_s:null,differs:[]}],
   providers:[{name:'groq',selector:{source:'builtin',index:0},saved:{enabled:true,kind:'openai',base_url:'https://api.groq.com/openai/v1',
@@ -956,6 +985,7 @@ ctx.fetch=(url,options)=>{
 };
 let f=ctx.simpleUi.formOf(plain(saved));
 f.summary.language='Unsaved detailed language';f.inject.session_start_chars='7777';f.paid_usd_per_month='99';
+f.retention.forever=false;f.retention.edit='90';
 ctx.ui.setForm(f);ctx.ui.setView('settings');ctx.ui.setLang('ja');ctx.ui.drawSettings();
 assert.equal(panel.querySelectorAll('.simple-block').length,7,'all seven blocks are present');
 assert(text(panel).includes('要約に使える AI がまだない'),'an unusable home has a clear first action');
@@ -975,6 +1005,7 @@ assert.equal(requests[0].body.paid_usd_per_month,2);
 assert.equal(requests[0].body.worker,undefined,'a first simple save does not activate suggested resident mode');
 assert.equal(ctx.ui.getForm().summary.language,'Unsaved detailed language','unrelated drafts survive the saved response');
 assert.equal(ctx.ui.getForm().inject.session_start_chars,'7777');
+assert.deepEqual([ctx.ui.getForm().retention.forever,ctx.ui.getForm().retention.edit],[false,'90'],'an unsaved period survives too');
 assert(text(panel).includes('保存しました'),'a saved receipt is beside the changed block');
 type(field('paid_usd_per_month'),'3.5');for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
 assert.equal(requests.at(-1).body.paid_usd_per_month,3.5);

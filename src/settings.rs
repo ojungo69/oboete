@@ -123,9 +123,19 @@ pub fn show(home: &Path) -> Value {
             provider_rows(&path, &doc)?,
             crate::backup::location(t).ok()?,
             config::parse_capture(Some(t)).ok()?.redaction,
+            config::parse_retention(t).ok()?,
         ))
     });
-    let Some(((cfg, capture, inject), alone, worker, view, providers, backup, redaction)) = read
+    let Some((
+        (cfg, capture, inject),
+        alone,
+        worker,
+        view,
+        providers,
+        backup,
+        redaction,
+        retention,
+    )) = read
     else {
         return json!({"version": version, "error": "file_invalid"});
     };
@@ -210,6 +220,8 @@ pub fn show(home: &Path) -> Value {
             "tool_output": tool_output(capture.tool_output),
         },
         "backup": {"dir": backup},
+        // docs/retention.md: null is forever.
+        "retention": {"days": retention.days},
         "redaction": {
             "enabled": redaction.enabled != Some(false),
             "extra_rules": redaction.extra_rules,
@@ -242,6 +254,7 @@ pub fn show(home: &Path) -> Value {
             "daily_requests": [BUDGET.start(), BUDGET.end()],
             "timeout_s": [TIMEOUT_S.start(), TIMEOUT_S.end()],
             "view_port": [1, u16::MAX],
+            "retention_days": [config::RETENTION_DAYS.start(), config::RETENTION_DAYS.end()],
         },
     })
 }
@@ -499,6 +512,10 @@ struct Save {
     backup: Option<BackupIn>,
     /// Older pages leave the custom rules and exact-value exceptions alone.
     redaction: Option<config::Redaction>,
+    /// Older pages leave `[retention]` as it is (docs/retention.md); a null is refused, not read
+    /// as left out.
+    #[serde(default, deserialize_with = "given")]
+    retention: Option<RetentionIn>,
     /// Workers AI's account and caps; older pages leave them alone (W4).
     embedding: Option<embedding::Values>,
     /// Every chain entry once, in the order the page wants.
@@ -510,6 +527,22 @@ struct Save {
 struct BackupIn {
     /// Null removes the override and follows backup::dir's default.
     dir: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionIn {
+    /// Null removes the key: forever. Left out (None) is refused, not read as forever.
+    #[serde(default, deserialize_with = "given")]
+    days: Option<Option<u32>>,
+}
+
+/// A field that may be left out (None) but is read as a `T` when given, so a null where `T` takes
+/// none is refused rather than read as left out.
+fn given<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -1247,6 +1280,34 @@ fn write_privacy_config(
             }
         }
     }
+    if let Some(retention) = &posted.retention {
+        let Some(days) = retention.days else {
+            return Err(refused(422, "type", "retention.days"));
+        };
+        if days.is_some_and(|d| !config::RETENTION_DAYS.contains(&d)) {
+            return Err(refused(422, "range", "retention.days"));
+        }
+        let old = config::parse_retention(text).map_err(|_| invalid())?.days;
+        if days != old {
+            match days {
+                Some(days) => put(doc, "retention", "days", i64::from(days).into()),
+                None => {
+                    let comments = doc
+                        .get("retention")
+                        .and_then(toml_edit::Item::as_table)
+                        .map(|table| key_comments(table, "days"))
+                        .unwrap_or_default();
+                    if let Some(table) = doc
+                        .get_mut("retention")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    {
+                        table.remove("days");
+                    }
+                    keep_comments(doc, &comments);
+                }
+            }
+        }
+    }
     if let Some(redaction) = &posted.redaction {
         crate::redact::Rules::new(redaction)
             .map_err(|_| refused(422, "redaction_invalid", "redaction"))?;
@@ -1967,6 +2028,54 @@ mod tests {
         let kept = save_to(&home, &body).unwrap();
         assert_eq!(kept["view"]["port"], 43123);
         assert_eq!(config::view(home.path()).unwrap().port.get(), 43123);
+    }
+
+    /// docs/retention.md: the page shows `[retention] days`, saves a day count in range or null for
+    /// forever, refuses one out of range, and an older page that sends none leaves it.
+    #[test]
+    fn retention_days_save_and_an_older_page_keeps_them() {
+        let original = "providers = []\n[retention]\n# a month\ndays = 30\n";
+        let home = home_with(Some(original));
+        let shown = show(home.path());
+        assert_eq!(shown["retention"]["days"], 30);
+        assert_eq!(shown["ranges"]["retention_days"], json!([1, 36_500]));
+        let kept = save_to(
+            &home,
+            &posted(&shown, |v| v["summary"]["language"] = json!("English")),
+        )
+        .unwrap();
+        assert_eq!(kept["retention"]["days"], 30);
+        let days = |home: &tempfile::TempDir| config::retention(home.path()).unwrap().days;
+        assert_eq!(days(&home), Some(30));
+        for (bad, code, field) in [
+            (json!({"days": 0}), "range", "retention.days"),
+            (json!({"days": 36_501}), "range", "retention.days"),
+            (json!({"days": "30"}), "type", ""),
+            (json!({}), "type", "retention.days"),
+            (Value::Null, "type", ""),
+        ] {
+            let body = posted(&kept, |v| v["retention"] = bad.clone());
+            let refusal = save_to(&home, &body).unwrap_err();
+            assert_eq!(
+                (refusal.status, refusal.code, refusal.field.as_str()),
+                (422, code, field),
+                "{bad}"
+            );
+            assert_eq!(days(&home), Some(30), "{bad}");
+        }
+        let body = posted(&kept, |v| v["retention"] = json!({"days": 90}));
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(
+            (saved["retention"]["days"].clone(), days(&home)),
+            (json!(90), Some(90))
+        );
+        let body = posted(&saved, |v| v["retention"] = json!({"days": null}));
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(
+            (saved["retention"]["days"].clone(), days(&home)),
+            (Value::Null, None)
+        );
+        assert!(file(&home).unwrap().contains("# a month"));
     }
 
     #[test]
