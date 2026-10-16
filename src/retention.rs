@@ -10,10 +10,11 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// How often the worker looks for records past the period; an owed batch is looked for at every
-/// `forget::continue_due` (docs/retention.md).
-const LOOK_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How often the worker looks for records past the period, once a week (decision 49: each batch
+/// builds knowledge.db again); an owed batch is looked for at every `forget::continue_due`
+/// (docs/retention.md).
+const LOOK_EVERY_MS: i64 = 7 * DAY_MS;
 /// The worker's last look, in unix ms.
 const LOOK: &str = "retention-look";
 /// Step 1's copy of the batch, which a restore applies when raw.db is lost.
@@ -30,7 +31,7 @@ pub struct Pass {
     pub owed: bool,
 }
 
-/// Whether a pass is due: a batch is owed, or a period is set and the last look is a day old.
+/// Whether a pass is due: a batch is owed, or a period is set and the last look is a week old.
 pub(crate) fn due(home: &Path, raw: &Raw) -> Result<bool> {
     if !raw.expiry_owed()?.is_empty() {
         return Ok(true);
@@ -42,7 +43,7 @@ pub(crate) fn due(home: &Path, raw: &Raw) -> Result<bool> {
     Ok(!looked_lately(home))
 }
 
-/// Whether the last look (`state/retention-look`) is less than a day old.
+/// Whether the last look (`state/retention-look`) is less than a week old.
 fn looked_lately(home: &Path) -> bool {
     std::fs::read_to_string(home.join("state").join(LOOK))
         .ok()
@@ -103,7 +104,7 @@ fn rows(home: &Path, days: Option<u32>, done: &mut Pass) -> Result<bool> {
     let mut raw = crate::raw::open(home)?;
     let mut owed = raw.expiry_owed()?;
     if owed.is_empty() {
-        // A new batch at most once a day, however often `forget --continue` runs for a forget or
+        // A new batch at most once a week, however often `forget --continue` runs for a forget or
         // a mask (Codex on #552); an owed one is finished at every pass.
         let Some(days) = days.filter(|_| !looked_lately(home)) else {
             return Ok(false);
@@ -1249,7 +1250,7 @@ mod tests {
     /// The look is daily, however often `forget --continue` runs for a forget or a mask: a pass
     /// within the day begins nothing, though a window became eligible (Codex on #552).
     #[test]
-    fn a_new_batch_waits_a_day_after_the_last_look() {
+    fn a_new_batch_waits_a_week_after_the_last_look() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         let now = crate::db::now_ms();
@@ -1261,7 +1262,7 @@ mod tests {
         crate::worker::run_once(home.path()).unwrap();
         period(home.path(), Some(1));
         assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
-        // A day later by the records' time, within the day by the look's.
+        // Past the period by the records' time, within the week by the look's (decision 49).
         let device = crate::raw::open(home.path()).unwrap().device().to_owned();
         rusqlite::Connection::open(home.path().join("raw.db"))
             .unwrap()
@@ -1270,9 +1271,15 @@ mod tests {
                 [&device],
             )
             .unwrap();
+        let looked = |days_ago: i64| {
+            let at = crate::db::now_ms() - days_ago * DAY_MS;
+            std::fs::write(home.path().join("state").join(LOOK), at.to_string()).unwrap();
+        };
+        assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
+        looked(6);
         assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
         assert!(!expired(home.path(), a));
-        std::fs::remove_file(home.path().join("state").join(LOOK)).unwrap();
+        looked(8);
         assert_eq!(pass(home.path()).unwrap().unwrap().expired, 2);
     }
 
