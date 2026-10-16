@@ -981,6 +981,9 @@ pub struct Inject {
     pub session_start: bool,
     /// The short user-visible status at session start; it never contains stored text.
     pub session_start_note: bool,
+    /// Above that line, the memory list the agent got, as claude-mem shows its timeline in the
+    /// terminal (decision 51); off, the line alone.
+    pub session_start_list: bool,
     /// The packet's size in characters (`SESSION_START_CHARS`); the manifest in it is stored rendered
     /// at 6,000, so the cards have room (docs/cards.md S5).
     pub session_start_chars: usize,
@@ -1017,6 +1020,7 @@ impl Default for Inject {
         Self {
             session_start: true,
             session_start_note: true,
+            session_start_list: true,
             session_start_chars: crate::consumer::manifest::CAP,
             per_prompt: false,
             per_prompt_chars: 1_500,

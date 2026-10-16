@@ -398,14 +398,16 @@ fn run_io(
         // one more read of config.toml, once a session. Only at an injection point (a resumed
         // session gets none), not beside a recording failure, which has its own line, and not in
         // a replay, whose output is the measured packet. Settings that do not load say nothing.
-        let note = (injecting
+        let terminal = (injecting
             && (agent, event) == ("claude", "SessionStart")
             && failure.is_none()
             && std::env::var_os(crate::capture::REPLAY_ENV).is_none())
         .then(|| config::inject_with_language(home).ok())
         .flatten()
-        .filter(|(inject, _)| inject.session_start_note)
-        .map(|(inject, japanese)| {
+        .filter(|(inject, _)| inject.session_start_note);
+        let listed =
+            terminal.is_some_and(|(inject, _)| inject.session_start_list && inject.session_start);
+        let note = terminal.map(|(inject, japanese)| {
             let packet = manifest.as_ref().filter(|m| !m.text.is_empty());
             let handed = match packet {
                 _ if !inject.session_start => Handed::Off,
@@ -482,6 +484,18 @@ fn run_io(
             }
             None => text,
         };
+        // Decision 51: above the line, the memory list as the agent got it (cut where its block
+        // was), as claude-mem shows its timeline in the terminal.
+        let note = note.map(|line| {
+            let got = manifest.as_ref().filter(|_| listed).map(|m| {
+                let end = kept.get(memory).copied().unwrap_or(0).min(m.text.len());
+                &m.text[..m.text.floor_char_boundary(end)]
+            });
+            match got.filter(|list| !list.trim().is_empty()) {
+                Some(list) => format!("{}\n\n{line}", terminal_list(list)),
+                None => line,
+            }
+        });
         // Cursor gets its field even when empty: a reinjection is consumed either way.
         if !text.is_empty() || (injecting && agent == "cursor") || note.is_some() {
             let mut response = injection(agent, event, &text);
@@ -966,8 +980,41 @@ enum Handed {
     Shown(usize, usize),
 }
 
+/// Decision 51: the memory list as the terminal shows it, its headings bold and cyan and its
+/// legend lines dim, as claude-mem colours its timeline for Claude Code. Stored text never acts
+/// on the terminal: each control character in it (an escape, a carriage return, a bell) and each
+/// bidirectional override is shown as U+FFFD (commit security review).
+fn terminal_list(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let l: String = l
+                .chars()
+                .map(|c| {
+                    let bidi = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+                    if (c.is_control() && c != '\t') || bidi {
+                        '\u{FFFD}'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            if l.starts_with('#') {
+                format!("\x1b[1;36m{l}\x1b[0m")
+            } else if ["Legend:", "Format:", "Fetch details:"]
+                .iter()
+                .any(|p| l.starts_with(p))
+            {
+                format!("\x1b[2m{l}\x1b[0m")
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The line a person sees at a session's start. It never holds stored text, a token or an
-/// address.
+/// address; the list above it (decision 51) is the memory itself.
 fn session_start_note(japanese: bool, handed: Handed) -> String {
     match (japanese, handed) {
         (true, Handed::Off) => {
@@ -6759,6 +6806,13 @@ mod tests {
         p.decided(2, "Parser errors go to stderr.", &[]);
         p.s.decided("another-repository", 86_400_000, "Other memory.", &[]);
         p.s.run();
+        // The line alone (decision 51's list off): it never holds stored text, a token or an
+        // address.
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[inject]\nsession_start_list = false\n",
+        )
+        .unwrap();
         let out = hook(
             p.s.home.path(),
             "claude",
@@ -6843,7 +6897,9 @@ mod tests {
             &json!({"session_id": "stopped", "cwd": p.c, "source": "startup"}),
         );
         let v: Value = serde_json::from_str(&out).unwrap();
+        // The line and the stop's, below the memory list (decision 51).
         let note = v["systemMessage"].as_str().unwrap();
+        let note = note.rsplit("\n\n").next().unwrap();
         assert!(
             note.starts_with("oboete: 記憶は有効です。") && note.ends_with(
                 "\noboete: 要約が 2 時間前から止まっています。要約役があなたの操作を待っています。理由と直し方: oboete doctor"
@@ -6897,11 +6953,65 @@ mod tests {
             );
             let v: Value = serde_json::from_str(&out).unwrap();
             assert_eq!(
-                v["systemMessage"],
+                v["systemMessage"].as_str().unwrap().lines().last().unwrap(),
                 "oboete: memory is on. 1 remembered items for this repository were handed over. Open the page with: oboete view --open",
                 "{language}"
             );
         }
+    }
+
+    /// Decision 51: stored text in the list cannot drive the terminal: its escapes, carriage
+    /// returns, bells and bidirectional overrides are shown as U+FFFD; the list's own colours stay.
+    #[test]
+    fn the_terminal_list_shows_control_characters_as_replacements() {
+        let shown =
+            terminal_list("# Head \u{1b}]0;title\u{7}\nA \u{1b}[2J card\r\nB \u{202E}evil\tok");
+        assert_eq!(
+            shown,
+            "\u{1b}[1;36m# Head \u{FFFD}]0;title\u{FFFD}\u{1b}[0m\nA \u{FFFD}[2J card\nB \u{FFFD}evil\tok"
+        );
+    }
+
+    /// Decision 51: the terminal shows the memory list the agent got above the line, its headings
+    /// coloured as claude-mem colours its timeline; with the list off, the line alone.
+    #[test]
+    fn session_start_list_shows_the_memory_above_the_line() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let start = |p: &Prompts, session: &str| {
+            let out = hook(
+                p.s.home.path(),
+                "claude",
+                "SessionStart",
+                &json!({"session_id": session, "cwd": p.c, "source": "startup"}),
+            );
+            let v: Value = serde_json::from_str(&out).unwrap();
+            let context = v["hookSpecificOutput"]["additionalContext"].as_str();
+            (
+                v["systemMessage"].as_str().unwrap().to_owned(),
+                context.unwrap().to_owned(),
+            )
+        };
+        let line = "oboete: 記憶は有効です。このリポジトリの記憶 1 件を渡しました。画面を開くには oboete view --open";
+        let (shown, context) = start(&p, "list");
+        let (list, last) = shown.rsplit_once("\n\n").unwrap();
+        assert_eq!(last, line);
+        assert!(
+            list.contains("Parser errors go to stderr.")
+                && context.contains("Parser errors go to stderr."),
+            "{shown}"
+        );
+        assert!(
+            list.contains("\x1b[1;36m## Decisions and open items\x1b[0m"),
+            "{shown}"
+        );
+        std::fs::write(
+            p.s.home.path().join("config.toml"),
+            "[inject]\nsession_start_list = false\n",
+        )
+        .unwrap();
+        assert_eq!(start(&p, "line").0, line);
     }
 
     #[test]

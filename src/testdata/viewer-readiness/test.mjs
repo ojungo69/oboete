@@ -575,7 +575,7 @@ console.log('PASS: four tier draft plans, source-backed grouping and unrelated d
 {
 const settings=(mode,extra={})=>({version:'v1',first_run:false,resident_supported:true,worker:{resident:true},view:{port:17373},
   summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:0,gemini:null,usd_this_month:0,
-  stopped:null,inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,session_start_chars:6000,
+  stopped:null,inject:{session_start:true,session_start_note:true,session_start_list:true,per_prompt:false,correction:true,session_start_chars:6000,
     per_prompt_chars:1500,per_prompt_wait_ms:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},backup:{dir:null},
   retention:{days:null},
   redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:null,
@@ -710,6 +710,21 @@ ctx.ui.setLang('ja');ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(text(panel).includes('元の記録を残す期間')&&text(panel).includes('保存済み: 30 日'),'Japanese retention section');
 ctx.ui.setLang('en');
 console.log('PASS: the retention period');
+// Decision 51: the memory list switch, below the terminal line's, follows it and is sent.
+f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.equal(field('inject.session_start_list').checked,true,'the list is on by default');
+assert.equal(field('inject.session_start_list').disabled,false);
+assert(text(panel).includes('Also show the list of memories handed over'),'the list switch');
+tick(field('inject.session_start_note'),false);
+assert.equal(field('inject.session_start_list').disabled,true,'no list without the line');
+tick(field('inject.session_start_note'),true);
+assert.equal(field('inject.session_start_list').disabled,false);
+tick(field('inject.session_start_list'),false);
+assert.equal(w6.saveBody().body.inject.session_start_list,false,'the list choice is sent');
+ctx.ui.setLang('ja');ctx.ui.drawSettings();
+assert(text(panel).includes('渡した記憶の一覧も表示する'),'Japanese list switch');
+ctx.ui.setLang('en');
+console.log('PASS: the session start list');
 }
 
 // The owner, 2026-10-09: an HTTP entry's API, chosen in its editor and saved as `api`.
@@ -787,7 +802,7 @@ const embedding=(extra={})=>({provider:'none',
   local:{unavailable:null,files:'not_downloaded',dir:'/home/u/.oboete/models/bge-m3',held:0},...extra});
 const settings=(extra={})=>({version:'v1',first_run:false,resident_supported:true,worker:{resident:true},view:{port:17373},
   summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:0,gemini:null,usd_this_month:0,
-  stopped:null,inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,session_start_chars:6000,
+  stopped:null,inject:{session_start:true,session_start_note:true,session_start_list:true,per_prompt:false,correction:true,session_start_chars:6000,
     per_prompt_chars:1500,per_prompt_wait_ms:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},backup:{dir:null},
   redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:true,
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
@@ -959,7 +974,7 @@ const plain=value=>JSON.parse(JSON.stringify(value));
 const privacy={available:true,repositories:[],folders:[],rescan:{state:'idle',processed:null,total:null}};
 let saved={version:'simple-v1',first_run:true,resident_supported:true,worker:{resident:false},view:{port:17373},
   summary:{curate:false,language:'Japanese',window_tokens:6000,idle_minutes:10},paid_usd_per_month:2,gemini:null,usd_this_month:0,
-  stopped:[],inject:{session_start:true,session_start_note:true,per_prompt:false,correction:true,
+  stopped:[],inject:{session_start:true,session_start_note:true,session_start_list:true,per_prompt:false,correction:true,
     session_start_chars:6000,per_prompt_chars:1500,per_prompt_wait_ms:1500,correction_chars:800},capture:{store_prompts:false,tool_output:'full'},
   redaction:{enabled:true,extra_rules:[],allowlist:[]},privacy,backup:{dir:null},warnings:[],key_input:true,
   embedding:{provider:'none',workers_ai:{account_id:null,key_file:'test-key.md',key:'missing',daily_requests:200,monthly_usd:1,
