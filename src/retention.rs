@@ -1282,7 +1282,13 @@ mod tests {
     fn segments_left_in_an_earlier_backup_location_are_rewritten() {
         let home = tempfile::tempdir().unwrap();
         let (a, _) = finished(home.path());
-        std::fs::write(home.path().join("config.toml"), "[backup]\ndir = \"old\"\n").unwrap();
+        // A location may hold a newline where the system allows one (Codex on #552).
+        let old = if cfg!(unix) { "old\\nline" } else { "old" };
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[backup]\ndir = \"{old}\"\n"),
+        )
+        .unwrap();
         // The worker's own backup, as on any run.
         crate::worker::run_once(home.path()).unwrap();
         assert!(holding(home.path()).iter().any(|f| f.ends_with(".seg.zst")));

@@ -745,9 +745,10 @@ pub fn export_timed(home: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> 
     export_from(&raw::open(home)?, &export_dir(home)?)
 }
 
-/// Where earlier `[backup] dir` values are remembered, one a line as config.toml gave them, so a
-/// forget's or a retention pass's rewrite still reaches the segments a change of location left
-/// behind: the settings page moves none (Codex on #552).
+/// Where earlier `[backup] dir` values are remembered, one a line as config.toml gave them, each a
+/// JSON string (a location may hold a newline), so a forget's or a retention pass's rewrite still
+/// reaches the segments a change of location left behind: the settings page moves none (Codex on
+/// #552).
 const DIRS: &str = "backup-dirs";
 
 /// `dir`, its configured location remembered in `state/backup-dirs` first.
@@ -762,8 +763,9 @@ fn export_dir(home: &Path) -> Result<PathBuf> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).context("read state/backup-dirs"),
         };
-        if !known.lines().any(|l| l == location) {
-            write_synced(&state, DIRS, format!("{known}{location}\n").as_bytes())?;
+        let line = serde_json::to_string(location)?;
+        if !known.lines().any(|l| l == line) {
+            write_synced(&state, DIRS, format!("{known}{line}\n").as_bytes())?;
         }
     }
     dir(home)
@@ -773,7 +775,13 @@ fn export_dir(home: &Path) -> Result<PathBuf> {
 fn segment_dirs(home: &Path) -> Result<Vec<PathBuf>> {
     let mut dirs = vec![dir(home)?, home.join("backups")];
     match std::fs::read_to_string(home.join("state").join(DIRS)) {
-        Ok(text) => dirs.extend(text.lines().filter(|l| !l.is_empty()).map(|l| home.join(l))),
+        Ok(text) => {
+            for line in text.lines().filter(|l| !l.is_empty()) {
+                let location: String =
+                    serde_json::from_str(line).context("state/backup-dirs is damaged")?;
+                dirs.push(home.join(location));
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).context("read state/backup-dirs"),
     }
