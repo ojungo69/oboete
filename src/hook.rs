@@ -981,10 +981,23 @@ enum Handed {
 }
 
 /// Decision 51: the memory list as the terminal shows it, its headings bold and cyan and its
-/// legend lines dim, as claude-mem colours its timeline for Claude Code.
+/// legend lines dim, as claude-mem colours its timeline for Claude Code. Stored text never acts
+/// on the terminal: each control character in it (an escape, a carriage return, a bell) and each
+/// bidirectional override is shown as U+FFFD (commit security review).
 fn terminal_list(text: &str) -> String {
     text.lines()
         .map(|l| {
+            let l: String = l
+                .chars()
+                .map(|c| {
+                    let bidi = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+                    if (c.is_control() && c != '\t') || bidi {
+                        '\u{FFFD}'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
             if l.starts_with('#') {
                 format!("\x1b[1;36m{l}\x1b[0m")
             } else if ["Legend:", "Format:", "Fetch details:"]
@@ -993,7 +1006,7 @@ fn terminal_list(text: &str) -> String {
             {
                 format!("\x1b[2m{l}\x1b[0m")
             } else {
-                l.to_owned()
+                l
             }
         })
         .collect::<Vec<_>>()
@@ -6945,6 +6958,18 @@ mod tests {
                 "{language}"
             );
         }
+    }
+
+    /// Decision 51: stored text in the list cannot drive the terminal: its escapes, carriage
+    /// returns, bells and bidirectional overrides are shown as U+FFFD; the list's own colours stay.
+    #[test]
+    fn the_terminal_list_shows_control_characters_as_replacements() {
+        let shown =
+            terminal_list("# Head \u{1b}]0;title\u{7}\nA \u{1b}[2J card\r\nB \u{202E}evil\tok");
+        assert_eq!(
+            shown,
+            "\u{1b}[1;36m# Head \u{FFFD}]0;title\u{FFFD}\u{1b}[0m\nA \u{FFFD}[2J card\nB \u{FFFD}evil\tok"
+        );
     }
 
     /// Decision 51: the terminal shows the memory list the agent got above the line, its headings
