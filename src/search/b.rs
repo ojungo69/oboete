@@ -453,14 +453,22 @@ pub struct PromptNear {
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
 /// itself, nor a reranker or a judge (spec 4.3, 4.10). Keys only: the hook reads and gates what it
 /// shows.
-/// N5 (docs/memory-lookup.md): `text`'s query vector in `repo`, made as `prompt_near` makes a
-/// prompt's, for a memory lookup that searches with it in its hook; or why there is none.
-pub fn query_vector(home: &Path, repo: &str, text: &str) -> Result<Result<Vec<f32>, VectorSkip>> {
+/// G23 and N5: what a prompt-time query of `text` in `repo` reads (raw.db, the forget fence,
+/// knowledge.db) and its vector, as the resident viewer makes one; or why there is none.
+struct PromptVector {
+    raw: crate::raw::Raw,
+    /// Milestone 5 D5 (#439): no forget commits until the answer is built.
+    _read: std::fs::File,
+    k: Connection,
+    near: Near,
+}
+
+fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVector, VectorSkip>> {
     if !crate::raw::exists(home) {
         return Ok(Err(VectorSkip::NoVectors));
     }
     let raw = crate::raw::open(home)?;
-    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let k = crate::knowledge::open(home)?;
     let active: Option<String> = k
         .query_row(
@@ -478,7 +486,20 @@ pub fn query_vector(home: &Path, repo: &str, text: &str) -> Result<Result<Vec<f3
     if !local(home) && excluded_now(home, &raw, &q).unwrap_or(true) {
         return Ok(Err(VectorSkip::Excluded));
     }
-    Ok(embedded(home, &raw, &q, active, QUERY_TIMEOUT, Caller::Reader)?.map(|near| near.vector))
+    Ok(
+        embedded(home, &raw, &q, active, QUERY_TIMEOUT, Caller::Reader)?.map(|near| PromptVector {
+            raw,
+            _read: read,
+            k,
+            near,
+        }),
+    )
+}
+
+/// N5 (docs/memory-lookup.md): `text`'s query vector in `repo`, made as `prompt_near` makes a
+/// prompt's, for a memory lookup that searches with it in its hook; or why there is none.
+pub fn query_vector(home: &Path, repo: &str, text: &str) -> Result<Result<Vec<f32>, VectorSkip>> {
+    Ok(prompt_vector(home, repo, text)?.map(|v| v.near.vector))
 }
 
 pub fn prompt_near(
@@ -493,31 +514,13 @@ pub fn prompt_near(
             hits: Vec::new(),
         })
     };
-    if !crate::raw::exists(home) {
-        return nothing(VectorSkip::NoVectors);
-    }
-    let raw = crate::raw::open(home)?;
-    // Milestone 5 D5 (#439): no forget commits until the answer is built.
-    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
-    let k = crate::knowledge::open(home)?;
-    let active: Option<String> = k
-        .query_row(
-            "SELECT embedder FROM vec_generation WHERE state = 'active'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let q = Query {
-        text: text.to_owned(),
-        repo: Some(repo.to_owned()),
-        caller: Some(repo.to_owned()),
-        ..Default::default()
-    };
-    if !local(home) && excluded_now(home, &raw, &q).unwrap_or(true) {
-        return nothing(VectorSkip::Excluded);
-    }
-    let near = match embedded(home, &raw, &q, active, QUERY_TIMEOUT, Caller::Reader)? {
-        Ok(near) => near,
+    let PromptVector {
+        raw,
+        _read,
+        k,
+        near,
+    } = match prompt_vector(home, repo, text)? {
+        Ok(v) => v,
         Err(skip) => return nothing(skip),
     };
     let mut decided = k.prepare(&format!(
