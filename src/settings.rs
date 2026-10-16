@@ -512,7 +512,9 @@ struct Save {
     backup: Option<BackupIn>,
     /// Older pages leave the custom rules and exact-value exceptions alone.
     redaction: Option<config::Redaction>,
-    /// Older pages leave `[retention]` as it is (docs/retention.md).
+    /// Older pages leave `[retention]` as it is (docs/retention.md); a null is refused, not read
+    /// as left out.
+    #[serde(default, deserialize_with = "given")]
     retention: Option<RetentionIn>,
     /// Workers AI's account and caps; older pages leave them alone (W4).
     embedding: Option<embedding::Values>,
@@ -530,10 +532,17 @@ struct BackupIn {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetentionIn {
-    /// Null removes the key: forever. Required: a body without it is refused, not read as
-    /// forever.
-    #[serde(deserialize_with = "Option::deserialize")]
-    days: Option<u32>,
+    /// Null removes the key: forever. Left out (None) is refused, not read as forever.
+    #[serde(default, deserialize_with = "given")]
+    days: Option<Option<u32>>,
+}
+
+/// A field that may be left out (None) but is read as a `T` when given, so a null where `T` takes
+/// none is refused rather than read as left out.
+fn given<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -1272,15 +1281,15 @@ fn write_privacy_config(
         }
     }
     if let Some(retention) = &posted.retention {
-        if retention
-            .days
-            .is_some_and(|d| !config::RETENTION_DAYS.contains(&d))
-        {
+        let Some(days) = retention.days else {
+            return Err(refused(422, "type", "retention.days"));
+        };
+        if days.is_some_and(|d| !config::RETENTION_DAYS.contains(&d)) {
             return Err(refused(422, "range", "retention.days"));
         }
         let old = config::parse_retention(text).map_err(|_| invalid())?.days;
-        if retention.days != old {
-            match retention.days {
+        if days != old {
+            match days {
                 Some(days) => put(doc, "retention", "days", i64::from(days).into()),
                 None => {
                     let comments = doc
@@ -2042,7 +2051,8 @@ mod tests {
             (json!({"days": 0}), "range", "retention.days"),
             (json!({"days": 36_501}), "range", "retention.days"),
             (json!({"days": "30"}), "type", ""),
-            (json!({}), "type", ""),
+            (json!({}), "type", "retention.days"),
+            (Value::Null, "type", ""),
         ] {
             let body = posted(&kept, |v| v["retention"] = bad.clone());
             let refusal = save_to(&home, &body).unwrap_err();

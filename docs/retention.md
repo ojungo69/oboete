@@ -286,7 +286,8 @@ the backups, and knowledge.db, which is built again. R2 holds nothing until mile
   day count from 1 to 36,500, counted from each record's own time (so records already older go at
   the next look), and what stays, the daily look, the rebuild's few minutes and that removed text
   does not come back. An older page that sends no `retention` leaves the table as it is; a
-  `retention` without `days` is refused, not read as forever. An unsaved period survives a
+  `retention` without `days`, or a null one, is refused, not read as forever or as left out. An
+  unsaved period survives a
   provider or key operation, as the other drafts do.
 
 ## Pull requests

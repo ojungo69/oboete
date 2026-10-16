@@ -4051,8 +4051,8 @@ function retentionSection(f) {
   days.disabled = r.forever;
   const forever = checkbox(r.forever, (v) => { r.forever = v; days.disabled = v; });
   forever.dataset.field = 'retention.forever';
-  const value = r.days === null ? t('retention_forever_value')
-    : t(r.days === 1 ? 'retention_day_value' : 'retention_days_value', { days: r.days.toLocaleString('en-US') });
+  let value = t('retention_forever_value');
+  if (r.days !== null) value = t(r.days === 1 ? 'retention_day_value' : 'retention_days_value', { days: r.days.toLocaleString('en-US') });
   return el('section', 'retention',
     el('h3', null, t('retention_h')),
     el('p', 'desc', t('retention_desc')),
