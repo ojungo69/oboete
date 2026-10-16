@@ -63,9 +63,11 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
     }
 }
 
-/// The newest claude-mem schema the import reads all of: 13.39.0's (docs/claude-mem-import.md I2).
-/// v65 (13.36.0) only recomputes `observations.title_norm_key`, which the import does not read.
-const NEWEST_SCHEMA: i64 = 65;
+/// The newest claude-mem schema the import reads all of: 13.40.0's (docs/claude-mem-import.md I2).
+/// v65 (13.36.0) only recomputes `observations.title_norm_key`; v66 adds cloud sync columns to
+/// `work_state_entries` and v67 lets the sync ledgers name that kind (13.40.0). The import reads
+/// none of them.
+const NEWEST_SCHEMA: i64 = 67;
 
 /// `settings` gates the work state rows as a write's (docs/work-state.md L5).
 pub fn claude_mem(
@@ -1029,7 +1031,7 @@ mod tests {
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
     #[test]
-    fn a_database_newer_than_v65_is_refused_with_nothing_written() {
+    fn a_database_newer_than_v67_is_refused_with_nothing_written() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("claude-mem.db");
         claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
@@ -1037,7 +1039,9 @@ mod tests {
             .unwrap()
             .execute_batch(
                 "INSERT INTO schema_versions VALUES(3, 65, '');
-                 INSERT INTO schema_versions VALUES(4, 66, '');",
+                 INSERT INTO schema_versions VALUES(4, 66, '');
+                 INSERT INTO schema_versions VALUES(5, 67, '');
+                 INSERT INTO schema_versions VALUES(6, 68, '');",
             )
             .unwrap();
         let mut raw = crate::raw::open(dir.path()).unwrap();
@@ -1045,26 +1049,43 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(said.contains("v66") && said.contains("v65"), "{said}");
+        assert!(said.contains("v68") && said.contains("v67"), "{said}");
         assert!(docs(&raw).is_empty() && work_ops(&raw).is_empty());
     }
 
-    /// I2: 13.36.0's v65, which only recomputes `observations.title_norm_key`, comes in as v64
-    /// does.
+    /// I2: 13.36.0's v65, which only recomputes `observations.title_norm_key`, and 13.40.0's v67,
+    /// which adds the work state's sync columns, come in as v64 does.
     #[test]
-    fn a_v65_database_comes_in_as_v64_does() {
+    fn a_v65_or_v67_database_comes_in_as_v64_does() {
         let dir = tempfile::tempdir().unwrap();
-        let (v64, v65) = (dir.path().join("v64.db"), dir.path().join("v65.db"));
-        claude_mem_v64(&v64, "2025-12-14T16:09:58.769Z");
-        claude_mem_v64(&v65, "2025-12-14T16:09:58.769Z");
+        let (v64, v65, v67) = (
+            dir.path().join("v64.db"),
+            dir.path().join("v65.db"),
+            dir.path().join("v67.db"),
+        );
+        for db in [&v64, &v65, &v67] {
+            claude_mem_v64(db, "2025-12-14T16:09:58.769Z");
+        }
+        let v65_batch = "ALTER TABLE observations ADD COLUMN title_norm_key TEXT;
+             UPDATE observations SET title_norm_key = lower(title);
+             INSERT INTO schema_versions VALUES(3, 65, '2026-10-13T00:22:16.544Z');";
         Connection::open(&v65)
             .unwrap()
+            .execute_batch(v65_batch)
+            .unwrap();
+        let v67_conn = Connection::open(&v67).unwrap();
+        v67_conn.execute_batch(v65_batch).unwrap();
+        v67_conn
             .execute_batch(
-                "ALTER TABLE observations ADD COLUMN title_norm_key TEXT;
-                 UPDATE observations SET title_norm_key = lower(title);
-                 INSERT INTO schema_versions VALUES(3, 65, '2026-10-13T00:22:16.544Z');",
+                "ALTER TABLE work_state_entries ADD COLUMN synced_at INTEGER;
+                 ALTER TABLE work_state_entries ADD COLUMN origin_device_id TEXT;
+                 ALTER TABLE work_state_entries ADD COLUMN origin_local_id TEXT;
+                 ALTER TABLE work_state_entries ADD COLUMN sync_rev TEXT NOT NULL DEFAULT '1';
+                 INSERT INTO schema_versions VALUES(4, 66, '2026-10-16T14:58:42.000Z');
+                 INSERT INTO schema_versions VALUES(5, 67, '2026-10-16T14:58:42.000Z');",
             )
             .unwrap();
+        drop(v67_conn);
         let import = |src: &Path, home: &Path| {
             std::fs::create_dir(home).unwrap();
             let mut raw = crate::raw::open(home).unwrap();
@@ -1081,8 +1102,14 @@ mod tests {
                 docs,
             )
         };
-        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-        assert_eq!(import(&v65, &b), import(&v64, &a));
+        let (a, b, c) = (
+            dir.path().join("a"),
+            dir.path().join("b"),
+            dir.path().join("c"),
+        );
+        let want = import(&v64, &a);
+        assert_eq!(import(&v65, &b), want);
+        assert_eq!(import(&v67, &c), want);
     }
 
     /// Test 2: what is read is found by its columns, whatever version the log names: an older
