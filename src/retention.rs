@@ -132,6 +132,7 @@ fn rows(home: &Path, days: Option<u32>, done: &mut Pass) -> Result<bool> {
             return Ok(false);
         }
         owed = raw.expiry_owed()?;
+        crate::backup::fail_after("expiry_committed")?;
     }
     write_owed(home, &owed)?;
     crate::backup::fail_after("expiry_begun")?;
@@ -908,6 +909,7 @@ mod tests {
     #[test]
     fn a_pass_stopped_after_each_step_is_finished_by_the_next() {
         for stage in [
+            "expiry_committed",
             "expiry_begun",
             "expiry_backups",
             "expiry_rows",
@@ -958,10 +960,10 @@ mod tests {
         assert!(raw.expiry_owed().unwrap().is_empty());
     }
 
-    /// A restore while a batch is owed applies `state/expiry-owed` to the raw.db it rebuilds from
-    /// the segments, which hold the text yet, and leaves none of the text in the file's free space.
-    /// The pass sealed the curation ops before it began (here the backups held none of them), so
-    /// they come back with the records. The next pass finishes the batch on it.
+    /// A restore while a batch is owed and raw.db is lost applies `state/expiry-owed` to the raw.db
+    /// it rebuilds from the segments, which hold the text yet, and leaves none of the text in the
+    /// file's free space. The pass sealed the curation ops before it began (here the backups held
+    /// none of them), so they come back with the records. The next pass finishes the batch on it.
     #[test]
     fn a_restore_during_a_batch_finishes_it_on_the_rebuilt_store() {
         let home = tempfile::tempdir().unwrap();
@@ -1001,6 +1003,10 @@ mod tests {
         crate::backup::FAIL_AFTER.set(Some("expiry_begun"));
         assert!(pass(home.path()).is_err());
         period(home.path(), None);
+        // Only the file knows the batch.
+        for name in ["raw.db", "raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.path().join(name));
+        }
         crate::backup::restore(home.path()).unwrap();
         assert!(expired(home.path(), a) && expired(home.path(), b));
         let raw = crate::raw::open(home.path()).unwrap();
@@ -1011,6 +1017,34 @@ mod tests {
         let chunk = &stored[stored.len() / 2..stored.len() / 2 + 64];
         let file = std::fs::read(home.path().join("raw.db")).unwrap();
         assert!(!file.windows(64).any(|w| w == chunk));
+        pass(home.path()).unwrap().unwrap();
+        assert_eq!(holding(home.path()), Vec::<String>::new());
+        assert!(!home.path().join("state").join(OWED).exists());
+    }
+
+    /// A stop between step 1's commit and its file leaves the batch in raw.db alone: a restore then
+    /// reads it from the raw.db it replaces, and finishes it on the rebuilt store (Codex on #552).
+    #[test]
+    fn a_restore_before_the_batch_has_its_file_reads_it_from_raw_db() {
+        let home = tempfile::tempdir().unwrap();
+        let (a, b) = finished(home.path());
+        let owed = || {
+            crate::raw::open(home.path())
+                .unwrap()
+                .expiry_owed()
+                .unwrap()
+                .len()
+        };
+        crate::backup::export(home.path()).unwrap();
+        period(home.path(), Some(1));
+        crate::backup::FAIL_AFTER.set(Some("expiry_committed"));
+        assert!(pass(home.path()).is_err());
+        assert!(!home.path().join("state").join(OWED).exists());
+        assert_eq!(owed(), 2);
+        period(home.path(), None);
+        crate::backup::restore(home.path()).unwrap();
+        assert!(expired(home.path(), a) && expired(home.path(), b));
+        assert_eq!(owed(), 2);
         pass(home.path()).unwrap().unwrap();
         assert_eq!(holding(home.path()), Vec::<String>::new());
         assert!(!home.path().join("state").join(OWED).exists());

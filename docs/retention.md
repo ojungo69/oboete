@@ -142,11 +142,13 @@ takes. Its steps, in order, each finished before the next starts:
    vector. The knowledge.db copies set aside are carried from and removed. Then the owed rows and
    `state/expiry-owed` go.
 
-A restore (`backup::restore`) applies `state/expiry-owed` to the raw.db it rebuilds before it
-swaps it in: the owed rows go into its `expiry_owed`, it is stamped format 3, and an owed record
-restored as an event whose time matches becomes expired, so a batch cut by a damaged raw.db is
-finished on what replaces it. The original it quarantines is a copy the next pass rewrites
-(step 2). Step 5 removes the file after the table's rows.
+A restore (`backup::restore`) applies the batch to the raw.db it rebuilds before it swaps it in:
+the `expiry_owed` rows of the raw.db it replaces when that one still reads (a stop between step
+1's commit and its file leaves them alone; forget's requests are read from it the same way), and
+`state/expiry-owed`'s. The owed rows go into the new `expiry_owed`, it is stamped format 3, and an
+owed record restored as an event whose time matches becomes expired, so a batch cut by a damaged
+raw.db is finished on what replaces it. The original it quarantines is a copy the next pass
+rewrites (step 2). Step 5 removes the file after the table's rows.
 
 As built (part 2):
 

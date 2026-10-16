@@ -1879,15 +1879,19 @@ pub(crate) fn restore_report_holding(
     }
 }
 
-/// The forget requests a raw.db that still reads holds (D1 rule 14), read under the swap lock
-/// without opening it as a store. A lost database or unreadable table has none (F1); once the
-/// table opens, a bad row must stop the restore rather than discard other live requests.
-fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
+/// A retention batch's records: device, seq and time.
+type Owed = Vec<(String, i64, i64)>;
+
+/// The forget requests (D1 rule 14) and the retention batch begun (docs/retention.md) a raw.db
+/// that still reads holds, read under the swap lock without opening it as a store. A lost database
+/// or unreadable table has none (F1); once the table opens, a bad row must stop the restore rather
+/// than discard other live requests.
+fn held_requests(home: &Path) -> Result<(Vec<crate::forget::Request>, Owed)> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         raw::path(home),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     // docs/store-format.md: a raw.db a newer oboete wrote is not restored over while it reads:
     // the rebuild would put an older home in its place, from segments it may not read right.
@@ -1896,7 +1900,16 @@ fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
     {
         return Err(raw::NewerFormat { found }.into());
     }
-    requests_in(&conn)
+    Ok((requests_in(&conn)?, owed_in(&conn)?))
+}
+
+fn owed_in(conn: &rusqlite::Connection) -> Result<Owed> {
+    let Ok(mut st) = conn.prepare("SELECT device, seq, ts FROM expiry_owed") else {
+        return Ok(Vec::new());
+    };
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect::<rusqlite::Result<_>>()
+        .context("read live expiry_owed row")
 }
 
 fn requests_in(conn: &rusqlite::Connection) -> Result<Vec<crate::forget::Request>> {
@@ -1952,7 +1965,7 @@ fn restore_locked(
     if let Some(consent) = consent {
         consent.check_locked(home)?;
     }
-    let held = held_requests(home)?;
+    let (held, mut owed) = held_requests(home)?;
     let dir = dir(home)?;
     let Selection {
         device,
@@ -2014,8 +2027,11 @@ fn restore_locked(
         }
     }
     rebuild.forget(forget);
-    // docs/retention.md: a retention batch begun before raw.db was lost is finished on this one.
-    rebuild.expire(&crate::retention::read_owed(home)?, crate::db::now_ms())?;
+    // docs/retention.md: a retention batch begun before raw.db was lost is finished on this one:
+    // the one its table holds, which a stop before `state/expiry-owed` is written leaves alone
+    // (Codex on #552), and the file's, for a raw.db that no longer reads.
+    owed.extend(crate::retention::read_owed(home)?);
+    rebuild.expire(&owed, crate::db::now_ms())?;
     let dropped = rebuild.finish()?;
     receipt.dropped_ops = dropped as u64;
     receipt.retained_ops = receipt.replayed_ops - receipt.dropped_ops;
