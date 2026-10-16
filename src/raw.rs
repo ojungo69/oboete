@@ -5897,6 +5897,23 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Whether this device's hook records from `from` to `to` hold turns that ended: some are
+    /// there, and every session's last of them is its reply or its end, so nothing more of a turn
+    /// they hold is to come (docs/curation-timing.md). A session whose turn goes on, one window
+    /// holding records of several, keeps it false (Codex on #557).
+    pub fn turns_ended(&self, from: i64, to: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "WITH hooks AS (
+               SELECT kind, row_number() OVER (PARTITION BY agent, session ORDER BY seq DESC) AS n
+               FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
+                 AND type = 'event' AND source = 'hook')
+             SELECT EXISTS (SELECT 1 FROM hooks)
+               AND NOT EXISTS (SELECT 1 FROM hooks WHERE n = 1 AND kind NOT IN ('reply', 'end'))",
+            params![self.device, from, to],
+            |r| r.get(0),
+        )?)
+    }
+
     /// D9: the time of this device's newest record a hook wrote, walking down from the top past
     /// tombstones, imports and replays, which never say the owner is at work.
     pub fn last_hook_ts(&self) -> Result<Option<i64>> {
@@ -8356,6 +8373,29 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/curation-timing.md: turns ended when every session's last hook record in the range is
+    /// its reply or its end; not with another session at work, nor with no hook record at all.
+    #[test]
+    fn turns_ended_reads_every_sessions_last_hook_record() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ev = |kind: &str, session: &str, source: &str| Event {
+            kind: kind.into(),
+            session: session.into(),
+            source: source.into(),
+            ..test_event("{}")
+        };
+        let replay = raw.append(&ev("prompt", "r", "replay")).unwrap();
+        assert!(!raw.turns_ended(replay, replay).unwrap());
+        let a = raw.append(&ev("prompt", "a", "hook")).unwrap();
+        raw.append(&ev("prompt", "b", "hook")).unwrap();
+        let reply = raw.append(&ev("reply", "a", "hook")).unwrap();
+        assert!(!raw.turns_ended(a, reply).unwrap());
+        let end = raw.append(&ev("end", "b", "hook")).unwrap();
+        assert!(raw.turns_ended(a, end).unwrap());
+        assert!(raw.turns_ended(replay, end).unwrap());
+    }
 
     fn format_in(raw: &Raw) -> i64 {
         raw.conn
