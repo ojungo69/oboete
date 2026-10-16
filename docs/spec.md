@@ -763,6 +763,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
   - So agy may keep every window it curated.
   - The curator spike records what each CLI writes under its home during a call and looks for a flag that stops it. Until one is found, those paths are listed in MUST-M23's doc, and forget prints them. (Claude; overrulable)
 - claude-mem's database: oboete never touches claude-mem (owner rule).
+- **Backups left in a backup location used only before locations were remembered**: forget's segment rewrite, and a retention pass's, walk the backup directory in use, the default one and every earlier `[backup] dir` remembered in `state/backup-dirs`, which each backup adds to from 3e-3 part 2 on (docs/retention.md). A location given up before that is not known; its segments keep what they hold until the user removes them.
 - **Provider-side retention**: text sent to an LLM or embedding provider before the forget stays under that provider's terms.
   - The egress ledger (S7) shows which providers saw data from the target.
   - For that, each ledger row also records the device seq range or the uids it carried (metadata only), since S7 as written logs only the repo (RD/improvements-synthesis.md:472).

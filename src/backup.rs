@@ -735,14 +735,51 @@ fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
 /// Returns the last segment written, `None` when there was nothing new. (The worker calls `run`.)
 #[cfg(test)]
 pub fn export(home: &Path) -> Result<Option<PathBuf>> {
-    Ok(export_from(&raw::open(home)?, &dir(home)?)?
+    Ok(export_from(&raw::open(home)?, &export_dir(home)?)?
         .pop()
         .map(|(p, _)| p))
 }
 
 /// `export`, with the time each segment took (Task 12 measures D11's segment cap with it).
 pub fn export_timed(home: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> {
-    export_from(&raw::open(home)?, &dir(home)?)
+    export_from(&raw::open(home)?, &export_dir(home)?)
+}
+
+/// Where earlier `[backup] dir` values are remembered, one a line as config.toml gave them, so a
+/// forget's or a retention pass's rewrite still reaches the segments a change of location left
+/// behind: the settings page moves none (Codex on #552).
+const DIRS: &str = "backup-dirs";
+
+/// `dir`, its configured location remembered in `state/backup-dirs` first.
+fn export_dir(home: &Path) -> Result<PathBuf> {
+    if let Ok(text) = std::fs::read_to_string(home.join("config.toml"))
+        && let Some(location) = location(&text)?.as_deref().and_then(Path::to_str)
+    {
+        let state = home.join("state");
+        std::fs::create_dir_all(&state)?;
+        let known = match std::fs::read_to_string(state.join(DIRS)) {
+            Ok(known) => known,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).context("read state/backup-dirs"),
+        };
+        if !known.lines().any(|l| l == location) {
+            write_synced(&state, DIRS, format!("{known}{location}\n").as_bytes())?;
+        }
+    }
+    dir(home)
+}
+
+/// Every directory segments may be in: the one in use, the default, and the remembered ones.
+fn segment_dirs(home: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = vec![dir(home)?, home.join("backups")];
+    match std::fs::read_to_string(home.join("state").join(DIRS)) {
+        Ok(text) => dirs.extend(text.lines().filter(|l| !l.is_empty()).map(|l| home.join(l))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("read state/backup-dirs"),
+    }
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+    Ok(dirs)
 }
 
 /// Each segment written, with the time it took to read, compress and seal.
@@ -1072,11 +1109,25 @@ fn walk_some(
     judge: &dyn Fn(&str) -> (Option<String>, bool),
     apply: bool,
 ) -> Result<OpsPurge> {
-    let dir = dir(home)?;
     let mut done = OpsPurge::default();
-    let entries = match std::fs::read_dir(&dir) {
+    for dir in segment_dirs(home)? {
+        walk_dir(&dir, kind, wanted, judge, apply, &mut done)?;
+    }
+    Ok(done)
+}
+
+/// `walk_some` in one directory.
+fn walk_dir(
+    dir: &Path,
+    kind: Kind,
+    wanted: &dyn Fn(&str) -> bool,
+    judge: &dyn Fn(&str) -> (Option<String>, bool),
+    apply: bool,
+    done: &mut OpsPurge,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(done),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
     };
     let mut segments = Vec::new();
@@ -1119,14 +1170,14 @@ fn walk_some(
             // Stopped after its rename: the seal's second line is this content's (d).
             if apply && seal.lines().count() > 1 {
                 write_synced(
-                    &dir,
+                    dir,
                     &format!("{name}.sha256"),
                     seal_line(&sha, name).as_bytes(),
                 )?;
             }
             if let (Some(text), _) = judge(&read_whole(&data)?) {
                 if apply {
-                    replace(&dir, name, &sha, text.as_bytes())?;
+                    replace(dir, name, &sha, text.as_bytes())?;
                 }
                 *rewritten += 1;
             }
@@ -1140,7 +1191,7 @@ fn walk_some(
             Ok((Some(text), false)) => {
                 if apply {
                     let z = zstd::bulk::compress(text.as_bytes(), 3)?;
-                    write_synced_at(&dir, name, &z, Some("purge_rewrite_unrenamed"))?;
+                    write_synced_at(dir, name, &z, Some("purge_rewrite_unrenamed"))?;
                     fail_after("purge_rewrite_renamed")?;
                 }
                 *rewritten += 1;
@@ -1161,9 +1212,9 @@ fn walk_some(
     // rename after it synced the directory (Greptile on #453).
     #[cfg(unix)]
     if apply {
-        std::fs::File::open(&dir)?.sync_all()?;
+        std::fs::File::open(dir)?.sync_all()?;
     }
-    Ok(done)
+    Ok(())
 }
 
 /// docs/retention.md, step 2: each record segment, live or set aside, that may hold an owed record
@@ -2215,7 +2266,7 @@ pub fn run(home: &Path, raw: &Raw) {
     run_report(home, raw, &mut |_| {});
 }
 pub(crate) fn run_report(home: &Path, raw: &Raw, committed: &mut impl FnMut(&'static str)) -> u64 {
-    if let Err(e) = dir(home).and_then(|d| export_from_report(raw, &d, committed)) {
+    if let Err(e) = export_dir(home).and_then(|d| export_from_report(raw, &d, committed)) {
         eprintln!("oboete: backup: {e:#}");
         return 1;
     }

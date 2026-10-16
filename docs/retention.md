@@ -167,6 +167,12 @@ As built (part 2):
 - Rule 4 is read per session: a session with a turn the exclusion list keeps back keeps every
   window it has a record in. Rule 5 reads every record consumer, compression's checkpoint too.
 - The pass takes the worker lock only when a period is set or a batch is owed.
+- Step 2, and a forget's segment rewrite, which walks the same way, reach every directory
+  segments may be in: the backup directory in use, the default one and each earlier `[backup]
+  dir`, which every backup remembers in `state/backup-dirs` (Codex on #552). A location given up
+  before this version is not known (spec 6.3).
+- A new batch begins at most once a day (`state/retention-look`), however often
+  `forget --continue` runs for a forget or a mask; an owed batch is finished at every pass.
 
 ## Claims stay
 

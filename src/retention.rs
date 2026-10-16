@@ -1241,4 +1241,24 @@ mod tests {
         std::fs::remove_file(home.path().join("state").join(LOOK)).unwrap();
         assert_eq!(pass(home.path()).unwrap().unwrap().expired, 2);
     }
+
+    /// Segments a change of backup location left behind (the settings page moves none) are
+    /// rewritten where they are, as the default directory's are (Codex on #552).
+    #[test]
+    fn segments_left_in_an_earlier_backup_location_are_rewritten() {
+        let home = tempfile::tempdir().unwrap();
+        let (a, _) = finished(home.path());
+        std::fs::write(home.path().join("config.toml"), "[backup]\ndir = \"old\"\n").unwrap();
+        // The worker's own backup, as on any run.
+        crate::worker::run_once(home.path()).unwrap();
+        assert!(holding(home.path()).iter().any(|f| f.ends_with(".seg.zst")));
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[backup]\ndir = \"new\"\n[retention]\ndays = 1\n",
+        )
+        .unwrap();
+        assert_eq!(pass(home.path()).unwrap().unwrap().expired, 2);
+        assert!(expired(home.path(), a));
+        assert_eq!(holding(home.path()), Vec::<String>::new());
+    }
 }
