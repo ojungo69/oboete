@@ -136,10 +136,18 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   how the last prompt that could ask took its block (`state/prompt-side`: in time, after the wait,
   a request the viewer failed before the wait was over, no viewer, or the viewer's reason for no
   vector); the settings page shows the same under the wait, in both languages.
-- **The reader's model.** The viewer drops its model after 10 minutes without a search
-  (`READER_IDLE`) and loads it again on the next query in about 2 s, past `QUERY_TIMEOUT`: the
-  first prompt after such a pause takes words alone and starts the load, and the next ones take
-  meaning. Keeping the model loaded would hold about 2.5 GB at all times.
+- **The reader's model.** In a home that embeds with the local model and has its files, the
+  resident viewer loads its model, or keeps it, whenever the hooks record again (it looks every
+  2 s for a newer hook record), and at its own start when the newest hook record is less than 30
+  minutes old, as the session start that started it; it drops the model after 30 minutes with
+  neither a search nor a hook record (`WARM_IDLE`), whichever request loaded it; a load takes
+  about 2 s, past `QUERY_TIMEOUT`. So a session's start loads it before the first prompt, and the
+  agent's work keeps it; a prompt after 30 minutes with nothing recorded still takes words alone
+  and starts the load. Until 2026-10-17 only searches counted, for 10 minutes: of the 16 prompts
+  of the week before, 15 came to a dropped model, where 13 came within 30 minutes of the hooks'
+  last record (parity row 31). An MCP server or a CLI command that searches keeps its own model 10
+  minutes after its last search (`READER_IDLE`), as before. The model holds about 2.5 GB while
+  loaded.
 
 ## As built (the second slice: imported history, #506)
 
