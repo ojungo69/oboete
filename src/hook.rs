@@ -3318,7 +3318,9 @@ fn cursor_turns(path: &Path) -> Vec<(String, String)> {
     turns
 }
 
-/// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
+/// The last assistant text in a Codex rollout or a Claude Code transcript (JSONL), reading only
+/// the file's tail. A Claude Code line's text blocks are joined, as claude-mem reads them; its
+/// subagents' lines and lines with no text are passed over.
 pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
     let text = transcript_tail(path, TAIL);
     let mut last = String::new();
@@ -3326,17 +3328,30 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if v["type"] != "response_item"
-            || v["payload"]["type"] != "message"
-            || v["payload"]["role"] != "assistant"
+        let found = if v["type"] == "response_item"
+            && v["payload"]["type"] == "message"
+            && v["payload"]["role"] == "assistant"
         {
-            continue;
-        }
-        if let Some(t) = v["payload"]["content"]
-            .as_array()
-            .and_then(|c| c.iter().rev().find_map(|x| x["text"].as_str()))
-        {
-            last = t.to_string();
+            v["payload"]["content"]
+                .as_array()
+                .and_then(|c| c.iter().rev().find_map(|x| x["text"].as_str()))
+                .map(str::to_owned)
+        } else if v["type"] == "assistant" && v["isSidechain"] != true {
+            match &v["message"]["content"] {
+                Value::String(t) => Some(t.clone()),
+                Value::Array(blocks) => Some(
+                    (blocks.iter())
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(t) = found.filter(|t| !t.trim().is_empty()) {
+            last = t;
         }
     }
     last

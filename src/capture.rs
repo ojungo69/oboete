@@ -417,8 +417,10 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             ("tool", body)
         }
         "Stop" => {
-            // Codex's Stop carries no message; its rollout transcript does.
-            let reply = match str_field(payload, &["last_assistant_message"]) {
+            // Codex's Stop carries no message, and Claude Code's an empty one when the session
+            // ends in a tool call: the transcript has it, as claude-mem reads it (parity row 17).
+            let given = str_field(payload, &["last_assistant_message"]);
+            let reply = match given.filter(|t| !t.trim().is_empty()) {
                 Some(t) => t.to_string(),
                 None => str_field(payload, &["transcript_path"])
                     .map(|p| crate::hook::last_assistant_in_transcript(Path::new(p)))
@@ -1848,6 +1850,24 @@ mod tests {
             )
             .is_empty()
         );
+        // Claude Code's empty message at a session that ended in a tool call: its transcript's
+        // last text, never a subagent's (parity row 17).
+        let transcript = dir.path().join("session.jsonl");
+        let lines = [
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Tests pass."}, {"type": "text", "text": "Pushed."}]}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {}}]}}),
+            json!({"type": "assistant", "isSidechain": true, "message": {"role": "assistant",
+                "content": [{"type": "text", "text": "a subagent's"}]}}),
+        ];
+        let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, text.join("\n")).unwrap();
+        let e = one(
+            "Stop",
+            json!({"last_assistant_message": "", "transcript_path": transcript}),
+        );
+        assert_eq!(body(&e)["assistant"], "Tests pass.\nPushed.");
         assert!(
             events(
                 "claude",
