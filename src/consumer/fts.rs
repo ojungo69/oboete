@@ -255,6 +255,17 @@ pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
     Ok(())
 }
 
+/// docs/retention.md, step 5: an expired record's text row gone; its labels' row and where its
+/// session started stay.
+pub(crate) fn expired(k: &Connection, device: &str, seq: i64) -> Result<()> {
+    schema(k)?;
+    k.execute(
+        "DELETE FROM raw_fts WHERE rowid = (SELECT rowid FROM raw_docs WHERE device = ?1 AND seq = ?2)",
+        params![device, seq],
+    )?;
+    Ok(())
+}
+
 /// One indexed record's text replaced by what `Raw::after` returns for it now; its row removed
 /// when that is no event. Nothing for a record this index never held.
 fn reindex(raw: &Raw, k: &Connection, device: &str, seq: i64) -> Result<()> {

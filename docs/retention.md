@@ -146,6 +146,22 @@ restored as an event whose time matches becomes expired, so a batch cut by a dam
 finished on what replaces it. The original it quarantines is a copy the next pass rewrites
 (step 2). Step 5 removes the file after the table's rows.
 
+As built (part 2):
+
+- Before step 1 the pass seals the backups of the records and the ops (`backup::export_timed`)
+  and begins nothing when that fails, so a restore that finishes a batch also brings back the
+  claims and summaries made from its records (Codex's review of part 2).
+- `state/expiry-owed` holds one `device seq time` line per record.
+- A restore's rebuild runs with `secure_delete`: the text it clears for an owed batch, or for a
+  forget it applies, leaves nothing in the file's free space.
+- A copy whose WAL a reader keeps from truncating is removed, as a purge removes a copy it cannot
+  rewrite.
+- Step 5 cleans a record only when its row is the expired row of the owed time: a seq another
+  record took keeps that record's text row and facts.
+- Rule 4 is read per session: a session with a turn the exclusion list keeps back keeps every
+  window it has a record in. Rule 5 reads every record consumer, compression's checkpoint too.
+- The pass takes the worker lock only when a period is set or a batch is owed.
+
 ## Claims stay
 
 Spec 6.2: claims stay, and their evidence reads "raw expired". One function gives each quote's
@@ -247,8 +263,9 @@ and the backups. R2 holds nothing until milestone 6.
 
 ## Doctor and the page
 
-- doctor: `retention: forever` or `retention: N days (a session expires once curated and past
-  it; last pass <time>, M records expired)`, rows still owed, and a wrong table as a failure.
+- doctor: `retention: forever` or `retention: N days (a window expires once curated and past
+  it; last look <time>, M records expired)`, a batch begun and not finished, and a wrong table
+  as a failure.
 - The settings page (its own PR): the key in the detailed view's privacy group, in English and
   Japanese.
 

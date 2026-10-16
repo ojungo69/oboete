@@ -1061,6 +1061,17 @@ fn walk(
     judge: &dyn Fn(&str) -> (Option<String>, bool),
     apply: bool,
 ) -> Result<OpsPurge> {
+    walk_some(home, kind, &|_| true, judge, apply)
+}
+
+/// `walk` over the segments whose name `wanted` takes.
+fn walk_some(
+    home: &Path,
+    kind: Kind,
+    wanted: &dyn Fn(&str) -> bool,
+    judge: &dyn Fn(&str) -> (Option<String>, bool),
+    apply: bool,
+) -> Result<OpsPurge> {
     let dir = dir(home)?;
     let mut done = OpsPurge::default();
     let entries = match std::fs::read_dir(&dir) {
@@ -1078,10 +1089,10 @@ fn walk(
             if apply && leftover(name) {
                 std::fs::remove_file(&path)?;
             }
-        } else if segment(name, kind) {
+        } else if segment(name, kind) && wanted(name) {
             // Under the names oboete gives only, as for the set-aside ones (Codex on #453).
             segments.push((path, false));
-        } else if set_aside(name, kind) {
+        } else if set_aside(name, kind) && wanted(name) {
             segments.push((path, true));
         }
     }
@@ -1153,6 +1164,76 @@ fn walk(
         std::fs::File::open(&dir)?.sync_all()?;
     }
     Ok(done)
+}
+
+/// docs/retention.md, step 2: each record segment, live or set aside, that may hold an owed record
+/// (its name's seq range holds one, or it is set aside under a name that gives none) with that
+/// record's `event` line made its `expired` line: its text goes, its labels, ledger and identity
+/// stay. A line of another time is another record that took the seq.
+pub(crate) fn expire_record_segments(
+    home: &Path,
+    owed: &std::collections::HashMap<(String, i64), i64>,
+    at: i64,
+) -> Result<OpsPurge> {
+    let mut seqs: std::collections::HashMap<&str, Vec<i64>> = std::collections::HashMap::new();
+    for (device, seq) in owed.keys() {
+        seqs.entry(device.as_str()).or_default().push(*seq);
+    }
+    for list in seqs.values_mut() {
+        list.sort_unstable();
+    }
+    let wanted = |name: &str| {
+        let base = name.split(".quarantined-").next().unwrap_or(name);
+        let Some((false, device, first, last)) = segment_name(std::ffi::OsStr::new(base)) else {
+            return true;
+        };
+        seqs.get(device.as_str()).is_some_and(|list| {
+            let i = list.partition_point(|s| *s < first);
+            list.get(i).is_some_and(|s| *s <= last)
+        })
+    };
+    walk_some(
+        home,
+        Kind::Records,
+        &wanted,
+        &|text| purge_lines(text, |l| expired_record_line(l, owed, at)),
+        true,
+    )
+}
+
+/// An `event` line of an owed record as its `expired` line; any other line as it is.
+fn expired_record_line(
+    line: &str,
+    owed: &std::collections::HashMap<(String, i64), i64>,
+    at: i64,
+) -> Line {
+    if line.trim().is_empty() {
+        return Line::Kept;
+    }
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Line::Unknown(None);
+    };
+    match v["type"].as_str() {
+        Some("event") => {}
+        Some("removed" | "tombstone" | "expired") => return Line::Kept,
+        _ => return Line::Unknown(None),
+    }
+    let (Some(device), Some(seq), Some(ts)) =
+        (v["device"].as_str(), v["seq"].as_i64(), v["ts"].as_i64())
+    else {
+        return Line::Unknown(None);
+    };
+    if owed.get(&(device.to_owned(), seq)) != Some(&ts) {
+        return Line::Kept;
+    }
+    let Some(fields) = v.as_object_mut() else {
+        return Line::Unknown(None);
+    };
+    fields.remove("body");
+    fields.remove("original_bytes");
+    fields.insert("type".into(), "expired".into());
+    fields.insert("expired".into(), at.into());
+    Line::Purged(v.to_string())
 }
 
 /// The suffix of a replacement's temporary name, `.<segment>.purge` (2c, decision 3): the segment
@@ -1882,6 +1963,8 @@ fn restore_locked(
         }
     }
     rebuild.forget(forget);
+    // docs/retention.md: a retention batch begun before raw.db was lost is finished on this one.
+    rebuild.expire(&crate::retention::read_owed(home)?, crate::db::now_ms())?;
     let dropped = rebuild.finish()?;
     receipt.dropped_ops = dropped as u64;
     receipt.retained_ops = receipt.replayed_ops - receipt.dropped_ops;

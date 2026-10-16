@@ -767,6 +767,31 @@ fn label_facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> 
     dirty(k, device, repo, branch)
 }
 
+/// docs/retention.md, step 5: the facts an expired record's text gave gone (its labels' stay, as
+/// `label_facts` makes them), and their checkouts marked for a rebuild.
+pub(crate) fn expired(k: &Connection, device: &str, seq: i64) -> Result<()> {
+    schema(k)?;
+    let text = "fact NOT IN ('event', 'prompt', 'reply', 'end')";
+    let checkouts: Vec<(String, String)> = k
+        .prepare_cached(&format!(
+            "SELECT DISTINCT repo, branch FROM manifest_facts
+             WHERE device = ?1 AND seq = ?2 AND {text}"
+        ))?
+        .query_map(params![device, seq], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if checkouts.is_empty() {
+        return Ok(());
+    }
+    k.execute(
+        &format!("DELETE FROM manifest_facts WHERE device = ?1 AND seq = ?2 AND {text}"),
+        params![device, seq],
+    )?;
+    for (repo, branch) in checkouts {
+        dirty(k, device, &repo, &branch)?;
+    }
+    Ok(())
+}
+
 /// Every checkout of `repo` marked for a rebuild, `branch`'s among them.
 fn dirty(k: &Connection, device: &str, repo: &str, branch: &str) -> Result<()> {
     // Owner directives and other sessions are the repo's, not the branch's: every checkout of

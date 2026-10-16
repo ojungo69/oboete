@@ -3301,6 +3301,51 @@ fn curated_through(raw: &Raw) -> Result<i64> {
         .and_then(whole_through)
 }
 
+/// docs/retention.md: `curated_through` for a retention pass.
+pub(crate) fn curated_through_raw(raw: &Raw) -> Result<i64> {
+    curated_through(raw)
+}
+
+/// docs/retention.md: the spans of `ops` (a device's window ops, in op order) no curation read:
+/// skipped or refused windows, whatever the reason, and the records a window kept back for an
+/// excluded session, less what later recurations curated.
+pub(crate) fn unread_spans(ops: &[(i64, Value)]) -> Vec<Span> {
+    let (mut unread, mut recurated) = (Vec::new(), Vec::new());
+    let kept_back = |body: &Value| {
+        body["excluded"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_i64)
+            .map(|seq| Span::records(seq, seq))
+            .collect::<Vec<_>>()
+    };
+    for (op_seq, body) in ops {
+        if body["recurate"] == true {
+            for range in [body, &body["covers"]] {
+                recurated.extend(curated_parts(body, range).into_iter().map(|c| (*op_seq, c)));
+            }
+        } else if body["outcome"] == "skipped" || body["refused"] == true {
+            if let Some(span) = op_span(body) {
+                unread.push((*op_seq, span));
+            }
+            continue;
+        }
+        unread.extend(kept_back(body).into_iter().map(|s| (*op_seq, s)));
+    }
+    unread
+        .into_iter()
+        .flat_map(|(at, s)| {
+            recurated
+                .iter()
+                .filter(|(r, _)| *r > at)
+                .fold(vec![s], |parts, (_, c)| {
+                    parts.iter().flat_map(|p| p.minus(c)).collect()
+                })
+        })
+        .collect()
+}
+
 pub(crate) fn curated_through_in(conn: &Connection, device: &str) -> Result<i64> {
     crate::raw::curation_checkpoint_in(conn, device).and_then(whole_through)
 }
