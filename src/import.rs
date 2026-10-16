@@ -34,6 +34,8 @@ pub struct Stats {
     pub refused: u64,
     /// Work state rows of a project whose repository is never recorded (slice 4a, I6).
     pub never_recorded: u64,
+    /// claude-mem's exclusion patterns added as patterns never recorded (parity row 14, I8).
+    pub exclusions: u64,
 }
 
 struct Session {
@@ -89,6 +91,10 @@ pub fn claude_mem(
         );
     }
     let source = source_name(&src)?;
+    let mut stats = Stats {
+        exclusions: exclusions(raw, path)?,
+        ..Stats::default()
+    };
     // A row claude-mem merged into another project is read under that one (I3).
     let project = |table: &str| -> Result<&'static str> {
         Ok(if has_column(&src, table, "merged_into_project")? {
@@ -109,7 +115,6 @@ pub fn claude_mem(
         source: &source,
         docs: Vec::new(),
     };
-    let mut stats = Stats::default();
 
     // Observations and summaries name claude-mem's own session id; prompts name the agent's.
     // oboete keys sessions by the agent's id, so the same session captured by both lines up.
@@ -253,6 +258,35 @@ pub fn claude_mem(
         work_state(raw, &src, &source, settings, &mut stats)?;
     }
     Ok(stats)
+}
+
+/// I8 (parity row 14): claude-mem's exclusion patterns, `CLAUDE_MEM_EXCLUDED_PROJECTS` in the
+/// `settings.json` beside its database, each added as a pattern never recorded unless an exclusion
+/// op ever named it, so one taken back here is not added again. None when the file or the key is
+/// missing or unreadable: what claude-mem keeps is imported all the same.
+fn exclusions(raw: &mut Raw, db: &Path) -> Result<u64> {
+    let read = db
+        .parent()
+        .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let Some(list) = read
+        .as_ref()
+        .and_then(|v| v["CLAUDE_MEM_EXCLUDED_PROJECTS"].as_str())
+    else {
+        return Ok(0);
+    };
+    let named = raw.patterns_ever_named()?;
+    let mut added = 0;
+    for given in list.split(',') {
+        let Ok(pattern) = crate::capture::pattern(given) else {
+            continue;
+        };
+        if !named.contains(&pattern) {
+            raw.exclude_capture(("pattern", &pattern), false)?;
+            added += 1;
+        }
+    }
+    Ok(added)
 }
 
 /// I4: claude-mem's work state rows as work state ops, oldest first, under their project as an
@@ -1304,6 +1338,48 @@ mod tests {
             counts(&claude_mem(&mut raw, &other, &Default::default()).unwrap()),
             (6, 1, 1, 0, 2)
         );
+    }
+
+    /// I8 (parity row 14): claude-mem's exclusion patterns, read from the settings beside its
+    /// database, come in once as patterns never recorded; one taken back is not added again, and
+    /// a database with no settings beside it imports all the same.
+    #[test]
+    fn claude_mems_exclusions_come_in_once_as_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        assert_eq!(
+            claude_mem(&mut raw, &src, &Default::default())
+                .unwrap()
+                .exclusions,
+            0
+        );
+        let settings = serde_json::json!({
+            "CLAUDE_MEM_EXCLUDED_PROJECTS": "secret-a, ~/private/** ,, secret-b",
+            "CLAUDE_MEM_MODEL": "unrelated",
+        });
+        std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();
+        assert_eq!(
+            claude_mem(&mut raw, &src, &Default::default())
+                .unwrap()
+                .exclusions,
+            3
+        );
+        let patterns = raw.capture_exclusions().unwrap().patterns;
+        assert_eq!(
+            Vec::from_iter(patterns),
+            ["secret-a", "secret-b", "~/private/**"]
+        );
+        raw.exclude_capture(("pattern", "secret-b"), true).unwrap();
+        assert_eq!(
+            claude_mem(&mut raw, &src, &Default::default())
+                .unwrap()
+                .exclusions,
+            0
+        );
+        assert_eq!(raw.capture_exclusions().unwrap().patterns.len(), 2);
     }
 
     /// D5: each append of `raw::IMPORT_BATCH` documents commits alone, so an import killed at one

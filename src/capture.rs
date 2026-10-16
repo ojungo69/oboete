@@ -196,7 +196,80 @@ pub fn never_recorded(
     crate::raw::CaptureExclusions {
         repos: list.repos.iter().map(|r| label("repo", r)).collect(),
         folders: list.folders.iter().map(|f| label("cwd", f)).collect(),
+        patterns: list.patterns.iter().map(|p| label("cwd", p)).collect(),
     }
+}
+
+/// Parity row 14: whether claude-mem's exclusion `pattern` names the working folder `cwd`, as its
+/// `project-filter.ts` reads one: `*` is any run of characters within one part of a path, `**`
+/// any run across parts, `?` one character within a part, a leading `~` the home folder, and `\`
+/// reads as `/`; it names the whole path or its last part, and `dir/**` names `dir` too. A pattern
+/// with no `/` also names every folder inside one it names, where claude-mem reads the last part
+/// alone: a session started below an excluded project is not recorded either. Letter case is
+/// ignored where the platform ignores it, as for a folder (`raw::folded`).
+pub fn pattern_covers(pattern: &str, cwd: &str) -> bool {
+    let slashed = |s: &str| crate::raw::folded(&s.replace('\\', "/")).into_owned();
+    let pattern = slashed(pattern.trim());
+    let pattern = match pattern.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = slashed(&crate::config::home_dir().to_string_lossy());
+            format!("{}{rest}", home.trim_end_matches('/'))
+        }
+        _ => pattern,
+    };
+    if pattern.is_empty() {
+        return false;
+    }
+    let path = slashed(cwd);
+    let path = path.trim_end_matches('/');
+    let named = |glob: &str, s: &str| {
+        globbed(
+            &glob.chars().collect::<Vec<_>>(),
+            &s.chars().collect::<Vec<_>>(),
+        )
+    };
+    named(&pattern, path)
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|last| named(&pattern, last))
+        || (!pattern.contains('/') && path.split('/').any(|part| named(&pattern, part)))
+        || pattern
+            .strip_suffix("/**")
+            .is_some_and(|dir| named(dir, path))
+}
+
+/// `s` as `glob` matches it whole, as claude-mem's glob becomes a regular expression: `**` any
+/// characters, `*` any but `/`, `?` one that is not `/`, any other character itself.
+fn globbed(glob: &[char], s: &[char]) -> bool {
+    // `at[j]`: whether the glob read so far matches `s[..j]`.
+    let mut at = vec![false; s.len() + 1];
+    at[0] = true;
+    let mut i = 0;
+    while i < glob.len() {
+        let mut next = vec![false; s.len() + 1];
+        let across = glob[i] == '*' && glob.get(i + 1) == Some(&'*');
+        match glob[i] {
+            '*' => {
+                for j in 0..=s.len() {
+                    next[j] = at[j] || (j > 0 && next[j - 1] && (across || s[j - 1] != '/'));
+                }
+            }
+            '?' => {
+                for j in 1..=s.len() {
+                    next[j] = at[j - 1] && s[j - 1] != '/';
+                }
+            }
+            c => {
+                for j in 1..=s.len() {
+                    next[j] = at[j - 1] && s[j - 1] == c;
+                }
+            }
+        }
+        at = next;
+        i += if across { 2 } else { 1 };
+    }
+    at[s.len()]
 }
 
 /// Slice 4a: a repository or folder as `oboete capture exclude` stores it, through the same gate
@@ -319,6 +392,16 @@ pub fn not_recorded_why(
     if list.refuses(Some(&never), (Some(&repo), None), Some((&place.repo, None))) {
         return Some(format!(
             "its repository {repo} is excluded (oboete capture exclude)"
+        ));
+    }
+    // Parity row 14: a pattern names it.
+    if [&folder, &cwd]
+        .into_iter()
+        .any(|c| list.pattern_naming(c).is_some())
+        || never.pattern_naming(&cwd).is_some()
+    {
+        return Some(format!(
+            "{cwd} is named by an excluded pattern (oboete capture exclude --pattern)"
         ));
     }
     (list.covers(None, Some(&folder))
@@ -486,6 +569,19 @@ fn capture(
     settings: &Settings,
 ) -> Captured {
     labelled(agent, kind, body, payload, ts, place(payload), settings)
+}
+
+/// Parity row 14: a pattern as `oboete capture exclude --pattern`, the page and the import of
+/// claude-mem's settings store it: trimmed, else as given; refused when empty, over 4,096 bytes,
+/// or holding a control character.
+pub fn pattern(given: &str) -> anyhow::Result<String> {
+    let p = given.trim();
+    anyhow::ensure!(
+        !p.is_empty() && p.len() <= 4096 && !p.chars().any(char::is_control),
+        "a pattern is a folder's name or a claude-mem pattern of at most 4,096 bytes, with no \
+         control character"
+    );
+    Ok(p.to_owned())
 }
 
 /// The checkout `payload`'s `cwd` names.
@@ -1147,6 +1243,41 @@ mod tests {
         }
     }
 
+    /// Parity row 14: claude-mem's patterns name folders as its `project-filter.ts` reads them,
+    /// and a name with no `/` names the folders inside one so named too.
+    #[test]
+    fn a_pattern_names_folders_as_claude_mems_does() {
+        for (pattern, cwd, named) in [
+            ("secret", "/work/secret", true),
+            ("secret", "/work/secret/src", true),
+            ("secret", "/work/secrets", false),
+            ("sec*", "/work/secret", true),
+            ("sec?et", "/work/secret", true),
+            ("sec?et", "/work/sec/et", false),
+            ("/work/*/private", "/work/a/private", true),
+            ("/work/*/private", "/work/a/b/private", false),
+            ("/work/**/private", "/work/a/b/private", true),
+            ("/work/**", "/work", true),
+            ("/work/**", "/work/a/b", true),
+            ("/work/**", "/other", false),
+            (r"\work\secret", "/work/secret/", true),
+            ("  secret ", "/work/secret", true),
+            ("", "/work/secret", false),
+        ] {
+            assert_eq!(pattern_covers(pattern, cwd), named, "{pattern:?} {cwd}");
+        }
+        let home = crate::config::home_dir()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let home = home.trim_end_matches('/');
+        assert!(pattern_covers("~/secret", &format!("{home}/secret")));
+        assert!(pattern_covers("~/**", &format!("{home}/a/b")));
+        assert!(!pattern_covers("~/secret", "/elsewhere/secret"));
+        assert!(pattern("  a b ").is_ok_and(|p| p == "a b"));
+        assert!(pattern(" ").is_err() && pattern("a\nb").is_err());
+        assert!(pattern(&"a".repeat(4097)).is_err());
+    }
+
     /// Codex on #489: a folder reads alike however it was written: `.` and `..` by name, a
     /// trailing separator dropped, a relative path against the current directory.
     #[test]
@@ -1189,6 +1320,10 @@ mod tests {
         let why = not_recorded_why(&dir, &list, &settings).unwrap();
         assert!(why.contains("excluded folder"), "{why}");
         list.folders.clear();
+        list.patterns.insert("deep".into());
+        let why = not_recorded_why(&dir, &list, &settings).unwrap();
+        assert!(why.contains("excluded pattern"), "{why}");
+        list.patterns.clear();
         list.repos.insert(repo::key(top.path()));
         let why = not_recorded_why(&dir, &list, &settings).unwrap();
         assert!(why.contains("its repository"), "{why}");

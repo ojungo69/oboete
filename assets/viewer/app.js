@@ -1173,6 +1173,14 @@ const TEXT = {
   never_undone_covered: ['This folder is no longer excluded, but nothing there is recorded yet: another exclusion, or its checkout’s .oboete.toml, still covers it.', 'このフォルダーの除外は外しましたが、別の除外かチェックアウトの .oboete.toml がまだ当てはまるため、ここはまだ記録しません。'],
   capture_folder: ["Enter the folder's full path: from / (or a drive letter on Windows).", 'フォルダーのフルパスを入力してください (/ から、Windows ではドライブ名から)。'],
   folder_not_found: ['This folder is no longer in the list. Reload its state.', 'このフォルダーは一覧にありません。状態を再読み込みしてください。'],
+  capture_pattern: ['Enter a folder name or a pattern of at most 4,096 bytes.', 'フォルダー名かパターンを入力してください (4,096 バイトまで)。'],
+  pattern_not_found: ['This name or pattern is no longer in the list. Reload its state.', 'この名前やパターンは一覧にありません。状態を再読み込みしてください。'],
+  never_patterns_h: ['Folder names and patterns', 'フォルダー名とパターン'],
+  never_patterns_desc: ['A name such as my-secret-project stops recording in every folder of that name and inside one. A pattern works as in claude-mem: * stands for any characters within one folder name, ** for any folders, ? for one character, and a leading ~ for your home folder.', 'my-secret-project のような名前を入れると、その名前のフォルダーとその中では記録しません。パターンは claude-mem と同じ書き方です。* はフォルダー名の中の任意の文字、** は任意の階層、? は 1 文字、先頭の ~ はホームフォルダーを表します。'],
+  never_patterns_none: ['No folder name or pattern is excluded.', '除外しているフォルダー名やパターンはありません。'],
+  never_pattern_input: ['Folder name or pattern to never record', '記録しないフォルダー名またはパターン'],
+  never_pattern_add: ['Never record the folders it names', '当てはまるフォルダーを記録しない'],
+  never_pattern_stopped: ['Recording in the folders it names stopped. What was recorded before stays.', '当てはまるフォルダーの記録を止めました。これまでの記録は残ります。'],
   never_other: ['Another repository never recorded reads as this one under the rules now, so this one is not recorded either. Recording it again here would record that repository too: record it again from its own row, or change the rule that makes them read alike.', '記録しない別のリポジトリが、今の規則ではこのリポジトリと同じに読めるため、こちらも記録されていません。ここで記録を再開すると、そのリポジトリも記録されます。そのリポジトリの行から再開するか、同じに読ませている規則を変えてください。'],
   never_ambiguous: ['Several repositories never recorded read as this one now: record each again from its own row, or with `oboete capture exclude --undo` and the name it was excluded under.', '記録しない複数のリポジトリが、今の規則ではこのリポジトリと同じに読めます。それぞれの行から、または `oboete capture exclude --undo` に除外したときの名前を付けて、記録を再開してください。'],
   rescan_h: ['Rescan on this device', 'この端末の再検査'],
@@ -3906,6 +3914,7 @@ function captureSection(f, simple = false) {
       if (!currentSettings(f)) return;
       if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
       if (body.folder) f.neverFolder = '';
+      if (body.pattern) f.neverPattern = '';
       // A folder or a repository another entry still covers is not recorded again (Codex and
       // CodeRabbit on #491).
       if (body.folder_selector && answer.never_recorded === true) receipt = t('never_undone_covered');
@@ -3928,6 +3937,9 @@ function captureSection(f, simple = false) {
       t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label }))));
   const folders = (state.folders || []).map((folder) => row(folder.label, true, (action) =>
     write(action, { folder_selector: folder.selector, undo: true }, t('never_undone'))));
+  // Parity row 14: folder names and claude-mem's patterns.
+  const patterns = (state.patterns || []).map((pattern) => row(pattern.label, true, (action) =>
+    write(action, { pattern_selector: pattern.selector, undo: true }, t('never_undone'))));
   const folder = input('text', f.neverFolder || '', '', 'never.folder', (v) => { f.neverFolder = v; });
   const add = el('button', 'quiet small', t('never_folder_add'));
   add.type = 'button';
@@ -3944,16 +3956,27 @@ function captureSection(f, simple = false) {
       if (event.key === 'Enter') { event.preventDefault(); if (!add.disabled) add.click(); }
     });
     const section = simpleBlock('never',
-      repos.length || folders.length ? el('ul', 'simple-places', ...repos, ...folders) : el('p', 'desc', t('simple_never_empty')),
+      repos.length || folders.length || patterns.length ? el('ul', 'simple-places', ...repos, ...folders, ...patterns) : el('p', 'desc', t('simple_never_empty')),
       el('label', 'field', el('span', null, t('never_folder_input')), folder), add,
       detailedSettingsLink('simple_never_more', '.never-record'));
     section.className += ' never-record';
     return section;
   }
+  const pattern = input('text', f.neverPattern || '', '', 'never.pattern', (v) => { f.neverPattern = v; });
+  const addPattern = el('button', 'quiet small', t('never_pattern_add'));
+  addPattern.type = 'button';
+  addPattern.addEventListener('click', () => {
+    if (addPattern.disabled) return;
+    if (!pattern.value.trim()) { setStatus(t('capture_pattern'), true, lang); return; }
+    void write(addPattern, { pattern: pattern.value, undo: false }, t('never_pattern_stopped'));
+  });
   return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
     el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('privacy_none')),
     el('h4', null, t('never_folders_h')), folders.length ? el('ul', null, ...folders) : el('p', 'desc', t('never_folders_none')),
-    el('label', 'field', el('span', null, t('never_folder_input')), folder), add);
+    el('label', 'field', el('span', null, t('never_folder_input')), folder), add,
+    el('h4', null, t('never_patterns_h')), el('p', 'desc', t('never_patterns_desc')),
+    patterns.length ? el('ul', null, ...patterns) : el('p', 'desc', t('never_patterns_none')),
+    el('label', 'field', el('span', null, t('never_pattern_input')), pattern), addPattern);
 }
 
 function claimReceipt(answer) {
@@ -4244,6 +4267,7 @@ function preserveSettingsDrafts(next, mine) {
   for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction', 'retention']) next[key] = mine[key];
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.neverFolder = mine.neverFolder;
+  next.neverPattern = mine.neverPattern;
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {

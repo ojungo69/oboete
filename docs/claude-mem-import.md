@@ -69,6 +69,13 @@ I7. **Size.** The owner's database of 2026-09-24 (178,370 documents) made raw.db
 knowledge.db 864 MB in an evaluation home (docs/milestone-4.md); their vectors add about 930 MB,
 from the local model on this PC and from Workers AI on the iMac (decision 35's estimate).
 
+I8. **Exclusions (parity row 14).** claude-mem's exclusion patterns, the comma-separated
+`CLAUDE_MEM_EXCLUDED_PROJECTS` of the `settings.json` beside its database, come in as patterns
+never recorded (docs/settings-privacy.md, Never record), before any row, each one only if no
+exclusion op ever named it: one taken back on the page or with `--undo` is not added again by a
+later import. A database with no settings beside it, or settings without the key, imports as
+before. The import's line counts them (`exclusions`).
+
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,
