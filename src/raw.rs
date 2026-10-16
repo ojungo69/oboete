@@ -4913,6 +4913,47 @@ impl Raw {
         })
     }
 
+    /// Parity row X1 (claude-mem's `CONTEXT_MAIN_AGENT_ONLY`): whether `device`'s events from
+    /// `from` to `to` are a subagent's work alone, tool calls its hooks or its transcript mark
+    /// with an `agent_id`, beside session starts and ends, which hold no work. Any other event,
+    /// or one whose text retention removed, is the main agent's or cannot tell: false.
+    pub fn subagent_only(&self, device: &str, from: i64, to: i64) -> Result<bool> {
+        // Most windows hold a prompt or a reply: no body need be read for them.
+        let other: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
+               AND type = 'event' AND kind NOT IN ('tool', 'start', 'end'))",
+            params![device, from, to],
+            |r| r.get(0),
+        )?;
+        if other {
+            return Ok(false);
+        }
+        let (mut at, mut tools) = (from - 1, false);
+        while at < to {
+            let take = usize::try_from(to - at).unwrap_or(usize::MAX).min(200);
+            let page = self.after_within(device, at, take, MAX_BATCH_BYTES)?;
+            let Some(last) = page.last().map(|r| r.seq) else {
+                break;
+            };
+            at = last;
+            for r in page.into_iter().filter(|r| r.seq <= to) {
+                match r.item {
+                    Item::Event(e) if e.kind == "tool" => {
+                        let body: serde_json::Value =
+                            serde_json::from_str(&e.body).unwrap_or_default();
+                        if body["agent_id"].as_str().is_none_or(str::is_empty) {
+                            return Ok(false);
+                        }
+                        tools = true;
+                    }
+                    Item::Event(_) | Item::Removed | Item::Tombstone(_) => {}
+                    Item::Expired(_) => return Ok(false),
+                }
+            }
+        }
+        Ok(tools)
+    }
+
     /// The sessions, as `session_key` spells them, of `device`'s events in the inclusive seq
     /// ranges `spans` and at `seqs`, from the rows alone: what a card or a summary was made from
     /// (docs/cards.md K4, docs/summaries.md T7), which the embedding phase passes it over for
@@ -8435,6 +8476,41 @@ mod tests {
         })
         .unwrap();
         assert_eq!(newest_hook(home.path()).unwrap(), Some((a, 7_000)));
+    }
+
+    /// Parity row X1: a span is a subagent's work alone when its tool calls all carry an
+    /// `agent_id` and nothing but session starts and ends stands beside them.
+    #[test]
+    fn subagent_only_reads_the_spans_tool_calls() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let ev = |kind: &str, body: serde_json::Value| Event {
+            kind: kind.into(),
+            ..test_event(&body.to_string())
+        };
+        let sub = || {
+            ev(
+                "tool",
+                serde_json::json!({"tool": "Read", "agent_id": "a1"}),
+            )
+        };
+        let start = raw.append(&ev("start", serde_json::json!({}))).unwrap();
+        assert!(!raw.subagent_only(&dev, start, start).unwrap());
+        let a = raw.append(&sub()).unwrap();
+        let b = raw.append(&sub()).unwrap();
+        assert!(raw.subagent_only(&dev, start, b).unwrap());
+        let main = raw
+            .append(&ev(
+                "tool",
+                serde_json::json!({"tool": "Read", "agent_id": ""}),
+            ))
+            .unwrap();
+        assert!(!raw.subagent_only(&dev, a, main).unwrap());
+        let c = raw.append(&sub()).unwrap();
+        let reply = raw.append(&ev("reply", serde_json::json!({}))).unwrap();
+        assert!(raw.subagent_only(&dev, c, c).unwrap());
+        assert!(!raw.subagent_only(&dev, c, reply).unwrap());
     }
 
     fn format_in(raw: &Raw) -> i64 {

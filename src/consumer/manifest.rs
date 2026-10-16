@@ -2862,6 +2862,30 @@ extra_rules = [
         (crate::raw::OpKind::Window, op)
     }
 
+    /// Parity row X1: a card of a window that is a subagent's work alone is not shown at session
+    /// start, as claude-mem's `CONTEXT_MAIN_AGENT_ONLY` keeps its rows out; the main agent's are.
+    #[test]
+    fn session_start_leaves_out_a_subagents_work() {
+        let (_h, _c, text) = start(
+            |store, cwd| {
+                let sub = |output: &str| {
+                    let body = serde_json::json!({"tool": "Read", "input": "{}", "output": output,
+                        "failed": false, "agent_id": "a1"});
+                    ev("tool", "s1", DAY, cwd, body)
+                };
+                let from = store.append(&sub("one")).unwrap();
+                let to = store.append(&sub("two")).unwrap();
+                vec![
+                    cards_op(1, 7, &["Ours"]),
+                    cards_op(from, to, &["The subagent's"]),
+                ]
+            },
+            None,
+        );
+        assert!(text.contains(" ● Ours\n"), "{text}");
+        assert!(!text.contains("The subagent's"), "{text}");
+    }
+
     /// docs/cards.md S1, S4: the repository's cards, as claude-mem's block, after the owner's
     /// decisions and before the checkout's state lines; another repository's are not shown.
     #[test]

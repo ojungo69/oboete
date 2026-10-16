@@ -260,7 +260,17 @@ read through `cards::recent` (K3, K4, K6), of every agent: claude-mem shows only
 agent's by default, and one memory across agents is what oboete is for. Measured on the evaluation
 home's copy (26,444 records, release build): reading 50 cards takes about 8 ms in a fresh process
 and 4 ms after, and the whole packet about 15 ms where it took 11 without them; the first run
-after a build, with nothing of the stores in the page cache, took 107 ms.
+after a build, with nothing of the stores in the page cache, took 107 ms. Since 2026-10-17 (parity
+row X1) no card of a window that is a subagent's work alone is shown, as claude-mem leaves out the
+rows of subagent events by default (`CLAUDE_MEM_CONTEXT_MAIN_AGENT_ONLY`): such a window holds only
+tool calls whose hook or transcript names an `agent_id`, beside session starts and ends, and its
+cards are marked when they are kept (`cards.subagent`). Search and the page still show them. A
+window that mixes the main agent's records with a subagent's keeps its cards at session start;
+claude-mem judges each tool call alone, while oboete's cards are made a window at a time. Cards
+kept before the mark get it from the cards consumer, the newest first, 200 a step. In this PC's
+week to 2026-10-17, 2,753 of the 4,986 tool calls Claude Code's hooks recorded were a subagent's,
+and 1,117 of the week's 1,830 cards came from 694 windows (of 1,124) that are a subagent's work
+alone.
 
 S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem's block alone
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).

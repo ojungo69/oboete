@@ -158,7 +158,15 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
             tx.commit()?;
         }
     }
-    Ok(())
+    // Parity row X1: 1 for a card of a window that is a subagent's work alone
+    // (`Raw::subagent_only`), 0 for another; none for one kept before, until the cards consumer
+    // marks it (`consumer::cards::mark`), the newest first.
+    crate::claims::migrate(
+        k,
+        "SELECT count(*) = 0 FROM pragma_table_info('cards') WHERE name = 'subagent'",
+        "ALTER TABLE cards ADD COLUMN subagent INTEGER;
+         CREATE INDEX IF NOT EXISTS cards_unmarked ON cards(ts) WHERE subagent IS NULL;",
+    )
 }
 
 /// A path as `card_files` keeps it and is searched by: `/` for `\\`.
@@ -428,7 +436,9 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
     }))
 }
 
-/// `repo`'s newest cards, at most `limit`, the newest first.
+/// `repo`'s newest cards for session start, at most `limit`, the newest first: none of a
+/// subagent's work alone, as claude-mem's `CONTEXT_MAIN_AGENT_ONLY` keeps its rows out (parity
+/// row X1); search and the page still have them.
 pub fn recent(
     k: &Connection,
     raw: &Raw,
@@ -439,8 +449,15 @@ pub fn recent(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(Vec::new());
     }
+    // A hook can read a store the worker has not given the column yet.
+    let marked: bool = k.query_row(
+        "SELECT count(*) > 0 FROM pragma_table_info('cards') WHERE name = 'subagent'",
+        [],
+        |r| r.get(0),
+    )?;
+    let main = if marked { "AND subagent IS NOT 1" } else { "" };
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE repo = ?1 AND replaced_by IS NULL
+        "SELECT {COLUMNS} FROM cards WHERE repo = ?1 AND replaced_by IS NULL {main}
          ORDER BY ts DESC, device DESC, op_seq DESC, n"
     ))?;
     let mut rows = st.query([repo])?;

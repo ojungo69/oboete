@@ -153,7 +153,7 @@ const ACTIVE: &str = "CREATE VIEW active AS
 /// can open the same older knowledge.db at once, and the second to change it would fail or
 /// change it twice (#213). The read first keeps a current file free of the lock; a step's
 /// transaction holds it already (it is immediate), and anywhere else one is taken here.
-fn migrate(k: &Connection, needed: &str, change: &str) -> Result<()> {
+pub(crate) fn migrate(k: &Connection, needed: &str, change: &str) -> Result<()> {
     let is = |c: &Connection| c.query_row(needed, [], |r| r.get::<_, bool>(0));
     if !is(k)? {
         return Ok(());
