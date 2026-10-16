@@ -453,6 +453,34 @@ pub struct PromptNear {
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
 /// itself, nor a reranker or a judge (spec 4.3, 4.10). Keys only: the hook reads and gates what it
 /// shows.
+/// N5 (docs/memory-lookup.md): `text`'s query vector in `repo`, made as `prompt_near` makes a
+/// prompt's, for a memory lookup that searches with it in its hook; or why there is none.
+pub fn query_vector(home: &Path, repo: &str, text: &str) -> Result<Result<Vec<f32>, VectorSkip>> {
+    if !crate::raw::exists(home) {
+        return Ok(Err(VectorSkip::NoVectors));
+    }
+    let raw = crate::raw::open(home)?;
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let k = crate::knowledge::open(home)?;
+    let active: Option<String> = k
+        .query_row(
+            "SELECT embedder FROM vec_generation WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let q = Query {
+        text: text.to_owned(),
+        repo: Some(repo.to_owned()),
+        caller: Some(repo.to_owned()),
+        ..Default::default()
+    };
+    if !local(home) && excluded_now(home, &raw, &q).unwrap_or(true) {
+        return Ok(Err(VectorSkip::Excluded));
+    }
+    Ok(embedded(home, &raw, &q, active, QUERY_TIMEOUT, Caller::Reader)?.map(|near| near.vector))
+}
+
 pub fn prompt_near(
     home: &Path,
     repo: &str,

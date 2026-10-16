@@ -2194,6 +2194,23 @@ fn ask_resident(
     Some(answer)
 }
 
+/// N5 (docs/memory-lookup.md): the resident viewer asked for the query vector of `text` in `repo`,
+/// waited for until `deadline` at most; none when no resident viewer listens, it made none, or it
+/// came late. The viewer gates and cuts the text as it cuts a prompt.
+pub(crate) fn ask_vector(
+    home: &Path,
+    repo: &str,
+    text: &str,
+    deadline: std::time::Instant,
+) -> Option<Vec<f32>> {
+    let (port, token) = crate::view::resident_answering(home)?;
+    let text: String = text.chars().take(2 * crate::embed::PROMPT_CHARS).collect();
+    let body = serde_json::to_vec(&json!({"repo": repo, "text": text})).ok()?;
+    let v = post_json(port, &token, "/api/query-vector", &body, deadline)?;
+    let vector: Vec<f32> = serde_json::from_value(v.get("vector")?.clone()).ok()?;
+    (vector.len() == crate::embed::DIM && vector.iter().all(|x| x.is_finite())).then_some(vector)
+}
+
 /// One `POST /api/prompt-context` to the viewer at 127.0.0.1:`port`, given up at `deadline`: whether
 /// it made a vector (`used`, or its reason for none) and what it found.
 fn post_prompt(
@@ -2202,6 +2219,24 @@ fn post_prompt(
     body: &[u8],
     deadline: std::time::Instant,
 ) -> Option<(String, Vec<crate::search::b::PromptHit>)> {
+    let v = post_json(port, token, "/api/prompt-context", body, deadline)?;
+    let vector: String = v.get("vector")?.as_str()?.chars().take(20).collect();
+    let vector = vector
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '-')
+        .then_some(vector)?;
+    Some((vector, serde_json::from_value(v.get("hits")?.clone()).ok()?))
+}
+
+/// One `POST` of `body` to `path` of the viewer at 127.0.0.1:`port`, with its token, given up at
+/// `deadline`: its JSON answer when it answered 200 in time.
+fn post_json(
+    port: u16,
+    token: &str,
+    path: &str,
+    body: &[u8],
+    deadline: std::time::Instant,
+) -> Option<Value> {
     let left = || {
         deadline
             .checked_duration_since(std::time::Instant::now())
@@ -2211,7 +2246,7 @@ fn post_prompt(
     let mut stream = std::net::TcpStream::connect_timeout(&at, left()?).ok()?;
     stream.set_write_timeout(left()).ok()?;
     let head = format!(
-        "POST /api/prompt-context HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
@@ -2234,13 +2269,7 @@ fn post_prompt(
         return None;
     };
     (response.code == Some(200)).then_some(())?;
-    let v: Value = serde_json::from_slice(&answer[at..]).ok()?;
-    let vector: String = v.get("vector")?.as_str()?.chars().take(20).collect();
-    let vector = vector
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c == '-')
-        .then_some(vector)?;
-    Some((vector, serde_json::from_value(v.get("hits")?.clone()).ok()?))
+    serde_json::from_slice(&answer[at..]).ok()
 }
 
 /// G23: how the last prompt that could ask the resident viewer took its block, for doctor and the
@@ -4355,6 +4384,34 @@ mod tests {
         assert_eq!(p.hook("PreToolUse", "s1", lookup), "");
     }
 
+    /// N5 (docs/memory-lookup.md): a native memory lookup takes the resident viewer's query
+    /// vector, so a document near it in meaning answers it though no word of the lookup is in it;
+    /// with no viewer listening, the words side alone, which finds nothing of it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_native_memory_lookup_takes_the_viewers_meaning_side() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser caches stay in Redis.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let config = "[embedding]\nprovider = \"local\"\n";
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        crate::embed::stub::local(&home, "0");
+        crate::embed_phase::fixture::embed_all(&p.s);
+        let lookup = json!({"tool_name": "memory_search", "tool_input": {"query": "zebra"}});
+        let words = p.hook("PreToolUse", "s1", lookup.clone());
+        assert!(!words.contains("Parser caches"), "{words}");
+        let vector =
+            crate::embed::stub::vector(crate::embed::EMBEDDER, "Parser caches stay in Redis.");
+        let r = Resident::answering(&home, 2_000, json!({ "vector": vector }));
+        let meaning = p.hook("PreToolUse", "s1", lookup);
+        assert!(
+            meaning.contains("Parser caches stay in Redis."),
+            "{meaning}"
+        );
+        assert_eq!(r.asked(), [json!({"repo": p.repo, "text": "zebra"})]);
+    }
+
     #[test]
     fn a_title_cannot_close_the_file_notes_fence() {
         let mut r = Reads::new();
@@ -4646,6 +4703,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Resident {
         fn start(home: &Path, wait_ms: u64, hits: Value, delay: Duration) -> Self {
+            let answer = (!hits.is_null()).then(|| json!({"vector": "used", "hits": hits}));
+            Self::serve(home, wait_ms, answer, delay)
+        }
+
+        /// One that answers every request with `answer` (N5's query vector).
+        fn answering(home: &Path, wait_ms: u64, answer: Value) -> Self {
+            Self::serve(home, wait_ms, Some(answer), Duration::ZERO)
+        }
+
+        fn serve(home: &Path, wait_ms: u64, answer: Option<Value>, delay: Duration) -> Self {
             use std::os::unix::fs::PermissionsExt;
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -4695,12 +4762,12 @@ mod tests {
                     kept.lock()
                         .unwrap()
                         .push(serde_json::from_str(&body).unwrap());
-                    // `null` hits: the viewer fails the request, closing it unanswered.
-                    if hits.is_null() {
+                    // No answer: the viewer fails the request, closing it unanswered.
+                    let Some(answer) = &answer else {
                         continue;
-                    }
+                    };
                     std::thread::sleep(delay);
-                    let answer = json!({"vector": "used", "hits": hits}).to_string();
+                    let answer = answer.to_string();
                     let _ = conn.write_all(
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\

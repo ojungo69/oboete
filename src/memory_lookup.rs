@@ -233,10 +233,8 @@ pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Optio
     let Some(found) = lookup(tool, args, Path::new(cwd), &roots) else {
         return Ok(None);
     };
-    if !crate::config::inject(home)?.memory_lookup
-        || !crate::raw::exists(home)
-        || !home.join("knowledge.db").exists()
-    {
+    let inject = crate::config::inject(home)?;
+    if !inject.memory_lookup || !crate::raw::exists(home) || !home.join("knowledge.db").exists() {
         return Ok(None);
     }
     let settings = crate::capture::Settings::load(home)?;
@@ -249,6 +247,11 @@ pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Optio
         return Ok(None);
     }
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
+    // N5: the meaning side too, from the resident viewer within the prompt's wait (G23), as
+    // claude-mem's worker searches with its vectors; else the words side alone.
+    let wait = std::time::Duration::from_millis(inject.per_prompt_wait_ms as u64);
+    let vector =
+        crate::hook::ask_vector(home, &repo, &found.query, std::time::Instant::now() + wait);
     let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
     let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
     let search = crate::mem_search::Search {
@@ -259,6 +262,7 @@ pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Optio
         repo: &scope,
         rules: &settings.rules,
         hook: true,
+        vector: vector.as_deref(),
     };
     let args = crate::mem_search::Args {
         mode: Some("auto".into()),

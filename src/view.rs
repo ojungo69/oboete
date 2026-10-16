@@ -1181,6 +1181,7 @@ impl Viewer {
             ("POST", "/api/view/resident") => (MAX_BODY, |v, b, _| v.view_resident(b)),
             ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
             ("POST", "/api/prompt-context") => (PROMPT_BODY, |v, b, _| v.prompt_context(b)),
+            ("POST", "/api/query-vector") => (PROMPT_BODY, |v, b, _| v.query_vector(b)),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -1191,7 +1192,7 @@ impl Viewer {
         // The prompt hook is no browser and sends no Origin: its request reads as the page's
         // search does, which needs none either, and the token header it carries is what a page of
         // another site cannot send (a custom header needs a preflight, and OPTIONS is 405).
-        let browser = target != "/api/prompt-context";
+        let browser = !matches!(target, "/api/prompt-context" | "/api/query-vector");
         match self.save_gate(headers, cap, browser) {
             Ok(len) => Head::Body(len, save, given.to_owned()),
             Err(r) => Head::Answer(r),
@@ -1320,6 +1321,26 @@ impl Viewer {
                 },
                 "hits": near.hits,
             })),
+            Err(e) => failed(&e),
+        }
+    }
+
+    /// N5 (docs/memory-lookup.md): the query vector of a memory lookup's words, which the hook
+    /// searches with itself; or the reason for none (`search::b::VectorSkip`).
+    fn query_vector(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Asked {
+            repo: String,
+            text: String,
+        }
+        let asked = match serde_json::from_slice::<Asked>(body) {
+            Ok(a) if !a.repo.is_empty() && !a.text.trim().is_empty() => a,
+            _ => return Response::text(400, "a query vector takes a repository and a text"),
+        };
+        match search::b::query_vector(&self.home, &asked.repo, &asked.text) {
+            Ok(Ok(vector)) => Response::json(&json!({ "vector": vector })),
+            Ok(Err(skip)) => Response::json(&json!({ "skip": skip })),
             Err(e) => failed(&e),
         }
     }
@@ -5971,6 +5992,37 @@ curate = false
         assert_eq!(ask(&[HOST, TOKEN], &over).status, 400);
         get(&v, "/api/settings");
         assert!(!opener.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// N5: the memory lookup's route takes the token but no Origin, as the prompt's does; a body
+    /// without a repository or a text, or with more, is refused; an answer is a vector or why none.
+    #[test]
+    fn the_query_vector_route_takes_the_token_but_no_origin() {
+        let (dir, v) = viewer("query-vector");
+        let ask = |headers: &[(&str, &str)], body: &Value| {
+            let body = serde_json::to_vec(body).unwrap();
+            let len = body.len().to_string();
+            let mut h = headers.to_vec();
+            h.extend([
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ]);
+            request(&v, "POST", "/api/query-vector", &h, &body)
+        };
+        let asked = json!({"repo": "github.com/o/r", "text": "parser caches"});
+        assert_eq!(ask(&[HOST], &asked).status, 401);
+        for body in [
+            json!({"repo": "", "text": "x"}),
+            json!({"repo": "r", "text": " "}),
+            json!({"repo": "r", "text": "x", "more": 1}),
+        ] {
+            assert_eq!(ask(&[HOST, TOKEN], &body).status, 400, "{body}");
+        }
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &asked)),
+            json!({"skip": "no-vectors"})
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
