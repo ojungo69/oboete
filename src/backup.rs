@@ -735,14 +735,59 @@ fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
 /// Returns the last segment written, `None` when there was nothing new. (The worker calls `run`.)
 #[cfg(test)]
 pub fn export(home: &Path) -> Result<Option<PathBuf>> {
-    Ok(export_from(&raw::open(home)?, &dir(home)?)?
+    Ok(export_from(&raw::open(home)?, &export_dir(home)?)?
         .pop()
         .map(|(p, _)| p))
 }
 
 /// `export`, with the time each segment took (Task 12 measures D11's segment cap with it).
 pub fn export_timed(home: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> {
-    export_from(&raw::open(home)?, &dir(home)?)
+    export_from(&raw::open(home)?, &export_dir(home)?)
+}
+
+/// Where earlier `[backup] dir` values are remembered, one a line as config.toml gave them, each a
+/// JSON string (a location may hold a newline), so a forget's or a retention pass's rewrite still
+/// reaches the segments a change of location left behind: the settings page moves none (Codex on
+/// #552).
+const DIRS: &str = "backup-dirs";
+
+/// `dir`, its configured location remembered in `state/backup-dirs` first.
+fn export_dir(home: &Path) -> Result<PathBuf> {
+    if let Ok(text) = std::fs::read_to_string(home.join("config.toml"))
+        && let Some(location) = location(&text)?.as_deref().and_then(Path::to_str)
+    {
+        let state = home.join("state");
+        std::fs::create_dir_all(&state)?;
+        let known = match std::fs::read_to_string(state.join(DIRS)) {
+            Ok(known) => known,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).context("read state/backup-dirs"),
+        };
+        let line = serde_json::to_string(location)?;
+        if !known.lines().any(|l| l == line) {
+            write_synced(&state, DIRS, format!("{known}{line}\n").as_bytes())?;
+        }
+    }
+    dir(home)
+}
+
+/// Every directory segments may be in: the one in use, the default, and the remembered ones.
+fn segment_dirs(home: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = vec![dir(home)?, home.join("backups")];
+    match std::fs::read_to_string(home.join("state").join(DIRS)) {
+        Ok(text) => {
+            for line in text.lines().filter(|l| !l.is_empty()) {
+                let location: String =
+                    serde_json::from_str(line).context("state/backup-dirs is damaged")?;
+                dirs.push(home.join(location));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("read state/backup-dirs"),
+    }
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+    Ok(dirs)
 }
 
 /// Each segment written, with the time it took to read, compress and seal.
@@ -1061,11 +1106,36 @@ fn walk(
     judge: &dyn Fn(&str) -> (Option<String>, bool),
     apply: bool,
 ) -> Result<OpsPurge> {
-    let dir = dir(home)?;
+    walk_some(home, kind, &|_| true, judge, apply)
+}
+
+/// `walk` over the segments whose name `wanted` takes.
+fn walk_some(
+    home: &Path,
+    kind: Kind,
+    wanted: &dyn Fn(&str) -> bool,
+    judge: &dyn Fn(&str) -> (Option<String>, bool),
+    apply: bool,
+) -> Result<OpsPurge> {
     let mut done = OpsPurge::default();
-    let entries = match std::fs::read_dir(&dir) {
+    for dir in segment_dirs(home)? {
+        walk_dir(&dir, kind, wanted, judge, apply, &mut done)?;
+    }
+    Ok(done)
+}
+
+/// `walk_some` in one directory.
+fn walk_dir(
+    dir: &Path,
+    kind: Kind,
+    wanted: &dyn Fn(&str) -> bool,
+    judge: &dyn Fn(&str) -> (Option<String>, bool),
+    apply: bool,
+    done: &mut OpsPurge,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(done),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
     };
     let mut segments = Vec::new();
@@ -1078,10 +1148,10 @@ fn walk(
             if apply && leftover(name) {
                 std::fs::remove_file(&path)?;
             }
-        } else if segment(name, kind) {
+        } else if segment(name, kind) && wanted(name) {
             // Under the names oboete gives only, as for the set-aside ones (Codex on #453).
             segments.push((path, false));
-        } else if set_aside(name, kind) {
+        } else if set_aside(name, kind) && wanted(name) {
             segments.push((path, true));
         }
     }
@@ -1108,14 +1178,14 @@ fn walk(
             // Stopped after its rename: the seal's second line is this content's (d).
             if apply && seal.lines().count() > 1 {
                 write_synced(
-                    &dir,
+                    dir,
                     &format!("{name}.sha256"),
                     seal_line(&sha, name).as_bytes(),
                 )?;
             }
             if let (Some(text), _) = judge(&read_whole(&data)?) {
                 if apply {
-                    replace(&dir, name, &sha, text.as_bytes())?;
+                    replace(dir, name, &sha, text.as_bytes())?;
                 }
                 *rewritten += 1;
             }
@@ -1129,7 +1199,7 @@ fn walk(
             Ok((Some(text), false)) => {
                 if apply {
                     let z = zstd::bulk::compress(text.as_bytes(), 3)?;
-                    write_synced_at(&dir, name, &z, Some("purge_rewrite_unrenamed"))?;
+                    write_synced_at(dir, name, &z, Some("purge_rewrite_unrenamed"))?;
                     fail_after("purge_rewrite_renamed")?;
                 }
                 *rewritten += 1;
@@ -1150,9 +1220,79 @@ fn walk(
     // rename after it synced the directory (Greptile on #453).
     #[cfg(unix)]
     if apply {
-        std::fs::File::open(&dir)?.sync_all()?;
+        std::fs::File::open(dir)?.sync_all()?;
     }
-    Ok(done)
+    Ok(())
+}
+
+/// docs/retention.md, step 2: each record segment, live or set aside, that may hold an owed record
+/// (its name's seq range holds one, or it is set aside under a name that gives none) with that
+/// record's `event` line made its `expired` line: its text goes, its labels, ledger and identity
+/// stay. A line of another time is another record that took the seq.
+pub(crate) fn expire_record_segments(
+    home: &Path,
+    owed: &std::collections::HashMap<(String, i64), i64>,
+    at: i64,
+) -> Result<OpsPurge> {
+    let mut seqs: std::collections::HashMap<&str, Vec<i64>> = std::collections::HashMap::new();
+    for (device, seq) in owed.keys() {
+        seqs.entry(device.as_str()).or_default().push(*seq);
+    }
+    for list in seqs.values_mut() {
+        list.sort_unstable();
+    }
+    let wanted = |name: &str| {
+        let base = name.split(".quarantined-").next().unwrap_or(name);
+        let Some((false, device, first, last)) = segment_name(std::ffi::OsStr::new(base)) else {
+            return true;
+        };
+        seqs.get(device.as_str()).is_some_and(|list| {
+            let i = list.partition_point(|s| *s < first);
+            list.get(i).is_some_and(|s| *s <= last)
+        })
+    };
+    walk_some(
+        home,
+        Kind::Records,
+        &wanted,
+        &|text| purge_lines(text, |l| expired_record_line(l, owed, at)),
+        true,
+    )
+}
+
+/// An `event` line of an owed record as its `expired` line; any other line as it is.
+fn expired_record_line(
+    line: &str,
+    owed: &std::collections::HashMap<(String, i64), i64>,
+    at: i64,
+) -> Line {
+    if line.trim().is_empty() {
+        return Line::Kept;
+    }
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Line::Unknown(None);
+    };
+    match v["type"].as_str() {
+        Some("event") => {}
+        Some("removed" | "tombstone" | "expired") => return Line::Kept,
+        _ => return Line::Unknown(None),
+    }
+    let (Some(device), Some(seq), Some(ts)) =
+        (v["device"].as_str(), v["seq"].as_i64(), v["ts"].as_i64())
+    else {
+        return Line::Unknown(None);
+    };
+    if owed.get(&(device.to_owned(), seq)) != Some(&ts) {
+        return Line::Kept;
+    }
+    let Some(fields) = v.as_object_mut() else {
+        return Line::Unknown(None);
+    };
+    fields.remove("body");
+    fields.remove("original_bytes");
+    fields.insert("type".into(), "expired".into());
+    fields.insert("expired".into(), at.into());
+    Line::Purged(v.to_string())
 }
 
 /// The suffix of a replacement's temporary name, `.<segment>.purge` (2c, decision 3): the segment
@@ -1747,15 +1887,19 @@ pub(crate) fn restore_report_holding(
     }
 }
 
-/// The forget requests a raw.db that still reads holds (D1 rule 14), read under the swap lock
-/// without opening it as a store. A lost database or unreadable table has none (F1); once the
-/// table opens, a bad row must stop the restore rather than discard other live requests.
-fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
+/// A retention batch's records: device, seq and time.
+type Owed = Vec<(String, i64, i64)>;
+
+/// The forget requests (D1 rule 14) and the retention batch begun (docs/retention.md) a raw.db
+/// that still reads holds, read under the swap lock without opening it as a store. A lost database
+/// or unreadable table has none (F1); once the table opens, a bad row must stop the restore rather
+/// than discard other live requests.
+fn held_requests(home: &Path) -> Result<(Vec<crate::forget::Request>, Owed)> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         raw::path(home),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     // docs/store-format.md: a raw.db a newer oboete wrote is not restored over while it reads:
     // the rebuild would put an older home in its place, from segments it may not read right.
@@ -1764,7 +1908,16 @@ fn held_requests(home: &Path) -> Result<Vec<crate::forget::Request>> {
     {
         return Err(raw::NewerFormat { found }.into());
     }
-    requests_in(&conn)
+    Ok((requests_in(&conn)?, owed_in(&conn)?))
+}
+
+fn owed_in(conn: &rusqlite::Connection) -> Result<Owed> {
+    let Ok(mut st) = conn.prepare("SELECT device, seq, ts FROM expiry_owed") else {
+        return Ok(Vec::new());
+    };
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect::<rusqlite::Result<_>>()
+        .context("read live expiry_owed row")
 }
 
 fn requests_in(conn: &rusqlite::Connection) -> Result<Vec<crate::forget::Request>> {
@@ -1820,7 +1973,7 @@ fn restore_locked(
     if let Some(consent) = consent {
         consent.check_locked(home)?;
     }
-    let held = held_requests(home)?;
+    let (held, mut owed) = held_requests(home)?;
     let dir = dir(home)?;
     let Selection {
         device,
@@ -1882,6 +2035,11 @@ fn restore_locked(
         }
     }
     rebuild.forget(forget);
+    // docs/retention.md: a retention batch begun before raw.db was lost is finished on this one:
+    // the one its table holds, which a stop before `state/expiry-owed` is written leaves alone
+    // (Codex on #552), and the file's, for a raw.db that no longer reads.
+    owed.extend(crate::retention::read_owed(home)?);
+    rebuild.expire(&owed, crate::db::now_ms())?;
     let dropped = rebuild.finish()?;
     receipt.dropped_ops = dropped as u64;
     receipt.retained_ops = receipt.replayed_ops - receipt.dropped_ops;
@@ -2132,7 +2290,7 @@ pub fn run(home: &Path, raw: &Raw) {
     run_report(home, raw, &mut |_| {});
 }
 pub(crate) fn run_report(home: &Path, raw: &Raw, committed: &mut impl FnMut(&'static str)) -> u64 {
-    if let Err(e) = dir(home).and_then(|d| export_from_report(raw, &d, committed)) {
+    if let Err(e) = export_dir(home).and_then(|d| export_from_report(raw, &d, committed)) {
         eprintln!("oboete: backup: {e:#}");
         return 1;
     }

@@ -129,6 +129,11 @@ CREATE TABLE IF NOT EXISTS denied_scopes(
   job TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, before INTEGER NOT NULL,
   device TEXT, since INTEGER, until INTEGER
 );
+-- Retention's batch begun and not finished (docs/retention.md): each record by its identity and
+-- time; its rows go when the batch's last step is done.
+CREATE TABLE IF NOT EXISTS expiry_owed(
+  device TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY(device, seq)
+) WITHOUT ROWID;
 ";
 
 /// Only a fresh schema needs an identity. The replacements are OS-random hex and the native
@@ -205,6 +210,18 @@ pub enum Item {
     /// An event whose text retention removed (docs/retention.md): its labels, with an empty body.
     /// A whole-record tombstone makes it `Removed` as it makes an event.
     Expired(Box<Event>),
+}
+
+/// docs/retention.md: an event as a retention pass reads it: its labels, no body.
+#[derive(Debug, Clone)]
+pub(crate) struct ScanRow {
+    pub(crate) seq: i64,
+    pub(crate) ts: i64,
+    pub(crate) agent: Option<String>,
+    pub(crate) session: Option<String>,
+    pub(crate) kind: String,
+    pub(crate) source: String,
+    pub(crate) expired: bool,
 }
 
 /// A record as it leaves `raw.rs`; `Raw::after` is the only way out.
@@ -3952,43 +3969,7 @@ impl Raw {
     /// stays in raw.db-wal; tried every 100 ms for `wait`. False when readers kept it from
     /// truncating.
     pub(crate) fn truncate_wal(&self, wait: Duration) -> Result<bool> {
-        // Each try returns at once, a busy one too: the sleeps here pace them.
-        let timeout: u32 = self
-            .conn
-            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
-        self.conn.busy_timeout(Duration::ZERO)?;
-        let until = Instant::now() + wait;
-        let truncated = loop {
-            let tried = self
-                .conn
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-                    r.get::<_, i64>(0)
-                });
-            let busy = match tried {
-                Ok(busy) => busy != 0,
-                Err(e)
-                    if matches!(
-                        e.sqlite_error_code(),
-                        Some(
-                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                        )
-                    ) =>
-                {
-                    true
-                }
-                Err(e) => break Err(e),
-            };
-            if !busy {
-                break Ok(true);
-            }
-            if Instant::now() >= until {
-                break Ok(false);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        self.conn
-            .busy_timeout(Duration::from_millis(timeout.into()))?;
-        Ok(truncated?)
+        truncate_wal(&self.conn, wait)
     }
 
     /// Each request raw holds with its step (D5: 1 registered, 2 its ops' bodies purged), oldest
@@ -4691,6 +4672,160 @@ impl Raw {
             params![device, from, to],
             |r| r.get(0),
         )?)
+    }
+
+    /// docs/retention.md: this device's events in seq order, with no body, expired ones too: what a
+    /// retention pass reads to find the windows that may expire.
+    pub(crate) fn expiry_scan(&self) -> Result<Vec<ScanRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, ts, agent, session, COALESCE(kind, ''), source, expired IS NOT NULL
+             FROM records WHERE device = ?1 AND type = 'event' ORDER BY seq",
+        )?;
+        let rows = st.query_map([&self.device], |r| {
+            Ok(ScanRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                agent: r.get(2)?,
+                session: r.get(3)?,
+                kind: r.get(4)?,
+                source: r.get(5)?,
+                expired: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// docs/retention.md: this device's window ops, in op order, each body as JSON.
+    pub(crate) fn window_bodies(&self) -> Result<Vec<(i64, serde_json::Value)>> {
+        let mut st = self.conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE device = ?1 AND type = 'window' ORDER BY op_seq",
+        )?;
+        let rows = st.query_map([&self.device], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (op_seq, body) = row?;
+            out.push((op_seq, serde_json::from_str(&body)?));
+        }
+        Ok(out)
+    }
+
+    /// docs/retention.md, step 1: a batch begun, in one write transaction that captures wait
+    /// behind: each session's newest record checked again against what the pass read (none when
+    /// one came since, and nothing is written), the records owed, and the home stamped with the
+    /// format that reads an expired record.
+    pub(crate) fn begin_expiry(
+        &mut self,
+        records: &[(i64, i64)],
+        sessions: &[(Option<String>, Option<String>, i64)],
+    ) -> Result<bool> {
+        self.session_indexes()?;
+        self.current()?;
+        let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+        {
+            let mut newest = tx.prepare(
+                "SELECT COALESCE(MAX(seq), 0) FROM records
+                 WHERE device = ?1 AND agent IS ?2 AND session IS ?3 AND type = 'event'",
+            )?;
+            for (agent, session, seen) in sessions {
+                let now: i64 =
+                    newest.query_row(params![self.device, agent, session], |r| r.get(0))?;
+                if now != *seen {
+                    return Ok(false);
+                }
+            }
+            let mut owe = tx
+                .prepare("INSERT OR IGNORE INTO expiry_owed(device, seq, ts) VALUES(?1, ?2, ?3)")?;
+            for (seq, ts) in records {
+                owe.execute(params![self.device, seq, ts])?;
+            }
+        }
+        if format_of(&tx)? < EXPIRED_FORMAT {
+            tx.execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// docs/retention.md: the batch begun and not finished, by device and seq, with each record's
+    /// time.
+    pub(crate) fn expiry_owed(&self) -> Result<Vec<(String, i64, i64)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT device, seq, ts FROM expiry_owed ORDER BY device, seq")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// docs/retention.md, step 3: the owed records' rows made expired, `RECORD_PURGE_BATCH` at a
+    /// time under dispatch, as a purge's are: their text goes, their labels, ledger and identity
+    /// stay. A row of another time is another record that took the seq, and is left. How many.
+    pub(crate) fn expire_owed(&mut self, at: i64) -> Result<usize> {
+        let owed = self.expiry_owed()?;
+        let mut expired = 0;
+        for batch in owed.chunks(RECORD_PURGE_BATCH) {
+            let _dispatch = crate::dispatch::exclusive(&self.home)
+                .context("the expired records were not rewritten")?;
+            self.current()?;
+            let tx = begin_batch(&self.conn, crate::db::OPEN_WRITE_WAIT)?;
+            {
+                let mut st = tx.prepare(&format!(
+                    "UPDATE records SET {EXPIRED_ROW}
+                     WHERE device = ?1 AND seq = ?2 AND ts = ?3 AND type = 'event'
+                       AND expired IS NULL"
+                ))?;
+                for (device, seq, ts) in batch {
+                    expired += st.execute(params![device, seq, ts, at])?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(expired)
+    }
+
+    /// docs/retention.md, step 5's end: the batch done.
+    pub(crate) fn clear_expiry_owed(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM expiry_owed", [])?;
+        Ok(())
+    }
+
+    /// docs/retention.md: every expired record's identity and time, for the copies' rewrite.
+    pub(crate) fn expired_identities(
+        &self,
+    ) -> Result<std::collections::HashMap<(String, i64), i64>> {
+        let mut st = self.conn.prepare(
+            "SELECT device, seq, ts FROM records WHERE type = 'event' AND expired IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// docs/retention.md: how many records' text expired, for doctor.
+    pub(crate) fn expired_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM records WHERE type = 'event' AND expired IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// docs/retention.md, rule 8: every quote of this device's records in a claim op, whichever
+    /// device's op; an op a forget or a mask rewrote holds none.
+    pub(crate) fn claim_quotes(&self) -> Result<Vec<crate::claims::Evidence>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT body FROM ops WHERE type = 'claim'")?;
+        let mut rows = st.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let Ok(op) = serde_json::from_str::<crate::claims::ClaimOp>(&row.get::<_, String>(0)?)
+            else {
+                continue;
+            };
+            out.extend(op.evidence.into_iter().filter(|e| e.device == self.device));
+        }
+        Ok(out)
     }
 
     /// docs/retention.md: how many of `agent`'s `session`'s prompts expired.
@@ -6149,6 +6284,13 @@ impl Rebuild {
         self.forget = requests;
     }
 
+    /// docs/retention.md: the batch the home's `state/expiry-owed` names, applied to the rebuilt
+    /// store before it is renamed in, so a batch a damaged raw.db cut is finished on what
+    /// replaces it.
+    pub(crate) fn expire(&self, owed: &[(String, i64, i64)], at: i64) -> Result<()> {
+        apply_expiry_owed(&self.conn, owed, at)
+    }
+
     pub(crate) fn home_id(&self) -> Result<String> {
         Ok(self
             .conn
@@ -6166,6 +6308,9 @@ impl Rebuild {
         conn.execute_batch(&format!("PRAGMA user_version = {OPEN_FORMAT}"))?;
         // A staging file is fresh, but the history rebuilt into it is not proof of a fresh home.
         conn.execute("DELETE FROM meta WHERE key='home_id_proven'", [])?;
+        // What `finish` and `expire` clear of the text the lines brought (a forget's records, a
+        // retention batch's) leaves no byte in the file's free space (Codex on part 2 of 3e-3).
+        conn.execute_batch("PRAGMA secure_delete = ON")?;
         crate::db::ensure_device(&conn, path)?;
         conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'device_id'",
@@ -6703,6 +6848,138 @@ pub(crate) fn purge_copies(
         std::fs::File::open(home)?.sync_all()?;
     }
     Ok((rewritten, removed))
+}
+
+/// `Raw::truncate_wal` for any store: its WAL checkpointed and truncated, tried every 100 ms for
+/// `wait`; false when readers kept it from truncating (knowledge.db's, docs/retention.md step 5).
+pub(crate) fn truncate_wal(conn: &Connection, wait: Duration) -> Result<bool> {
+    // Each try returns at once, a busy one too: the sleeps here pace them.
+    let timeout: u32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+    conn.busy_timeout(Duration::ZERO)?;
+    let until = Instant::now() + wait;
+    let truncated = loop {
+        let tried = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        let busy = match tried {
+            Ok(busy) => busy != 0,
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                true
+            }
+            Err(e) => break Err(e),
+        };
+        if !busy {
+            break Ok(true);
+        }
+        if Instant::now() >= until {
+            break Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    conn.busy_timeout(Duration::from_millis(timeout.into()))?;
+    Ok(truncated?)
+}
+
+/// docs/retention.md, step 2: every copy of raw.db set aside with its rows of `expired` records
+/// (device and seq, a row of another time being another record) made expired as the live store's
+/// are, and stamped with the format that reads them; a copy that cannot be rewritten is removed,
+/// as forget's purge removes it. How many were rewritten and removed.
+pub(crate) fn expire_copies(
+    home: &Path,
+    expired: &std::collections::HashMap<(String, i64), i64>,
+    at: i64,
+) -> Result<(usize, usize)> {
+    let (mut rewritten, mut removed) = (0, 0);
+    for copy in copies_set_aside(home)? {
+        let done = if copy.ends_with("raw.db.restoring") {
+            None
+        } else {
+            expire_copy(&copy, expired, at).ok()
+        };
+        match done {
+            Some(0) => {}
+            Some(_) => rewritten += 1,
+            None => {
+                remove_with_sidecars(&copy)?;
+                removed += 1;
+            }
+        }
+    }
+    #[cfg(unix)]
+    if removed > 0 {
+        std::fs::File::open(home)?.sync_all()?;
+    }
+    Ok((rewritten, removed))
+}
+
+fn expire_copy(
+    copy: &Path,
+    expired: &std::collections::HashMap<(String, i64), i64>,
+    at: i64,
+) -> Result<usize> {
+    let mut conn = Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    // No one reads a copy: one in use is removed rather than waited for.
+    conn.busy_timeout(Duration::ZERO)?;
+    conn.execute_batch("PRAGMA secure_delete = ON")?;
+    let tx = conn.transaction()?;
+    // A copy an older binary set aside has no column for it.
+    let column: bool = tx.query_row(
+        "SELECT COUNT(*) = 1 FROM pragma_table_info('records') WHERE name = 'expired'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !column {
+        tx.execute_batch("ALTER TABLE records ADD COLUMN expired INTEGER")?;
+    }
+    let mut changed = 0;
+    {
+        let mut st = tx.prepare(&format!(
+            "UPDATE records SET {EXPIRED_ROW}
+             WHERE device = ?1 AND seq = ?2 AND ts = ?3 AND type = 'event' AND expired IS NULL"
+        ))?;
+        for ((device, seq), ts) in expired {
+            changed += st.execute(params![device, seq, ts, at])?;
+        }
+    }
+    if changed > 0 && format_of(&tx).unwrap_or(FORMAT) < EXPIRED_FORMAT {
+        tx.execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
+    }
+    tx.commit()?;
+    // Every time, as `rewrite_copy` does: a pass that stopped after a commit left the old bytes
+    // in the copy's WAL, and a reader of the copy keeps them there (Codex on part 2 of 3e-3).
+    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    anyhow::ensure!(busy == 0, "{} is in use", copy.display());
+    Ok(changed)
+}
+
+/// docs/retention.md: a restore's raw.db given the batch the home's `state/expiry-owed` names,
+/// before it is renamed in: owed again, its records restored as events of their time made expired,
+/// and stamped with the format that reads them.
+pub(crate) fn apply_expiry_owed(
+    conn: &Connection,
+    owed: &[(String, i64, i64)],
+    at: i64,
+) -> Result<()> {
+    if owed.is_empty() {
+        return Ok(());
+    }
+    let mut owe =
+        conn.prepare("INSERT OR IGNORE INTO expiry_owed(device, seq, ts) VALUES(?1, ?2, ?3)")?;
+    let mut expire = conn.prepare(&format!(
+        "UPDATE records SET {EXPIRED_ROW}
+         WHERE device = ?1 AND seq = ?2 AND ts = ?3 AND type = 'event' AND expired IS NULL"
+    ))?;
+    for (device, seq, ts) in owed {
+        owe.execute(params![device, seq, ts])?;
+        expire.execute(params![device, seq, ts, at])?;
+    }
+    conn.execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
+    Ok(())
 }
 
 /// The copies of raw.db set aside in `home` (2c, decision 5), the live store never among them, and
@@ -7639,6 +7916,10 @@ pub(crate) type ForgottenOrigins =
 /// source and kind (a live record's identity, `original_metadata`), with no text or label.
 const REMOVED_ROW: &str = "type = 'removed', enc = 'plain', body = NULL, original_bytes = NULL,
     agent = NULL, session = NULL, repo = NULL, branch = NULL, head = NULL, gitdir = NULL, cwd = NULL";
+
+/// What an expired record's row becomes (docs/retention.md): an event whose text is gone, its labels,
+/// ledger and identity kept, `expired` the time (`?4` of the statement).
+const EXPIRED_ROW: &str = "enc = 'plain', body = X'', original_bytes = NULL, expired = ?4";
 
 /// Forgotten records rewritten in one transaction (slice 3c): a hook waits behind one no longer
 /// than behind a page's registration.

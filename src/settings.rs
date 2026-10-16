@@ -98,6 +98,7 @@ pub(crate) fn parsed(
     crate::backup::location(text).ok()?;
     config::parse_worker(text).ok()?;
     config::parse_view(text).ok()?;
+    config::parse_retention(text).ok()?;
     Some((
         config::from_text(path, text).ok()?,
         capture.capture,

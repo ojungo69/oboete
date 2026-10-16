@@ -2594,6 +2594,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     // G22: the spans every provider skipped, and the command that curates them again, from raw.db
     // alone: knowledge.db may be gone or set aside (Codex on #438).
     let mut forget_stopped = false;
+    let mut retention_wrong = false;
     if crate::raw::exists(home) {
         section(
             &mut unhealthy,
@@ -2620,6 +2621,27 @@ pub fn doctor(home: &Path) -> Result<()> {
     }
     if forget_stopped {
         unhealthy.push("a forget stopped (see above)");
+    }
+    // docs/retention.md: the setting with or without a store; what expired with one.
+    section(
+        &mut unhealthy,
+        "retention",
+        (|| -> Result<()> {
+            let raw = if crate::raw::exists(home) {
+                Some(crate::raw::open(home)?)
+            } else {
+                None
+            };
+            let (lines, wrong) = crate::retention::doctor_lines(home, raw.as_ref())?;
+            for line in lines {
+                println!("  {line}");
+            }
+            retention_wrong = wrong;
+            Ok(())
+        })(),
+    );
+    if retention_wrong {
+        unhealthy.push("[retention] could not be read (see above)");
     }
     // Milestone 4 Task 10: `local`'s files, with or without a store.
     if config::load(home).is_ok_and(|c| c.embedding.provider == "local") {

@@ -1161,6 +1161,49 @@ pub fn parse_view(text: &str) -> Result<View> {
         .view)
 }
 
+/// `[retention]` (spec 1.5, 6.2; docs/retention.md): how many days a raw record's text is kept
+/// once its curation and summary are done with it. No key, or no table, is forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Retention {
+    pub days: Option<u32>,
+}
+
+/// `[retention] days`, which the settings page shows and checks too: never 0, which would expire
+/// every curated record at the next pass.
+pub const RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=36_500;
+
+/// `home`'s `[retention]`, by its own parse as `worker`'s. An error is not "forever" to the expiry:
+/// it expires nothing until the file loads (docs/retention.md).
+pub fn retention(home: &Path) -> Result<Retention> {
+    let path = home.join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_retention(&text).with_context(|| format!("parse {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Retention::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+pub fn parse_retention(text: &str) -> Result<Retention> {
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        retention: Retention,
+    }
+    let retention = toml::from_str::<File>(text)
+        .map_err(|e| toml_error(text, &e))?
+        .retention;
+    if let Some(days) = retention.days {
+        anyhow::ensure!(
+            RETENTION_DAYS.contains(&days),
+            "[retention] days is {} to {}",
+            RETENTION_DAYS.start(),
+            RETENTION_DAYS.end()
+        );
+    }
+    Ok(retention)
+}
+
 /// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be
 /// removed, and false positives to keep, each the SHA-256 (hex) of one exact value.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1254,6 +1297,8 @@ pub struct CaptureConfig {
     _worker: serde::de::IgnoredAny,
     #[serde(default, rename = "view")]
     _view: serde::de::IgnoredAny,
+    #[serde(default, rename = "retention")]
+    _retention: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
@@ -1365,9 +1410,12 @@ off = ["codex"]
 resident = true
 [view]
 port = 17374
+[retention]
+days = 90
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
+        assert_eq!(parse_retention(text).unwrap().days, Some(90));
         for bad in ["-1.0", "nan", "inf"] {
             assert!(toml::from_str::<Config>(&format!("paid_usd_per_month = {bad}")).is_err());
             assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_in = {bad}")).is_err());
@@ -1926,6 +1974,29 @@ model = { gone = "m" }
         }
         let set = parse_inject("[inject]\nper_prompt = true\ncorrection = false\n").unwrap();
         assert!(set.per_prompt && !set.correction);
+    }
+
+    /// docs/retention.md: no key or no table is forever; a day count past either end, or not a
+    /// whole number of days, is refused rather than read as some period, and capture never minds.
+    #[test]
+    fn retention_is_forever_unless_a_whole_number_of_days_in_range() {
+        assert_eq!(parse_retention("").unwrap().days, None);
+        assert_eq!(parse_retention("[retention]\n").unwrap().days, None);
+        for (value, ok) in [
+            ("1", true),
+            ("36500", true),
+            ("0", false),
+            ("36501", false),
+            ("-1", false),
+            ("1.5", false),
+            ("\"30\"", false),
+            ("4294967296", false),
+        ] {
+            let text = format!("[retention]\ndays = {value}\n");
+            assert_eq!(parse_retention(&text).is_ok(), ok, "days = {value}");
+            parse_capture(Some(&text)).unwrap();
+        }
+        assert!(parse_retention("[retention]\nweeks = 2\n").is_err());
     }
 
     /// `[view]` (docs/resident.md R5): the resident viewer's port, 17373 where the table names

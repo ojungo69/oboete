@@ -135,16 +135,47 @@ takes. Its steps, in order, each finished before the next starts:
    batch waits).
 4. **The WAL**: truncated as a purge's is (`truncate_wal`); readers that keep it from truncating
    leave the batch owed for the next look.
-5. **knowledge.db**: each record's `raw_fts` row, its vector key and index rows, and a cached
-   vector no other key uses, go in one transaction; a `vector_keys` row marks it `expired`, so the
-   queue and the backlog pass it. Its `raw_docs` row (labels only) and `session_start` stay. Then
-   `state/expiry-owed` goes.
+5. **knowledge.db**: built again from raw.db, as a forget's purge builds it (its step 3). A
+   full-text index keeps a deleted row's trigrams and their places in its segments until they
+   merge, so only a new file holds none of the text. The readers of part 1 index no expired text,
+   mark its vector key `expired` and give its labels' facts; no carry takes an expired record's
+   vector. The knowledge.db copies set aside are carried from and removed. Then the owed rows and
+   `state/expiry-owed` go.
 
-A restore (`backup::restore`) applies `state/expiry-owed` to the raw.db it rebuilds before it
-swaps it in: the owed rows go into its `expiry_owed`, it is stamped format 3, and an owed record
-restored as an event whose time matches becomes expired, so a batch cut by a damaged raw.db is
-finished on what replaces it. The original it quarantines is a copy the next pass rewrites
-(step 2). Step 5 removes the file after the table's rows.
+A restore (`backup::restore`) applies the batch to the raw.db it rebuilds before it swaps it in:
+the `expiry_owed` rows of the raw.db it replaces when that one still reads (a stop between step
+1's commit and its file leaves them alone; forget's requests are read from it the same way), and
+`state/expiry-owed`'s. The owed rows go into the new `expiry_owed`, it is stamped format 3, and an
+owed record restored as an event whose time matches becomes expired, so a batch cut by a damaged
+raw.db is finished on what replaces it. The original it quarantines is a copy the next pass
+rewrites (step 2). Step 5 removes the file after the table's rows.
+
+As built (part 2):
+
+- Before step 1 the pass seals the backups of the records and the ops (`backup::export_timed`)
+  and begins nothing when that fails, so a restore that finishes a batch also brings back the
+  claims and summaries made from its records (Codex's review of part 2).
+- `state/expiry-owed` holds one `device seq time` line per record.
+- A restore's rebuild runs with `secure_delete`: the text it clears for an owed batch, or for a
+  forget it applies, leaves nothing in the file's free space.
+- A copy whose WAL a reader keeps from truncating is removed, as a purge removes a copy it cannot
+  rewrite.
+- Step 5 is a rebuild of knowledge.db (the commit security review of part 2: rows deleted from a
+  contentless trigram index leave the trigrams and their places in its segments, and FTS5's
+  `secure-delete` cannot act on a contentless table). It costs what `oboete rebuild` costs, about
+  5 minutes on this PC's store (slice 3c-1), once a batch; while it runs, search and the
+  per-prompt context answer as during `oboete rebuild`. A seq another record took is that
+  record's, and the rebuild indexes it.
+- Rule 4 is read per session: a session with a turn the exclusion list keeps back keeps every
+  window it has a record in. Rule 5 reads every record consumer, compression's checkpoint too.
+- The pass takes the worker lock only when a period is set or a batch is owed.
+- Step 2, and a forget's segment rewrite, which walks the same way, reach every directory
+  segments may be in: the backup directory in use, the default one and each earlier `[backup]
+  dir`, which every backup remembers in `state/backup-dirs`, one JSON string a line, as a
+  location may hold a newline (Codex on #552). A location given up before this version is not
+  known (spec 6.3).
+- A new batch begins at most once a day (`state/retention-look`), however often
+  `forget --continue` runs for a forget or a mask; an owed batch is finished at every pass.
 
 ## Claims stay
 
@@ -243,12 +274,13 @@ Expiry removes records' text, not memory: claims keep their quotes, cards and se
 keep what curation wrote, turn summaries keep theirs, and the ops that hold them are not
 rewritten. Spec 6.2 and section 8's retention line say so: the "0 hits" for an expired span is for
 the records' bodies outside what claims quote and summaries say, in raw.db, its WAL and copies,
-and the backups. R2 holds nothing until milestone 6.
+the backups, and knowledge.db, which is built again. R2 holds nothing until milestone 6.
 
 ## Doctor and the page
 
-- doctor: `retention: forever` or `retention: N days (a session expires once curated and past
-  it; last pass <time>, M records expired)`, rows still owed, and a wrong table as a failure.
+- doctor: `retention: forever` or `retention: N days (a window expires once curated and past
+  it; last look <time>, M records expired)`, a batch begun and not finished, and a wrong table
+  as a failure.
 - The settings page (its own PR): the key in the detailed view's privacy group, in English and
   Japanese.
 

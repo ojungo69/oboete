@@ -45,6 +45,7 @@ mod redact;
 mod replay;
 mod repo;
 mod resident;
+mod retention;
 mod search;
 mod settings;
 mod setup;

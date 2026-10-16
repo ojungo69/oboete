@@ -925,9 +925,9 @@ pub(crate) fn doctor_lines(home: &Path) -> Result<(Vec<String>, bool)> {
 
 /// How long a purge tries to truncate raw.db-wal past the readers that hold it (D5, 2b).
 #[cfg(not(test))]
-const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(test)]
-const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+pub(crate) const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// What a purge did (D5, 2b).
 #[derive(Debug, Default, PartialEq)]
@@ -1074,7 +1074,7 @@ fn knowledge_holding(home: &Path, uids: &HashSet<String>) -> Result<HashSet<Stri
 
 /// The files of knowledge.db copies set aside, sidecars too: a rebuild's that stopped and the
 /// quarantined (spec 1.7).
-fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     // A listing or an entry that cannot be read may hide one: an error then, so step 3 waits
     // (Codex on #444).
@@ -1089,14 +1089,9 @@ fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// D5 (2b): each uid job purged by the state it finds (item 7). Step 2: its ops that hold its text
-/// rewritten without it and raw.db-wal truncated, under the worker lock as `oboete rebuild` takes
-/// it. Step 3: knowledge.db rebuilt from raw.db once for every job not past step 3 (item 4),
-/// the copies of knowledge.db set aside carried from by the same rule and removed (item 5), and
-/// the uids taken out of every session's shown value (item 6). A uid knowledge.db holds after the
-/// rebuild came from an op the purge did not find: its job is stopped, reported and not done.
-/// Only one runs at a time (`state/purge.lock`, not waited for: None when another holds it).
-pub fn purge(home: &Path) -> Result<Option<Purged>> {
+/// `state/purge.lock`, held: one purge or retention pass at a time (docs/retention.md); none when
+/// another holds it.
+pub(crate) fn purge_lock(home: &Path) -> Result<Option<std::fs::File>> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let lock = std::fs::OpenOptions::new()
@@ -1105,10 +1100,23 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         .write(true)
         .open(state.join("purge.lock"))?;
     match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
+}
+
+/// D5 (2b): each uid job purged by the state it finds (item 7). Step 2: its ops that hold its text
+/// rewritten without it and raw.db-wal truncated, under the worker lock as `oboete rebuild` takes
+/// it. Step 3: knowledge.db rebuilt from raw.db once for every job not past step 3 (item 4),
+/// the copies of knowledge.db set aside carried from by the same rule and removed (item 5), and
+/// the uids taken out of every session's shown value (item 6). A uid knowledge.db holds after the
+/// rebuild came from an op the purge did not find: its job is stopped, reported and not done.
+/// Only one runs at a time (`state/purge.lock`, not waited for: None when another holds it).
+pub fn purge(home: &Path) -> Result<Option<Purged>> {
+    let Some(_lock) = purge_lock(home)? else {
+        return Ok(None);
+    };
     let mut purged = Purged::default();
     if !crate::raw::exists(home) {
         return Ok(Some(purged));
@@ -1558,7 +1566,8 @@ pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
                 || !records_due(raw)?.is_empty()
                 || raw.record_backups_owed()?
                 || raw.masks_owed()?.is_some()
-                || text_waits(home, raw)?)
+                || text_waits(home, raw)?
+                || crate::retention::due(home, raw)?)
         })
         .unwrap_or_else(|e| {
             eprintln!("oboete: forget jobs not read: {e:#}");
@@ -2079,10 +2088,25 @@ pub fn run(
     }
     if resume {
         // Nothing to continue says nothing: the worker starts it when a job waits (D5 item 8).
-        return match purge(home)? {
-            Some(p) if p.jobs > 0 || p.masks => say_purged(&p),
-            _ => Ok(()),
-        };
+        if let Some(p) = purge(home)?.filter(|p| p.jobs > 0 || p.masks) {
+            say_purged(&p)?;
+        }
+        // docs/retention.md: a retention pass after the purge, whose masks come first.
+        if let Some(r) = crate::retention::pass(home)? {
+            if r.expired > 0 {
+                println!(
+                    "Raw records whose text expired under [retention]: {}",
+                    r.expired
+                );
+            }
+            if r.owed {
+                println!(
+                    "A retention batch is still owed: a mask's purge or a reader of raw.db comes \
+                     first, and the worker tries it again."
+                );
+            }
+        }
+        return Ok(());
     }
     if show {
         for job in status(home)? {
