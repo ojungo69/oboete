@@ -349,6 +349,8 @@ pub(crate) const PORT_IN_USE: &str = "port in use";
 
 /// How often the resident viewer looks at its home, and the worker at the viewer (R4).
 const MINUTE: Duration = Duration::from_secs(60);
+/// How often the resident viewer looks for new hook records to keep its model warm (row 31).
+const WARM_EVERY: Duration = Duration::from_secs(2);
 
 /// How long the worker waits to start the viewer again after "port in use" (R4).
 const AFTER_PORT_IN_USE: Duration = Duration::from_secs(600);
@@ -570,6 +572,20 @@ pub fn resident(home: &Path) -> Result<()> {
         return Ok(());
     };
     let id = viewer.home_lock;
+    // Parity row 31: while the hooks record, the local model is loaded and kept, so a prompt after
+    // a session's start or the agent's work finds it warm instead of the words alone.
+    let warming = viewer.home.clone();
+    std::thread::spawn(move || {
+        let mut seen = crate::raw::newest_hook_seq(&warming).ok().flatten();
+        loop {
+            std::thread::sleep(WARM_EVERY);
+            let newest = crate::raw::newest_hook_seq(&warming).ok().flatten();
+            if newest.is_some() && newest != seen {
+                crate::search::b::warm(&warming);
+                seen = newest;
+            }
+        }
+    });
     let looking = Arc::clone(&viewer);
     std::thread::spawn(move || {
         let mut seen = looking.requests.load(Ordering::SeqCst);

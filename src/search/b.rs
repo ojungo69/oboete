@@ -26,6 +26,13 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 /// A reader's local model goes after this long without a search (D14), and one whose load
 /// failed is tried again after as long.
 const READER_IDLE: Duration = Duration::from_secs(10 * 60);
+/// The model the hooks keep warm (`warm`) goes after this long without a search or a hook record:
+/// of the 16 prompts of the week to 2026-10-17, 13 came within it of the hooks' last record, 10
+/// within `READER_IDLE` (parity row 31).
+const WARM_IDLE: Duration = Duration::from_secs(30 * 60);
+/// Whether this process keeps its model warm: only the resident viewer does, so an MCP server or
+/// a CLI command keeps its own model no longer than `READER_IDLE`.
+static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// An evaluation question's embedding (Task 6): longer than a search's, as a question that cannot
 /// be embedded stops the run (Step 13: 5 of 624 queries passed 1.2 s).
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1039,8 +1046,23 @@ fn local_query(
     }
 }
 
+/// Parity row 31: the local model started, or kept, because the hooks recorded again, so the
+/// next prompt finds it loaded rather than waiting past `QUERY_TIMEOUT` for its load. Nothing
+/// when the home embeds elsewhere or not at all, or its model's files are not ready: a search
+/// says why (doctor too), not every hook record.
+pub(crate) fn warm(home: &Path) {
+    if !local(home) || crate::embed::local_model(home).is_err() {
+        return;
+    }
+    WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(model) = reader(home) {
+        model.keep();
+    }
+}
+
 /// This process's local model for searches (D14): started by the first search that needs it,
-/// gone after `READER_IDLE` without one. A load that failed is tried again only after as long.
+/// gone after `READER_IDLE` without one (`WARM_IDLE` without one or a hook record where the hooks
+/// keep it warm). A load that failed is tried again only after `READER_IDLE`.
 /// One CLI command (`--vectors`, `eval`) keeps its model here between its queries.
 fn reader(home: &Path) -> Result<std::sync::Arc<crate::resident::Resident>, VectorSkip> {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -1058,7 +1080,12 @@ fn reader(home: &Path) -> Result<std::sync::Arc<crate::resident::Resident>, Vect
         eprintln!("oboete: {why}");
         VectorSkip::NoModel
     })?;
-    let model = Arc::new(crate::resident::Resident::start(load, Some(READER_IDLE)));
+    let idle = if WARMING.load(std::sync::atomic::Ordering::Relaxed) {
+        WARM_IDLE
+    } else {
+        READER_IDLE
+    };
+    let model = Arc::new(crate::resident::Resident::start(load, Some(idle)));
     readers.push((home.to_owned(), Arc::clone(&model), Instant::now()));
     Ok(model)
 }
@@ -6799,6 +6826,26 @@ mod tests {
         let asked = query_cli(home, &q("parser caches"), true).unwrap();
         assert_eq!(asked.vector, Vector::Used);
         assert_eq!(crate::embed::stub::local_loads(home), loads + 1);
+    }
+
+    /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and
+    /// nothing in a home that does not.
+    #[test]
+    fn warming_loads_the_model_only_where_it_embeds() {
+        let s = local_store("0");
+        let home = s.home.path();
+        let before = crate::embed::stub::local_loads(home);
+        warm(home);
+        let t = Instant::now();
+        while crate::embed::stub::local_loads(home) == before {
+            assert!(t.elapsed() < Duration::from_secs(5), "never loaded");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let other = Store::new();
+        crate::embed::stub::local(other.home.path(), "0");
+        warm(other.home.path());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(crate::embed::stub::local_loads(other.home.path()), 0);
     }
 
     /// Task 10: with the model gone from the home, a reader's search is full text and says why.

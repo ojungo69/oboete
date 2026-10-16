@@ -829,6 +829,25 @@ fn existing_read_path(home: &Path) -> Result<Option<std::path::PathBuf>> {
     Ok(None)
 }
 
+/// Parity row 31: the seq of this store's newest hook record, read as the viewer reads, so the
+/// resident viewer can tell when the hooks record again; none with no store or no record.
+pub(crate) fn newest_hook_seq(home: &Path) -> Result<Option<i64>> {
+    use rusqlite::OptionalExtension;
+    let Some(read) = read_only(home)? else {
+        return Ok(None);
+    };
+    let device = crate::db::device_id(&read.conn)?;
+    Ok(read
+        .conn
+        .query_row(
+            "SELECT seq FROM records WHERE device = ?1 AND type = 'event' AND source = 'hook'
+             ORDER BY seq DESC LIMIT 1",
+            [&device],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
     let before = existing_read_path(home)?;
     let lock_path = home.join("raw.lock");
@@ -8395,6 +8414,22 @@ mod tests {
         let end = raw.append(&ev("end", "b", "hook")).unwrap();
         assert!(raw.turns_ended(a, end).unwrap());
         assert!(raw.turns_ended(replay, end).unwrap());
+    }
+
+    /// Parity row 31: the newest hook record's seq as the viewer reads it, a replayed record's
+    /// never; none before a store exists.
+    #[test]
+    fn newest_hook_seq_reads_the_hooks_last_record() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(newest_hook_seq(home.path()).unwrap(), None);
+        let mut raw = open(home.path()).unwrap();
+        let a = raw.append(&test_event("{}")).unwrap();
+        raw.append(&Event {
+            source: "replay".into(),
+            ..test_event("{}")
+        })
+        .unwrap();
+        assert_eq!(newest_hook_seq(home.path()).unwrap(), Some(a));
     }
 
     fn format_in(raw: &Raw) -> i64 {

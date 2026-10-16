@@ -91,6 +91,17 @@ impl Resident {
         Resident { jobs, state }
     }
 
+    /// Counts as a request: the model stays its `idle` longer, loading on if it is still loading
+    /// (parity row 31: kept warm while the hooks record).
+    pub fn keep(&self) {
+        let (reply, _) = mpsc::channel();
+        let _ = self.jobs.send(Job {
+            texts: Vec::new(),
+            until: None,
+            reply,
+        });
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -267,6 +278,24 @@ mod tests {
         let t = Instant::now();
         while !r.gone() {
             assert!(t.elapsed() < Duration::from_secs(5), "never gone");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Parity row 31: kept, the model stays past its idle time, and goes once no longer kept.
+    #[test]
+    fn kept_it_stays_past_its_idle_and_goes_after() {
+        let r = Resident::start(model(Duration::ZERO), Some(Duration::from_millis(200)));
+        r.embed(&texts(&["a"]), None).unwrap();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(800) {
+            r.keep();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!r.gone(), "kept, it stays");
+        let t = Instant::now();
+        while !r.gone() {
+            assert!(t.elapsed() < Duration::from_secs(5), "never went idle");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
