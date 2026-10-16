@@ -2615,11 +2615,6 @@ pub fn doctor(home: &Path) -> Result<()> {
                     println!("  {line}");
                 }
                 forget_stopped = stopped;
-                let (lines, wrong) = crate::retention::doctor_lines(home, &raw)?;
-                for line in lines {
-                    println!("  {line}");
-                }
-                retention_wrong = wrong;
                 Ok(())
             })(),
         );
@@ -2627,6 +2622,24 @@ pub fn doctor(home: &Path) -> Result<()> {
     if forget_stopped {
         unhealthy.push("a forget stopped (see above)");
     }
+    // docs/retention.md: the setting with or without a store; what expired with one.
+    section(
+        &mut unhealthy,
+        "retention",
+        (|| -> Result<()> {
+            let raw = if crate::raw::exists(home) {
+                Some(crate::raw::open(home)?)
+            } else {
+                None
+            };
+            let (lines, wrong) = crate::retention::doctor_lines(home, raw.as_ref())?;
+            for line in lines {
+                println!("  {line}");
+            }
+            retention_wrong = wrong;
+            Ok(())
+        })(),
+    );
     if retention_wrong {
         unhealthy.push("[retention] could not be read (see above)");
     }

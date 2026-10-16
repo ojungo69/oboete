@@ -1074,7 +1074,7 @@ fn knowledge_holding(home: &Path, uids: &HashSet<String>) -> Result<HashSet<Stri
 
 /// The files of knowledge.db copies set aside, sidecars too: a rebuild's that stopped and the
 /// quarantined (spec 1.7).
-fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn aside_files(home: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     // A listing or an entry that cannot be read may hide one: an error then, so step 3 waits
     // (Codex on #444).

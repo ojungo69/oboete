@@ -3,7 +3,7 @@
 //! ledger and identity stay: an expired record is read as `raw::Item::Expired`.
 
 use crate::curate::Span;
-use crate::raw::{Item, Raw, ScanRow};
+use crate::raw::{Raw, ScanRow};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -63,12 +63,43 @@ pub fn pass(home: &Path) -> Result<Option<Pass>> {
     if days.is_none() && crate::raw::open(home)?.expiry_owed()?.is_empty() {
         return Ok(Some(done));
     }
+    if !rows(home, days, &mut done)? {
+        return Ok(Some(done));
+    }
+    // Step 5: knowledge.db built again from raw.db, as a forget's purge builds it (its step 3). A
+    // full-text index keeps a deleted record's trigrams and their places in its segments until they
+    // merge, so only a new file holds none of the expired text (the commit security review of part
+    // 2). No carry takes an expired record's vector (`forgotten_record_keys`). The rebuild takes
+    // the worker lock and raw itself.
+    crate::worker::rebuild(home).context("knowledge.db was not rebuilt")?;
+    crate::backup::fail_after("expiry_knowledge")?;
+    let _worker = crate::worker::lock_asking(home)?;
+    let raw = crate::raw::open(home)?;
+    // The copies of knowledge.db set aside held what the old one did: their vectors carried, as a
+    // purge carries them, then removed.
+    let aside = crate::forget::aside_files(home)?;
+    if !aside.is_empty() {
+        crate::embed_phase::carry_set_aside(home, &crate::knowledge::open(home)?, &raw)?;
+        for file in aside {
+            std::fs::remove_file(&file)
+                .with_context(|| format!("{} was not removed", file.display()))?;
+        }
+    }
+    raw.clear_expiry_owed()?;
+    remove_owed(home)?;
+    Ok(Some(done))
+}
+
+/// Steps 1 to 4 under the worker lock: whether the batch's rows and raw.db's WAL are done, so
+/// step 5 may run. A batch owed is finished first, whatever the setting says; else, with a period
+/// set and no mask owed, the windows every rule lets go begin as one.
+fn rows(home: &Path, days: Option<u32>, done: &mut Pass) -> Result<bool> {
     let _worker = crate::worker::lock_asking(home)?;
     let mut raw = crate::raw::open(home)?;
     let mut owed = raw.expiry_owed()?;
     if owed.is_empty() {
         let Some(days) = days else {
-            return Ok(Some(done));
+            return Ok(false);
         };
         // Stamped first: a look that fails is not tried again at once.
         let state = home.join("state");
@@ -80,10 +111,10 @@ pub fn pass(home: &Path) -> Result<Option<Pass>> {
         // Rule 7: while a mask is owed no batch begins, and its windows wait too.
         if raw.masks_owed()?.is_some() {
             done.waiting += plan.records.len();
-            return Ok(Some(done));
+            return Ok(false);
         }
         if plan.records.is_empty() {
-            return Ok(Some(done));
+            return Ok(false);
         }
         // The batch's records and the curation ops made from them sealed in the backups first: a
         // restore that finishes a batch on records it expires brings back their claims and
@@ -91,7 +122,7 @@ pub fn pass(home: &Path) -> Result<Option<Pass>> {
         crate::backup::export_timed(home).context("no expiry begins without its backup")?;
         // A session that moved since it was read waits for the next look.
         if !raw.begin_expiry(&plan.records, &plan.sessions)? {
-            return Ok(Some(done));
+            return Ok(false);
         }
         owed = raw.expiry_owed()?;
     }
@@ -106,48 +137,29 @@ pub fn pass(home: &Path) -> Result<Option<Pass>> {
     crate::backup::expire_record_segments(home, &owed_map, at)
         .context("the backups of the expiring records were not rewritten")?;
     let mut expired = raw.expired_identities()?;
-    expired.extend(owed_map.clone());
+    expired.extend(owed_map);
     crate::raw::expire_copies(home, &expired, at)?;
     crate::backup::fail_after("expiry_backups")?;
     // Step 3, once no mask is owed: `forget --continue` purges the masks first.
     if raw.masks_owed()?.is_some() {
         done.owed = true;
-        return Ok(Some(done));
+        return Ok(false);
     }
     done.expired = raw.expire_owed(at)?;
     crate::backup::fail_after("expiry_rows")?;
     // Step 4.
     if !raw.truncate_wal(crate::forget::TRUNCATE_WAIT)? {
         done.owed = true;
-        return Ok(Some(done));
+        return Ok(false);
     }
     crate::backup::fail_after("expiry_wal")?;
-    // Step 5.
-    let mut k = crate::knowledge::open(home)?;
-    let tx = k.transaction()?;
-    for (device, seq, ts) in &owed {
-        // A seq another record took is that record's: its text row and facts stay.
-        let record = raw
-            .after(device, seq - 1, 1)?
-            .into_iter()
-            .find(|r| r.seq == *seq);
-        if !record.is_some_and(|r| matches!(&r.item, Item::Expired(e) if e.ts == *ts)) {
-            continue;
-        }
-        crate::consumer::fts::expired(&tx, device, *seq)?;
-        crate::embed_phase::expired(&raw, &tx, &format!("{device}:{seq}"))?;
-        crate::consumer::manifest::expired(&tx, device, *seq)?;
-    }
-    tx.commit()?;
-    crate::backup::fail_after("expiry_knowledge")?;
-    raw.clear_expiry_owed()?;
-    remove_owed(home)?;
-    Ok(Some(done))
+    Ok(true)
 }
 
 /// doctor's lines: the period, the last look and how many records expired, a batch owed; and
-/// whether `[retention]` is wrong, which expires nothing until it loads.
-pub(crate) fn doctor_lines(home: &Path, raw: &Raw) -> Result<(Vec<String>, bool)> {
+/// whether `[retention]` is wrong, which expires nothing until it loads. With no store yet the
+/// table is read all the same (Codex on #552).
+pub(crate) fn doctor_lines(home: &Path, raw: Option<&Raw>) -> Result<(Vec<String>, bool)> {
     let mut lines = Vec::new();
     let wrong = match crate::config::retention(home) {
         Ok(r) => {
@@ -162,7 +174,7 @@ pub(crate) fn doctor_lines(home: &Path, raw: &Raw) -> Result<(Vec<String>, bool)
                         "retention: {days} day{} (a window expires once curated and past it; last \
                          look {last}, {} records expired)",
                         if days == 1 { "" } else { "s" },
-                        raw.expired_count()?
+                        raw.map(Raw::expired_count).transpose()?.unwrap_or(0)
                     )
                 }
             });
@@ -173,7 +185,10 @@ pub(crate) fn doctor_lines(home: &Path, raw: &Raw) -> Result<(Vec<String>, bool)
             true
         }
     };
-    let owed = raw.expiry_owed()?.len();
+    let owed = raw
+        .map(Raw::expiry_owed)
+        .transpose()?
+        .map_or(0, |o| o.len());
     if owed > 0 {
         lines.push(format!(
             "retention: a batch of {owed} records is begun and not finished (the worker finishes it)"
@@ -419,7 +434,7 @@ fn remove_owed(home: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raw::{Event, OpKind, Target};
+    use crate::raw::{Event, Item, OpKind, Target};
     use serde_json::json;
 
     /// Words only the expiring records hold.
@@ -469,7 +484,7 @@ mod tests {
             "s",
             "prompt",
             1_000,
-            &format!("Build it {CANARY}."),
+            &format!("Build it {CANARY} zqxjkvwy."),
         );
         let b = said(&mut raw, "s", "reply", 2_000, "Built.");
         window(&mut raw, a, b, json!({}));
@@ -501,9 +516,6 @@ mod tests {
                     continue;
                 }
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                if name.starts_with("knowledge.db") {
-                    continue;
-                }
                 let mut bytes = std::fs::read(&path).unwrap();
                 if crate::backup::segment_name(path.file_name().unwrap()).is_some() {
                     bytes = zstd::stream::decode_all(&bytes[..]).unwrap_or(bytes);
@@ -546,7 +558,23 @@ mod tests {
         crate::backup::export(home.path()).unwrap();
         let copy = home.path().join("raw.db.quarantined-1");
         std::fs::copy(home.path().join("raw.db"), &copy).unwrap();
+        let aside = home.path().join("knowledge.db.quarantined-1");
+        std::fs::copy(home.path().join("knowledge.db"), &aside).unwrap();
         assert!(!holding(home.path()).is_empty());
+        // The full-text index keeps a deleted row's trigrams in its segments until they merge:
+        // `kvw` is one of the canary's that no other record has.
+        let trigram = |home: &Path| -> bool {
+            let k = crate::knowledge::open(home).unwrap();
+            let blocks: Vec<Vec<u8>> = k
+                .prepare("SELECT block FROM raw_fts_data WHERE block IS NOT NULL")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            blocks.iter().any(|b| b.windows(3).any(|w| w == b"kvw"))
+        };
+        assert!(trigram(home.path()));
         period(home.path(), None);
         assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
         period(home.path(), Some(1));
@@ -561,7 +589,10 @@ mod tests {
         );
         assert!(expired(home.path(), a) && expired(home.path(), b));
         assert_eq!(holding(home.path()), Vec::<String>::new());
-        // Step 5: no text row is left to search; the labels' rows stay.
+        // Step 5 built knowledge.db again: no trigram of the text, and no copy set aside.
+        assert!(!trigram(home.path()));
+        assert!(!aside.exists());
+        // No text row is left to search; the labels' rows stay.
         let indexed = |home: &Path| -> (i64, i64) {
             let k = crate::knowledge::open(home).unwrap();
             let count = |sql: &str| k.query_row(sql, [], |r| r.get(0)).unwrap();
@@ -584,7 +615,7 @@ mod tests {
         drop(raw);
         assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
         let raw = crate::raw::open(home.path()).unwrap();
-        let (lines, wrong) = doctor_lines(home.path(), &raw).unwrap();
+        let (lines, wrong) = doctor_lines(home.path(), Some(&raw)).unwrap();
         assert!(
             !wrong && lines[0].starts_with("retention: 1 day ("),
             "{lines:?}"
@@ -1010,11 +1041,11 @@ mod tests {
         let raw = crate::raw::open(home.path()).unwrap();
         period(home.path(), None);
         assert_eq!(
-            doctor_lines(home.path(), &raw).unwrap(),
+            doctor_lines(home.path(), Some(&raw)).unwrap(),
             (vec!["retention: forever".to_owned()], false)
         );
         std::fs::write(home.path().join("config.toml"), "[retention]\ndays = 0\n").unwrap();
-        let (lines, wrong) = doctor_lines(home.path(), &raw).unwrap();
+        let (lines, wrong) = doctor_lines(home.path(), Some(&raw)).unwrap();
         assert!(wrong && lines[0].contains("nothing expires"), "{lines:?}");
         drop(raw);
         assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());

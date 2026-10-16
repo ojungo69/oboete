@@ -2115,30 +2115,6 @@ pub fn touched(raw: Option<&Raw>, k: &Connection, family: &str, key: &str) -> Re
     Ok(())
 }
 
-/// docs/retention.md, step 5: an expired record's vectors gone: its key and index rows (the
-/// queue's next read of it marks it `expired`), and a cached vector no other key uses.
-pub(crate) fn expired(raw: &Raw, k: &Connection, key: &str) -> Result<()> {
-    k.execute_batch(
-        "CREATE INDEX IF NOT EXISTS vector_keys_sha ON vector_keys(embedder, src_sha)",
-    )?;
-    let cached: Vec<(String, String)> = k
-        .prepare_cached(
-            "SELECT embedder, src_sha FROM vector_keys
-             WHERE kind = 'r' AND key = ?1 AND src_sha IS NOT NULL",
-        )?
-        .query_map([key], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    touched(Some(raw), k, "r", key)?;
-    for (embedder, sha) in cached {
-        k.execute(
-            "DELETE FROM vectors WHERE embedder = ?1 AND src_sha = ?2
-               AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.src_sha = ?2)",
-            params![embedder, sha],
-        )?;
-    }
-    Ok(())
-}
-
 /// A batch's vectors, cached and indexed, in one transaction: a document whose stored text is no
 /// longer the one sent (a correction or a mask meanwhile) gets none (row 55-6).
 fn write(raw: &Raw, k: &Connection, batch: &Batch, vecs: &[Vec<f32>]) -> Result<()> {

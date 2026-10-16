@@ -903,7 +903,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
     - **Crash**: kill the forget at each of the 8 step boundaries and at random points, using M2's harness (RD/options-draft.md:331), then restart the worker. Pass: the job finishes and the grep finds 0 hits (hard).
     - **In-flight curation**: forget while a curator call on an overlapping window is running. Pass: 0 hits after the call returns.
     - **Rescan range**: the redaction-rescan range tombstone passes the same grep.
-    - **Retention**: after expiry, 0 hits in raw.db, its WAL and copies, the backups and R2 for the expired records' text outside what claims quote and summaries say (docs/retention.md, "What it does not remove"). Raw nobody curated is untouched.
+    - **Retention**: after expiry, 0 hits in raw.db, its WAL and copies, the backups, knowledge.db (built again) and R2 for the expired records' text outside what claims quote and summaries say (docs/retention.md, "What it does not remove"). Raw nobody curated is untouched.
 - **Capture exclusion**: a canary event in an excluded repo and in an excluded folder leaves 0 hits in raw.db.
 - **Injection canary**: MUST-M4's three cases, 0% reach decided.
 - **Curator isolation** (6.5): the capability test (tool list empty, or the no-tool flags proven) is the gate; the obedience canary is a supporting test only.

@@ -3969,43 +3969,7 @@ impl Raw {
     /// stays in raw.db-wal; tried every 100 ms for `wait`. False when readers kept it from
     /// truncating.
     pub(crate) fn truncate_wal(&self, wait: Duration) -> Result<bool> {
-        // Each try returns at once, a busy one too: the sleeps here pace them.
-        let timeout: u32 = self
-            .conn
-            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
-        self.conn.busy_timeout(Duration::ZERO)?;
-        let until = Instant::now() + wait;
-        let truncated = loop {
-            let tried = self
-                .conn
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-                    r.get::<_, i64>(0)
-                });
-            let busy = match tried {
-                Ok(busy) => busy != 0,
-                Err(e)
-                    if matches!(
-                        e.sqlite_error_code(),
-                        Some(
-                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                        )
-                    ) =>
-                {
-                    true
-                }
-                Err(e) => break Err(e),
-            };
-            if !busy {
-                break Ok(true);
-            }
-            if Instant::now() >= until {
-                break Ok(false);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        self.conn
-            .busy_timeout(Duration::from_millis(timeout.into()))?;
-        Ok(truncated?)
+        truncate_wal(&self.conn, wait)
     }
 
     /// Each request raw holds with its step (D5: 1 registered, 2 its ops' bodies purged), oldest
@@ -6884,6 +6848,41 @@ pub(crate) fn purge_copies(
         std::fs::File::open(home)?.sync_all()?;
     }
     Ok((rewritten, removed))
+}
+
+/// `Raw::truncate_wal` for any store: its WAL checkpointed and truncated, tried every 100 ms for
+/// `wait`; false when readers kept it from truncating (knowledge.db's, docs/retention.md step 5).
+pub(crate) fn truncate_wal(conn: &Connection, wait: Duration) -> Result<bool> {
+    // Each try returns at once, a busy one too: the sleeps here pace them.
+    let timeout: u32 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+    conn.busy_timeout(Duration::ZERO)?;
+    let until = Instant::now() + wait;
+    let truncated = loop {
+        let tried = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        let busy = match tried {
+            Ok(busy) => busy != 0,
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                true
+            }
+            Err(e) => break Err(e),
+        };
+        if !busy {
+            break Ok(true);
+        }
+        if Instant::now() >= until {
+            break Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    conn.busy_timeout(Duration::from_millis(timeout.into()))?;
+    Ok(truncated?)
 }
 
 /// docs/retention.md, step 2: every copy of raw.db set aside with its rows of `expired` records
