@@ -22,6 +22,7 @@ impl Consumer for Cards {
 
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
         schema(k)?;
+        mark(raw, k)?;
         let ops = raw.ops_after(device, after, BATCH)?;
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
@@ -51,6 +52,7 @@ impl Consumer for Cards {
             };
             let labels = raw.labels_in(device, span.from, span.to)?;
             let (agent, session) = labels.session.unzip();
+            let subagent = raw.subagent_only(device, span.from, span.to)?;
             // A list as the table keeps it; none where the op or the card gives none. An op
             // that lists no removal: every removal from its records hides the card (K4).
             let list = |v: &serde_json::Value| match v {
@@ -63,9 +65,9 @@ impl Consumer for Cards {
                 k.execute(
                     "INSERT INTO cards(device, op_seq, n, from_seq, from_offset, to_seq,
                        to_offset, goals, removed, ts, agent, session, repo, type, title,
-                       subtitle, narrative, facts, concepts, files_read, files_modified)
+                       subtitle, narrative, facts, concepts, files_read, files_modified, subagent)
                      VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                       ?16, ?17, ?18, ?19, ?20, ?21)",
+                       ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                     params![
                         device,
                         op.op_seq,
@@ -87,7 +89,8 @@ impl Consumer for Cards {
                         list(&c["facts"]),
                         list(&c["concepts"]),
                         list(&c["files_read"]),
-                        list(&c["files_modified"])
+                        list(&c["files_modified"]),
+                        i64::from(subagent)
                     ],
                 )?;
                 crate::consumer::fts::cards(k, Some(k.last_insert_rowid()))?;
@@ -184,6 +187,25 @@ fn replace(k: &Connection, device: &str, op_seq: i64, op: &serde_json::Value) ->
     Ok(())
 }
 
+/// Parity row X1: the cards kept before `cards.subagent` get it, all at the first step after the
+/// change, since a worker that has caught up steps again only when an op comes (Codex on #561).
+fn mark(raw: &Raw, k: &Connection) -> Result<()> {
+    let windows: Vec<(String, i64, i64, i64)> = k
+        .prepare(
+            "SELECT DISTINCT device, op_seq, from_seq, to_seq FROM cards WHERE subagent IS NULL",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (device, op_seq, from, to) in windows {
+        let subagent = raw.subagent_only(&device, from, to)?;
+        k.execute(
+            "UPDATE cards SET subagent = ?3 WHERE device = ?1 AND op_seq = ?2",
+            params![device, op_seq, i64::from(subagent)],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Cards;
@@ -219,6 +241,49 @@ mod tests {
             repo: Some(repo.into()),
             ..raw::test_event("{}")
         }
+    }
+
+    /// Parity row X1: a window of a subagent's tool calls alone gives cards marked so, another
+    /// window's are marked not, and a card kept before the mark gets it at a later step.
+    #[test]
+    fn a_subagents_window_gives_marked_cards() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let sub = Event {
+            body: json!({"tool": "Read", "agent_id": "a1"}).to_string(),
+            ..event("s1", "r", 1_000)
+        };
+        raw.append(&sub).unwrap();
+        raw.append(&Event { ts: 2_000, ..sub }).unwrap();
+        raw.append(&event("s1", "r", 3_000)).unwrap();
+        raw.append_ops(&[
+            window(1, 2, "curated", "A subagent read the parser."),
+            window(3, 3, "curated", "The main agent read the lexer."),
+        ])
+        .unwrap();
+        drop(raw);
+        let marks = |home: &Path| -> Vec<(i64, Option<i64>)> {
+            let k = crate::knowledge::open(home).unwrap();
+            k.prepare("SELECT from_seq, subagent FROM cards ORDER BY from_seq")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(marks(home.path()), vec![(1, Some(1)), (3, Some(0))]);
+        let titles = |home: &Path| -> Vec<String> {
+            recent(home, "r").into_iter().map(|c| c.title).collect()
+        };
+        assert_eq!(titles(home.path()), vec!["The main agent read the lexer."]);
+        crate::knowledge::open(home.path())
+            .unwrap()
+            .execute("UPDATE cards SET subagent = NULL", [])
+            .unwrap();
+        assert_eq!(titles(home.path()).len(), 2);
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(marks(home.path()), vec![(1, Some(1)), (3, Some(0))]);
     }
 
     /// A window op over records `from` to `to`, as the curation phase writes one.
