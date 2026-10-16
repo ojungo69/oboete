@@ -1,7 +1,9 @@
 # claude-mem and oboete, feature by feature (2026-10-03)
 
 Owner decision 36: finish oboete as a complete superset of claude-mem. This table defines that
-comparison; decision 37 sets the scope based on it.
+comparison; decision 37 sets the scope based on it. Decision 50: claude-mem comes off only once this
+table, brought up to date against claude-mem's current release, shows every difference closed or
+accepted by the owner.
 
 ## How it was made
 
