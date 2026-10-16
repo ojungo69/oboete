@@ -39,10 +39,15 @@ pub(crate) fn due(home: &Path, raw: &Raw) -> Result<bool> {
     if !crate::config::retention(home).is_ok_and(|r| r.days.is_some()) {
         return Ok(false);
     }
-    let last = std::fs::read_to_string(home.join("state").join(LOOK))
+    Ok(!looked_lately(home))
+}
+
+/// Whether the last look (`state/retention-look`) is less than a day old.
+fn looked_lately(home: &Path) -> bool {
+    std::fs::read_to_string(home.join("state").join(LOOK))
         .ok()
-        .and_then(|t| t.trim().parse::<i64>().ok());
-    Ok(!last.is_some_and(|at| (0..LOOK_EVERY_MS).contains(&(crate::db::now_ms() - at))))
+        .and_then(|t| t.trim().parse::<i64>().ok())
+        .is_some_and(|at| (0..LOOK_EVERY_MS).contains(&(crate::db::now_ms() - at)))
 }
 
 /// One pass (docs/retention.md, "How a pass runs"): an owed batch finished first, whatever the
@@ -98,7 +103,9 @@ fn rows(home: &Path, days: Option<u32>, done: &mut Pass) -> Result<bool> {
     let mut raw = crate::raw::open(home)?;
     let mut owed = raw.expiry_owed()?;
     if owed.is_empty() {
-        let Some(days) = days else {
+        // A new batch at most once a day, however often `forget --continue` runs for a forget or
+        // a mask (Codex on #552); an owed one is finished at every pass.
+        let Some(days) = days.filter(|_| !looked_lately(home)) else {
             return Ok(false);
         };
         // Stamped first: a look that fails is not tried again at once.
@@ -1203,5 +1210,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexed, 1);
+    }
+
+    /// The look is daily, however often `forget --continue` runs for a forget or a mask: a pass
+    /// within the day begins nothing, though a window became eligible (Codex on #552).
+    #[test]
+    fn a_new_batch_waits_a_day_after_the_last_look() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let now = crate::db::now_ms();
+        let a = said(&mut raw, "s", "prompt", now, "Build it.");
+        let b = said(&mut raw, "s", "reply", now + 1, "Built.");
+        window(&mut raw, a, b, json!({}));
+        asked(&mut raw, "s", a, b, false);
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        period(home.path(), Some(1));
+        assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
+        // A day later by the records' time, within the day by the look's.
+        let device = crate::raw::open(home.path()).unwrap().device().to_owned();
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE records SET ts = ts - 2 * 86400000 WHERE device = ?1",
+                [&device],
+            )
+            .unwrap();
+        assert_eq!(pass(home.path()).unwrap().unwrap(), Pass::default());
+        assert!(!expired(home.path(), a));
+        std::fs::remove_file(home.path().join("state").join(LOOK)).unwrap();
+        assert_eq!(pass(home.path()).unwrap().unwrap().expired, 2);
     }
 }
