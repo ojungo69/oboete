@@ -1517,8 +1517,17 @@ pub fn run_phase(
         // Unreadable: taken for the owner at work, so the window waits rather than go out short.
         Err(_) => Some(crate::db::now_ms() + idle),
     };
+    // A turn that ended is curated at once: when the newest hook record is a reply or a session's
+    // end, nothing of that turn is to come, and its cards are ready for the next prompt instead of
+    // after the idle wait, as claude-mem's observer makes them while the work goes on
+    // (docs/curation-timing.md).
+    let ended = |raw: &Raw| {
+        let kind = raw.last_hook_kind().ok().flatten();
+        matches!(kind.as_deref(), Some("reply" | "end"))
+    };
     let now = crate::db::now_ms();
     if !w.full
+        && !ended(raw)
         && let Some(until) = working(raw)
     {
         return Ok(Phase::Waiting {
@@ -6763,6 +6772,70 @@ mod tests {
         let phase =
             run_phase(&mut raw, &kn(), &db, &rules, &curating(3), "", &mut curator).unwrap();
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
+    }
+
+    /// A window goes at once when the newest hook record ends a turn (its reply, or the session's
+    /// end), not after the idle wait (docs/curation-timing.md); one a later prompt follows still
+    /// waits.
+    #[test]
+    fn a_window_that_ends_a_turn_goes_at_once() {
+        let calls = Cell::new(0);
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            Ok(answered("groq"))
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let ts = crate::db::now_ms() - 60_000;
+        let at = |e: Event| Event { ts, ..e };
+        for last in ["reply", "end"] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&at(prompt("Build the parser."))).unwrap();
+            raw.append(&at(tool("ok"))).unwrap();
+            let body = match last {
+                "reply" => json!({"assistant": "Built the parser."}),
+                _ => json!({"reason": "exit"}),
+            };
+            raw.append(&at(event(last, body))).unwrap();
+            calls.set(0);
+            let phase =
+                run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+            assert_eq!((phase, calls.get()), (Phase::Covered, 1), "{last}");
+            // The next turn's prompt alone waits for the owner, as before.
+            raw.append(&at(prompt("Now the lexer."))).unwrap();
+            let phase =
+                run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+            assert_eq!(
+                (phase, calls.get()),
+                (
+                    Phase::Waiting {
+                        until: ts + 600_000,
+                        up: true
+                    },
+                    1
+                ),
+                "{last}"
+            );
+        }
+        // A reply a later prompt follows in the same window: the turn going on waits.
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&at(prompt("Build the parser."))).unwrap();
+        raw.append(&at(event("reply", json!({"assistant": "Built."}))))
+            .unwrap();
+        raw.append(&at(prompt("And the lexer?"))).unwrap();
+        calls.set(0);
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!(
+            (phase, calls.get()),
+            (
+                Phase::Waiting {
+                    until: ts + 600_000,
+                    up: true
+                },
+                0
+            )
+        );
     }
 
     /// D10: a provider's reset is timed from its answer, even after a slow call. The hold's
