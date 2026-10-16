@@ -206,6 +206,7 @@ pub fn show(home: &Path) -> Value {
         "inject": {
             "session_start": inject.session_start,
             "session_start_note": inject.session_start_note,
+            "session_start_list": inject.session_start_list,
             "session_start_chars": inject.session_start_chars,
             "per_prompt": inject.per_prompt,
             "per_prompt_chars": inject.per_prompt_chars,
@@ -573,6 +574,8 @@ struct InjectIn {
     session_start: bool,
     /// Older pages omit the terminal note choice and keep its saved value.
     session_start_note: Option<bool>,
+    /// Older pages omit the terminal list choice and keep its saved value (decision 51).
+    session_start_list: Option<bool>,
     session_start_chars: usize,
     per_prompt: bool,
     per_prompt_chars: usize,
@@ -809,10 +812,23 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
         }
     }
     let i = &posted.inject;
-    if let Some(note) = i.session_start_note
-        && note != inject.session_start_note
-    {
-        put(&mut doc, "inject", "session_start_note", note.into());
+    for (key, posted, was) in [
+        (
+            "session_start_note",
+            i.session_start_note,
+            inject.session_start_note,
+        ),
+        (
+            "session_start_list",
+            i.session_start_list,
+            inject.session_start_list,
+        ),
+    ] {
+        if let Some(now) = posted
+            && now != was
+        {
+            put(&mut doc, "inject", key, now.into());
+        }
     }
     for (key, now, was) in [
         ("memory_lookup", i.memory_lookup, inject.memory_lookup),
@@ -1642,6 +1658,27 @@ mod tests {
             crate::config::inject(home.path())
                 .unwrap()
                 .session_start_note
+        );
+        // Decision 51: the list above the line, on unless saved off; an older page that omits it
+        // keeps the saved choice.
+        assert_eq!(saved["inject"]["session_start_list"], true);
+        let body = posted(&saved, |value| {
+            value["inject"]["session_start_list"] = json!(false);
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["inject"]["session_start_list"], false);
+        let body = posted(&saved, |value| {
+            value["inject"]
+                .as_object_mut()
+                .unwrap()
+                .remove("session_start_list");
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["inject"]["session_start_list"], false);
+        assert!(
+            !crate::config::inject(home.path())
+                .unwrap()
+                .session_start_list
         );
     }
 
@@ -2925,7 +2962,7 @@ mod tests {
         let shown = show(home.path());
         assert_eq!(
             shown["inject"],
-            json!({"session_start": true, "session_start_note": true, "session_start_chars": 9000, "per_prompt": false,
+            json!({"session_start": true, "session_start_note": true, "session_start_list": true, "session_start_chars": 9000, "per_prompt": false,
                 "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "memory_lookup": true,
                 "memory_instructions": true, "correction": true, "correction_chars": 800})
         );

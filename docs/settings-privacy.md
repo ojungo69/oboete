@@ -8,7 +8,10 @@ actions, so they do not submit unrelated configuration drafts.
 ## Configuration
 
 The session-start terminal note is `[inject] session_start_note`. Its saved choice
-applies at the next session start. The note contains no stored text.
+applies at the next session start. The note contains no stored text. Above it,
+`[inject] session_start_list` (on by default, decision 51) shows the memory list the
+agent got, which is stored text, as claude-mem's terminal timeline is; off, the note
+is shown alone.
 
 `[backup] dir` follows the existing backup reader: a relative path starts at the
 memory home and an absolute path stays absolute. Clearing the override selects

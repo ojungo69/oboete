@@ -1070,7 +1070,9 @@ const TEXT = {
   ],
   inject_on: ['Give agents the summary of your memory', 'エージェントに記憶のまとめを渡す'],
   session_note_on: ['Show a status line in the terminal when a session starts', 'セッション開始時に端末へ状態を表示する'],
-  session_note_desc: ['A short notice with no stored text. This changes at the next session start.', '保存した本文を含まない短い案内です。次のセッション開始から反映されます。'],
+  session_note_desc: ['A short status line. This changes at the next session start.', '短い状態の 1 行です。次のセッション開始から反映されます。'],
+  session_list_on: ['Also show the list of memories handed over, as claude-mem does', '渡した記憶の一覧も表示する (claude-mem と同じ表示)'],
+  session_list_desc: ['The list shows the titles and summaries from your memory that the agent gets. Off, only the status line is shown.', '一覧には、AI に渡したのと同じ記憶の題名や要約が表示されます。オフにすると、状態の 1 行だけを表示します。'],
   inject_chars: ['Size in characters ({min} to {max})', '大きさ(文字数、{min}〜{max})'],
   per_prompt_on: [
     'Also give the decisions, cards and session summaries that match each prompt in words or meaning, and the imported history and notes that match it in meaning (off until it has been measured)',
@@ -4862,6 +4864,7 @@ function saveBody() {
       inject: {
         session_start: form.inject.session_start,
         session_start_note: form.inject.session_start_note,
+        session_start_list: form.inject.session_start_list,
         per_prompt: form.inject.per_prompt,
         memory_lookup: form.inject.memory_lookup,
         memory_instructions: form.inject.memory_instructions,
@@ -5573,7 +5576,11 @@ function drawSettings() {
     return el('label', 'field', el('span', null, t(label, { min: least.toLocaleString('en-US'), max: most.toLocaleString('en-US') })), i);
   };
   const flag = (key, label) => el('label', 'check', checkbox(f.inject[key], (v) => { f.inject[key] = v; }), t(label));
-  const terminalNote = checkbox(f.inject.session_start_note, (v) => { f.inject.session_start_note = v; });
+  // Decision 51: the memory list above the line, meaningful only while the line is shown.
+  const terminalList = checkbox(f.inject.session_start_list, (v) => { f.inject.session_start_list = v; });
+  terminalList.dataset.field = 'inject.session_start_list';
+  terminalList.disabled = !f.inject.session_start_note;
+  const terminalNote = checkbox(f.inject.session_start_note, (v) => { f.inject.session_start_note = v; terminalList.disabled = !v; });
   terminalNote.dataset.field = 'inject.session_start_note';
   const backupReset = el('button', 'quiet small', t('backup_reset'));
   backupReset.type = 'button';
@@ -5621,6 +5628,7 @@ function drawSettings() {
         el('p', 'desc', t('inject_desc')),
         flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
         el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
+        el('label', 'check', terminalList, t('session_list_on')), note(t('session_list_desc')),
         flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
         size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
         flag('memory_lookup', 'memory_lookup_on'),
