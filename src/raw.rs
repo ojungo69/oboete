@@ -829,9 +829,9 @@ fn existing_read_path(home: &Path) -> Result<Option<std::path::PathBuf>> {
     Ok(None)
 }
 
-/// Parity row 31: the seq of this store's newest hook record, read as the viewer reads, so the
-/// resident viewer can tell when the hooks record again; none with no store or no record.
-pub(crate) fn newest_hook_seq(home: &Path) -> Result<Option<i64>> {
+/// Parity row 31: the seq and time of this store's newest hook record, read as the viewer reads,
+/// so the resident viewer can tell when the hooks record again; none with no store or no record.
+pub(crate) fn newest_hook(home: &Path) -> Result<Option<(i64, i64)>> {
     use rusqlite::OptionalExtension;
     let Some(read) = read_only(home)? else {
         return Ok(None);
@@ -840,10 +840,10 @@ pub(crate) fn newest_hook_seq(home: &Path) -> Result<Option<i64>> {
     Ok(read
         .conn
         .query_row(
-            "SELECT seq FROM records WHERE device = ?1 AND type = 'event' AND source = 'hook'
+            "SELECT seq, ts FROM records WHERE device = ?1 AND type = 'event' AND source = 'hook'
              ORDER BY seq DESC LIMIT 1",
             [&device],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
 }
@@ -8416,20 +8416,25 @@ mod tests {
         assert!(raw.turns_ended(replay, end).unwrap());
     }
 
-    /// Parity row 31: the newest hook record's seq as the viewer reads it, a replayed record's
-    /// never; none before a store exists.
+    /// Parity row 31: the newest hook record's seq and time as the viewer reads them, a replayed
+    /// record's never; none before a store exists.
     #[test]
-    fn newest_hook_seq_reads_the_hooks_last_record() {
+    fn newest_hook_reads_the_hooks_last_record() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(newest_hook_seq(home.path()).unwrap(), None);
+        assert_eq!(newest_hook(home.path()).unwrap(), None);
         let mut raw = open(home.path()).unwrap();
-        let a = raw.append(&test_event("{}")).unwrap();
+        let a = raw
+            .append(&Event {
+                ts: 7_000,
+                ..test_event("{}")
+            })
+            .unwrap();
         raw.append(&Event {
             source: "replay".into(),
             ..test_event("{}")
         })
         .unwrap();
-        assert_eq!(newest_hook_seq(home.path()).unwrap(), Some(a));
+        assert_eq!(newest_hook(home.path()).unwrap(), Some((a, 7_000)));
     }
 
     fn format_in(raw: &Raw) -> i64 {

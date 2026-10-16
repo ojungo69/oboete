@@ -30,9 +30,25 @@ const READER_IDLE: Duration = Duration::from_secs(10 * 60);
 /// of the 16 prompts of the week to 2026-10-17, 13 came within it of the hooks' last record, 10
 /// within `READER_IDLE` (parity row 31).
 const WARM_IDLE: Duration = Duration::from_secs(30 * 60);
-/// Whether this process keeps its model warm: only the resident viewer does, so an MCP server or
-/// a CLI command keeps its own model no longer than `READER_IDLE`.
+/// Whether this process keeps its model warm (`keep_warm`): only the resident viewer does, so an
+/// MCP server or a CLI command keeps its own model no longer than `READER_IDLE`.
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The resident viewer, before it takes any request: every model this process loads stays
+/// `WARM_IDLE` (parity row 31).
+pub(crate) fn keep_warm() {
+    WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Parity row 31: whether the hooks' newest record, `(seq, ts)`, warms the model: one after the
+/// record `seen` before; at the viewer's start, with none seen, one within `WARM_IDLE`, as the
+/// session start that started the viewer (Codex and CodeRabbit on #560), and no older one.
+pub(crate) fn warms(seen: Option<i64>, (seq, ts): (i64, i64), now: i64) -> bool {
+    match seen {
+        Some(seen) => seq != seen,
+        None => now.saturating_sub(ts) < WARM_IDLE.as_millis() as i64,
+    }
+}
 /// An evaluation question's embedding (Task 6): longer than a search's, as a question that cannot
 /// be embedded stops the run (Step 13: 5 of 624 queries passed 1.2 s).
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1054,7 +1070,6 @@ pub(crate) fn warm(home: &Path) {
     if !local(home) || crate::embed::local_model(home).is_err() {
         return;
     }
-    WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Ok(model) = reader(home) {
         model.keep();
     }
@@ -6826,6 +6841,19 @@ mod tests {
         let asked = query_cli(home, &q("parser caches"), true).unwrap();
         assert_eq!(asked.vector, Vector::Used);
         assert_eq!(crate::embed::stub::local_loads(home), loads + 1);
+    }
+
+    /// Parity row 31 (Codex and CodeRabbit on #560): a newer record warms the model; at the
+    /// viewer's start, the newest one does when it is recent, as the session start that started
+    /// it, and not when it is older than `WARM_IDLE`.
+    #[test]
+    fn a_new_or_recent_hook_record_warms_the_model() {
+        let now = 100 * 60 * 60 * 1_000;
+        let min = 60 * 1_000;
+        assert!(warms(None, (5, now - min), now));
+        assert!(!warms(None, (5, now - 31 * min), now));
+        assert!(!warms(Some(5), (5, now), now));
+        assert!(warms(Some(5), (6, now - 31 * min), now));
     }
 
     /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and

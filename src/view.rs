@@ -563,6 +563,9 @@ struct Resident {
 /// a minute it looks at its home and leaves when `leaving` says so, while no connection is live
 /// and no save runs (R4).
 pub fn resident(home: &Path) -> Result<()> {
+    // Parity row 31: every model this viewer loads, a search's before the first hook record's
+    // too, stays as long as the hooks keep it (Codex and CodeRabbit on #560).
+    crate::search::b::keep_warm();
     let Some(Resident {
         lock,
         listener,
@@ -576,14 +579,16 @@ pub fn resident(home: &Path) -> Result<()> {
     // a session's start or the agent's work finds it warm instead of the words alone.
     let warming = viewer.home.clone();
     std::thread::spawn(move || {
-        let mut seen = crate::raw::newest_hook_seq(&warming).ok().flatten();
+        let mut seen = None;
         loop {
-            std::thread::sleep(WARM_EVERY);
-            let newest = crate::raw::newest_hook_seq(&warming).ok().flatten();
-            if newest.is_some() && newest != seen {
-                crate::search::b::warm(&warming);
-                seen = newest;
+            let newest = crate::raw::newest_hook(&warming).ok().flatten();
+            if let Some((seq, ts)) = newest {
+                if crate::search::b::warms(seen, (seq, ts), crate::db::now_ms()) {
+                    crate::search::b::warm(&warming);
+                }
+                seen = Some(seq);
             }
+            std::thread::sleep(WARM_EVERY);
         }
     });
     let looking = Arc::clone(&viewer);
