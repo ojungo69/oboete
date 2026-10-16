@@ -1037,18 +1037,30 @@ impl<'r> Prepared<'r> {
     /// A tool call whose output is larger than a window: its line, and the output's head and tail
     /// with what lies between left out, as many characters of each as fit in `room` tokens, up to
     /// `ELIDED_CHARS`, as claude-mem's observer keeps a long output's head and tail (parity row
-    /// 20). The gates read the whole output, as for the shrink.
+    /// 20); its size alone when not one character of each fits. The gates read the whole output,
+    /// as for the shrink.
     fn elided(&self, seq: i64, room: u32) -> Piece {
-        let mut keep = ELIDED_CHARS;
-        loop {
-            let piece = self.kept(seq, 0, None, Some(keep));
-            if piece.tokens <= room || keep <= SHORT_CHARS {
-                return Piece {
-                    turn: false,
-                    ..piece
-                };
+        let fits = |keep: usize| self.kept(seq, 0, None, Some(keep)).tokens <= room;
+        // The most of each end that fits (Codex on #559): more kept is never fewer tokens.
+        let (mut lo, mut hi) = (0, ELIDED_CHARS);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
             }
-            keep /= 2;
+        }
+        let piece = if lo > 0 {
+            self.kept(seq, 0, None, Some(lo))
+        } else {
+            let bytes = self.long.as_ref().map_or(0, |(l, _)| l.len());
+            let text = format!("{} ({bytes} bytes of output, seen, elided)", self.head);
+            self.with(seq, 0, None, text)
+        };
+        Piece {
+            turn: false,
+            ..piece
         }
     }
 
@@ -5250,6 +5262,40 @@ mod tests {
         assert!(w.text.contains(" characters not shown ...] "), "{}", w.text);
         assert!(!w.text.contains(&"y".repeat(600)), "{}", w.text);
         assert!(crate::budget::estimate(&w.text) <= 300, "{}", w.text);
+    }
+
+    /// Codex on #559: a window that holds less than 300 characters of each end of an output still
+    /// takes what it can hold, and never more than the window.
+    #[test]
+    fn an_elided_output_never_passes_its_window() {
+        let (_h, mut raw, dev) = store();
+        let output = format!("HEADMARK{}TAILMARK", "\u{3042}".repeat(5_000));
+        raw.append(&tool(&output)).unwrap();
+        raw.append(&prompt("next")).unwrap();
+        let w = next_window(&raw, &dev, 300, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.elided, vec![1]);
+        assert!(crate::budget::estimate(&w.text) <= 300, "{}", w.text);
+        assert!(
+            w.text.contains("HEADMARK") && w.text.contains("TAILMARK"),
+            "{}",
+            w.text
+        );
+    }
+
+    /// Codex on #559: the most of each end that fits, not half of it.
+    #[test]
+    fn an_elided_output_takes_the_most_that_fits() {
+        let (_h, mut raw, dev) = store();
+        raw.append(&tool(&"a".repeat(40_000))).unwrap();
+        raw.append(&prompt("next")).unwrap();
+        let w = next_window(&raw, &dev, 4_400, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.elided, vec![1]);
+        let used = crate::budget::estimate(&w.text);
+        assert!((4_000..=4_400).contains(&used), "{used}");
     }
 
     /// Parity row 20: an output larger than the window reaches the curator as its head and its
