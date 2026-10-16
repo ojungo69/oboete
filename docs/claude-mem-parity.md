@@ -5,6 +5,114 @@ comparison; decision 37 sets the scope based on it. Decision 50: claude-mem come
 table, brought up to date against claude-mem's current release, shows every difference closed or
 accepted by the owner.
 
+## Status against claude-mem 13.40.0 (2026-10-17)
+
+### How it was checked
+
+Every row of this table was read again against claude-mem 13.40.0 source and against oboete `main` at 576cb79. The 13.29 to 13.40 changelog was read for new features. A feature that extends a row was merged into that row. A feature with no row got a new id (`G01`, `X1` to `X9`). A second reader re-checked each status and tried to refute it. Where that reader corrected the first reading, the corrected status is used. Where two readers disagreed, the table says so in the row. Rows were checked on the owner's single WSL PC. Only counts of the owner's data are given here. Decision 50 (2026-10-17) is the rule: claude-mem comes off only once oboete stands in for its functions almost completely. So an accepted difference that is worse still counts against removal.
+
+Impact means how often the owner would notice the difference: `daily`, `weekly`, `rare` or `none`. `blocker` means a one-time step that removal depends on.
+
+### Counts
+
+| Status | Rows |
+|---|---|
+| equal_or_better | 20 |
+| partial | 30 |
+| missing | 19 |
+| accepted_difference | 8 |
+| total | 77 |
+
+### Open checks before removal
+
+- claude-mem's history up to the switch is in oboete: 253,413 imported documents of the owner's claude-mem database (its import ops in raw.db, the documents in knowledge.db's `imported`), the newest from 2026-10-15. What claude-mem recorded after that is not; oboete has recorded those sessions itself since the switch.
+- `oboete import claude-mem` refuses the live claude-mem database, which is at schema v67 since 2026-10-16, so a catch-up import fails today (row N1).
+- 58,912 imported documents and 32,288 raw records still wait for vectors (doctor, 2026-10-16 15:31Z). The imported ones go down at about 6,000 to 7,500 an hour (92,123 at 10:10Z); raw records come after them (row 5).
+
+### Table
+
+| Id | Difference | Status | Impact | Evidence (claude-mem / oboete) |
+|---|---|---|---|---|
+| 1 | Both keep a worker up and serve a page at a fixed address. oboete's page needs a token, which the bookmark carries. A fixed idle exit replaces claude-mem's opt-in `IDLE_EXIT_SEC`. | equal_or_better | none | SettingsDefaultsManager.ts:432 / src/view.rs:741 |
+| 2 | oboete has no stop, restart or status command. It does not replace a hung worker that holds the lock. A hung worker stops curation and the page with no notice. claude-mem reclaims a wedged worker using a heartbeat. | partial | rare | worker-service.ts:1533 / docs/resident.md:342 |
+| 3 | claude-mem deletes a card or a session from the page. oboete forgets from the CLI only, and its forget is broader (preview, repo or time range, backups purged). The page has no forget route. | partial | rare | DataRoutes.ts:212 / src/view.rs:1100 |
+| 4 | The settings page does more than claude-mem's single-provider dialog. It covers the provider chain, connection test, write-only keys, the spending cap, embeddings, redaction, exclusions, retention, agents and a first-run guide. A stale save is refused with 409. Nobody has re-checked how easy it is on the real screen since #512 and #536. | equal_or_better | none | ContextSettingsModal.tsx:358 / src/view.rs:1491 |
+| 5 | Meaning search is on, with local bge-m3. 58,912 imported documents (22%) and 32,288 raw records still have no vectors; the imported ones go down at about 6,000 to 7,500 an hour, and raw records wait behind them (new claims and cards go first). With an empty queue, a prompt-time query embedding may also have no loaded model. oboete has no 90-day recency cut, which claude-mem applies by default. | partial | weekly | SearchOrchestrator.ts:137 / src/embed_phase.rs:1357 |
+| 6 | The legacy search has no `offset` and no `platformSource` (per-agent) filter. It has no file or concept filter either. `get` and `timeline` have no total byte cap, while claude-mem caps every tool reply at 32 KiB. Bad dates are refused. | partial | rare | mcp-server.ts:613 / src/mcp.rs:36 |
+| 7 | Trigram OR ranking plus a short-word boost. All-words matching is left out by decision 37. Measured nDCG@10 is 0.545 against 0.244. | accepted_difference | none | SessionSearch.ts:575 / src/search.rs:92 |
+| 8 | The file note is built for Claude Code, Codex and Grok, with the same rules. It is built from oboete cards only. The import does not read `files_read` or `files_modified`, so imported history never produces a note. | partial | weekly | file-context.ts:23 / src/import.rs:140 |
+| 9 | Session start shows one line (counts and the command to open the page). claude-mem shows the timeline and a link. Decision 37 chose the one line, and the note holds no stored text by design. | accepted_difference | weekly | context.ts:337 / src/hook.rs:971 |
+| 10 | The first-visit welcome dialog is built. It has no "How it works" link and no docs link. | equal_or_better | none | WelcomeCard.tsx:7 / assets/viewer/app.js:2077 |
+| 11 | The stopped-curation line names a class of cause (owner, budget, no answer), not the provider's words or a remedy link. A refused key shows only after 30 minutes. The terminal note appears on Claude Code only, and there is no relay instruction for Codex or Grok. | partial | rare | observer-health.ts:351 / src/curate.rs:3100 |
+| 12 | Hooks write raw.db themselves and always exit 0. A failed write is kept under `unwritten/` and written back later. A busy database is waited out. claude-mem uses a hook spool for the same purpose. | equal_or_better | none | hook-spool.ts:10 / src/unwritten.rs:1 |
+| 13 | Money spent is shown. The session-start "N obs, tokens read, work, % savings" line is missing. | partial | rare | AgentFormatter.ts:46 / assets/viewer/app.js:1036 |
+| 14 | oboete excludes by repository key or absolute folder. It has no glob and no basename match. The owner's 9 claude-mem exclusion patterns are neither read nor imported, and oboete has no exclusions set. | partial | weekly | project-filter.ts:68 / src/capture.rs:189 |
+| 15 | Private prompts behave the same. oboete strips 4 block names. claude-mem strips 6, and also removes `system-reminder` and `persisted-output` from tool fields. One edge of nested tags differs. | partial | rare | tag-stripping.ts:5 / src/hook.rs:32 |
+| 16 | The page has no sessions list, no per-session page and no category chips. Feed items carry no session id. | missing | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2078 |
+| 17 | Summaries have the same six fields and can be searched. A summary appears only after the turn's windows are curated, which can be about 10 minutes after the turn ends. claude-mem writes it at Stop. There is no fallback when the last message is empty. | partial | weekly | summarize.ts:103 / src/curate.rs:1471 |
+| 18 | oboete has no tool, Bash-pattern or agent-type skip settings. The only switch is the coarse `OBOETE_SKIP` (it also skips reads), and it is not documented for users. The owner uses only claude-mem's default skip list, which covers about 0.5% of tool rows. | partial | rare | SettingsDefaultsManager.ts:433 / src/hook.rs:22 |
+| 19 | Counts are fixed at claude-mem's defaults (50 cards, 10 summaries). oboete has no type, concept, field or full-count settings, and no switch to turn work state off. A Context page preview exists. | partial | none | ContextConfigLoader.ts:52 / src/consumer/manifest.rs:56 |
+| 20 | A tool output over about 17.8k characters reaches the curator only as its size. 262 of 1,471 windows (18%) had one. claude-mem condenses such an output with a model call or keeps its head and tail. oboete's `shrink` is off by default. Decision 37 left this out. | partial | daily | field-optimizer.ts:257 / src/curate.rs:498 |
+| 21 | oboete cannot join two repository keys: there is no merge and no `repo alias`, although the spec mentions one. Keys come from the origin URL, so worktrees already share one. | missing | rare | ProjectMerge.ts:21 / src/repo.rs:1 |
+| 22 | No team server and no TeamBrain. Decision 37. | accepted_difference | none | mcp-server.ts:765 / docs/spec.md:64 |
+| 23 | oboete ships no slash-command skills: no timeline-report, weekly-digests, how-it-works or mem-search skill. The MCP instructions teach mem_search. | partial | rare | plugin/skills/ / src/mcp.rs:636 |
+| 24 | No smart_search, smart_outline or smart_unfold (decision 37), and no File Read Gate (decision 40). The gate is on in the owner's claude-mem, and no denial was found in recent transcripts. | accepted_difference | rare | file-context.ts:294 / docs/spec.md:67 |
+| 25 | The page serves on 127.0.0.1 only. There is no allowed-origins or public-URL setting. Decision 37. | accepted_difference | none | SettingsDefaultsManager.ts:415 / src/view.rs:1593 |
+| 26 | No full-screen TV page. Decision 37. | accepted_difference | none | ViewerRoutes.ts:170 / docs/spec.md:64 |
+| 27 | "Never start a worker" exists only as the undocumented `OBOETE_NO_SPAWN` variable. | partial | none | worker-autostart.ts:10 / src/hook.rs:3310 |
+| 28 | An empty repository gets a "recording is on, no memory yet" line, and the line is recomputed every time. | equal_or_better | none | SearchRoutes.ts:86 / src/hook.rs:981 |
+| 29 | An image-only prompt is dropped instead of stored as a placeholder. A prompt delivered twice is stored twice. Prompts are not numbered. No native prompt id is kept. | partial | rare | SessionRoutes.ts:868 / src/capture.rs:366 |
+| 30 | No ranking by re-confirmation. claude-mem's version is off by default and off for the owner. | missing | none | rank.ts:1 / src/cards.rs:432 |
+| 31 | Per-prompt hints are on and rank better than claude-mem's. After 10 idle minutes the model is unloaded, and it takes about 2 s to reload against a 1.2 s limit. So the first prompt after a pause gets the words side only. A card arrives as its title and first sentence, not the full narrative. Decision 44(c) covers only the "nothing passes, inject nothing" part. | partial | daily | SearchRoutes.ts:569 / src/search/b.rs:28 |
+| 32 | No `session_start_context` tool. `timeline` with no arguments partly stands in for it. | partial | rare | mcp-server.ts:437 / src/mcp.rs:1687 |
+| 33 | No capture for Kimi, Oh My Pi, Windsurf, Copilot, Goose, Roo, Warp, T3 Code, DeepSeek Harness or Qoder. The owner's DB has 36 Oh My Pi sessions, the last on 2026-09-16. | missing | rare | ide-detection.ts:51 / src/setup.rs:20 |
+| 34 | Cursor, OpenCode, Antigravity and Pi are wired and unit-tested but never checked live. The OpenCode plugin is V2-only. Pi has no mem_search. | partial | rare | CursorHooksInstaller.ts:264 / src/setup.rs:85 |
+| 35 | No local HTTP ingest or query API and no bot adapter (#344, #345). Decision 33 defers them. | missing | none | SessionRoutes.ts:572 / docs/spec-client-runtime.md:98 |
+| 36 | No live transcript watcher and no user-written watch config. Codex's internal helper prompts are not filtered. The owner's claude-mem watches are idle: the state file was last written in May and the bot folder is empty. | missing | rare | transcripts/cli.ts:33 / src/main.rs:343 |
+| 37 | No sync between machines yet (milestone 6). The owner's claude-mem has no sync configured. | missing | none | CloudSync.ts:1 / src/worker.rs:205 |
+| 38 | No copy of memory over SSH. | missing | none | scripts/claude-mem-sync:2 / docs/spec.md:35 |
+| 39 | No Cowork or Claude Desktop support. | missing | none | cowork/README.md:1 / src/mcp.rs:1 |
+| 40 | No knowledge corpora or knowledge agent. The owner's corpora folder is empty. | missing | none | mcp-server.ts:1045 / src/mcp.rs:224 |
+| 41 | One fixed coding set, equal to claude-mem's `code` mode. No chill mode, no other domains, no custom modes. | partial | none | ModeManager.ts:25 / docs/cards.md:240 |
+| 42 | No Telegram alerts or wrap-ups. The owner has not configured them. | missing | none | TelegramNotifier.ts:44 / docs/claude-mem-parity.md:151 |
+| 43 | No per-folder CLAUDE.md timeline. It is off for the owner. | missing | none | ResponseProcessor.ts:1107 / src/hook.rs:629 |
+| 44 | No import of the agents' own memory-folder notes, no note-folder watcher, and no auto-memory switch. The owner uses none of them. | missing | rare | ingest.ts:1 / src/main.rs:343 |
+| 45 | No selective export or import (#346). | missing | none | scripts/export-memories.ts:1 / docs/spec-client-runtime.md:133 |
+| 46 | No near-duplicate merge or review. claude-mem's version is off by default and off for the owner. | missing | none | DedupRoutes.ts:38 / src/claims.rs:99 |
+| 47 | oboete has a multi-provider chain with fallback and stored cooldowns. It has no key rotation, no named presets, no parallel calls, no separate summary model and no `<think>` stripping. It does not retry without a rejected parameter, does not stream, and sends no cache labels. Prompt caching is not on for the owner's Anthropic entry. | partial | rare | api-key-pool.ts:3 / src/provider.rs:1381 |
+| 48 | No per-attempt log of what a curator tried to do. The codex curator still receives `~/.codex/AGENTS.md`. | partial | rare | observer-audit.ts:1 / src/provider.rs:2403 |
+| 49 | The page polls every 3 s instead of being pushed updates. | partial | none | useSSE.ts:31 / assets/viewer/app.js:5865 |
+| 50 | Uninstall does not stop the worker and says nothing about the data left behind. | partial | rare | uninstall.ts:222 / src/setup.rs:194 |
+| 51 | No README, no `oboete update` and no release pipeline. The installer does not preselect detected agents. A JSON config that starts with a BOM stops setup safely. | missing | rare | npx-cli/index.ts:141 / src/main.rs:70 |
+| 52 | No log files and no log view on the page. Doctor, the provider-call table and the last outcome stand in for them. | partial | rare | LogsRoutes.ts:73 / src/providers_db.rs:22 |
+| 53 | No status-line counter. The owner's status line does not use claude-mem's. | missing | none | statusline-counts.js:1 / src/main.rs:78 |
+| 54 | Cards arrive a window at a time and can be up to about 10 minutes late. All agents share them by design (decision 39). A resume injects nothing on either side. | accepted_difference | weekly | ClaudeProvider.ts:1315 / src/curate.rs:21 |
+| 55 | No Docker trial image. oboete uses the dogfood user or a scratch home instead. | missing | none | docker/claude-mem/Dockerfile:1 / src/main.rs:69 |
+| 56 | No maker account and no hosted summariser. Decision 37. | accepted_difference | none | cmem-gateway.ts:1 / docs/spec.md:64 |
+| 57 | oboete sends no telemetry. claude-mem's telemetry is on for the owner. | equal_or_better | none | telemetry/consent.ts:43 / docs/spec.md:1135 |
+| 58 | Records are stored before any model runs. A failed window passes through the provider chain, is held, and can be recurated. Spent credit pauses that provider and nothing is lost. | equal_or_better | none | SessionMessageBuffer.ts:23 / src/curate.rs:1552 |
+| 59 | Worktrees share the repository key from the first record, so nothing needs adopting. Cards from an unmerged branch show at once. | equal_or_better | rare | WorktreeAdoption.ts:1 / src/repo.rs:27 |
+| 60 | Masking is on by default with 222 gitleaks rules plus generic credential rules. An off switch exists. claude-mem's masking is off for the owner. | equal_or_better | none | redaction.ts:75 / src/redact.rs:203 |
+| N1 | The import refuses a database above schema v65. The live claude-mem database is v67, so a catch-up import fails today with nothing written. v66 and v67 add only sync columns. The history up to the switch is imported. | partial | blocker | sqlite/connection.ts:19 / src/import.rs:68 |
+| N2 | A newer home is refused before any write. One stamp guards raw, knowledge and providers, and it is raised inside an IMMEDIATE transaction. | equal_or_better | none | sqlite/connection.ts:46 / src/raw.rs:1556 |
+| N3 | save_memory is built and passes the capture gate. A note does not appear in the page's Feed. `metadata` is ignored. | partial | rare | save-memory.ts:5 / src/view.rs:2060 |
+| N4 | mem_search has the same contract: guided and auto modes, cursors, limits and a 15-minute TTL. | equal_or_better | none | progressive-search.ts:126 / src/mem_search.rs:223 |
+| N5 | The native memory-lookup bridge uses the same triggers. It searches words only, with no vectors. The two checks disagree on whether claude-mem's side is any stronger. | partial | weekly | memory-search.ts:122 / src/mem_search.rs:552 |
+| N6 | The same memory-use instructions at session start, with a switch. | equal_or_better | none | memory-instructions.ts:1 / src/mem_search.rs:27 |
+| N7 | A Codex subagent gets its memory back after a compaction. | equal_or_better | none | codex-compaction-gate.ts:1 / src/hook.rs:589 |
+| G01 | work_state_write and work_state_read, shown first at session start, with a 3,000-character cap. Any field name is kept. | equal_or_better | daily | WorkStateRenderer.ts:13 / src/work_state.rs:17 |
+| X1 | Subagent work is not kept out of session start. claude-mem's `MAIN_AGENT_ONLY` is on for the owner, and the owner's DB has about 22k subagent observations. | missing | weekly | ObservationCompiler.ts:92 / src/capture.rs:398 |
+| X2 | Session-start latency was measured once on a copy of the owner's store (#438, 34 ms), a copy whose window ops went unread; it has not been measured on the live store since. The design reads a prepared manifest behind a 1 s limit. | partial | daily (unmeasured) | context-cache.ts:30 / src/hook.rs:25 |
+| X3 | `--resume` injects nothing, for every agent. | equal_or_better | daily | context.ts:137 / src/hook.rs:549 |
+| X4 | Failed tool calls are recorded together with their error. | equal_or_better | daily | adapters/claude-code.ts:12 / src/capture.rs:391 |
+| X5 | Read-only memory tools carry a read-only hint, so they run in plan mode. | equal_or_better | rare | mcp-server.ts:504 / src/mcp.rs:226 |
+| X6 | Memory searches and saved notes are not curated again as new memories. | equal_or_better | daily | memory-retrieval-tools.ts:20 / src/curate.rs:608 |
+| X7 | Raw-text retention by days, after curation, with a page control. Off by default on both sides. | equal_or_better | rare | tool-uses.ts:494 / src/retention.rs:34 |
+| X8 | The feed has a stable newest-first order, and repeated prompts are never merged. | equal_or_better | rare | PaginationHelper.ts:102 / src/view.rs:2110 |
+| X9 | Long prompt cards are not collapsed behind "Show more". The server caps a prompt at 2,000 characters. | partial | rare | viewer-template.html:1152 / src/view.rs:2100 |
+
+The sections after this one are the first comparison, of 2026-10-03 against claude-mem 13.28.0.
+
 ## How it was made
 
 - claude-mem's source at commit 039c6160 (package version 13.28.0, 2026-10-01) was read area by area into an
