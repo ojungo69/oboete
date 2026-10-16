@@ -17,10 +17,10 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 20 |
-| partial | 30 |
-| missing | 19 |
-| accepted_difference | 8 |
+| equal_or_better | 21 |
+| partial | 31 |
+| missing | 18 |
+| accepted_difference | 7 |
 | total | 77 |
 
 ### Open checks before removal
