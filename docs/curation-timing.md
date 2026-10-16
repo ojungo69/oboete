@@ -39,14 +39,16 @@ the provider chain.
 
 ## What changes
 
-A window whose newest hook record ends a turn, a reply (the agent's Stop) or a session's end, goes
-at once instead of after the idle wait: nothing more of that turn is to come. The record must be in
-the window as it was read: a reply appended after the window was read, or past where the window
-stops, waits for the window that holds it, so a turn is not sent in two pieces. A window whose newest
-hook record is anything else (a prompt, a tool call) waits as before, and the idle wait stays the
-fallback for a turn that ends without a reply. A replay of this PC's last 22 days gives about 20
-more calls a day (1-2%), the extra windows being short; the expected lag from a reply to its card
-is one curator call (median 6.8 s) plus any queue.
+A window in which every session's last hook record ends a turn, a reply (the agent's Stop) or a
+session's end, goes at once instead of after the idle wait: nothing more of those turns is to come.
+The record must be in the window as it was read: a reply appended after the window was read, or
+past where the window stops, is the next window's, so a turn is not sent in two pieces. A window
+in which a session's last hook record is anything else (a prompt, a tool call) waits as before,
+as when one session replies while another one, its records in the same window, is still at work;
+the idle wait stays the fallback for a turn that ends without a reply. A replay of this PC's last
+22 days under the first form of this rule (the device's newest hook record) gave about 20 more
+calls a day (1-2%), the extra windows being short; the expected lag from a reply to its card is
+one curator call (median 6.8 s) plus any queue.
 
 ## Not changed, and next
 

@@ -1517,15 +1517,13 @@ pub fn run_phase(
         // Unreadable: taken for the owner at work, so the window waits rather than go out short.
         Err(_) => Some(crate::db::now_ms() + idle),
     };
-    // A turn that ended is curated at once: when the newest hook record is a reply or a session's
-    // end and this window holds it, nothing of that turn is to come, and its cards are ready for
-    // the next prompt instead of after the idle wait, as claude-mem's observer makes them while
-    // the work goes on (docs/curation-timing.md). One appended after the window was read, or past
-    // where the window stops, waits for the window that holds it (Codex on #557).
-    let ended = |raw: &Raw| {
-        let last = raw.last_hook_record().ok().flatten();
-        last.is_some_and(|(seq, kind)| seq <= w.to_seq && matches!(kind.as_str(), "reply" | "end"))
-    };
+    // Turns that ended are curated at once: when every session's last record in this window is
+    // its reply or its end, nothing of the turns it holds is to come, and their cards are ready
+    // for the next prompt instead of after the idle wait, as claude-mem's observer makes them
+    // while the work goes on (docs/curation-timing.md). A reply appended after the window was
+    // read, or past where it stops, is the next window's, and another session's turn going on in
+    // this one keeps it waiting (Codex on #557).
+    let ended = |raw: &Raw| raw.turns_ended(w.from_seq, w.to_seq).unwrap_or(false);
     let now = crate::db::now_ms();
     if !w.full
         && !ended(raw)
@@ -6775,9 +6773,10 @@ mod tests {
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
     }
 
-    /// A window goes at once when the newest hook record ends a turn (its reply, or the session's
-    /// end) and the window holds it, not after the idle wait (docs/curation-timing.md); one a
-    /// later prompt follows still waits, and so does one past where the window stops.
+    /// A window goes at once when every session's last hook record in it ends a turn (its reply,
+    /// or the session's end), not after the idle wait (docs/curation-timing.md); one a later prompt
+    /// follows still waits, so does one past where the window stops, and so does another session's
+    /// turn going on in the same window.
     #[test]
     fn a_window_that_ends_a_turn_goes_at_once() {
         let calls = Cell::new(0);
@@ -6861,6 +6860,35 @@ mod tests {
                 0
             )
         );
+        // Two sessions in one window: one's reply leaves the other's turn going on, which waits;
+        // once that one replies too, the window goes (Codex on #557).
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let other = |e: Event| Event {
+            session: "other".into(),
+            ..at(e)
+        };
+        raw.append(&at(prompt("Build the parser."))).unwrap();
+        raw.append(&other(prompt("Fix the lexer."))).unwrap();
+        raw.append(&other(tool("ok"))).unwrap();
+        raw.append(&at(event("reply", json!({"assistant": "Built."}))))
+            .unwrap();
+        calls.set(0);
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!(
+            (phase, calls.get()),
+            (
+                Phase::Waiting {
+                    until: ts + 600_000,
+                    up: true
+                },
+                0
+            )
+        );
+        raw.append(&other(event("reply", json!({"assistant": "Fixed."}))))
+            .unwrap();
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
+        assert_eq!((phase, calls.get()), (Phase::Covered, 1));
     }
 
     /// D10: a provider's reset is timed from its answer, even after a slow call. The hold's
