@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 22 |
-| partial | 30 |
+| equal_or_better | 24 |
+| partial | 28 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 77 |
@@ -26,7 +26,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 ### Open checks before removal
 
 - claude-mem's history up to the switch is in oboete: 253,413 imported documents of the owner's claude-mem database (its import ops in raw.db, the documents in knowledge.db's `imported`), the newest from 2026-10-15. What claude-mem recorded after that is not; oboete has recorded those sessions itself since the switch.
-- `oboete import claude-mem` refuses the live claude-mem database, which is at schema v67 since 2026-10-16, so a catch-up import fails today (row N1).
+- `oboete import claude-mem` reads the live claude-mem database, at schema v67 since 2026-10-16, again since #556 (row N1).
 - 58,912 imported documents and 32,288 raw records still wait for vectors (doctor, 2026-10-16 15:31Z). The imported ones go down at about 6,000 to 7,500 an hour (92,123 at 10:10Z); raw records come after them (row 5).
 
 ### Table
@@ -93,7 +93,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 58 | Records are stored before any model runs. A failed window passes through the provider chain, is held, and can be recurated. Spent credit pauses that provider and nothing is lost. | equal_or_better | none | SessionMessageBuffer.ts:23 / src/curate.rs:1552 |
 | 59 | Worktrees share the repository key from the first record, so nothing needs adopting. Cards from an unmerged branch show at once. | equal_or_better | rare | WorktreeAdoption.ts:1 / src/repo.rs:27 |
 | 60 | Masking is on by default with 222 gitleaks rules plus generic credential rules. An off switch exists. claude-mem's masking is off for the owner. | equal_or_better | none | redaction.ts:75 / src/redact.rs:203 |
-| N1 | The import refuses a database above schema v65. The live claude-mem database is v67, so a catch-up import fails today with nothing written. v66 and v67 add only sync columns. The history up to the switch is imported. | partial | blocker | sqlite/connection.ts:19 / src/import.rs:68 |
+| N1 | Since #556 the import reads claude-mem's schemas up to v67 (13.40.0); v66 and v67 add only sync columns. The history up to the switch is imported. | equal_or_better | none | sqlite/connection.ts:19 / src/import.rs:68 |
 | N2 | A newer home is refused before any write. One stamp guards raw, knowledge and providers, and it is raised inside an IMMEDIATE transaction. | equal_or_better | none | sqlite/connection.ts:46 / src/raw.rs:1556 |
 | N3 | save_memory is built and passes the capture gate. A note does not appear in the page's Feed. `metadata` is ignored. | partial | rare | save-memory.ts:5 / src/view.rs:2060 |
 | N4 | mem_search has the same contract: guided and auto modes, cursors, limits and a 15-minute TTL. | equal_or_better | none | progressive-search.ts:126 / src/mem_search.rs:223 |

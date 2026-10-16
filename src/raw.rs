@@ -1235,7 +1235,11 @@ impl CaptureExclusions {
             return self.repos.contains(repo);
         }
         let repos: Vec<String> = self.repos.iter().cloned().collect();
+        // Parity row 14: a claude-mem project a pattern names, its name read as a folder's, as
+        // claude-mem names a project by its folder (CodeRabbit on #563).
         crate::embed_phase::import_excluded(repo, &repos)
+            || (repo.strip_prefix("claude-mem:"))
+                .is_some_and(|project| self.pattern_naming(project).is_some())
     }
 }
 
@@ -8129,6 +8133,9 @@ const OP_NAMES: &[&str] = &[
     "kind",
     // An exclusion op's level (slice 4a, #489).
     "level",
+    // A pattern never recorded, as given: a mask's `*` would change what it names (parity row 14,
+    // Codex on #563).
+    "pattern",
     "list",
     "lowered",
     "outcome",
@@ -9602,8 +9609,9 @@ mod tests {
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
     }
 
-    /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, are
-    /// names no rule masks, so an excluded folder keeps matching its events' `cwd` labels.
+    /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, and its
+    /// `pattern` (parity row 14) are names no rule masks, so an excluded folder keeps matching its
+    /// events' `cwd` labels.
     #[test]
     fn an_exclusion_ops_folder_and_level_are_names() {
         let home = tempfile::tempdir().unwrap();
@@ -9615,6 +9623,14 @@ mod tests {
         let rules = crate::redact::Rules::load(home.path()).unwrap();
         let body = serde_json::json!({
             "folder": "/w/acme-482915", "level": "capture", "undo": false, "clock": 1,
+        });
+        assert_eq!(
+            masked_op_text(OpKind::Exclusion, &body.to_string(), &rules),
+            None
+        );
+        // Parity row 14 (Codex on #563): a pattern too, whose `*` a mask would make another one.
+        let body = serde_json::json!({
+            "pattern": "acme-482915-*", "level": "capture", "undo": false, "clock": 1,
         });
         assert_eq!(
             masked_op_text(OpKind::Exclusion, &body.to_string(), &rules),

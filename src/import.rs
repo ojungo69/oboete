@@ -275,13 +275,14 @@ fn exclusions(raw: &mut Raw, db: &Path) -> Result<u64> {
     else {
         return Ok(0);
     };
-    let named = raw.patterns_ever_named()?;
+    let mut named = raw.patterns_ever_named()?;
     let mut added = 0;
     for given in list.split(',') {
         let Ok(pattern) = crate::capture::pattern(given) else {
             continue;
         };
-        if !named.contains(&pattern) {
+        // A pattern the list repeats comes in once (Codex on #563).
+        if named.insert(pattern.clone()) {
             raw.exclude_capture(("pattern", &pattern), false)?;
             added += 1;
         }
@@ -975,6 +976,20 @@ mod tests {
         assert_eq!(ops[0]["source_id"], "w2");
     }
 
+    /// Parity row 14 (CodeRabbit on #563): a pattern that names a claude-mem project keeps the
+    /// project's imported work state out, as a repository never recorded does.
+    #[test]
+    fn a_pattern_keeps_a_projects_imported_work_state_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude_capture(("pattern", "free-*"), false).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!((stats.work_state, stats.never_recorded), (0, 4));
+        assert!(work_ops(&raw).is_empty());
+    }
+
     /// Codex on #489: a repository excluded under a rule that masks part of its name keeps its
     /// claude-mem project's work state out too: the project's name is matched as labelled now.
     #[test]
@@ -1357,7 +1372,7 @@ mod tests {
             0
         );
         let settings = serde_json::json!({
-            "CLAUDE_MEM_EXCLUDED_PROJECTS": "secret-a, ~/private/** ,, secret-b",
+            "CLAUDE_MEM_EXCLUDED_PROJECTS": "secret-a, ~/private/** ,, secret-b, secret-a",
             "CLAUDE_MEM_MODEL": "unrelated",
         });
         std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();

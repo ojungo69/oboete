@@ -221,7 +221,12 @@ pub fn pattern_covers(pattern: &str, cwd: &str) -> bool {
         return false;
     }
     let path = slashed(cwd);
-    let path = path.trim_end_matches('/');
+    // A root keeps its separator: `/`, `C:/` (Codex on #563).
+    let trimmed = path.trim_end_matches('/');
+    let path = match trimmed.is_empty() || trimmed.ends_with(':') {
+        true => &path[..(trimmed.len() + 1).min(path.len())],
+        false => trimmed,
+    };
     let named = |glob: &str, s: &str| {
         globbed(
             &glob.chars().collect::<Vec<_>>(),
@@ -1261,6 +1266,9 @@ mod tests {
             ("/work/**", "/work/a/b", true),
             ("/work/**", "/other", false),
             (r"\work\secret", "/work/secret/", true),
+            ("/", "/", true),
+            ("C:/", "C:/", true),
+            ("/", "/work", false),
             ("  secret ", "/work/secret", true),
             ("", "/work/secret", false),
         ] {
