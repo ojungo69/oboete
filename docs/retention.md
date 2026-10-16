@@ -263,10 +263,12 @@ expired (an expired row no tombstone hides), or it is gone (forgotten, masked ov
   forever. A value out of range, or not a whole number of days, makes the table wrong: no new
   batch is taken (owed rows still finish) and doctor says so (`config::retention`). The hooks
   ignore the table (`CaptureConfig`), so a wrong one never stops capture.
-- The worker looks at most once a week (decision 49: each batch builds knowledge.db again), where
-  it looks for a forget left unfinished (`forget::continue_due`), and every 10 minutes while rows
-  are owed: it starts `oboete forget --continue`, which runs the pass after forget's own work,
-  under the same purge lock and the worker lock (the resident worker steps aside, as for a purge).
+- From its round, at most once in ten minutes, the worker checks whether `oboete forget
+  --continue` has work (`forget::continue_due`): a forget left unfinished, a batch owed, or a look
+  for a new batch due. A look is due once a week (decision 49: each batch builds knowledge.db
+  again); a batch owed is finished at the next check. `oboete forget --continue` runs the pass
+  after forget's own work, under the same purge lock and the worker lock (the resident worker
+  steps aside, as for a purge).
 
 ## What it does not remove
 
