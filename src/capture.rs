@@ -203,10 +203,13 @@ pub fn never_recorded(
 /// Parity row 14: whether claude-mem's exclusion `pattern` names the working folder `cwd`, as its
 /// `project-filter.ts` reads one: `*` is any run of characters within one part of a path, `**`
 /// any run across parts, `?` one character within a part, a leading `~` the home folder, and `\`
-/// reads as `/`; it names the whole path or its last part, and `dir/**` names `dir` too. A pattern
-/// with no `/` also names every folder inside one it names, where claude-mem reads the last part
-/// alone: a session started below an excluded project is not recorded either. Letter case is
-/// ignored where the platform ignores it, as for a folder (`raw::folded`).
+/// reads as `/`; it names the whole path or, for a pattern that does not start at a root (`/`,
+/// `C:/`), the end of one in whole parts: `work/secret` names `/home/u/work/secret` and
+/// `secret/**` names `/work/secret/src`, where claude-mem tries the last part alone, which no
+/// pattern with a `/` names (Codex on #563). `dir/**` names `dir` too. A pattern with no `/`
+/// also names every folder inside one it names, where claude-mem reads the last part alone: a
+/// session started below an excluded project is not recorded either. Letter case is ignored
+/// where the platform ignores it, as for a folder (`raw::folded`).
 pub fn pattern_covers(pattern: &str, cwd: &str) -> bool {
     let slashed = |s: &str| crate::raw::folded(&s.replace('\\', "/")).into_owned();
     let home = slashed(&crate::config::home_dir().to_string_lossy());
@@ -222,15 +225,16 @@ pub fn pattern_covers(pattern: &str, cwd: &str) -> bool {
             &s.chars().collect::<Vec<_>>(),
         )
     };
-    named(&pattern, path)
-        || path
-            .rsplit('/')
-            .next()
-            .is_some_and(|last| named(&pattern, last))
+    // No check of the last part alone: the end of the path holds it, and a pattern from a root
+    // holds a `/` that no part holds.
+    let rooted = matches!(
+        pattern.as_bytes(),
+        [b'/', ..] | [b'A'..=b'Z' | b'a'..=b'z', b':', b'/', ..]
+    );
+    let ends = |glob: &str| named(glob, path) || (!rooted && named(&format!("**/{glob}"), path));
+    ends(&pattern)
         || (!pattern.contains('/') && path.split('/').any(|part| named(&pattern, part)))
-        || pattern
-            .strip_suffix("/**")
-            .is_some_and(|dir| named(dir, path))
+        || pattern.strip_suffix("/**").is_some_and(ends)
 }
 
 /// `path` without trailing separators, but a root keeps its one: `/`, `C:/` (Codex on #563).
@@ -1286,6 +1290,21 @@ mod tests {
             ("C:/", "C:/work", false),
             ("  secret ", "/work/secret", true),
             ("", "/work/secret", false),
+            // A pattern that does not start at a root names the end of a path (Codex on #563).
+            ("secret/**", "/work/secret", true),
+            ("secret/**", "/work/secret/src", true),
+            ("secret/**", "/work/secrets", false),
+            ("a/b/**", "/x/a/b", true),
+            ("a/b/**", "/x/a/b/c", true),
+            ("a/b", "/x/a/b", true),
+            ("a/b", "/x/a/b/c", false),
+            ("a/b", "/xa/b", false),
+            ("*/private", "/work/a/private", true),
+            ("/a/b", "/x/a/b", false),
+            ("C:/a/b", "/x/C:/a/b", false),
+            ("/server/share", "//server/share", false),
+            ("/**", "C:/", false),
+            ("/**", "C:/work", false),
         ] {
             assert_eq!(pattern_covers(pattern, cwd), named, "{pattern:?} {cwd}");
         }

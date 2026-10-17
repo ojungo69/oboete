@@ -124,8 +124,11 @@ patterns", as `oboete capture exclude --pattern` adds one, and taken back from i
 selector, a hash of the pattern as stored. It is read as claude-mem's `project-filter.ts` reads
 one (`capture::pattern_covers`): `*` is any run of characters within one part of a path, `**` any
 run across parts, `?` one character within a part, a leading `~` the home folder, and `\` reads
-as `/`; it names a working folder when it matches the whole path or its last part, and `dir/**`
-names `dir` too. A pattern with no `/` also names every folder inside one it names, where
+as `/`; it names a working folder when it matches the whole path or, for a pattern that does not
+start at a root (`/`, `C:/`, or `~` once expanded), the end of one in whole parts: `work/secret`
+names `/home/u/work/secret` and `secret/**` names `/work/secret/src`, where claude-mem tries the
+last part alone, which no pattern with a `/` names (Codex on #563). `dir/**` names `dir` too. A
+pattern with no `/` also names every folder inside one it names, where
 claude-mem reads the last part alone, so a session started below an excluded project is not
 recorded either; letter case is ignored where the platform ignores it, as for a folder. Each event
 is checked by its working folder as read and as labelled, against the patterns as given and as the
