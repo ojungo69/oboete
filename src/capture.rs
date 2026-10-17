@@ -209,24 +209,13 @@ pub fn never_recorded(
 /// ignored where the platform ignores it, as for a folder (`raw::folded`).
 pub fn pattern_covers(pattern: &str, cwd: &str) -> bool {
     let slashed = |s: &str| crate::raw::folded(&s.replace('\\', "/")).into_owned();
-    let pattern = slashed(pattern.trim());
-    let pattern = match pattern.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            let home = slashed(&crate::config::home_dir().to_string_lossy());
-            format!("{}{rest}", home.trim_end_matches('/'))
-        }
-        _ => pattern,
-    };
+    let home = slashed(&crate::config::home_dir().to_string_lossy());
+    let pattern = expanded(slashed(pattern.trim()), &home);
     if pattern.is_empty() {
         return false;
     }
     let path = slashed(cwd);
-    // A root keeps its separator: `/`, `C:/` (Codex on #563).
-    let trimmed = path.trim_end_matches('/');
-    let path = match trimmed.is_empty() || trimmed.ends_with(':') {
-        true => &path[..(trimmed.len() + 1).min(path.len())],
-        false => trimmed,
-    };
+    let path = unslashed(&path);
     let named = |glob: &str, s: &str| {
         globbed(
             &glob.chars().collect::<Vec<_>>(),
@@ -242,6 +231,25 @@ pub fn pattern_covers(pattern: &str, cwd: &str) -> bool {
         || pattern
             .strip_suffix("/**")
             .is_some_and(|dir| named(dir, path))
+}
+
+/// `path` without trailing separators, but a root keeps its one: `/`, `C:/` (Codex on #563).
+fn unslashed(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.is_empty() || trimmed.ends_with(':') {
+        true => &path[..(trimmed.len() + 1).min(path.len())],
+        false => trimmed,
+    }
+}
+
+/// A leading `~` of `pattern` as claude-mem expands it, `home` written with `/`: a home that is a
+/// root keeps its separator, so `~` names that root alone (Codex on #563).
+fn expanded(pattern: String, home: &str) -> String {
+    match pattern.strip_prefix('~') {
+        Some("") => unslashed(home).to_owned(),
+        Some(rest) if rest.starts_with('/') => format!("{}{rest}", home.trim_end_matches('/')),
+        _ => pattern,
+    }
 }
 
 /// `s` as `glob` matches it whole, as claude-mem's glob becomes a regular expression: `**` any
@@ -1275,6 +1283,7 @@ mod tests {
             ("/", "/", true),
             ("C:/", "C:/", true),
             ("/", "/work", false),
+            ("C:/", "C:/work", false),
             ("  secret ", "/work/secret", true),
             ("", "/work/secret", false),
         ] {
@@ -1287,6 +1296,17 @@ mod tests {
         assert!(pattern_covers("~/secret", &format!("{home}/secret")));
         assert!(pattern_covers("~/**", &format!("{home}/a/b")));
         assert!(!pattern_covers("~/secret", "/elsewhere/secret"));
+        // A home that is a root: `~` names that root alone (Codex on #563).
+        for (pattern, home, want) in [
+            ("~", "/", "/"),
+            ("~", "C:/", "C:/"),
+            ("~", "/home/u/", "/home/u"),
+            ("~/x", "/", "/x"),
+            ("~/x", "C:/", "C:/x"),
+            ("~x", "/home/u", "~x"),
+        ] {
+            assert_eq!(expanded(pattern.into(), home), want, "{pattern} {home}");
+        }
         assert!(pattern("  a b ").is_ok_and(|p| p == "a b"));
         assert!(pattern(" ").is_err() && pattern("a\nb").is_err());
         assert!(pattern(&"a".repeat(256)).is_ok() && pattern(&"a".repeat(257)).is_err());
