@@ -9,7 +9,7 @@ accepted by the owner.
 
 ### How it was checked
 
-Every row of this table was read again against claude-mem 13.40.0 source and against oboete `main` at 576cb79. The 13.29 to 13.40 changelog was read for new features. A feature that extends a row was merged into that row. A feature with no row got a new id (`G01`, `X1` to `X9`). A second reader re-checked each status and tried to refute it. Where that reader corrected the first reading, the corrected status is used. Where two readers disagreed, the table says so in the row. Rows were checked on the owner's single WSL PC. Only counts of the owner's data are given here. Decision 50 (2026-10-17) is the rule: claude-mem comes off only once oboete stands in for its functions almost completely. So an accepted difference that is worse still counts against removal.
+Every row of this table was read again against claude-mem 13.40.0 source and against oboete `main` at 576cb79. The rows that #557 to #564 changed were brought up to date by those PRs, and the counts, the open checks and rows 5 and X2 on 2026-10-17 with `main` at ec084a1. The 13.29 to 13.40 changelog was read for new features. A feature that extends a row was merged into that row. A feature with no row got a new id (`G01`, `X1` to `X9`). A second reader re-checked each status and tried to refute it. Where that reader corrected the first reading, the corrected status is used. Where two readers disagreed, the table says so in the row. Rows were checked on the owner's single WSL PC. Only counts of the owner's data are given here. Decision 50 (2026-10-17) is the rule: claude-mem comes off only once oboete stands in for its functions almost completely. So an accepted difference that is worse still counts against removal.
 
 Impact means how often the owner would notice the difference: `daily`, `weekly`, `rare` or `none`. `blocker` means a one-time step that removal depends on.
 
@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 24 |
-| partial | 28 |
+| equal_or_better | 25 |
+| partial | 27 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 77 |
@@ -27,7 +27,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 - claude-mem's history up to the switch is in oboete: 253,413 imported documents of the owner's claude-mem database (its import ops in raw.db, the documents in knowledge.db's `imported`), the newest from 2026-10-15. What claude-mem recorded after that is not; oboete has recorded those sessions itself since the switch.
 - `oboete import claude-mem` reads the live claude-mem database, at schema v67 since 2026-10-16, again since #556 (row N1).
-- 58,912 imported documents and 32,288 raw records still wait for vectors (doctor, 2026-10-16 15:31Z). The imported ones go down at about 6,000 to 7,500 an hour (92,123 at 10:10Z); raw records come after them (row 5).
+- 1,042 imported documents and 32,406 raw records still wait for vectors (doctor, 2026-10-17 03:18Z). The imported ones are nearly all done (58,912 on 2026-10-16 15:31Z); raw records come after them (row 5).
+- claude-mem's exclusion patterns are in oboete since 2026-10-17 (row 14): all 9 of the owner's, none of which names a folder oboete has recorded.
 
 ### Table
 
@@ -37,7 +38,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 2 | oboete has no stop, restart or status command. It does not replace a hung worker that holds the lock. A hung worker stops curation and the page with no notice. claude-mem reclaims a wedged worker using a heartbeat. | partial | rare | worker-service.ts:1533 / docs/resident.md:342 |
 | 3 | claude-mem deletes a card or a session from the page. oboete forgets from the CLI only, and its forget is broader (preview, repo or time range, backups purged). The page has no forget route. | partial | rare | DataRoutes.ts:212 / src/view.rs:1100 |
 | 4 | The settings page does more than claude-mem's single-provider dialog. It covers the provider chain, connection test, write-only keys, the spending cap, embeddings, redaction, exclusions, retention, agents and a first-run guide. A stale save is refused with 409. Nobody has re-checked how easy it is on the real screen since #512 and #536. | equal_or_better | none | ContextSettingsModal.tsx:358 / src/view.rs:1491 |
-| 5 | Meaning search is on, with local bge-m3. 58,912 imported documents (22%) and 32,288 raw records still have no vectors; the imported ones go down at about 6,000 to 7,500 an hour, and raw records wait behind them (new claims and cards go first). With an empty queue, a prompt-time query embedding may also have no loaded model. oboete has no 90-day recency cut, which claude-mem applies by default. | partial | weekly | SearchOrchestrator.ts:137 / src/embed_phase.rs:1357 |
+| 5 | Meaning search is on, with local bge-m3. 1,042 imported documents (0.4%) and 32,406 raw records still have no vectors (2026-10-17 03:18Z), and raw records wait behind the imported ones (new claims and cards go first). With an empty queue, a prompt-time query embedding may also have no loaded model. oboete has no 90-day recency cut, which claude-mem applies by default. | partial | weekly | SearchOrchestrator.ts:137 / src/embed_phase.rs:1357 |
 | 6 | The legacy search has no `offset` and no `platformSource` (per-agent) filter. It has no file or concept filter either. `get` and `timeline` have no total byte cap, while claude-mem caps every tool reply at 32 KiB. Bad dates are refused. | partial | rare | mcp-server.ts:613 / src/mcp.rs:36 |
 | 7 | Trigram OR ranking plus a short-word boost. All-words matching is left out by decision 37. Measured nDCG@10 is 0.545 against 0.244. | accepted_difference | none | SessionSearch.ts:575 / src/search.rs:92 |
 | 8 | The file note is built for Claude Code, Codex and Grok, with the same rules. It is built from oboete cards only. The import does not read `files_read` or `files_modified`, so imported history never produces a note. | partial | weekly | file-context.ts:23 / src/import.rs:140 |
@@ -102,7 +103,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | N7 | A Codex subagent gets its memory back after a compaction. | equal_or_better | none | codex-compaction-gate.ts:1 / src/hook.rs:589 |
 | G01 | work_state_write and work_state_read, shown first at session start, with a 3,000-character cap. Any field name is kept. | equal_or_better | daily | WorkStateRenderer.ts:13 / src/work_state.rs:17 |
 | X1 | Since 2026-10-17 session start leaves out the cards of a window that is a subagent's work alone (docs/cards.md S4), as claude-mem's `MAIN_AGENT_ONLY` (on by default) leaves out subagent rows. claude-mem judges each tool call; oboete judges a window, so a window that mixes the main agent's records with a subagent's keeps its cards. In this PC's week to 2026-10-17 that is 1,117 of 1,830 cards. Cards kept before the change are marked by the worker at its first step after it. There is no switch to show them. | partial | rare | ObservationCompiler.ts:92 / src/cards.rs:432 |
-| X2 | Session-start latency was measured once on a copy of the owner's store (#438, 34 ms), a copy whose window ops went unread; it has not been measured on the live store since. The design reads a prepared manifest behind a 1 s limit. | partial | daily (unmeasured) | context-cache.ts:30 / src/hook.rs:25 |
+| X2 | Session start on the live store (raw.db about 4 GB), as Claude Code timed both hooks in the 10 session starts from the switch to 2026-10-17: oboete's hook took a median of 135 ms (186 ms at a startup, 82 ms after a compaction, 442 ms at most), claude-mem's context hook 305 ms in the same sessions (540 ms and 287 ms, 725 ms at most). `oboete inject` in this repository took 74 to 147 ms (median 75 ms, 10 runs, 2026-10-17). The design reads a prepared manifest behind a 1 s limit. | equal_or_better | daily | context-cache.ts:30 / src/hook.rs:25 |
 | X3 | `--resume` injects nothing, for every agent. | equal_or_better | daily | context.ts:137 / src/hook.rs:549 |
 | X4 | Failed tool calls are recorded together with their error. | equal_or_better | daily | adapters/claude-code.ts:12 / src/capture.rs:391 |
 | X5 | Read-only memory tools carry a read-only hint, so they run in plan mode. | equal_or_better | rare | mcp-server.ts:504 / src/mcp.rs:226 |
