@@ -69,6 +69,21 @@ I7. **Size.** The owner's database of 2026-09-24 (178,370 documents) made raw.db
 knowledge.db 864 MB in an evaluation home (docs/milestone-4.md); their vectors add about 930 MB,
 from the local model on this PC and from Workers AI on the iMac (decision 35's estimate).
 
+I8. **Exclusions (parity row 14).** claude-mem's exclusion patterns, the comma-separated
+`CLAUDE_MEM_EXCLUDED_PROJECTS` of the `settings.json` beside its database, come in as patterns never
+recorded (docs/settings-privacy.md, Never record), before any row, each one only if no exclusion op
+ever named it: one taken back on the page or with `--undo` is not added again by a later import. A
+database with no settings beside it, or settings without the key (or with it `null`), imports as
+before. The file is read as claude-mem reads it (`settings-document.ts`): a leading BOM skipped, and
+the keys under `env` when that holds claude-mem's keys. A file that is there but cannot be read, is
+not a JSON object, or holds the key as anything but one string stops the import before any write,
+since the folders its patterns name would be recorded; the error names the file, its line and column
+at most (Codex on #563). The import's line counts the patterns it adds (`exclusions`). An empty
+entry is none, as claude-mem reads the list; a pattern oboete refuses (over 256 bytes, or with a
+control character) is not brought over, and since the folders it names are then recorded, the line
+counts it (`exclusions_refused`) and a warning on standard error says so by its count alone, to add
+a shorter form with `oboete capture exclude --pattern`.
+
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,

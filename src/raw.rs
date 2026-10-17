@@ -1179,19 +1179,28 @@ pub(crate) fn capture_exclusions_in(conn: &Connection) -> Result<CaptureExclusio
 }
 
 /// Slice 4a (spec 6.1): what is never recorded, as every device's exclusion ops of level `capture`
-/// leave it: repositories by their label (`repo`), this device's folders by their `cwd` label.
+/// leave it: repositories by their label (`repo`), this device's folders by their `cwd` label,
+/// and folders named by claude-mem's patterns (`pattern`, parity row 14).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CaptureExclusions {
     pub repos: std::collections::BTreeSet<String>,
     pub folders: std::collections::BTreeSet<String>,
+    pub patterns: std::collections::BTreeSet<String>,
 }
 
 impl CaptureExclusions {
-    /// Whether an event labelled `repo` and `cwd` is never recorded: its repository listed, or its
-    /// working directory in a listed folder, component by component.
+    /// Whether an event labelled `repo` and `cwd` is never recorded: its repository listed, its
+    /// working directory in a listed folder, component by component, or named by a pattern.
     pub fn covers(&self, repo: Option<&str>, cwd: Option<&str>) -> bool {
         repo.is_some_and(|r| self.repos.contains(r))
-            || cwd.is_some_and(|c| self.folder_around(c).is_some())
+            || cwd.is_some_and(|c| {
+                self.folder_around(c).is_some() || self.pattern_naming(c).is_some()
+            })
+    }
+
+    /// Parity row 14: the listed pattern that names `cwd` (`capture::pattern_covers`).
+    pub fn pattern_naming(&self, cwd: &str) -> Option<&String> {
+        (self.patterns.iter()).find(|p| crate::capture::pattern_covers(p, cwd))
     }
 
     /// The listed folder that `cwd` lies in, component by component, `cwd` itself included.
@@ -1226,7 +1235,11 @@ impl CaptureExclusions {
             return self.repos.contains(repo);
         }
         let repos: Vec<String> = self.repos.iter().cloned().collect();
+        // Parity row 14: a claude-mem project a pattern names, its name read as a folder's, as
+        // claude-mem names a project by its folder (CodeRabbit on #563).
         crate::embed_phase::import_excluded(repo, &repos)
+            || (repo.strip_prefix("claude-mem:"))
+                .is_some_and(|project| self.pattern_naming(project).is_some())
     }
 }
 
@@ -1307,10 +1320,12 @@ fn exclusion_sets(
             v["level"].as_str(),
             v["repo"].as_str(),
             v["folder"].as_str(),
+            v["pattern"].as_str(),
         ) {
-            (None, Some(repo), _) => (&mut sent, repo),
-            (Some("capture"), Some(repo), _) => (&mut never.repos, repo),
-            (Some("capture"), None, Some(folder)) => (&mut never.folders, folder),
+            (None, Some(repo), ..) => (&mut sent, repo),
+            (Some("capture"), Some(repo), ..) => (&mut never.repos, repo),
+            (Some("capture"), None, Some(folder), _) => (&mut never.folders, folder),
+            (Some("capture"), None, None, Some(pattern)) => (&mut never.patterns, pattern),
             _ => continue,
         };
         if v["undo"] == true {
@@ -5570,9 +5585,20 @@ impl Raw {
         self.exclusion(serde_json::json!({ "repo": repo, "undo": undo }))
     }
 
+    /// Parity row 14: every pattern an exclusion op ever named, taken back or not.
+    pub fn patterns_ever_named(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT json_extract(body, '$.pattern') FROM ops
+             WHERE type = 'exclusion' AND json_extract(body, '$.pattern') IS NOT NULL",
+        )?;
+        let named = st.query_map([], |r| r.get(0))?;
+        Ok(named.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Slice 4a (spec 6.1): an exclusion op of level `capture`, or its undo, as `exclude` appends
     /// one: `("repo", label)` stops every device recording that repository, and sending it;
-    /// `("folder", cwd label)` stops this device recording under that folder.
+    /// `("folder", cwd label)` stops this device recording under that folder; `("pattern", given)`
+    /// stops recording in the folders it names (parity row 14).
     pub fn exclude_capture(&mut self, (key, value): (&str, &str), undo: bool) -> Result<i64> {
         let mut op = serde_json::json!({ "undo": undo, "level": "capture" });
         op[key] = value.into();
@@ -8107,6 +8133,9 @@ const OP_NAMES: &[&str] = &[
     "kind",
     // An exclusion op's level (slice 4a, #489).
     "level",
+    // A pattern never recorded, as given: a mask's `*` would change what it names (parity row 14,
+    // Codex on #563).
+    "pattern",
     "list",
     "lowered",
     "outcome",
@@ -9580,8 +9609,9 @@ mod tests {
         assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
     }
 
-    /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, are
-    /// names no rule masks, so an excluded folder keeps matching its events' `cwd` labels.
+    /// Slice 3e-4 (CodeRabbit on #487): an exclusion op's `folder` and `level`, slice 4a's, and its
+    /// `pattern` (parity row 14) are names no rule masks, so an excluded folder keeps matching its
+    /// events' `cwd` labels.
     #[test]
     fn an_exclusion_ops_folder_and_level_are_names() {
         let home = tempfile::tempdir().unwrap();
@@ -9593,6 +9623,14 @@ mod tests {
         let rules = crate::redact::Rules::load(home.path()).unwrap();
         let body = serde_json::json!({
             "folder": "/w/acme-482915", "level": "capture", "undo": false, "clock": 1,
+        });
+        assert_eq!(
+            masked_op_text(OpKind::Exclusion, &body.to_string(), &rules),
+            None
+        );
+        // Parity row 14 (Codex on #563): a pattern too, whose `*` a mask would make another one.
+        let body = serde_json::json!({
+            "pattern": "acme-482915-*", "level": "capture", "undo": false, "clock": 1,
         });
         assert_eq!(
             masked_op_text(OpKind::Exclusion, &body.to_string(), &rules),
@@ -9716,6 +9754,39 @@ mod tests {
         assert_eq!(
             list.covers(None, Some(event)),
             cfg!(any(windows, target_os = "macos"))
+        );
+    }
+
+    /// Parity row 14: an event in a folder a pattern names is refused by an append, and a pattern
+    /// taken back records it again; every pattern ever named is known, taken back or not.
+    #[test]
+    fn a_pattern_keeps_the_folders_it_names_from_every_append() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let at = |cwd: &str| Event {
+            repo: Some("github.com/o/open".into()),
+            cwd: Some(cwd.into()),
+            ..test_event("canary-14")
+        };
+        raw.exclude_capture(("pattern", "secret-*"), false).unwrap();
+        for cwd in ["/w/secret-a", "/w/secret-a/src"] {
+            assert_eq!(raw.append_with_ledger(&at(cwd), &[], "").unwrap(), None);
+        }
+        assert!(
+            raw.append_with_ledger(&at("/w/open"), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        raw.exclude_capture(("pattern", "secret-*"), true).unwrap();
+        assert!(
+            raw.append_with_ledger(&at("/w/secret-a"), &[], "")
+                .unwrap()
+                .is_some()
+        );
+        assert!(raw.capture_exclusions().unwrap().patterns.is_empty());
+        assert_eq!(
+            Vec::from_iter(raw.patterns_ever_named().unwrap()),
+            ["secret-*"]
         );
     }
 

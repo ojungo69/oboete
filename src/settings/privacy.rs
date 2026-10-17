@@ -18,6 +18,8 @@ struct PrivacyState {
     repositories: Vec<Repository>,
     /// Slice 4b: this device's folders never recorded (spec 6.1).
     folders: Vec<Folder>,
+    /// Parity row 14: the folder names and claude-mem patterns never recorded.
+    patterns: Vec<Folder>,
     rescan: RescanState,
 }
 
@@ -68,6 +70,11 @@ fn folder_selector(label: &str) -> String {
     hashed(b"oboete:privacy-folder:v1", label)
 }
 
+/// Parity row 14: a pattern never recorded, as the page names it back.
+fn pattern_selector(label: &str) -> String {
+    hashed(b"oboete:privacy-pattern:v1", label)
+}
+
 fn hashed(domain: &[u8], label: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(domain);
@@ -88,6 +95,7 @@ pub fn show(home: &Path) -> Value {
         available: false,
         repositories: Vec::new(),
         folders: Vec::new(),
+        patterns: Vec::new(),
         rescan: RescanState {
             state: RescanPhase::Unavailable,
             processed: None,
@@ -103,6 +111,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
             available: true,
             repositories: Vec::new(),
             folders: Vec::new(),
+            patterns: Vec::new(),
             rescan: RescanState {
                 state: RescanPhase::Empty,
                 processed: Some(0),
@@ -182,10 +191,19 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
             label: crate::redact::outbound_with(label, &settings.rules),
         })
         .collect();
+    let patterns = never
+        .patterns
+        .iter()
+        .map(|label| Folder {
+            selector: pattern_selector(label),
+            label: crate::redact::outbound_with(label, &settings.rules),
+        })
+        .collect();
     Ok(PrivacyState {
         available: true,
         repositories,
         folders,
+        patterns,
         rescan,
     })
 }
@@ -427,7 +445,9 @@ fn listed_repository(
 }
 
 /// Slice 4b's request: a listed repository by its `selector`, a folder to stop recording in by its
-/// absolute path, or a listed folder by its `folder_selector` to record in again.
+/// absolute path, or a listed folder by its `folder_selector` to record in again; a folder name or
+/// claude-mem pattern (`pattern`) to stop recording by, or a listed one by its `pattern_selector`
+/// to record by again (parity row 14).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Capture {
@@ -437,6 +457,10 @@ struct Capture {
     folder: Option<String>,
     #[serde(default)]
     folder_selector: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    pattern_selector: Option<String>,
     undo: bool,
 }
 
@@ -450,89 +474,131 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (key, label, row, mut writer, answer) =
-        match (posted.selector, posted.folder, posted.folder_selector) {
-            (Some(wanted), None, None) => {
-                if !is_selector(&wanted) {
-                    return Err(refused(422, "privacy_selector", "selector"));
-                }
-                let (raw, row, history) = listed_repository(home, &wanted)?;
-                // Stored as its records name it, the one name the page has for it (owner,
-                // 2026-10-13: what is never recorded is stored as given); an undo takes back the
-                // entry stored for it, as the CLI's does (Codex on #491), or the one its row
-                // stands for (`rows`), and never another repository's entry that only reads as it
-                // now (Codex Security Review and Codex on #491).
-                let label = if posted.undo {
-                    let settings =
-                        crate::capture::Settings::load(home).map_err(|_| unavailable())?;
-                    let stored = crate::raw::capture_exclusions_in(&raw.conn)
-                        .map_err(|_| unavailable())?
-                        .repos;
-                    match crate::capture::undone("repo", &row, &stored, &settings) {
-                        Ok(entry) => entry,
-                        Err(e) => match e
-                            .downcast_ref::<crate::capture::ReadAlike>()
-                            .map(|alike| alike.entries.as_slice())
-                        {
-                            Some([entry]) if stands_for(&history, &settings, &row, entry) => {
-                                entry.clone()
-                            }
-                            Some([_]) => return Err(refused(409, "never_other", "selector")),
-                            _ => return Err(refused(409, "never_ambiguous", "selector")),
-                        },
-                    }
-                } else {
-                    row.clone()
-                };
-                let writer = raw.into_writer(home).map_err(|_| unavailable())?;
-                ("repo", label, row, writer, json!({ "selector": wanted }))
+    let (key, label, row, mut writer, answer) = match (
+        posted.selector,
+        posted.folder,
+        posted.folder_selector,
+        posted.pattern,
+        posted.pattern_selector,
+    ) {
+        (Some(wanted), None, None, None, None) => {
+            if !is_selector(&wanted) {
+                return Err(refused(422, "privacy_selector", "selector"));
             }
-            (None, Some(folder), None) if !posted.undo => {
-                if folder.len() > 4096 || folder.contains('\0') || !Path::new(&folder).is_absolute()
-                {
-                    return Err(refused(422, "capture_folder", "folder"));
+            let (raw, row, history) = listed_repository(home, &wanted)?;
+            // Stored as its records name it, the one name the page has for it (owner,
+            // 2026-10-13: what is never recorded is stored as given); an undo takes back the
+            // entry stored for it, as the CLI's does (Codex on #491), or the one its row
+            // stands for (`rows`), and never another repository's entry that only reads as it
+            // now (Codex Security Review and Codex on #491).
+            let label = if posted.undo {
+                let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
+                let stored = crate::raw::capture_exclusions_in(&raw.conn)
+                    .map_err(|_| unavailable())?
+                    .repos;
+                match crate::capture::undone("repo", &row, &stored, &settings) {
+                    Ok(entry) => entry,
+                    Err(e) => match e
+                        .downcast_ref::<crate::capture::ReadAlike>()
+                        .map(|alike| alike.entries.as_slice())
+                    {
+                        Some([entry]) if stands_for(&history, &settings, &row, entry) => {
+                            entry.clone()
+                        }
+                        Some([_]) => return Err(refused(409, "never_other", "selector")),
+                        _ => return Err(refused(409, "never_ambiguous", "selector")),
+                    },
                 }
-                // As the CLI stores it: as given, `.` and `..` by name (slice 4a's `folder_path`;
-                // owner 2026-10-13: what is never recorded is stored as given), and as the entry
-                // already stored for it in another spelling of letter case where that is one
-                // folder (Codex on #489).
-                let given = crate::capture::folder_path(&folder);
-                let writer = crate::raw::open(home).map_err(|_| unavailable())?;
-                let stored = writer
-                    .capture_exclusions()
-                    .map_err(|_| unavailable())?
-                    .folders;
-                let label = crate::capture::stored_entry("cwd", &given, &stored)
-                    .cloned()
-                    .unwrap_or(given);
-                let answer = json!({ "folder_selector": folder_selector(&label) });
-                ("folder", label.clone(), label, writer, answer)
+            } else {
+                row.clone()
+            };
+            let writer = raw.into_writer(home).map_err(|_| unavailable())?;
+            ("repo", label, row, writer, json!({ "selector": wanted }))
+        }
+        (None, Some(folder), None, None, None) if !posted.undo => {
+            if folder.len() > 4096 || folder.contains('\0') || !Path::new(&folder).is_absolute() {
+                return Err(refused(422, "capture_folder", "folder"));
             }
-            (None, None, Some(wanted)) if posted.undo => {
-                if !is_selector(&wanted) {
-                    return Err(refused(422, "privacy_selector", "folder_selector"));
-                }
-                let raw = crate::raw::read_only(home)
-                    .map_err(|_| unavailable())?
-                    .ok_or_else(|| refused(404, "folder_not_found", "folder_selector"))?;
-                let folders = crate::raw::capture_exclusions_in(&raw.conn)
-                    .map_err(|_| unavailable())?
-                    .folders;
-                let label = folders
-                    .into_iter()
-                    .find(|f| folder_selector(f) == wanted)
-                    .ok_or_else(|| refused(404, "folder_not_found", "folder_selector"))?;
-                let writer = raw.into_writer(home).map_err(|_| unavailable())?;
-                (
-                    "folder",
-                    label.clone(),
-                    label,
-                    writer,
-                    json!({ "folder_selector": wanted }),
-                )
+            // As the CLI stores it: as given, `.` and `..` by name (slice 4a's `folder_path`;
+            // owner 2026-10-13: what is never recorded is stored as given), and as the entry
+            // already stored for it in another spelling of letter case where that is one
+            // folder (Codex on #489).
+            let given = crate::capture::folder_path(&folder);
+            let writer = crate::raw::open(home).map_err(|_| unavailable())?;
+            let stored = writer
+                .capture_exclusions()
+                .map_err(|_| unavailable())?
+                .folders;
+            let label = crate::capture::stored_entry("cwd", &given, &stored)
+                .cloned()
+                .unwrap_or(given);
+            let answer = json!({ "folder_selector": folder_selector(&label) });
+            ("folder", label.clone(), label, writer, answer)
+        }
+        (None, None, Some(wanted), None, None) if posted.undo => {
+            if !is_selector(&wanted) {
+                return Err(refused(422, "privacy_selector", "folder_selector"));
             }
-            _ => return Err(refused(400, "bad_request", "")),
-        };
+            let raw = crate::raw::read_only(home)
+                .map_err(|_| unavailable())?
+                .ok_or_else(|| refused(404, "folder_not_found", "folder_selector"))?;
+            let folders = crate::raw::capture_exclusions_in(&raw.conn)
+                .map_err(|_| unavailable())?
+                .folders;
+            let label = folders
+                .into_iter()
+                .find(|f| folder_selector(f) == wanted)
+                .ok_or_else(|| refused(404, "folder_not_found", "folder_selector"))?;
+            let writer = raw.into_writer(home).map_err(|_| unavailable())?;
+            (
+                "folder",
+                label.clone(),
+                label,
+                writer,
+                json!({ "folder_selector": wanted }),
+            )
+        }
+        // Parity row 14: as the CLI stores one (`capture::pattern`), and as the entry already
+        // stored for it in another spelling of letter case where the platform ignores it.
+        (None, None, None, Some(pattern), None) if !posted.undo => {
+            let given = crate::capture::pattern(&pattern)
+                .map_err(|_| refused(422, "capture_pattern", "pattern"))?;
+            let writer = crate::raw::open(home).map_err(|_| unavailable())?;
+            let stored = writer
+                .capture_exclusions()
+                .map_err(|_| unavailable())?
+                .patterns;
+            let label = crate::capture::stored_entry("cwd", &given, &stored)
+                .cloned()
+                .unwrap_or(given);
+            let answer = json!({ "pattern_selector": pattern_selector(&label) });
+            ("pattern", label.clone(), label, writer, answer)
+        }
+        (None, None, None, None, Some(wanted)) if posted.undo => {
+            if !is_selector(&wanted) {
+                return Err(refused(422, "privacy_selector", "pattern_selector"));
+            }
+            let raw = crate::raw::read_only(home)
+                .map_err(|_| unavailable())?
+                .ok_or_else(|| refused(404, "pattern_not_found", "pattern_selector"))?;
+            let patterns = crate::raw::capture_exclusions_in(&raw.conn)
+                .map_err(|_| unavailable())?
+                .patterns;
+            let label = patterns
+                .into_iter()
+                .find(|p| pattern_selector(p) == wanted)
+                .ok_or_else(|| refused(404, "pattern_not_found", "pattern_selector"))?;
+            let writer = raw.into_writer(home).map_err(|_| unavailable())?;
+            (
+                "pattern",
+                label.clone(),
+                label,
+                writer,
+                json!({ "pattern_selector": wanted }),
+            )
+        }
+        _ => return Err(refused(400, "bad_request", "")),
+    };
     // What is taken off the list stays unrecorded while another entry still covers it: a folder,
     // one around it or its repository (Codex on #491, CodeRabbit on #489), and a repository,
     // another entry that reads as it now, as its row reads (CodeRabbit on #491). The answer says
@@ -541,7 +607,10 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     let still = if posted.undo {
         let mut list = writer.capture_exclusions().map_err(|_| unavailable())?;
         let settings = crate::capture::Settings::load(home).map_err(|_| unavailable())?;
-        if key == "folder" {
+        if key == "pattern" {
+            // A pattern names no one place to say this of.
+            false
+        } else if key == "folder" {
             list.folders.remove(&label);
             crate::capture::not_recorded_why(&label, &list, &settings).is_some()
         } else {
@@ -803,6 +872,47 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Parity row 14: the page stops recording by a folder name or claude-mem pattern, lists it,
+    /// refuses an empty one or a request that names two things, and takes it back by its selector.
+    #[test]
+    fn the_page_stops_recording_by_a_pattern_and_takes_it_back() {
+        let mut store = Store::new();
+        store.said("s", "github.com/o/open", 1_000, "Pattern page journey.");
+        store.run();
+        let home = store.home.path().to_owned();
+        let saving = Mutex::new(());
+        let post =
+            |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+        let saved = post(json!({"pattern": " secret-* ", "undo": false})).unwrap();
+        assert_eq!(saved["never_recorded"], true);
+        let id = saved["pattern_selector"].as_str().unwrap().to_owned();
+        assert_eq!(
+            show(&home)["patterns"],
+            json!([{"selector": id, "label": "secret-*"}])
+        );
+        for (body, code) in [
+            (json!({"pattern": "  ", "undo": false}), "capture_pattern"),
+            (
+                json!({"pattern_selector": "0".repeat(64), "undo": true}),
+                "pattern_not_found",
+            ),
+            (json!({"pattern": "x", "undo": true}), "bad_request"),
+            (
+                json!({"pattern": "x", "folder": "/x", "undo": false}),
+                "bad_request",
+            ),
+        ] {
+            let before = store.raw.max_op_seq().unwrap();
+            assert_eq!(post(body.clone()).unwrap_err().code, code, "{body}");
+            assert_eq!(store.raw.max_op_seq().unwrap(), before, "{body}");
+        }
+        assert_eq!(
+            post(json!({"pattern_selector": id, "undo": true})).unwrap()["never_recorded"],
+            false
+        );
+        assert_eq!(show(&home)["patterns"], json!([]));
     }
 
     /// Slice 4b: the page stops recording a listed repository by its selector and a folder by its

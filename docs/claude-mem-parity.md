@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 22 |
-| partial | 30 |
+| equal_or_better | 24 |
+| partial | 28 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 77 |
@@ -26,7 +26,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 ### Open checks before removal
 
 - claude-mem's history up to the switch is in oboete: 253,413 imported documents of the owner's claude-mem database (its import ops in raw.db, the documents in knowledge.db's `imported`), the newest from 2026-10-15. What claude-mem recorded after that is not; oboete has recorded those sessions itself since the switch.
-- `oboete import claude-mem` refuses the live claude-mem database, which is at schema v67 since 2026-10-16, so a catch-up import fails today (row N1).
+- `oboete import claude-mem` reads the live claude-mem database, at schema v67 since 2026-10-16, again since #556 (row N1).
 - 58,912 imported documents and 32,288 raw records still wait for vectors (doctor, 2026-10-16 15:31Z). The imported ones go down at about 6,000 to 7,500 an hour (92,123 at 10:10Z); raw records come after them (row 5).
 
 ### Table
@@ -46,7 +46,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 11 | The stopped-curation line names a class of cause (owner, budget, no answer), not the provider's words or a remedy link. A refused key shows only after 30 minutes. The terminal note appears on Claude Code only, and there is no relay instruction for Codex or Grok. | partial | rare | observer-health.ts:351 / src/curate.rs:3100 |
 | 12 | Hooks write raw.db themselves and always exit 0. A failed write is kept under `unwritten/` and written back later. A busy database is waited out. claude-mem uses a hook spool for the same purpose. | equal_or_better | none | hook-spool.ts:10 / src/unwritten.rs:1 |
 | 13 | Money spent is shown. The session-start "N obs, tokens read, work, % savings" line is missing. | partial | rare | AgentFormatter.ts:46 / assets/viewer/app.js:1036 |
-| 14 | oboete excludes by repository key or absolute folder. It has no glob and no basename match. The owner's 9 claude-mem exclusion patterns are neither read nor imported, and oboete has no exclusions set. | partial | weekly | project-filter.ts:68 / src/capture.rs:189 |
+| 14 | Since 2026-10-17 oboete also excludes by a folder name or claude-mem pattern (`*`, `**`, `?`, a leading `~`), read as claude-mem reads one, and a name with no `/` also covers the folders inside one so named; a pattern that does not start at a root also names the end of a path (`secret/**` names `/work/secret` and the folders in it), where claude-mem tries it against the whole path and the last part alone, so such a pattern with a `/` names no folder there; `oboete import claude-mem` brings claude-mem's patterns over once (docs/settings-privacy.md, docs/claude-mem-import.md I8). | equal_or_better | none | project-filter.ts:68 / src/capture.rs:203 |
 | 15 | Private prompts behave the same. oboete strips 4 block names. claude-mem strips 6, and also removes `system-reminder` and `persisted-output` from tool fields. One edge of nested tags differs. | partial | rare | tag-stripping.ts:5 / src/hook.rs:32 |
 | 16 | The page has no sessions list, no per-session page and no category chips. Feed items carry no session id. | missing | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2078 |
 | 17 | Summaries have the same six fields and can be searched. A summary appears after the turn's windows are curated. Since 2026-10-17 a window whose sessions have all replied goes at once (#557, docs/curation-timing.md), so the summary comes about one curator call after the reply, where it could wait about 10 minutes before; a turn that ends with no reply still waits the idle time. claude-mem writes it at Stop. Since 2026-10-17 a Stop whose message is empty (Claude Code's when a session ends in a tool call) takes the transcript's last assistant text, as claude-mem does. | partial | rare | summarize.ts:103 / src/curate.rs:1471 |
@@ -93,7 +93,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 58 | Records are stored before any model runs. A failed window passes through the provider chain, is held, and can be recurated. Spent credit pauses that provider and nothing is lost. | equal_or_better | none | SessionMessageBuffer.ts:23 / src/curate.rs:1552 |
 | 59 | Worktrees share the repository key from the first record, so nothing needs adopting. Cards from an unmerged branch show at once. | equal_or_better | rare | WorktreeAdoption.ts:1 / src/repo.rs:27 |
 | 60 | Masking is on by default with 222 gitleaks rules plus generic credential rules. An off switch exists. claude-mem's masking is off for the owner. | equal_or_better | none | redaction.ts:75 / src/redact.rs:203 |
-| N1 | The import refuses a database above schema v65. The live claude-mem database is v67, so a catch-up import fails today with nothing written. v66 and v67 add only sync columns. The history up to the switch is imported. | partial | blocker | sqlite/connection.ts:19 / src/import.rs:68 |
+| N1 | Since #556 the import reads claude-mem's schemas up to v67 (13.40.0); v66 and v67 add only sync columns. The history up to the switch is imported. | equal_or_better | none | sqlite/connection.ts:19 / src/import.rs:68 |
 | N2 | A newer home is refused before any write. One stamp guards raw, knowledge and providers, and it is raised inside an IMMEDIATE transaction. | equal_or_better | none | sqlite/connection.ts:46 / src/raw.rs:1556 |
 | N3 | save_memory is built and passes the capture gate. A note does not appear in the page's Feed. `metadata` is ignored. | partial | rare | save-memory.ts:5 / src/view.rs:2060 |
 | N4 | mem_search has the same contract: guided and auto modes, cursors, limits and a 15-minute TTL. | equal_or_better | none | progressive-search.ts:126 / src/mem_search.rs:223 |

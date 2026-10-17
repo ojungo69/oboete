@@ -85,11 +85,15 @@ enum CaptureCmd {
     /// unless one is named
     Exclude {
         /// The repository as oboete labels it (github.com/<owner>/<name>, or its path)
-        #[arg(conflicts_with = "folder")]
+        #[arg(conflicts_with_all = ["folder", "pattern"])]
         repo: Option<String>,
         /// A folder of this device instead: nothing in it or below it is recorded
-        #[arg(long)]
+        #[arg(long, conflicts_with = "pattern")]
         folder: Option<PathBuf>,
+        /// A folder's name or a claude-mem pattern instead (`*`, `**`, `?`, a leading `~`):
+        /// nothing is recorded in a folder it names, nor, for one with no `/`, inside one
+        #[arg(long)]
+        pattern: Option<String>,
         /// Record it again from now on (nothing from while it was excluded comes back)
         #[arg(long)]
         undo: bool,
@@ -753,8 +757,14 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Doctor => setup::doctor(&home),
         Cmd::Capture {
-            action: CaptureCmd::Exclude { repo, folder, undo },
-        } => capture_exclude(&home, repo, folder, undo),
+            action:
+                CaptureCmd::Exclude {
+                    repo,
+                    folder,
+                    pattern,
+                    undo,
+                },
+        } => capture_exclude(&home, repo, folder, pattern, undo),
         Cmd::Pref {
             action: PrefCmd::Add { text },
         } => {
@@ -949,16 +959,18 @@ fn capture_exclude(
     home: &std::path::Path,
     repo: Option<String>,
     folder: Option<PathBuf>,
+    pattern: Option<String>,
     undo: bool,
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
     let settings = capture::Settings::load(home)?;
     // Stored as given, unmasked, so it holds whatever the rules become (owner, 2026-10-13).
-    let (key, given) = match folder {
+    let (key, given) = match (folder, pattern) {
         // As an agent's `cwd` is labelled (`capture::folder_path`), with no `\\?\` that
         // `canonicalize` gives on Windows.
-        Some(folder) => ("folder", capture::folder_path(&folder.to_string_lossy())),
-        None => match repo {
+        (Some(folder), _) => ("folder", capture::folder_path(&folder.to_string_lossy())),
+        (None, Some(pattern)) => ("pattern", capture::pattern(&pattern)?),
+        (None, None) => match repo {
             Some(r) => ("repo", r),
             None => ("repo", repo::key(&std::env::current_dir()?)),
         },
@@ -967,6 +979,7 @@ fn capture_exclude(
     let was = raw.capture_exclusions()?;
     let (field, stored) = match key {
         "folder" => ("cwd", &was.folders),
+        "pattern" => ("cwd", &was.patterns),
         _ => ("repo", &was.repos),
     };
     // An undo takes the entry stored for it, and an add keeps one entry for a folder in either
@@ -1005,6 +1018,7 @@ fn capture_exclude(
         .iter()
         .cloned()
         .chain(list.folders.iter().map(|f| format!("{f} (folder)")))
+        .chain(list.patterns.iter().map(|p| format!("{p} (pattern)")))
         .collect();
     if names.is_empty() {
         println!("everything is recorded: nothing is excluded");
@@ -1014,7 +1028,7 @@ fn capture_exclude(
     if undo {
         return Ok(());
     }
-    if key == "folder" {
+    if key != "repo" {
         println!("What was recorded there before stays.");
         return Ok(());
     }

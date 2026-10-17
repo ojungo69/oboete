@@ -34,6 +34,11 @@ pub struct Stats {
     pub refused: u64,
     /// Work state rows of a project whose repository is never recorded (slice 4a, I6).
     pub never_recorded: u64,
+    /// claude-mem's exclusion patterns added as patterns never recorded (parity row 14, I8).
+    pub exclusions: u64,
+    /// claude-mem's exclusion patterns oboete does not take (over 256 bytes, or with a control
+    /// character): the folders they name are recorded, and the import says so.
+    pub exclusions_refused: u64,
 }
 
 struct Session {
@@ -89,6 +94,12 @@ pub fn claude_mem(
         );
     }
     let source = source_name(&src)?;
+    let (added, refused) = exclusions(raw, path)?;
+    let mut stats = Stats {
+        exclusions: added,
+        exclusions_refused: refused,
+        ..Stats::default()
+    };
     // A row claude-mem merged into another project is read under that one (I3).
     let project = |table: &str| -> Result<&'static str> {
         Ok(if has_column(&src, table, "merged_into_project")? {
@@ -109,7 +120,6 @@ pub fn claude_mem(
         source: &source,
         docs: Vec::new(),
     };
-    let mut stats = Stats::default();
 
     // Observations and summaries name claude-mem's own session id; prompts name the agent's.
     // oboete keys sessions by the agent's id, so the same session captured by both lines up.
@@ -253,6 +263,72 @@ pub fn claude_mem(
         work_state(raw, &src, &source, settings, &mut stats)?;
     }
     Ok(stats)
+}
+
+/// I8 (parity row 14): claude-mem's exclusion patterns, `CLAUDE_MEM_EXCLUDED_PROJECTS` in the
+/// `settings.json` beside its database, each added as a pattern never recorded unless an exclusion
+/// op ever named it, so one taken back here is not added again; and how many oboete does not take,
+/// which a line names, since the folders they name are recorded (the commit's security review).
+/// None when the file or the key is missing; a file that is there but cannot be read as
+/// claude-mem's settings stops the import before any write, for the same reason (Codex on #563).
+fn exclusions(raw: &mut Raw, db: &Path) -> Result<(u64, u64)> {
+    let path = db.with_file_name("settings.json");
+    // A failure names the file, its line and column at most: never what it holds.
+    let stop = |why: String| {
+        anyhow::anyhow!(
+            "{} {why}, so the folders claude-mem's exclusion patterns name would be recorded: \
+             nothing is imported; fix it, or move it away to import without them",
+            path.display()
+        )
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(e) => return Err(stop(format!("cannot be read ({e})"))),
+    };
+    // As claude-mem reads it (settings-document.ts): a leading BOM skipped, and the keys under
+    // `env` when that holds claude-mem's keys.
+    let doc: serde_json::Value =
+        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
+            .map_err(|e| stop(format!("is not JSON ({e})")))?;
+    let Some(root) = doc.as_object() else {
+        return Err(stop("is not a JSON object".into()));
+    };
+    let target = match root.get("env").and_then(|env| env.as_object()) {
+        Some(env) if env.keys().any(|k| k.starts_with("CLAUDE_MEM_")) => env,
+        _ => root,
+    };
+    let list = match target.get("CLAUDE_MEM_EXCLUDED_PROJECTS") {
+        None | Some(serde_json::Value::Null) => return Ok((0, 0)),
+        Some(serde_json::Value::String(list)) => list,
+        Some(_) => {
+            return Err(stop(
+                "holds CLAUDE_MEM_EXCLUDED_PROJECTS as something other than one string".into(),
+            ));
+        }
+    };
+    let mut named = raw.patterns_ever_named()?;
+    let (mut added, mut refused) = (0, 0);
+    // An empty entry is none, as claude-mem reads the list.
+    for given in list.split(',').filter(|g| !g.trim().is_empty()) {
+        let Ok(pattern) = crate::capture::pattern(given) else {
+            refused += 1;
+            continue;
+        };
+        // A pattern the list repeats comes in once (Codex on #563).
+        if named.insert(pattern.clone()) {
+            raw.exclude_capture(("pattern", &pattern), false)?;
+            added += 1;
+        }
+    }
+    if refused > 0 {
+        eprintln!(
+            "oboete: {refused} of claude-mem's exclusion patterns are not brought over (over 256 \
+             bytes, or with a control character), so the folders they name are recorded: add \
+             each with `oboete capture exclude --pattern` in a form of at most 256 bytes"
+        );
+    }
+    Ok((added, refused))
 }
 
 /// I4: claude-mem's work state rows as work state ops, oldest first, under their project as an
@@ -941,6 +1017,20 @@ mod tests {
         assert_eq!(ops[0]["source_id"], "w2");
     }
 
+    /// Parity row 14 (CodeRabbit on #563): a pattern that names a claude-mem project keeps the
+    /// project's imported work state out, as a repository never recorded does.
+    #[test]
+    fn a_pattern_keeps_a_projects_imported_work_state_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        let mut raw = crate::raw::open(dir.path()).unwrap();
+        raw.exclude_capture(("pattern", "free-*"), false).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!((stats.work_state, stats.never_recorded), (0, 4));
+        assert!(work_ops(&raw).is_empty());
+    }
+
     /// Codex on #489: a repository excluded under a rule that masks part of its name keeps its
     /// claude-mem project's work state out too: the project's name is matched as labelled now.
     #[test]
@@ -1303,6 +1393,112 @@ mod tests {
         assert_eq!(
             counts(&claude_mem(&mut raw, &other, &Default::default()).unwrap()),
             (6, 1, 1, 0, 2)
+        );
+    }
+
+    /// I8 (parity row 14): claude-mem's exclusion patterns, read from the settings beside its
+    /// database, come in once as patterns never recorded; one taken back is not added again, and
+    /// a database with no settings beside it imports all the same.
+    #[test]
+    fn claude_mems_exclusions_come_in_once_as_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        assert_eq!(
+            claude_mem(&mut raw, &src, &Default::default())
+                .unwrap()
+                .exclusions,
+            0
+        );
+        let long = "x".repeat(257);
+        let settings = serde_json::json!({
+            "CLAUDE_MEM_EXCLUDED_PROJECTS":
+                format!("secret-a, ~/private/** ,, secret-b, secret-a, {long}"),
+            "CLAUDE_MEM_MODEL": "unrelated",
+        });
+        std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        // One oboete does not take is counted, never dropped unsaid (the commit's security review).
+        assert_eq!((stats.exclusions, stats.exclusions_refused), (3, 1));
+        let patterns = raw.capture_exclusions().unwrap().patterns;
+        assert_eq!(
+            Vec::from_iter(patterns),
+            ["secret-a", "secret-b", "~/private/**"]
+        );
+        raw.exclude_capture(("pattern", "secret-b"), true).unwrap();
+        assert_eq!(
+            claude_mem(&mut raw, &src, &Default::default())
+                .unwrap()
+                .exclusions,
+            0
+        );
+        assert_eq!(raw.capture_exclusions().unwrap().patterns.len(), 2);
+    }
+
+    /// I8: claude-mem's settings are read as claude-mem reads them, a BOM skipped and the keys
+    /// under `env` when that holds them; a file that is there but cannot be read so stops the
+    /// import before any write (Codex on #563).
+    #[test]
+    fn claude_mems_settings_are_read_as_it_reads_them_or_stop_the_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let settings = dir.path().join("settings.json");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        let unreadable = claude_mem(&mut raw, &src, &Default::default());
+        std::fs::remove_dir(&settings).unwrap();
+        for (given, why) in [
+            ("{\"CLAUDE_MEM_EXCLUDED_PROJECTS\": \"a\"", "is not JSON"),
+            ("[\"a\"]", "is not a JSON object"),
+            (
+                "{\"CLAUDE_MEM_EXCLUDED_PROJECTS\": [\"a\"]}",
+                "other than one string",
+            ),
+        ] {
+            std::fs::write(&settings, given).unwrap();
+            let Err(err) = claude_mem(&mut raw, &src, &Default::default()) else {
+                panic!("{given} imported");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains(why) && err.contains("nothing is imported"),
+                "{given}: {err}"
+            );
+        }
+        assert!(
+            unreadable
+                .err()
+                .is_some_and(|err| err.to_string().contains("cannot be read"))
+        );
+        let nested = serde_json::json!({
+            "env": {"CLAUDE_MEM_EXCLUDED_PROJECTS": "nested-a", "CLAUDE_MEM_MODEL": "m"},
+            "CLAUDE_MEM_EXCLUDED_PROJECTS": "stale-root",
+            "theme": "dark",
+        });
+        std::fs::write(&settings, format!("\u{feff}{nested}")).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        // The stopped runs wrote nothing: every row comes in now, none seen before.
+        assert_eq!((stats.exclusions, stats.seen), (1, 0));
+        assert!(stats.observations > 0);
+        assert_eq!(
+            Vec::from_iter(raw.capture_exclusions().unwrap().patterns),
+            ["nested-a"]
+        );
+        // An `env` without claude-mem's keys leaves them at the top, as claude-mem reads them.
+        let flat = r#"{"env": {"PATH": "/bin"}, "CLAUDE_MEM_EXCLUDED_PROJECTS": "flat-a"}"#;
+        std::fs::write(&settings, flat).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(stats.exclusions, 1);
+        std::fs::write(&settings, r#"{"CLAUDE_MEM_EXCLUDED_PROJECTS": null}"#).unwrap();
+        assert_eq!(
+            claude_mem(&mut raw, &src, &Default::default())
+                .unwrap()
+                .exclusions,
+            0
         );
     }
 

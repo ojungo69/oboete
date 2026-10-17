@@ -119,6 +119,27 @@ it is stored as the CLI stores it (`.` and `..` taken by name), through the gate
 as an event's `cwd` label, and its selector is a hash of that stored label. A relative path, an unknown selector, or a request that
 names more than one target is refused before any write.
 
+A folder name or a claude-mem pattern (parity row 14) is added under "Folder names and
+patterns", as `oboete capture exclude --pattern` adds one, and taken back from its row by its
+selector, a hash of the pattern as stored. It is read as claude-mem's `project-filter.ts` reads
+one (`capture::pattern_covers`): `*` is any run of characters within one part of a path, `**` any
+run across parts, `?` one character within a part, a leading `~` the home folder, and `\` reads
+as `/`; it names a working folder when it matches the whole path or, for a pattern that does not
+start at a root (`/`, `C:/`, or `~` once expanded), the end of one in whole parts: `work/secret`
+names `/home/u/work/secret` and `secret/**` names `/work/secret/src`, where claude-mem tries the
+last part alone, which no pattern with a `/` names (Codex on #563). `dir/**` names `dir` too. A
+pattern with no `/` also names every folder inside one it names, where
+claude-mem reads the last part alone, so a session started below an excluded project is not
+recorded either; letter case is ignored where the platform ignores it, as for a folder. Each event
+is checked by its working folder as read and as labelled, against the patterns as given and as the
+rules now read them, as folders are. A pattern is stored trimmed, else as given; an empty one, one
+over 256 bytes (a folder's name is at most 255 on the common file systems, and a match costs
+the pattern's length times the path's) or one with a control character is refused before any
+write. Taking one back says nothing about whether another entry still covers a place, since a
+pattern names no one place.
+`oboete import claude-mem` brings claude-mem's own patterns over once, and says how many it
+refuses (docs/claude-mem-import.md I8).
+
 The first-run guide says to name such places before their next session and
 offers a button to this section.
 

@@ -675,7 +675,7 @@ The four levels below are owner decision 19.
 
 | Level | Command / viewer | Reversible | Reaches | Use |
 |---|---|---|---|---|
-| Never record | `oboete capture exclude <repo or folder>`, setup, or `capture = false` in the repo's `.oboete.toml` | yes (include again; nothing from the excluded period comes back) | a repo exclusion travels as section 5's exclusion op with level "capture", so every device stops recording it, and it is also a sync exclusion (the hub refuses that repo's content ops, §5.5); a folder is a path and stays on this device | a repo or folder that must never be stored |
+| Never record | `oboete capture exclude <repo or folder>`, a folder name or claude-mem pattern (`--pattern`, parity row 14), setup, or `capture = false` in the repo's `.oboete.toml` | yes (include again; nothing from the excluded period comes back) | a repo exclusion travels as section 5's exclusion op with level "capture", so every device stops recording it, and it is also a sync exclusion (the hub refuses that repo's content ops, §5.5); a folder is a path and stays on this device | a repo or folder that must never be stored |
 | Mute | `oboete mute <uid>`, viewer button | yes (unmute) | every device (an owner-correction op) | a correct but noisy claim: never injected, still searchable. Pulled forward from LATER (RD/improvements-synthesis.md:531) (owner decision 19) |
 | Withdraw / exclude | section 5 | yes (un-exclude re-publishes) | other devices and the hub drop copies; the recording device keeps its own | stop sharing a repo |
 | Forget | `oboete forget`, viewer button | **no** | every device, the hub, R2, Vectorize, backups | content must not exist any more (a leaked secret, private text) |
