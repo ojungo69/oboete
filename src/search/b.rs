@@ -3261,6 +3261,68 @@ pub(crate) mod fixture {
             uid
         }
 
+        /// An imported observation `id` of `kind` in `session`, filed under claude-mem project
+        /// `project`, with a files op naming `read` and `modified` (docs/file-note.md F10): its uid.
+        #[allow(clippy::too_many_arguments)]
+        pub fn imported_with_files(
+            &mut self,
+            id: &str,
+            (project, session): (&str, &str),
+            kind: &str,
+            ts: i64,
+            title: &str,
+            read: &[&str],
+            modified: &[&str],
+        ) -> String {
+            let uid = format!("claude-mem:test:{id}");
+            let doc = ImportDoc {
+                uid: uid.clone(),
+                source: "claude-mem:test".into(),
+                source_id: id.into(),
+                kind: kind.into(),
+                repo: crate::import::repo(project),
+                session: session.into(),
+                ts,
+                title: title.into(),
+                body: format!("{title}."),
+            };
+            self.raw
+                .append_import_items(
+                    vec![
+                        crate::raw::Import::Doc(doc),
+                        crate::raw::Import::Files(self.files_of(
+                            id,
+                            (project, session),
+                            read,
+                            modified,
+                        )),
+                    ],
+                    |_| {},
+                )
+                .unwrap();
+            uid
+        }
+
+        /// A files op for imported document `id` (F10), as `oboete import claude-mem` appends one.
+        pub fn files_of(
+            &self,
+            id: &str,
+            (project, session): (&str, &str),
+            read: &[&str],
+            modified: &[&str],
+        ) -> crate::raw::ImportFiles {
+            let list = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect();
+            crate::raw::ImportFiles {
+                uid: format!("claude-mem:test:{id}"),
+                source: "claude-mem:test".into(),
+                source_id: id.into(),
+                repo: crate::import::repo(project),
+                session: session.into(),
+                files_read: list(read),
+                files_modified: list(modified),
+            }
+        }
+
         /// claude-mem documents `(id, session, kind, ts, body)` of one project, appended at once:
         /// their uids.
         pub fn imported_all(

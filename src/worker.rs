@@ -267,6 +267,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::turns::Turns),
         // Imported documents (milestone 4 D5), for search only.
         Box::new(crate::consumer::imported::Imported),
+        // The files imported observations name, for the note on a file (docs/file-note.md F12).
+        Box::new(crate::consumer::imported::ImportedFiles),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
         Box::new(crate::consumer::gaps::Gaps::new(home)),
         Box::new(crate::consumer::compress::Compress),

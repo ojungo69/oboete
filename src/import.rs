@@ -14,7 +14,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::raw::{ImportDoc, Raw};
+use crate::raw::{ImportDoc, ImportFiles, Raw};
 use crate::{curate, hook, redact};
 
 const SOURCE: &str = "claude-mem";
@@ -39,7 +39,14 @@ pub struct Stats {
     /// claude-mem's exclusion patterns oboete does not take (over 256 bytes, or with a control
     /// character): the folders they name are recorded, and the import says so.
     pub exclusions_refused: u64,
+    /// Observations whose files came in as a files op (docs/file-note.md F10, F11).
+    pub files: u64,
+    /// Paths left out of a files op to keep it within `FILES_BYTES` (F10).
+    pub files_cut: u64,
 }
+
+/// The most a files op takes as stored (docs/file-note.md F10): half the op cap.
+const FILES_BYTES: usize = crate::raw::MAX_OP_BYTES / 2;
 
 struct Session {
     id: String,
@@ -74,11 +81,24 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
 /// none of them.
 const NEWEST_SCHEMA: i64 = 67;
 
-/// `settings` gates the work state rows as a write's (docs/work-state.md L5).
+/// The plain import, as the tests run it.
+#[cfg(test)]
 pub fn claude_mem(
     raw: &mut Raw,
     path: &Path,
     settings: &crate::capture::Settings,
+) -> Result<Stats> {
+    claude_mem_with(raw, path, settings, false)
+}
+
+/// `settings` gates the work state rows as a write's (docs/work-state.md L5). With `files_only`
+/// (`--files`, docs/file-note.md F11), the files ops of the observations imported before and
+/// nothing else: no document, work state or exclusion.
+pub fn claude_mem_with(
+    raw: &mut Raw,
+    path: &Path,
+    settings: &crate::capture::Settings,
+    files_only: bool,
 ) -> Result<Stats> {
     let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {} read-only", path.display()))?;
@@ -94,7 +114,10 @@ pub fn claude_mem(
         );
     }
     let source = source_name(&src)?;
-    let (added, refused) = exclusions(raw, path)?;
+    let (added, refused) = match files_only {
+        true => (0, 0),
+        false => exclusions(raw, path)?,
+    };
     let mut stats = Stats {
         exclusions: added,
         exclusions_refused: refused,
@@ -114,11 +137,22 @@ pub fn claude_mem(
     } else {
         "''"
     };
+    // F10: the files an observation names, where claude-mem keeps them.
+    let file_column = |col: &str| -> Result<String> {
+        Ok(match has_column(&src, "observations", col)? {
+            true => format!("COALESCE({col}, '')"),
+            false => "''".to_owned(),
+        })
+    };
+    let (read, modified) = (file_column("files_read")?, file_column("files_modified")?);
     let mut sink = Sink {
         known: raw.import_repos(&source)?,
+        known_files: raw.import_files_repos(&source)?,
         raw,
         source: &source,
-        docs: Vec::new(),
+        files_only,
+        items: Vec::new(),
+        files: 0,
     };
 
     // Observations and summaries name claude-mem's own session id; prompts name the agent's.
@@ -150,11 +184,15 @@ pub fn claude_mem(
         &format!(
             "SELECT id, COALESCE(memory_session_id, ''), {observed}, created_at_epoch,
                     COALESCE(type, ''), COALESCE(title, ''), COALESCE(narrative, ''),
-                    COALESCE(facts, '') FROM observations ORDER BY id"
+                    COALESCE(facts, ''), {read}, {modified} FROM observations ORDER BY id"
         ),
         |r| {
             let (id, memory, project, ts): (i64, String, String, i64) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            let files = [
+                file_list(&r.get::<_, String>(8)?, &settings.rules),
+                file_list(&r.get::<_, String>(9)?, &settings.rules),
+            ];
             // The import's rules throughout, as the writes owe the op text scan by them (owner
             // decision 43; Codex's security review of the switch).
             let title = redact::outbound_with(&r.get::<_, String>(5)?, &settings.rules);
@@ -175,11 +213,19 @@ pub fn claude_mem(
                 kind: kind(&r.get::<_, String>(4)?),
                 title: &title,
                 body: &body,
+                files,
             };
-            count(sink.put(row)?, &mut stats.observations, &mut stats.seen);
+            let put = sink.put(row)?;
+            stats.files_cut += put.cut;
+            count(put.new, &mut stats.observations, &mut stats.seen);
             Ok(())
         },
     )?;
+    if files_only {
+        sink.flush()?;
+        stats.files = sink.files;
+        return Ok(stats);
+    }
 
     each_row(
         &src,
@@ -223,8 +269,9 @@ pub fn claude_mem(
                 kind: "summary",
                 title: "",
                 body: &body,
+                files: Default::default(),
             };
-            count(sink.put(row)?, &mut stats.summaries, &mut stats.seen);
+            count(sink.put(row)?.new, &mut stats.summaries, &mut stats.seen);
             Ok(())
         },
     )?;
@@ -253,12 +300,14 @@ pub fn claude_mem(
                 kind: "prompt",
                 title: "",
                 body: &body,
+                files: Default::default(),
             };
-            count(sink.put(row)?, &mut stats.prompts, &mut stats.seen);
+            count(sink.put(row)?.new, &mut stats.prompts, &mut stats.seen);
             Ok(())
         },
     )?;
     sink.flush()?;
+    stats.files = sink.files;
     if has_table(&src, "work_state_entries")? {
         work_state(raw, &src, &source, settings, &mut stats)?;
     }
@@ -510,9 +559,11 @@ struct Row<'a> {
     kind: &'a str,
     title: &'a str,
     body: &'a str,
+    /// The files it read and modified, gated (docs/file-note.md F10): an observation's only.
+    files: [Vec<String>; 2],
 }
 
-/// Where rows go: import ops, appended every `raw::IMPORT_BATCH` documents, each append its own
+/// Where rows go: import ops, appended every `raw::IMPORT_BATCH` ops, each append its own
 /// transaction, so a run that stops keeps what it appended.
 struct Sink<'a> {
     raw: &'a mut Raw,
@@ -520,24 +571,35 @@ struct Sink<'a> {
     /// The source ids imported so far, by earlier runs and this one, each with the repositories
     /// it was filed under.
     known: HashMap<String, HashSet<String>>,
-    docs: Vec<ImportDoc>,
+    /// The same for the documents' files ops (F11).
+    known_files: HashMap<String, HashSet<String>>,
+    /// `--files`: the files ops of the documents imported before, and no document (F11).
+    files_only: bool,
+    items: Vec<crate::raw::Import>,
+    /// Files ops put.
+    files: u64,
+}
+
+/// What `Sink::put` did with a row: whether its document is new, and how many of its paths its
+/// files op left out (F10).
+struct Put {
+    new: bool,
+    cut: u64,
 }
 
 impl Sink<'_> {
-    /// A row as an import op, with its session. False: imported before under this repository.
-    /// A row claude-mem moved since (I3) comes in again with the same uid: readers take a
-    /// document's newest row (Codex on #431).
-    fn put(&mut self, r: Row) -> Result<bool> {
+    /// A row as an import op, with its session, and its files as a files op (docs/file-note.md
+    /// F10, F11): the files op of a document filed before comes now if it has none under the
+    /// repository the document is filed under. A row claude-mem moved since (I3) comes in again
+    /// with the same uid: readers take a document's newest row (Codex on #431).
+    fn put(&mut self, r: Row) -> Result<Put> {
         let repo = repo(r.project);
-        match self.known.get(&r.key) {
+        let filed = match self.known.get(&r.key) {
             // One whose project is lost (claude-mem pruned its session) stays where it came in.
-            Some(had) if had.contains(&repo) || r.project.is_empty() => return Ok(false),
-            _ => {}
-        }
-        self.known
-            .entry(r.key.clone())
-            .or_default()
-            .insert(repo.clone());
+            Some(had) if r.project.is_empty() => had.iter().min().cloned(),
+            Some(had) if had.contains(&repo) => Some(repo.clone()),
+            _ => None,
+        };
         let session = match r.session {
             Some(s) => s.id.clone(),
             // No session id at all: a session of its own, so unrelated rows do not merge.
@@ -545,27 +607,104 @@ impl Sink<'_> {
             // A session claude-mem no longer lists keeps its id.
             None => r.session_id.to_owned(),
         };
-        self.docs.push(ImportDoc {
-            uid: format!("{}:{}", self.source, r.key),
-            source: self.source.to_owned(),
-            source_id: r.key,
-            kind: r.kind.to_owned(),
-            repo,
-            session,
-            ts: r.ts,
-            title: r.title.to_owned(),
-            body: r.body.to_owned(),
-        });
-        if self.docs.len() >= crate::raw::IMPORT_BATCH {
+        let uid = format!("{}:{}", self.source, r.key);
+        let new = filed.is_none() && !self.files_only;
+        if new {
+            self.known
+                .entry(r.key.clone())
+                .or_default()
+                .insert(repo.clone());
+            self.items.push(crate::raw::Import::Doc(ImportDoc {
+                uid: uid.clone(),
+                source: self.source.to_owned(),
+                source_id: r.key.clone(),
+                kind: r.kind.to_owned(),
+                repo: repo.clone(),
+                session: session.clone(),
+                ts: r.ts,
+                title: r.title.to_owned(),
+                body: r.body.to_owned(),
+            }));
+        }
+        let mut cut = 0;
+        let [read, modified] = r.files;
+        let under = filed.or_else(|| new.then_some(repo));
+        if let Some(under) = under
+            && !(read.is_empty() && modified.is_empty())
+            && !self
+                .known_files
+                .get(&r.key)
+                .is_some_and(|had| had.contains(&under))
+        {
+            let (files, left_out) = fitted(ImportFiles {
+                uid,
+                source: self.source.to_owned(),
+                source_id: r.key.clone(),
+                repo: under.clone(),
+                session,
+                files_read: read,
+                files_modified: modified,
+            })?;
+            cut = left_out;
+            if !(files.files_read.is_empty() && files.files_modified.is_empty()) {
+                self.known_files.entry(r.key).or_default().insert(under);
+                self.items.push(crate::raw::Import::Files(files));
+                self.files += 1;
+            }
+        }
+        if self.items.len() >= crate::raw::IMPORT_BATCH {
             self.flush()?;
         }
-        Ok(true)
+        Ok(Put { new, cut })
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.raw.append_imports(std::mem::take(&mut self.docs))?;
+        self.raw
+            .append_import_items(std::mem::take(&mut self.items), |_| {})?;
         Ok(())
     }
+}
+
+/// docs/file-note.md F10: a list of files as claude-mem's lookup reads one, a JSON array's
+/// strings (anything else is none), each trimmed, the empty left out, gated.
+fn file_list(text: &str, rules: &redact::Rules) -> Vec<String> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::trim))
+            .filter(|p| !p.is_empty())
+            .map(|p| redact::outbound_with(p, rules))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// F10: `files` with its paths kept in order, read first, while its op as stored stays within
+/// `FILES_BYTES` (each path as JSON writes it, escapes included), and how many were left out.
+fn fitted(mut files: ImportFiles) -> Result<(ImportFiles, u64)> {
+    let lists = [
+        std::mem::take(&mut files.files_read),
+        std::mem::take(&mut files.files_modified),
+    ];
+    let mut size = serde_json::to_string(&files)?.len();
+    let (mut full, mut cut) = (false, 0);
+    for (modified, list) in lists.into_iter().enumerate() {
+        for path in list {
+            // The path as JSON writes it, and a comma.
+            let more = serde_json::to_string(&path)?.len() + 1;
+            full |= size + more > FILES_BYTES;
+            if full {
+                cut += 1;
+                continue;
+            }
+            size += more;
+            match modified {
+                0 => files.files_read.push(path),
+                _ => files.files_modified.push(path),
+            }
+        }
+    }
+    Ok((files, cut))
 }
 
 /// claude-mem's `project` as its documents' repository.
@@ -790,14 +929,209 @@ mod tests {
             .collect()
     }
 
-    /// The import ops raw holds, in op order.
+    /// The documents' import ops raw holds, in op order.
     fn docs(raw: &Raw) -> Vec<ImportDoc> {
         raw.ops_after(raw.device(), 0, 10_000)
             .unwrap()
             .into_iter()
-            .filter(|o| o.kind == OpKind::Import)
+            .filter(|o| o.kind == OpKind::Import && !crate::raw::is_import_files(&o.body))
             .map(|o| serde_json::from_value(o.body).unwrap())
             .collect()
+    }
+
+    /// The files ops raw holds (docs/file-note.md F10), in op order.
+    fn files_ops(raw: &Raw) -> Vec<ImportFiles> {
+        raw.ops_after(raw.device(), 0, 10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.kind == OpKind::Import && crate::raw::is_import_files(&o.body))
+            .map(|o| serde_json::from_value(o.body).unwrap())
+            .collect()
+    }
+
+    /// `claude_mem_db` with claude-mem's lists of files, and `lists` (observation id, read,
+    /// modified) in them.
+    fn with_files(path: &Path, lists: &[(i64, serde_json::Value, serde_json::Value)]) {
+        let c = Connection::open(path).unwrap();
+        let has: bool = c
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('observations') WHERE name = 'files_read'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if !has {
+            c.execute_batch(
+                "ALTER TABLE observations ADD COLUMN files_read TEXT;
+                 ALTER TABLE observations ADD COLUMN files_modified TEXT;",
+            )
+            .unwrap();
+        }
+        for (id, read, modified) in lists {
+            c.execute(
+                "UPDATE observations SET files_read = ?2, files_modified = ?3 WHERE id = ?1",
+                params![id, read.to_string(), modified.to_string()],
+            )
+            .unwrap();
+        }
+    }
+
+    /// docs/file-note.md F10 (test 15): an observation that names files gets a files op after its
+    /// document's, its paths gated and kept within `FILES_BYTES` as stored; one whose lists are
+    /// none, or whose only path does not fit, gets none.
+    #[test]
+    fn an_observations_files_come_in_as_a_files_op_beside_its_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        // Paths JSON writes longer than they are: a quote, a backslash and a control character.
+        let odd: Vec<String> = (0..2_000).map(|i| format!("a\"\\\u{1}{i}.rs")).collect();
+        with_files(
+            &src,
+            &[
+                (
+                    10,
+                    json!(["src/a.rs", " ", 7, format!("{key}/b.rs")]),
+                    json!(["src/a.rs"]),
+                ),
+                (13, json!("src/c.rs"), json!({"x": 1})),
+                (14, json!(odd), json!(["src/d.rs"])),
+                (15, json!(["x".repeat(FILES_BYTES)]), json!([])),
+            ],
+        );
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        let files = files_ops(&raw);
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| f.source_id.as_str())
+                .collect::<Vec<_>>(),
+            ["o10", "o14"]
+        );
+        let a = &files[0];
+        assert_eq!(a.files_read[0], "src/a.rs");
+        assert_eq!(
+            a.files_read.len(),
+            2,
+            "the blank and the number are no paths"
+        );
+        assert!(a.files_read[1].ends_with("/b.rs") && !a.files_read[1].contains(&key));
+        assert_eq!(a.files_modified, ["src/a.rs"]);
+        let doc = docs(&raw)
+            .into_iter()
+            .find(|d| d.source_id == "o10")
+            .unwrap();
+        assert_eq!(
+            (&a.uid, &a.repo, &a.session),
+            (&doc.uid, &doc.repo, &doc.session)
+        );
+        // The cut: kept in order, read first, within the bytes as stored.
+        let b = &files[1];
+        let stored = serde_json::to_string(b).unwrap().len();
+        assert!(stored <= FILES_BYTES, "{stored}");
+        assert!(b.files_read.len() < odd.len() && b.files_modified.is_empty());
+        assert_eq!(b.files_read[..], odd[..b.files_read.len()]);
+        let cut = (odd.len() - b.files_read.len() + 1) as u64;
+        assert_eq!((stats.files, stats.files_cut), (2, cut + 1));
+        // In op order, each after its document, and none reads as a document.
+        let ops = raw.ops_after(raw.device(), 0, 10_000).unwrap();
+        let at = |id: &str, files: bool| {
+            ops.iter()
+                .position(|o| {
+                    o.body["source_id"] == id && crate::raw::is_import_files(&o.body) == files
+                })
+                .unwrap()
+        };
+        assert!(at("o10", false) < at("o10", true) && at("o14", false) < at("o14", true));
+        for o in ops.iter().filter(|o| crate::raw::is_import_files(&o.body)) {
+            assert!(serde_json::from_value::<ImportDoc>(o.body.clone()).is_err());
+            assert!(o.body.get("body").is_none() && o.body.get("ts").is_none());
+        }
+    }
+
+    /// F11 (test 16): `--files` brings the files of the observations imported before and nothing
+    /// else, once; a plain import brings what an earlier run left out, and a document claude-mem
+    /// moved gets its files under its new repository.
+    #[test]
+    fn the_files_of_observations_imported_before_come_in_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let homes = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let mut raws: Vec<Raw> = homes
+            .iter()
+            .map(|h| crate::raw::open(h.path()).unwrap())
+            .collect();
+        // Imported before claude-mem's files came in, as this PC's store was.
+        for raw in &mut raws {
+            claude_mem(raw, &src, &Default::default()).unwrap();
+            assert!(files_ops(raw).is_empty());
+        }
+        with_files(
+            &src,
+            &[
+                (10, json!(["src/a.rs"]), json!([])),
+                (13, json!(["src/c.rs"]), json!([])),
+                (14, json!([]), json!(["src/d.rs"])),
+            ],
+        );
+        let c = Connection::open(&src).unwrap();
+        c.execute(
+            "INSERT INTO observations VALUES(40, 'mem-1', 'free-mem', 1700, 'bugfix', 'New',
+               'Since the last import.', '', '[\"src/e.rs\"]', '[]')",
+            [],
+        )
+        .unwrap();
+        let ids = |raw: &Raw| -> Vec<String> {
+            files_ops(raw).into_iter().map(|f| f.source_id).collect()
+        };
+        let [plain, only] = &mut raws[..] else {
+            unreachable!()
+        };
+        // A forgotten document gets no files op either.
+        let forgotten = docs(only)
+            .into_iter()
+            .find(|d| d.source_id == "o13")
+            .unwrap();
+        only.append_ops(&[(OpKind::Forget, json!({"uid": forgotten.uid, "job": "j"}))])
+            .unwrap();
+        let before = docs(only).len();
+        let stats = claude_mem_with(only, &src, &Default::default(), true).unwrap();
+        assert_eq!(ids(only), ["o10", "o14"]);
+        assert_eq!(docs(only).len(), before, "no document");
+        assert_eq!((stats.observations, stats.work_state), (0, 0));
+        claude_mem_with(only, &src, &Default::default(), true).unwrap();
+        assert_eq!(ids(only).len(), 2, "once");
+        claude_mem(only, &src, &Default::default()).unwrap();
+        assert_eq!(
+            ids(only),
+            ["o10", "o14", "o40"],
+            "the new one with its document"
+        );
+        // The plain import brings what the first run, before the lists, could not.
+        claude_mem(plain, &src, &Default::default()).unwrap();
+        assert_eq!(ids(plain), ["o10", "o13", "o14", "o40"]);
+        claude_mem(plain, &src, &Default::default()).unwrap();
+        assert_eq!(ids(plain).len(), 4);
+        // Moved: its document and its files again, under the new project; `--files` leaves a
+        // moved one to the plain import.
+        c.execute(
+            "UPDATE observations SET project = 'other' WHERE id = 10",
+            [],
+        )
+        .unwrap();
+        claude_mem_with(plain, &src, &Default::default(), true).unwrap();
+        assert_eq!(ids(plain).len(), 4);
+        claude_mem(plain, &src, &Default::default()).unwrap();
+        let moved: Vec<String> = files_ops(plain)
+            .into_iter()
+            .filter(|f| f.source_id == "o10")
+            .map(|f| f.repo)
+            .collect();
+        assert_eq!(moved, [repo("free-mem"), repo("other")]);
     }
 
     fn counts(s: &Stats) -> (u64, u64, u64, u64, u64) {

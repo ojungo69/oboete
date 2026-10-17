@@ -463,7 +463,11 @@ mod tests {
         assert_eq!(found(&["/w/repo/lib/b.rs", "lib/b.rs"]), [1]);
         assert_eq!(found(&["src/foo+a.rs"]), [4]);
         assert!(found(&["/w/repo/a.rs", "a.rs"]).is_empty());
+        let raw = raw::open(home.path()).unwrap();
         let k = crate::knowledge::open(home.path()).unwrap();
+        let one = cards::by_file(&k, &raw, "r", &["src/a.rs"], 40, &Rules::default()).unwrap();
+        assert_eq!(one[0].named, 2, "the files it names in all (F6)");
+        drop(raw);
         k.execute_batch("DROP TABLE card_files").unwrap();
         drop(k);
         assert!(found(&["src/a.rs"]).is_empty());

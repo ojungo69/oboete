@@ -29,7 +29,9 @@ switches to.
 - **When it moves**: a release raises `FORMAT` when an older binary would mishandle anything it
   writes: raw.db's schema or the meaning of its rows and ops, knowledge.db's or providers.db's, a
   backup segment's lines. A change an older binary reads correctly (a column it ignores, an index)
-  does not raise it. The release notes say when it moved.
+  does not raise it. The release notes say when it moved. An imported document's files op
+  (docs/file-note.md F10, 2026-10-17) is such a change: an `import` op with no title, which an
+  older binary's consumer passes over as one it cannot read.
 - **A format a home earns** (3, raw retention, docs/retention.md): `FORMAT` is the newest a binary
   reads and `raw::OPEN_FORMAT` what its open stamps; they differ when only some homes hold what an
   older binary would mishandle. Retention's binary reads up to 3 and stamps 2 on open, so a home

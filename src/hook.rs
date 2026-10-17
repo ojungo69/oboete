@@ -663,6 +663,12 @@ fn file_notes(
     let session = session_label(payload);
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
     let store = crate::raw::open_within(home, Duration::from_secs(2))?;
+    // F8, F15: none in a checkout nothing is recorded from, whatever cards or imported history
+    // name its files from before.
+    let list = store.capture_exclusions()?;
+    if crate::capture::not_recorded_why(&cwd.to_string_lossy(), &list, &settings).is_some() {
+        return Ok(None);
+    }
     // #439: held until what the notes considered is recorded and they are written (Codex on #446).
     *fence = Some(crate::dispatch::reading(home, READ_WAIT)?);
     let k = rusqlite::Connection::open_with_flags(
@@ -693,7 +699,7 @@ fn file_notes(
             }
         }
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let cards = crate::cards::by_file(&k, &store, &repo, &names, 40, &settings.rules)?;
+        let cards = crate::cards::on_file(&k, &store, &repo, &names, 40, &settings.rules)?;
         let now = db::now_ms();
         let Some(note) =
             crate::cards::file_note(&cards, mtime, store.device(), now, &chrono::Local)
@@ -710,7 +716,7 @@ fn file_notes(
         // F5: once a session, again only for a card the last note did not consider. The check
         // and the claim are one step under the session's lock, so parallel reads of one file
         // give one note (Codex and CodeRabbit on #388).
-        let ids: Vec<String> = cards.iter().map(|f| f.card.id(store.device())).collect();
+        let ids: Vec<String> = cards.iter().map(|f| f.id(store.device())).collect();
         let flag: String = sha2::Sha256::digest(names[0].as_bytes())[..8]
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -4054,6 +4060,257 @@ mod tests {
         );
         assert_eq!(sub, "");
         assert!(!r.read("s9", "src/a.rs").is_empty());
+    }
+
+    /// docs/file-note.md F13, F14 (tests 19, 21): imported claude-mem history that names the file
+    /// joins the note when its session maps to the checkout's repository (#506), by any of F3's
+    /// paths: by its uid, time, icon and title, beside the cards; once a session, and again for a
+    /// row it did not consider.
+    #[test]
+    fn imported_history_that_names_the_file_joins_the_note() {
+        let mut r = Reads::new();
+        let repo = r.repo.clone();
+        let day = |d: i64, h: i64| d * 86_400_000 + h * 3_600_000;
+        // Sessions oboete recorded here and elsewhere; "unrecorded" it never saw.
+        for (session, place) in [
+            ("h1", repo.as_str()),
+            ("h2", &repo),
+            ("h3", &repo),
+            ("h4", &repo),
+        ]
+        .into_iter()
+        .chain([("t1", "github.com/o/other")])
+        {
+            r.s.event("prompt", session, (place, "main"), day(1, 23), json!({}));
+        }
+        let card = r.cards(
+            3,
+            json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+        );
+        let abs = format!("{}/src/a.rs", r.c);
+        let s = &mut r.s;
+        let by_top = s.imported_with_files(
+            "o1",
+            ("x", "h1"),
+            "bugfix",
+            day(2, 9),
+            "Fixed the reader",
+            &["src/a.rs"],
+            &[],
+        );
+        let by_abs = s.imported_with_files(
+            "o2",
+            ("x", "h2"),
+            "decision",
+            day(2, 10),
+            "Kept the format",
+            &[],
+            &[&abs],
+        );
+        let other = s.imported_with_files(
+            "o3",
+            ("x", "t1"),
+            "bugfix",
+            day(2, 11),
+            "Elsewhere",
+            &["src/a.rs"],
+            &[],
+        );
+        let unmapped = s.imported_with_files(
+            "o4",
+            ("x", "unrecorded"),
+            "bugfix",
+            day(2, 12),
+            "Never seen",
+            &[&abs],
+            &[],
+        );
+        let gone = s.imported_with_files(
+            "o5",
+            ("x", "h3"),
+            "bugfix",
+            day(2, 13),
+            "Forgotten",
+            &["src/a.rs"],
+            &[],
+        );
+        let unrelated = s.imported_with_files(
+            "o6",
+            ("x", "h4"),
+            "bugfix",
+            day(2, 14),
+            "Other file",
+            &["src/b.rs"],
+            &[],
+        );
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Forget, json!({"uid": gone, "job": "j"}))])
+            .unwrap();
+        s.run();
+        let note = r.read("s9", "src/a.rs");
+        for id in [&card[0], &by_top, &by_abs] {
+            assert!(note.contains(&format!("{id} ")), "{id}: {note}");
+        }
+        assert!(
+            note.contains("🔴 Fixed the reader") && note.contains("⚖️ Kept the format"),
+            "{note}"
+        );
+        for id in [&other, &unmapped, &gone, &unrelated] {
+            assert!(!note.contains(id.as_str()), "{id}: {note}");
+        }
+        // F5: once a session; a row it did not consider brings it again.
+        assert_eq!(r.read("s9", "src/a.rs"), "");
+        r.s.event("prompt", "h5", (&repo, "main"), day(1, 23), json!({}));
+        let newer = r.s.imported_with_files(
+            "o7",
+            ("x", "h5"),
+            "feature",
+            day(2, 15),
+            "Read in pages",
+            &["src/a.rs"],
+            &[],
+        );
+        r.s.run();
+        assert!(r.read("s9", "src/a.rs").contains(&format!("{newer} ")));
+    }
+
+    /// F14 (test 20): cards and imported observations share the 40 the note considers, the newest
+    /// of both: a newer observation takes the place of an older card.
+    #[test]
+    fn cards_and_imported_history_share_one_pool() {
+        let mut r = Reads::new();
+        let repo = r.repo.clone();
+        let day = |d: i64, h: i64| d * 86_400_000 + h * 3_600_000;
+        r.s.event("prompt", "h1", (&repo, "main"), day(1, 1), json!({}));
+        r.s.event("prompt", "h2", (&repo, "main"), day(1, 1), json!({}));
+        let newer = r.s.imported_with_files(
+            "o1",
+            ("x", "h1"),
+            "bugfix",
+            day(3, 9),
+            "Newer",
+            &["src/a.rs"],
+            &[],
+        );
+        let older = r.s.imported_with_files(
+            "o2",
+            ("x", "h2"),
+            "bugfix",
+            day(1, 12),
+            "Older",
+            &["src/a.rs"],
+            &[],
+        );
+        let card = r.cards(2, json!([Reads::card("Between", &["src/a.rs"])]));
+        let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
+        let k = crate::knowledge::open(r.s.home.path()).unwrap();
+        let on = |limit| {
+            crate::cards::on_file(&k, &r.s.raw, &repo, &["src/a.rs"], limit, &settings.rules)
+                .unwrap()
+                .iter()
+                .map(|f| f.id(r.s.raw.device()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(on(40), [newer.clone(), card[0].clone(), older]);
+        assert_eq!(on(2), [newer, card[0].clone()]);
+    }
+
+    /// F12, F13 (test 18): an imported observation is found by its newest files op alone, with
+    /// that op's flag (modified when either list names the file so) and number of files.
+    #[test]
+    fn an_imported_observation_is_found_by_its_newest_files_op() {
+        let mut r = Reads::new();
+        let repo = r.repo.clone();
+        r.s.event("prompt", "h1", (&repo, "main"), 86_400_000 + 1, json!({}));
+        let uid = r.s.imported_with_files(
+            "o1",
+            ("x", "h1"),
+            "bugfix",
+            2 * 86_400_000,
+            "Moved the reader",
+            &["src/a.rs", "src/x.rs"],
+            &["src/a.rs"],
+        );
+        r.s.run();
+        let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
+        let found = |r: &Reads, file: &str| {
+            let k = crate::knowledge::open(r.s.home.path()).unwrap();
+            crate::cards::imported_by_file(&k, &r.s.raw, &repo, &[file], 40, &settings.rules)
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.id(r.s.raw.device()), f.modified, f.named))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found(&r, "src/a.rs"), [(uid.clone(), true, 3)]);
+        let newer = r.s.files_of("o1", ("x", "h1"), &["src/b.rs"], &[]);
+        r.s.raw
+            .append_import_items(vec![crate::raw::Import::Files(newer)], |_| {})
+            .unwrap();
+        r.s.run();
+        assert!(
+            found(&r, "src/a.rs").is_empty(),
+            "the older op names it no more"
+        );
+        assert_eq!(found(&r, "src/b.rs"), [(uid, false, 1)]);
+    }
+
+    /// F8, F15 (test 22): no note, and no hook state written, in a checkout nothing is recorded
+    /// from: by repository, folder or pattern, or by its `.oboete.toml`, whatever cards and
+    /// imported history name its files from before.
+    #[test]
+    fn no_note_in_a_checkout_nothing_is_recorded_from() {
+        let mut r = Reads::new();
+        let repo = r.repo.clone();
+        r.cards(
+            2,
+            json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+        );
+        r.s.event("prompt", "h1", (&repo, "main"), 86_400_000 + 1, json!({}));
+        r.s.imported_with_files(
+            "o1",
+            ("x", "h1"),
+            "bugfix",
+            2 * 86_400_000,
+            "Fixed",
+            &["src/a.rs"],
+            &[],
+        );
+        r.s.run();
+        let folder = crate::capture::folder_path(&r.c);
+        let name = folder.rsplit('/').next().unwrap().to_owned();
+        for (key, value) in [
+            ("repo", repo.clone()),
+            ("folder", folder),
+            ("pattern", name),
+        ] {
+            r.s.raw.exclude_capture((key, &value), false).unwrap();
+            assert_eq!(r.read("s9", "src/a.rs"), "", "{key}");
+            r.s.raw.exclude_capture((key, &value), true).unwrap();
+        }
+        let toml = format!("{}/.oboete.toml", r.c);
+        for text in ["capture = false\n", "capture = [\n"] {
+            std::fs::write(&toml, text).unwrap();
+            assert_eq!(r.read("s9", "src/a.rs"), "", "{text}");
+        }
+        std::fs::remove_file(&toml).unwrap();
+        // Nothing was claimed while it was excluded: the first read since gets the note.
+        assert!(r.read("s9", "src/a.rs").contains("The parser was fixed"));
+    }
+
+    /// F13 (test 23): a store whose consumers have not made the imported tables yet gives the
+    /// cards' note as before.
+    #[test]
+    fn the_cards_note_needs_no_imported_tables() {
+        let mut r = Reads::new();
+        r.cards(
+            2,
+            json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+        );
+        let k = rusqlite::Connection::open(r.s.home.path().join("knowledge.db")).unwrap();
+        k.execute_batch("DROP TABLE imported_files; DROP TABLE session_start;")
+            .unwrap();
+        drop(k);
+        assert!(r.read("s9", "src/a.rs").contains("The parser was fixed"));
     }
 
     /// X5 F1, F2 (G25): Codex's reads get the note, as claude-mem's adapter takes their files: a

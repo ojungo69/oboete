@@ -84,6 +84,15 @@ control character) is not brought over, and since the folders it names are then 
 counts it (`exclusions_refused`) and a warning on standard error says so by its count alone, to add
 a shorter form with `oboete capture exclude --pattern`.
 
+I9. **The files an observation names (parity row 8, 2026-10-17).** An observation's
+`files_read` and `files_modified` come in as a files op beside its document, for the note on a
+file: an `import` op with the document's labels and the two lists, gated, and no text, which no
+reader of documents takes for one (docs/file-note.md F10, F11). Each import also brings the
+files op of an observation imported before that has none under its document's repository, and
+`oboete import claude-mem <db> --files` brings only those, with no new document, work state or
+exclusion. The import's line counts the observations whose files came in (`files`) and the paths
+left out to keep a files op within 32 KiB (`files_cut`).
+
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,
