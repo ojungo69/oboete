@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 21 |
-| partial | 31 |
+| equal_or_better | 22 |
+| partial | 30 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 77 |
@@ -97,7 +97,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | N2 | A newer home is refused before any write. One stamp guards raw, knowledge and providers, and it is raised inside an IMMEDIATE transaction. | equal_or_better | none | sqlite/connection.ts:46 / src/raw.rs:1556 |
 | N3 | save_memory is built and passes the capture gate. A note does not appear in the page's Feed. `metadata` is ignored. | partial | rare | save-memory.ts:5 / src/view.rs:2060 |
 | N4 | mem_search has the same contract: guided and auto modes, cursors, limits and a 15-minute TTL. | equal_or_better | none | progressive-search.ts:126 / src/mem_search.rs:223 |
-| N5 | The native memory-lookup bridge uses the same triggers. It searches words only, with no vectors. The two checks disagree on whether claude-mem's side is any stronger. | partial | weekly | memory-search.ts:122 / src/mem_search.rs:552 |
+| N5 | The native memory-lookup bridge uses the same triggers. Since 2026-10-17 it searches with the meaning side too when the resident viewer makes the lookup's query vector within the prompt's wait, else words only, as the prompt's block does (docs/memory-lookup.md). | equal_or_better | none | memory-search.ts:122 / src/memory_lookup.rs:252 |
 | N6 | The same memory-use instructions at session start, with a switch. | equal_or_better | none | memory-instructions.ts:1 / src/mem_search.rs:27 |
 | N7 | A Codex subagent gets its memory back after a compaction. | equal_or_better | none | codex-compaction-gate.ts:1 / src/hook.rs:589 |
 | G01 | work_state_write and work_state_read, shown first at session start, with a 3,000-character cap. Any field name is kept. | equal_or_better | daily | WorkStateRenderer.ts:13 / src/work_state.rs:17 |

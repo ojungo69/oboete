@@ -25,8 +25,10 @@ note (docs/file-note.md).
   pattern file, an option's value never); a tool's `pattern`; else the file's name, `MEMORY`
   standing for "preferences decisions corrections". At most 500 characters and 1,024 bytes.
 - **The answer**: `mem_search` in auto mode, at most 8 rows, of the checkout's repository
-  (docs/mem-search.md), on the words side alone: the hook embeds nothing and calls no provider
-  (decision 38). It comes after claude-mem's sentence (with oboete's name) inside the memory fence,
+  (docs/mem-search.md), with the meaning side too when the resident viewer makes the lookup's
+  query vector within `[inject] per_prompt_wait_ms` (`POST /api/query-vector`, as the prompt asks
+  it for its block, G23), else the words side alone: the hook embeds nothing itself and calls no
+  provider (decision 38). Since 2026-10-17 (parity row N5). It comes after claude-mem's sentence (with oboete's name) inside the memory fence,
   through the egress gate, the whole within 9,500 UTF-16 units and cut at a line, as the file
   note's room is. It holds no continuation (none would outlive the hook: claude-mem's hook and
   tool share one worker's store) and no muted claim, since it is injected (spec 6.1). When it
@@ -41,7 +43,7 @@ note (docs/file-note.md).
 | claude-mem | oboete | Why |
 |---|---|---|
 | The worker searches, through HTTP, waiting at most 3 s | the hook searches the stores itself | oboete's hooks read the stores directly; no worker is waited for |
-| Search with its vectors (Chroma) | the words side alone | a hook embeds nothing (decision 38) |
+| Search with its vectors (Chroma) | with the resident viewer's query vector within the prompt's wait, else the words side alone | a hook embeds nothing itself (decision 38); the viewer holds the model, as for the prompt's block (G23) |
 | `<claude-mem-retrieved-data>`, its text cut at 10,000 characters and the sentence and tags added | oboete's fence, the whole within 9,500 UTF-16 units | Grok and Claude Code clip a context at 10,000 (docs/file-note.md F1) |
 | Folders of `CLAUDE_MEM_MEMORY_WATCH_ROOTS` too | not yet | claude-mem's folder watcher is parity row 44, after the switch |
 

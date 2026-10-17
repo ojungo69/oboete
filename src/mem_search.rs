@@ -214,10 +214,13 @@ pub struct Search<'a> {
     /// The egress gate's rules as they are now: each title and detail passes it whole before it
     /// is cut, so no cut leaves part of a secret the gate no longer finds.
     pub rules: &'a crate::redact::Rules,
-    /// A hook's search (the memory lookup bridge, docs/memory-lookup.md): the words side alone, no
-    /// query embedded (decision 38); no continuation, which no store would keep past the hook; and
-    /// no muted claim, since its answer is injected (spec 6.1).
+    /// A hook's search (the memory lookup bridge, docs/memory-lookup.md): no query embedded in
+    /// it (decision 38); no continuation, which no store would keep past the hook; and no muted
+    /// claim, since its answer is injected (spec 6.1).
     pub hook: bool,
+    /// A hook's query vector, which the resident viewer made (N5): the meaning side too; none,
+    /// the words side alone.
+    pub vector: Option<&'a [f32]>,
 }
 
 impl Search<'_> {
@@ -542,7 +545,7 @@ impl Search<'_> {
             ..Default::default()
         };
         let answer = match self.hook {
-            true => search::query_with(self.home, &q, None)?,
+            true => search::query_with(self.home, &q, self.vector)?,
             false => search::query(self.home, &q)?,
         };
         Ok(answer
@@ -1033,6 +1036,7 @@ mod tests {
             repo: scope,
             rules: &crate::redact::Rules::default(),
             hook: false,
+            vector: None,
         };
         let detail = |id: &str| Detail {
             row: row(id, "observation", "t"),

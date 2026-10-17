@@ -432,6 +432,7 @@ impl Oboete {
             repo: &repo,
             rules: &rules,
             hook: false,
+            vector: None,
         };
         match search.run(&a) {
             Ok(Ok(answer)) => text(answer),
@@ -2072,6 +2073,7 @@ mod tests {
             repo: &|p: Option<&str>| server.scope(None, p),
             rules: &crate::redact::Rules::default(),
             hook: false,
+            vector: None,
         };
         let args: crate::mem_search::Args =
             serde_json::from_value(json!({"continuation": token, "selectedIds": [uid]})).unwrap();
@@ -2356,6 +2358,7 @@ mod tests {
             repo: &|_| Err(anyhow::anyhow!("no such table in /home/x/knowledge.db")),
             rules: &crate::redact::Rules::default(),
             hook: false,
+            vector: None,
         };
         let args: crate::mem_search::Args =
             serde_json::from_value(json!({"query": "quartz parser", "project": "github.com/o/r"}))
