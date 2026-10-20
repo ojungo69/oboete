@@ -219,10 +219,34 @@ pub fn lookup(tool: &str, args: &Value, cwd: &Path, roots: &Roots) -> Option<Loo
 /// answer of `mem_search` in auto mode (at most 8 rows) on its words, inside the memory fence after
 /// `LOOKUP`, the whole within `room` UTF-16 units and cut at a line; none for any other call, with
 /// `[inject] memory_lookup` off, where nothing is recorded, before the stores are made, or when
-/// the search fails or has not answered within `LOOKUP_WAIT` (the native lookup goes on as it
-/// would). A subagent's lookup gets it too, as claude-mem's handler runs before its subagent check.
+/// the search fails or has not answered within `LOOKUP_WAIT` (`Late`; the native lookup goes on as
+/// it would). A subagent's lookup gets it too, as claude-mem's handler runs before its subagent
+/// check.
 pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Option<String>> {
+    #[cfg(test)]
+    if let Some(wait) = TEST_WAIT.get() {
+        return answer_within(home, payload, room, wait);
+    }
     answer_within(home, payload, room, LOOKUP_WAIT)
+}
+
+/// A lookup whose search did not answer within its wait: it spent the hook's time, so the hook
+/// gives nothing else after it (CodeRabbit on #568).
+#[derive(Debug)]
+pub struct Late(Duration);
+
+impl std::fmt::Display for Late {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the search did not answer within {:?}", self.0)
+    }
+}
+
+impl std::error::Error for Late {}
+
+#[cfg(test)]
+thread_local! {
+    /// A hook test's wait for its lookups, `LOOKUP_WAIT` when none.
+    pub(crate) static TEST_WAIT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 /// claude-mem's bridge gives its worker's search 3 s (`timeoutMs: 3_000`), and the native lookup
@@ -304,9 +328,7 @@ pub(crate) fn answer_within(
     });
     let text = match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(text) => text?,
-        Err(RecvTimeoutError::Timeout) => {
-            anyhow::bail!("the search did not answer within {wait:?}")
-        }
+        Err(RecvTimeoutError::Timeout) => return Err(Late(wait).into()),
         Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
     };
     // The egress gate over the whole answer, as the MCP server's `text` passes every answer through

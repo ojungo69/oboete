@@ -131,12 +131,15 @@ fn run_io(
         // read goes on. Grok's read gets it beside what else its PreToolUse shows (below).
         if matches!((agent, event), ("claude" | "codex", "PreToolUse")) {
             // claude-mem's bridge first (docs/memory-lookup.md): a lookup of the agent's own memory
-            // gets oboete's search of it, and then no file note.
-            noted = crate::memory_lookup::answer(home, &payload, NOTE_ROOM).unwrap_or_else(|e| {
+            // gets oboete's search of it, and then no file note; nor does one past its wait, which
+            // spent the hook's time (CodeRabbit on #568).
+            let looked = crate::memory_lookup::answer(home, &payload, NOTE_ROOM);
+            let late = (looked.as_ref()).is_err_and(|e| e.is::<crate::memory_lookup::Late>());
+            noted = looked.unwrap_or_else(|e| {
                 eprintln!("oboete: no memory for the lookup: {e:#}");
                 None
             });
-            if noted.is_none() {
+            if noted.is_none() && !late {
                 noted =
                     file_notes(home, agent, &payload, &mut fence, NOTE_ROOM).unwrap_or_else(|e| {
                         eprintln!("oboete: no note on the file: {e:#}");
@@ -4811,6 +4814,34 @@ mod tests {
                 .is_err_and(|e| format!("{e:#}").contains("did not answer within")),
             "{held:?}"
         );
+    }
+
+    /// N5 (CodeRabbit on #568): a lookup past its wait spent the hook's time, so no file note
+    /// follows it: a forget holding the stores back costs the hook its wait alone.
+    #[test]
+    fn a_memory_lookup_past_its_wait_takes_no_file_note_after_it() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let checkout = Path::new(&p.c);
+        let notes = checkout.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(checkout.join(".claude")).unwrap();
+        let settings = json!({ "autoMemoryDirectory": notes });
+        std::fs::write(checkout.join(".claude/settings.json"), settings.to_string()).unwrap();
+        let file = notes.join("deploys.md");
+        std::fs::write(&file, "Deploys wait for the canary.\n").unwrap();
+        let read = json!({"tool_name": "Read", "tool_input": {"file_path": file}});
+        crate::memory_lookup::TEST_WAIT.set(Some(Duration::from_millis(300)));
+        let forget = crate::dispatch::exclusive_within(p.s.home.path(), Duration::from_secs(1));
+        let started = std::time::Instant::now();
+        let got = p.hook("PreToolUse", "s1", read);
+        let took = started.elapsed();
+        drop(forget.unwrap());
+        crate::memory_lookup::TEST_WAIT.set(None);
+        assert_eq!(got, "");
+        // The file note would wait `READ_WAIT` for the forget on top.
+        assert!(took < Duration::from_millis(900), "{took:?}");
     }
 
     #[test]
