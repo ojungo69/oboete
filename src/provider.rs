@@ -2213,10 +2213,23 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
 /// `write_stdin_approval` (0.160.0): input to a terminal launched with more than the current
 /// permissions waits for an approval, and off it waits for none
 /// (codex-rs/core/src/unified_exec/stdin_approval.rs at rust-v0.160.0). No tool comes with it.
-pub(crate) const CODEX_ON: [&str; 47] = [
+/// Those of 0.163.0 (codex-rs/features/src/lib.rs at rust-v0.163.0), none of them a tool:
+/// `api_key_cyber_access_programs` sends a cyber access program a turn names with an API key's
+/// requests, as a ChatGPT sign-in always does (core/src/cyber_access_program.rs);
+/// `api_key_model_discovery` lists models for an API key; `cli_daybreak` picks that program for
+/// an exec turn from the model catalog (exec/src/daybreak.rs), a treatment by the server;
+/// `browser_annotation_api` and `in_app_voice` are the desktop apps', set by requirements;
+/// `code_mode_interrupt` and `instant_interrupt` end or yield code mode cells, which stay off;
+/// `ultrafast_mode` is a service tier, as `fast_mode`.
+pub(crate) const CODEX_ON: [&str; 55] = [
+    "api_key_cyber_access_programs",
+    "api_key_model_discovery",
     "auth_elicitation",
+    "browser_annotation_api",
     "browser_use_full_cdp_access",
+    "cli_daybreak",
     "code_mode_host",
+    "code_mode_interrupt",
     "collaboration_modes",
     "compaction_image_budget",
     "content_item_kinds",
@@ -2232,6 +2245,8 @@ pub(crate) const CODEX_ON: [&str; 47] = [
     "in_app_dictation",
     "in_app_local_automation",
     "in_app_updates",
+    "in_app_voice",
+    "instant_interrupt",
     "item_ids",
     "mentions_v2",
     "multi_agent",
@@ -2253,6 +2268,7 @@ pub(crate) const CODEX_ON: [&str; 47] = [
     "tool_search_always_defer_mcp_tools",
     "tool_suggest",
     "tui_app_server",
+    "ultrafast_mode",
     "unbounded_connection_retries",
     "unified_exec",
     "unified_exec_tty",
