@@ -131,12 +131,15 @@ fn run_io(
         // read goes on. Grok's read gets it beside what else its PreToolUse shows (below).
         if matches!((agent, event), ("claude" | "codex", "PreToolUse")) {
             // claude-mem's bridge first (docs/memory-lookup.md): a lookup of the agent's own memory
-            // gets oboete's search of it, and then no file note.
-            noted = crate::memory_lookup::answer(home, &payload, NOTE_ROOM).unwrap_or_else(|e| {
+            // gets oboete's search of it, and then no file note; nor does one past its wait, which
+            // spent the hook's time (CodeRabbit on #568).
+            let looked = crate::memory_lookup::answer(home, &payload, NOTE_ROOM);
+            let late = (looked.as_ref()).is_err_and(|e| e.is::<crate::memory_lookup::Late>());
+            noted = looked.unwrap_or_else(|e| {
                 eprintln!("oboete: no memory for the lookup: {e:#}");
                 None
             });
-            if noted.is_none() {
+            if noted.is_none() && !late {
                 noted =
                     file_notes(home, agent, &payload, &mut fence, NOTE_ROOM).unwrap_or_else(|e| {
                         eprintln!("oboete: no note on the file: {e:#}");
@@ -4753,6 +4756,144 @@ mod tests {
             "{meaning}"
         );
         assert_eq!(r.asked(), [json!({"repo": p.repo, "text": "zebra"})]);
+    }
+
+    /// N5 (docs/memory-lookup.md): a lookup whose search has not answered within its wait gives
+    /// nothing, as claude-mem's bridge gives up on its worker's search after 3 s, and the native
+    /// lookup goes on. Here a forget committing holds the search back.
+    #[test]
+    fn a_memory_lookup_past_its_wait_gives_nothing() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path();
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let lookup = |wait| crate::memory_lookup::answer_within(home, &payload, NOTE_ROOM, wait);
+        let answered = lookup(Duration::from_secs(60)).unwrap();
+        assert!(answered.is_some_and(|a| a.contains("Deploys wait")));
+        let forget = crate::dispatch::exclusive_within(home, Duration::from_secs(1)).unwrap();
+        let started = std::time::Instant::now();
+        let held = lookup(Duration::from_millis(300));
+        let took = started.elapsed();
+        drop(forget);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(
+            held.as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("did not answer within")),
+            "{held:?}"
+        );
+    }
+
+    /// N5: the lookup's wait holds the viewer's query vector too: a viewer slower than the wait
+    /// costs the lookup no more than it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_memory_lookups_wait_holds_the_viewers_vector_too() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "canary");
+        let slow = Some(json!({ "vector": vector }));
+        // The prompt's longest wait (`per_prompt_wait_ms`), past the lookup's.
+        let _r = Resident::serve(&home, 3_000, slow, Duration::from_secs(5));
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let started = std::time::Instant::now();
+        let held = crate::memory_lookup::answer_within(
+            &home,
+            &payload,
+            NOTE_ROOM,
+            Duration::from_millis(300),
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(
+            held.as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("did not answer within")),
+            "{held:?}"
+        );
+    }
+
+    /// N5 (CodeRabbit on #568): a lookup past its wait spent the hook's time, so no file note
+    /// follows it: a forget holding the stores back costs the hook its wait alone.
+    #[test]
+    fn a_memory_lookup_past_its_wait_takes_no_file_note_after_it() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let checkout = Path::new(&p.c);
+        let notes = checkout.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(checkout.join(".claude")).unwrap();
+        let settings = json!({ "autoMemoryDirectory": notes });
+        std::fs::write(checkout.join(".claude/settings.json"), settings.to_string()).unwrap();
+        let file = notes.join("deploys.md");
+        std::fs::write(&file, "Deploys wait for the canary.\n").unwrap();
+        let read = json!({"tool_name": "Read", "tool_input": {"file_path": file}});
+        crate::memory_lookup::TEST_WAIT.set(Some(Duration::from_millis(300)));
+        let forget = crate::dispatch::exclusive_within(p.s.home.path(), Duration::from_secs(1));
+        let started = std::time::Instant::now();
+        let got = p.hook("PreToolUse", "s1", read);
+        let took = started.elapsed();
+        drop(forget.unwrap());
+        crate::memory_lookup::TEST_WAIT.set(None);
+        assert_eq!(got, "");
+        // The file note would wait `READ_WAIT` for the forget on top.
+        assert!(took < Duration::from_millis(900), "{took:?}");
+    }
+
+    /// N5 (CodeRabbit on #568): the wait holds the lookup's reads of the stores too: a restore
+    /// holding raw.db's lock costs the lookup no more than its wait.
+    #[test]
+    fn a_memory_lookups_wait_holds_its_store_reads_too() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let Prompts { s, _cwd, c, .. } = p;
+        let crate::search::b::fixture::Store { home, raw } = s;
+        drop(raw);
+        let payload = json!({"session_id": "s1", "cwd": c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let restore = crate::raw::lock_for_swap(home.path()).unwrap();
+        let started = std::time::Instant::now();
+        let wait = Duration::from_millis(300);
+        let held = crate::memory_lookup::answer_within(home.path(), &payload, NOTE_ROOM, wait);
+        let took = started.elapsed();
+        drop(restore);
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert!(
+            held.as_ref()
+                .is_err_and(|e| e.is::<crate::memory_lookup::Late>()),
+            "{held:?}"
+        );
+    }
+
+    /// N5 (Codex on #568): the wait holds the lookup's own discovery too: Claude Code's settings
+    /// in the checkout that cannot be read (a FIFO no one writes) cost the hook no more than it.
+    #[cfg(unix)]
+    #[test]
+    fn a_memory_lookups_wait_holds_its_discovery_too() {
+        let p = Prompts::new(false);
+        let claude = Path::new(&p.c).join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let fifo = claude.join("settings.json");
+        let path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path the call only reads.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let home = p.s.home.path().to_owned();
+        let (send, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let wait = Duration::from_millis(300);
+            let late = crate::memory_lookup::answer_within(&home, &payload, NOTE_ROOM, wait)
+                .map_err(|e| e.is::<crate::memory_lookup::Late>());
+            let _ = send.send(late);
+        });
+        let answer = got.recv_timeout(Duration::from_secs(2));
+        assert!(matches!(answer, Ok(Err(true))), "{answer:?}");
     }
 
     #[test]

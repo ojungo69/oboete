@@ -35,14 +35,17 @@ note (docs/file-note.md).
   answers, the file note waits for the next read; the native lookup goes on either way.
 - **None**: for any other call; with `[inject] memory_lookup = false` (on by default, as claude-mem's
   `CLAUDE_MEM_MEMORY_SEARCH_HOOK_ENABLED`), on the detailed settings page; where nothing is
-  recorded; before the stores are made; when the search fails. A subagent's lookup gets it too, as
-  claude-mem's handler runs before its subagent check.
+  recorded; before the stores are made; when the search fails; when it has not answered 3 s after
+  the hook started, its discovery, the reads of the stores and the vector's wait included
+  (`LOOKUP_WAIT`, claude-mem's `timeoutMs: 3_000` for its worker's search), the search left on its
+  thread until the hook exits, and then no file note either, since the wait spent the hook's time.
+  A subagent's lookup gets it too, as claude-mem's handler runs before its subagent check.
 
 ## Differences from claude-mem, and why
 
 | claude-mem | oboete | Why |
 |---|---|---|
-| The worker searches, through HTTP, waiting at most 3 s | the hook searches the stores itself | oboete's hooks read the stores directly; no worker is waited for |
+| The worker searches, through HTTP, waiting at most 3 s | the hook searches the stores itself, at most 3 s from its start | oboete's hooks read the stores directly; the 3 s keep the hook within Claude Code's 5 s, as claude-mem's do |
 | Search with its vectors (Chroma) | with the resident viewer's query vector within the prompt's wait, else the words side alone | a hook embeds nothing itself (decision 38); the viewer holds the model, as for the prompt's block (G23) |
 | `<claude-mem-retrieved-data>`, its text cut at 10,000 characters and the sentence and tags added | oboete's fence, the whole within 9,500 UTF-16 units | Grok and Claude Code clip a context at 10,000 (docs/file-note.md F1) |
 | Folders of `CLAUDE_MEM_MEMORY_WATCH_ROOTS` too | not yet | claude-mem's folder watcher is parity row 44, after the switch |
@@ -56,8 +59,72 @@ release build, 150 calls each): a Bash call that is no lookup took p50 1.8 ms, p
 3.6 ms, as a Read of a file that is no memory did (p50 1.8 ms, p95 2.1 ms), which the hook has
 always been sent.
 
+## Speed (2026-10-20)
+
+Claude Code's record of the hook on this PC from 2026-10-15 to 2026-10-20: 59 lookups, the median
+5.0 s, 51 over 3 s, 39 ended at its 5 s with nothing shown. claude-mem's bridge took a median of
+247 ms over the same days. One lookup of a memory file's name, the stores' pages dropped from the
+page cache first, took 9.3 s, of which:
+
+- 4.9 s the imported leg's full text: the trigrams of a few words match nearly every imported
+  document (235,789 of 263,208), and its join read each match's row (428 MB) for its filters and
+  order, before the leg's 100 best were taken. The ranking alone took 0.9 s.
+- 2.1 s the rescoring of the vector side's candidates (`knn_scored`: 400 a leg, 2,092 in all), each
+  fp32 vector a few random pages of a 1.1 GB table read one after another.
+- 0.95 s the records' leg (ranking 0.5 s, their text for snippets 0.45 s), whose rows come after
+  the other legs' 100 documents and so never reached the 8 shown.
+- The rest the bit index's scans and the legs' hits. A lookup whose index has a title of its words
+  also reads the context of each such anchor, a timeline: there the repository's imported
+  documents were read whole with their text for each side (5.4 s cold, 0.75 s warm around one
+  anchor), and its prompts by a scan of every record (0.85 s cold). The imported leg's join had
+  read the same documents, so its cost had hidden this one.
+
+What changed (each gives the same answers: 16 lookups in another home with this PC's store, 10 on
+the store itself with the resident viewer's vectors, and 54 CLI searches and timelines, all byte
+for byte the same as before):
+
+- The imported consumer makes a narrow index of the columns that join reads
+  (`consumer::imported::COVER`, `imported(rowid, repo, ts, kind, session, uid)`: 31 MB on this
+  store), which `search::b::imported_fts` reads when it exists: a reader never makes an index, since
+  a hook can be ended mid-build. Short words' pool reads the title and body of its `POOL` rows
+  alone. Cold, the join took 0.6 s instead of 3.9 s on a copy of the store.
+- The rescoring reads its first 8 vectors, and when they took more than 0.2 ms each (the disk, not
+  the page cache) it reads the others ahead on 8 read-only connections at once, kept for the
+  search's other legs (`search::b::prefetch_vectors`): 400 cold vectors took 0.15 s instead of
+  0.70 s, and a warm search opens none. Nothing read ahead is used: a vector never changes under
+  its `src_sha`.
+- The records' leg, below the others in relevance order (`mem_search`'s, the CLI's default), is
+  neither ranked nor read when the other legs have as many documents as the answer's limit, since
+  none of its rows could take a place (each leg keeps to a kind filter before its depth); by date
+  it is read, and its ranking still runs while a query's call to the embedder is out (D8).
+- A timeline reads a repository's imported documents by a second index, `imported(repo, ts, uid)`
+  (`imported_time`), each of its two names to the page's end in the side's own order, and its
+  prompts by a partial index of the prompt records (`raw_docs_prompts`), both the consumers'.
+- The 3 s above, so a lookup the cache cannot answer in time costs 3 s and not Claude Code's 5.
+
+The speed-ups serve every search and timeline, `mem_search` and the viewer's included.
+
+After, on a copy of this PC's store in another home with the resident viewer's query vectors
+(2026-10-20): the lookup above took 2.66 s cold and 0.79 s warm (9.66 s and 1.52 s before); five
+memory files' lookups, cold, answered in 2.50 to 2.87 s but for MEMORY.md's ("preferences
+decisions corrections", words most documents hold), which passed 3 s and gave nothing, and warm in
+0.76 to 1.02 s. What a cold lookup still reads: the imported ranking (0.7 s), the bit index's scan
+of the imported partition (0.6 s) and the legs' hits.
+
 ## Tests
 
+`hook::tests::a_memory_lookup_past_its_wait_gives_nothing` (a forget holding the search back: an
+error within the wait, as the hook reports a failure, the native lookup going on),
+`a_memory_lookups_wait_holds_the_viewers_vector_too` (a viewer slower than the wait costs no more),
+`a_memory_lookup_past_its_wait_takes_no_file_note_after_it` (a forget holding the stores back costs
+the hook its wait alone), `a_memory_lookups_wait_holds_its_store_reads_too` (a restore holding
+raw.db's lock costs no more), `a_memory_lookups_wait_holds_its_discovery_too` (checkout settings
+that cannot be read, a FIFO, cost no more);
+`search::b::tests::imported_full_text_reads_the_narrow_index_and_finds_the_same`,
+`a_timeline_reads_a_repositorys_documents_in_time_order_and_finds_the_same`,
+`by_date_a_newer_record_comes_before_imported_documents_that_fill_the_limit`,
+`prefetch_reads_a_files_vectors_and_skips_memory`;
+`search::b::timeline::tests::a_repositorys_prompts_are_read_by_their_index`;
 `memory_lookup::tests::a_lookup_is_told_as_claude_mem_tells_one` (claude-mem's cases: native
 searches, the memory tool, reads of a memory folder by each tool and shell reader, grep's and rg's
 options, paths with `~/` and `..`, and the calls that are none),

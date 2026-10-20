@@ -39,6 +39,21 @@ pub fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// N5 (docs/memory-lookup.md): every column the trigram side of a search reads of an imported
+/// match (`search::b::imported_fts`), so its join reads this narrow index and not the documents.
+/// The consumer makes it, never a reader: a hook's search can be ended mid-build. On this PC's
+/// store (263,208 documents, 2026-10-20) about 31 MB, made in 0.6 s with the documents cached.
+pub(crate) const COVER: &str = "imported_cover";
+
+fn cover(k: &Connection) -> Result<()> {
+    k.execute_batch(
+        "CREATE INDEX IF NOT EXISTS imported_cover ON imported(rowid, repo, ts, kind, session, uid);
+         -- N5: a timeline's documents of a repository in time order (`search::b::imported_side`).
+         CREATE INDEX IF NOT EXISTS imported_time ON imported(repo, ts, uid);",
+    )?;
+    Ok(())
+}
+
 impl Consumer for Imported {
     fn name(&self) -> &'static str {
         "imported"
@@ -50,6 +65,7 @@ impl Consumer for Imported {
 
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
         schema(k)?;
+        cover(k)?;
         let ops = raw.ops_after(device, after, BATCH)?;
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
