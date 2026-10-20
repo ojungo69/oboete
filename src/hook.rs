@@ -2099,8 +2099,9 @@ fn docs_by_words(
 }
 
 /// A card, a session summary or an imported document through its reader (current, over no record
-/// removed since, not forgotten, gated), as a prompt's block names it: a card by its title and the
-/// first sentence of its narrative, a summary by its request, an imported document as
+/// removed since, not forgotten, gated), as a prompt's block names it: a card by its title and its
+/// whole narrative (claude-mem's block, parity row 31), matched on its title and the narrative's
+/// first sentence; a summary by its request; an imported document as
 /// `consumer::imported::prompt_line` does. `None` for one the reader hides, or a summary without a
 /// request.
 fn read_doc(
@@ -2121,10 +2122,22 @@ fn read_doc(
             } else {
                 format!("{}: {first}", c.row_title)
             };
+            // The line shows the whole narrative; the words a prompt is matched on stay as above, as
+            // a longer text would let more cards past 4.6's threshold, which the one evaluation
+            // sets (decision 34). A card stored without a title is titled with its narrative's
+            // start, which the line shows once.
+            let narrative = c.narrative.trim();
+            let shown = if narrative.is_empty() {
+                c.row_title.clone()
+            } else if narrative.starts_with(c.row_title.trim_end_matches('…')) {
+                narrative.to_owned()
+            } else {
+                format!("{}: {narrative}", c.row_title)
+            };
             let what = format!("{} card", c.kind.as_deref().unwrap_or("summary"));
             let key = c.id(local);
             Doc {
-                line: doc_line(c.ts, &what, &key, &words, rules),
+                line: doc_line(c.ts, &what, &key, &shown, rules),
                 key,
                 kind,
                 words,
@@ -5077,9 +5090,10 @@ mod tests {
         let decision = text
             .find("- 1970-01-02 decision: Parser errors go to stderr.")
             .expect(&text);
+        // Parity row 31: the whole narrative, as claude-mem's block shows one.
         let card_line = format!(
             "- 1970-01-03 bugfix card {card}: Parser errors go to stderr now: The parser writes its \
-             errors to stderr.\n"
+             errors to stderr. It used to write them to the log.\n"
         );
         let summary_line = format!(
             "- 1970-01-03 session summary {summary}: Make the parser errors go to stderr now\n"
@@ -5098,6 +5112,44 @@ mod tests {
         );
         assert_eq!(p.prompt("s1", "parser errors go to stderr now"), "");
         assert_eq!(last_side(p.s.home.path()).unwrap().1, "no-viewer");
+    }
+
+    /// Parity row 31: the default block holds five cards with their whole narratives, each line
+    /// near the length a line is cut at (`consumer::manifest::CLIP`), as claude-mem's block holds
+    /// its five.
+    #[test]
+    fn the_default_block_holds_five_whole_narratives() {
+        let mut p = Prompts::new(true);
+        let tail = "Then it flushes the stream and closes it. ".repeat(7);
+        let lines: Vec<String> = (1..=5)
+            .map(|i| {
+                let title = format!("Parser errors go to stderr now, step {i}");
+                let narrative = format!("The parser writes its errors to stderr, step {i}. {tail}");
+                let card = work(&mut p, i, &title, narrative.trim(), "").0;
+                format!("bugfix card {card}: {title}: {}\n", narrative.trim())
+            })
+            .collect();
+        let text = p.prompt("s1", "parser errors go to stderr now");
+        for line in &lines {
+            assert!(text.contains(line.as_str()), "{line}\n{text}");
+        }
+    }
+
+    /// Parity row 31: a card's line shows its whole narrative, but the words side still matches the
+    /// prompt on its title and first sentence: words later in the narrative do not carry a card
+    /// past the threshold (decision 34 leaves that to the one evaluation).
+    #[test]
+    fn a_cards_later_sentences_do_not_carry_it_past_the_threshold() {
+        let mut p = Prompts::new(true);
+        let (card, _) = work(
+            &mut p,
+            2,
+            "Lexer tokens are cached",
+            "The lexer keeps its tokens. Parser errors go to stderr now.",
+            "",
+        );
+        let text = p.prompt("s1", "parser errors go to stderr now");
+        assert!(!text.contains(&card), "{text}");
     }
 
     /// #506 item 1 (G23): a card or a summary the session was shown is no claim: the correction
@@ -5121,7 +5173,8 @@ mod tests {
     }
 
     /// G23: a card the session start showed is in the shown set with its kind, so a prompt does
-    /// not show it again; a summary's card (no type) shows its sentence once.
+    /// not show it again; a summary's card (no type) shows its narrative, whose first sentence
+    /// is its title, once.
     #[test]
     fn a_card_the_session_start_showed_is_not_shown_again() {
         let mut p = Prompts::new(true);
@@ -5148,7 +5201,9 @@ mod tests {
         .clone();
         p.s.run();
         let text = p.prompt("s2", "the lexer reads one line at a time");
-        let line = format!("summary card {summary_card}: The lexer reads one line at a time.\n");
+        let line = format!(
+            "summary card {summary_card}: The lexer reads one line at a time. Then more.\n"
+        );
         assert!(text.contains(&line), "{text}");
     }
 

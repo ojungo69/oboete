@@ -2963,7 +2963,7 @@ mod tests {
         assert_eq!(
             shown["inject"],
             json!({"session_start": true, "session_start_note": true, "session_start_list": true, "session_start_chars": 9000, "per_prompt": false,
-                "per_prompt_chars": 1500, "per_prompt_wait_ms": 1000, "memory_lookup": true,
+                "per_prompt_chars": 2500, "per_prompt_wait_ms": 2000, "memory_lookup": true,
                 "memory_instructions": true, "correction": true, "correction_chars": 800})
         );
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
