@@ -4870,6 +4870,32 @@ mod tests {
         );
     }
 
+    /// N5 (Codex on #568): the wait holds the lookup's own discovery too: Claude Code's settings
+    /// in the checkout that cannot be read (a FIFO no one writes) cost the hook no more than it.
+    #[cfg(unix)]
+    #[test]
+    fn a_memory_lookups_wait_holds_its_discovery_too() {
+        let p = Prompts::new(false);
+        let claude = Path::new(&p.c).join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let fifo = claude.join("settings.json");
+        let path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path the call only reads.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let home = p.s.home.path().to_owned();
+        let (send, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let wait = Duration::from_millis(300);
+            let late = crate::memory_lookup::answer_within(&home, &payload, NOTE_ROOM, wait)
+                .map_err(|e| e.is::<crate::memory_lookup::Late>());
+            let _ = send.send(late);
+        });
+        let answer = got.recv_timeout(Duration::from_secs(2));
+        assert!(matches!(answer, Ok(Err(true))), "{answer:?}");
+    }
+
     #[test]
     fn a_title_cannot_close_the_file_notes_fence() {
         let mut r = Reads::new();

@@ -264,6 +264,32 @@ pub(crate) fn answer_within(
     wait: Duration,
 ) -> anyhow::Result<Option<String>> {
     let deadline = Instant::now() + wait;
+    // All of it runs on a thread the hook does not wait for past `deadline`: a slow file system
+    // can hold the lookup's own discovery (Codex on #568), raw.db's open can wait for a restore
+    // (CodeRabbit on #568), and a cold store's search took 9 s on this PC's on 2026-10-20
+    // (docs/memory-lookup.md).
+    let (send, answered) = std::sync::mpsc::channel();
+    let (home, payload) = (home.to_owned(), payload.clone());
+    std::thread::spawn(move || {
+        // No one hears an answer past the deadline.
+        let _ = send.send(looked_up(&home, &payload, deadline, room));
+    });
+    match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(answer) => answer,
+        Err(RecvTimeoutError::Timeout) => Err(Late(wait).into()),
+        Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
+    }
+}
+
+/// `answer_within`'s answer, on its thread: none for a call that is no lookup, with
+/// `[inject] memory_lookup` off, before the stores are made, where nothing is recorded, when the
+/// search refuses it or when nothing of it fits `room`.
+fn looked_up(
+    home: &Path,
+    payload: &Value,
+    deadline: Instant,
+    room: usize,
+) -> anyhow::Result<Option<String>> {
     let Some(cwd) = payload["cwd"].as_str() else {
         return Ok(None);
     };
@@ -277,33 +303,6 @@ pub(crate) fn answer_within(
     let Some(found) = lookup(tool, args, Path::new(cwd), &roots) else {
         return Ok(None);
     };
-    // What reads the stores, asks the viewer and searches runs on a thread the hook does not wait
-    // for past `deadline`: raw.db's open can wait for a restore (CodeRabbit on #568), and a cold
-    // store's search took 9 s on this PC's on 2026-10-20 (docs/memory-lookup.md).
-    let (send, answered) = std::sync::mpsc::channel();
-    let (home, payload) = (home.to_owned(), payload.clone());
-    std::thread::spawn(move || {
-        // No one hears an answer past the deadline.
-        let _ = send.send(searched(&home, &payload, found, deadline, room));
-    });
-    match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(answer) => answer,
-        Err(RecvTimeoutError::Timeout) => Err(Late(wait).into()),
-        Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
-    }
-}
-
-/// `answer_within`'s answer to the lookup `found`: none with `[inject] memory_lookup` off, before
-/// the stores are made, where nothing is recorded, when the search refuses it or when nothing of
-/// it fits `room`.
-fn searched(
-    home: &Path,
-    payload: &Value,
-    found: Lookup,
-    deadline: Instant,
-    room: usize,
-) -> anyhow::Result<Option<String>> {
-    let cwd = payload["cwd"].as_str().unwrap_or_default();
     let inject = crate::config::inject(home)?;
     if !inject.memory_lookup || !crate::raw::exists(home) || !home.join("knowledge.db").exists() {
         return Ok(None);
