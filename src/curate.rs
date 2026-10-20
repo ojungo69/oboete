@@ -682,7 +682,7 @@ pub(crate) fn memory_write(tool: &str, body: &Value) -> bool {
 
 /// A tool's server and its own name: `mcp__<server>__<tool>` as Claude Code and Codex name it,
 /// `<server>__<tool>` as Grok does; `<server>.<tool>`, `/` or `:` (Cursor's `mcp:<tool>`).
-fn served(tool: &str) -> Option<(&str, &str)> {
+pub(crate) fn served(tool: &str) -> Option<(&str, &str)> {
     tool.rsplit_once("__")
         .or_else(|| tool.rsplit_once(['.', '/', ':']))
 }
@@ -701,7 +701,7 @@ fn claude_mem(server: &str) -> bool {
 }
 
 /// oboete's own server: its name, or Cursor's `mcp`, which names no server.
-fn oboete(server: &str) -> bool {
+pub(crate) fn oboete(server: &str) -> bool {
     server.contains("oboete") || server == "mcp"
 }
 

@@ -1,0 +1,1720 @@
+//! Parity row X10 (docs/my-work.md): claude-mem 14.0's My Work read from the stores, as its
+//! `buildHumanRequests` (`request-projection.mjs`) and `statusFor` (`view-model.js`) make it at
+//! v14.0.1. A request is an agent's session, or a `request_id` its work state names; its copy is
+//! the session summaries the curators write, so a read makes no model call.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
+use std::sync::LazyLock;
+
+use anyhow::Result;
+use regex::Regex;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Map, Value, json};
+
+use crate::cards::Card;
+use crate::raw::{Item, Raw, WorkWrite};
+use crate::redact::Rules;
+use crate::turns::TurnSummary;
+
+/// What is read, at most, as claude-mem's agent view reads it (`readAgentRecords`,
+/// `buildAgentView`): the newest 240 work items, 300 observations (cards here), 100 summaries.
+const WORK: usize = 240;
+const CARDS: usize = 300;
+const SUMMARIES: usize = 100;
+/// shortcut: the newest 2,000 live prompts, where claude-mem reads every prompt of the sessions it
+/// loaded; a session whose first prompt is older has its oldest one read as its ask. Read them by
+/// session when a home holds more.
+const PROMPTS: usize = 2_000;
+/// An ask and a follow-up, in characters, and the follow-ups kept (`requestText`, scope updates).
+const ASK: usize = 1_200;
+const FOLLOW_UP: usize = 500;
+const FOLLOW_UPS: usize = 6;
+/// A card's title, summary and next step, in characters (claude-mem's copy).
+const TITLE: usize = 100;
+const SUMMARY: usize = 240;
+const NEXT: usize = 160;
+/// claude-mem's `uniqueCall`: a write and the one tool call that made it, this far apart at most.
+const CALL_MS: i64 = 5_000;
+/// claude-mem's `STALE_MS`: no update for this long is "No recent update".
+const QUIET_MS: i64 = 6 * 3_600_000;
+/// The cards a request names, at most (claude-mem's activity of a request).
+const ACTIVITY: usize = 40;
+/// The characters past a shown part of a prompt that the gate reads too, so that a value the cut
+/// splits is whole when the rules read it (`hook::clip`'s overlap).
+const OVERLAP: usize = 4_000;
+
+/// claude-mem's `fieldText` keys of a work item's next step, outcome and progress (`agent-view.mjs`).
+const NEXT_KEYS: &[&str] = &[
+    "next_step",
+    "nextStep",
+    "next",
+    "next_action",
+    "remaining",
+    "pending",
+    "then_run",
+];
+const OUTCOME_KEYS: &[&str] = &["outcome", "result", "completed", "verified", "verification"];
+const PROGRESS_KEYS: &[&str] = &[
+    "human_summary",
+    "summary",
+    "progress",
+    "phase",
+    "stage",
+    "status_note",
+];
+const REQUEST_KEYS: &[&str] = &["human_request", "request", "user_request"];
+
+/// The page's time range: claude-mem's past 24 hours, past 7 days and all recorded work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Range {
+    Day,
+    Week,
+    All,
+}
+
+impl Range {
+    /// `range` as the route takes it; absent is a day.
+    pub(crate) fn of(range: Option<&str>) -> Option<Self> {
+        match range {
+            None | Some("day") => Some(Self::Day),
+            Some("week") => Some(Self::Week),
+            Some("all") => Some(Self::All),
+            Some(_) => None,
+        }
+    }
+
+    fn since(self, now: i64) -> i64 {
+        match self {
+            Self::Day => now - 86_400_000,
+            Self::Week => now - 7 * 86_400_000,
+            Self::All => i64::MIN,
+        }
+    }
+}
+
+/// An agent's session, by its agent and session as the readers gate them: claude-mem's
+/// conversation (`conversationKey`).
+type Key = (String, String);
+
+/// A live prompt as a request shows it.
+#[derive(Clone)]
+struct Said {
+    id: String,
+    device: String,
+    seq: i64,
+    ts: i64,
+    /// claude-mem's `requestText` of it before any gate: what tells an ask from an
+    /// acknowledgement, never shown as it is (`shown`); none for a prompt with nothing of a
+    /// person's in it.
+    text: Option<String>,
+}
+
+/// The first `max` characters of `text` as a request shows them: the gate reads `OVERLAP` more,
+/// and a key block the cut leaves open goes, as `hook::clip` keeps a field. The gate reads no more
+/// of a long prompt (a delegated review's runs to 20,000 characters).
+fn shown(text: &str, max: usize, rules: &Rules) -> String {
+    let window: String = text.chars().take(max + OVERLAP).collect();
+    let mut gated = crate::redact::outbound_with(&window, rules);
+    if window.len() < text.len()
+        && !rules.is_off()
+        && let Some(begin) = gated.rfind("-----BEGIN")
+        && !gated[begin..].contains("-----END")
+    {
+        gated.truncate(begin);
+    }
+    clip(&gated, max)
+}
+
+/// A session summary, with the records it summarizes.
+struct Turn {
+    s: TurnSummary,
+    span: (i64, i64),
+}
+
+/// A card, with the records its window holds.
+struct Shown {
+    c: Card,
+    span: (i64, i64),
+}
+
+impl Shown {
+    fn in_turn(&self, t: &Turn) -> bool {
+        self.c.device == t.s.device && self.span.0 <= t.span.1 && self.span.1 >= t.span.0
+    }
+}
+
+#[derive(Default)]
+struct Conversation {
+    repos: BTreeSet<String>,
+    /// The oldest first.
+    prompts: Vec<Said>,
+    /// The newest first, as `turns::page` reads them.
+    turns: Vec<Turn>,
+    /// The newest first, as `cards::page` reads them.
+    cards: Vec<Shown>,
+}
+
+impl Conversation {
+    /// claude-mem's `originalFor`: the first prompt that reads as a person's request. A session
+    /// none of whose prompts asks (one resumed with "再開して") has its oldest reply's `request`,
+    /// the curator's (the design's 1, beyond claude-mem's), from its first prompt on.
+    fn original(&self, local: &str) -> Option<Original> {
+        if let Some(p) = (self.prompts.iter()).find(|p| p.text.as_deref().is_some_and(asks)) {
+            return Some(Original {
+                id: Some(p.id.clone()),
+                ts: p.ts,
+                text: p.text.clone().unwrap_or_default(),
+                from: "prompt",
+            });
+        }
+        let (t, request) = (self.turns.iter().rev()).find_map(|t| {
+            let request = t.s.fields.get("request").filter(|r| !r.trim().is_empty())?;
+            Some((t, request))
+        })?;
+        Some(Original {
+            id: Some(t.s.id(local)),
+            ts: self.prompts.first().map_or(t.s.ts, |p| p.ts),
+            text: request.trim().to_owned(),
+            from: "summary",
+        })
+    }
+
+    /// The replies that no request owns and that have a card, and the cards of no reply yet,
+    /// once: what of the conversation is counted among the unlinked.
+    fn units(&self, owned: &HashSet<(String, i64)>) -> usize {
+        let turns = self.turns.iter().filter(|t| !owned.contains(&turn_key(t)));
+        let with_cards = turns
+            .filter(|t| self.cards.iter().any(|c| c.in_turn(t)))
+            .count();
+        let tail = (self.cards.iter()).any(|c| !self.turns.iter().any(|t| c.in_turn(t)));
+        with_cards + usize::from(tail)
+    }
+}
+
+fn turn_key(t: &Turn) -> (String, i64) {
+    (t.s.device.clone(), t.s.op_seq)
+}
+
+/// A list's state or one of its tasks, folded as claude-mem folds them: the latest value of each
+/// key, a null clearing it.
+struct Work {
+    repo: String,
+    list: String,
+    task: Option<String>,
+    fields: Map<String, Value>,
+    /// The list's own fields, which a task's request fields fall back to.
+    list_fields: Map<String, Value>,
+    updated: i64,
+    /// The oldest first.
+    writes: Vec<WorkWrite>,
+    /// The conversation of the newest write that one call made (claude-mem's attribution), and
+    /// that call's record.
+    by: Option<(Key, String, i64)>,
+}
+
+impl Work {
+    /// claude-mem's `fieldText` of its own fields: the first of `keys` that holds text, as the
+    /// gate shows it beside its key, as work state's own lines show it (a rule may match a value
+    /// only with its key), whole before the cut: a field is at most 2,000 characters (L3).
+    fn text(&self, keys: &[&str], max: usize, rules: &Rules) -> Option<String> {
+        keys.iter()
+            .find_map(|k| Some((*k, self.fields.get(*k).and_then(meaningful)?)))
+            .map(|(k, t)| cut(&crate::work_state::beside(k, &t, rules), max))
+    }
+
+    /// A request field: its own, else its list's.
+    fn either(&self, key: &str) -> Option<&Value> {
+        (self.fields.get(key).filter(|v| !v.is_null()))
+            .or_else(|| self.list_fields.get(key).filter(|v| !v.is_null()))
+    }
+
+    fn request_id(&self) -> Option<String> {
+        match self.either("request_id")? {
+            v @ (Value::String(_) | Value::Number(_)) => {
+                Some(crate::work_state::text(v).trim().to_owned()).filter(|s| !s.is_empty())
+            }
+            _ => None,
+        }
+    }
+
+    /// Its recorded request when it reads as one (claude-mem's `explicitRequestText`), as the gate
+    /// shows it beside its key.
+    fn request_text(&self, rules: &Rules) -> Option<String> {
+        let own = |f: &Map<String, Value>| {
+            REQUEST_KEYS
+                .iter()
+                .find_map(|k| Some((*k, f.get(*k).and_then(meaningful)?)))
+        };
+        let (key, text) = own(&self.fields).or_else(|| own(&self.list_fields))?;
+        let text = request_text(&text, usize::MAX).filter(|t| asks(t))?;
+        Some(crate::work_state::beside(key, &text, rules))
+    }
+
+    fn status(&self) -> String {
+        self.fields
+            .get("status")
+            .map_or_else(String::new, |s| normalized(&crate::work_state::text(s)))
+    }
+
+    /// The request's own completion or status as this item records it (claude-mem's lifecycle),
+    /// and whether it is `request_complete`'s, which comes first at the same time.
+    fn lifecycle(&self) -> Option<(bool, String)> {
+        if let Some(Value::Bool(done)) = self.either("request_complete") {
+            return Some((true, if *done { "done" } else { "open" }.into()));
+        }
+        match self.either("request_status") {
+            Some(Value::String(s)) if !s.trim().is_empty() => Some((false, normalized(s))),
+            _ => None,
+        }
+    }
+}
+
+/// A recorded text, as claude-mem's `meaningful` reads one: not empty, nor a bare boolean, null or
+/// number written as text.
+fn meaningful(v: &Value) -> Option<String> {
+    static BARE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)^(true|false|null|undefined|\d+)$").unwrap());
+    let t = v.as_str()?.trim();
+    (!t.is_empty() && !BARE.is_match(t)).then(|| t.to_owned())
+}
+
+/// claude-mem's `normalizeRecordedStatus`: lower-cased, `_` and spaces read as `-`, and the
+/// aliases of needs you.
+fn normalized(status: &str) -> String {
+    let s = status.trim().to_lowercase().replace(['_', ' '], "-");
+    match s.as_str() {
+        "needs-input" | "waiting-on-user" | "awaiting-approval" | "needs-approval" => {
+            "needs-you".into()
+        }
+        _ => s,
+    }
+}
+
+/// The work state of `writes`, folded into claude-mem's candidates: each list's tasks, and the
+/// list itself when its state has a key besides `task`; the newest `WORK`.
+fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
+    /// A list's state or one of its tasks: what its writes left, when, and the writes.
+    #[derive(Default)]
+    struct Kept {
+        fields: Map<String, Value>,
+        updated: i64,
+        writes: Vec<WorkWrite>,
+    }
+    impl Kept {
+        fn put(&mut self, w: WorkWrite) {
+            for (k, v) in &w.fields {
+                match v {
+                    Value::Null => self.fields.remove(k),
+                    v => self.fields.insert(k.clone(), v.clone()),
+                };
+            }
+            self.updated = w.ts;
+            self.writes.push(w);
+        }
+    }
+    struct List {
+        repo: String,
+        list: String,
+        state: Kept,
+        tasks: Vec<(String, Kept)>,
+        at: HashMap<String, usize>,
+    }
+    let mut lists: Vec<List> = Vec::new();
+    let mut at: HashMap<(String, String), usize> = HashMap::new();
+    for w in writes {
+        let i = *at
+            .entry((w.repo.clone(), w.list.clone()))
+            .or_insert_with(|| {
+                lists.push(List {
+                    repo: w.repo.clone(),
+                    list: w.list.clone(),
+                    state: Kept::default(),
+                    tasks: Vec::new(),
+                    at: HashMap::new(),
+                });
+                lists.len() - 1
+            });
+        let l = &mut lists[i];
+        let task = match w.fields.get("task") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.is_empty() => None,
+            Some(t) => Some(crate::work_state::text(t)),
+        };
+        match task {
+            None => l.state.put(w),
+            Some(t) => {
+                let j = *l.at.entry(t.clone()).or_insert_with(|| {
+                    l.tasks.push((t, Kept::default()));
+                    l.tasks.len() - 1
+                });
+                l.tasks[j].1.put(w);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for l in lists {
+        for (name, task) in l.tasks {
+            out.push(Work {
+                repo: l.repo.clone(),
+                list: l.list.clone(),
+                task: Some(name),
+                fields: task.fields,
+                list_fields: l.state.fields.clone(),
+                updated: task.updated,
+                writes: task.writes,
+                by: None,
+            });
+        }
+        if l.state.fields.keys().any(|k| k != "task") {
+            out.push(Work {
+                repo: l.repo,
+                list: l.list,
+                task: None,
+                fields: l.state.fields.clone(),
+                list_fields: l.state.fields,
+                updated: l.state.updated,
+                writes: l.state.writes,
+                by: None,
+            });
+        }
+    }
+    out.sort_by_key(|w| std::cmp::Reverse(w.updated));
+    out.truncate(WORK);
+    out
+}
+
+/// A call of oboete's `work_state_write` in a live record: its conversation, record, repository,
+/// and the list and fields it sent.
+struct Call {
+    key: Key,
+    device: String,
+    seq: i64,
+    repo: Option<String>,
+    list: String,
+    fields: Map<String, Value>,
+}
+
+/// The calls of oboete's `work_state_write` recorded within `CALL_MS` of `ts`, through the fts
+/// consumer's index `raw_docs_tools`; none before the worker has made it.
+fn calls_near(raw: &Raw, k: &Connection, ts: i64, rules: &Rules) -> Result<Vec<Call>> {
+    if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
+        return Ok(Vec::new());
+    }
+    let mut st = k.prepare_cached(
+        "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
+         WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
+    )?;
+    let rows: Vec<(String, i64)> = st
+        .query_map(params![ts - CALL_MS, ts + CALL_MS], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
+    let mut out = Vec::new();
+    for (device, seq) in rows {
+        let Some(Item::Event(e)) = (raw.after(&device, seq - 1, 1)?.pop())
+            .filter(|r| r.seq == seq)
+            .map(|r| r.item)
+        else {
+            continue;
+        };
+        let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
+            continue;
+        };
+        let ours = body["tool"]
+            .as_str()
+            .and_then(crate::curate::served)
+            .is_some_and(|(server, name)| {
+                crate::curate::oboete(server) && name == "work_state_write"
+            });
+        if !crate::raw::is_live(&e.source) || !ours {
+            continue;
+        }
+        let sent: Option<Value> = match &body["input"] {
+            Value::String(s) => serde_json::from_str(s).ok(),
+            v => Some(v.clone()),
+        };
+        let Some(sent) = sent else { continue };
+        let (Some(list), Some(fields)) = (sent["list"].as_str(), sent["fields"].as_object()) else {
+            continue;
+        };
+        out.push(Call {
+            key: (gate(&e.agent), gate(&e.session)),
+            device,
+            seq,
+            repo: e.repo.clone(),
+            list: list.trim().to_owned(),
+            fields: fields.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// claude-mem's attribution: each item is the work of the conversation of its newest write that
+/// exactly one call matches, by repository, list and fields, within `CALL_MS`.
+fn link(raw: &Raw, k: &Connection, rules: &Rules, work: &mut [Work]) -> Result<()> {
+    for w in work.iter_mut() {
+        for write in w.writes.iter().rev() {
+            let calls = calls_near(raw, k, write.ts, rules)?;
+            let mut matching = calls.into_iter().filter(|c| {
+                c.repo.as_deref() == Some(write.repo.as_str())
+                    && c.list == write.list
+                    && c.fields == write.fields
+            });
+            if let (Some(c), None) = (matching.next(), matching.next()) {
+                w.by = Some((c.key, c.device, c.seq));
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a request takes of a conversation: all of it, or the replies its writes were made in.
+enum Owns {
+    All,
+    Turns(HashSet<(String, i64)>),
+}
+
+/// A request's original ask: a prompt, the oldest reply's `request` of a session none of whose
+/// prompts asks, or the recorded request of a `request_id` of no session.
+#[derive(Clone)]
+struct Original {
+    /// The ID `get` takes: the prompt's record or the summary; none for a work item's request.
+    id: Option<String>,
+    ts: i64,
+    /// Before the gate, which `answer` puts it through when it shows it.
+    text: String,
+    /// `prompt`, `summary` or `work`.
+    from: &'static str,
+}
+
+struct Request {
+    id: String,
+    original: Original,
+    explicit_text: Option<String>,
+    owns: Vec<(Key, Owns)>,
+    work: Vec<usize>,
+}
+
+impl Request {
+    fn new(id: String, original: Original) -> Self {
+        Self {
+            id,
+            original,
+            explicit_text: None,
+            owns: Vec::new(),
+            work: Vec::new(),
+        }
+    }
+
+    fn take(&mut self, key: &Key, own: Owns) {
+        match self.owns.iter_mut().find(|(k, _)| k == key) {
+            None => self.owns.push((key.clone(), own)),
+            Some((_, Owns::All)) => {}
+            Some((_, have @ Owns::Turns(_))) => match own {
+                Owns::All => *have = Owns::All,
+                Owns::Turns(more) => {
+                    if let Owns::Turns(t) = have {
+                        t.extend(more);
+                    }
+                }
+            },
+        }
+    }
+}
+
+fn conversation_id((agent, session): &Key) -> String {
+    format!("c:{agent}:{session}")
+}
+
+/// The requests of `range` at `now`, the newest update first, and how many work records no
+/// request takes (claude-mem's "N work records need a linked human request").
+pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(json!({"requests": [], "unlinked": 0}));
+    };
+    let rules = Rules::load(home)?;
+    let gate = |s: &str| crate::redact::outbound_with(s, &rules);
+    // An excluded repository's sessions take no part, nor its work (the design's 1).
+    let excluded_repos = raw.exclusions_now()?;
+    let excluded: HashSet<Key> = (raw.sessions_in(&excluded_repos)?.iter())
+        .filter_map(|s| s.split_once('\0'))
+        .map(|(a, s)| (gate(a), gate(s)))
+        .collect();
+    let mut convs: BTreeMap<Key, Conversation> = BTreeMap::new();
+    let (prompts, _) = raw.prompt_events(None, None, PROMPTS)?;
+    for (device, seq, e) in prompts.into_iter().rev() {
+        let c = convs.entry((gate(&e.agent), gate(&e.session))).or_default();
+        c.repos.extend(e.repo.as_deref().map(gate));
+        let text = crate::curate::long_text(&e).unwrap_or_default();
+        c.prompts.push(Said {
+            id: format!("{device}:{seq}"),
+            text: request_text(&text, usize::MAX),
+            device,
+            seq,
+            ts: e.ts,
+        });
+    }
+    let (summaries, _) = crate::turns::page(&k, &raw, None, None, SUMMARIES, &rules)?;
+    for s in summaries {
+        let span = k.query_row(
+            "SELECT from_seq, through FROM turns WHERE device = ?1 AND op_seq = ?2",
+            params![s.device, s.op_seq],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let c = convs
+            .entry((s.agent.clone(), s.session.clone()))
+            .or_default();
+        c.repos.extend(s.repo.clone());
+        c.turns.push(Turn { s, span });
+    }
+    let (cards, _) = crate::cards::page(&k, &raw, None, None, CARDS, &rules)?;
+    for card in cards {
+        let (Some(agent), Some(session)) = (card.agent.clone(), card.session.clone()) else {
+            continue;
+        };
+        let span = k.query_row(
+            "SELECT from_seq, to_seq FROM cards WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+            params![card.device, card.op_seq, card.n],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let c = convs.entry((agent, session)).or_default();
+        c.repos.extend(card.repo.clone());
+        c.cards.push(Shown { c: card, span });
+    }
+    convs.retain(|key, _| !excluded.contains(key));
+    let mut work = fold(raw.native_work_writes()?);
+    work.retain(|w| !excluded_repos.contains(&w.repo));
+    link(&raw, &k, &rules, &mut work)?;
+    work.retain(|w| {
+        w.by.as_ref()
+            .is_none_or(|(key, ..)| !excluded.contains(key))
+    });
+
+    // claude-mem's `buildHumanRequests`: the request ids each conversation's work names, then
+    // each item's request, then the conversations' own records.
+    let mut named: HashMap<Key, BTreeSet<String>> = HashMap::new();
+    for w in &work {
+        if let (Some((key, ..)), Some(id)) = (&w.by, w.request_id()) {
+            named.entry(key.clone()).or_default().insert(id);
+        }
+    }
+    let mut requests: Vec<Request> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut unlinked = 0;
+    for (i, w) in work.iter().enumerate() {
+        let key = w.by.as_ref().map(|(key, ..)| key);
+        let ids = key.and_then(|k| named.get(k));
+        let own_id = w.request_id();
+        if own_id.is_none() && ids.is_some_and(|s| s.len() > 1) {
+            unlinked += 1;
+            continue;
+        }
+        let explicit = own_id.or_else(|| ids.filter(|s| s.len() == 1)?.first().cloned());
+        let explicit_text = w.request_text(&rules);
+        let original = key
+            .and_then(|k| convs.get(k)?.original(raw.device()))
+            .or_else(|| {
+                let text = explicit.as_ref().and(explicit_text.clone())?;
+                Some(Original {
+                    id: None,
+                    ts: w.updated,
+                    text,
+                    from: "work",
+                })
+            });
+        let (Some(original), true) = (original, key.is_some() || explicit.is_some()) else {
+            unlinked += 1;
+            continue;
+        };
+        let id = explicit.map_or_else(|| conversation_id(key.unwrap()), |e| format!("r:{e}"));
+        let r = match at.get(&id) {
+            Some(&j) => &mut requests[j],
+            None => {
+                at.insert(id.clone(), requests.len());
+                requests.push(Request::new(id, original.clone()));
+                requests.last_mut().unwrap()
+            }
+        };
+        if original.ts < r.original.ts {
+            r.original = original;
+        }
+        if r.explicit_text.is_none() {
+            r.explicit_text = explicit_text;
+        }
+        r.work.push(i);
+    }
+    for (key, c) in &convs {
+        let ids = named
+            .get(key)
+            .map(|s| s.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if ids.len() > 1 {
+            // Each request owns the replies its writes were made in (the design's 1).
+            let mut owned = HashSet::new();
+            for id in &ids {
+                let Some(&j) = at.get(&format!("r:{id}")) else {
+                    continue;
+                };
+                let calls: Vec<(String, i64)> = (requests[j].work.iter())
+                    .filter_map(|&i| work[i].by.as_ref())
+                    .filter(|(k, ..)| k == key)
+                    .map(|(_, device, seq)| (device.clone(), *seq))
+                    .collect();
+                let turns: HashSet<(String, i64)> = (c.turns.iter())
+                    .filter(|t| {
+                        (calls.iter())
+                            .any(|(d, s)| *d == t.s.device && t.span.0 <= *s && *s <= t.span.1)
+                    })
+                    .map(turn_key)
+                    .collect();
+                owned.extend(turns.iter().cloned());
+                requests[j].take(key, Owns::Turns(turns));
+            }
+            unlinked += c.units(&owned);
+            continue;
+        }
+        let id = ids
+            .first()
+            .map_or_else(|| conversation_id(key), |e| format!("r:{e}"));
+        match at.get(&id) {
+            Some(&j) => requests[j].take(key, Owns::All),
+            None => match c.original(raw.device()) {
+                Some(o) if ids.is_empty() => {
+                    at.insert(id.clone(), requests.len());
+                    let mut r = Request::new(id, o);
+                    r.take(key, Owns::All);
+                    requests.push(r);
+                }
+                _ => unlinked += c.units(&HashSet::new()),
+            },
+        }
+    }
+
+    let since = range.since(now);
+    let mut answers = Vec::new();
+    for r in &requests {
+        answers.extend(answer(r, &convs, &work, (&raw, &k, &rules), (since, now))?);
+    }
+    answers.sort_by_key(|v| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
+    Ok(json!({"requests": answers, "unlinked": unlinked}))
+}
+
+/// One request as the route gives it, every text through the gate; none when its newest update is
+/// before `since`, which then gates nothing.
+fn answer(
+    r: &Request,
+    convs: &BTreeMap<Key, Conversation>,
+    work: &[Work],
+    (raw, k, rules): (&Raw, &Connection, &Rules),
+    (since, now): (i64, i64),
+) -> Result<Option<Value>> {
+    let items: Vec<&Work> = r.work.iter().map(|&i| &work[i]).collect();
+    let mut turns: Vec<&Turn> = Vec::new();
+    let mut cards: Vec<&Shown> = Vec::new();
+    let mut prompts: Vec<&Said> = Vec::new();
+    // A request that owns some replies of a conversation shares its prompts but not their time.
+    let mut active: Vec<i64> = Vec::new();
+    let mut repos = BTreeSet::new();
+    let mut agents = BTreeSet::new();
+    let mut latest_prompt: Option<&Said> = None;
+    for (key, own) in &r.owns {
+        let Some(c) = convs.get(key) else { continue };
+        agents.insert(key.0.clone());
+        repos.extend(c.repos.iter().cloned());
+        prompts.extend(c.prompts.iter());
+        match own {
+            Owns::All => {
+                turns.extend(c.turns.iter());
+                cards.extend(c.cards.iter());
+                active.extend(c.prompts.iter().map(|p| p.ts));
+                if let Some(p) = c.prompts.last()
+                    && latest_prompt.is_none_or(|l| p.ts > l.ts)
+                {
+                    latest_prompt = Some(p);
+                }
+            }
+            Owns::Turns(owned) => {
+                let mine: Vec<&Turn> = (c.turns.iter())
+                    .filter(|t| owned.contains(&turn_key(t)))
+                    .collect();
+                cards.extend(
+                    c.cards
+                        .iter()
+                        .filter(|card| mine.iter().any(|t| card.in_turn(t))),
+                );
+                turns.extend(mine);
+            }
+        }
+    }
+    for w in &items {
+        repos.insert(crate::redact::outbound_with(&w.repo, rules));
+    }
+    turns.sort_by_key(|t| std::cmp::Reverse(t.s.ts));
+    cards.sort_by_key(|c| std::cmp::Reverse(c.c.ts));
+    prompts.sort_by_key(|p| p.ts);
+    let original = &r.original;
+    let follow_ups: Vec<Value> = {
+        let later: Vec<&&Said> = (prompts.iter())
+            .filter(|p| {
+                p.text.is_some() && p.ts >= original.ts && original.id.as_ref() != Some(&p.id)
+            })
+            .collect();
+        let from = later.len().saturating_sub(FOLLOW_UPS);
+        (later[from..].iter())
+            .map(|p| {
+                let text = p.text.as_deref().map(|t| shown(t, FOLLOW_UP, rules));
+                json!({"id": p.id, "ts": p.ts, "text": text})
+            })
+            .collect()
+    };
+    let activity = (turns.iter().map(|t| t.s.ts))
+        .chain(cards.iter().map(|c| c.c.ts))
+        .chain(active)
+        .max();
+    let updated = (items.iter().map(|w| w.updated))
+        .chain(activity)
+        .max()
+        .unwrap_or(0);
+    if updated < since {
+        return Ok(None);
+    }
+    let status = status(&items, activity, now);
+    let recorded = (r.explicit_text.as_deref()).map(|t| title(&shown(t, ASK, rules)));
+    let ask = shown(&original.text, ASK, rules);
+    let (copy, title, summary, next, updating) = if turns.is_empty() {
+        let mut updates: Vec<(i64, String)> = (items.iter())
+            .filter_map(|w| {
+                let text = w
+                    .text(OUTCOME_KEYS, SUMMARY, rules)
+                    .or_else(|| w.text(PROGRESS_KEYS, SUMMARY, rules));
+                text.map(|t| (w.updated, t))
+            })
+            .collect();
+        updates.extend(cards.iter().filter_map(|c| {
+            let text = [&c.c.subtitle, &c.c.title]
+                .into_iter()
+                .find(|t| !t.trim().is_empty())?;
+            Some((c.c.ts, cut(text, SUMMARY)))
+        }));
+        updates.sort_by_key(|u| std::cmp::Reverse(u.0));
+        let summary =
+            (updates.into_iter().next().map(|u| u.1)).unwrap_or_else(|| cut(&ask, SUMMARY));
+        let next = items.iter().find_map(|w| w.text(NEXT_KEYS, NEXT, rules));
+        let title = recorded.unwrap_or_else(|| title(&ask));
+        ("recorded", title, Some(summary), next, false)
+    } else {
+        let field = |names: &[&str]| {
+            turns.iter().find_map(|t| {
+                names
+                    .iter()
+                    .find_map(|n| t.s.fields.get(*n))
+                    .filter(|v| !v.trim().is_empty())
+            })
+        };
+        let summary = field(&["completed", "learned", "investigated"]).map(|t| cut(t, SUMMARY));
+        let next = field(&["next_steps"]).map(|t| cut(t, NEXT));
+        let first = (turns.iter().rev())
+            .find_map(|t| t.s.fields.get("request").filter(|v| !v.trim().is_empty()));
+        let title = recorded
+            .or_else(|| first.map(|t| title(t)))
+            .unwrap_or_else(|| title(&ask));
+        let updating = match latest_prompt {
+            Some(p) => !covered(raw, k, p)?,
+            None => false,
+        };
+        ("summary", title, summary, next, updating)
+    };
+    let names: Vec<String> = (repos.iter())
+        .map(|repo| crate::consumer::manifest::repo_name(repo, rules))
+        .collect();
+    let ask = json!({"id": original.id, "ts": original.ts, "text": ask,
+        "from": original.from});
+    // Each name and value as the gate shows it beside its key, as work state's own lines do; a
+    // closing status is one of two words, no recorded text (`capture::work_state`).
+    let work: Vec<Value> = (items.iter())
+        .map(|w| {
+            let status = w
+                .fields
+                .get("status")
+                .map(|s| match crate::work_state::closed(Some(s)) {
+                    true => crate::work_state::text(s),
+                    false => {
+                        crate::work_state::beside("status", &crate::work_state::text(s), rules)
+                    }
+                });
+            let task = (w.task.as_deref()).map(|t| crate::work_state::beside("task", t, rules));
+            json!({"list": crate::redact::outbound_with(&w.list, rules), "task": task,
+                "status": status, "updated": w.updated})
+        })
+        .collect();
+    let id = match r.id.strip_prefix("r:") {
+        Some(e) => format!("r:{}", crate::work_state::beside("request_id", e, rules)),
+        None => r.id.clone(),
+    };
+    Ok(Some(json!({
+        "id": id,
+        "title": title,
+        "summary": summary,
+        "next": next,
+        "copy": copy,
+        "updating": updating,
+        "status": status,
+        "updated": updated,
+        "started": original.ts,
+        "agents": agents,
+        "projects": names,
+        "repos": repos,
+        "ask": ask,
+        "follow_ups": follow_ups,
+        "work": work,
+        "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
+        "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
+    })))
+}
+
+/// claude-mem's `statusFor` over a request's work and its records (an observation's row, here the
+/// newest of its prompts, replies and cards), then its lifecycle (`buildModel`), as the page names
+/// them: needs, blocked, ready, quiet, working, todo, unknown, closed.
+fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
+    let states: Vec<String> = items.iter().map(|w| w.status()).collect();
+    let all = |s: &[&str]| {
+        activity.is_none() && !items.is_empty() && states.iter().all(|x| s.contains(&x.as_str()))
+    };
+    let updated = (items.iter().map(|w| w.updated))
+        .chain(activity)
+        .max()
+        .unwrap_or(0);
+    let from_work = if states.iter().any(|s| s == "needs-you") {
+        "needs-you"
+    } else if states.iter().any(|s| s == "blocked" || s == "failed") {
+        "blocked"
+    } else if all(&["done", "completed"]) {
+        "done"
+    } else if all(&["dropped"]) {
+        "closed"
+    } else if now - updated > QUIET_MS {
+        "quiet"
+    } else if (states.iter())
+        .any(|s| ["doing", "in-progress", "active", "running"].contains(&s.as_str()))
+    {
+        "in-progress"
+    } else if (states.iter()).any(|s| ["todo", "planned", "queued"].contains(&s.as_str())) {
+        "todo"
+    } else {
+        "unknown"
+    };
+    // The newest item's record of the request's own state decides (claude-mem's lifecycle).
+    let mut recorded: Vec<(i64, bool, String)> = (items.iter())
+        .filter_map(|w| {
+            let (complete, status) = w.lifecycle()?;
+            Some((w.updated, complete, status))
+        })
+        .collect();
+    recorded.sort_by_key(|r| std::cmp::Reverse((r.0, r.1)));
+    let lifecycle = recorded.into_iter().next().map(|r| r.2);
+    let complete = lifecycle
+        .as_deref()
+        .is_some_and(|s| ["done", "completed", "complete", "shipped", "delivered"].contains(&s));
+    let lifecycle = if complete {
+        Some("done".to_owned())
+    } else {
+        lifecycle
+    };
+    let mut status = from_work;
+    if matches!(status, "done" | "closed")
+        && !matches!(lifecycle.as_deref(), Some("done" | "closed"))
+    {
+        status = "unknown";
+    }
+    if let Some(s) = lifecycle.as_deref()
+        && let Some(known) = [
+            "needs-you",
+            "blocked",
+            "in-progress",
+            "quiet",
+            "done",
+            "todo",
+            "unknown",
+            "closed",
+        ]
+        .into_iter()
+        .find(|k| *k == s)
+    {
+        status = known;
+    }
+    match status {
+        "needs-you" => "needs",
+        "done" => "ready",
+        "in-progress" => "working",
+        other => other,
+    }
+}
+
+/// Whether a turn op, kept or skipped, covers `said`: the reply it led to has had its summary
+/// written, or been passed.
+fn covered(raw: &Raw, k: &Connection, said: &Said) -> Result<bool> {
+    let Some(Item::Event(e)) = (raw.after(&said.device, said.seq - 1, 1)?.pop())
+        .filter(|r| r.seq == said.seq)
+        .map(|r| r.item)
+    else {
+        return Ok(true);
+    };
+    Ok(k.query_row(
+        "SELECT 1 FROM turns WHERE device = ?1 AND agent = ?2 AND session = ?3
+               AND from_seq <= ?4 AND through >= ?4 LIMIT 1",
+        params![said.device, e.agent, e.session, said.seq],
+        |_| Ok(()),
+    )
+    .optional()?
+    .is_some())
+}
+
+/// claude-mem's `requestText`: the text of a prompt a person wrote, without the harness's blocks
+/// and instruction lines, at most `max` characters; none when nothing of it is left.
+fn request_text(value: &str, max: usize) -> Option<String> {
+    static SECTION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?im)^\s*#{1,2}\s+My request\s*:\s*(?:\r?\n)?((?s:.*))\z").unwrap()
+    });
+    static BLOCKS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        [
+            "environment_context",
+            "instructions",
+            "system-reminder",
+            "turn_aborted",
+            "permissions",
+            "collaboration_mode",
+            "skills_instructions",
+        ]
+        .iter()
+        .map(|tag| Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>")).unwrap())
+        .collect()
+    });
+    static AGENTS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?im)^\s*#\s*AGENTS\.md instructions[^\n]*(?:\n|$)").unwrap()
+    });
+    static PASTED: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)</?pasted_content\b[^>]*>").unwrap());
+    static FILES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)^\s*#{1,2}\s+Files mentioned by the user\s*:").unwrap());
+    static HARNESS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^\s*<(?:environment_context|instructions|system-reminder)\b").unwrap()
+    });
+    let mut text = SECTION
+        .captures(value)
+        .and_then(|c| c.get(1))
+        .map_or(value, |m| m.as_str())
+        .to_owned();
+    for block in BLOCKS.iter() {
+        text = block.replace_all(&text, " ").into_owned();
+    }
+    let text = AGENTS.replace_all(&text, " ");
+    let text = PASTED.replace_all(&text, "");
+    let text = text.trim();
+    if text.is_empty() || FILES.is_match(text) || HARNESS.is_match(text) {
+        return None;
+    }
+    Some(clip(text, max))
+}
+
+/// claude-mem's cut of a prompt: its first `max - 1` characters and `…`.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(max - 1).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// claude-mem's `isHumanActionRequest`, without its list of English action words (the design's
+/// 1): not an acknowledgement, a greeting or the harness's text, in English or Japanese.
+fn asks(text: &str) -> bool {
+    static REJECTED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        [
+            r"(?i)^(?:please\s+)?read\s+(?:the\s+)?[\w./ -]*(?:AGENTS|KICKOFF|CLAUDE)\.md(?:\s+and\s+(?:follow|obey|read|apply)(?:\s+it|\s+the\s+instructions)?\s*)?[.!]?$",
+            r"(?i)^(?:hi|hello|hey|thanks|thank you|ok(?:ay)?|yes|no|sure|continue|go ahead|keep going|resume|done)[.!\s]*$",
+            r"(?i)^(?:You are (?:Codex|an AI)|Available skills|Environment context)\b",
+            r"(?i)^(?:(?:please|just)\s+)?make sure (?:this|that|it|everything) (?:is |will be |keeps? )?(?:working|works|ok|okay|correct)(?:[.!\s]*)$",
+            r"^(?:(?:はい|いいえ|うん|ええ|了解(?:です|しました)?|りょうかい|わかった|わかりました|分かりました|ありがとう(?:ございます)?|お願いします|おねがいします|よろしく(?:お願いします)?|続けて(?:ください)?|続行(?:して)?|再開(?:して(?:ください)?)?|進めて(?:ください)?|どうぞ|いいよ|いいです|大丈夫(?:です)?|オッケー|OK|ok)[、,\s]*)+[。．.!！\s]*$",
+        ]
+        .iter()
+        .map(|r| Regex::new(r).unwrap())
+        .collect()
+    });
+    static TESTS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^you can (?:def(?:initely)? )?do (?:real )?tests?[,;.!\s]").unwrap()
+    });
+    static WORK_WORD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(?:fix|build|create|implement|change|update|rename|remove|add)\b")
+            .unwrap()
+    });
+    let plain = text.replace(['*', '_', '`', '#'], "");
+    let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    !plain.is_empty()
+        && !REJECTED.iter().any(|r| r.is_match(&plain))
+        && !(TESTS.is_match(&plain) && !WORK_WORD.is_match(&plain))
+}
+
+/// claude-mem's `humanRequestTitle`: a `GOAL:` line or the first line, without its marks, its
+/// first sentence or clause, at most `TITLE` characters cut at a word.
+fn title(text: &str) -> String {
+    static GOAL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?im)(?:^|\n)\s*GOAL\s*:\s*([^\n]+)").unwrap());
+    static CALLED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bcalled\s*$").unwrap());
+    static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+    static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+    static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+    static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^#{1,6}\s*").unwrap());
+    let Some(text) = request_text(text, ASK) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let goal = GOAL
+        .captures(&text)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str());
+    let first = goal.or(lines.first().copied()).unwrap_or("");
+    let quoted = match lines.get(1) {
+        Some(next) if CALLED.is_match(first) && next.starts_with(['"', '“', '\'', '‘']) => {
+            format!(" {next}")
+        }
+        _ => String::new(),
+    };
+    let line = format!("{first}{quoted}");
+    let line = LINK.replace_all(&line, "$1");
+    let line = BOLD.replace_all(&line, "$1");
+    let line = CODE.replace_all(&line, "$1");
+    let line = HEADING.replace(&line, "");
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A sentence's end and a space, or `; `, as claude-mem splits; and a Japanese full stop.
+    let chars: Vec<char> = line.chars().collect();
+    let mut end = chars.len();
+    for i in 0..chars.len() {
+        let next = chars.get(i + 1).copied();
+        if matches!(chars[i], '.' | '!' | '?') && next.is_some_and(char::is_whitespace) {
+            end = i + 1;
+            break;
+        }
+        if chars[i] == ';' && next.is_some_and(char::is_whitespace) {
+            end = i;
+            break;
+        }
+        if chars[i] == '。' {
+            end = i + 1;
+            break;
+        }
+    }
+    let clause: String = chars[..end].iter().collect();
+    if clause.chars().count() <= TITLE {
+        return clause;
+    }
+    let cut: Vec<char> = clause.chars().take(TITLE - 1).collect();
+    let boundary = cut.iter().rposition(|c| *c == ' ').filter(|&b| b > 60);
+    let kept: String = cut[..boundary.unwrap_or(TITLE - 1)].iter().collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// claude-mem's `cleanText` cut: at most `max` characters, at a space past two thirds of them
+/// where there is one, and `…`.
+fn cut(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max {
+        return text;
+    }
+    let cut: Vec<char> = text.chars().take(max - 1).collect();
+    let boundary = (cut.iter().rposition(|c| *c == ' '))
+        .filter(|&b| b as f64 > max as f64 * 0.65)
+        .unwrap_or(max - 1);
+    let kept: String = cut[..boundary].iter().collect();
+    format!("{}…", kept.trim_end_matches([',', ':', ';', '-', ' ']))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raw::{OpKind, Target};
+    use crate::search::b::fixture::Store;
+    use serde_json::Map;
+
+    const R: &str = "github.com/o/r";
+
+    /// A home whose times are near now: a work state write takes the time it is appended.
+    struct Home {
+        s: Store,
+        t: i64,
+    }
+
+    impl Home {
+        fn new() -> Self {
+            Self {
+                s: Store::new(),
+                t: crate::db::now_ms(),
+            }
+        }
+
+        /// A prompt of `session` at `at` ms from the start: its seq.
+        fn said(&mut self, session: &str, at: i64, text: &str) -> i64 {
+            self.s.said(session, R, self.t + at, text)
+        }
+
+        /// The agent's reply in `session` at `at`: its seq.
+        fn reply(&mut self, session: &str, at: i64) -> i64 {
+            let body = json!({"text": "Done."});
+            self.s
+                .event("reply", session, (R, "main"), self.t + at, body)
+        }
+
+        /// A work state write as oboete's server appends it: its time and fields.
+        fn write(&mut self, list: &str, fields: Value) -> (i64, Map<String, Value>) {
+            let fields = fields.as_object().unwrap().clone();
+            let seq = self.s.raw.work_state(R, list, &fields, None).unwrap();
+            let ts = rusqlite::Connection::open(self.s.home.path().join("raw.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT ts FROM ops WHERE device = ?1 AND op_seq = ?2",
+                    rusqlite::params![self.s.raw.device(), seq],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (ts, fields)
+        }
+
+        /// The call of `work_state_write` in `session` at `ts` that sent `list` and `fields`.
+        fn call(&mut self, session: &str, ts: i64, list: &str, fields: &Map<String, Value>) -> i64 {
+            let input = json!({"list": list, "fields": fields}).to_string();
+            let body = json!({"tool": "mcp__oboete__work_state_write", "input": input,
+                "output": "Saved.", "failed": false});
+            self.s.event("tool", session, (R, "main"), ts, body)
+        }
+
+        /// A write and the call that made it in `session`, 20 ms after it: the call's seq.
+        fn wrote(&mut self, session: &str, list: &str, fields: Value) -> i64 {
+            let (ts, fields) = self.write(list, fields);
+            self.call(session, ts + 20, list, &fields)
+        }
+
+        /// The session summary of `session`'s records `from` to `through`, at `at`: its ID.
+        fn turn(
+            &mut self,
+            session: &str,
+            (from, through): (i64, i64),
+            at: i64,
+            f: Value,
+        ) -> String {
+            self.s
+                .turn(json!({"agent": "claude", "session": session, "repo": R,
+                "ts": self.t + at, "from": from, "through": through, "read": [], "goals": [],
+                "removed": [], "fields": f, "skipped": false}))
+        }
+
+        fn read(&self, range: Range, now: i64) -> Value {
+            self.s.run();
+            super::read(self.s.home.path(), range, now).unwrap()
+        }
+    }
+
+    fn by_id<'a>(v: &'a Value, id: &str) -> &'a Value {
+        v["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {v}"))
+    }
+
+    fn ids(v: &Value) -> Vec<String> {
+        let requests = v["requests"].as_array().unwrap();
+        requests
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn tasks(r: &Value) -> Vec<&str> {
+        let work = r["work"].as_array().unwrap();
+        work.iter().map(|w| w["task"].as_str().unwrap()).collect()
+    }
+
+    /// The design's 1 (claude-mem's `originalFor` and scope updates): a session's first prompt
+    /// that asks is its request's original ask, not an acknowledgement or a greeting, in English
+    /// or Japanese; its later prompts, the newest 6, are the follow-ups, each cut to 500
+    /// characters.
+    #[test]
+    fn the_first_prompt_that_asks_is_the_original_ask_and_the_later_ones_follow_up() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "再開して");
+        h.said("s1", -59_000, "Fix the parser's error messages.");
+        for i in 1..=7 {
+            h.said("s1", -58_000 + i * 1_000, &format!("Step {i}."));
+        }
+        h.said("s1", -40_000, &"x".repeat(600));
+        h.said("s2", -30_000, "Continue.");
+        h.said("s2", -29_000, "パーサのエラーを直して");
+        let v = h.read(Range::All, h.t);
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["ask"]["text"], "Fix the parser's error messages.");
+        let follow: Vec<&str> = (s1["follow_ups"].as_array().unwrap().iter())
+            .map(|f| f["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            &follow[..5],
+            ["Step 3.", "Step 4.", "Step 5.", "Step 6.", "Step 7."]
+        );
+        assert_eq!(follow.len(), 6);
+        assert_eq!(follow[5].chars().count(), 500);
+        assert!(follow[5].ends_with('…'));
+        assert_eq!(
+            by_id(&v, "c:claude:s2")["ask"]["text"],
+            "パーサのエラーを直して"
+        );
+    }
+
+    /// A session whose prompts never ask is no request; its card counts among the unlinked.
+    #[test]
+    fn a_session_that_never_asks_is_no_request() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "続けて");
+        h.s.cards(
+            p,
+            p,
+            json!([{"type": "change", "title": "Went on", "subtitle": "s", "narrative": "n"}]),
+            false,
+        );
+        let v = h.read(Range::All, h.t);
+        assert_eq!((ids(&v), &v["unlinked"]), (Vec::<String>::new(), &json!(1)));
+    }
+
+    /// Its work (claude-mem's `uniqueCall`): a work state write is the work of the session whose
+    /// one call of oboete's `work_state_write` sent the same list and fields within 5 s; a write
+    /// two calls match, or none, or one past 5 s, is no session's and is counted.
+    #[test]
+    fn a_write_is_the_work_of_the_one_session_whose_call_sent_it_within_five_seconds() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        h.said("s2", -60_000, "Fix the lexer.");
+        let (ts, f) = h.write("plan", json!({"task": "parser", "status": "doing"}));
+        h.call("s1", ts + 20, "plan", &f);
+        // The same list and fields sent in another repository, or to another server, are not
+        // its call.
+        let input = json!({"list": "plan", "fields": f}).to_string();
+        let sent =
+            |tool: &str| json!({"tool": tool, "input": input, "output": "", "failed": false});
+        let elsewhere = ("github.com/o/other", "main");
+        h.s.event(
+            "tool",
+            "s2",
+            elsewhere,
+            ts + 25,
+            sent("mcp__oboete__work_state_write"),
+        );
+        h.s.event(
+            "tool",
+            "s2",
+            (R, "main"),
+            ts + 30,
+            sent("mcp__other__work_state_write"),
+        );
+        let (ts, f) = h.write("plan", json!({"task": "twice", "status": "todo"}));
+        for (s, after) in [("s1", 20), ("s2", 30)] {
+            h.call(s, ts + after, "plan", &f);
+        }
+        h.write("plan", json!({"task": "uncalled", "status": "todo"}));
+        let (ts, f) = h.write("plan", json!({"task": "late", "status": "todo"}));
+        h.call("s2", ts + 6_000, "plan", &f);
+        let v = h.read(Range::All, h.t + 10_000);
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(tasks(s1), ["parser"]);
+        assert_eq!(s1["status"], "working");
+        assert_eq!(tasks(by_id(&v, "c:claude:s2")), Vec::<&str>::new());
+        assert_eq!(v["unlinked"], 3);
+    }
+
+    /// The design's 2: work state imported from claude-mem (sourced ops, row N1) has no call in a
+    /// session: My Work neither reads nor counts it.
+    #[test]
+    fn imported_work_state_is_neither_read_nor_counted() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let settings = crate::capture::Settings::load(h.s.home.path()).unwrap();
+        let op = json!({"repo": "claude-mem:r", "list": "plan",
+            "fields": {"task": "old", "status": "doing"}, "clock": 1, "at": h.t - 1_000,
+            "source": "claude-mem", "source_id": "w1"});
+        (h.s.raw)
+            .append_imported_ops(&[(OpKind::WorkState, op)], &settings)
+            .unwrap();
+        let v = h.read(Range::All, h.t);
+        assert_eq!(v["unlinked"], 0);
+        assert_eq!(tasks(by_id(&v, "c:claude:s1")), Vec::<&str>::new());
+    }
+
+    /// The design's 1: two `request_id`s in a session make two requests with its original ask,
+    /// each titled by its own recorded request, each with the replies its writes were made in and
+    /// their summaries; a reply of neither, with a card, counts once among the unlinked. One id
+    /// in a session takes all of it.
+    #[test]
+    fn two_request_ids_in_a_session_make_two_requests_each_with_its_own_replies() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Ship the release.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "A", "request": "Write the release notes",
+                "status": "doing"}),
+        );
+        let r = h.reply("s1", -50_000);
+        let notes = h.turn(
+            "s1",
+            (p, r),
+            -50_000,
+            json!({"request": "Release notes", "completed": "Notes written."}),
+        );
+        let p = h.said("s1", -40_000, "Now tag it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "B", "request": "Tag the release",
+                "status": "doing"}),
+        );
+        let r = h.reply("s1", -35_000);
+        let tag = h.turn(
+            "s1",
+            (p, r),
+            -35_000,
+            json!({"request": "Tag", "completed": "Tagged."}),
+        );
+        let p = h.said("s1", -30_000, "Check the build.");
+        let r = h.reply("s1", -25_000);
+        h.turn(
+            "s1",
+            (p, r),
+            -25_000,
+            json!({"request": "Build", "completed": "Green."}),
+        );
+        h.s.cards(
+            p,
+            r,
+            json!([{"type": "discovery", "title": "Green", "subtitle": "CI passed.",
+                "narrative": "CI passed."}]),
+            false,
+        );
+        let q = h.said("s2", -20_000, "Fix the docs.");
+        h.wrote(
+            "s2",
+            "docs",
+            json!({"task": "readme", "request_id": "C", "status": "todo"}),
+        );
+        let r = h.reply("s2", -15_000);
+        let docs = h.turn(
+            "s2",
+            (q, r),
+            -15_000,
+            json!({"request": "Docs", "completed": "Fixed."}),
+        );
+        let q = h.said("s2", -12_000, "And the changelog.");
+        let r = h.reply("s2", -11_000);
+        let changelog = h.turn(
+            "s2",
+            (q, r),
+            -11_000,
+            json!({"request": "Changelog", "completed": "Added."}),
+        );
+        let v = h.read(Range::All, h.t + 10_000);
+        let (a, b) = (by_id(&v, "r:A"), by_id(&v, "r:B"));
+        for r in [a, b] {
+            assert_eq!(r["ask"]["text"], "Ship the release.");
+        }
+        assert_eq!(a["title"], "Write the release notes");
+        assert_eq!(b["title"], "Tag the release");
+        assert_eq!(
+            (&a["summaries"], &a["summary"]),
+            (&json!([notes]), &json!("Notes written."))
+        );
+        assert_eq!(
+            (&b["summaries"], &b["summary"]),
+            (&json!([tag]), &json!("Tagged."))
+        );
+        assert!(!ids(&v).contains(&"c:claude:s1".to_owned()));
+        assert_eq!(v["unlinked"], 1);
+        assert_eq!(by_id(&v, "r:C")["summaries"], json!([changelog, docs]));
+    }
+
+    /// The design's 4, claude-mem's `statusFor` and its lifecycle: needs you (and its aliases),
+    /// blocked, ready only on the request's own recorded completion, in progress, to do, and no
+    /// recent update after 6 quiet hours; work that is all done is "Update recorded".
+    #[test]
+    fn each_status_comes_from_the_recorded_work_as_claude_mems_does() {
+        let mut h = Home::new();
+        let cases = [
+            ("needs", json!({"task": "t", "status": "Needs_Input"})),
+            ("blocked", json!({"task": "t", "status": "failed"})),
+            ("unknown", json!({"task": "t", "status": "done"})),
+            (
+                "ready",
+                json!({"task": "t", "status": "done", "request_complete": true}),
+            ),
+            (
+                "ready",
+                json!({"task": "t", "status": "doing", "request_status": "shipped"}),
+            ),
+            ("working", json!({"task": "t", "status": "in progress"})),
+            ("todo", json!({"task": "t", "status": "planned"})),
+            ("unknown", json!({"task": "t", "status": "someday"})),
+        ];
+        for (i, (_, fields)) in cases.iter().enumerate() {
+            let session = format!("s{i}");
+            h.said(&session, -60_000, "Do the thing.");
+            h.wrote(&session, &format!("list {i}"), fields.clone());
+        }
+        let v = h.read(Range::All, h.t + 10_000);
+        for (i, (status, _)) in cases.iter().enumerate() {
+            assert_eq!(
+                by_id(&v, &format!("c:claude:s{i}"))["status"],
+                *status,
+                "{i}"
+            );
+        }
+        let later = h.read(Range::All, h.t + QUIET_MS + 60_000);
+        assert_eq!(by_id(&later, "c:claude:s5")["status"], "quiet");
+        assert_eq!(by_id(&later, "c:claude:s2")["status"], "quiet");
+        assert_eq!(by_id(&later, "c:claude:s0")["status"], "needs");
+    }
+
+    /// #570 (CodeRabbit on #573): the request's own status is the newest record of its items'
+    /// `request_status` or `request_complete`, whatever an earlier one said; and a `request_id`
+    /// written as a number and as text is one request, across sessions too.
+    #[test]
+    fn the_newest_record_of_the_request_decides_and_its_id_is_one_text() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "R", "request_status": "done"}),
+        );
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "R", "request_status": "blocked"}),
+        );
+        h.said("s2", -50_000, "Fix the docs.");
+        h.said("s3", -40_000, "And their index.");
+        h.wrote(
+            "s2",
+            "docs",
+            json!({"task": "a", "request_id": 7, "status": "doing"}),
+        );
+        h.wrote(
+            "s3",
+            "docs",
+            json!({"task": "b", "request_id": "7", "status": "doing"}),
+        );
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(by_id(&v, "r:R")["status"], "blocked");
+        let seven = by_id(&v, "r:7");
+        assert_eq!(tasks(seven), ["b", "a"]);
+        assert_eq!(seven["ask"]["text"], "Fix the docs.");
+    }
+
+    /// The design's 3: the card's copy is the session summaries: the title the first reply's
+    /// `request`, the summary the latest reply's `completed`, else `learned`, else
+    /// `investigated`, the next step the latest `next_steps`, each cut at a word; a prompt after
+    /// the newest summary marks it updating. Without a summary, the recorded wording.
+    #[test]
+    fn the_copy_is_the_session_summaries_else_the_recorded_wording() {
+        let mut h = Home::new();
+        let p = h.said(
+            "s1",
+            -60_000,
+            "Make the parser report the line of each error.",
+        );
+        let r = h.reply("s1", -55_000);
+        h.turn(
+            "s1",
+            (p, r),
+            -55_000,
+            json!({"request": "Parser errors with line numbers",
+                "investigated": "Read the lexer.", "next_steps": "Add a test."}),
+        );
+        let p = h.said("s1", -50_000, "And the column.");
+        let r = h.reply("s1", -45_000);
+        let learned = "The lexer counts bytes. ".repeat(20);
+        h.turn(
+            "s1",
+            (p, r),
+            -45_000,
+            json!({"request": "Columns too", "learned": learned,
+                "investigated": "Read the column code."}),
+        );
+        let v = h.read(Range::All, h.t);
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["title"], "Parser errors with line numbers");
+        let summary = s1["summary"].as_str().unwrap();
+        assert!(summary.starts_with("The lexer counts bytes."), "{summary}");
+        assert!(
+            summary.ends_with('…') && summary.chars().count() <= SUMMARY,
+            "{summary}"
+        );
+        assert_eq!(s1["next"], "Add a test.");
+        assert_eq!(
+            (&s1["copy"], &s1["updating"]),
+            (&json!("summary"), &json!(false))
+        );
+        h.said("s1", -40_000, "One more thing.");
+        let v = h.read(Range::All, h.t);
+        assert_eq!(by_id(&v, "c:claude:s1")["updating"], true);
+        let q = h.said(
+            "s2",
+            -30_000,
+            "Speed up the index. It is slow on cold caches.",
+        );
+        h.s.cards(
+            q,
+            q,
+            json!([{"type": "discovery", "title": "Cold reads",
+                "subtitle": "The first read takes 3 s.", "narrative": "x"}]),
+            false,
+        );
+        let v = h.read(Range::All, h.t);
+        let s2 = by_id(&v, "c:claude:s2");
+        assert_eq!(s2["title"], "Speed up the index.");
+        assert_eq!(s2["summary"], "The first read takes 3 s.");
+        assert_eq!(s2["copy"], "recorded");
+        // A work item's recorded request titles it before the ask does.
+        h.said("s3", -20_000, "Look at search.");
+        h.wrote(
+            "s3",
+            "perf",
+            json!({"task": "cold", "request": "Make cold reads fast", "status": "doing"}),
+        );
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(by_id(&v, "c:claude:s3")["title"], "Make cold reads fast");
+    }
+
+    /// The design's 1, beyond claude-mem's rule: a session none of whose prompts asks (resumed with
+    /// an acknowledgement) takes its oldest reply's `request` as its ask, and all of its prompts
+    /// follow it up.
+    #[test]
+    fn a_session_resumed_with_an_acknowledgement_asks_what_its_first_reply_says() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "再開して");
+        let r = h.reply("s1", -55_000);
+        let summary = h.turn(
+            "s1",
+            (p, r),
+            -55_000,
+            json!({"request": "Resume the parser fix", "completed": "Fixed."}),
+        );
+        let p = h.said("s1", -50_000, "続けて");
+        let r = h.reply("s1", -45_000);
+        h.turn(
+            "s1",
+            (p, r),
+            -45_000,
+            json!({"request": "Add the regression test", "completed": "Added."}),
+        );
+        let v = h.read(Range::All, h.t);
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(
+            s1["ask"],
+            json!({"id": summary, "ts": h.t - 60_000, "text": "Resume the parser fix",
+                "from": "summary"})
+        );
+        assert_eq!(s1["follow_ups"][0]["text"], "再開して");
+        assert_eq!(s1["title"], "Resume the parser fix");
+        assert_eq!(v["unlinked"], 0);
+    }
+
+    /// Every text goes through the gate as its rules are now, before its cut: a value a rule added
+    /// after the prompts were kept, which the worker's rescan has not masked yet, is masked in the
+    /// ask and the follow-ups, also where the ask's cut at 1,200 characters splits it.
+    #[test]
+    fn a_value_a_rule_masks_is_masked_also_where_the_cut_splits_it() {
+        let mut h = Home::new();
+        let long = format!("{}Use the canary-4827 key.", "Fix the deploy. ".repeat(74));
+        h.said("s1", -60_000, &long);
+        h.said("s1", -50_000, "Use canary-4827 again.");
+        h.s.run();
+        let config =
+            "[redaction]\nextra_rules = [{ id = \"canary\", regex = 'canary-[0-9]{4}' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
+        let v = super::read(h.s.home.path(), Range::All, h.t).unwrap();
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["ask"]["text"].as_str().unwrap().chars().count(), ASK);
+        assert_eq!(s1["follow_ups"].as_array().unwrap().len(), 1);
+        assert!(!v.to_string().contains("canary-"), "{v}");
+    }
+
+    /// Work state's names and values go out as its own lines show them, each beside its key: a
+    /// rule added after the write that matches a value only with its key masks it (the commit
+    /// security review of this slice).
+    #[test]
+    fn a_work_value_a_rule_masks_beside_its_key_is_masked() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Rotate the keys.");
+        h.wrote(
+            "s1",
+            "keys",
+            json!({"task": "canary-4827", "status": "doing", "outcome": "canary-1234 rotated"}),
+        );
+        h.s.run();
+        let config = "[redaction]\nextra_rules = [{ id = \"t\", regex = 'task = \"canary-[0-9]{4}' }, \
+                      { id = \"o\", regex = 'outcome = \"canary-[0-9]{4}' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
+        let v = super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["work"][0]["task"], crate::redact::MASK);
+        assert_eq!(s1["summary"], crate::redact::MASK);
+        assert!(!v.to_string().contains("canary-"), "{v}");
+    }
+
+    /// The design's 3 (#570's measurement): a read makes no provider call.
+    #[test]
+    fn a_read_makes_no_provider_call() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let calls = |h: &Home| -> i64 {
+            crate::providers_db::open(h.s.home.path())
+                .unwrap()
+                .query_row("SELECT count(*) FROM provider_calls", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = calls(&h);
+        assert_eq!(ids(&h.read(Range::All, h.t)), ["c:claude:s1"]);
+        assert_eq!(calls(&h), before);
+    }
+
+    /// The range is the newest update's: a day by default, a week, or all; a session in an
+    /// excluded repository and a prompt a forget took are not shown.
+    #[test]
+    fn the_range_the_exclusions_and_a_forget_decide_what_is_shown() {
+        let mut h = Home::new();
+        h.said("old", -3 * 86_400_000, "Fix the old thing.");
+        let gone = h.said("s1", -60_000, "Delete the canary-4827 note.");
+        h.said("s1", -50_000, "Fix the parser.");
+        h.s.said(
+            "x",
+            "github.com/o/private",
+            h.t - 60_000,
+            "Fix the private thing.",
+        );
+        h.s.exclude("github.com/o/private");
+        let device = h.s.raw.device().to_owned();
+        (h.s.raw)
+            .append_tombstone(Target::Record { device, seq: gone })
+            .unwrap();
+        assert_eq!(ids(&h.read(Range::Day, h.t)), ["c:claude:s1"]);
+        assert_eq!(
+            ids(&h.read(Range::Week, h.t)),
+            ["c:claude:s1", "c:claude:old"]
+        );
+        let v = h.read(Range::Day, h.t);
+        assert_eq!(by_id(&v, "c:claude:s1")["ask"]["text"], "Fix the parser.");
+        assert!(!v.to_string().contains("canary-4827"), "{v}");
+    }
+}

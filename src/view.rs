@@ -1881,6 +1881,11 @@ impl Viewer {
                 };
                 feed(&self.home, repo.as_deref(), cursor, limit)?
             }
+            // X10 (docs/my-work.md): every repository's requests, as claude-mem's My Work shows them.
+            "my-work" => match crate::my_work::Range::of(q.get("range").map(String::as_str)) {
+                Some(range) => crate::my_work::read(&self.home, range, crate::db::now_ms())?,
+                None => return Ok(bad("range")),
+            },
             "timeline" => {
                 let (all, limit, before) = match (flag(q, "all"), limit(q, 50), page(q)) {
                     (Ok(all), Ok(limit), Ok(before)) => (all, limit, before),
@@ -4107,6 +4112,21 @@ curate = false
 
     fn get(v: &Viewer, target: &str) -> Value {
         json_of(&v.route("GET", target, &[HOST, TOKEN]))
+    }
+
+    /// X10: the My Work route takes the token, reads a day by default, a week or everything, and
+    /// refuses another range before it reads.
+    #[test]
+    fn the_my_work_route_reads_a_range() {
+        let (dir, v) = viewer("my-work");
+        assert_eq!(v.route("GET", "/api/my-work", &[HOST]).status, 401);
+        for q in ["", "?range=day", "?range=week", "?range=all"] {
+            let answer = get(&v, &format!("/api/my-work{q}"));
+            assert_eq!(answer, json!({"requests": [], "unlinked": 0}), "{q}");
+        }
+        let year = v.route("GET", "/api/my-work?range=year", &[HOST, TOKEN]);
+        assert_eq!(year.status, 400);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A feed over invented records, without the older timeline fixture's claims or imports.

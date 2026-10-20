@@ -245,6 +245,19 @@ pub struct Prompt {
 /// A prompt page's last kept record: its own time and stored ID, descending (page.md P3).
 pub type PromptPosition = (i64, String, i64);
 
+/// A live prompt's device, seq and event, before any gate (`Raw::prompt_events`).
+pub(crate) type PromptEvent = (String, i64, Event);
+
+/// One of this store's own work state writes (`Raw::native_work_writes`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkWrite {
+    pub repo: String,
+    pub list: String,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    /// When it was appended, unix ms: its tool call is recorded within moments of it.
+    pub ts: i64,
+}
+
 impl Prompt {
     pub fn position(&self) -> PromptPosition {
         (self.ts, self.device.clone(), self.seq)
@@ -4617,6 +4630,30 @@ impl Raw {
         limit: usize,
         rules: &crate::redact::Rules,
     ) -> Result<(Vec<Prompt>, bool)> {
+        let (events, more) = self.prompt_events(repo, before, limit)?;
+        let gate = |s: &str| crate::redact::outbound_with(s, rules);
+        let prompts = events
+            .into_iter()
+            .map(|(device, seq, e)| Prompt {
+                device,
+                seq,
+                ts: e.ts,
+                agent: gate(&e.agent),
+                repo: e.repo.as_deref().map(gate),
+                text: gate(&crate::curate::long_text(&e).unwrap_or_default()),
+            })
+            .collect();
+        Ok((prompts, more))
+    }
+
+    /// `prompts`' records, each with its device and seq, as `after` returns them and before any
+    /// gate: a reader that shows a part of a prompt gates that part (X10, `my_work`).
+    pub(crate) fn prompt_events(
+        &self,
+        repo: Option<&str>,
+        before: Option<&PromptPosition>,
+        limit: usize,
+    ) -> Result<(Vec<PromptEvent>, bool)> {
         self.conn.execute_batch(PROMPT_INDEX)?;
         let mut st = self.conn.prepare(
             "SELECT device, seq FROM records
@@ -4649,15 +4686,7 @@ impl Raw {
             if out.len() == limit {
                 return Ok((out, true));
             }
-            let gate = |s: &str| crate::redact::outbound_with(s, rules);
-            out.push(Prompt {
-                device,
-                seq,
-                ts: e.ts,
-                agent: gate(&e.agent),
-                repo: e.repo.as_deref().map(gate),
-                text: gate(&crate::curate::long_text(&e).unwrap_or_default()),
-            });
+            out.push((device, seq, *e));
         }
         Ok((out, false))
     }
@@ -5755,6 +5784,50 @@ impl Raw {
     /// `work_state_in` on this store.
     pub fn work_state_entries(&self, repo: &str) -> Result<Vec<crate::work_state::Entry>> {
         work_state_in(&self.conn, repo)
+    }
+
+    /// X10 (docs/my-work.md): this store's own work state writes, every repository's, in the order
+    /// they fold (`work_state_in`'s clock order), each at the time it was appended: none imported
+    /// from claude-mem (row N1), which has no tool call in a session.
+    pub(crate) fn native_work_writes(&self) -> Result<Vec<WorkWrite>> {
+        let mut st = self.conn.prepare(
+            "SELECT device, ts, body FROM main.ops
+             WHERE type = 'work_state' AND json_extract(body, '$.source') IS NULL
+             ORDER BY device, op_seq",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut writes = Vec::new();
+        let (mut device, mut clock) = (String::new(), i64::MIN);
+        for (i, row) in rows.enumerate() {
+            let (from, ts, body) = row?;
+            let v: serde_json::Value = serde_json::from_str(&body)?;
+            if from != device {
+                (device, clock) = (from.clone(), i64::MIN);
+            }
+            clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+            let (Some(repo), Some(list), Some(fields)) = (
+                v["repo"].as_str(),
+                v["list"].as_str(),
+                v["fields"].as_object(),
+            ) else {
+                continue;
+            };
+            let write = WorkWrite {
+                repo: repo.to_owned(),
+                list: list.to_owned(),
+                fields: fields.clone(),
+                ts,
+            };
+            writes.push((clock, from, i, write));
+        }
+        writes.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+        Ok(writes.into_iter().map(|w| w.3).collect())
     }
 
     /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded

@@ -100,21 +100,24 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 
 1. **A request** is an agent's session, as claude-mem's conversation: `(agent, session)`, or an
    explicit `request_id` in work state, by claude-mem's rules above: the requests of one
-   conversation share its original ask and follow-ups, and differ in their title and their work.
-   The original ask is the session's first prompt with its text recorded (1,200 characters) that is
-   not an envelope, a greeting or an acknowledgement, in English or Japanese ("ok", "continue",
-   "resume", "はい", "続けて", "再開して" and the like); the follow-ups its later prompts (the newest
-   6, 500 characters each). Unlike claude-mem, a prompt needs no English action word: most of the
-   owner's prompts are Japanese, and claude-mem's list of words would leave them out. A prompt kept
-   private, a session in an excluded repository and a forgotten record take no part, as
-   everywhere. A request owns the replies (turns) of its conversations, with their summaries and
-   cards; in a conversation of several `request_id`s, each owns only the replies in which its own
-   work items were written (the reply of the linked `work_state_write` call), as claude-mem gives
-   such a request only the observations of the prompts that wrote its work, and each reply that
-   none owns, with cards, counts once among the unlinked records (claude-mem counts each of the
-   conversation's prompts with observations). A request of several conversations takes the
-   earliest of their original asks (claude-mem takes the first it reads) and the newest 6 of their
-   follow-ups.
+   conversation share its original ask and follow-ups, and differ in their title and their work. The
+   original ask is the session's first prompt with its text recorded (1,200 characters) that is not
+   an envelope, a greeting or an acknowledgement, in English or Japanese ("ok", "continue",
+   "resume", "はい", "続けて", "再開して" and the like); the follow-ups its later prompts (the newest 6, 500
+   characters each). Unlike claude-mem, a prompt needs no English action word: most of the owner's
+   prompts are Japanese, and claude-mem's list of words would leave them out. A session none of
+   whose prompts asks, one resumed with "再開して", takes its oldest reply's `request`, which the
+   curator wrote, as its ask, and all of its prompts follow it up (added with slice 1: of the six
+   live Claude sessions on this PC on 2026-10-21 one was so, which claude-mem shows under no
+   request, its work counted among the unlinked). A prompt kept private, a session in an excluded
+   repository and a forgotten record take no part, as everywhere. A request owns the replies (turns)
+   of its conversations, with their summaries and cards; in a conversation of several `request_id`s,
+   each owns only the replies in which its own work items were written (the reply of the linked
+   `work_state_write` call), as claude-mem gives such a request only the observations of the prompts
+   that wrote its work, and each reply that none owns, with cards, counts once among the unlinked
+   records (claude-mem counts each of the conversation's prompts with observations). A request of
+   several conversations takes the earliest of their original asks (claude-mem takes the first it
+   reads) and the newest 6 of their follow-ups.
 2. **Its work**: each work-state entry is tied to the session whose `tool` record of
    `work_state_write` names the same list and the same fields within 5 s of the op, and only when
    exactly one does (claude-mem's rule). The rest is the unlinked count. Only the work state this
@@ -199,3 +202,59 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   OpenRouter as its provider; the owner's writes none).
 - TeamBrain and claude-mem's cloud links.
 - Server-sent events: the page polls, as it does for its other views (row 49).
+
+## As built
+
+### Slice 1: the reader and its route (2026-10-21)
+
+- `src/my_work.rs` reads the requests, and `GET /api/my-work?range=day|week|all` answers with them:
+  a day by default, another value refused with 400 before anything is read, the newest update
+  first, with the unlinked count.
+- **What is read**: the newest 2,000 live prompts, 100 session summaries (`turns::page`), 300 cards
+  (`cards::page`), and this store's own work state writes (`Raw::native_work_writes`), folded as
+  claude-mem folds them (each list's tasks, and the list itself when its state has a key besides
+  `task`) into the newest 240 items. The 2,000 prompts are a shortcut: claude-mem reads every
+  prompt of the sessions it loaded, so a session whose first prompt is older than them has its
+  oldest read prompt as its ask.
+- **The link**: a write is the work of the session whose call of oboete's `work_state_write`
+  (named as `curate::served` and `curate::oboete` read a tool: `mcp__oboete__…`, `oboete__…`,
+  `oboete.…`) sent the same repository, list and fields within 5 s, when exactly one did; an item
+  is the work of its newest write that links, as claude-mem credits it. The calls are found by
+  time through `raw_docs_tools`, a new index the fts consumer makes in knowledge.db, as it makes
+  `raw_docs_prompts` (2.6 s once on this PC's store, and no hook waits on it); before the worker
+  has made it, nothing links. On this PC each of the 77 writes had exactly one such call, 14 to
+  158 ms after it. A write whose fields the gate stored otherwise than its call's input links to
+  nothing.
+- **The request's own status** (#570): the newest record among its items of `request_complete` or
+  `request_status`, each from the item's own fields, else its list's, `request_complete` first at
+  the same time, decides first; then its work's, claude-mem's `statusFor`. A request's prompts,
+  replies and cards are one more row of its work, as claude-mem's observations are, so work that
+  is all done reads "Update recorded" until it has been quiet for 6 hours.
+- **Its identity** (#570): `c:<agent>:<session>`, or `r:<request_id>`, the id trimmed and a number
+  written as its text, so `7` and `"7"` are one request.
+- **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
+  `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
+  its own for the rest. Checked comes with slice 3.
+- **"Summary updating"**: the request's newest prompt has no turn op yet, kept or skipped, that
+  covers it.
+- **The recorded wording**, before any summary: the newest of its work items' outcome or progress
+  and its cards' subtitles, else its ask, is the summary, as claude-mem's newest recorded update.
+- **The unlinked count**: the work items no request takes; and, of a conversation with no request
+  or with several `request_id`s, each reply no request owns that has a card, and the cards of no
+  reply yet, once.
+- **The gate**: an ask is told from an acknowledgement on the prompt's own text, and only what is
+  shown goes through the gate, as the rules are now: an ask's first 1,200 characters, or a
+  follow-up's first 500, and 4,000 more, so that a value the cut splits is whole when the rules
+  read it, a key block the cut leaves open left out, as `hook::clip` keeps a field. The live
+  prompts on this PC are 226,000 characters (39 prompts, most of them delegated reviews), which the
+  gate read whole in 1.1 s. Work state's names and values go out as its own lines show them, each
+  beside its key (`work_state::beside`); an item's other fields are not in the answer.
+- **Speed**, on a copy of this PC's store (10 requests in a day, 18 in all): 2.4 s cold and 1.0 s
+  warm, most of it the gate the summaries' and the cards' readers put every field through. The
+  page reads it only when the store's version moves (row 49), and each connection to the viewer
+  has a thread of its own, so a hook's request does not wait on it.
+- **The answer** of a request: `id`, `title`, `summary`, `next`, `copy` (`summary` or `recorded`),
+  `updating`, `status`, `updated`, `started`, `agents`, `projects`, `repos`, `ask` (`id`, `ts`,
+  `text`, and `from`: `prompt`, `summary` or `work`), `follow_ups` (each `id`, `ts`, `text`), `work`
+  (each item's `list`, `task`, `status`, `updated`), and `summaries` and `cards`, the IDs `get`
+  takes, the newest first, at most 40 cards.
