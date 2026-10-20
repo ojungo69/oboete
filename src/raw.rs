@@ -394,6 +394,16 @@ pub struct ImportFiles {
     pub files_modified: Vec<String>,
 }
 
+impl ImportFiles {
+    /// Its paths as the import's checks read its text: read, then modified, a line each.
+    pub fn text(&self) -> String {
+        let paths: Vec<&str> = (self.files_read.iter().chain(&self.files_modified))
+            .map(String::as_str)
+            .collect();
+        paths.join("\n")
+    }
+}
+
 /// Whether the body of an `import` op is a document's files (F10) rather than a document.
 pub fn is_import_files(body: &serde_json::Value) -> bool {
     body.get("title").is_none() && body.get("files_read").is_some_and(|v| v.is_array())
@@ -3068,6 +3078,18 @@ impl Raw {
     /// Milestone 5 D5: whether `uid`, a claim's or an imported document's, is forgotten.
     pub fn forgotten(&self, uid: &str) -> Result<bool> {
         forgotten_uid(&self.conn, uid)
+    }
+
+    /// Whether an import leaves out an item, `(source, source_id)`'s with `uid` and `text`: its
+    /// origin denied (`denied`), or its uid forgotten (D5).
+    pub(crate) fn import_refused(
+        &self,
+        (source, source_id): (&str, &str),
+        uid: &str,
+        text: &str,
+    ) -> Result<bool> {
+        let origin = crate::forget::origin(source, source_id);
+        Ok(denied(&self.conn, Some(&origin), text)? || forgotten_uid(&self.conn, uid)?)
     }
 
     /// Every forgotten uid (D5): the readers and senders pass them over.
@@ -6005,19 +6027,10 @@ impl Raw {
                     &d.uid,
                     format!("{}\n{}", d.title, d.body),
                 ),
-                Import::Files(f) => {
-                    let paths = f.files_read.iter().chain(&f.files_modified);
-                    (
-                        &f.source,
-                        &f.source_id,
-                        &f.uid,
-                        paths.cloned().collect::<Vec<_>>().join("\n"),
-                    )
-                }
+                Import::Files(f) => (&f.source, &f.source_id, &f.uid, f.text()),
             };
-            let origin = crate::forget::origin(source, source_id);
             // A forgotten document (D5) is passed over here: `append_ops` refuses a batch with it.
-            if denied(&self.conn, Some(&origin), &text)? || forgotten_uid(&self.conn, uid)? {
+            if self.import_refused((source, source_id), uid, &text)? {
                 continue;
             }
             let body = match item {

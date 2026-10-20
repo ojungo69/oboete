@@ -90,8 +90,12 @@ file: an `import` op with the document's labels and the two lists, gated, and no
 reader of documents takes for one (docs/file-note.md F10, F11). Each import also brings the
 files op of an observation imported before that has none under its document's repository, and
 `oboete import claude-mem <db> --files` brings only those, with no new document, work state or
-exclusion. The import's line counts the observations whose files came in (`files`) and the paths
-left out to keep a files op within 32 KiB (`files_cut`).
+exclusion; a document claude-mem moved since stays where it is filed and gets its files op
+there. The import's line counts the observations whose files came in (`files`, none of a
+forgotten or denied uid) and the paths left out to keep a files op within 32 KiB (`files_cut`; an
+observation none of whose paths fits gets no files op, so each run counts its paths again). Under
+`--files`, `seen` counts the observations imported before; those claude-mem recorded since are
+left to the plain import and not counted.
 
 ## Tests
 

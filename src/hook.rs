@@ -4297,20 +4297,34 @@ mod tests {
         assert!(r.read("s9", "src/a.rs").contains("The parser was fixed"));
     }
 
-    /// F13 (test 23): a store whose consumers have not made the imported tables yet gives the
-    /// cards' note as before.
+    /// F13 (test 23): a store whose consumers have not made `imported_files`, `imported` or
+    /// `session_start` yet gives the cards' note as before, though imported history names the file.
     #[test]
     fn the_cards_note_needs_no_imported_tables() {
-        let mut r = Reads::new();
-        r.cards(
-            2,
-            json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
-        );
-        let k = rusqlite::Connection::open(r.s.home.path().join("knowledge.db")).unwrap();
-        k.execute_batch("DROP TABLE imported_files; DROP TABLE session_start;")
-            .unwrap();
-        drop(k);
-        assert!(r.read("s9", "src/a.rs").contains("The parser was fixed"));
+        for table in ["imported_files", "imported", "session_start"] {
+            let mut r = Reads::new();
+            let repo = r.repo.clone();
+            r.cards(
+                2,
+                json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+            );
+            r.s.event("prompt", "h1", (&repo, "main"), 86_400_000 + 1, json!({}));
+            r.s.imported_with_files(
+                "o1",
+                ("x", "h1"),
+                "bugfix",
+                2 * 86_400_000,
+                "Fixed",
+                &["src/a.rs"],
+                &[],
+            );
+            r.s.run();
+            let k = rusqlite::Connection::open(r.s.home.path().join("knowledge.db")).unwrap();
+            k.execute_batch(&format!("DROP TABLE {table}")).unwrap();
+            drop(k);
+            let note = r.read("s9", "src/a.rs");
+            assert!(note.contains("The parser was fixed"), "{table}: {note}");
+        }
     }
 
     /// X5 F1, F2 (G25): Codex's reads get the note, as claude-mem's adapter takes their files: a

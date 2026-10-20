@@ -41,7 +41,8 @@ pub struct Stats {
     pub exclusions_refused: u64,
     /// Observations whose files came in as a files op (docs/file-note.md F10, F11).
     pub files: u64,
-    /// Paths left out of a files op to keep it within `FILES_BYTES` (F10).
+    /// Paths left out of a files op to keep it within `FILES_BYTES` (F10). An observation none of
+    /// whose paths fits gets no files op, so each run tries it, and counts them, again.
     pub files_cut: u64,
 }
 
@@ -217,7 +218,7 @@ pub fn claude_mem_with(
             };
             let put = sink.put(row)?;
             stats.files_cut += put.cut;
-            count(put.new, &mut stats.observations, &mut stats.seen);
+            count(&put, &mut stats.observations, &mut stats.seen);
             Ok(())
         },
     )?;
@@ -271,7 +272,7 @@ pub fn claude_mem_with(
                 body: &body,
                 files: Default::default(),
             };
-            count(sink.put(row)?.new, &mut stats.summaries, &mut stats.seen);
+            count(&sink.put(row)?, &mut stats.summaries, &mut stats.seen);
             Ok(())
         },
     )?;
@@ -302,7 +303,7 @@ pub fn claude_mem_with(
                 body: &body,
                 files: Default::default(),
             };
-            count(sink.put(row)?.new, &mut stats.prompts, &mut stats.seen);
+            count(&sink.put(row)?, &mut stats.prompts, &mut stats.seen);
             Ok(())
         },
     )?;
@@ -576,14 +577,15 @@ struct Sink<'a> {
     /// `--files`: the files ops of the documents imported before, and no document (F11).
     files_only: bool,
     items: Vec<crate::raw::Import>,
-    /// Files ops put.
+    /// Files ops put, none of a uid the append leaves out (`Raw::import_refused`).
     files: u64,
 }
 
-/// What `Sink::put` did with a row: whether its document is new, and how many of its paths its
-/// files op left out (F10).
+/// What `Sink::put` did with a row: whether its document is new, whether an earlier run imported
+/// it, and how many of its paths its files op left out (F10).
 struct Put {
     new: bool,
+    before: bool,
     cut: u64,
 }
 
@@ -591,15 +593,18 @@ impl Sink<'_> {
     /// A row as an import op, with its session, and its files as a files op (docs/file-note.md
     /// F10, F11): the files op of a document filed before comes now if it has none under the
     /// repository the document is filed under. A row claude-mem moved since (I3) comes in again
-    /// with the same uid: readers take a document's newest row (Codex on #431).
+    /// with the same uid: readers take a document's newest row (Codex on #431). `--files` moves
+    /// none, so such a row's files op is filed where its document is.
     fn put(&mut self, r: Row) -> Result<Put> {
         let repo = repo(r.project);
-        let filed = match self.known.get(&r.key) {
+        let had = self.known.get(&r.key);
+        let filed = match had {
             // One whose project is lost (claude-mem pruned its session) stays where it came in.
             Some(had) if r.project.is_empty() => had.iter().min().cloned(),
             Some(had) if had.contains(&repo) => Some(repo.clone()),
             _ => None,
         };
+        let before = had.is_some();
         let session = match r.session {
             Some(s) => s.id.clone(),
             // No session id at all: a session of its own, so unrelated rows do not merge.
@@ -609,6 +614,12 @@ impl Sink<'_> {
         };
         let uid = format!("{}:{}", self.source, r.key);
         let new = filed.is_none() && !self.files_only;
+        let under = match filed {
+            Some(at) => Some(at),
+            None if new => Some(repo.clone()),
+            // Moved since, under `--files`: where it was filed, as a lost project's.
+            None => had.and_then(|had| had.iter().min().cloned()),
+        };
         if new {
             self.known
                 .entry(r.key.clone())
@@ -628,7 +639,6 @@ impl Sink<'_> {
         }
         let mut cut = 0;
         let [read, modified] = r.files;
-        let under = filed.or_else(|| new.then_some(repo));
         if let Some(under) = under
             && !(read.is_empty() && modified.is_empty())
             && !self
@@ -645,17 +655,26 @@ impl Sink<'_> {
                 files_read: read,
                 files_modified: modified,
             })?;
-            cut = left_out;
-            if !(files.files_read.is_empty() && files.files_modified.is_empty()) {
-                self.known_files.entry(r.key).or_default().insert(under);
-                self.items.push(crate::raw::Import::Files(files));
-                self.files += 1;
+            // None of a uid the append leaves out (D5), which it asks again: `files` counts what
+            // is stored, and a forgotten uid's is not put again at every run.
+            let refused = self.raw.import_refused(
+                (&files.source, &files.source_id),
+                &files.uid,
+                &files.text(),
+            )?;
+            if !refused {
+                cut = left_out;
+                if !(files.files_read.is_empty() && files.files_modified.is_empty()) {
+                    self.known_files.entry(r.key).or_default().insert(under);
+                    self.items.push(crate::raw::Import::Files(files));
+                    self.files += 1;
+                }
             }
         }
         if self.items.len() >= crate::raw::IMPORT_BATCH {
             self.flush()?;
         }
-        Ok(Put { new, cut })
+        Ok(Put { new, before, cut })
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -760,8 +779,14 @@ fn observation_body(narrative: &str, facts: &str) -> String {
     lines.join("\n")
 }
 
-fn count(new: bool, added: &mut u64, seen: &mut u64) {
-    *if new { added } else { seen } += 1;
+/// A row in the import's line: added, imported by an earlier run, or neither (one claude-mem
+/// recorded since, which `--files` leaves to the plain import, F11).
+fn count(put: &Put, added: &mut u64, seen: &mut u64) {
+    if put.new {
+        *added += 1;
+    } else if put.before {
+        *seen += 1;
+    }
 }
 
 #[cfg(test)]
@@ -998,6 +1023,12 @@ mod tests {
                 (13, json!("src/c.rs"), json!({"x": 1})),
                 (14, json!(odd), json!(["src/d.rs"])),
                 (15, json!(["x".repeat(FILES_BYTES)]), json!([])),
+                // Kept while they fit: a short path after one that did not fit is left out too.
+                (
+                    16,
+                    json!(["y".repeat(FILES_BYTES / 2), "z".repeat(FILES_BYTES)]),
+                    json!(["m.rs"]),
+                ),
             ],
         );
         let home = tempfile::tempdir().unwrap();
@@ -1009,7 +1040,7 @@ mod tests {
                 .iter()
                 .map(|f| f.source_id.as_str())
                 .collect::<Vec<_>>(),
-            ["o10", "o14"]
+            ["o10", "o14", "o16"]
         );
         let a = &files[0];
         assert_eq!(a.files_read[0], "src/a.rs");
@@ -1034,8 +1065,10 @@ mod tests {
         assert!(stored <= FILES_BYTES, "{stored}");
         assert!(b.files_read.len() < odd.len() && b.files_modified.is_empty());
         assert_eq!(b.files_read[..], odd[..b.files_read.len()]);
+        let short = &files[2];
+        assert_eq!((short.files_read.len(), short.files_modified.len()), (1, 0));
         let cut = (odd.len() - b.files_read.len() + 1) as u64;
-        assert_eq!((stats.files, stats.files_cut), (2, cut + 1));
+        assert_eq!((stats.files, stats.files_cut), (3, cut + 1 + 2));
         // In op order, each after its document, and none reads as a document.
         let ops = raw.ops_after(raw.device(), 0, 10_000).unwrap();
         let at = |id: &str, files: bool| {
@@ -1053,8 +1086,8 @@ mod tests {
     }
 
     /// F11 (test 16): `--files` brings the files of the observations imported before and nothing
-    /// else, once; a plain import brings what an earlier run left out, and a document claude-mem
-    /// moved gets its files under its new repository.
+    /// else, once, none of a forgotten or denied uid; a plain import brings what an earlier run
+    /// left out, and a document claude-mem moved gets its files under its new repository.
     #[test]
     fn the_files_of_observations_imported_before_come_in_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1074,6 +1107,7 @@ mod tests {
             &src,
             &[
                 (10, json!(["src/a.rs"]), json!([])),
+                (11, json!(["src/b.rs"]), json!([])),
                 (13, json!(["src/c.rs"]), json!([])),
                 (14, json!([]), json!(["src/d.rs"])),
             ],
@@ -1085,46 +1119,66 @@ mod tests {
             [],
         )
         .unwrap();
+        // Work state claude-mem kept since, which `--files` leaves to the plain import too.
+        c.execute_batch(
+            "CREATE TABLE work_state_entries(id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project TEXT NOT NULL, list_name TEXT NOT NULL, fields TEXT NOT NULL,
+               created_at TEXT NOT NULL, created_at_epoch INTEGER NOT NULL);
+             INSERT INTO work_state_entries(project, list_name, fields, created_at,
+               created_at_epoch) VALUES('free-mem', 'plan', '{\"task\": \"Port search\"}', '', 3000);",
+        )
+        .unwrap();
         let ids = |raw: &Raw| -> Vec<String> {
             files_ops(raw).into_iter().map(|f| f.source_id).collect()
         };
         let [plain, only] = &mut raws[..] else {
             unreachable!()
         };
-        // A forgotten document gets no files op either.
+        // A forgotten document gets no files op, nor one whose origin is denied.
         let forgotten = docs(only)
             .into_iter()
             .find(|d| d.source_id == "o13")
             .unwrap();
         only.append_ops(&[(OpKind::Forget, json!({"uid": forgotten.uid, "job": "j"}))])
             .unwrap();
+        Connection::open(homes[1].path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+                 VALUES(?1, 'd', 1, 0, 's', 'j')",
+                [crate::forget::origin(&forgotten.source, "o11")],
+            )
+            .unwrap();
         let before = docs(only).len();
         let stats = claude_mem_with(only, &src, &Default::default(), true).unwrap();
         assert_eq!(ids(only), ["o10", "o14"]);
         assert_eq!(docs(only).len(), before, "no document");
         assert_eq!((stats.observations, stats.work_state), (0, 0));
-        claude_mem_with(only, &src, &Default::default(), true).unwrap();
-        assert_eq!(ids(only).len(), 2, "once");
-        claude_mem(only, &src, &Default::default()).unwrap();
+        // Six imported before (o12 is empty); o40, recorded since, is left to the plain import.
+        assert_eq!((counts(&stats), stats.files), ((0, 0, 0, 6, 1), 2));
+        let again = claude_mem_with(only, &src, &Default::default(), true).unwrap();
+        assert_eq!((ids(only).len(), again.files), (2, 0), "once");
+        let plain_run = claude_mem(only, &src, &Default::default()).unwrap();
         assert_eq!(
             ids(only),
             ["o10", "o14", "o40"],
             "the new one with its document"
         );
+        assert_eq!((plain_run.files, plain_run.work_state), (1, 1));
         // The plain import brings what the first run, before the lists, could not.
         claude_mem(plain, &src, &Default::default()).unwrap();
-        assert_eq!(ids(plain), ["o10", "o13", "o14", "o40"]);
+        assert_eq!(ids(plain), ["o10", "o11", "o13", "o14", "o40"]);
         claude_mem(plain, &src, &Default::default()).unwrap();
-        assert_eq!(ids(plain).len(), 4);
-        // Moved: its document and its files again, under the new project; `--files` leaves a
-        // moved one to the plain import.
+        assert_eq!(ids(plain).len(), 5);
+        // Moved: its document and its files again, under the new project; `--files`, which
+        // moves no document, has its files op already where the document is filed.
         c.execute(
             "UPDATE observations SET project = 'other' WHERE id = 10",
             [],
         )
         .unwrap();
         claude_mem_with(plain, &src, &Default::default(), true).unwrap();
-        assert_eq!(ids(plain).len(), 4);
+        assert_eq!(ids(plain).len(), 5);
         claude_mem(plain, &src, &Default::default()).unwrap();
         let moved: Vec<String> = files_ops(plain)
             .into_iter()
@@ -1132,6 +1186,36 @@ mod tests {
             .map(|f| f.repo)
             .collect();
         assert_eq!(moved, [repo("free-mem"), repo("other")]);
+    }
+
+    /// F11 (test 16): a document imported before claude-mem's files came in, and moved to another
+    /// project since, gets its files op from `--files` where it is filed, once; the plain import
+    /// then moves it and files its files again under the new project.
+    #[test]
+    fn files_only_files_a_moved_documents_files_where_it_is_filed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        with_files(&src, &[(10, json!(["src/a.rs"]), json!([]))]);
+        Connection::open(&src)
+            .unwrap()
+            .execute(
+                "UPDATE observations SET project = 'other' WHERE id = 10",
+                [],
+            )
+            .unwrap();
+        let repos =
+            |raw: &Raw| -> Vec<String> { files_ops(raw).into_iter().map(|f| f.repo).collect() };
+        let stats = claude_mem_with(&mut raw, &src, &Default::default(), true).unwrap();
+        assert_eq!(repos(&raw), [repo("free-mem")]);
+        assert_eq!((stats.files, stats.seen), (1, 6), "imported before: seen");
+        claude_mem_with(&mut raw, &src, &Default::default(), true).unwrap();
+        assert_eq!(repos(&raw), [repo("free-mem")], "once");
+        claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(repos(&raw), [repo("free-mem"), repo("other")]);
     }
 
     fn counts(s: &Stats) -> (u64, u64, u64, u64, u64) {

@@ -153,9 +153,12 @@ imported before this version, or an import that stopped between a document and i
 gets them at its next run, and a document claude-mem moved to another project since (I3) gets
 one for the repository it is filed under now, for the exclusion and sync rules that read an op's
 labels. `oboete import claude-mem <db> --files` does only the second: no new document, so what
-claude-mem recorded after the last import stays out (claude-mem-parity.md, the first open check).
+claude-mem recorded after the last import stays out (claude-mem-parity.md, the first open check),
+and a document claude-mem moved since stays where it is filed, which is where its files op goes
+(the plain import moves it and files its files again).
 Which uids hold a files op, under which repository, is read from the ops, as `import_repos` reads
-the documents'. No files op is appended for a forgotten or denied uid; a forget registered while
+the documents'. No files op is put for a forgotten or denied uid (the append asks again, so the
+import's count is of what it stored); a forget registered while
 an import runs refuses the batch it falls in, as it refuses a batch of documents, and the import
 stops with what it appended before, which a second run finishes. Both run under the import lock,
 in batches as the documents are.
@@ -182,7 +185,8 @@ per-prompt block, where claude-mem maps by the project's name: on this PC 66% of
 observations that name a file map (all of this repository's 47,004, half of the other projects').
 Whether the rest should map by name, as claude-mem's does, is the owner's to decide (parity row 8).
 Until the consumers have made `imported_files`, `imported` and `session_start` (a store from
-before, or a first pass not through yet), the note has no imported rows and is the cards' alone.
+before), the note has no imported rows and is the cards' alone; while a first pass or a rebuild
+is still going, it has the rows indexed so far, as `card_files` has the cards'.
 
 F14. **One pool.** The note takes the 40 newest of F3's cards and F13's observations together, by
 time, as claude-mem takes its 40 from one table; F4 to F7 then hold for both alike. F4's newest
@@ -203,6 +207,17 @@ before it was excluded.
 F9 for the second kind: the lookup is one query by `(name, path)`. It is timed before the files
 ops reach this PC's store, on a store of the same size (147,956 observations' files, a name
 thousands of them share, ten files a read), and again on this PC's store after `--files`.
+Before (2026-10-20, a synthetic store of 250,000 imported rows, 147,500 with files and 421,271
+path rows, ten names shared by thousands): a read of ten such files took 144.5 ms at the median,
+162 ms at p95 and 282 ms at most, about 14.5 ms a file for the 2,300 rows that share its path.
+The cost grows with the rows that share the file's path in every project, about 5 µs each, and
+the lookup reads them all before it keeps the 40: on this PC the most observations one path has
+is 3,793, and 28 paths have 1,000 or more, so a read of the hottest file would take some 20 to
+30 ms, within the times of the other read hooks (session start at 135 ms at the median, the
+per-prompt block at 74 to 147 ms, claude-mem-parity.md X2) and under claude-mem's. If the
+measurement after `--files` puts a read of a hot file past them, the index keeps each row's time
+and whether its op is its uid's newest, and the lookup walks the rows newest first, stopping at
+the 40th.
 
 ## Slices (test first, one at a time)
 
@@ -255,7 +270,9 @@ thousands of them share, ten files a read), and again on this PC's store after `
     names a file, none for a forgotten or denied uid, and no document; a second run, and a plain
     import after it, append no files op again. A plain import that stopped after a document and
     before its files op appends that files op at its next run; a document moved to another
-    project gets a files op under its new repository.
+    project gets a files op under its new repository, and `--files` gives one moved before it had
+    any a files op where it is filed. The import's line counts the files ops it stored and, under
+    `--files`, as seen only the observations imported before.
 17. A files op reads as no document: search, `get`, the timeline and the per-prompt block give
     what they gave without it.
 18. `imported_files`: a row per path of each list, each with its op's number of paths; a rewind

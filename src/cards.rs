@@ -1033,6 +1033,56 @@ mod tests {
         assert_eq!(rows(&note), ["claude-mem:abc:o9", "2.0"]);
     }
 
+    /// F14 (test 20): an imported row is ranked by its own number of files and flag (its card
+    /// names none), one a session, and dates the note as a card does: F4 takes the newest of both.
+    #[test]
+    fn an_imported_row_ranks_and_dates_the_note_as_a_card_does() {
+        let imported = |id: i64, ts: i64, session: &str, named: usize, modified: bool| Filed {
+            named,
+            modified,
+            uid: Some(format!("claude-mem:abc:o{id}")),
+            session: Some((None, session.into())),
+            ..filed(id, ts, session, &[], &[])
+        };
+        let nine = ["a", "b", "c", "d", "e", "f", "g", "h", "src/a.rs"];
+        // Newest first, as `on_file` gives them: 15 cards of nine files (no points), then older
+        // imported rows: one modified it and names one file, one names 20, and two of a session.
+        let mut all: Vec<Filed> = (0..15)
+            .rev()
+            .map(|i| {
+                filed(
+                    100 + i,
+                    at(3, 10, i as u32, 0),
+                    &format!("s{i}"),
+                    &nine,
+                    &[],
+                )
+            })
+            .collect();
+        all.extend([
+            imported(1, at(3, 9, 30, 0), "x", 3, false),
+            imported(2, at(3, 9, 20, 0), "x", 1, true),
+            imported(3, at(3, 9, 0, 0), "y", 1, true),
+            imported(4, at(3, 8, 0, 0), "z", 20, false),
+        ]);
+        let note = file_note(&all, 0, "d", at(3, 12, 0, 0), &jst()).unwrap();
+        let shown = rows(&note);
+        assert_eq!(shown.len(), 15);
+        for id in ["claude-mem:abc:o1", "claude-mem:abc:o3"] {
+            assert!(shown.contains(&id), "{id}: {shown:?}");
+        }
+        for id in ["claude-mem:abc:o2", "claude-mem:abc:o4", "100.0"] {
+            assert!(!shown.contains(&id), "{id}: {shown:?}");
+        }
+        // F4: the newest of both.
+        let pair = [
+            imported(5, at(3, 11, 0, 0), "w", 1, false),
+            filed(6, at(3, 9, 0, 0), "s", &["src/a.rs"], &[]),
+        ];
+        assert!(file_note(&pair, at(3, 10, 0, 0), "d", at(3, 12, 0, 0), &jst()).is_some());
+        assert!(file_note(&pair, at(3, 11, 0, 0), "d", at(3, 12, 0, 0), &jst()).is_none());
+    }
+
     /// X5 F4: no note when the file changed at or after its newest card, or no card names it.
     #[test]
     fn no_note_when_the_file_changed_since_its_newest_card() {

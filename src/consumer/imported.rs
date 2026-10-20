@@ -1,7 +1,8 @@
 //! Milestone 4 Task 3 (D5): the imported documents consumer. It reads the op log of every device
 //! that has ops and keeps each `import` op's document in knowledge.db, keyed by the op that brought
-//! it, with a trigram index over its title and body. Curation reads records, never these ops, and
-//! only the per-prompt block injects them (#506, `prompt_line`).
+//! it, with a trigram index over its title and body. Curation reads records, never these ops; the
+//! per-prompt block (#506, `prompt_line`) and the note on a file (docs/file-note.md F13, by the
+//! files `ImportedFiles` keeps) are what inject them.
 
 use crate::raw::{ImportDoc, OpKind, Raw};
 use crate::worker::Consumer;
