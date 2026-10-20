@@ -85,6 +85,10 @@ pub struct Query {
     /// `mem_search`'s (claude-mem has no kind for them): raw session starts take no place, each
     /// leg leaving them out before its depth (Codex on #527).
     pub no_starts: bool,
+    /// Decision 52: the calling checkout's claude-mem names (`import::names_of`). An exclusion of
+    /// a project one of them names keeps its query from a provider, as one of the project its
+    /// repository's last part names does, without case, as the names map (CodeRabbit on #567).
+    pub names: Vec<String>,
 }
 
 impl Query {
@@ -446,8 +450,9 @@ pub struct PromptNear {
 /// G23 (docs/prompt-context.md, decision 44): the claims, cards, session summaries and imported
 /// history of `repo` whose meaning is near `text`, at `shortlist::MEANING` or above, the nearest
 /// first; claims only under delivery's rule (`claims::DECIDED_WHERE`, and no link ending them:
-/// `delivered_one`), and imported documents only through the mapping of #506
-/// (`consumer::imported::maps`), before anything is kept. What the prompt hook
+/// `delivered_one`), and imported documents only through the mapping of #506 and decision 52,
+/// by session or by the checkout's claude-mem `names` (`consumer::imported::maps`), before
+/// anything is kept. What the prompt hook
 /// asks the resident viewer: the reader's vector (D14), the local model loaded on the first prompt
 /// and kept, or Workers AI through the gate, within `QUERY_TIMEOUT`; an excluded repository's
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
@@ -463,7 +468,11 @@ struct PromptVector {
     near: Near,
 }
 
-fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVector, VectorSkip>> {
+fn prompt_vector(
+    home: &Path,
+    (repo, names): (&str, &[String]),
+    text: &str,
+) -> Result<Result<PromptVector, VectorSkip>> {
     if !crate::raw::exists(home) {
         return Ok(Err(VectorSkip::NoVectors));
     }
@@ -481,6 +490,7 @@ fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVec
         text: text.to_owned(),
         repo: Some(repo.to_owned()),
         caller: Some(repo.to_owned()),
+        names: names.to_vec(),
         ..Default::default()
     };
     if !local(home) && excluded_now(home, &raw, &q).unwrap_or(true) {
@@ -499,12 +509,12 @@ fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVec
 /// N5 (docs/memory-lookup.md): `text`'s query vector in `repo`, made as `prompt_near` makes a
 /// prompt's, for a memory lookup that searches with it in its hook; or why there is none.
 pub fn query_vector(home: &Path, repo: &str, text: &str) -> Result<Result<Vec<f32>, VectorSkip>> {
-    Ok(prompt_vector(home, repo, text)?.map(|v| v.near.vector))
+    Ok(prompt_vector(home, (repo, &[]), text)?.map(|v| v.near.vector))
 }
 
 pub fn prompt_near(
     home: &Path,
-    repo: &str,
+    (repo, names): (&str, &[String]),
     text: &str,
     shown: &std::collections::HashSet<String>,
 ) -> Result<PromptNear> {
@@ -519,7 +529,7 @@ pub fn prompt_near(
         _read,
         k,
         near,
-    } = match prompt_vector(home, repo, text)? {
+    } = match prompt_vector(home, (repo, names), text)? {
         Ok(v) => v,
         Err(skip) => return nothing(skip),
     };
@@ -536,11 +546,12 @@ pub fn prompt_near(
     let own = [repo.to_owned()];
     // #506: imported history inside the KNN by the sessions that map to `repo`, so the documents
     // of a project's other sessions take none of its candidates (Codex on #547); past
-    // `SESSION_FILTER` of them, by the projects their documents are filed under. `maps` keeps
-    // each hit to the mapping either way.
-    let sessions = imported_sessions(&k, repo)?;
+    // `SESSION_FILTER` of them, by the projects their documents are filed under. Since decision
+    // 52 the documents filed under the checkout's claude-mem names map too, their sessions and
+    // projects with them. `maps` keeps each hit to the mapping either way.
+    let sessions = imported_sessions(&k, repo, names)?;
     let imported = match sessions.len() > SESSION_FILTER {
-        true => ("repo", imported_projects(&k, repo)?),
+        true => ("repo", imported_projects(&k, repo, names)?),
         false => ("session", sessions),
     };
     for (family, kind, filter) in [
@@ -570,7 +581,7 @@ pub fn prompt_near(
                 }
                 "k" => {
                     !shown.contains(&key)
-                        && crate::consumer::imported::maps(&k, &key, repo)?
+                        && crate::consumer::imported::maps(&k, &key, repo, names)?
                         && crate::consumer::imported::prompt_line(&k, &raw, &key)?.is_some()
                 }
                 _ => shows_doc(&k, &raw, family, &key, &rules)?
@@ -623,20 +634,32 @@ const SESSION_FILTER: usize = 128;
 
 /// #506: the sessions whose imported documents may reach `repo`'s prompts: each that started in
 /// `repo` (`session_start`) with a document that is no prompt, and `NOTE_SESSION` when an agent
-/// saved a note in `repo`. No project is read by its name. Empty when nothing maps, so the scan of
+/// saved a note in `repo`; since decision 52, each with a document that is no prompt filed under
+/// one of the checkout's claude-mem `names`, without case. Empty when nothing maps, so the scan of
 /// the imported vectors is not paid for nothing, and before the consumers made the tables it
 /// reads.
-fn imported_sessions(k: &Connection, repo: &str) -> Result<Vec<String>> {
+/// `imported_sessions`' query: `repo` (?1) and the names' repositories (?2, `import::name_labels`),
+/// the second side by the index `imported_project`, each document by its newest row, as `maps`
+/// and the vectors read it: one moved since to another project brings its session no more
+/// (Codex on #567).
+const IMPORTED_SESSIONS: &str =
+    "SELECT i.session FROM session_start s JOIN imported i ON i.session = s.session
+     WHERE s.repo = ?1 AND i.kind <> 'prompt'
+     UNION
+     SELECT i.session FROM imported i
+     WHERE i.repo COLLATE NOCASE IN (SELECT value FROM json_each(?2)) AND i.kind <> 'prompt'
+       AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)";
+
+fn imported_sessions(k: &Connection, repo: &str, names: &[String]) -> Result<Vec<String>> {
     use crate::consumer::manifest::exists;
     if !exists(k, "table", "imported")? || !exists(k, "table", "session_start")? {
         return Ok(Vec::new());
     }
     let mut sessions: Vec<String> = k
-        .prepare(
-            "SELECT DISTINCT i.session FROM session_start s JOIN imported i ON i.session = s.session
-             WHERE s.repo = ?1 AND i.kind <> 'prompt'",
-        )?
-        .query_map([repo], |r| r.get(0))?
+        .prepare(IMPORTED_SESSIONS)?
+        .query_map(params![repo, crate::import::name_labels(names)], |r| {
+            r.get(0)
+        })?
         .collect::<rusqlite::Result<_>>()?;
     if k.query_row(
         "SELECT EXISTS(SELECT 1 FROM imported WHERE session = ?1 AND repo = ?2)",
@@ -649,14 +672,19 @@ fn imported_sessions(k: &Connection, repo: &str) -> Result<Vec<String>> {
 }
 
 /// #506: the projects `repo`'s mapped imported documents are filed under, as the vectors file them
-/// (`embed_phase::vec_repo`), and `repo` itself, where its notes are.
-fn imported_projects(k: &Connection, repo: &str) -> Result<Vec<String>> {
+/// (`embed_phase::vec_repo`), and `repo` itself, where its notes are; since decision 52 with the
+/// projects of the checkout's claude-mem `names` as stored, whatever their case.
+fn imported_projects(k: &Connection, repo: &str, names: &[String]) -> Result<Vec<String>> {
     let mut projects = vec![repo.to_owned()];
     let mut st = k.prepare(
-        "SELECT DISTINCT i.repo FROM session_start s JOIN imported i ON i.session = s.session
-         WHERE s.repo = ?1 AND i.kind <> 'prompt'",
+        "SELECT i.repo FROM session_start s JOIN imported i ON i.session = s.session
+         WHERE s.repo = ?1 AND i.kind <> 'prompt'
+         UNION
+         SELECT repo FROM imported
+         WHERE repo COLLATE NOCASE IN (SELECT value FROM json_each(?2)) AND kind <> 'prompt'",
     )?;
-    for project in st.query_map([repo], |r| r.get::<_, String>(0))? {
+    let labels = crate::import::name_labels(names);
+    for project in st.query_map(params![repo, labels], |r| r.get::<_, String>(0))? {
         let project = crate::embed_phase::vec_repo("k", &project?).to_owned();
         if !projects.contains(&project) {
             projects.push(project);
@@ -1586,15 +1614,18 @@ pub fn excluded(list: &[String], q: &Query) -> bool {
     if q.all {
         return !list.is_empty();
     }
+    let scoped = |r: &str, list: &[String]| {
+        let ([own, named], worktrees) = imported_scope(r);
+        crate::embed_phase::import_excluded(&own, list)
+            || crate::embed_phase::import_excluded(&named, list)
+            || list.iter().any(|x| x.starts_with(&worktrees))
+    };
+    let folded: Vec<String> = list.iter().map(|x| x.to_lowercase()).collect();
     [q.caller.as_deref(), q.searched()]
         .into_iter()
         .flatten()
-        .any(|r| {
-            let ([own, named], worktrees) = imported_scope(r);
-            crate::embed_phase::import_excluded(&own, list)
-                || crate::embed_phase::import_excluded(&named, list)
-                || list.iter().any(|x| x.starts_with(&worktrees))
-        })
+        .any(|r| scoped(r, list))
+        || (q.names.iter()).any(|name| scoped(&crate::import::repo(&name.to_lowercase()), &folded))
 }
 
 /// The claims `q` finds: the delivered and current ones in units (`claims::units`, the pair rule)
@@ -5478,7 +5509,7 @@ mod tests {
         let asked = stub.requests();
         let near = prompt_near(
             s.home.path(),
-            R,
+            (R, &[]),
             "Parser errors go to stderr.",
             &Default::default(),
         )
@@ -5504,13 +5535,19 @@ mod tests {
         assert_eq!(stub.requests(), asked + 1);
         // What the session was shown, by the IDs the hook shows them by, takes no place.
         let shown = [decided.clone(), short].into_iter().collect();
-        let near = prompt_near(s.home.path(), R, "Parser errors go to stderr.", &shown).unwrap();
+        let near = prompt_near(
+            s.home.path(),
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &shown,
+        )
+        .unwrap();
         assert_eq!(near.hits.len(), 0);
         // Nor a claim an owner's change the worker has not applied yet touches.
         s.correct(&decided, None, Some("Parser errors go to the log."));
         let near = prompt_near(
             s.home.path(),
-            R,
+            (R, &[]),
             "Parser errors go to stderr.",
             &Default::default(),
         )
@@ -5518,8 +5555,8 @@ mod tests {
         assert!(!near.hits.iter().any(|h| h.key == decided));
     }
 
-    /// #506 (acceptance test): imported history reaches a prompt only through an explicit mapping,
-    /// never by its project's name. History imported from a project named `payments`, and two
+    /// #506 (acceptance test), with no names given: imported history reaches a prompt only through
+    /// an explicit mapping, never by its project's name (decision 52 adds the names given). History imported from a project named `payments`, and two
     /// checkouts `a/payments` and `b/payments`: while oboete recorded none of its sessions, neither
     /// gets it; once oboete recorded a session starting in `a/payments`, only `a/payments` gets
     /// that session's documents, and `b/payments` those of the session that started there; a
@@ -5572,7 +5609,7 @@ mod tests {
         let none = Default::default();
         let home = s.home.path().to_owned();
         let near = |repo: &str, shown: &std::collections::HashSet<String>| {
-            let near = prompt_near(&home, repo, text, shown).unwrap();
+            let near = prompt_near(&home, (repo, &[]), text, shown).unwrap();
             assert_eq!(near.vector, Vector::Used);
             let mut keys: Vec<String> = near
                 .hits
@@ -5642,7 +5679,7 @@ mod tests {
         s.said("cm-a", a, 500, "Work on the payment gateway.");
         s.run();
         embedded_by(&s, &stub);
-        let near = prompt_near(s.home.path(), a, text, &Default::default()).unwrap();
+        let near = prompt_near(s.home.path(), (a, &[]), text, &Default::default()).unwrap();
         let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
         assert_eq!(keys, ["claude-mem:test:own"]);
     }
@@ -5692,9 +5729,111 @@ mod tests {
         s.said("cm-b", b, 500, "Work on the payment gateway.");
         s.run();
         embedded_by(&s, &stub);
-        let near = prompt_near(s.home.path(), a, text, &Default::default()).unwrap();
+        let near = prompt_near(s.home.path(), (a, &[]), text, &Default::default()).unwrap();
         let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
         assert_eq!(keys, ["claude-mem:test:own"]);
+    }
+
+    /// Decision 52 (docs/prompt-context.md, "Decision 52"): with the checkout's claude-mem names a
+    /// document of a session oboete never recorded reaches the prompt when it is filed under one of
+    /// them, in any case, a worktree's own project included; another worktree's, another name's and
+    /// a v1 document of a session never recorded do not. Past `SESSION_FILTER` sessions, the
+    /// projects' scan holds the names' projects; the names' sessions are read by their index.
+    #[test]
+    fn imported_history_reaches_a_prompt_by_the_checkouts_names_too() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let a = "example.com/a/payments";
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: String, project: &str, session: String, body: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id,
+            kind: "decision".into(),
+            repo: crate::import::repo(project),
+            session,
+            ts: 1_000,
+            title: String::new(),
+            body: body.into(),
+        };
+        let near_doc =
+            |id: &str, project: &str, session: &str| doc(id.into(), project, session.into(), text);
+        s.raw
+            .append_imports(vec![
+                near_doc("main", "payments", "cm-1"),
+                near_doc("wt", "payments/fix", "cm-2"),
+                near_doc("spike", "payments/spike", "cm-3"),
+                near_doc("billing", "billing", "cm-4"),
+                crate::raw::ImportDoc {
+                    source: "oboete-v1".into(),
+                    repo: a.into(),
+                    ..near_doc("v1", "payments", "v1-lost")
+                },
+            ])
+            .unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let home = s.home.path().to_owned();
+        let near = |names: &[String]| {
+            let mut keys: Vec<String> = prompt_near(&home, (a, names), text, &Default::default())
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        let uid = |id: &str| format!("claude-mem:test:{id}");
+        // A worktree `fix` of `payments` checked out: its two names, the first in other case.
+        let names = ["PAYMENTS".to_owned(), "payments/fix".to_owned()];
+        assert_eq!(near(&names), [uid("main"), uid("wt")]);
+        assert_eq!(near(&[]), Vec::<String>::new());
+        assert_eq!(near(&["billing-old".to_owned()]), Vec::<String>::new());
+        // A document filed under a name and moved since to another project brings its session no
+        // more, as its newest row is read (Codex on #567).
+        for project in ["payments", "billing"] {
+            let moved = near_doc("moved", project, "cm-moved");
+            s.raw.append_imports(vec![moved]).unwrap();
+            s.run();
+        }
+        {
+            let k = crate::knowledge::open(&home).unwrap();
+            let sessions = imported_sessions(&k, a, &names).unwrap();
+            assert!(sessions.contains(&"cm-1".to_owned()), "{sessions:?}");
+            assert!(!sessions.contains(&"cm-moved".to_owned()), "{sessions:?}");
+        }
+        // Many sessions under the name: the projects' scan, which files the worktree's documents
+        // under `payments` too.
+        let far: Vec<_> = (0..=SESSION_FILTER)
+            .map(|i| {
+                let session = format!("cm-far-{i}");
+                doc(
+                    format!("far{i}"),
+                    "payments",
+                    session,
+                    "Lexer tokens are cached.",
+                )
+            })
+            .chain([near_doc("late", "payments", "cm-late")])
+            .collect();
+        s.raw.append_imports(far).unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let k = crate::knowledge::open(&home).unwrap();
+        assert!(imported_sessions(&k, a, &names).unwrap().len() > SESSION_FILTER);
+        assert_eq!(near(&names), [uid("late"), uid("main"), uid("wt")]);
+        let plan: Vec<String> = k
+            .prepare(&format!("EXPLAIN QUERY PLAN {IMPORTED_SESSIONS}"))
+            .unwrap()
+            .query_map(params![a, "[]"], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|d| d.contains("INDEX imported_project")),
+            "{plan:?}"
+        );
     }
 
     /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no
@@ -5729,8 +5868,13 @@ mod tests {
             seq: gone,
         };
         crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
-        let near =
-            prompt_near(&home, R, "Parser errors go to stderr.", &Default::default()).unwrap();
+        let near = prompt_near(
+            &home,
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
         let hidden_key = format!("{device}.{hidden}");
         assert!(!near.hits.iter().any(|h| h.key == hidden_key));
         let k = crate::knowledge::open(&home).unwrap();
@@ -5855,7 +5999,7 @@ mod tests {
         let asked = stub.requests();
         let near = prompt_near(
             s.home.path(),
-            R,
+            (R, &[]),
             "Parser errors go to stderr.",
             &Default::default(),
         )
@@ -5863,6 +6007,37 @@ mod tests {
         assert_eq!(near.vector, Vector::Skipped(VectorSkip::Excluded));
         assert!(near.hits.is_empty());
         assert_eq!(stub.requests(), asked);
+    }
+
+    /// Decision 52 (CodeRabbit on #567): a checkout named by an excluded claude-mem project,
+    /// though its repository's last part names another, has its prompt embedded by no provider
+    /// either, the name's case and a worktree's aside; another name's prompt is sent.
+    #[test]
+    fn prompt_near_sends_no_prompt_of_a_checkout_an_excluded_project_names() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        s.exclude(&crate::import::repo("payroll"));
+        s.run();
+        let near = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            let text = "Parser errors go to stderr.";
+            prompt_near(s.home.path(), (R, &names), text, &Default::default()).unwrap()
+        };
+        let asked = stub.requests();
+        for names in [&["Payroll"][..], &["payroll/fix"], &["billing", "PAYROLL"]] {
+            let near = near(names);
+            assert_eq!(
+                near.vector,
+                Vector::Skipped(VectorSkip::Excluded),
+                "{names:?}"
+            );
+            assert!(near.hits.is_empty());
+        }
+        assert_eq!(stub.requests(), asked);
+        assert_eq!(near(&["billing"]).vector, Vector::Used);
     }
 
     /// Task 6 (row 46-3, spec 8.2 M1): the question's own session leaves each leg in SQL before

@@ -676,6 +676,9 @@ fn file_notes(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     let top = crate::repo::top(cwd);
+    // Decision 52: the checkout's claude-mem names, which imported history maps by too, read once
+    // a file needs them.
+    let mut projects = None;
     let mut notes = Vec::new();
     for file in files {
         // F2: a file of at least 1,500 bytes; an absolute path stays as it is.
@@ -699,7 +702,9 @@ fn file_notes(
             }
         }
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let cards = crate::cards::on_file(&k, &store, &repo, &names, 40, &settings.rules)?;
+        let projects = projects.get_or_insert_with(|| crate::import::names_of(cwd));
+        let cards =
+            crate::cards::on_file(&k, &store, (&repo, projects), &names, 40, &settings.rules)?;
         let now = db::now_ms();
         let Some(note) =
             crate::cards::file_note(&cards, mtime, store.device(), now, &chrono::Local)
@@ -1966,8 +1971,12 @@ fn prompt_picks(
     let branch = branch.unwrap_or_default();
     let text = strip_blocks(prompt, true);
     let long = text.chars().count() >= ASKS_FROM;
-    let asked =
-        (long && sendable).then(|| ask_resident(a.home, &repo, &text, was_shown, a.deadline));
+    let asked = (long && sendable).then(|| {
+        // Decision 52: the checkout's claude-mem names, which imported history maps by too.
+        let cwd = a.labels.get("cwd").and_then(Value::as_str).unwrap_or(".");
+        let names = crate::import::names_of(Path::new(cwd));
+        ask_resident(a.home, (&repo, &names), &text, was_shown, a.deadline)
+    });
     let failure = failed_call(a.home, a.raw, a.agent, a.label, rules);
     let texts: Vec<&str> = [Some(text.as_str()), failure.as_deref()]
         .into_iter()
@@ -2172,7 +2181,7 @@ enum WasShown<'a> {
 /// viewer listens (`view::resident_answering`).
 fn ask_resident(
     home: &Path,
-    repo: &str,
+    (repo, names): (&str, &[String]),
     text: &str,
     shown: &WasShown,
     deadline: std::time::Instant,
@@ -2181,7 +2190,12 @@ fn ask_resident(
     // The viewer gates the prompt and then cuts it to what it embeds: twice that leaves the gate
     // the words around the cut.
     let prompt: String = text.chars().take(2 * crate::embed::PROMPT_CHARS).collect();
-    let mut asked = json!({"repo": repo, "prompt": prompt});
+    // A name past the viewer's limit stays out, so the rest of the answer comes.
+    let names: Vec<&String> = names
+        .iter()
+        .filter(|n| n.len() <= crate::import::NAME_BYTES)
+        .collect();
+    let mut asked = json!({"repo": repo, "prompt": prompt, "projects": names});
     match shown {
         WasShown::Keys(keys) if keys.is_empty() => {}
         WasShown::Keys(keys) => asked["shown"] = json!(keys),
@@ -4205,11 +4219,18 @@ mod tests {
         let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
         let k = crate::knowledge::open(r.s.home.path()).unwrap();
         let on = |limit| {
-            crate::cards::on_file(&k, &r.s.raw, &repo, &["src/a.rs"], limit, &settings.rules)
-                .unwrap()
-                .iter()
-                .map(|f| f.id(r.s.raw.device()))
-                .collect::<Vec<_>>()
+            crate::cards::on_file(
+                &k,
+                &r.s.raw,
+                (&repo, &[]),
+                &["src/a.rs"],
+                limit,
+                &settings.rules,
+            )
+            .unwrap()
+            .iter()
+            .map(|f| f.id(r.s.raw.device()))
+            .collect::<Vec<_>>()
         };
         assert_eq!(on(40), [newer.clone(), card[0].clone(), older]);
         assert_eq!(on(2), [newer, card[0].clone()]);
@@ -4235,7 +4256,7 @@ mod tests {
         let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
         let found = |r: &Reads, file: &str| {
             let k = crate::knowledge::open(r.s.home.path()).unwrap();
-            crate::cards::imported_by_file(&k, &r.s.raw, &repo, &[file], 40, &settings.rules)
+            crate::cards::imported_by_file(&k, &r.s.raw, (&repo, &[]), &[file], 40, &settings.rules)
                 .unwrap()
                 .into_iter()
                 .map(|f| (f.id(r.s.raw.device()), f.modified, f.named))
@@ -4325,6 +4346,57 @@ mod tests {
             let note = r.read("s9", "src/a.rs");
             assert!(note.contains("The parser was fixed"), "{table}: {note}");
         }
+    }
+
+    /// Decision 52 (docs/file-note.md test 25): imported history of a session oboete never recorded
+    /// joins the note when it is filed under the checkout's claude-mem name, in other letters'
+    /// case; another name's does not. In a linked worktree, its main project's and its own join, and
+    /// another worktree's does not.
+    #[test]
+    fn imported_history_filed_under_the_checkouts_name_joins_the_note() {
+        let mut r = Reads::new();
+        let repo = r.repo.clone();
+        let names = crate::import::names_of(Path::new(&r.c));
+        let day = |d: i64, h: i64| d * 86_400_000 + h * 3_600_000;
+        let s = &mut r.s;
+        let file = |s: &mut crate::search::b::fixture::Store, id, project: &str, h| {
+            s.imported_with_files(
+                id,
+                (project, &format!("never-{id}")),
+                "bugfix",
+                day(2, h),
+                &format!("Fixed in {id}"),
+                &["src/a.rs"],
+                &[],
+            )
+        };
+        let by_name = file(s, "o1", &names[0].to_uppercase(), 9);
+        let other = file(s, "o2", "someone-else", 10);
+        let main = file(s, "o3", "main", 11);
+        let own = file(s, "o4", "main/wt", 12);
+        let elsewhere = file(s, "o5", "main/spike", 13);
+        s.run();
+        let note = r.read("s9", "src/a.rs");
+        assert!(note.contains(&format!("{by_name} ")), "{note}");
+        for id in [&other, &main, &own, &elsewhere] {
+            assert!(!note.contains(id.as_str()), "{id}: {note}");
+        }
+        let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
+        let k = crate::knowledge::open(r.s.home.path()).unwrap();
+        let worktree = ["main".to_owned(), "main/wt".to_owned()];
+        let found: Vec<String> = crate::cards::imported_by_file(
+            &k,
+            &r.s.raw,
+            (&repo, &worktree),
+            &["src/a.rs"],
+            40,
+            &settings.rules,
+        )
+        .unwrap()
+        .iter()
+        .map(|f| f.id(r.s.raw.device()))
+        .collect();
+        assert_eq!(found, [own, main]);
     }
 
     /// X5 F1, F2 (G25): Codex's reads get the note, as claude-mem's adapter takes their files: a
@@ -5075,14 +5147,18 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains(&"f".repeat(12)), "{text}");
-        let session = json!({"repo": p.repo, "prompt": prompt, "agent": "claude", "session": "s1"});
+        // Decision 52: with the checkout's claude-mem names.
+        let projects = crate::import::names_of(Path::new(&p.c));
+        let session = json!({"repo": p.repo, "prompt": prompt, "projects": projects,
+                             "agent": "claude", "session": "s1"});
         assert_eq!(r.asked(), [session]);
         assert_eq!(last_side(p.s.home.path()).unwrap().1, "meaning");
         // The next prompt names the session, whose stored set the viewer reads and leaves out
         // (Codex on #521): it holds the card shown with its body, and no key goes with the request.
         let next = "and where does it go when the stream is closed";
         p.prompt("s1", next);
-        let next = json!({"repo": p.repo, "prompt": next, "agent": "claude", "session": "s1"});
+        let next = json!({"repo": p.repo, "prompt": next, "projects": projects,
+                          "agent": "claude", "session": "s1"});
         assert_eq!(r.asked()[1], next);
         assert_eq!(
             shown_set(p.s.home.path(), "claude", "s1")[&card]["body"],
@@ -5114,11 +5190,14 @@ mod tests {
             .unwrap();
         p.s.run();
         let near = json!([{"key": uid, "kind": "imported", "cosine": 0.9}]);
-        let _r = Resident::start(p.s.home.path(), 2_000, near, Duration::ZERO);
+        let r = Resident::start(p.s.home.path(), 2_000, near, Duration::ZERO);
         let line = "- 1970-01-02 imported decision (status unknown) claude-mem:test:o1: \
                     Gateway retries: Payments retry on a gateway timeout.";
         let text = p.prompt("s1", "what happens when the payment gateway is slow");
         assert!(text.contains(line), "{text}");
+        // Decision 52: the viewer is told the checkout's claude-mem names.
+        let names = crate::import::names_of(Path::new(&p.c));
+        assert_eq!(r.asked()[0]["projects"], json!(names));
         assert!(shown_kinds(&p, "s1").contains(&(uid.to_owned(), "imported".to_owned())));
         let next = p.prompt("s1", "and what if the gateway never answers at all");
         assert!(!next.contains(uid), "{next}");
@@ -5133,6 +5212,28 @@ mod tests {
                           "hookEventName": "PreToolUse", "toolName": "Read"});
         let tool = injected("grok", &hook(&home, "grok", "PreToolUse", &tool));
         assert!(tool.contains(line), "{tool}");
+    }
+
+    /// Decision 52: a claude-mem name past `import::NAME_BYTES`, which the viewer would refuse with
+    /// the whole request, stays out of the ask, and the others go.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_past_the_viewers_limit_is_not_sent() {
+        let p = Prompts::new(true);
+        let r = Resident::start(p.s.home.path(), 2_000, json!([]), Duration::ZERO);
+        let names = [
+            "payments".to_owned(),
+            "n".repeat(crate::import::NAME_BYTES + 1),
+        ];
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let shown = WasShown::Keys(Vec::new());
+        let text = "where should the parser's errors end up";
+        let answer = ask_resident(p.s.home.path(), (&p.repo, &names), text, &shown, deadline);
+        answer
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(r.asked()[0]["projects"], json!(["payments"]));
     }
 
     /// G23 (Codex on #521): a prompt that shows the manifest (Cursor's, after a compaction) sends

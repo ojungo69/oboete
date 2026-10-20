@@ -178,12 +178,13 @@ both give rows; the lookup reads the newest op's alone.
 
 F13. **Which imported observations.** One joins a file's note when its newest row maps to the
 checkout's repository by its session, as imported history maps for the per-prompt block (#506,
-docs/prompt-context.md, "As built": `session_start`), and its files rows name the file by one of
-F3's three paths. Not a forgotten one, and never a summary or a prompt (they have no files op).
-An observation of a session oboete never recorded maps nowhere and stays search-only, as for the
-per-prompt block, where claude-mem maps by the project's name: on this PC 66% of the imported
-observations that name a file map (all of this repository's 47,004, half of the other projects').
-Whether the rest should map by name, as claude-mem's does, is the owner's to decide (parity row 8).
+docs/prompt-context.md, "As built": `session_start`), or, since decision 52 (2026-10-20), its
+newest row's project is one of the names claude-mem gives the checkout (docs/prompt-context.md,
+"Decision 52"), and its files rows name the file by one of F3's three paths. Not a forgotten one, and never a summary or a prompt (they have no files op).
+An observation of a session oboete never recorded, filed under none of the checkout's names, maps
+nowhere and stays search-only. By session alone, on this PC 65% of the 143,931 imported
+observations that name a file mapped (all of this repository's, half of the other projects'), and
+the other 50,630 were the reason for decision 52.
 Until the consumers have made `imported_files`, `imported` and `session_start` (a store from
 before), the note has no imported rows and is the cards' alone; while a first pass or a rebuild
 is still going, it has the rows indexed so far, as `card_files` has the cards'.
@@ -218,6 +219,15 @@ per-prompt block at 74 to 147 ms, claude-mem-parity.md X2) and under claude-mem'
 measurement after `--files` puts a read of a hot file past them, the index keeps each row's time
 and whether its op is its uid's newest, and the lookup walks the rows newest first, stopping at
 the 40th.
+After (2026-10-20, this PC's store once `--files` had brought 143,931 files ops, 320,936 rows of
+`imported_files`), the whole spawned read hook, 20 reads of each file in this repository's
+checkout: for the ten files the most imported observations name (1,287 to 3,804 each) 20 to 32 ms
+at the median and 21 to 35 ms at p95 (one read 96 ms), against 8 to 15 ms and 9 to 16 ms before
+`--files`; a file none names, 8.4 ms. Within the other read hooks' times, so the lookup stays as
+it is. Claude Code's own record of the hooks since the switch has claude-mem's read hook at a
+median of 3,229 ms (41 reads). For those hot files the 40 newest are cards of the last days, so
+the imported rows join the notes of files fewer cards name (a planning document: 10 imported
+rows; a file no card names: a note of its imported rows alone).
 
 ## Slices (test first, one at a time)
 
@@ -294,3 +304,7 @@ the 40th.
     the cards' note as before.
 24. A forget registered after an import's check of forgotten uids: the batch it falls in is
     refused, nothing of the uid is stored, and a second run appends the rest.
+25. Decision 52: an imported observation of a session oboete never recorded, filed under the
+    checkout's claude-mem name in other letters' case, joins the note; one filed under another
+    name does not; in a linked worktree, one filed under the main repository's name and one under
+    `<main>/<worktree>` join, and one under another worktree's does not.

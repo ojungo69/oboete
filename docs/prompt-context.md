@@ -162,7 +162,7 @@ a document it cannot map stays search-only.
   transcripts or of v1. A session oboete never recorded maps nowhere, and its documents stay
   search-only. No project name is read, so `a/payments` and `b/payments` each get the history of
   the sessions that started in them, and a project's sessions that started elsewhere go where they
-  started. v1's documents, which the migration files under a repository, map through their
+  started (decision 52 adds the checkout's claude-mem names to this rule, below). v1's documents, which the migration files under a repository, map through their
   sessions too. An agent's note (spec 4.12), which has no session of an agent's, maps to the
   repository it was saved in. Measured on this PC's store on 2026-10-15: of its 248,608 imported
   documents that are not prompts, 153,544 (62%) have a session oboete recorded (9,067 of v1's
@@ -223,6 +223,81 @@ a document it cannot map stays search-only.
   This repository is searched by its projects; one of fewer sessions by its session list, which
   costs about 1.2 ms a session. The wait's default of 1,000 ms stays: four times the 95th
   percentile at full size, and the imported history grows only by a later import.
+
+## Decision 52: imported history by the project's name too (2026-10-20)
+
+Spec decision 52 widens #506's rule: an imported claude-mem document also maps to a checkout when
+its project is one of the names claude-mem gives that checkout, as claude-mem's own reads match
+rows. The session rule stays, and so do v1's documents and agents' notes.
+
+- **What claude-mem does (14.0.1).** Its file context and its context reads ask for
+  `getProjectContext(cwd).allProjects` and take a row whose `project`, or whose
+  `merged_into_project`, is one of those names, compared without case
+  (`src/services/sqlite/project-read-keys.ts` `projectScopeSql`). Its default naming
+  (`CLAUDE_MEM_PROJECT_NAME_SOURCE` unset or `path`, `src/utils/project-name.ts`
+  `getPathProjectContext` and `src/utils/worktree.ts` `detectWorktree`) gives:
+  - inside git, the name of the working tree's top level;
+  - for a linked worktree (its `.git` a file whose `gitdir` ends in `.git/worktrees/<name>`), its
+    main repository's folder name and `<main>/<worktree>`, or the main name alone when the two are
+    the same, with `<main>/<main>` kept as a second name;
+  - for a submodule (`gitdir` under `.git/modules/`), its superproject's folder name and
+    `<super>/<its path under the superproject>`, with the submodule's own folder name as a third
+    name when that differs from the superproject's;
+  - outside git, the nearest ancestor holding `.claude-mem-project` or `.claude-mem.json`, the walk
+    stopping before the home directory, the temporary directory or Claude's config directory (and
+    never starting inside the last), with the directory's own name as a second name when it is
+    below that root;
+  - otherwise the directory's own name, and `unknown-project` at the filesystem's root.
+- **What oboete copies.** `import::names_of(cwd)` gives those names for a hook's `cwd`, from
+  files alone (`repo::top`, the `.git` file's `gitdir`, read as claude-mem reads it: one line,
+  resolved against the checkout without following links). The project oboete keeps for an
+  imported document (its `repo`, `claude-mem:<project>`) is already the one claude-mem merged it
+  into (docs/claude-mem-import.md I3), so its comparison covers claude-mem's `merged_into_project`
+  column, and its `project` column for the rows claude-mem did not merge: a checkout named after
+  the project a merge took rows from does not get them, while a worktree gets the rows merged into
+  its main project, whose name its names hold. A document maps to the checkout when its newest row's session started in the checkout's
+  repository (#506), or its newest row's `repo` is `claude-mem:<name>` for one of the checkout's
+  names, without case (SQLite's `NOCASE`, as claude-mem's).
+- **Where.** The note on a file (docs/file-note.md F13) and this block. Search and the timeline
+  are unchanged (they find a repository's imported documents by name already, I5), and session
+  start shows no imported history (milestone 4 D6).
+- **This block.** The hook sends the checkout's names with the prompt (`projects` in
+  `POST /api/prompt-context`, at most 16, each 1 to 4,096 bytes, `import::NAME_BYTES`, a path's
+  length, as a submodule's or a worktree's name joins its parent's; the hook leaves out a longer
+  one, which the viewer would refuse with the whole request; a viewer from before this version
+  refuses the field, and the hook has the words side alone until the viewer has moved to the new
+  binary, R9). The names are read only when the viewer is asked. The viewer keeps the imported partition's KNN to the sessions that map to the
+  repository and, now, the sessions of the documents filed under one of its names, while they are
+  at most `SESSION_FILTER` (128); past it, to the projects, now with the names' (as the vectors
+  file them, `embed_phase::vec_repo`: a worktree's documents under its main project). Either way
+  `consumer::imported::maps` keeps each hit to the mapping. Past `SESSION_FILTER` the scan by a
+  main project holds its other worktrees' documents too, which `maps` refuses for a checkout whose
+  names leave them out; they can take some of the KNN's 400 candidates, as #506's scan lets a
+  project's other sessions take some. The names' sessions and projects are
+  read from a new index, `imported(repo COLLATE NOCASE, session, kind)`, which the imported
+  consumer makes; a name's sessions are those of each document's newest row, as `maps` reads it,
+  so a document moved since to another project brings its session no more.
+- **Exclusions** (spec 5.5, row 30-2). An exclusion of a claude-mem project one of the names
+  names, without case, keeps the prompt from a remote embedder, at the viewer's first check and
+  at its check just before the call, as an exclusion of the project the repository's last part
+  names (D13) always did; the local model's vector leaves no machine and is kept, as before.
+- **Two checkouts with one name** (`a/payments`, `b/payments`) both get the history filed under
+  `payments`, as in claude-mem: the cost decision 52 accepts.
+- **Differences from claude-mem.** The names come from the hook's `cwd`, where claude-mem's
+  Claude Code hooks take `CLAUDE_PROJECT_DIR` first when it is set: oboete's repository, cards and
+  session rule all come from `cwd`, so its names do too. They come from the `.git` files, not from
+  git's own discovery: in a subfolder of a checkout git refuses (a worktree made by Windows git and
+  read from WSL, one whose main repository moved, another user's checkout), claude-mem names the
+  subfolder by itself, oboete by the checkout; at the checkout's top both name it the same. claude-mem's optional naming
+  (`CLAUDE_MEM_PROJECT_NAME_SOURCE=git-remote`, `CLAUDE_MEM_PROJECT_ENVIRONMENTS`) is not read; a
+  history recorded under it maps by its sessions alone. A row claude-mem filed under one project
+  and merged into another is matched by the project it was merged into, where claude-mem matches
+  it by either; and the mapping follows claude-mem's merges as of the last plain import, which
+  files a moved document again (docs/claude-mem-import.md I3): on this PC 358 of the 9,555 imported
+  observations filed under a worktree's name (3.7%) were merged into another project by claude-mem
+  after their import, and reach the main checkout only through their sessions until a plain
+  import, which also brings what claude-mem recorded after the switch (claude-mem-parity.md, the
+  first open check).
 
 ## Where it does not reach yet
 
@@ -291,7 +366,8 @@ resident viewer keeps its token (`keyfile::private_fs`, #281):
 
 The second slice:
 
-- Imported history reaches a prompt only through its session (#506's acceptance test): history
+- With no names given, imported history reaches a prompt only through its session (#506's
+  acceptance test, which decision 52 widens with the names): history
   imported from a project named `payments` reaches neither `a/payments` nor `b/payments` while
   oboete recorded none of its sessions; once one session started in each, each checkout gets that
   session's documents only, and a session never recorded goes to neither, a v1 document filed under
@@ -315,3 +391,31 @@ The second slice:
   (`hook::tests::imported_history_the_viewer_finds_joins_the_block`).
 - Mutation check: 16 mutants of the mapping, the table's upkeep, the reader, the KNN's filter,
   the scan's skip and the hook's kind, each failed by one of these tests.
+
+Decision 52:
+
+- The names: a checkout and a folder in it (the top level's name), a linked worktree (the main
+  repository's name, then `<main>/<worktree>`; one named as its main repository, `<main>/<main>`
+  then the main name), a submodule by a relative `gitdir` (the superproject's name, its own, then
+  `<super>/<path>`), a `.git` file of more than its line or naming neither (a checkout of its
+  own), a folder below a marker root (its own name, then the root's) and the root itself, no
+  marker (the folder's name), a path with `..` folded first (a link before it folded away with it,
+  not followed), a walk that stops before a stop and
+  never starts in the config directory, and the filesystem's root (`unknown-project`)
+  (`import::tests::a_checkouts_names_are_claude_mems_by_path`).
+- This block: with a worktree's two names, the first in other letters' case, a document of a
+  session never recorded filed under the main project or the worktree's reaches the prompt; one
+  of another worktree, of another name or a v1 document of a session never recorded does not;
+  without names nothing does; a document filed under a name and moved since brings its session
+  no more; past `SESSION_FILTER` sessions the projects' scan finds a near document among them;
+  the names' sessions are read through `imported_project`
+  (`search::b::tests::imported_history_reaches_a_prompt_by_the_checkouts_names_too`).
+- A checkout one of whose names, in any case or as a worktree's, an excluded claude-mem project
+  names has its prompt embedded by no remote provider, and another name's is
+  (`search::b::tests::prompt_near_sends_no_prompt_of_a_checkout_an_excluded_project_names`).
+- The viewer takes `projects`, at most 16 names of 1 to 4,096 bytes, and refuses more, an empty
+  one, a longer one or a string (`view::tests::the_prompt_context_route_takes_the_token_but_no_origin`);
+  the hook sends the checkout's names (`hook::tests::imported_history_the_viewer_finds_joins_the_block`)
+  and leaves out one past the limit (`a_name_past_the_viewers_limit_is_not_sent`).
+- The note on a file: docs/file-note.md test 25
+  (`hook::tests::imported_history_filed_under_the_checkouts_name_joins_the_note`).

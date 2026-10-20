@@ -618,17 +618,25 @@ impl Filed {
 }
 
 /// X5 F3, F13, F14: what the note on a file considers, the newest `limit` of `repo`'s cards and
-/// imported observations that name it by one of `paths`, newest first.
+/// imported observations that name it by one of `paths`, newest first; `names` are the checkout's
+/// claude-mem names (decision 52).
 pub fn on_file(
     k: &Connection,
     raw: &Raw,
-    repo: &str,
+    (repo, names): (&str, &[String]),
     paths: &[&str],
     limit: usize,
     rules: &Rules,
 ) -> Result<Vec<Filed>> {
     let mut rows = by_file(k, raw, repo, paths, limit, rules)?;
-    rows.extend(imported_by_file(k, raw, repo, paths, limit, rules)?);
+    rows.extend(imported_by_file(
+        k,
+        raw,
+        (repo, names),
+        paths,
+        limit,
+        rules,
+    )?);
     // Stable: a card before an observation of the same time, each in its reader's order.
     rows.sort_by_key(|f| std::cmp::Reverse(f.card.ts));
     rows.truncate(limit);
@@ -638,12 +646,12 @@ pub fn on_file(
 /// docs/file-note.md F13: the imported observations that name a file by one of `paths`, newest
 /// first, at most `limit`: by their newest files op (F12; only observations have one), their
 /// newest row mapping to `repo` by its session as for the per-prompt block (#506,
-/// `consumer::imported::maps`), not forgotten. None until the consumers have made the tables it
-/// reads.
+/// `consumer::imported::maps`) or filed under one of the checkout's claude-mem `names` (decision
+/// 52), not forgotten. None until the consumers have made the tables it reads.
 pub fn imported_by_file(
     k: &Connection,
     raw: &Raw,
-    repo: &str,
+    (repo, names): (&str, &[String]),
     paths: &[&str],
     limit: usize,
     rules: &Rules,
@@ -669,11 +677,16 @@ pub fn imported_by_file(
            AND (f.op_device, f.op_seq) = (SELECT g.op_device, g.op_seq FROM imported_files g
              WHERE g.uid = f.uid ORDER BY g.rowid DESC LIMIT 1)
            AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = f.uid)
-           AND EXISTS (SELECT 1 FROM session_start s WHERE s.session = i.session AND s.repo = ?1)
+           AND (EXISTS (SELECT 1 FROM session_start s WHERE s.session = i.session AND s.repo = ?1)
+             OR i.repo COLLATE NOCASE IN (SELECT value FROM json_each(?{labels})))
          GROUP BY i.uid
-         ORDER BY i.ts DESC, i.op_device DESC, i.op_seq DESC"
+         ORDER BY i.ts DESC, i.op_device DESC, i.op_seq DESC",
+        labels = 3 + paths.len()
     ))?;
-    let values = [repo.to_owned(), name].into_iter().chain(paths);
+    let values = [repo.to_owned(), name]
+        .into_iter()
+        .chain(paths)
+        .chain([crate::import::name_labels(names)]);
     let mut rows = st.query(rusqlite::params_from_iter(values))?;
     let mut out = Vec::new();
     while out.len() < limit

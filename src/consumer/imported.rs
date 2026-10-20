@@ -30,6 +30,9 @@ pub fn schema(k: &Connection) -> Result<()> {
          -- #506: a repository's prompts read the sessions that started in it and the projects
          -- their documents are filed under, prompts left out, from the index alone.
          CREATE INDEX IF NOT EXISTS imported_session ON imported(session, repo, kind);
+         -- Decision 52: the sessions and projects of the documents filed under a checkout's
+         -- claude-mem names, read without case as claude-mem reads them.
+         CREATE INDEX IF NOT EXISTS imported_project ON imported(repo COLLATE NOCASE, session, kind);
          CREATE VIRTUAL TABLE IF NOT EXISTS imported_fts
            USING fts5(text, tokenize='trigram', content='', contentless_delete=1);",
     )?;
@@ -186,16 +189,24 @@ impl Consumer for ImportedFiles {
 /// #506 (docs/prompt-context.md, the second slice): whether imported document `uid` belongs to
 /// `repo`'s prompts, by its newest row: a document of a session that started in `repo`
 /// (`session_start`, oboete's first record of it), or an agent's note saved in `repo`, which has no
-/// session of an agent's. Never by a project's name, which two checkouts may share, nor by the
-/// repository a document is filed under (v1's documents are, and map through their sessions).
-pub(crate) fn maps(k: &Connection, uid: &str, repo: &str) -> Result<bool> {
+/// session of an agent's; and since decision 52, one filed under one of the checkout's claude-mem
+/// names (`import::names_of`), without case. Never by the repository a document is filed under
+/// otherwise (v1's documents are, and map through their sessions).
+pub(crate) fn maps(k: &Connection, uid: &str, repo: &str, names: &[String]) -> Result<bool> {
     Ok(k.prepare_cached(
         "SELECT 1 FROM imported i
          WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = ?1)
-           AND (i.session = ?3 AND i.repo = ?2 OR EXISTS (
-             SELECT 1 FROM session_start s WHERE s.session = i.session AND s.repo = ?2))",
+           AND (i.session = ?3 AND i.repo = ?2
+             OR i.repo COLLATE NOCASE IN (SELECT value FROM json_each(?4))
+             OR EXISTS (
+               SELECT 1 FROM session_start s WHERE s.session = i.session AND s.repo = ?2))",
     )?
-    .exists(params![uid, repo, crate::raw::NOTE_SESSION])?)
+    .exists(params![
+        uid,
+        repo,
+        crate::raw::NOTE_SESSION,
+        crate::import::name_labels(names)
+    ])?)
 }
 
 /// #506 (spec 4.5, 4.12): imported document `uid` as a prompt's block names it, by its newest

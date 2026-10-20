@@ -731,6 +731,177 @@ pub(crate) fn repo(project: &str) -> String {
     format!("{SOURCE}:{project}")
 }
 
+/// What claude-mem names a directory nothing names (`projectNameFromSource`).
+const UNKNOWN_PROJECT: &str = "unknown-project";
+
+/// The longest claude-mem name a prompt sends the viewer (decision 52): a path's, which a
+/// submodule's or a worktree's name joins with its parent's.
+pub(crate) const NAME_BYTES: usize = 4_096;
+
+/// claude-mem's project-root markers outside git (`PROJECT_ROOT_MARKERS`).
+const PROJECT_MARKERS: [&str; 2] = [".claude-mem-project", ".claude-mem.json"];
+
+/// Spec decision 52 (docs/prompt-context.md, "Decision 52"): claude-mem's names for the checkout
+/// at `cwd`, as 14.0.1 reads them by path (`getPathProjectContext`'s `allProjects`,
+/// src/utils/project-name.ts), the one it writes under last: the git top level's folder name, a
+/// linked worktree's or a submodule's with its parent's, a marker root's, or the folder's own.
+pub(crate) fn names_of(cwd: &Path) -> Vec<String> {
+    // `path.resolve`: absolute, `.` and `..` folded, links kept (git's top is the real path's).
+    let cwd = &lexical(&std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
+    let real = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let top = crate::repo::top(&real);
+    let marker = top.is_none().then(|| marker_root(cwd)).flatten();
+    let name = folder_name(top.as_deref().or(marker.as_deref()).unwrap_or(cwd), cwd);
+    let root = top.as_deref().unwrap_or(cwd);
+    if let Some((parent, submodule)) = git_parent(root)
+        && let Some(parent_name) = parent.file_name().map(|n| n.to_string_lossy().into_owned())
+    {
+        let (primary, alias) = if submodule {
+            // Its path under the superproject (`submoduleLeaf`), else its own name.
+            let leaf = root
+                .strip_prefix(&parent)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| name.clone());
+            // Its own name too, which the loop below drops when it is the superproject's.
+            (format!("{parent_name}/{leaf}"), Some(name.clone()))
+        } else if name == parent_name {
+            // `buildWorktreeProjectKey`: a worktree named as its repository writes to it, and
+            // the doubled key it wrote to before stays readable.
+            (parent_name.clone(), Some(format!("{parent_name}/{name}")))
+        } else {
+            (format!("{parent_name}/{name}"), None)
+        };
+        let mut names = Vec::new();
+        for n in [Some(parent_name), alias].into_iter().flatten() {
+            if n != primary && !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        names.push(primary);
+        return names;
+    }
+    // A marker re-keys the directories below its root; the folder's own name stays readable (at
+    // the root it is the root's).
+    let own = folder_name(cwd, cwd);
+    if marker.is_some() && own != name && own != UNKNOWN_PROJECT {
+        return vec![own, name];
+    }
+    vec![name]
+}
+
+/// `path.basename` of what names the project, as `projectNameFromSource` takes it: a drive's
+/// root is `drive-<letter>` on Windows (by `cwd`), and any other root `unknown-project`.
+fn folder_name(source: &Path, cwd: &Path) -> String {
+    match source.file_name() {
+        Some(n) => n.to_string_lossy().into_owned(),
+        None => {
+            let cwd = cwd.to_string_lossy();
+            let drive = cwd.as_bytes();
+            match cfg!(windows) && drive.len() >= 3 && drive[1] == b':' && drive[2] == b'\\' {
+                true if drive[0].is_ascii_alphabetic() => {
+                    format!("drive-{}", (drive[0] as char).to_ascii_uppercase())
+                }
+                _ => UNKNOWN_PROJECT.to_owned(),
+            }
+        }
+    }
+}
+
+/// claude-mem's `detectWorktree` (src/utils/worktree.ts): a `.git` file of one `gitdir:` line, the
+/// path resolved against `root` without following links, naming `<parent>/.git/worktrees/<name>`
+/// (a linked worktree) or `<parent>/.git/modules/...` (a submodule, `true`): the parent.
+fn git_parent(root: &Path) -> Option<(std::path::PathBuf, bool)> {
+    let git = root.join(".git");
+    if !std::fs::metadata(&git).ok()?.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&git).ok()?;
+    let gitdir = text.trim().strip_prefix("gitdir:")?.trim_start();
+    if gitdir.is_empty() || gitdir.contains(['\n', '\r']) {
+        return None;
+    }
+    let path = lexical(&root.join(gitdir));
+    let parts: Vec<_> = path.components().collect();
+    let n = parts.len();
+    let is = |i: usize, s: &str| parts[i].as_os_str() == s;
+    // `^(.+)/.git/worktrees/<name>$`, then `^(.+)/.git/modules/(.+)$` (its last such `.git`).
+    let (at, submodule) = if n >= 4 && is(n - 3, ".git") && is(n - 2, "worktrees") {
+        (n - 3, false)
+    } else {
+        (
+            (1..n.saturating_sub(2))
+                .rev()
+                .find(|&i| is(i, ".git") && is(i + 1, "modules"))?,
+            true,
+        )
+    };
+    (at >= 2).then(|| (parts[..at].iter().collect(), submodule))
+}
+
+/// claude-mem's `findMarkerProjectRoot`: the nearest ancestor of `cwd` holding a marker, the walk
+/// stopping before the home directory, the temporary directory, Claude's config directory and the
+/// root, and never starting inside the config directory.
+fn marker_root(cwd: &Path) -> Option<std::path::PathBuf> {
+    let both = |d: std::path::PathBuf| {
+        let d = lexical(&d);
+        let real = d.canonicalize().unwrap_or_else(|_| d.clone());
+        [d, real]
+    };
+    let config = both(crate::setup::claude_dir());
+    let stops: Vec<_> = [crate::config::home_dir(), std::env::temp_dir()]
+        .into_iter()
+        .flat_map(both)
+        .chain(config.clone())
+        .collect();
+    marker_walk(cwd, &config, &stops)
+}
+
+/// `marker_root` with its stops given: none inside `config`, none at or above a stop.
+fn marker_walk(
+    cwd: &Path,
+    config: &[std::path::PathBuf],
+    stops: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    let mut current = lexical(cwd);
+    if config.iter().any(|c| current.starts_with(c)) {
+        return None;
+    }
+    for _ in 0..64 {
+        if stops.contains(&current) {
+            return None;
+        }
+        let parent = current.parent()?.to_path_buf();
+        if PROJECT_MARKERS.iter().any(|m| current.join(m).exists()) {
+            return Some(current);
+        }
+        current = parent;
+    }
+    None
+}
+
+/// `path.resolve` of an absolute path: `.` and `..` folded without the filesystem.
+fn lexical(path: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Decision 52: the repositories, as imported documents are filed (`repo`), of claude-mem's names
+/// `names`: a JSON array for `json_each`, compared with `COLLATE NOCASE` as claude-mem compares.
+pub(crate) fn name_labels(names: &[String]) -> String {
+    serde_json::Value::from(names.iter().map(|n| repo(n)).collect::<Vec<_>>()).to_string()
+}
+
 /// The repositories whose imported documents and work state are `repo`'s: claude-mem names a
 /// project, not a repository, and files it as `claude-mem:<project>` (`repo`), so a repository's
 /// are those of the project its key ends in, and a claude-mem name's those of its own project (a
@@ -1985,5 +2156,94 @@ mod tests {
         );
         drop(held);
         lock(home.path()).unwrap();
+    }
+
+    /// Decision 52 (docs/prompt-context.md, "Decision 52"): claude-mem 14.0.1's names by path.
+    #[test]
+    fn a_checkouts_names_are_claude_mems_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let mk = |p: &Path| std::fs::create_dir_all(p).unwrap();
+        // A checkout and a folder in it: the top level's name.
+        let main = d.join("payments");
+        mk(&main.join(".git/worktrees/payments-fix"));
+        mk(&main.join("src/deep"));
+        assert_eq!(names_of(&main), ["payments"]);
+        assert_eq!(names_of(&main.join("src/deep")), ["payments"]);
+        // A linked worktree: the main repository's name, then `<main>/<worktree>`.
+        let wt = d.join("payments-fix");
+        mk(&wt.join("src"));
+        let gitdir = |to: &Path| format!("gitdir: {}\n", to.display());
+        std::fs::write(
+            wt.join(".git"),
+            gitdir(&main.join(".git/worktrees/payments-fix")),
+        )
+        .unwrap();
+        assert_eq!(
+            names_of(&wt.join("src")),
+            ["payments", "payments/payments-fix"]
+        );
+        // One named as its main repository writes to it, the doubled key kept readable.
+        let same = d.join("elsewhere/payments");
+        mk(&same);
+        std::fs::write(
+            same.join(".git"),
+            gitdir(&main.join(".git/worktrees/payments")),
+        )
+        .unwrap();
+        assert_eq!(names_of(&same), ["payments/payments", "payments"]);
+        // A submodule by a relative gitdir: the superproject's name, its own, `<super>/<path>`.
+        let sub = main.join("vendor/lib");
+        mk(&sub);
+        std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/vendor/lib\n").unwrap();
+        assert_eq!(names_of(&sub), ["payments", "lib", "payments/vendor/lib"]);
+        // A `.git` file of more than its line, or naming neither, is a checkout of its own.
+        std::fs::write(
+            sub.join(".git"),
+            "gitdir: ../../.git/modules/vendor/lib\nmore\n",
+        )
+        .unwrap();
+        assert_eq!(names_of(&sub), ["lib"]);
+        std::fs::write(wt.join(".git"), gitdir(&d.join("other/.git"))).unwrap();
+        assert_eq!(names_of(&wt), ["payments-fix"]);
+        // A bare repository's worktree (`<repo>.git/worktrees/<name>`) is not one to claude-mem.
+        std::fs::write(
+            wt.join(".git"),
+            gitdir(&d.join("bare.git/worktrees/payments-fix")),
+        )
+        .unwrap();
+        assert_eq!(names_of(&wt), ["payments-fix"]);
+        // Outside git: the nearest marker root's name, the folder's own below it; no marker, the
+        // folder's. A path is folded first, as `path.resolve` folds it.
+        let site = d.join("site");
+        mk(&site.join("pages/blog"));
+        std::fs::write(site.join(".claude-mem.json"), "{}").unwrap();
+        assert_eq!(names_of(&site), ["site"]);
+        assert_eq!(names_of(&site.join("pages/blog")), ["blog", "site"]);
+        assert_eq!(names_of(&site.join("pages/blog/..")), ["pages", "site"]);
+        let loose = d.join("notes/today");
+        mk(&loose);
+        assert_eq!(names_of(&loose), ["today"]);
+        // A link before `..` is folded away with it, as `path.resolve` folds it, not followed to
+        // its target's parent (CodeRabbit on #567).
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&loose, site.join("pages/today")).unwrap();
+            assert_eq!(names_of(&site.join("pages/today/..")), ["pages", "site"]);
+        }
+        // The walk stops before a stop (the home directory) and never starts in the config one.
+        let home = d.join("home");
+        mk(&home.join("work"));
+        std::fs::write(home.join(".claude-mem-project"), "").unwrap();
+        let config = [d.join("home/.claude")];
+        let stops = [home.clone(), config[0].clone()];
+        assert_eq!(marker_walk(&home.join("work"), &config, &stops), None);
+        assert_eq!(
+            marker_walk(&home.join("work"), &config, &[]),
+            Some(home.clone())
+        );
+        assert_eq!(marker_walk(&home.join(".claude/x"), &config, &[]), None);
+        #[cfg(unix)]
+        assert_eq!(names_of(Path::new("/")), [UNKNOWN_PROJECT]);
     }
 }

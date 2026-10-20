@@ -259,6 +259,7 @@ impl Oboete {
             limit: a.limit.unwrap_or(10).min(MAX_LIMIT),
             skip_session: None,
             no_starts: false,
+            names: Vec::new(),
         };
         let answer = search::query(&self.home, &q).map_err(internal)?;
         let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
