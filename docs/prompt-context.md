@@ -275,7 +275,12 @@ rows. The session rule stays, and so do v1's documents and agents' notes.
   names leave them out; they can take some of the KNN's 400 candidates, as #506's scan lets a
   project's other sessions take some. The names' sessions and projects are
   read from a new index, `imported(repo COLLATE NOCASE, session, kind)`, which the imported
-  consumer makes.
+  consumer makes; a name's sessions are those of each document's newest row, as `maps` reads it,
+  so a document moved since to another project brings its session no more.
+- **Exclusions** (spec 5.5, row 30-2). An exclusion of a claude-mem project one of the names
+  names, without case, keeps the prompt from a remote embedder, at the viewer's first check and
+  at its check just before the call, as an exclusion of the project the repository's last part
+  names (D13) always did; the local model's vector leaves no machine and is kept, as before.
 - **Two checkouts with one name** (`a/payments`, `b/payments`) both get the history filed under
   `payments`, as in claude-mem: the cost decision 52 accepts.
 - **Differences from claude-mem.** The names come from the hook's `cwd`, where claude-mem's
@@ -394,15 +399,20 @@ Decision 52:
   then the main name), a submodule by a relative `gitdir` (the superproject's name, its own, then
   `<super>/<path>`), a `.git` file of more than its line or naming neither (a checkout of its
   own), a folder below a marker root (its own name, then the root's) and the root itself, no
-  marker (the folder's name), a path with `..` folded first, a walk that stops before a stop and
+  marker (the folder's name), a path with `..` folded first (a link before it folded away with it,
+  not followed), a walk that stops before a stop and
   never starts in the config directory, and the filesystem's root (`unknown-project`)
   (`import::tests::a_checkouts_names_are_claude_mems_by_path`).
 - This block: with a worktree's two names, the first in other letters' case, a document of a
   session never recorded filed under the main project or the worktree's reaches the prompt; one
   of another worktree, of another name or a v1 document of a session never recorded does not;
-  without names nothing does; past `SESSION_FILTER` sessions the projects' scan finds a near
-  document among them; the names' sessions are read through `imported_project`
+  without names nothing does; a document filed under a name and moved since brings its session
+  no more; past `SESSION_FILTER` sessions the projects' scan finds a near document among them;
+  the names' sessions are read through `imported_project`
   (`search::b::tests::imported_history_reaches_a_prompt_by_the_checkouts_names_too`).
+- A checkout one of whose names, in any case or as a worktree's, an excluded claude-mem project
+  names has its prompt embedded by no remote provider, and another name's is
+  (`search::b::tests::prompt_near_sends_no_prompt_of_a_checkout_an_excluded_project_names`).
 - The viewer takes `projects`, at most 16 names of 1 to 4,096 bytes, and refuses more, an empty
   one, a longer one or a string (`view::tests::the_prompt_context_route_takes_the_token_but_no_origin`);
   the hook sends the checkout's names (`hook::tests::imported_history_the_viewer_finds_joins_the_block`)

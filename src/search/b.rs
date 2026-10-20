@@ -85,6 +85,10 @@ pub struct Query {
     /// `mem_search`'s (claude-mem has no kind for them): raw session starts take no place, each
     /// leg leaving them out before its depth (Codex on #527).
     pub no_starts: bool,
+    /// Decision 52: the calling checkout's claude-mem names (`import::names_of`). An exclusion of
+    /// a project one of them names keeps its query from a provider, as one of the project its
+    /// repository's last part names does, without case, as the names map (CodeRabbit on #567).
+    pub names: Vec<String>,
 }
 
 impl Query {
@@ -464,7 +468,11 @@ struct PromptVector {
     near: Near,
 }
 
-fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVector, VectorSkip>> {
+fn prompt_vector(
+    home: &Path,
+    (repo, names): (&str, &[String]),
+    text: &str,
+) -> Result<Result<PromptVector, VectorSkip>> {
     if !crate::raw::exists(home) {
         return Ok(Err(VectorSkip::NoVectors));
     }
@@ -482,6 +490,7 @@ fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVec
         text: text.to_owned(),
         repo: Some(repo.to_owned()),
         caller: Some(repo.to_owned()),
+        names: names.to_vec(),
         ..Default::default()
     };
     if !local(home) && excluded_now(home, &raw, &q).unwrap_or(true) {
@@ -500,7 +509,7 @@ fn prompt_vector(home: &Path, repo: &str, text: &str) -> Result<Result<PromptVec
 /// N5 (docs/memory-lookup.md): `text`'s query vector in `repo`, made as `prompt_near` makes a
 /// prompt's, for a memory lookup that searches with it in its hook; or why there is none.
 pub fn query_vector(home: &Path, repo: &str, text: &str) -> Result<Result<Vec<f32>, VectorSkip>> {
-    Ok(prompt_vector(home, repo, text)?.map(|v| v.near.vector))
+    Ok(prompt_vector(home, (repo, &[]), text)?.map(|v| v.near.vector))
 }
 
 pub fn prompt_near(
@@ -520,7 +529,7 @@ pub fn prompt_near(
         _read,
         k,
         near,
-    } = match prompt_vector(home, repo, text)? {
+    } = match prompt_vector(home, (repo, names), text)? {
         Ok(v) => v,
         Err(skip) => return nothing(skip),
     };
@@ -630,13 +639,16 @@ const SESSION_FILTER: usize = 128;
 /// the imported vectors is not paid for nothing, and before the consumers made the tables it
 /// reads.
 /// `imported_sessions`' query: `repo` (?1) and the names' repositories (?2, `import::name_labels`),
-/// the second side by the index `imported_project`.
+/// the second side by the index `imported_project`, each document by its newest row, as `maps`
+/// and the vectors read it: one moved since to another project brings its session no more
+/// (Codex on #567).
 const IMPORTED_SESSIONS: &str =
     "SELECT i.session FROM session_start s JOIN imported i ON i.session = s.session
      WHERE s.repo = ?1 AND i.kind <> 'prompt'
      UNION
-     SELECT session FROM imported
-     WHERE repo COLLATE NOCASE IN (SELECT value FROM json_each(?2)) AND kind <> 'prompt'";
+     SELECT i.session FROM imported i
+     WHERE i.repo COLLATE NOCASE IN (SELECT value FROM json_each(?2)) AND i.kind <> 'prompt'
+       AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)";
 
 fn imported_sessions(k: &Connection, repo: &str, names: &[String]) -> Result<Vec<String>> {
     use crate::consumer::manifest::exists;
@@ -1602,15 +1614,18 @@ pub fn excluded(list: &[String], q: &Query) -> bool {
     if q.all {
         return !list.is_empty();
     }
+    let scoped = |r: &str, list: &[String]| {
+        let ([own, named], worktrees) = imported_scope(r);
+        crate::embed_phase::import_excluded(&own, list)
+            || crate::embed_phase::import_excluded(&named, list)
+            || list.iter().any(|x| x.starts_with(&worktrees))
+    };
+    let folded: Vec<String> = list.iter().map(|x| x.to_lowercase()).collect();
     [q.caller.as_deref(), q.searched()]
         .into_iter()
         .flatten()
-        .any(|r| {
-            let ([own, named], worktrees) = imported_scope(r);
-            crate::embed_phase::import_excluded(&own, list)
-                || crate::embed_phase::import_excluded(&named, list)
-                || list.iter().any(|x| x.starts_with(&worktrees))
-        })
+        .any(|r| scoped(r, list))
+        || (q.names.iter()).any(|name| scoped(&crate::import::repo(&name.to_lowercase()), &folded))
 }
 
 /// The claims `q` finds: the delivered and current ones in units (`claims::units`, the pair rule)
@@ -5775,6 +5790,19 @@ mod tests {
         assert_eq!(near(&names), [uid("main"), uid("wt")]);
         assert_eq!(near(&[]), Vec::<String>::new());
         assert_eq!(near(&["billing-old".to_owned()]), Vec::<String>::new());
+        // A document filed under a name and moved since to another project brings its session no
+        // more, as its newest row is read (Codex on #567).
+        for project in ["payments", "billing"] {
+            let moved = near_doc("moved", project, "cm-moved");
+            s.raw.append_imports(vec![moved]).unwrap();
+            s.run();
+        }
+        {
+            let k = crate::knowledge::open(&home).unwrap();
+            let sessions = imported_sessions(&k, a, &names).unwrap();
+            assert!(sessions.contains(&"cm-1".to_owned()), "{sessions:?}");
+            assert!(!sessions.contains(&"cm-moved".to_owned()), "{sessions:?}");
+        }
         // Many sessions under the name: the projects' scan, which files the worktree's documents
         // under `payments` too.
         let far: Vec<_> = (0..=SESSION_FILTER)
@@ -5979,6 +6007,37 @@ mod tests {
         assert_eq!(near.vector, Vector::Skipped(VectorSkip::Excluded));
         assert!(near.hits.is_empty());
         assert_eq!(stub.requests(), asked);
+    }
+
+    /// Decision 52 (CodeRabbit on #567): a checkout named by an excluded claude-mem project,
+    /// though its repository's last part names another, has its prompt embedded by no provider
+    /// either, the name's case and a worktree's aside; another name's prompt is sent.
+    #[test]
+    fn prompt_near_sends_no_prompt_of_a_checkout_an_excluded_project_names() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        s.exclude(&crate::import::repo("payroll"));
+        s.run();
+        let near = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            let text = "Parser errors go to stderr.";
+            prompt_near(s.home.path(), (R, &names), text, &Default::default()).unwrap()
+        };
+        let asked = stub.requests();
+        for names in [&["Payroll"][..], &["payroll/fix"], &["billing", "PAYROLL"]] {
+            let near = near(names);
+            assert_eq!(
+                near.vector,
+                Vector::Skipped(VectorSkip::Excluded),
+                "{names:?}"
+            );
+            assert!(near.hits.is_empty());
+        }
+        assert_eq!(stub.requests(), asked);
+        assert_eq!(near(&["billing"]).vector, Vector::Used);
     }
 
     /// Task 6 (row 46-3, spec 8.2 M1): the question's own session leaves each leg in SQL before

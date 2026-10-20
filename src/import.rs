@@ -2224,6 +2224,13 @@ mod tests {
         let loose = d.join("notes/today");
         mk(&loose);
         assert_eq!(names_of(&loose), ["today"]);
+        // A link before `..` is folded away with it, as `path.resolve` folds it, not followed to
+        // its target's parent (CodeRabbit on #567).
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&loose, site.join("pages/today")).unwrap();
+            assert_eq!(names_of(&site.join("pages/today/..")), ["pages", "site"]);
+        }
         // The walk stops before a stop (the home directory) and never starts in the config one.
         let home = d.join("home");
         mk(&home.join("work"));
