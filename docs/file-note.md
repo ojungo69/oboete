@@ -3,7 +3,7 @@
 Unit X5 of the claude-mem parity plan ([claude-mem-parity.md](claude-mem-parity.md) row 8), built
 before the switch (spec decision 39). When the agent opens a file that past cards name, it is
 told, before the read, which cards those are, so it can fetch one instead of working the file out
-again.
+again. Since 2026-10-17 the claude-mem history oboete imported joins the cards (F10 to F15).
 
 ## What claude-mem does
 
@@ -78,7 +78,7 @@ consumer keeps a table `card_files(device, op_seq, n, name, path, modified)`, in
 last part (`\\` read as `/`): the lookup takes the rows of the file's name whose path is the
 file's absolute path, its path relative to `cwd`, or its path relative to the checkout's top level
 (cards name files as the window's lines did, C3), and the repository and currency from the cards
-themselves. The 40 newest.
+themselves. The 40 newest, together with imported history (F13, F14).
 
 F4. **Not when the file changed since.** When the file's modification time is at or after the
 newest such card's time, there is no note, as in claude-mem.
@@ -120,6 +120,105 @@ of spec 8.2: its own line, set from its first measurement (the p95 of the whole 
 hook-state write included) on the replay fixture's Claude Code read sample, and kept for every
 later run.
 
+## Imported history (parity row 8, 2026-10-17)
+
+claude-mem's note reads all of its own observations, so after the switch the owner's claude-mem
+showed a file's history from before it, where oboete's note showed only the cards made since.
+`oboete import claude-mem` brought those observations over without the files they name
+(docs/claude-mem-import.md I3): on this PC 147,956 imported observations name a file (64% of
+them), most of them by a path relative to the project's top (73% hold one; 29% hold an absolute
+path, and an observation can hold both).
+
+F10. **What the import brings.** For each observation it reads `files_read` and `files_modified`,
+JSON arrays of strings, as claude-mem's lookup reads them: anything that is not an array of
+strings counts as none, an item that is no string or is empty after trimming is left out. An
+observation that names a file gets, after its document's op, a files op: an op of the same
+`import` kind whose body is `{uid, source, source_id, repo, session, files_read, files_modified}`,
+the document's labels and its two lists, with no title, body, kind or time. Each path passes the
+gate as the title and the body do (`redact::outbound_with`), and paths are kept in order, read
+first, while the op as stored stays within 32 KiB (half the op cap, each path counted as JSON
+writes it, escapes included), the rest left out and counted (on this PC the most an observation
+names is 6,347 bytes, so none is cut); an observation none of whose paths fits gets no files op,
+so a files op always names a file and its rows show which op is a uid's newest (F12). A files op
+is no document: the `imported` consumer passes over it (it says so in code, not only by failing
+to read one), so search, `get`, the timeline and the per-prompt block are as before. An older binary passes over it too, so the store's format
+does not change (docs/store-format.md, "When it moves"): the rollback binary opens and reads a
+store that holds files ops. A forget names a files op by its uid, as it names the document, and
+the rescan's masks reach its paths (they are not among `OP_NAMES`).
+
+F11. **Every import brings the files an imported observation lacks.** `oboete import claude-mem
+<db>` appends, beside each document it adds, that document's files op, and also the files op of
+each observation it imported before that has none under its document's repository: a store
+imported before this version, or an import that stopped between a document and its files op,
+gets them at its next run, and a document claude-mem moved to another project since (I3) gets
+one for the repository it is filed under now, for the exclusion and sync rules that read an op's
+labels. `oboete import claude-mem <db> --files` does only the second: no new document, so what
+claude-mem recorded after the last import stays out (claude-mem-parity.md, the first open check),
+and a document claude-mem moved since stays where it is filed, which is where its files op goes
+(the plain import moves it and files its files again).
+Which uids hold a files op, under which repository, is read from the ops, as `import_repos` reads
+the documents'. No files op is put for a forgotten or denied uid (the append asks again, so the
+import's count is of what it stored); a forget registered while
+an import runs refuses the batch it falls in, as it refuses a batch of documents, and the import
+stops with what it appended before, which a second run finishes. Both run under the import lock,
+in batches as the documents are.
+
+F12. **The index.** A consumer of its own, `imported_files`, keeps
+`imported_files(rowid, op_device, op_seq, uid, name, path, modified, named)` with indexes on
+`(name, path)` and on `uid`: one row per path of each list, as `card_files` keeps a card's (`\`
+read as `/`, `name` the last part), each with the number of paths its op names in all (`named`,
+F6), so the lookup counts nothing. A uid's files are those of its newest files op, the one of the
+highest rowid, as a document's text is its newest row's. It has its own checkpoint, so a rollback's
+older binary, which passes over files ops, cannot move it past one it never read; on a store
+from before, its first pass reads the ops from the start. A rewind deletes the rows of the ops it
+takes back, a rebuild makes them again from raw.db, and a forget's purge rewrites a files op as it
+rewrites the document's, so the rebuild after it has no rows of the uid (forget's
+`knowledge_holding` names the table). Two files ops of one uid (two devices, or a moved document)
+both give rows; the lookup reads the newest op's alone.
+
+F13. **Which imported observations.** One joins a file's note when its newest row maps to the
+checkout's repository by its session, as imported history maps for the per-prompt block (#506,
+docs/prompt-context.md, "As built": `session_start`), and its files rows name the file by one of
+F3's three paths. Not a forgotten one, and never a summary or a prompt (they have no files op).
+An observation of a session oboete never recorded maps nowhere and stays search-only, as for the
+per-prompt block, where claude-mem maps by the project's name: on this PC 66% of the imported
+observations that name a file map (all of this repository's 47,004, half of the other projects').
+Whether the rest should map by name, as claude-mem's does, is the owner's to decide (parity row 8).
+Until the consumers have made `imported_files`, `imported` and `session_start` (a store from
+before), the note has no imported rows and is the cards' alone; while a first pass or a rebuild
+is still going, it has the rows indexed so far, as `card_files` has the cards'.
+
+F14. **One pool.** The note takes the 40 newest of F3's cards and F13's observations together, by
+time, as claude-mem takes its 40 from one table; F4 to F7 then hold for both alike. F4's newest
+is the newest of the 40. F5 keeps every ID considered, an observation by its uid
+(`claude-mem:<source>:o<id>`, which `get` takes). F6 keys an observation by its session with no
+agent; its modified flag and its number of files come from its files rows. F7 shows its uid, its
+time, its kind's icon and its title, gated as the search gates an imported title, cut at 160
+characters: claude-mem's `refactor` and the types oboete does not keep came in as `discovery`
+(I3), so they show 🔵, and an imported `preference` shows ❓.
+
+F15. **F8, checked.** A read in a checkout nothing is recorded from gets no note and writes no
+hook state: the reason `capture::not_recorded_why` gives, a repository, folder or pattern never
+recorded (milestone 5), or the checkout's `.oboete.toml` with `capture = false` or one that does
+not read. Until now F8 held only because such a checkout makes no cards; an import does not pass
+capture exclusion, so its history would come back at a read, and so would the cards it made
+before it was excluded.
+
+F9 for the second kind: the lookup is one query by `(name, path)`. It is timed before the files
+ops reach this PC's store, on a store of the same size (147,956 observations' files, a name
+thousands of them share, ten files a read), and again on this PC's store after `--files`.
+Before (2026-10-20, a synthetic store of 250,000 imported rows, 147,500 with files and 421,271
+path rows, ten names shared by thousands): a read of ten such files took 144.5 ms at the median,
+162 ms at p95 and 282 ms at most, about 14.5 ms a file for the 2,300 rows that share its path.
+The cost grows with the rows that share the file's path in every project, about 5 µs each, and
+the lookup reads them all before it keeps the 40: on this PC the most observations one path has
+is 3,793, and 28 paths have 1,000 or more, so a read of the hottest file would take some 20 to
+30 ms, within the times of the other read hooks (session start at 135 ms at the median, the
+per-prompt block at 74 to 147 ms, claude-mem-parity.md X2) and under claude-mem's. If the
+measurement after `--files` puts a read of a hot file past them, the index keeps each row's time
+and whether its op is its uid's newest, and the lookup walks the rows newest first, stopping at
+the 40th.
+
 ## Slices (test first, one at a time)
 
 1. **The index and the lookup**: `card_files` in the cards consumer (with its backfill, as
@@ -127,6 +226,9 @@ later run.
 2. **Claude Code**: the hook (F1, F2, F5, F8), `oboete setup`'s matcher, and the measurement (F9).
 3. **Grok, then Codex**, each after its probe in the dogfood user (G25; both probes passed on
    2026-10-11).
+4. **Imported history** (F10 to F15), one PR: the files ops and `--files`, the consumer, the
+   lookup in one pool, F8's check; then, once installed, `--files` on this PC's store and F9's
+   measurement again.
 
 ## Tests
 
@@ -159,3 +261,36 @@ later run.
     The hook takes for an MCP read what Codex's matcher sends it.
 14. `oboete setup` adds Codex's `PreToolUse` group with that matcher after the user's own, and the
     row that trusts it.
+15. An import of observations that name files appends a files op after each such document and
+    none for one that names none; the op holds the gated paths and no title or body; paths past
+    the 32 KiB of the op as stored are cut and counted, also paths of quotes, backslashes and
+    control characters, which JSON writes longer, and many short ones; a malformed list is none;
+    an observation whose only path does not fit gets no files op.
+16. `--files` on a store imported before appends one files op for each imported observation that
+    names a file, none for a forgotten or denied uid, and no document; a second run, and a plain
+    import after it, append no files op again. A plain import that stopped after a document and
+    before its files op appends that files op at its next run; a document moved to another
+    project gets a files op under its new repository, and `--files` gives one moved before it had
+    any a files op where it is filed. The import's line counts the files ops it stored and, under
+    `--files`, as seen only the observations imported before.
+17. A files op reads as no document: search, `get`, the timeline and the per-prompt block give
+    what they gave without it.
+18. `imported_files`: a row per path of each list, each with its op's number of paths; a rewind
+    drops the rows of the ops it takes back; a rebuild makes the same rows; a forget's purge and
+    the rebuild leave none of the uid, and `knowledge_holding` names it until then. Two files ops
+    of one uid with different lists: the newest op's paths, flag and number alone count.
+19. A read of a file that an imported observation of a mapped session names, by its absolute path,
+    its path relative to `cwd` or to the checkout's top, gives the note with its uid, time, icon
+    and title; an observation of an unmapped session, of another repository's session, or a
+    forgotten one gives none.
+20. Cards and imported observations share the 40 and the 15: one row a session, ranked as F6, and
+    F4 against the newest of both.
+21. A session that was shown a file's note with an imported row gets it again only when a row
+    that was not considered names the file.
+22. A read in a checkout excluded by repository, by folder or by pattern, or with
+    `capture = false` or an unreadable `.oboete.toml`, gets no note and writes no hook state, also
+    where cards and imported history name the file from before the exclusion.
+23. A store whose consumers have not made `imported_files`, `imported` or `session_start` gives
+    the cards' note as before.
+24. A forget registered after an import's check of forgotten uids: the batch it falls in is
+    refused, nothing of the uid is stored, and a second run appends the rest.

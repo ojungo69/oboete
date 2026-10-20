@@ -1054,6 +1054,8 @@ fn knowledge_holding(home: &Path, uids: &HashSet<String>) -> Result<HashSet<Stri
         ("derivations", "uid = ?1"),
         ("corrections", "uid = ?1"),
         ("imported", "uid = ?1"),
+        // A document's files (docs/file-note.md F12): they name what it read.
+        ("imported_files", "uid = ?1"),
         ("vector_keys", "kind IN ('c', 'k', 'p') AND key = ?1"),
     ]
     .into_iter()
@@ -4755,6 +4757,41 @@ mod tests {
         };
         assert_eq!(raw.append_imports(vec![again]).unwrap(), 0);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Deploy notes")));
+    }
+
+    /// docs/file-note.md F12 (test 18): a document's files are held for it until its purge, which
+    /// takes them from raw.db's ops and, by the rebuild, from knowledge.db.
+    #[test]
+    fn a_purged_documents_files_go_with_it() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.imported_with_files(
+            "o1",
+            ("r", "cm"),
+            "bugfix",
+            3_000,
+            "Fixed the reader",
+            &["src/reader.rs"],
+            &[],
+        );
+        s.run();
+        let home = s.home.path().to_owned();
+        // Its files alone hold it: the document's row taken away by hand.
+        let k = rusqlite::Connection::open(home.join("knowledge.db")).unwrap();
+        k.execute("DELETE FROM imported WHERE uid = ?1", [&uid])
+            .unwrap();
+        drop(k);
+        let uids = HashSet::from([uid.clone()]);
+        assert!(knowledge_holding(&home, &uids).unwrap().contains(&uid));
+        start(
+            &home,
+            &preview(&home, Target::parse_uid(&uid).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert!(knowledge_holding(&home, &uids).unwrap().is_empty());
+        assert!(!op_rows(&home).iter().any(|o| o.3.contains("src/reader.rs")));
     }
 
     /// D5 (2b-1): while a reader holds raw.db-wal, the purge rewrites the ops but cannot truncate

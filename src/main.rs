@@ -360,6 +360,10 @@ enum Cmd {
         /// Import transcripts; without this flag, print a preview and write nothing
         #[arg(long)]
         yes: bool,
+        /// claude-mem only: bring the files the observations imported before name, and nothing
+        /// else (docs/file-note.md F11)
+        #[arg(long)]
+        files: bool,
     },
     /// Move v1's store (oboete.db) into Design B (spec 7.4): its events as records, its documents
     /// as imported documents, its settings into a home that has none. v1's store is never written;
@@ -645,10 +649,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             eval_store,
             agent,
             yes,
+            files,
         } => {
             if source == "transcripts" {
                 anyhow::ensure!(db.is_none(), "import transcripts takes no database path");
                 anyhow::ensure!(!eval_store, "--eval-store is only for import claude-mem");
+                anyhow::ensure!(!files, "--files is only for import claude-mem");
                 let claude = setup::claude_dir().join("projects");
                 let codex = setup::codex_home().join("sessions");
                 let roots: Vec<(&str, &std::path::Path)> =
@@ -680,7 +686,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let mut raw = raw::open(&home)?;
             // Owner decision 43: what it writes under rules turned off owes the op text scan.
             raw.gates_with(&settings.rules);
-            let stats = import::claude_mem(&mut raw, &db, &settings)?;
+            let stats = import::claude_mem_with(&mut raw, &db, &settings, files)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }

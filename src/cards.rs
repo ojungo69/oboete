@@ -170,12 +170,12 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 }
 
 /// A path as `card_files` keeps it and is searched by: `/` for `\\`.
-fn slashed(path: &str) -> String {
+pub(crate) fn slashed(path: &str) -> String {
     path.replace('\\', "/")
 }
 
 /// The last part of a slashed path, which `card_files` is searched by.
-fn file_name(path: &str) -> &str {
+pub(crate) fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
@@ -596,13 +596,129 @@ const NOTE_ICONS: [(&str, &str); 6] = [
     ("change", "✅"),
 ];
 
-/// A card `by_file` found, with what the note ranks it by as stored, before the gate (K6) masks
-/// the card's own fields (Codex on #387): its agent and session, and whether it modified the file.
+/// A card `by_file` found, or an imported observation `imported_by_file` found as a card's row
+/// shows it (docs/file-note.md F14), with what the note ranks it by as stored, before the gate
+/// (K6) masks the card's own fields (Codex on #387): its agent and session, whether it modified
+/// the file, and how many files it names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filed {
     pub card: Card,
     pub(crate) session: Option<(Option<String>, String)>,
     pub(crate) modified: bool,
+    pub(crate) named: usize,
+    /// An imported observation's uid, its ID; none for a card, whose ID is `Card::id`'s.
+    pub(crate) uid: Option<String>,
+}
+
+impl Filed {
+    /// Its ID as `get` takes it, read on device `local`.
+    pub fn id(&self, local: &str) -> String {
+        self.uid.clone().unwrap_or_else(|| self.card.id(local))
+    }
+}
+
+/// X5 F3, F13, F14: what the note on a file considers, the newest `limit` of `repo`'s cards and
+/// imported observations that name it by one of `paths`, newest first.
+pub fn on_file(
+    k: &Connection,
+    raw: &Raw,
+    repo: &str,
+    paths: &[&str],
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<Filed>> {
+    let mut rows = by_file(k, raw, repo, paths, limit, rules)?;
+    rows.extend(imported_by_file(k, raw, repo, paths, limit, rules)?);
+    // Stable: a card before an observation of the same time, each in its reader's order.
+    rows.sort_by_key(|f| std::cmp::Reverse(f.card.ts));
+    rows.truncate(limit);
+    Ok(rows)
+}
+
+/// docs/file-note.md F13: the imported observations that name a file by one of `paths`, newest
+/// first, at most `limit`: by their newest files op (F12; only observations have one), their
+/// newest row mapping to `repo` by its session as for the per-prompt block (#506,
+/// `consumer::imported::maps`), not forgotten. None until the consumers have made the tables it
+/// reads.
+pub fn imported_by_file(
+    k: &Connection,
+    raw: &Raw,
+    repo: &str,
+    paths: &[&str],
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<Filed>> {
+    let paths: Vec<String> = paths.iter().map(|p| slashed(p)).collect();
+    let Some(name) = paths.first().map(|p| file_name(p).to_owned()) else {
+        return Ok(Vec::new());
+    };
+    for table in ["imported_files", "imported", "session_start"] {
+        if !crate::consumer::manifest::exists(k, "table", table)? {
+            return Ok(Vec::new());
+        }
+    }
+    let marks = (3..3 + paths.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut st = k.prepare(&format!(
+        "SELECT i.uid, i.session, i.ts, i.kind, i.title, i.op_device, i.op_seq,
+                MAX(f.modified), MAX(f.named)
+         FROM imported_files f JOIN imported i ON i.uid = f.uid
+         WHERE f.name = ?2 AND f.path IN ({marks})
+           AND (f.op_device, f.op_seq) = (SELECT g.op_device, g.op_seq FROM imported_files g
+             WHERE g.uid = f.uid ORDER BY g.rowid DESC LIMIT 1)
+           AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = f.uid)
+           AND EXISTS (SELECT 1 FROM session_start s WHERE s.session = i.session AND s.repo = ?1)
+         GROUP BY i.uid
+         ORDER BY i.ts DESC, i.op_device DESC, i.op_seq DESC"
+    ))?;
+    let values = [repo.to_owned(), name].into_iter().chain(paths);
+    let mut rows = st.query(rusqlite::params_from_iter(values))?;
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        let uid: String = r.get(0)?;
+        if raw.forgotten(&uid)? {
+            continue;
+        }
+        let (session, title): (String, String) = (r.get(1)?, r.get(4)?);
+        let row_title = crate::redact::flattened_with(
+            &title,
+            rules,
+            usize::MAX,
+            crate::consumer::manifest::one_line,
+        )
+        .masked();
+        let card = Card {
+            device: r.get(5)?,
+            op_seq: r.get(6)?,
+            n: 0,
+            ts: r.get(2)?,
+            agent: None,
+            session: Some(crate::redact::outbound_with(&session, rules)),
+            repo: None,
+            // As a card's, one of claude-mem's types or none (C3).
+            kind: Some(r.get::<_, String>(3)?).filter(|k| TYPES.contains(&k.as_str())),
+            title: crate::redact::outbound_with(&title, rules),
+            row_title,
+            subtitle: String::new(),
+            narrative: String::new(),
+            facts: Vec::new(),
+            concepts: Vec::new(),
+            files_read: Vec::new(),
+            files_modified: Vec::new(),
+        };
+        out.push(Filed {
+            card,
+            session: Some((None, session)),
+            modified: r.get::<_, i64>(7)? != 0,
+            named: usize::try_from(r.get::<_, i64>(8)?).unwrap_or(usize::MAX),
+            uid: Some(uid),
+        });
+    }
+    Ok(out)
 }
 
 /// X5 F3: `repo`'s current cards that name a file by one of `paths` (its absolute path, and its
@@ -645,9 +761,11 @@ pub fn by_file(
         let (agent, session) = (r.get(4)?, r.get::<_, Option<String>>(5)?);
         let modified = r.get::<_, Option<bool>>(19)?.unwrap_or(false);
         out.extend(read(r, raw, rules)?.map(|card| Filed {
+            named: card.files_read.len() + card.files_modified.len(),
             card,
             session: session.map(|s| (agent, s)),
             modified,
+            uid: None,
         }));
     }
     Ok(out)
@@ -674,24 +792,22 @@ where
     // rank, stable, so the newer first among equals: +2 for the file modified, +2 for at most
     // 3 files named, +1 for at most 8.
     let mut seen = std::collections::HashSet::new();
-    let mut ranked: Vec<(u8, &Card)> = cards
+    let mut ranked: Vec<(u8, &Filed)> = cards
         .iter()
         .filter(|f| f.session.as_ref().is_none_or(|s| seen.insert(s.clone())))
         .map(|f| {
-            let c = &f.card;
-            let named = c.files_read.len() + c.files_modified.len();
             let score = 2 * u8::from(f.modified)
-                + match named {
+                + match f.named {
                     0..=3 => 2,
                     4..=8 => 1,
                     _ => 0,
                 };
-            (score, c)
+            (score, f)
         })
         .collect();
     ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-    let mut shown: Vec<&Card> = ranked.into_iter().take(15).map(|(_, c)| c).collect();
-    shown.sort_by_key(|c| (c.ts, c.device.clone(), c.op_seq, c.n));
+    let mut shown: Vec<&Filed> = ranked.into_iter().take(15).map(|(_, f)| f).collect();
+    shown.sort_by_key(|f| (f.card.ts, f.card.device.clone(), f.card.op_seq, f.card.n));
     let in_tz = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(tz));
     let mut out = vec![
         format!(
@@ -704,7 +820,8 @@ where
         "- **Need details on a past observation?** get(ID) — ~300 tokens each.".to_owned(),
     ];
     let mut day = String::new();
-    for c in shown {
+    for f in shown {
+        let c = &f.card;
         let Some(t) = in_tz(c.ts) else {
             continue;
         };
@@ -727,7 +844,7 @@ where
             .take(160)
             .collect();
         let title = if title.is_empty() { "Untitled" } else { &title };
-        out.push(format!("{} {} {icon} {title}", c.id(local), clock(&t)));
+        out.push(format!("{} {} {icon} {title}", f.id(local), clock(&t)));
     }
     Some(out.join("\n"))
 }
@@ -812,9 +929,11 @@ mod tests {
             ..card(op_seq, 0, ts, Some("bugfix"), &format!("Card {op_seq}"))
         };
         Filed {
+            named: read.len() + modified.len(),
             card,
             session: Some((Some("claude".into()), session.into())),
             modified: !modified.is_empty(),
+            uid: None,
         }
     }
 
@@ -900,6 +1019,68 @@ mod tests {
         codex.session = Some((Some("codex".into()), "s".into()));
         let note = file_note(&[same[0].clone(), codex], 0, "d", now, &jst()).unwrap();
         assert_eq!(rows(&note), ["1.0", "2.0"]);
+    }
+
+    /// docs/file-note.md F14: an imported observation's row shows its uid, and its session, which
+    /// has no agent, is not a card's of the same session text.
+    #[test]
+    fn an_imported_rows_id_is_its_uid() {
+        let card = filed(2, at(3, 11, 2, 0), "s", &["src/a.rs"], &[]);
+        let mut imported = filed(1, at(3, 11, 1, 0), "s", &["src/a.rs"], &[]);
+        imported.uid = Some("claude-mem:abc:o9".into());
+        imported.session = Some((None, "s".into()));
+        let note = file_note(&[card, imported], 0, "d", at(3, 12, 0, 0), &jst()).unwrap();
+        assert_eq!(rows(&note), ["claude-mem:abc:o9", "2.0"]);
+    }
+
+    /// F14 (test 20): an imported row is ranked by its own number of files and flag (its card
+    /// names none), one a session, and dates the note as a card does: F4 takes the newest of both.
+    #[test]
+    fn an_imported_row_ranks_and_dates_the_note_as_a_card_does() {
+        let imported = |id: i64, ts: i64, session: &str, named: usize, modified: bool| Filed {
+            named,
+            modified,
+            uid: Some(format!("claude-mem:abc:o{id}")),
+            session: Some((None, session.into())),
+            ..filed(id, ts, session, &[], &[])
+        };
+        let nine = ["a", "b", "c", "d", "e", "f", "g", "h", "src/a.rs"];
+        // Newest first, as `on_file` gives them: 15 cards of nine files (no points), then older
+        // imported rows: one modified it and names one file, one names 20, and two of a session.
+        let mut all: Vec<Filed> = (0..15)
+            .rev()
+            .map(|i| {
+                filed(
+                    100 + i,
+                    at(3, 10, i as u32, 0),
+                    &format!("s{i}"),
+                    &nine,
+                    &[],
+                )
+            })
+            .collect();
+        all.extend([
+            imported(1, at(3, 9, 30, 0), "x", 3, false),
+            imported(2, at(3, 9, 20, 0), "x", 1, true),
+            imported(3, at(3, 9, 0, 0), "y", 1, true),
+            imported(4, at(3, 8, 0, 0), "z", 20, false),
+        ]);
+        let note = file_note(&all, 0, "d", at(3, 12, 0, 0), &jst()).unwrap();
+        let shown = rows(&note);
+        assert_eq!(shown.len(), 15);
+        for id in ["claude-mem:abc:o1", "claude-mem:abc:o3"] {
+            assert!(shown.contains(&id), "{id}: {shown:?}");
+        }
+        for id in ["claude-mem:abc:o2", "claude-mem:abc:o4", "100.0"] {
+            assert!(!shown.contains(&id), "{id}: {shown:?}");
+        }
+        // F4: the newest of both.
+        let pair = [
+            imported(5, at(3, 11, 0, 0), "w", 1, false),
+            filed(6, at(3, 9, 0, 0), "s", &["src/a.rs"], &[]),
+        ];
+        assert!(file_note(&pair, at(3, 10, 0, 0), "d", at(3, 12, 0, 0), &jst()).is_some());
+        assert!(file_note(&pair, at(3, 11, 0, 0), "d", at(3, 12, 0, 0), &jst()).is_none());
     }
 
     /// X5 F4: no note when the file changed at or after its newest card, or no card names it.

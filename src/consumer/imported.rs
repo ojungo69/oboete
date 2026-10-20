@@ -1,7 +1,8 @@
 //! Milestone 4 Task 3 (D5): the imported documents consumer. It reads the op log of every device
 //! that has ops and keeps each `import` op's document in knowledge.db, keyed by the op that brought
-//! it, with a trigram index over its title and body. Curation reads records, never these ops, and
-//! only the per-prompt block injects them (#506, `prompt_line`).
+//! it, with a trigram index over its title and body. Curation reads records, never these ops; the
+//! per-prompt block (#506, `prompt_line`) and the note on a file (docs/file-note.md F13, by the
+//! files `ImportedFiles` keeps) are what inject them.
 
 use crate::raw::{ImportDoc, OpKind, Raw};
 use crate::worker::Consumer;
@@ -51,6 +52,11 @@ impl Consumer for Imported {
             return Ok(after);
         };
         for op in ops.into_iter().filter(|o| o.kind == OpKind::Import) {
+            // A document's files are no document: `ImportedFiles` keeps them (docs/file-note.md
+            // F10, F12).
+            if crate::raw::is_import_files(&op.body) {
+                continue;
+            }
             // An op this version cannot read stays in raw, unread.
             let Ok(d) = serde_json::from_value::<ImportDoc>(op.body) else {
                 continue;
@@ -101,6 +107,78 @@ impl Consumer for Imported {
         for uid in uids {
             crate::embed_phase::touched(None, k, "i", &uid)?;
         }
+        Ok(())
+    }
+}
+
+/// docs/file-note.md F12: the files imported observations name, from their files ops, for the
+/// note on a file. Its own checkpoint: a rollback's older binary passes over files ops, and it
+/// must not move this one past an op it never read.
+pub struct ImportedFiles;
+
+/// One row per path of each list of a files op, with the number of paths the op names in all
+/// (F6), so the note's lookup counts nothing; a uid's files are its newest op's (the highest
+/// rowid), as its text is its newest document row's.
+pub fn files_schema(k: &Connection) -> Result<()> {
+    k.execute_batch(
+        "CREATE TABLE IF NOT EXISTS imported_files(
+           rowid INTEGER PRIMARY KEY, op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+           uid TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, modified INTEGER NOT NULL,
+           named INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS imported_files_path ON imported_files(name, path);
+         CREATE INDEX IF NOT EXISTS imported_files_uid ON imported_files(uid);",
+    )?;
+    Ok(())
+}
+
+impl Consumer for ImportedFiles {
+    fn name(&self) -> &'static str {
+        "imported_files"
+    }
+
+    fn reads_ops(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
+        files_schema(k)?;
+        let ops = raw.ops_after(device, after, BATCH)?;
+        let Some(last) = ops.last().map(|o| o.op_seq) else {
+            return Ok(after);
+        };
+        let mut st = k.prepare_cached(
+            "INSERT INTO imported_files(op_device, op_seq, uid, name, path, modified, named)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for op in ops.into_iter().filter(|o| o.kind == OpKind::Import) {
+            if !crate::raw::is_import_files(&op.body) {
+                continue;
+            }
+            // An op this version cannot read stays in raw, unread.
+            let Ok(f) = serde_json::from_value::<crate::raw::ImportFiles>(op.body) else {
+                continue;
+            };
+            let named = (f.files_read.len() + f.files_modified.len()) as i64;
+            for (modified, list) in [(false, &f.files_read), (true, &f.files_modified)] {
+                for path in list {
+                    let path = crate::cards::slashed(path);
+                    let name = crate::cards::file_name(&path).to_owned();
+                    st.execute(params![
+                        device, op.op_seq, f.uid, name, path, modified, named
+                    ])?;
+                }
+            }
+        }
+        Ok(last)
+    }
+
+    fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
+        files_schema(k)?;
+        k.execute(
+            "DELETE FROM imported_files WHERE op_device = ?1 AND op_seq > ?2",
+            params![device, to],
+        )?;
         Ok(())
     }
 }
@@ -324,5 +402,63 @@ mod tests {
         assert_eq!(line("claude-mem:abc:p1"), None);
         assert_eq!(line("claude-mem:abc:o2"), None);
         assert_eq!(line("claude-mem:abc:none"), None);
+    }
+
+    /// docs/file-note.md F10, F12 (tests 17, 18): a files op is no document, and `imported_files`
+    /// keeps a row per path of each list, `\\` read as `/`, each with its op's number of paths; a
+    /// rewind drops the rows of the ops it takes back, and a rebuild makes the same rows again.
+    #[test]
+    fn a_files_op_is_indexed_and_is_no_document() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.imported_with_files(
+            "o1",
+            ("p", "cm"),
+            "bugfix",
+            3_000,
+            "Fixed the reader",
+            &["src/a.rs", r"src\b.rs"],
+            &["src/a.rs"],
+        );
+        s.run();
+        let home = s.home.path().to_owned();
+        let rows = || -> Vec<(String, String, bool, i64)> {
+            let k = crate::knowledge::open(&home).unwrap();
+            k.prepare("SELECT name, path, modified, named FROM imported_files WHERE uid = ?1 ORDER BY rowid")
+                .unwrap()
+                .query_map([&uid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let expected = vec![
+            ("a.rs".to_owned(), "src/a.rs".to_owned(), false, 3),
+            ("b.rs".to_owned(), "src/b.rs".to_owned(), false, 3),
+            ("a.rs".to_owned(), "src/a.rs".to_owned(), true, 3),
+        ];
+        assert_eq!(rows(), expected);
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!(count(&k, "imported"), 1, "the files op is no document");
+        let got = crate::search::b::get(&home, &uid).unwrap().unwrap();
+        assert!(
+            got.contains("Fixed the reader") && !got.contains("src/b.rs"),
+            "{got}"
+        );
+        let device = s.raw.device().to_owned();
+        let files_seq = s
+            .raw
+            .ops_after(&device, 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|o| crate::raw::is_import_files(&o.body))
+            .unwrap()
+            .op_seq;
+        ImportedFiles.rewind(&k, &device, files_seq - 1).unwrap();
+        assert!(rows().is_empty());
+        assert_eq!(count(&k, "imported"), 1);
+        drop(k);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        crate::worker::rebuild(&home).unwrap();
+        assert_eq!(rows(), expected);
     }
 }

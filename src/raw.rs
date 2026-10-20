@@ -380,6 +380,41 @@ pub struct ImportDoc {
     pub body: String,
 }
 
+/// docs/file-note.md F10: the files an imported observation names, an `import` op of its own
+/// beside its document's: the document's labels and its two lists, and no text, so no reader of
+/// documents takes it for one (`is_import_files`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportFiles {
+    pub uid: String,
+    pub source: String,
+    pub source_id: String,
+    pub repo: String,
+    pub session: String,
+    pub files_read: Vec<String>,
+    pub files_modified: Vec<String>,
+}
+
+impl ImportFiles {
+    /// Its paths as the import's checks read its text: read, then modified, a line each.
+    pub fn text(&self) -> String {
+        let paths: Vec<&str> = (self.files_read.iter().chain(&self.files_modified))
+            .map(String::as_str)
+            .collect();
+        paths.join("\n")
+    }
+}
+
+/// Whether the body of an `import` op is a document's files (F10) rather than a document.
+pub fn is_import_files(body: &serde_json::Value) -> bool {
+    body.get("title").is_none() && body.get("files_read").is_some_and(|v| v.is_array())
+}
+
+/// An `import` op on its way in: a document, or the files a document names (F10).
+pub enum Import {
+    Doc(ImportDoc),
+    Files(ImportFiles),
+}
+
 /// The source of a note an agent saved (`save_memory`): its uid is `oboete-note:<id>`.
 pub const NOTE_SOURCE: &str = "oboete-note";
 /// The session a note is kept under: none of an agent's, so no session start maps it (#506).
@@ -3043,6 +3078,18 @@ impl Raw {
     /// Milestone 5 D5: whether `uid`, a claim's or an imported document's, is forgotten.
     pub fn forgotten(&self, uid: &str) -> Result<bool> {
         forgotten_uid(&self.conn, uid)
+    }
+
+    /// Whether an import leaves out an item, `(source, source_id)`'s with `uid` and `text`: its
+    /// origin denied (`denied`), or its uid forgotten (D5).
+    pub(crate) fn import_refused(
+        &self,
+        (source, source_id): (&str, &str),
+        uid: &str,
+        text: &str,
+    ) -> Result<bool> {
+        let origin = crate::forget::origin(source, source_id);
+        Ok(denied(&self.conn, Some(&origin), text)? || forgotten_uid(&self.conn, uid)?)
     }
 
     /// Every forgotten uid (D5): the readers and senders pass them over.
@@ -5830,11 +5877,32 @@ impl Raw {
         &self,
         source: &str,
     ) -> Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
-        let mut st = self.conn.prepare(
+        // A document's files op (docs/file-note.md F10) is filed where its document is.
+        self.import_ops_repos(source, "TRUE")
+    }
+
+    /// docs/file-note.md F11: `import_repos` for the documents' files ops: the source ids of
+    /// `source` whose files are appended, each with the repositories they were filed under.
+    pub fn import_files_repos(
+        &self,
+        source: &str,
+    ) -> Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
+        self.import_ops_repos(
+            source,
+            "json_type(body, '$.title') IS NULL AND json_type(body, '$.files_read') = 'array'",
+        )
+    }
+
+    fn import_ops_repos(
+        &self,
+        source: &str,
+        which: &str,
+    ) -> Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
+        let mut st = self.conn.prepare(&format!(
             "SELECT json_extract(body, '$.source_id'), COALESCE(json_extract(body, '$.repo'), '')
              FROM ops WHERE type = 'import' AND json_extract(body, '$.source') = ?1
-               AND typeof(json_extract(body, '$.source_id')) = 'text'",
-        )?;
+               AND typeof(json_extract(body, '$.source_id')) = 'text' AND {which}"
+        ))?;
         let mut out = std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
         for row in st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))? {
             let (id, repo) = row?;
@@ -5938,17 +6006,37 @@ impl Raw {
     pub(crate) fn append_imports_counted(
         &mut self,
         docs: Vec<ImportDoc>,
+        committed: impl FnMut(u64),
+    ) -> Result<usize> {
+        self.append_import_items(docs.into_iter().map(Import::Doc).collect(), committed)
+    }
+
+    /// `append_imports` for documents and the files they name (docs/file-note.md F10), in their
+    /// order: a document's files after it, in its batch unless a batch ends between them.
+    pub(crate) fn append_import_items(
+        &mut self,
+        items: Vec<Import>,
         mut committed: impl FnMut(u64),
     ) -> Result<usize> {
         let (mut batch, mut bytes, mut appended) = (Vec::new(), 0, 0);
-        for doc in docs {
-            let text = format!("{}\n{}", doc.title, doc.body);
-            let origin = crate::forget::origin(&doc.source, &doc.source_id);
+        for item in items {
+            let (source, source_id, uid, text) = match &item {
+                Import::Doc(d) => (
+                    &d.source,
+                    &d.source_id,
+                    &d.uid,
+                    format!("{}\n{}", d.title, d.body),
+                ),
+                Import::Files(f) => (&f.source, &f.source_id, &f.uid, f.text()),
+            };
             // A forgotten document (D5) is passed over here: `append_ops` refuses a batch with it.
-            if denied(&self.conn, Some(&origin), &text)? || forgotten_uid(&self.conn, &doc.uid)? {
+            if self.import_refused((source, source_id), uid, &text)? {
                 continue;
             }
-            let body = serde_json::to_value(within_op_cap(doc)?)?;
+            let body = match item {
+                Import::Doc(doc) => serde_json::to_value(within_op_cap(doc)?)?,
+                Import::Files(files) => serde_json::to_value(files)?,
+            };
             let size = body.to_string().len();
             if batch.len() == IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
                 let count = self.append_ops(&std::mem::take(&mut batch))?.len();
@@ -10473,6 +10561,32 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert_eq!(timeout, 50);
+    }
+
+    /// docs/file-note.md F11 (test 24): a files op of a uid forgotten after the import's check is
+    /// refused with its whole batch, and the import's check keeps it out of the next one.
+    #[test]
+    fn a_forgotten_uids_files_op_is_refused_with_its_batch() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let a = s.files_of("o1", ("p", "cm"), &["src/a.rs"], &[]);
+        let b = s.files_of("o2", ("p", "cm"), &["src/b.rs"], &[]);
+        s.raw
+            .append_ops(&[(
+                OpKind::Forget,
+                serde_json::json!({"uid": a.uid, "job": "j"}),
+            )])
+            .unwrap();
+        let device = s.raw.device().to_owned();
+        let count = |raw: &Raw| raw.ops_after(&device, 0, 100).unwrap().len();
+        let before = count(&s.raw);
+        let batch =
+            [a.clone(), b.clone()].map(|f| (OpKind::Import, serde_json::to_value(f).unwrap()));
+        assert!(s.raw.append_ops(&batch).is_err());
+        assert_eq!(count(&s.raw), before);
+        let items = vec![Import::Files(a), Import::Files(b.clone())];
+        assert_eq!(s.raw.append_import_items(items, |_| {}).unwrap(), 1);
+        let last = s.raw.ops_after(&device, 0, 100).unwrap().pop().unwrap();
+        assert_eq!(last.body, serde_json::to_value(b).unwrap());
     }
 
     #[test]
