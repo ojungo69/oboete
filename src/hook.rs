@@ -4844,6 +4844,32 @@ mod tests {
         assert!(took < Duration::from_millis(900), "{took:?}");
     }
 
+    /// N5 (CodeRabbit on #568): the wait holds the lookup's reads of the stores too: a restore
+    /// holding raw.db's lock costs the lookup no more than its wait.
+    #[test]
+    fn a_memory_lookups_wait_holds_its_store_reads_too() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let Prompts { s, _cwd, c, .. } = p;
+        let crate::search::b::fixture::Store { home, raw } = s;
+        drop(raw);
+        let payload = json!({"session_id": "s1", "cwd": c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let restore = crate::raw::lock_for_swap(home.path()).unwrap();
+        let started = std::time::Instant::now();
+        let wait = Duration::from_millis(300);
+        let held = crate::memory_lookup::answer_within(home.path(), &payload, NOTE_ROOM, wait);
+        let took = started.elapsed();
+        drop(restore);
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert!(
+            held.as_ref()
+                .is_err_and(|e| e.is::<crate::memory_lookup::Late>()),
+            "{held:?}"
+        );
+    }
+
     #[test]
     fn a_title_cannot_close_the_file_notes_fence() {
         let mut r = Reads::new();

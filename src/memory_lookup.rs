@@ -277,6 +277,33 @@ pub(crate) fn answer_within(
     let Some(found) = lookup(tool, args, Path::new(cwd), &roots) else {
         return Ok(None);
     };
+    // What reads the stores, asks the viewer and searches runs on a thread the hook does not wait
+    // for past `deadline`: raw.db's open can wait for a restore (CodeRabbit on #568), and a cold
+    // store's search took 9 s on this PC's on 2026-10-20 (docs/memory-lookup.md).
+    let (send, answered) = std::sync::mpsc::channel();
+    let (home, payload) = (home.to_owned(), payload.clone());
+    std::thread::spawn(move || {
+        // No one hears an answer past the deadline.
+        let _ = send.send(searched(&home, &payload, found, deadline, room));
+    });
+    match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(answer) => answer,
+        Err(RecvTimeoutError::Timeout) => Err(Late(wait).into()),
+        Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
+    }
+}
+
+/// `answer_within`'s answer to the lookup `found`: none with `[inject] memory_lookup` off, before
+/// the stores are made, where nothing is recorded, when the search refuses it or when nothing of
+/// it fits `room`.
+fn searched(
+    home: &Path,
+    payload: &Value,
+    found: Lookup,
+    deadline: Instant,
+    room: usize,
+) -> anyhow::Result<Option<String>> {
+    let cwd = payload["cwd"].as_str().unwrap_or_default();
     let inject = crate::config::inject(home)?;
     if !inject.memory_lookup || !crate::raw::exists(home) || !home.join("knowledge.db").exists() {
         return Ok(None);
@@ -300,40 +327,27 @@ pub(crate) fn answer_within(
         &found.query,
         (Instant::now() + prompt_wait).min(deadline),
     );
+    let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
+    let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
+    let search = crate::mem_search::Search {
+        home,
+        scope: repo.clone(),
+        cursors: &cursors,
+        now: crate::db::now_ms(),
+        repo: &scope,
+        rules: &settings.rules,
+        hook: true,
+        vector: vector.as_deref(),
+    };
     let args = crate::mem_search::Args {
         mode: Some("auto".into()),
         query: Some(found.query),
         limit: Some(8),
         ..Default::default()
     };
-    // The search on a thread the hook does not wait for past `deadline`: a cold store's took 9 s
-    // on this PC's on 2026-10-20 (docs/memory-lookup.md).
-    let (send, answered) = std::sync::mpsc::channel();
-    let (home, rules) = (home.to_owned(), settings.rules.clone());
-    std::thread::spawn(move || {
-        let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
-        let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
-        let search = crate::mem_search::Search {
-            home: &home,
-            scope: repo.clone(),
-            cursors: &cursors,
-            now: crate::db::now_ms(),
-            repo: &scope,
-            rules: &rules,
-            hook: true,
-            vector: vector.as_deref(),
-        };
-        // No one hears an answer past the deadline.
-        let _ = send.send(search.run(&args));
-    });
-    let text = match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(text) => text?,
-        Err(RecvTimeoutError::Timeout) => return Err(Late(wait).into()),
-        Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
-    };
     // The egress gate over the whole answer, as the MCP server's `text` passes every answer through
     // it, before the fence (spec 6.4, 6.5).
-    Ok(match text {
+    Ok(match search.run(&args)? {
         Ok(text) => fitted(&crate::redact::outbound_with(&text, &settings.rules), room),
         Err(_) => None,
     })

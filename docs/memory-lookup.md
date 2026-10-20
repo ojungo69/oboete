@@ -36,10 +36,10 @@ note (docs/file-note.md).
 - **None**: for any other call; with `[inject] memory_lookup = false` (on by default, as claude-mem's
   `CLAUDE_MEM_MEMORY_SEARCH_HOOK_ENABLED`), on the detailed settings page; where nothing is
   recorded; before the stores are made; when the search fails; when it has not answered 3 s after
-  the hook started, the vector's wait included (`LOOKUP_WAIT`, claude-mem's `timeoutMs: 3_000` for
-  its worker's search), the search left on its thread until the hook exits, and then no file note
-  either, since the wait spent the hook's time. A subagent's lookup gets it too, as claude-mem's
-  handler runs before its subagent check.
+  the hook started, the reads of the stores and the vector's wait included (`LOOKUP_WAIT`,
+  claude-mem's `timeoutMs: 3_000` for its worker's search), the search left on its thread until
+  the hook exits, and then no file note either, since the wait spent the hook's time. A subagent's
+  lookup gets it too, as claude-mem's handler runs before its subagent check.
 
 ## Differences from claude-mem, and why
 
@@ -117,7 +117,8 @@ of the imported partition (0.6 s) and the legs' hits.
 error within the wait, as the hook reports a failure, the native lookup going on),
 `a_memory_lookups_wait_holds_the_viewers_vector_too` (a viewer slower than the wait costs no more),
 `a_memory_lookup_past_its_wait_takes_no_file_note_after_it` (a forget holding the stores back costs
-the hook its wait alone);
+the hook its wait alone), `a_memory_lookups_wait_holds_its_store_reads_too` (a restore holding
+raw.db's lock costs no more);
 `search::b::tests::imported_full_text_reads_the_narrow_index_and_finds_the_same`,
 `a_timeline_reads_a_repositorys_documents_in_time_order_and_finds_the_same`,
 `by_date_a_newer_record_comes_before_imported_documents_that_fill_the_limit`,
