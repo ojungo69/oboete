@@ -1304,7 +1304,9 @@ impl Viewer {
                     && a.shown.len() <= search::b::PROMPT_SHOWN
                     && a.shown.iter().all(|k| k.len() <= 256)
                     && a.projects.len() <= PROMPT_NAMES
-                    && a.projects.iter().all(|p| (1..=256).contains(&p.len())) =>
+                    && a.projects
+                        .iter()
+                        .all(|p| (1..=crate::import::NAME_BYTES).contains(&p.len())) =>
             {
                 a
             }
@@ -6002,14 +6004,16 @@ curate = false
         more.push("f".repeat(64));
         let over = json!({"repo": "github.com/o/r", "prompt": "x", "shown": more});
         assert_eq!(ask(&[HOST, TOKEN], &over).status, 400);
-        // Decision 52: the checkout's claude-mem names, at most `PROMPT_NAMES` of 1 to 256 bytes.
+        // Decision 52: the checkout's claude-mem names, at most `PROMPT_NAMES` of 1 to
+        // `import::NAME_BYTES` bytes.
         let named = |projects: Value| json!({"repo": "r", "prompt": "x", "projects": projects});
-        let most: Vec<String> = (0..PROMPT_NAMES).map(|_| "n".repeat(256)).collect();
+        let long = "n".repeat(crate::import::NAME_BYTES);
+        let most: Vec<String> = (0..PROMPT_NAMES).map(|_| long.clone()).collect();
         assert_eq!(ask(&[HOST, TOKEN], &named(json!(most))).status, 200);
         for bad in [
             json!(vec!["n"; PROMPT_NAMES + 1]),
             json!([""]),
-            json!(["n".repeat(257)]),
+            json!([format!("{long}n")]),
             json!("payments"),
         ] {
             assert_eq!(

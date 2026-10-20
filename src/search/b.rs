@@ -446,8 +446,9 @@ pub struct PromptNear {
 /// G23 (docs/prompt-context.md, decision 44): the claims, cards, session summaries and imported
 /// history of `repo` whose meaning is near `text`, at `shortlist::MEANING` or above, the nearest
 /// first; claims only under delivery's rule (`claims::DECIDED_WHERE`, and no link ending them:
-/// `delivered_one`), and imported documents only through the mapping of #506
-/// (`consumer::imported::maps`), before anything is kept. What the prompt hook
+/// `delivered_one`), and imported documents only through the mapping of #506 and decision 52,
+/// by session or by the checkout's claude-mem `names` (`consumer::imported::maps`), before
+/// anything is kept. What the prompt hook
 /// asks the resident viewer: the reader's vector (D14), the local model loaded on the first prompt
 /// and kept, or Workers AI through the gate, within `QUERY_TIMEOUT`; an excluded repository's
 /// prompt goes to no provider (row 30-2). Neither the full-text side, which the hook builds
@@ -5539,8 +5540,8 @@ mod tests {
         assert!(!near.hits.iter().any(|h| h.key == decided));
     }
 
-    /// #506 (acceptance test): imported history reaches a prompt only through an explicit mapping,
-    /// never by its project's name. History imported from a project named `payments`, and two
+    /// #506 (acceptance test), with no names given: imported history reaches a prompt only through
+    /// an explicit mapping, never by its project's name (decision 52 adds the names given). History imported from a project named `payments`, and two
     /// checkouts `a/payments` and `b/payments`: while oboete recorded none of its sessions, neither
     /// gets it; once oboete recorded a session starting in `a/payments`, only `a/payments` gets
     /// that session's documents, and `b/payments` those of the session that started there; a

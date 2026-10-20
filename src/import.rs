@@ -734,6 +734,10 @@ pub(crate) fn repo(project: &str) -> String {
 /// What claude-mem names a directory nothing names (`projectNameFromSource`).
 const UNKNOWN_PROJECT: &str = "unknown-project";
 
+/// The longest claude-mem name a prompt sends the viewer (decision 52): a path's, which a
+/// submodule's or a worktree's name joins with its parent's.
+pub(crate) const NAME_BYTES: usize = 4_096;
+
 /// claude-mem's project-root markers outside git (`PROJECT_ROOT_MARKERS`).
 const PROJECT_MARKERS: [&str; 2] = [".claude-mem-project", ".claude-mem.json"];
 
@@ -742,6 +746,8 @@ const PROJECT_MARKERS: [&str; 2] = [".claude-mem-project", ".claude-mem.json"];
 /// src/utils/project-name.ts), the one it writes under last: the git top level's folder name, a
 /// linked worktree's or a submodule's with its parent's, a marker root's, or the folder's own.
 pub(crate) fn names_of(cwd: &Path) -> Vec<String> {
+    // `path.resolve`: absolute, `.` and `..` folded, links kept (git's top is the real path's).
+    let cwd = &lexical(&std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
     let real = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let top = crate::repo::top(&real);
     let marker = top.is_none().then(|| marker_root(cwd)).flatten();
@@ -2208,12 +2214,13 @@ mod tests {
         .unwrap();
         assert_eq!(names_of(&wt), ["payments-fix"]);
         // Outside git: the nearest marker root's name, the folder's own below it; no marker, the
-        // folder's.
+        // folder's. A path is folded first, as `path.resolve` folds it.
         let site = d.join("site");
         mk(&site.join("pages/blog"));
         std::fs::write(site.join(".claude-mem.json"), "{}").unwrap();
         assert_eq!(names_of(&site), ["site"]);
         assert_eq!(names_of(&site.join("pages/blog")), ["blog", "site"]);
+        assert_eq!(names_of(&site.join("pages/blog/..")), ["pages", "site"]);
         let loose = d.join("notes/today");
         mk(&loose);
         assert_eq!(names_of(&loose), ["today"]);

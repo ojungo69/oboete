@@ -676,8 +676,9 @@ fn file_notes(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     let top = crate::repo::top(cwd);
-    // Decision 52: the checkout's claude-mem names, which imported history maps by too.
-    let projects = crate::import::names_of(cwd);
+    // Decision 52: the checkout's claude-mem names, which imported history maps by too, read once
+    // a file needs them.
+    let mut projects = None;
     let mut notes = Vec::new();
     for file in files {
         // F2: a file of at least 1,500 bytes; an absolute path stays as it is.
@@ -701,8 +702,9 @@ fn file_notes(
             }
         }
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let projects = projects.get_or_insert_with(|| crate::import::names_of(cwd));
         let cards =
-            crate::cards::on_file(&k, &store, (&repo, &projects), &names, 40, &settings.rules)?;
+            crate::cards::on_file(&k, &store, (&repo, projects), &names, 40, &settings.rules)?;
         let now = db::now_ms();
         let Some(note) =
             crate::cards::file_note(&cards, mtime, store.device(), now, &chrono::Local)
@@ -1969,12 +1971,12 @@ fn prompt_picks(
     let branch = branch.unwrap_or_default();
     let text = strip_blocks(prompt, true);
     let long = text.chars().count() >= ASKS_FROM;
-    // Decision 52: the checkout's claude-mem names, which imported history maps by too.
-    let names = crate::import::names_of(Path::new(
-        a.labels.get("cwd").and_then(Value::as_str).unwrap_or("."),
-    ));
-    let asked = (long && sendable)
-        .then(|| ask_resident(a.home, (&repo, &names), &text, was_shown, a.deadline));
+    let asked = (long && sendable).then(|| {
+        // Decision 52: the checkout's claude-mem names, which imported history maps by too.
+        let cwd = a.labels.get("cwd").and_then(Value::as_str).unwrap_or(".");
+        let names = crate::import::names_of(Path::new(cwd));
+        ask_resident(a.home, (&repo, &names), &text, was_shown, a.deadline)
+    });
     let failure = failed_call(a.home, a.raw, a.agent, a.label, rules);
     let texts: Vec<&str> = [Some(text.as_str()), failure.as_deref()]
         .into_iter()
@@ -2188,6 +2190,11 @@ fn ask_resident(
     // The viewer gates the prompt and then cuts it to what it embeds: twice that leaves the gate
     // the words around the cut.
     let prompt: String = text.chars().take(2 * crate::embed::PROMPT_CHARS).collect();
+    // A name past the viewer's limit stays out, so the rest of the answer comes.
+    let names: Vec<&String> = names
+        .iter()
+        .filter(|n| n.len() <= crate::import::NAME_BYTES)
+        .collect();
     let mut asked = json!({"repo": repo, "prompt": prompt, "projects": names});
     match shown {
         WasShown::Keys(keys) if keys.is_empty() => {}
@@ -5205,6 +5212,28 @@ mod tests {
                           "hookEventName": "PreToolUse", "toolName": "Read"});
         let tool = injected("grok", &hook(&home, "grok", "PreToolUse", &tool));
         assert!(tool.contains(line), "{tool}");
+    }
+
+    /// Decision 52: a claude-mem name past `import::NAME_BYTES`, which the viewer would refuse with
+    /// the whole request, stays out of the ask, and the others go.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_past_the_viewers_limit_is_not_sent() {
+        let p = Prompts::new(true);
+        let r = Resident::start(p.s.home.path(), 2_000, json!([]), Duration::ZERO);
+        let names = [
+            "payments".to_owned(),
+            "n".repeat(crate::import::NAME_BYTES + 1),
+        ];
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let shown = WasShown::Keys(Vec::new());
+        let text = "where should the parser's errors end up";
+        let answer = ask_resident(p.s.home.path(), (&p.repo, &names), text, &shown, deadline);
+        answer
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(r.asked()[0]["projects"], json!(["payments"]));
     }
 
     /// G23 (Codex on #521): a prompt that shows the manifest (Cursor's, after a compaction) sends

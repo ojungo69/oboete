@@ -375,7 +375,7 @@ The user can turn injection on or off and set its size per kind: SessionStart, p
 
 - Imported memories (claude-mem ~150k and current oboete) are labelled imported.
 - They are for search and timeline only, with status unknown.
-- They are never injected or used as current, except in the per-prompt block, labelled imported with their status unknown (decision 44), and only through an explicit mapping to the calling repository: a document maps to the repository its session started in, as oboete recorded that session, never by a project's name, and a document of a session oboete never recorded stays search-only ([prompt-context.md](prompt-context.md), [#506](https://github.com/ojungo69/oboete/issues/506)). History import does not imply live conversation ingestion or response-time context delivery; see [spec-client-runtime.md](spec-client-runtime.md).
+- They are never injected or used as current, except in the per-prompt block, labelled imported with their status unknown (decision 44), and only through an explicit mapping to the calling repository: a document maps to the repository its session started in, as oboete recorded that session, or, since decision 52, to a checkout one of whose claude-mem names is its project, and any other document of a session oboete never recorded stays search-only ([prompt-context.md](prompt-context.md), [#506](https://github.com/ojungo69/oboete/issues/506)). History import does not imply live conversation ingestion or response-time context delivery; see [spec-client-runtime.md](spec-client-runtime.md).
 
 ### 4.6 Per-prompt injection
 
