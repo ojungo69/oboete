@@ -757,13 +757,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             )
         }
         Ask::Given(Some(v)) => Some(match active.clone() {
-            Some(embedder) => (
-                Vector::Used,
-                Some(Near {
-                    embedder,
-                    vector: v.to_vec(),
-                }),
-            ),
+            Some(embedder) => (Vector::Used, Some(Near::new(embedder, v.to_vec()))),
             None => (Vector::Skipped(VectorSkip::NoVectors), None),
         }),
         // Before anything else: an excluded repository's query is never sent (row 30-2). One the
@@ -806,9 +800,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             RawArm::Only => None,
             _ => Some(imported_fts(&k, q, depth + forgotten.len())),
         };
-        let rows = match q.raw {
-            RawArm::Off => Ok(Vec::new()),
-            _ => super::raw_order(
+        let raw_order = || {
+            super::raw_order(
                 Some(&raw),
                 &k,
                 &q.text,
@@ -817,8 +810,11 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 q.skip_session.as_deref(),
                 raw_kinds(q),
                 depth,
-            ),
+            )
         };
+        // The records' full text is read while the query's call is out (D8); with no call out, only
+        // when they can take a place (below).
+        let mut rows = (q.raw != RawArm::Off && asked.is_err()).then(raw_order);
         let (vector, near) = match asked {
             Ok(ready) => ready,
             Err(call) => match call.join() {
@@ -853,8 +849,16 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 .filter_map(|key| by_key.remove(&key))
                 .collect();
         }
-        if q.raw != RawArm::Off {
-            let mut order = rows?;
+        // N5 (docs/memory-lookup.md): below the other legs in relevance order, the records come
+        // after `q.limit` of the other legs' documents when those are as many, and take no place
+        // (each leg keeps to a kind filter before its depth): they are neither ranked nor read
+        // (1.5 s of a cold lookup and 0.64 s of a warm one on this PC's store, 2026-10-20).
+        let below = q.raw == RawArm::Below && q.order == Order::Relevance;
+        if q.raw != RawArm::Off && !(below && imports.len() >= q.limit) {
+            let mut order = match rows.take() {
+                Some(rows) => rows?,
+                None => raw_order()?,
+            };
             if let Some(near) = &near {
                 order = rrf(&order, &near.query_knn(&k, q, "r", depth)?);
                 order.truncate(depth);
@@ -1059,10 +1063,7 @@ fn embedded(
     }
     Ok(match result {
         Ok(mut v) => match v.pop() {
-            Some(vector) if vector.len() == crate::embed::DIM => Ok(Near {
-                embedder: embedder.id,
-                vector,
-            }),
+            Some(vector) if vector.len() == crate::embed::DIM => Ok(Near::new(embedder.id, vector)),
             _ => Err(VectorSkip::Error),
         },
         Err(f) if f.status.is_none() && f.message.contains("timeout") => Err(VectorSkip::Timeout),
@@ -1107,10 +1108,7 @@ fn local_query(
     };
     match reader(home)?.embed(&[sent], wait) {
         Ok(mut vectors) => (vectors.pop())
-            .map(|vector| Near {
-                embedder: crate::embed::EMBEDDER.to_owned(),
-                vector,
-            })
+            .map(|vector| Near::new(crate::embed::EMBEDDER.to_owned(), vector))
             .ok_or(VectorSkip::Error),
         Err(Busy::Loading) => Err(VectorSkip::Loading),
         Err(Busy::Timeout) => Err(VectorSkip::Timeout),
@@ -1338,9 +1336,19 @@ fn sidecar(raw: &Raw, k: &Connection, keys: &[String]) -> Result<String> {
 struct Near {
     embedder: String,
     vector: Vec<f32>,
+    /// `prefetch_vectors`' connections, opened at the first rescoring and kept for the other legs'.
+    readers: std::sync::OnceLock<Vec<std::sync::Mutex<Connection>>>,
 }
 
 impl Near {
+    fn new(embedder: String, vector: Vec<f32>) -> Self {
+        Self {
+            embedder,
+            vector,
+            readers: std::sync::OnceLock::new(),
+        }
+    }
+
     /// Q5: keep the existing bounded KNN candidate pool, but remove unselected kinds before
     /// taking the leg's depth and fusing its ranks. This reads only kind metadata for filtering;
     /// the display readers below still decide visibility and gate the actual hits.
@@ -1514,12 +1522,14 @@ impl Near {
             .prepare(&sql)?
             .query_map(params_from_iter(args), |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let mut st = k.prepare_cached(
-            "SELECT x.key, v.vec FROM vector_keys x
-             JOIN vectors v ON v.embedder = x.embedder AND v.src_sha = x.src_sha WHERE x.id = ?1",
-        )?;
+        let mut st = k.prepare_cached(VECTOR_OF)?;
         let mut scored = Vec::with_capacity(ids.len());
-        for id in ids {
+        let started = Instant::now();
+        for (n, id) in ids.iter().enumerate() {
+            // The first reads tell a cold store, whose other vectors are read ahead.
+            if n == PROBE && started.elapsed() > COLD_READ * PROBE as u32 {
+                prefetch_vectors(&self.readers, k, &ids[n..]);
+            }
             let row: Option<(String, Vec<u8>)> = st
                 .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
@@ -1537,6 +1547,62 @@ impl Near {
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
         Ok(scored)
     }
+}
+
+/// The rescoring's first reads, and the time of one above which the store is taken as cold: a
+/// vector the page cache holds takes microseconds, one read from the disk about a millisecond.
+const PROBE: usize = 8;
+const COLD_READ: Duration = Duration::from_micros(200);
+
+/// A candidate's key and fp32 vector by its index row.
+const VECTOR_OF: &str = "SELECT x.key, v.vec FROM vector_keys x
+     JOIN vectors v ON v.embedder = x.embedder AND v.src_sha = x.src_sha WHERE x.id = ?1";
+
+/// N5 (docs/memory-lookup.md): `knn_scored` reads each candidate's vector in turn, a few random
+/// pages each that a cold store reads one after another (2.1 s for a lookup's 2,092 candidates on
+/// this PC's store, 2026-10-20). Read ahead on a few connections at once, they come from the page
+/// cache, about 4 times sooner; a warm store is not read ahead, which would cost it the
+/// connections' opening (0.16 s a lookup). A vector never changes under its `src_sha`, so another
+/// snapshot's read warms the pages this one reads; nothing read here is used, and a failure only
+/// leaves the pages cold.
+fn prefetch_vectors(
+    readers: &std::sync::OnceLock<Vec<std::sync::Mutex<Connection>>>,
+    k: &Connection,
+    ids: &[i64],
+) {
+    const READERS: usize = 8;
+    // An in-memory store's pages are no file's.
+    let Some(path) = k.path().filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let readers = readers.get_or_init(|| {
+        let flags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        (0..READERS)
+            .filter_map(|_| Connection::open_with_flags(path, flags).ok())
+            .map(std::sync::Mutex::new)
+            .collect()
+    });
+    if readers.is_empty() {
+        return;
+    }
+    let parts = ids.chunks(ids.len().div_ceil(readers.len()).max(1));
+    std::thread::scope(|s| {
+        for (reader, part) in readers.iter().zip(parts) {
+            s.spawn(move || {
+                let Ok(c) = reader.lock() else {
+                    return;
+                };
+                let Ok(mut st) = c.prepare_cached(VECTOR_OF) else {
+                    return;
+                };
+                for id in part {
+                    // The vector read whole, its overflow page too.
+                    let _ = st.query_row([id], |r| r.get::<_, Vec<u8>>(1));
+                }
+            });
+        }
+    });
 }
 
 /// The Raw arms' merge (Task 6, spec 8.2 Raw): imported rank i (from 1) scores 1/(60 + i) and
@@ -1833,10 +1899,7 @@ pub fn delivered_ranked(
         _ => None,
     };
     if let (Some(embedder), Some(v)) = (active, vector) {
-        let near = Near {
-            embedder,
-            vector: v.to_vec(),
-        };
+        let near = Near::new(embedder, v.to_vec());
         let mut decided = k.prepare(&format!(
             "SELECT 1 FROM active a WHERE a.uid = ?1 AND {}",
             claims::DECIDED_WHERE
@@ -1996,6 +2059,17 @@ fn imported_leg(
 
 /// The full-text side of `imported_leg`: uids, the best first, regardless of kind (Q2).
 fn imported_fts(k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    for (sql, args) in imported_fts_sql(k, q, depth)? {
+        let mut st = k.prepare(&sql)?;
+        let uids = st.query_map(params_from_iter(args), |r| r.get(0))?;
+        found.extend(uids.collect::<rusqlite::Result<Vec<String>>>()?);
+    }
+    Ok(found)
+}
+
+/// `imported_fts`'s statements, each with its values, in the order their uids are taken.
+fn imported_fts_sql(k: &Connection, q: &Query, depth: usize) -> Result<Vec<(String, Vec<Value>)>> {
     // The index keeps no text (`content=''`): short words read the joined title and body.
     let Some((mut clauses, mut args, order, order_args)) =
         super::query_clauses(&q.text, "imported_fts", &["i.title", "i.body"])
@@ -2016,34 +2090,38 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> 
     // Once per uid before the limit: two devices' imports of one document are one (Codex on
     // #306), its newest row, as the embedding phase reads it.
     clauses.push("i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)".into());
-    let query = |sql: &str, args: Vec<Value>| -> Result<Vec<String>> {
-        Ok(k.prepare(sql)?
-            .query_map(params_from_iter(args), |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
+    // N5 (docs/memory-lookup.md): the trigrams of a few words match nearly every document, and the
+    // join read the row of each for its filters and order, 4.9 s of a lookup's 9.3 s cold on this
+    // PC's store (2026-10-20); the consumer's narrow index holds all it reads. A store whose
+    // consumer has not made it yet, and a query of short words alone, join the documents.
+    let covered = !super::trigrams(&q.text).is_empty()
+        && crate::consumer::manifest::exists(k, "index", crate::consumer::imported::COVER)?;
+    let hits = match covered {
+        true => "imported_fts f JOIN imported i INDEXED BY imported_cover ON i.rowid = f.rowid",
+        false => "imported_fts f JOIN imported i ON i.rowid = f.rowid",
     };
-    let hits = "imported_fts f JOIN imported i ON i.rowid = f.rowid";
     if order_args.is_empty() {
         args.push(Value::Integer(super::sql_limit(depth)));
         let sql = format!(
             "SELECT i.uid FROM {hits} WHERE {} ORDER BY {order}i.ts DESC LIMIT ?",
             clauses.join(" AND ")
         );
-        return query(&sql, args);
+        return Ok(vec![(sql, args)]);
     }
-    // As the raw leg: the short words reorder the best `POOL` rows (`i` names them), and a hit
-    // below them keeps its place.
+    // As the raw leg: the short words reorder the best `POOL` rows (`p` names them, whose title
+    // and body alone are read), and a hit below them keeps its place.
     let mut pool = args.clone();
     pool.push(Value::Integer(super::sql_limit(super::POOL)));
     pool.extend(order_args);
     pool.push(Value::Integer(super::sql_limit(depth.min(super::POOL))));
     let sql = format!(
-        "SELECT uid FROM (
-           SELECT i.uid, i.ts, i.title, i.body, f.rank FROM {hits}
+        "SELECT i.uid FROM (
+           SELECT i.rowid AS id, i.ts AS ts, f.rank AS rank FROM {hits}
            WHERE {} ORDER BY rank, i.ts DESC, i.rowid LIMIT ?
-         ) i ORDER BY {order}ts DESC LIMIT ?",
+         ) p JOIN imported i ON i.rowid = p.id ORDER BY {order}p.ts DESC LIMIT ?",
         clauses.join(" AND ")
     );
-    let mut found = query(&sql, pool)?;
+    let mut statements = vec![(sql, pool)];
     if depth > super::POOL {
         args.push(Value::Integer(super::sql_limit(depth - super::POOL)));
         args.push(Value::Integer(super::sql_limit(super::POOL)));
@@ -2051,9 +2129,9 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> 
             "SELECT i.uid FROM {hits} WHERE {} ORDER BY rank, i.ts DESC, i.rowid LIMIT ? OFFSET ?",
             clauses.join(" AND ")
         );
-        found.extend(query(&sql, args)?);
+        statements.push((sql, args));
     }
-    Ok(found)
+    Ok(statements)
 }
 
 /// An imported uid's hit: its newest row.
@@ -3027,6 +3105,40 @@ pub fn timeline(
     Ok(after)
 }
 
+/// `others`' imported documents (each by its newest row), of the repository's two names
+/// (`?2`, `?3`) when `named`, else of every one. N5 (docs/memory-lookup.md): a name's are read by
+/// the consumer's index `imported_time` in the side's own order, at most to the page's end
+/// (`?5` + `?6`), the text of those alone: the whole repository's with their text took 5.4 s of a
+/// cold timeline around one anchor on this PC's store (2026-10-20), 0.75 s warm.
+fn imported_side(named: bool, older: bool) -> String {
+    let (side, order) = match older {
+        true => (
+            "i.ts <= ?4 AND (i.ts < ?4 OR i.uid > ?7)",
+            "i.ts DESC, i.uid",
+        ),
+        false => ("i.ts >= ?4 AND (i.ts > ?4 OR i.uid < ?7)", "i.ts, i.uid"),
+    };
+    let documents = |filter: &str, limit: &str| {
+        format!(
+            "SELECT * FROM (
+               SELECT i.uid, i.ts, i.kind, i.repo,
+                      CASE WHEN i.title <> '' THEN i.title ELSE i.body END, 'imported'
+               FROM imported i WHERE {filter}
+                 AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+               {limit})"
+        )
+    };
+    let window = format!("{side} ORDER BY {order} LIMIT ?5 + ?6");
+    match named {
+        true => format!(
+            "{} UNION ALL {}",
+            documents("i.repo = ?2", &format!("AND {window}")),
+            documents("i.repo = ?3 AND ?3 <> ?2", &format!("AND {window}"))
+        ),
+        false => documents("1", ""),
+    }
+}
+
 /// [`timeline`]'s entries strictly past (`at`, `key`) in its order: the older the newest first
 /// (`older`, then by key), else the newer the oldest first; an empty `key` keeps every entry of
 /// `at` on the older side. At most `limit`.
@@ -3041,19 +3153,18 @@ fn others(
 ) -> Result<Vec<Item>> {
     let pending = claims::Pending::read(raw, k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
-    let items = "SELECT key, ts, kind, repo, text, class FROM (
+    let items = format!(
+        "SELECT key, ts, kind, repo, text, class FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
                   a.repo AS repo, a.body AS text, 'claim' AS class
            FROM active a WHERE ?1 IS NULL OR a.repo = ?1
-           UNION ALL
-           SELECT i.uid, i.ts, i.kind, i.repo,
-                  CASE WHEN i.title <> '' THEN i.title ELSE i.body END, 'imported'
-           FROM imported i WHERE (?1 IS NULL OR i.repo IN (?2, ?3))
-             AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+           UNION ALL {}
            UNION ALL
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
                   COALESCE(d.session, ''), 'start'
-           FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))";
+           FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))",
+        imported_side(repo.is_some(), older)
+    );
     let sql = if older {
         format!(
             "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
@@ -4312,6 +4423,189 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// N5 (docs/memory-lookup.md): with the consumer's narrow index, a trigram query reads no
+    /// document of a match but the best `POOL` ones' title and body for its short words, and finds
+    /// what the join of the documents finds, in its order. A store without the index joins them.
+    #[test]
+    fn imported_full_text_reads_the_narrow_index_and_finds_the_same() {
+        let mut s = Store::new();
+        for n in 0..40_i64 {
+            let (project, body) = match n % 4 {
+                0 => ("r", "設計 worker cache"),
+                1 => ("r", "worker restarts"),
+                2 => ("other", "worker cache misses"),
+                _ => ("r", "cache 設計"),
+            };
+            s.imported(&format!("d{n}"), project, 1_000 * (n + 1), "", body);
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let plans = |k: &Connection, text: &str| -> Vec<String> {
+            let statements = imported_fts_sql(k, &q(text), 2 * crate::search::POOL).unwrap();
+            statements
+                .iter()
+                .map(|(sql, _)| {
+                    let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+                    let nulls = vec![Value::Null; st.parameter_count()];
+                    let rows = st.query_map(params_from_iter(nulls), |r| r.get::<_, String>(3));
+                    rows.unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                        .join(" | ")
+                })
+                .collect()
+        };
+        let texts = ["worker cache", "設計 worker", "設計"];
+        let found = |k: &Connection| -> Vec<Vec<String>> {
+            texts
+                .iter()
+                .map(|t| imported_fts(k, &q(t), 2 * crate::search::POOL).unwrap())
+                .collect()
+        };
+        let covered = found(&k);
+        assert!(covered.iter().all(|uids| !uids.is_empty()), "{covered:?}");
+        for text in &texts[..2] {
+            for plan in plans(&k, text) {
+                assert!(plan.contains("COVERING INDEX imported_cover"), "{plan}");
+            }
+        }
+        // Short words alone read the documents' text, so they join the documents.
+        for plan in plans(&k, texts[2]) {
+            assert!(!plan.contains("imported_cover"), "{plan}");
+        }
+        k.execute_batch("DROP INDEX imported_cover").unwrap();
+        for text in texts {
+            for plan in plans(&k, text) {
+                assert!(!plan.contains("imported_cover"), "{plan}");
+            }
+        }
+        assert_eq!(found(&k), covered);
+    }
+
+    /// N5 (docs/memory-lookup.md): a timeline reads a repository's imported documents by the
+    /// consumer's index `imported_time` on both sides, at most to the page's end, and shows what
+    /// the scan of every document showed: the newest, around anchors, two documents of one time on
+    /// either side of one, and a page; a store without the index scans them.
+    #[test]
+    fn a_timeline_reads_a_repositorys_documents_in_time_order_and_finds_the_same() {
+        let mut s = Store::new();
+        let mut uids = Vec::new();
+        for n in 0..24_i64 {
+            let project = if n % 4 == 0 { "other" } else { "r" };
+            let body = format!("note {n}");
+            uids.push(s.imported(&format!("d{n:02}"), project, 1_000 * (n / 2 + 1), "", &body));
+        }
+        s.decided(R, 6_000, "A decision among them.", &[]);
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        for older in [true, false] {
+            let mut st = k
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    imported_side(true, older)
+                ))
+                .unwrap();
+            let nulls = vec![Value::Null; st.parameter_count()];
+            let plan: Vec<String> = st
+                .query_map(params_from_iter(nulls), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let by_time = plan
+                .iter()
+                .filter(|p| p.contains("INDEX imported_time (repo=?"));
+            assert_eq!(by_time.count(), 2, "{plan:?}");
+        }
+        let keys_of = |items: Vec<Item>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
+        let read = || -> Vec<Vec<String>> {
+            let keys = keys_of;
+            let mut out = vec![keys(timeline(home, Some(R), None, None, 30).unwrap())];
+            for anchor in [&uids[1], &uids[5], &uids[11], &uids[23]] {
+                out.push(keys(
+                    timeline(home, Some(R), Some(anchor), None, 6).unwrap(),
+                ));
+            }
+            let page = Some((3_000, uids[5].clone()));
+            out.push(keys(timeline(home, Some(R), None, page, 4).unwrap()));
+            out
+        };
+        // A claude-mem label searched as the repository is its own two names: each document once.
+        let label = crate::import::repo("r");
+        let own = keys_of(timeline(home, Some(&label), None, None, 30).unwrap());
+        assert_eq!(own.len(), 18, "{own:?}");
+        assert_eq!(own.iter().collect::<HashSet<_>>().len(), 18);
+        // Past the first of a time's two documents, the second comes first.
+        let page =
+            keys_of(timeline(home, Some(R), None, Some((4_000, uids[6].clone())), 3).unwrap());
+        assert_eq!(page.first(), Some(&uids[7]), "{page:?}");
+        let indexed = read();
+        assert_eq!(indexed[0].len(), 19, "{:?}", indexed[0]);
+        assert!(indexed.iter().all(|keys| !keys.is_empty()), "{indexed:?}");
+        k.execute_batch("DROP INDEX imported_time").unwrap();
+        assert_eq!(read(), indexed);
+    }
+
+    /// N5: by date, a record newer than every imported document comes first though the imported
+    /// documents alone fill the limit, so the records' leg is read then.
+    #[test]
+    fn by_date_a_newer_record_comes_before_imported_documents_that_fill_the_limit() {
+        let mut s = Store::new();
+        for n in 0..5 {
+            s.imported(&format!("d{n}"), "r", 1_000 + n, "", "the parser cache");
+        }
+        let seq = s.said("s", R, 9_000, "the parser cache again");
+        s.run();
+        let by_date = Query {
+            order: Order::DateDesc,
+            limit: 3,
+            ..q("parser cache")
+        };
+        let answer = s.query(&by_date);
+        assert_eq!(answer.hits.first().map(|h| h.key.clone()), Some(s.key(seq)));
+        // In relevance order the imported documents fill it, the record below them.
+        let answer = s.query(&Query {
+            limit: 3,
+            ..q("parser cache")
+        });
+        assert!(
+            answer.hits.iter().all(|h| h.class == Class::Imported),
+            "{:?}",
+            keys(&answer)
+        );
+    }
+
+    /// N5: the read ahead of a file's vectors leaves the store as it was and its connection usable;
+    /// an in-memory store's opens nothing.
+    #[test]
+    fn prefetch_reads_a_files_vectors_and_skips_memory() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let ids: Vec<i64> = k
+            .prepare("SELECT id FROM vector_keys")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!ids.is_empty());
+        let readers = std::sync::OnceLock::new();
+        prefetch_vectors(&readers, &k, &ids);
+        assert!(readers.get().is_some_and(|r| !r.is_empty()));
+        let read: i64 = k
+            .query_row("SELECT count(*) FROM vectors", [], |r| r.get(0))
+            .unwrap();
+        assert!(read > 0);
+        let memory = Connection::open_in_memory().unwrap();
+        let none = std::sync::OnceLock::new();
+        prefetch_vectors(&none, &memory, &ids);
+        assert!(none.get().is_none());
     }
 
     /// As the raw leg: an imported hit below the best `POOL` keeps its place under a larger depth

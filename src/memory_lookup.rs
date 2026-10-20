@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 /// What the answer says before the memory (claude-mem's sentence, oboete's name).
 pub const LOOKUP: &str = "oboete progressive search for the pending memory lookup (native result \
@@ -217,9 +219,27 @@ pub fn lookup(tool: &str, args: &Value, cwd: &Path, roots: &Roots) -> Option<Loo
 /// answer of `mem_search` in auto mode (at most 8 rows) on its words, inside the memory fence after
 /// `LOOKUP`, the whole within `room` UTF-16 units and cut at a line; none for any other call, with
 /// `[inject] memory_lookup` off, where nothing is recorded, before the stores are made, or when
-/// the search fails (the native lookup goes on as it would). A subagent's lookup gets it too, as
-/// claude-mem's handler runs before its subagent check.
+/// the search fails or has not answered within `LOOKUP_WAIT` (the native lookup goes on as it
+/// would). A subagent's lookup gets it too, as claude-mem's handler runs before its subagent check.
 pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Option<String>> {
+    answer_within(home, payload, room, LOOKUP_WAIT)
+}
+
+/// claude-mem's bridge gives its worker's search 3 s (`timeoutMs: 3_000`), and the native lookup
+/// goes on without it; here from the hook's start, the vector's wait included, under Claude
+/// Code's 5 s for the hook (N5). A test's lookup waits longer: a loaded run of a debug build is no
+/// hook.
+const LOOKUP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 60 } else { 3 });
+
+/// `answer`, given up `wait` after it starts: an error then, the search left on its thread until
+/// the hook exits (a read holds nothing a write cannot wait out).
+pub(crate) fn answer_within(
+    home: &Path,
+    payload: &Value,
+    room: usize,
+    wait: Duration,
+) -> anyhow::Result<Option<String>> {
+    let deadline = Instant::now() + wait;
     let Some(cwd) = payload["cwd"].as_str() else {
         return Ok(None);
     };
@@ -249,30 +269,49 @@ pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Optio
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
     // N5: the meaning side too, from the resident viewer within the prompt's wait (G23), as
     // claude-mem's worker searches with its vectors; else the words side alone.
-    let wait = std::time::Duration::from_millis(inject.per_prompt_wait_ms as u64);
-    let vector =
-        crate::hook::ask_vector(home, &repo, &found.query, std::time::Instant::now() + wait);
-    let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
-    let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
-    let search = crate::mem_search::Search {
+    let prompt_wait = Duration::from_millis(inject.per_prompt_wait_ms as u64);
+    let vector = crate::hook::ask_vector(
         home,
-        scope: repo.clone(),
-        cursors: &cursors,
-        now: crate::db::now_ms(),
-        repo: &scope,
-        rules: &settings.rules,
-        hook: true,
-        vector: vector.as_deref(),
-    };
+        &repo,
+        &found.query,
+        (Instant::now() + prompt_wait).min(deadline),
+    );
     let args = crate::mem_search::Args {
         mode: Some("auto".into()),
         query: Some(found.query),
         limit: Some(8),
         ..Default::default()
     };
+    // The search on a thread the hook does not wait for past `deadline`: a cold store's took 9 s
+    // on this PC's on 2026-10-20 (docs/memory-lookup.md).
+    let (send, answered) = std::sync::mpsc::channel();
+    let (home, rules) = (home.to_owned(), settings.rules.clone());
+    std::thread::spawn(move || {
+        let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
+        let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
+        let search = crate::mem_search::Search {
+            home: &home,
+            scope: repo.clone(),
+            cursors: &cursors,
+            now: crate::db::now_ms(),
+            repo: &scope,
+            rules: &rules,
+            hook: true,
+            vector: vector.as_deref(),
+        };
+        // No one hears an answer past the deadline.
+        let _ = send.send(search.run(&args));
+    });
+    let text = match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(text) => text?,
+        Err(RecvTimeoutError::Timeout) => {
+            anyhow::bail!("the search did not answer within {wait:?}")
+        }
+        Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
+    };
     // The egress gate over the whole answer, as the MCP server's `text` passes every answer through
     // it, before the fence (spec 6.4, 6.5).
-    Ok(match search.run(&args)? {
+    Ok(match text {
         Ok(text) => fitted(&crate::redact::outbound_with(&text, &settings.rules), room),
         Err(_) => None,
     })

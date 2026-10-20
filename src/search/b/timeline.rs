@@ -395,6 +395,22 @@ fn anchored(
 
 /// Prompt records on one side of `at`, as [`others`] reads its entries, through the record leg's
 /// reader: raw.db's text, gated, a record a tombstone hides taking no place (T2).
+/// `prompts`' query, of the repository `?1` when `named`, else of every one. N5: a repository's by
+/// the consumer's index `raw_docs_prompts`, in the side's order: the scan of every record took
+/// 0.85 s of a cold lookup's context on this PC's store (2026-10-20).
+fn prompts_sql(named: bool, older: bool) -> String {
+    let side = if older {
+        "ts <= ?2 ORDER BY ts DESC, device DESC, seq DESC"
+    } else {
+        "ts > ?2 ORDER BY ts, device, seq"
+    };
+    let of = if named { "repo = ?1" } else { "?1 IS NULL" };
+    format!(
+        "SELECT device || ':' || seq FROM raw_docs
+         WHERE kind = 'prompt' AND {of} AND {side} LIMIT ?3 OFFSET ?4"
+    )
+}
+
 fn prompts(
     raw: &Raw,
     k: &Connection,
@@ -403,15 +419,7 @@ fn prompts(
     older: bool,
     limit: usize,
 ) -> Result<Vec<Entry>> {
-    let side = if older {
-        "ts <= ?2 ORDER BY ts DESC, device DESC, seq DESC"
-    } else {
-        "ts > ?2 ORDER BY ts, device, seq"
-    };
-    let mut st = k.prepare(&format!(
-        "SELECT device || ':' || seq FROM raw_docs
-         WHERE kind = 'prompt' AND (?1 IS NULL OR repo = ?1) AND {side} LIMIT ?3 OFFSET ?4"
-    ))?;
+    let mut st = k.prepare(&prompts_sql(repo.is_some(), older))?;
     let mut out = Vec::new();
     for page in 0.. {
         let keys: Vec<String> = st
@@ -612,6 +620,29 @@ mod tests {
     const R: &str = "github.com/o/r";
     /// Nov 14, 2023, 10:13 PM UTC.
     const DAY: i64 = 1_700_000_000_000;
+
+    /// N5 (docs/memory-lookup.md): a repository's prompts are read by the consumer's index
+    /// `raw_docs_prompts` on both sides; every repository's are not.
+    #[test]
+    fn a_repositorys_prompts_are_read_by_their_index() {
+        let mut s = Store::new();
+        s.said("s", R, DAY, "Deploys wait for the canary.");
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let nulls = vec![rusqlite::types::Value::Null; st.parameter_count()];
+            let rows = st.query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3));
+            rows.unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(" | ")
+        };
+        for older in [true, false] {
+            let named = plan(&prompts_sql(true, older));
+            assert!(named.contains("INDEX raw_docs_prompts (repo=?"), "{named}");
+        }
+    }
 
     /// A home of two days: a decision the day before; a prompt, the three cards and the summary
     /// of its window; two later decisions, each said in a prompt.

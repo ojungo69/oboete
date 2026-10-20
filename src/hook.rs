@@ -4755,6 +4755,64 @@ mod tests {
         assert_eq!(r.asked(), [json!({"repo": p.repo, "text": "zebra"})]);
     }
 
+    /// N5 (docs/memory-lookup.md): a lookup whose search has not answered within its wait gives
+    /// nothing, as claude-mem's bridge gives up on its worker's search after 3 s, and the native
+    /// lookup goes on. Here a forget committing holds the search back.
+    #[test]
+    fn a_memory_lookup_past_its_wait_gives_nothing() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path();
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let lookup = |wait| crate::memory_lookup::answer_within(home, &payload, NOTE_ROOM, wait);
+        let answered = lookup(Duration::from_secs(60)).unwrap();
+        assert!(answered.is_some_and(|a| a.contains("Deploys wait")));
+        let forget = crate::dispatch::exclusive_within(home, Duration::from_secs(1)).unwrap();
+        let started = std::time::Instant::now();
+        let held = lookup(Duration::from_millis(300));
+        let took = started.elapsed();
+        drop(forget);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(
+            held.as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("did not answer within")),
+            "{held:?}"
+        );
+    }
+
+    /// N5: the lookup's wait holds the viewer's query vector too: a viewer slower than the wait
+    /// costs the lookup no more than it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_memory_lookups_wait_holds_the_viewers_vector_too() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "canary");
+        let slow = Some(json!({ "vector": vector }));
+        // The prompt's longest wait (`per_prompt_wait_ms`), past the lookup's.
+        let _r = Resident::serve(&home, 3_000, slow, Duration::from_secs(5));
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let started = std::time::Instant::now();
+        let held = crate::memory_lookup::answer_within(
+            &home,
+            &payload,
+            NOTE_ROOM,
+            Duration::from_millis(300),
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(
+            held.as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("did not answer within")),
+            "{held:?}"
+        );
+    }
+
     #[test]
     fn a_title_cannot_close_the_file_notes_fence() {
         let mut r = Reads::new();

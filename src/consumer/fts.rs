@@ -305,6 +305,12 @@ impl Consumer for Fts {
 
     fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
         schema(k)?;
+        // N5 (docs/memory-lookup.md): a timeline's prompts of a repository in time order
+        // (`search::b::timeline`), the consumer's to make, never a reader's.
+        k.execute_batch(
+            "CREATE INDEX IF NOT EXISTS raw_docs_prompts ON raw_docs(repo, ts, device, seq)
+               WHERE kind = 'prompt'",
+        )?;
         let recs = raw.after(raw.device(), after, BATCH)?;
         for r in &recs {
             let (e, text) = match &r.item {
