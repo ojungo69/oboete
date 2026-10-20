@@ -852,7 +852,8 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         // N5 (docs/memory-lookup.md): below the other legs in relevance order, the records come
         // after `q.limit` of the other legs' documents when those are as many, and take no place
         // (each leg keeps to a kind filter before its depth): they are neither ranked nor read
-        // (1.5 s of a cold lookup and 0.64 s of a warm one on this PC's store, 2026-10-20).
+        // (1.5 s of a cold lookup and 0.64 s of a warm one on a copy of this PC's store, words
+        // alone, 2026-10-20).
         let below = q.raw == RawArm::Below && q.order == Order::Relevance;
         if q.raw != RawArm::Off && !(below && imports.len() >= q.limit) {
             let mut order = match rows.take() {

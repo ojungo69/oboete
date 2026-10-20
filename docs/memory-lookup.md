@@ -68,10 +68,10 @@ page cache first, took 9.3 s, of which:
 
 - 4.9 s the imported leg's full text: the trigrams of a few words match nearly every imported
   document (235,789 of 263,208), and its join read each match's row (428 MB) for its filters and
-  order, before the 40 best were taken. The ranking alone took 0.9 s.
+  order, before the leg's 100 best were taken. The ranking alone took 0.9 s.
 - 2.1 s the rescoring of the vector side's candidates (`knn_scored`: 400 a leg, 2,092 in all), each
   fp32 vector a few random pages of a 1.1 GB table read one after another.
-- 1.5 s the records' leg (ranking 0.8 s, their text for snippets 0.7 s), whose rows come after
+- 0.95 s the records' leg (ranking 0.5 s, their text for snippets 0.45 s), whose rows come after
   the other legs' 100 documents and so never reached the 8 shown.
 - The rest the bit index's scans and the legs' hits. A lookup whose index has a title of its words
   also reads the context of each such anchor, a timeline: there the repository's imported
