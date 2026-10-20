@@ -641,14 +641,20 @@ const SESSION_FILTER: usize = 128;
 /// `imported_sessions`' query: `repo` (?1) and the names' repositories (?2, `import::name_labels`),
 /// the second side by the index `imported_project`, each document by its newest row, as `maps`
 /// and the vectors read it: one moved since to another project brings its session no more
-/// (Codex on #567).
+/// (Codex on #567). The names' sessions come from the index, and each is kept once one of its
+/// documents under the names is its document's newest row, which is looked for once a session,
+/// not once a document: a name's project of 54,946 documents in 180 sessions took 3.0 s from a
+/// cold cache with each document's row read, 69 ms so (parity row 31).
 const IMPORTED_SESSIONS: &str =
     "SELECT i.session FROM session_start s JOIN imported i ON i.session = s.session
      WHERE s.repo = ?1 AND i.kind <> 'prompt'
      UNION
-     SELECT i.session FROM imported i
-     WHERE i.repo COLLATE NOCASE IN (SELECT value FROM json_each(?2)) AND i.kind <> 'prompt'
-       AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)";
+     SELECT d.session FROM (SELECT DISTINCT session FROM imported
+       WHERE repo COLLATE NOCASE IN (SELECT value FROM json_each(?2)) AND kind <> 'prompt') d
+     WHERE EXISTS (SELECT 1 FROM imported i
+       WHERE i.session = d.session AND i.repo COLLATE NOCASE IN (SELECT value FROM json_each(?2))
+         AND i.kind <> 'prompt'
+         AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid))";
 
 fn imported_sessions(k: &Connection, repo: &str, names: &[String]) -> Result<Vec<String>> {
     use crate::consumer::manifest::exists;
@@ -6127,6 +6133,13 @@ mod tests {
             .unwrap();
         assert!(
             plan.iter().any(|d| d.contains("INDEX imported_project")),
+            "{plan:?}"
+        );
+        // Parity row 31: the newest row is looked for once a session, by the session in the
+        // index, not once for each of the names' documents, whose rows a cold cache reads slowly.
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("imported_project (repo=? AND session=?)")),
             "{plan:?}"
         );
     }

@@ -227,10 +227,14 @@ pub(crate) fn maps(k: &Connection, uid: &str, repo: &str, names: &[String]) -> R
 
 /// #506 (spec 4.5, 4.12): imported document `uid` as a prompt's block names it, by its newest
 /// row, when it may take a place there: its time, what it is (`note` for an agent's note, else
-/// `imported <kind> (status unknown)`) and its words, its title and its body's first sentence (the
-/// longer alone when one starts with the other, as a note saved without a title is titled with its
-/// text's start, `mcp::untitled`). None for a prompt (a prompt's text is never injected, 4.6), a
-/// forgotten document (milestone 5 D5), or one with no words.
+/// `imported <kind> (status unknown)`) and its words, its title and its text (the longer alone when
+/// one starts with the other, as a note saved without a title is titled with its text's start,
+/// `mcp::untitled`; a title that only begins a word of the text is kept). Its text is an
+/// observation's whole body, its narrative and then its facts, and a note's whole text, as
+/// claude-mem's block shows an observation's narrative (parity row 31); a summary's is its first
+/// sentence, its request, as a session summary of oboete's is named. None for a prompt
+/// (a prompt's text is never injected, 4.6), a forgotten document (milestone 5 D5), or one with no
+/// words.
 pub(crate) fn prompt_line(
     k: &Connection,
     raw: &Raw,
@@ -259,19 +263,27 @@ pub(crate) fn prompt_line(
     if kind == "prompt" || raw.forgotten(uid)? {
         return Ok(None);
     }
-    let (title, first) = (title.trim(), crate::cards::first_sentence(body.trim()));
-    let stem = title.trim_end_matches("...");
-    let words = if first.starts_with(stem) {
-        first
-    } else if stem.starts_with(&first) {
+    let note = source == crate::raw::NOTE_SOURCE;
+    let body = body.trim();
+    // An observation's body is its narrative, then each fact on a line of its own
+    // (`import::observation_body`), which no mark tells apart from a list in the narrative: the
+    // body is shown whole, the line cut at `CLIP` (CodeRabbit on #571).
+    let text = match kind.as_str() {
+        "summary" => crate::cards::first_sentence(body),
+        _ => body.to_owned(),
+    };
+    let title = title.trim();
+    let words = if crate::cards::begins_with_title(&text, title) {
+        text
+    } else if title.trim_end_matches("...").starts_with(&text) {
         title.to_owned()
     } else {
-        format!("{title}: {first}")
+        format!("{title}: {text}")
     };
     if words.trim().is_empty() {
         return Ok(None);
     }
-    let what = match source == crate::raw::NOTE_SOURCE {
+    let what = match note {
         true => "note".to_owned(),
         false => format!("imported {kind} (status unknown)"),
     };
@@ -368,9 +380,10 @@ mod tests {
     }
 
     /// #506: how a prompt's block names an imported document, by its newest row: an observation
-    /// by its title and its body's first sentence, labelled imported with its status unknown; a
-    /// summary by its body's first sentence (its request); a note saved without a title by its
-    /// text's start once. A prompt, and a forgotten document, take no place.
+    /// by its title and its whole body, its narrative and its facts (parity row 31), a title that
+    /// only begins a word of it kept, labelled imported with its status unknown; a summary by its
+    /// body's first sentence (its request); a note saved without a title by its whole text once.
+    /// A prompt, and a forgotten document, take no place.
     #[test]
     fn a_prompt_names_an_imported_document_by_its_newest_row() {
         let home = tempfile::tempdir().unwrap();
@@ -379,13 +392,16 @@ mod tests {
             kind: kind.into(),
             ..doc(id, title, body)
         };
-        let untitled = "Use tabs in Makefiles. Make needs them.";
+        let untitled = "Use tabs in Makefiles. Make needs them, and spaces break the build where \
+                        nobody looks.";
+        // `mcp::untitled`: a note saved without a title is titled with its first 60 characters.
+        let title = format!("{}...", &untitled[..60]);
         raw.append_imports(vec![
             doc("o1", "Old title", "Old text."),
             doc(
                 "o1",
                 "Gateway retries",
-                "Payments retry on a timeout.\n- three times",
+                "Payments retry on a timeout. The gateway answers late at night.\n- three times",
             ),
             kind(
                 "s1",
@@ -396,9 +412,14 @@ mod tests {
             kind("p1", "prompt", "", "Why does the payment fail?"),
             ImportDoc {
                 source: crate::raw::NOTE_SOURCE.into(),
-                ..kind("n1", "note", untitled, untitled)
+                ..kind("n1", "note", &title, untitled)
             },
             doc("o2", "Forgotten", "Gone."),
+            doc(
+                "o3",
+                "Plan",
+                "Planet-scale storage was picked:\n- one region\n- two copies",
+            ),
         ])
         .unwrap();
         raw.append_ops(&[(
@@ -415,7 +436,15 @@ mod tests {
             line("claude-mem:abc:o1"),
             at(
                 "imported decision (status unknown)",
-                "Gateway retries: Payments retry on a timeout."
+                "Gateway retries: Payments retry on a timeout. The gateway answers late at night.\n\
+                 - three times"
+            )
+        );
+        assert_eq!(
+            line("claude-mem:abc:o3"),
+            at(
+                "imported decision (status unknown)",
+                "Plan: Planet-scale storage was picked:\n- one region\n- two copies"
             )
         );
         assert_eq!(

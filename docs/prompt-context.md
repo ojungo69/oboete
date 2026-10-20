@@ -110,9 +110,10 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   (by the share of the prompt's trigrams their line holds) and the meaning list (by cosine) fused
   by reciprocal rank (`search::b::rrf_lists`), 5 places in all. A short prompt still gets the
   claims its words match, as before (`shortlist::MIN_GRAMS`). Each line is dated with the
-  document's ID, which `get` takes: `- <date> <type> card <id>: <title>: <first sentence>` (a
-  summary's card, whose title is that sentence, once), `- <date> session summary <id>:
-  <request>`; the block is "Memory that may bear on this prompt".
+  document's ID, which `get` takes: `- <date> <type> card <id>: <title>: <narrative>` (a
+  summary's card, whose title is its narrative's first sentence, by its narrative once; the whole
+  narrative since 2026-10-21, below), `- <date> session summary <id>: <request>`; the block is
+  "Memory that may bear on this prompt".
 - **Shown set.** A card's or a summary's entry carries `"kind"`, and the correction pass skips it
   (#506 item 1). The cards and summaries the session start's block showed join the set too, so a
   prompt does not show them again; a compaction's manifest replaces the set, as before. Grok's turn
@@ -123,15 +124,16 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   the 50 gets anything (1 does, at 0.68). Against the delivered claims alone (53) it would be 0.64,
   too few to stand for a store's cards and summaries. At 0.67, 22 of the 42 false-premise
   questions with claims in their repository get one, which the one evaluation judges.
-- **The wait** defaults to 1,000 ms, measured on 2026-10-14 on this PC's WSL: a copy of the dev
-  home (5,307 claims and 2,691 cards embedded by the local bge-m3), the resident viewer warm, 47
-  questions of the dev pool sent as the hook sends them, with claude-mem's own processes running
-  as they do. The viewer's answer: p50 70 ms, p95 88 ms, max 101 ms. The whole prompt hook: p50
-  86 ms, p95 103 ms, max 116 ms with it; p50 24 ms, p95 37 ms, max 71 ms with the words side
-  alone; p50 19 ms, p95 24 ms on `main` before this change. A model the viewer dropped loads in
-  about 2 s, the viewer answering at once without a vector meanwhile. The default leaves ten
-  times the 95th percentile, for a busier machine and a larger store (the bit index's scan grows
-  with it), and stays under claude-mem's 2 s for Codex.
+- **The wait** defaulted to 1,000 ms (2,000 ms since 2026-10-21: the first prompt after a pause,
+  below), measured on 2026-10-14 on this PC's WSL: a copy of the dev home (5,307 claims and 2,691
+  cards embedded by the local bge-m3), the resident viewer warm, 47 questions of the dev pool sent
+  as the hook sends them, with claude-mem's own processes running as they do. The viewer's answer:
+  p50 70 ms, p95 88 ms, max 101 ms. The whole prompt hook: p50 86 ms, p95 103 ms, max 116 ms with
+  it; p50 24 ms, p95 37 ms, max 71 ms with the words side alone; p50 19 ms, p95 24 ms on `main`
+  before this change. A model the viewer dropped loads in about 2 s, the viewer answering at once
+  without a vector meanwhile. The default leaves ten times the 95th percentile, for a busier machine
+  and a larger store (the bit index's scan grows with it), and stays under claude-mem's 2 s for
+  Codex.
 - **Doctor and the page.** Doctor's per-prompt line says whether a resident viewer answers now, and
   how the last prompt that could ask took its block (`state/prompt-side`: in time, after the wait,
   a request the viewer failed before the wait was over, no viewer, or the viewer's reason for no
@@ -197,9 +199,10 @@ a document it cannot map stays search-only.
   read. claude-mem's own per-prompt search is by meaning only. So imported history and notes come
   only while the resident viewer answers with a vector.
 - **The line**, labelled imported with its status unknown (spec 4.5): `- <date> imported <kind>
-  (status unknown) <uid>: <title>: <first sentence>`, a summary by its body's first sentence (its
-  request); an agent's note as `- <date> note <uid>: <title>: <first sentence>`, the longer alone
-  when one starts with the other (a note saved without a title is titled with its text's start).
+  (status unknown) <uid>: <title>: <body>`, an observation's whole body (its narrative, then its
+  facts) since 2026-10-21 (below), a summary by its body's first sentence (its request); an
+  agent's note as `- <date> note <uid>: <title>: <text>`, the longer alone when one starts with all
+  of the other (a note saved without a title is titled with its text's start).
   The uid is the one `get` takes. It joins the shown set with the kind `imported` (the correction
   pass skips it, as a card) and Grok's kept picks with that kind. The block's lead names notes and
   imported history and says imported history's status is unknown.
@@ -221,8 +224,9 @@ a document it cannot map stays search-only.
   partition takes about 110 ms at that size whatever the repository filter (sqlite-vec reads every
   row of a partition), so a repository to which no imported document and no note maps skips it.
   This repository is searched by its projects; one of fewer sessions by its session list, which
-  costs about 1.2 ms a session. The wait's default of 1,000 ms stays: four times the 95th
-  percentile at full size, and the imported history grows only by a later import.
+  costs about 1.2 ms a session. The wait's default of 1,000 ms stayed: four times the 95th
+  percentile at full size, and the imported history grows only by a later import (2,000 ms since
+  2026-10-21, below).
 
 ## Decision 52: imported history by the project's name too (2026-10-20)
 
@@ -298,6 +302,83 @@ rows. The session rule stays, and so do v1's documents and agents' notes.
   after their import, and reach the main checkout only through their sessions until a plain
   import, which also brings what claude-mem recorded after the switch (claude-mem-parity.md, the
   first open check).
+
+## The first prompt after a pause, and whole narratives (2026-10-21, parity row 31)
+
+**What was wrong.** From 2026-10-13 to 2026-10-20 no prompt in Claude Code got oboete's block:
+Claude Code's transcripts on this PC hold 779 additional contexts from prompt hooks, none of them
+oboete's block and 31 claude-mem's (29 for typed prompts). The same prompts asked of the resident
+viewer afterwards found documents for 11 of 15. A copy of this PC's store with its files dropped
+from the page cache (`posix_fadvise`) showed what a cold store does: the viewer's answer took
+3.65 to 3.92 s, past the hook's 1,000 ms (and past 3,000 ms, the longest wait the settings allow),
+so such a prompt takes the words side, which nothing passed. That the owner's prompts met a cold
+store is inferred, not measured: WSL runs in 22 GB with `autoMemoryReclaim = gradual` and swap in
+use, and the two stores are 6.7 GB. The check is oboete's block counted in the transcripts once
+this change is installed, and `state/prompt-side` after a prompt. Of the 3.9 s, `imported_sessions`
+took 2.85 s: its side for decision 52's names read the row of each of the names' 54,946
+documents to find whether it was its document's newest row. The KNN of the four families took
+about 1.0 s more (claims 0.26 s, imported history 0.62 s), the prompt's vector 0.04 s. Warm, the
+answer took 0.29 s and the hook 0.6 to 0.7 s.
+
+**What changed:**
+
+- **`IMPORTED_SESSIONS` looks for the newest row once a session**, not once a document: the
+  names' sessions come from the index `imported_project`, and each is kept once one of its
+  documents under the names is its document's newest row. The same sessions (180 for the name
+  of this repository's checkout, 140 for another): 69 ms from a cold cache instead of 3,008, 10 ms
+  warm instead of 106. The viewer's cold answer took 1.27 s with it.
+- **`per_prompt_wait_ms` is 2,000 by default** (it was 1,000): a cold answer of 1.27 s then
+  reaches the prompt. On the copy, cold, the prompt hook took 1.31 to 1.35 s and its block had
+  five lines in each of 3 runs; at 1,000 ms it had none in 3 runs (1.22 to 1.24 s: cold, the
+  hook's own words side takes about that long). 2,000 ms is claude-mem's budget for Codex's
+  prompt hook (claude-mem waits up to 10 s for Claude Code's); a prompt waits only as long as the
+  viewer takes, 0.5 to 0.7 s warm. The 2026-10-14 measurement behind the old default was on
+  a copy of the dev home with a warm cache.
+- **The line** shows a card's whole narrative after its title, as claude-mem's block shows an
+  observation's (`/api/context/semantic` in `SearchRoutes.ts`; `CLAUDE_MEM_SEMANTIC_INJECT_FORMAT`
+  is `narrative` by default in 14.0.1, and its hook passes the block on whole). A card stored
+  without a title, titled with its narrative's first sentence, shows its narrative once
+  (`cards::begins_with_title`: the text holds all of the title, to a word's or a sentence's end);
+  a title that only begins a word of the narrative ("Plan" and "Planet-scale") is kept. An
+  imported observation shows its whole body as stored, its narrative and then its facts
+  (`import::observation_body`), as no mark tells the facts apart from a list in the narrative;
+  an agent's note shows its whole text; a session summary, oboete's or imported, its request as
+  before. A line is still cut at `consumer::manifest::CLIP` (400 characters) at a space or a
+  clause mark, as a session start's line is, and `get` shows the rest.
+- **What a prompt is matched on does not change**: a card's title and its narrative's first
+  sentence. A longer text would let more cards past the threshold of 4.6, which the one evaluation
+  sets (decision 34). The meaning side reads each document's vector, as before.
+- **`per_prompt_chars` is 2,500 by default** (it was 1,500): five lines of 400 characters with the
+  longest labels (an imported line's date, kind, `(status unknown)` and uid: 83 characters) and
+  the heading take 2,459; 1,500 holds three such lines. On this PC from 2026-10-13 to 2026-10-20,
+  claude-mem's block was 2,053 characters at the median and 3,712 at the 90th percentile, with five
+  observations each. oboete's cards' narratives are 192 characters at the median and 290 at the
+  90th percentile (3,454 cards), and claude-mem's observations' 408 and 624 (82,033 in the last 30
+  days). A smaller `per_prompt_chars` keeps fewer whole lines: the block leaves out the lines past
+  it.
+
+A cold cache has no seam in the tests: the measurement is a script on a copy of the store
+(the store copied with SQLite's backup, its identity kept, a viewer of its own on another port,
+the files dropped from the page cache before each run, the prompt hook run as Claude Code runs
+it). The tests hold what can be held: the query's plan looks for the newest row by the session in
+the index, the defaults, the lines and what they are matched on.
+
+Tests: `search::b::tests::imported_history_reaches_a_prompt_by_the_checkouts_names_too` (the
+names' sessions, a moved document's session left out, the plan),
+`hook::tests::the_default_block_holds_five_whole_narratives`,
+`a_cards_later_sentences_do_not_carry_it_past_the_threshold`,
+`a_prompt_gets_the_cards_and_summaries_its_words_bear_on` (a card's whole narrative),
+`a_card_the_session_start_showed_is_not_shown_again` (a summary's card by its narrative once),
+`a_title_that_only_begins_a_word_of_the_narrative_is_kept`,
+`cards::tests::a_text_begins_with_its_title_only_at_a_words_end`,
+`consumer::imported::tests::a_prompt_names_an_imported_document_by_its_newest_row` (an
+observation's whole body, a title that only begins a word of it kept, a note whole, a summary by
+its request), and `config::tests::inject_settings_check_ranges_and_save_alone` (the defaults).
+Mutation check: 13 mutants (the two defaults, a card's line, a summary card's title once, the
+words matched, an imported observation by its first sentence or cut at its facts, a summary by
+its whole body, the title check as a plain prefix, without the cut or without the sentence's end,
+the query once a document again, the query without the newest row), each failed by one of these
+tests.
 
 ## Where it does not reach yet
 
@@ -383,8 +464,8 @@ The second slice:
 - `session_start` keeps each session's first record as records come, an older one read later, a
   rewind and a forget, and fills a store from before it; each record's text keeps its own row in
   the raw index (`search::tests::session_start_keeps_where_each_session_started`).
-- The line: an observation by its title and first sentence, a summary by its request, a note
-  saved without a title once, none for a prompt or a forgotten document
+- The line: an observation by its title and its whole body, a summary by its request, a note
+  saved without a title by its whole text once, none for a prompt or a forgotten document
   (`consumer::imported::tests::a_prompt_names_an_imported_document_by_its_newest_row`).
 - In the hook: the viewer's imported hit joins the block with its line, the shown set with its
   kind, is not shown again nor corrected, and Grok's turn keeps it

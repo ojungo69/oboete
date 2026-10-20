@@ -1023,10 +1023,12 @@ impl Default for Inject {
             session_start_list: true,
             session_start_chars: crate::consumer::manifest::CAP,
             per_prompt: false,
-            per_prompt_chars: 1_500,
-            // Ten times the prompt hook's 95th percentile with the resident viewer on this PC's
-            // WSL (docs/prompt-context.md, as built).
-            per_prompt_wait_ms: 1_000,
+            // Five lines of `consumer::manifest::CLIP` characters with their labels and heading:
+            // each card shows its whole narrative (parity row 31).
+            per_prompt_chars: 2_500,
+            // The resident viewer's answer from a cold cache, about 1.3 s on this PC's WSL, with
+            // room; claude-mem's 2 s for Codex (docs/prompt-context.md, parity row 31).
+            per_prompt_wait_ms: 2_000,
             memory_lookup: true,
             memory_instructions: true,
             correction: true,
@@ -1958,7 +1960,7 @@ model = { gone = "m" }
                 d.correction,
                 d.correction_chars
             ),
-            (false, 1_500, 1_000, true, 800)
+            (false, 2_500, 2_000, true, 800)
         );
         for (key, low, high) in [
             ("session_start_chars", 1_000, 9_000),
