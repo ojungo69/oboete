@@ -32,6 +32,8 @@ const MAX_BODY: usize = 16 * 1024;
 /// `search::b::PROMPT_SHOWN` of at most 256 bytes each, a claim's 64), with room for JSON's quotes
 /// and escapes (Codex on #521).
 const PROMPT_BODY: usize = 1024 * 1024;
+/// Decision 52: the claude-mem names a prompt's checkout may send (claude-mem gives three at most).
+const PROMPT_NAMES: usize = 16;
 /// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
 /// version always fit.
 const MAX_KEY_BODY: usize = 1024;
@@ -1285,6 +1287,9 @@ impl Viewer {
             /// The keys of a manifest the hook shows in this call, before it stores them.
             #[serde(default)]
             shown: Vec<String>,
+            /// Decision 52: the checkout's claude-mem names (`import::names_of`).
+            #[serde(default)]
+            projects: Vec<String>,
         }
         let asked = match serde_json::from_slice::<Asked>(body) {
             Ok(a)
@@ -1297,7 +1302,9 @@ impl Viewer {
                         .as_deref()
                         .is_none_or(|s| (1..=512).contains(&s.len()))
                     && a.shown.len() <= search::b::PROMPT_SHOWN
-                    && a.shown.iter().all(|k| k.len() <= 256) =>
+                    && a.shown.iter().all(|k| k.len() <= 256)
+                    && a.projects.len() <= PROMPT_NAMES
+                    && a.projects.iter().all(|p| (1..=256).contains(&p.len())) =>
             {
                 a
             }
@@ -1313,7 +1320,12 @@ impl Viewer {
                     .map(|(key, _)| key),
             );
         }
-        match search::b::prompt_near(&self.home, &asked.repo, &asked.prompt, &shown) {
+        match search::b::prompt_near(
+            &self.home,
+            (&asked.repo, &asked.projects),
+            &asked.prompt,
+            &shown,
+        ) {
             Ok(near) => Response::json(&json!({
                 "vector": match near.vector {
                     search::b::Vector::Used => json!("used"),
@@ -5990,6 +6002,22 @@ curate = false
         more.push("f".repeat(64));
         let over = json!({"repo": "github.com/o/r", "prompt": "x", "shown": more});
         assert_eq!(ask(&[HOST, TOKEN], &over).status, 400);
+        // Decision 52: the checkout's claude-mem names, at most `PROMPT_NAMES` of 1 to 256 bytes.
+        let named = |projects: Value| json!({"repo": "r", "prompt": "x", "projects": projects});
+        let most: Vec<String> = (0..PROMPT_NAMES).map(|_| "n".repeat(256)).collect();
+        assert_eq!(ask(&[HOST, TOKEN], &named(json!(most))).status, 200);
+        for bad in [
+            json!(vec!["n"; PROMPT_NAMES + 1]),
+            json!([""]),
+            json!(["n".repeat(257)]),
+            json!("payments"),
+        ] {
+            assert_eq!(
+                ask(&[HOST, TOKEN], &named(bad.clone())).status,
+                400,
+                "{bad}"
+            );
+        }
         get(&v, "/api/settings");
         assert!(!opener.exists());
         std::fs::remove_dir_all(&dir).ok();
