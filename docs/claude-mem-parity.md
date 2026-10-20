@@ -111,7 +111,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | X7 | Raw-text retention by days, after curation, with a page control. Off by default on both sides. | equal_or_better | rare | tool-uses.ts:494 / src/retention.rs:34 |
 | X8 | The feed has a stable newest-first order, and repeated prompts are never merged. | equal_or_better | rare | PaginationHelper.ts:102 / src/view.rs:2110 |
 | X9 | Long prompt cards are not collapsed behind "Show more". The server caps a prompt at 2,000 characters. | partial | rare | viewer-template.html:1152 / src/view.rs:2100 |
-| X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. oboete has no such view. Decision 53: built in the table's order, before removal. | missing | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
+| X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written and shows the recorded wording when no compatible model can write one, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. oboete has no such view. Decision 53: built in the table's order, before removal. | missing | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
 
 The sections after this one are the first comparison, of 2026-10-03 against claude-mem 13.28.0.
 
@@ -214,7 +214,7 @@ each milestone and new features are added here.
 
 | # | Difference | Size |
 |---|---|---|
-| X10 | **What was asked, and where it stands.** claude-mem 14.0 opens its viewer on My Work: every request given to the agents as a card with a plain summary a model writes, who worked on it, its project and its status, attention first, and a mark that a person checked the result. oboete keeps the same requests and the work after them but shows no such view. The summaries add a model call per request: on this PC about 68 requests a day (the median of 13 days to 2026-10-20). | M |
+| X10 | **What was asked, and where it stands.** claude-mem 14.0 opens its viewer on My Work: every request given to the agents as a card with a plain summary a model writes (the recorded wording when none can), who worked on it, its project and its status, attention first, and a mark that a person checked the result. oboete keeps the same requests and the work after them but shows no such view. The summaries add a model call per request: on this PC about 68 requests a day (the median of 13 days to 2026-10-20). | M |
 
 ### After the switch, first
 
