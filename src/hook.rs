@@ -2129,7 +2129,7 @@ fn read_doc(
             let narrative = c.narrative.trim();
             let shown = if narrative.is_empty() {
                 c.row_title.clone()
-            } else if narrative.starts_with(c.row_title.trim_end_matches('…')) {
+            } else if crate::cards::begins_with_title(narrative, &c.row_title) {
                 narrative.to_owned()
             } else {
                 format!("{}: {narrative}", c.row_title)
@@ -5133,6 +5133,18 @@ mod tests {
         for line in &lines {
             assert!(text.contains(line.as_str()), "{line}\n{text}");
         }
+    }
+
+    /// Parity row 31 (Codex on #571): a card whose title only begins a word of its narrative keeps
+    /// its title on the line.
+    #[test]
+    fn a_title_that_only_begins_a_word_of_the_narrative_is_kept() {
+        let mut p = Prompts::new(true);
+        let narrative = "Planet-scale storage was picked for the index.";
+        let (card, _) = work(&mut p, 2, "Plan", narrative, "");
+        let text = p.prompt("s1", "planet-scale storage was picked for the index");
+        let line = format!("bugfix card {card}: Plan: {narrative}\n");
+        assert!(text.contains(&line), "{text}");
     }
 
     /// Parity row 31: a card's line shows its whole narrative, but the words side still matches the

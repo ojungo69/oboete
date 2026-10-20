@@ -230,6 +230,19 @@ pub(crate) fn first_sentence(text: &str) -> String {
     format!("{}…", cut.trim_end())
 }
 
+/// Whether `text` begins with all of `title`, so that a line names it by its text alone: an empty
+/// title, a title cut with `…` or `...` from the text's start (a summary's card, a note saved
+/// without a title), or one that ends where a word or a sentence ends. A title that only begins
+/// a word of the text ("Plan" and "Planet-scale") is kept (Codex on #571).
+pub(crate) fn begins_with_title(text: &str, title: &str) -> bool {
+    let stem = title.trim_end_matches('…').trim_end_matches("...");
+    let cut = stem.len() < title.len();
+    text.strip_prefix(stem).is_some_and(|rest| {
+        cut || !stem.chars().next_back().is_some_and(char::is_alphanumeric)
+            || !rest.chars().next().is_some_and(char::is_alphanumeric)
+    })
+}
+
 /// The offset as claude-mem's header names a zone it has no name for: `GMT+9`, `GMT-7`,
 /// `GMT+5:30`, and `UTC` at none.
 fn gmt(seconds: i32) -> String {
@@ -909,6 +922,38 @@ mod tests {
             .with_ymd_and_hms(2026, 10, d, h, m, s)
             .unwrap()
             .timestamp_millis()
+    }
+
+    /// Parity row 31 (Codex on #571): a line names a document by its text alone only when the text
+    /// holds all of its title: an empty one, one cut from the text's start, or one that ends where a
+    /// word or a sentence ends; a title that only begins a word of the text is kept.
+    #[test]
+    fn a_text_begins_with_its_title_only_at_a_words_end() {
+        assert!(begins_with_title("Planet-scale storage.", ""));
+        assert!(begins_with_title(
+            "The lexer reads one line. Then more.",
+            "The lexer reads one line."
+        ));
+        assert!(begins_with_title("Fix the parser now", "Fix the parser"));
+        assert!(begins_with_title("One line\nand another", "One line"));
+        assert!(begins_with_title(
+            "Use tabs in Makefiles, always",
+            "Use tabs in Make..."
+        ));
+        assert!(begins_with_title(
+            "Use tabs in Makefiles, always",
+            "Use tabs in Make…"
+        ));
+        assert!(begins_with_title(
+            "設定を一つにまとめた。次は表。",
+            "設定を一つにまとめた。"
+        ));
+        assert!(!begins_with_title(
+            "Planet-scale storage was picked.",
+            "Plan"
+        ));
+        assert!(!begins_with_title("設定画面を直した。", "設定"));
+        assert!(!begins_with_title("Other words.", "Plan"));
     }
 
     fn card(op_seq: i64, n: i64, ts: i64, kind: Option<&str>, title: &str) -> Card {

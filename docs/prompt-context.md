@@ -199,10 +199,10 @@ a document it cannot map stays search-only.
   read. claude-mem's own per-prompt search is by meaning only. So imported history and notes come
   only while the resident viewer answers with a vector.
 - **The line**, labelled imported with its status unknown (spec 4.5): `- <date> imported <kind>
-  (status unknown) <uid>: <title>: <narrative>`, an observation's whole narrative, its body before
-  its facts, since 2026-10-21 (below), a summary by its body's first sentence (its request); an
-  agent's note as `- <date> note <uid>: <title>: <text>`, the longer alone when one starts with the
-  other (a note saved without a title is titled with its text's start).
+  (status unknown) <uid>: <title>: <body>`, an observation's whole body (its narrative, then its
+  facts) since 2026-10-21 (below), a summary by its body's first sentence (its request); an
+  agent's note as `- <date> note <uid>: <title>: <text>`, the longer alone when one starts with all
+  of the other (a note saved without a title is titled with its text's start).
   The uid is the one `get` takes. It joins the shown set with the kind `imported` (the correction
   pass skips it, as a card) and Grok's kept picks with that kind. The block's lead names notes and
   imported history and says imported history's status is unknown.
@@ -336,13 +336,15 @@ answer took 0.29 s and the hook 0.6 to 0.7 s.
   a copy of the dev home with a warm cache.
 - **The line** shows a card's whole narrative after its title, as claude-mem's block shows an
   observation's (`/api/context/semantic` in `SearchRoutes.ts`; `CLAUDE_MEM_SEMANTIC_INJECT_FORMAT`
-  is `narrative` by default in 14.0.1, and its hook passes the block on whole); a card stored
-  without a title, titled with its narrative's first sentence, shows its narrative once. An
-  imported observation shows its whole narrative, its body before its facts
-  (`import::observation_body`), and an agent's note its whole text; a session summary, oboete's
-  or imported, shows its request as before. A line is still cut at `consumer::manifest::CLIP`
-  (400 characters) at a space or a clause mark, as a session start's line is, and `get` shows the
-  rest.
+  is `narrative` by default in 14.0.1, and its hook passes the block on whole). A card stored
+  without a title, titled with its narrative's first sentence, shows its narrative once
+  (`cards::begins_with_title`: the text holds all of the title, to a word's or a sentence's end);
+  a title that only begins a word of the narrative ("Plan" and "Planet-scale") is kept. An
+  imported observation shows its whole body as stored, its narrative and then its facts
+  (`import::observation_body`), as no mark tells the facts apart from a list in the narrative;
+  an agent's note shows its whole text; a session summary, oboete's or imported, its request as
+  before. A line is still cut at `consumer::manifest::CLIP` (400 characters) at a space or a
+  clause mark, as a session start's line is, and `get` shows the rest.
 - **What a prompt is matched on does not change**: a card's title and its narrative's first
   sentence. A longer text would let more cards past the threshold of 4.6, which the one evaluation
   sets (decision 34). The meaning side reads each document's vector, as before.
@@ -367,12 +369,16 @@ names' sessions, a moved document's session left out, the plan),
 `a_cards_later_sentences_do_not_carry_it_past_the_threshold`,
 `a_prompt_gets_the_cards_and_summaries_its_words_bear_on` (a card's whole narrative),
 `a_card_the_session_start_showed_is_not_shown_again` (a summary's card by its narrative once),
+`a_title_that_only_begins_a_word_of_the_narrative_is_kept`,
+`cards::tests::a_text_begins_with_its_title_only_at_a_words_end`,
 `consumer::imported::tests::a_prompt_names_an_imported_document_by_its_newest_row` (an
-observation's narrative without its facts, a note whole, a summary by its request), and
-`config::tests::inject_settings_check_ranges_and_save_alone` (the defaults). Mutation check: 10
-mutants (the two defaults, a card's line, a summary card's title once, the words matched, an
-imported narrative, its facts, a note, the query once a document again, the query without the
-newest row), each failed by one of these tests.
+observation's whole body, a title that only begins a word of it kept, a note whole, a summary by
+its request), and `config::tests::inject_settings_check_ranges_and_save_alone` (the defaults).
+Mutation check: 13 mutants (the two defaults, a card's line, a summary card's title once, the
+words matched, an imported observation by its first sentence or cut at its facts, a summary by
+its whole body, the title check as a plain prefix, without the cut or without the sentence's end,
+the query once a document again, the query without the newest row), each failed by one of these
+tests.
 
 ## Where it does not reach yet
 
@@ -458,9 +464,8 @@ The second slice:
 - `session_start` keeps each session's first record as records come, an older one read later, a
   rewind and a forget, and fills a store from before it; each record's text keeps its own row in
   the raw index (`search::tests::session_start_keeps_where_each_session_started`).
-- The line: an observation by its title and its whole narrative without its facts, a summary by
-  its request, a note saved without a title by its whole text once, none for a prompt or a
-  forgotten document
+- The line: an observation by its title and its whole body, a summary by its request, a note
+  saved without a title by its whole text once, none for a prompt or a forgotten document
   (`consumer::imported::tests::a_prompt_names_an_imported_document_by_its_newest_row`).
 - In the hook: the viewer's imported hit joins the block with its line, the shown set with its
   kind, is not shown again nor corrected, and Grok's turn keeps it
