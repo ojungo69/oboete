@@ -5,11 +5,11 @@ comparison; decision 37 sets the scope based on it. Decision 50: claude-mem come
 table, brought up to date against claude-mem's current release, shows every difference closed or
 accepted by the owner.
 
-## Status against claude-mem 13.40.0 (2026-10-17)
+## Status against claude-mem 13.40.0 (2026-10-17), new features to 14.0.1 (2026-10-20)
 
 ### How it was checked
 
-Every row of this table was read again against claude-mem 13.40.0 source and against oboete `main` at 576cb79. The rows that #557 to #564 changed were brought up to date by those PRs, and the counts, the open checks and rows 5 and X2 on 2026-10-17 with `main` at ec084a1. Row 8 and the counts were brought up to date on 2026-10-20 by #566 and decision 52. The 13.29 to 13.40 changelog was read for new features. A feature that extends a row was merged into that row. A feature with no row got a new id (`G01`, `X1` to `X9`). A second reader re-checked each status and tried to refute it. Where that reader corrected the first reading, the corrected status is used. Where two readers disagreed, the table says so in the row. Rows were checked on the owner's single WSL PC. Only counts of the owner's data are given here. Decision 50 (2026-10-17) is the rule: claude-mem comes off only once oboete stands in for its functions almost completely. So an accepted difference that is worse still counts against removal.
+Every row of this table was read again against claude-mem 13.40.0 source and against oboete `main` at 576cb79. The rows that #557 to #564 changed were brought up to date by those PRs, and the counts, the open checks and rows 5 and X2 on 2026-10-17 with `main` at ec084a1. Row 8 and the counts were brought up to date on 2026-10-20 by #566 and decision 52, and row N5 by #568. The 13.41 and 14.0.1 changelogs and source were read on 2026-10-20: My Work got row X10 (decision 53); TeamBrain, a paid team service, and 13.41's work-state telemetry (row 57) add none. The 13.29 to 13.40 changelog was read for new features. A feature that extends a row was merged into that row. A feature with no row got a new id (`G01`, `X1` to `X10`). A second reader re-checked each status and tried to refute it. Where that reader corrected the first reading, the corrected status is used. Where two readers disagreed, the table says so in the row. Rows were checked on the owner's single WSL PC. Only counts of the owner's data are given here. Decision 50 (2026-10-17) is the rule: claude-mem comes off only once oboete stands in for its functions almost completely. So an accepted difference that is worse still counts against removal.
 
 Impact means how often the owner would notice the difference: `daily`, `weekly`, `rare` or `none`. `blocker` means a one-time step that removal depends on.
 
@@ -19,9 +19,9 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 |---|---|
 | equal_or_better | 25 |
 | partial | 27 |
-| missing | 18 |
+| missing | 19 |
 | accepted_difference | 7 |
-| total | 77 |
+| total | 78 |
 
 ### Open checks before removal
 
@@ -98,7 +98,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | N2 | A newer home is refused before any write. One stamp guards raw, knowledge and providers, and it is raised inside an IMMEDIATE transaction. | equal_or_better | none | sqlite/connection.ts:46 / src/raw.rs:1556 |
 | N3 | save_memory is built and passes the capture gate. A note does not appear in the page's Feed. `metadata` is ignored. | partial | rare | save-memory.ts:5 / src/view.rs:2060 |
 | N4 | mem_search has the same contract: guided and auto modes, cursors, limits and a 15-minute TTL. | equal_or_better | none | progressive-search.ts:126 / src/mem_search.rs:223 |
-| N5 | The native memory-lookup bridge uses the same triggers. Since 2026-10-17 it searches with the meaning side too when the resident viewer makes the lookup's query vector within the prompt's wait, else words only, as the prompt's block does (docs/memory-lookup.md). Its speed fell short: from 2026-10-15 to 2026-10-20, 39 of 59 lookups ended at Claude Code's 5 s with nothing shown, where claude-mem's bridge took a median of 247 ms. Since 2026-10-20 it gives up after 3 s as claude-mem's does, and its search reads far less: on a copy of this PC's store a cold lookup took 2.5 to 2.9 s and a warm one 0.8 to 1.0 s; a cold lookup of words most documents hold (MEMORY.md's) still passed 3 s and gave nothing. | partial | rare | memory-search.ts:154 / src/memory_lookup.rs:232 |
+| N5 | The native memory-lookup bridge uses the same triggers. Since 2026-10-17 it searches with the meaning side too when the resident viewer makes the lookup's query vector within the prompt's wait, else words only, as the prompt's block does (docs/memory-lookup.md). Its speed fell short: from 2026-10-15 to 2026-10-20, 39 of 59 lookups ended at Claude Code's 5 s with nothing shown, where claude-mem's bridge took a median of 247 ms. Since 2026-10-20 it gives up after 3 s as claude-mem's does, and its search reads far less: on a copy of this PC's store a cold lookup took 2.5 to 2.9 s and a warm one 0.8 to 1.0 s; a cold lookup of words most documents hold (MEMORY.md's) still passed 3 s and gave nothing. Installed and measured on the store itself the same day, the stores' pages dropped before each cold run: 4 of 6 lookups answered in 2.72 to 2.95 s cold and 2 passed 3 s; warm, 0.78 to 0.99 s. | partial | rare | memory-search.ts:154 / src/memory_lookup.rs:256 |
 | N6 | The same memory-use instructions at session start, with a switch. | equal_or_better | none | memory-instructions.ts:1 / src/mem_search.rs:27 |
 | N7 | A Codex subagent gets its memory back after a compaction. | equal_or_better | none | codex-compaction-gate.ts:1 / src/hook.rs:589 |
 | G01 | work_state_write and work_state_read, shown first at session start, with a 3,000-character cap. Any field name is kept. | equal_or_better | daily | WorkStateRenderer.ts:13 / src/work_state.rs:17 |
@@ -111,6 +111,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | X7 | Raw-text retention by days, after curation, with a page control. Off by default on both sides. | equal_or_better | rare | tool-uses.ts:494 / src/retention.rs:34 |
 | X8 | The feed has a stable newest-first order, and repeated prompts are never merged. | equal_or_better | rare | PaginationHelper.ts:102 / src/view.rs:2110 |
 | X9 | Long prompt cards are not collapsed behind "Show more". The server caps a prompt at 2,000 characters. | partial | rare | viewer-template.html:1152 / src/view.rs:2100 |
+| X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written and shows the recorded wording when no compatible model can write one, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. oboete has no such view. Decision 53: built in the table's order, before removal. | missing | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
 
 The sections after this one are the first comparison, of 2026-10-03 against claude-mem 13.28.0.
 
@@ -208,6 +209,12 @@ each milestone and new features are added here.
 | N5 | **An agent's own memory lookups answered from memory.** claude-mem 13.35 answers a native memory lookup (an agent's notes folder, its memory search) with its own search of the same words, beside the native result, on Claude Code and Codex. oboete had nothing there. Built with claude-mem's recognition and matchers, `mem_search` in auto mode on the words side, in the file note's room, and the same switch (docs/memory-lookup.md). Folders of claude-mem's watcher stay with row 44. | M |
 | N4 | **One guided memory search.** claude-mem 13.35 gives the agent `mem_search`: an index, the context around chosen entries and their details, in steps it cannot skip, each taking a short continuation, or all at once in auto mode. oboete had `search`, `timeline` and `get`, which teach the same order and do not hold to it. Built with the same name, arguments, steps and texts on oboete's readers; the older tools stay and say to prefer it (docs/mem-search.md). | M |
 | N3 | **The agent saves a note on purpose.** claude-mem 13.35 gives the agent `save_memory`, which stores a note that search finds and the session start never shows. oboete had no such tool (row 32). Built with the same name and arguments: the note is a document of its repository, through the capture gate, refused where nothing is recorded, labelled `note` in search (docs/tools.md, slice 4). | M |
+
+### Before removal (added 2026-10-20, decision 53, from claude-mem 14.0)
+
+| # | Difference | Size |
+|---|---|---|
+| X10 | **What was asked, and where it stands.** claude-mem 14.0 opens its viewer on My Work: every request given to the agents as a card with a plain summary a model writes (the recorded wording when none can), who worked on it, its project and its status, attention first, and a mark that a person checked the result. oboete keeps the same requests and the work after them but shows no such view. The summaries add a model call per request: on this PC about 68 requests a day (the median of 13 days to 2026-10-20). | M |
 
 ### After the switch, first
 
