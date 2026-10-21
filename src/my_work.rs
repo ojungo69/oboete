@@ -18,13 +18,14 @@ use crate::redact::Rules;
 use crate::turns::TurnSummary;
 
 /// What is read, at most, as claude-mem's agent view reads it (`readAgentRecords`,
-/// `buildAgentView`): the newest 240 work items, 300 observations (cards here), 100 summaries.
+/// `buildAgentView`): the newest 240 work items, 300 observations (cards here), 100 summaries,
+/// of what no exclusion takes (`link`, `newest`).
 const WORK: usize = 240;
 const CARDS: usize = 300;
 const SUMMARIES: usize = 100;
-/// shortcut: the newest 2,000 live prompts, where claude-mem reads every prompt of the sessions it
-/// loaded; a session whose first prompt is older has its oldest one read as its ask. Read them by
-/// session when a home holds more.
+/// shortcut: the newest 2,000 live prompts no exclusion takes, where claude-mem reads every prompt
+/// of the sessions it loaded; a session whose first prompt is older has its oldest one read as its
+/// ask. Read them by session when a home holds more.
 const PROMPTS: usize = 2_000;
 /// An ask and a follow-up, in characters, and the follow-ups kept (`requestText`, scope updates).
 const ASK: usize = 1_200;
@@ -493,6 +494,27 @@ fn link(
     Ok(kept)
 }
 
+/// The newest `bound` of the records `page` reads that `keep` takes, newest first: the reader
+/// pages on from each page's last record past the rest, so what an excluded session wrote takes
+/// no part in a bound and pushes out no older record (Codex on #574).
+fn newest<T, P>(
+    bound: usize,
+    mut page: impl FnMut(Option<&P>) -> Result<(Vec<T>, bool)>,
+    position: impl Fn(&T) -> P,
+    keep: impl Fn(&T) -> bool,
+) -> Result<Vec<T>> {
+    let (mut kept, mut before) = (Vec::new(), None);
+    loop {
+        let (records, more) = page(before.as_ref())?;
+        before = records.last().map(&position);
+        kept.extend(records.into_iter().filter(&keep));
+        if kept.len() >= bound || !more {
+            kept.truncate(bound);
+            return Ok(kept);
+        }
+    }
+}
+
 /// What a request takes of a conversation: all of it, or the replies its writes were made in.
 enum Owns {
     All,
@@ -566,7 +588,12 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         .map(|(a, s)| (gate(a), gate(s)))
         .collect();
     let mut convs: BTreeMap<Key, Conversation> = BTreeMap::new();
-    let (prompts, _) = raw.prompt_events(None, None, PROMPTS)?;
+    let prompts = newest(
+        PROMPTS,
+        |before| raw.prompt_events(None, before, PROMPTS),
+        |(device, seq, e)| (e.ts, device.clone(), *seq),
+        |(_, _, e)| !excluded.contains(&(gate(&e.agent), gate(&e.session))),
+    )?;
     for (device, seq, e) in prompts.into_iter().rev() {
         let c = convs.entry((gate(&e.agent), gate(&e.session))).or_default();
         c.repos.extend(e.repo.as_deref().map(gate));
@@ -579,7 +606,12 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
             ts: e.ts,
         });
     }
-    let (summaries, _) = crate::turns::page(&k, &raw, None, None, SUMMARIES, &rules)?;
+    let summaries = newest(
+        SUMMARIES,
+        |before| crate::turns::page(&k, &raw, None, before, SUMMARIES, &rules),
+        TurnSummary::position,
+        |s| !excluded.contains(&(s.agent.clone(), s.session.clone())),
+    )?;
     for s in summaries {
         let span = k.query_row(
             "SELECT from_seq, through FROM turns WHERE device = ?1 AND op_seq = ?2",
@@ -592,7 +624,12 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         c.repos.extend(s.repo.clone());
         c.turns.push(Turn { s, span });
     }
-    let (cards, _) = crate::cards::page(&k, &raw, None, None, CARDS, &rules)?;
+    let cards = newest(
+        CARDS,
+        |before| crate::cards::page(&k, &raw, None, before, CARDS, &rules),
+        Card::position,
+        |c| (c.agent.clone().zip(c.session.clone())).is_none_or(|key| !excluded.contains(&key)),
+    )?;
     for card in cards {
         let (Some(agent), Some(session)) = (card.agent.clone(), card.session.clone()) else {
             continue;
@@ -606,7 +643,6 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         c.repos.extend(card.repo.clone());
         c.cards.push(Shown { c: card, span });
     }
-    convs.retain(|key, _| !excluded.contains(key));
     let writes = (raw.native_work_writes()?.into_iter())
         .filter(|w| !excluded_repos.contains(&w.repo))
         .collect();
@@ -1776,5 +1812,74 @@ mod tests {
         assert_eq!(ids(&v), ["c:claude:s1"]);
         assert_eq!(tasks(by_id(&v, "c:claude:s1")), ["parser"]);
         assert_eq!(v["unlinked"], 0);
+    }
+
+    /// The design's 1 and 5: an excluded session's prompts, summaries and cards take no part in
+    /// the `PROMPTS`, `SUMMARIES` and `CARDS` read either, so newer ones push out no request's
+    /// ask, summary or activity (Codex on #574).
+    #[test]
+    fn excluded_sessions_take_no_part_in_the_readers_bounds() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Fix the parser.");
+        let r = h.reply("s1", -59_000);
+        let summary = h.turn(
+            "s1",
+            (p, r),
+            -59_000,
+            json!({"request": "Parser work", "completed": "Fixed."}),
+        );
+        let card = h.s.cards(
+            p,
+            p,
+            json!([{"type": "change", "title": "Parser fixed", "narrative": "x"}]),
+            false,
+        );
+        let (private, t) = ("github.com/o/private", h.t);
+        let x: Vec<i64> = (0..PROMPTS as i64)
+            .map(|i| {
+                h.s.said("x", private, t - 50_000 + i, "Fix the private thing.")
+            })
+            .collect();
+        for i in 0..SUMMARIES as i64 {
+            let f = json!({"request": "Private work", "completed": "Done."});
+            h.turn("x", (x[0], x[0]), -50_000 + i, f);
+        }
+        let many = vec![json!({"type": "change", "title": "Private", "narrative": "x"}); CARDS];
+        h.s.cards(x[0], x[0], Value::Array(many), false);
+        h.s.exclude(private);
+        let v = h.read(Range::Day, h.t);
+        assert_eq!(ids(&v), ["c:claude:s1"]);
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(
+            (&s1["ask"]["from"], &s1["ask"]["text"]),
+            (&json!("prompt"), &json!("Fix the parser."))
+        );
+        assert_eq!(s1["summaries"], json!([summary]));
+        assert_eq!(s1["cards"], json!(card));
+    }
+
+    /// The design's 5: a reader that pages on past an excluded session's records reads its bound
+    /// and no more, each record once: here the `SUMMARIES` newest of a session's own.
+    #[test]
+    fn a_reader_that_pages_on_reads_its_bound_once() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Fix the parser.");
+        let r = h.reply("s1", -59_000);
+        let f = json!({"request": "Parser work", "completed": "Fixed."});
+        let mut s1: Vec<String> = (0..SUMMARIES as i64)
+            .map(|i| h.turn("s1", (p, r), -50_000 + i, f.clone()))
+            .collect();
+        let private = "github.com/o/private";
+        let x =
+            h.s.said("x", private, h.t - 40_000, "Fix the private thing.");
+        for i in 0..SUMMARIES as i64 - 1 {
+            h.turn("x", (x, x), -40_000 + i, f.clone());
+        }
+        s1.push(h.turn("s1", (p, r), -30_000, f));
+        h.s.exclude(private);
+        let v = h.read(Range::Day, h.t);
+        s1.reverse();
+        s1.truncate(SUMMARIES);
+        assert_eq!(by_id(&v, "c:claude:s1")["summaries"], json!(s1));
     }
 }
