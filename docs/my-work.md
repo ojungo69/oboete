@@ -184,8 +184,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 - Work state ties to the session whose single matching `work_state_write` call is within 5 s; two
   matching calls, or none, tie it to no session, and it is unlinked and counted unless it names a
   `request_id` with a recorded request, which is then a request of its own on that wording, as
-  claude-mem's `explicit-work-state-request`; work state imported from claude-mem is neither read
-  nor counted.
+  claude-mem's `explicit-work-state-request`; while a session is excluded such work is neither
+  shown nor counted, since it may be that session's; work state imported from claude-mem is
+  neither read nor counted.
 - Each status and alias above, from the request's recorded status and its work state; work that is
   all done, or an ended session, alone is not "Ready to check"; 6 quiet hours is "No recent
   update"; attention first orders them.
@@ -229,9 +230,12 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   is the work of its newest write that links, as claude-mem credits it. The calls are found by
   time through `raw_docs_tools`, a new index the fts consumer makes in knowledge.db, as it makes
   `raw_docs_prompts` (2.6 s once on this PC's store, and no hook waits on it); before the worker
-  has made it, nothing links. On this PC each of the 77 writes had exactly one such call, 14 to
-  158 ms after it. Each tool record is read once in a read, however many writes it is near. A
-  write whose fields the gate stored otherwise than its call's input links to nothing.
+  has made it, nothing links. An item no call ties to a session may be an excluded session's
+  write in a shown repository (capture refuses that session's later tool calls), so while a
+  session is excluded it is neither shown nor counted, in every repository, and before the index
+  no work is (Codex on #574). On this PC each of the 77 writes had exactly one such call,
+  14 to 158 ms after it. Each tool record is read once in a read, however many writes it is near.
+  A write whose fields the gate stored otherwise than its call's input links to nothing.
 - **The request's own status** (#570): the newest record among its items of `request_complete` or
   `request_status`, each from the item's own fields, else its list's, `request_complete` first at
   the same time, decides first; then its work's, claude-mem's `statusFor`. A recorded

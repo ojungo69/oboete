@@ -439,7 +439,9 @@ fn call(raw: &Raw, (device, seq): (&str, i64), rules: &Rules) -> Result<Option<C
 /// the worker has made it, and each is read once (CodeRabbit on #574). The newest `WORK` items
 /// of `work`, newest first, that no `excluded` conversation wrote: only the link names an
 /// excluded session's work, so its items are linked and left out until `WORK` are kept, and
-/// take no part in the bound (Codex on #574).
+/// take no part in the bound (Codex on #574). An item no call ties to a session may be an
+/// excluded session's too, so while a session is excluded it is left out as well; before the
+/// index every item is such (Codex on #574).
 fn link(
     raw: &Raw,
     k: &Connection,
@@ -448,7 +450,8 @@ fn link(
     excluded: &HashSet<Key>,
 ) -> Result<Vec<Work>> {
     if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
-        return Ok(work.into_iter().take(WORK).collect());
+        let shown = if excluded.is_empty() { WORK } else { 0 };
+        return Ok(work.into_iter().take(shown).collect());
     }
     let mut near = k.prepare_cached(
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
@@ -484,10 +487,10 @@ fn link(
                 break;
             }
         }
-        if w.by
-            .as_ref()
-            .is_none_or(|(key, ..)| !excluded.contains(key))
-        {
+        // shortcut: while a session is excluded, work of no known session is left out in every
+        // repository, not only those an excluded session touched; narrow it when a home with an
+        // exclusion loses work it should show.
+        if (w.by.as_ref()).map_or(excluded.is_empty(), |(key, ..)| !excluded.contains(key)) {
             kept.push(w);
         }
     }
@@ -1924,5 +1927,41 @@ mod tests {
         );
         assert_eq!(tasks(r), ["a"]);
         assert_eq!(v["unlinked"], 1);
+    }
+
+    /// The design's 1: an item no call ties to a session may be an excluded session's, so while a
+    /// session is excluded it is not read; before the fts consumer has made `raw_docs_tools` no
+    /// item is tied to one, so then no work is read (Codex on #574).
+    #[test]
+    fn work_of_no_known_session_is_not_read_while_a_session_is_excluded() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let private = "github.com/o/private";
+        h.s.said("x", private, h.t - 60_000, "Fix the private thing.");
+        h.wrote(
+            "x",
+            "plan",
+            json!({"task": "p", "request_id": "P", "request": "Fix the private thing",
+                "status": "doing"}),
+        );
+        h.write(
+            "loose",
+            json!({"task": "q", "request_id": "Q", "request": "Fix the loose thing",
+                "status": "doing"}),
+        );
+        let unindexed = |h: &Home| {
+            h.s.run();
+            (crate::knowledge::open(h.s.home.path()).unwrap())
+                .execute_batch("DROP INDEX raw_docs_tools")
+                .unwrap();
+            super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap()
+        };
+        let v = unindexed(&h);
+        assert!(ids(&v).contains(&"r:P".into()) && ids(&v).contains(&"r:Q".into()));
+        h.s.exclude(private);
+        for v in [h.read(Range::All, h.t + 10_000), unindexed(&h)] {
+            assert_eq!(ids(&v), ["c:claude:s1"]);
+            assert_eq!(v["unlinked"], 0);
+        }
     }
 }

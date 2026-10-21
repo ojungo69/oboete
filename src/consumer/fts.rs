@@ -312,7 +312,7 @@ impl Consumer for Fts {
                WHERE kind = 'prompt'",
         )?;
         // X10 (docs/my-work.md): the tool calls near a work state write, by time
-        // (`my_work::calls_near`), the consumer's to make, as the prompts' is.
+        // (`my_work::link`), the consumer's to make, as the prompts' is.
         k.execute_batch(
             "CREATE INDEX IF NOT EXISTS raw_docs_tools ON raw_docs(ts, device, seq)
                WHERE kind = 'tool'",
