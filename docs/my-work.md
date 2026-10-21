@@ -223,11 +223,14 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   time through `raw_docs_tools`, a new index the fts consumer makes in knowledge.db, as it makes
   `raw_docs_prompts` (2.6 s once on this PC's store, and no hook waits on it); before the worker
   has made it, nothing links. On this PC each of the 77 writes had exactly one such call, 14 to
-  158 ms after it. A write whose fields the gate stored otherwise than its call's input links to
-  nothing.
+  158 ms after it. Each tool record is read once in a read, however many writes it is near. A
+  write whose fields the gate stored otherwise than its call's input links to nothing.
 - **The request's own status** (#570): the newest record among its items of `request_complete` or
   `request_status`, each from the item's own fields, else its list's, `request_complete` first at
-  the same time, decides first; then its work's, claude-mem's `statusFor`. A request's prompts,
+  the same time, decides first; then its work's, claude-mem's `statusFor`. A recorded
+  `request_status` reads with the aliases an item's status reads with (`failed` is blocked,
+  `running` in progress, `queued` to do, `dropped` closed), where claude-mem's lifecycle takes only
+  its exact status names and leaves the rest to the work (Codex on #574). A request's prompts,
   replies and cards are one more row of its work, as claude-mem's observations are, so work that
   is all done reads "Update recorded" until it has been quiet for 6 hours.
 - **Its identity** (#570): `c:<agent>:<session>`, or `r:<request_id>`, the id trimmed and a number

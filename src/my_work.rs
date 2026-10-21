@@ -395,75 +395,79 @@ struct Call {
     fields: Map<String, Value>,
 }
 
-/// The calls of oboete's `work_state_write` recorded within `CALL_MS` of `ts`, through the fts
-/// consumer's index `raw_docs_tools`; none before the worker has made it.
-fn calls_near(raw: &Raw, k: &Connection, ts: i64, rules: &Rules) -> Result<Vec<Call>> {
-    if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
-        return Ok(Vec::new());
+/// The call of oboete's `work_state_write` that live record `(device, seq)` is, if it is one: its
+/// conversation, repository, and the list and fields it sent.
+fn call(raw: &Raw, (device, seq): (&str, i64), rules: &Rules) -> Result<Option<Call>> {
+    let Some(Item::Event(e)) = (raw.after(device, seq - 1, 1)?.pop())
+        .filter(|r| r.seq == seq)
+        .map(|r| r.item)
+    else {
+        return Ok(None);
+    };
+    let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
+        return Ok(None);
+    };
+    let ours = body["tool"]
+        .as_str()
+        .and_then(crate::curate::served)
+        .is_some_and(|(server, name)| crate::curate::oboete(server) && name == "work_state_write");
+    if !crate::raw::is_live(&e.source) || !ours {
+        return Ok(None);
     }
-    let mut st = k.prepare_cached(
-        "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
-         WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
-    )?;
-    let rows: Vec<(String, i64)> = st
-        .query_map(params![ts - CALL_MS, ts + CALL_MS], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let sent: Option<Value> = match &body["input"] {
+        Value::String(s) => serde_json::from_str(s).ok(),
+        v => Some(v.clone()),
+    };
+    let Some(sent) = sent else { return Ok(None) };
+    let (Some(list), Some(fields)) = (sent["list"].as_str(), sent["fields"].as_object()) else {
+        return Ok(None);
+    };
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
-    let mut out = Vec::new();
-    for (device, seq) in rows {
-        let Some(Item::Event(e)) = (raw.after(&device, seq - 1, 1)?.pop())
-            .filter(|r| r.seq == seq)
-            .map(|r| r.item)
-        else {
-            continue;
-        };
-        let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
-            continue;
-        };
-        let ours = body["tool"]
-            .as_str()
-            .and_then(crate::curate::served)
-            .is_some_and(|(server, name)| {
-                crate::curate::oboete(server) && name == "work_state_write"
-            });
-        if !crate::raw::is_live(&e.source) || !ours {
-            continue;
-        }
-        let sent: Option<Value> = match &body["input"] {
-            Value::String(s) => serde_json::from_str(s).ok(),
-            v => Some(v.clone()),
-        };
-        let Some(sent) = sent else { continue };
-        let (Some(list), Some(fields)) = (sent["list"].as_str(), sent["fields"].as_object()) else {
-            continue;
-        };
-        out.push(Call {
-            key: (gate(&e.agent), gate(&e.session)),
-            device,
-            seq,
-            repo: e.repo.clone(),
-            list: list.trim().to_owned(),
-            fields: fields.clone(),
-        });
-    }
-    Ok(out)
+    Ok(Some(Call {
+        key: (gate(&e.agent), gate(&e.session)),
+        device: device.to_owned(),
+        seq,
+        repo: e.repo.clone(),
+        list: list.trim().to_owned(),
+        fields: fields.clone(),
+    }))
 }
 
 /// claude-mem's attribution: each item is the work of the conversation of its newest write that
-/// exactly one call matches, by repository, list and fields, within `CALL_MS`.
+/// exactly one call matches, by repository, list and fields, within `CALL_MS`. The tool records
+/// near a write are found by time through the fts consumer's index `raw_docs_tools`, none before
+/// the worker has made it, and each is read once (CodeRabbit on #574).
 fn link(raw: &Raw, k: &Connection, rules: &Rules, work: &mut [Work]) -> Result<()> {
+    if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
+        return Ok(());
+    }
+    let mut near = k.prepare_cached(
+        "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
+         WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
+    )?;
+    let mut read: HashMap<(String, i64), Option<Call>> = HashMap::new();
     for w in work.iter_mut() {
         for write in w.writes.iter().rev() {
-            let calls = calls_near(raw, k, write.ts, rules)?;
-            let mut matching = calls.into_iter().filter(|c| {
-                c.repo.as_deref() == Some(write.repo.as_str())
-                    && c.list == write.list
-                    && c.fields == write.fields
-            });
-            if let (Some(c), None) = (matching.next(), matching.next()) {
-                w.by = Some((c.key, c.device, c.seq));
+            let span = params![write.ts - CALL_MS, write.ts + CALL_MS];
+            let rows: Vec<(String, i64)> = near
+                .query_map(span, |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for record in &rows {
+                if !read.contains_key(record) {
+                    let c = call(raw, (&record.0, record.1), rules)?;
+                    read.insert(record.clone(), c);
+                }
+            }
+            let matching: Vec<&Call> = (rows.iter())
+                .filter_map(|record| read[record].as_ref())
+                .filter(|c| {
+                    c.repo.as_deref() == Some(write.repo.as_str())
+                        && c.list == write.list
+                        && c.fields == write.fields
+                })
+                .collect();
+            if let [c] = matching[..] {
+                w.by = Some((c.key.clone(), c.device.clone(), c.seq));
                 break;
             }
         }
@@ -929,20 +933,7 @@ fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
     {
         status = "unknown";
     }
-    if let Some(s) = lifecycle.as_deref()
-        && let Some(known) = [
-            "needs-you",
-            "blocked",
-            "in-progress",
-            "quiet",
-            "done",
-            "todo",
-            "unknown",
-            "closed",
-        ]
-        .into_iter()
-        .find(|k| *k == s)
-    {
+    if let Some(known) = lifecycle.as_deref().and_then(category) {
         status = known;
     }
     match status {
@@ -951,6 +942,23 @@ fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
         "in-progress" => "working",
         other => other,
     }
+}
+
+/// The status a recorded request status means, its aliases read as `statusFor` reads an item's
+/// (Codex on #574: claude-mem's lifecycle takes only its exact status names, so a recorded
+/// `failed` left the work to decide); none for one that names no status.
+fn category(status: &str) -> Option<&'static str> {
+    Some(match status {
+        "needs-you" => "needs-you",
+        "blocked" | "failed" => "blocked",
+        "doing" | "in-progress" | "active" | "running" => "in-progress",
+        "todo" | "planned" | "queued" => "todo",
+        "closed" | "dropped" => "closed",
+        "done" => "done",
+        "quiet" => "quiet",
+        "unknown" => "unknown",
+        _ => return None,
+    })
 }
 
 /// Whether a turn op, kept or skipped, covers `said`: the reply it led to has had its summary
@@ -1465,6 +1473,14 @@ mod tests {
             ("working", json!({"task": "t", "status": "in progress"})),
             ("todo", json!({"task": "t", "status": "planned"})),
             ("unknown", json!({"task": "t", "status": "someday"})),
+            (
+                "blocked",
+                json!({"task": "t", "status": "doing", "request_status": "failed"}),
+            ),
+            (
+                "working",
+                json!({"task": "t", "status": "todo", "request_status": "Running"}),
+            ),
         ];
         for (i, (_, fields)) in cases.iter().enumerate() {
             let session = format!("s{i}");
