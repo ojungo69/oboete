@@ -32,7 +32,10 @@ column, `expired`, holds the time it expired. `Raw::after` reads such a row as
 - **Why the row stays**: a seq is a row's (`MAX(seq) + 1` is the next), a restore keeps a
   migration's ops only while every seq of it has a row, and the curation checkpoint stays.
 - **Body readers**: every query that reads `body` is checked for the empty body; the compression
-  consumer, the rescan and the masks pass an expired row over.
+  consumer, the rescan and the masks pass an expired row over. My Work (docs/my-work.md) reads a
+  `work_state_write` call's body to tie the work it wrote to its session: an expired call ties
+  none, so that work counts among the unlinked while its request keeps its summaries and cards;
+  keeping the tie past expiry needs it stored where expiry leaves it (#570).
 
 ## Store format
 

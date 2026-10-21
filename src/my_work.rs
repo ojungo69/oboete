@@ -403,6 +403,8 @@ struct Call {
 /// The call of oboete's `work_state_write` that live record `(device, seq)` is, if it is one: its
 /// conversation, repository, and the list and fields it sent.
 fn call(raw: &Raw, (device, seq): (&str, i64)) -> Result<Option<Call>> {
+    // An expired record (docs/retention.md) keeps its labels but not what it sent, so, as a
+    // forgotten one, it is no call: the work it wrote counts among the unlinked.
     let Some(Item::Event(e)) = (raw.after(device, seq - 1, 1)?.pop())
         .filter(|r| r.seq == seq)
         .map(|r| r.item)
@@ -795,11 +797,54 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
 
     let since = range.since(now);
     let mut answers = Vec::new();
+    let mut key = None;
     for r in &requests {
-        answers.extend(answer(r, &convs, &work, (&raw, &k, &rules), (since, now))?);
+        let stores = (&raw, &k, &rules);
+        answers.extend(answer(
+            r,
+            &convs,
+            &work,
+            stores,
+            (home, &mut key),
+            (since, now),
+        )?);
     }
     answers.sort_by_key(|v| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     Ok(json!({"requests": answers, "unlinked": unlinked}))
+}
+
+/// The home's key of the fingerprints of masked ids (`answer`): 32 random bytes in
+/// `state/my-work.key`, made the first time an id is masked and never in an answer, so that a
+/// fingerprint tells nothing of a guess at the id it stands for (CodeRabbit on #574). Whoever can
+/// read the file can read the stores, which hold the ids themselves.
+fn mask_key(home: &Path) -> Result<Vec<u8>> {
+    let path = home.join("state").join("my-work.key");
+    let read = || std::fs::read(&path).ok().filter(|key| key.len() == 32);
+    if let Some(key) = read() {
+        return Ok(key);
+    }
+    let (mut key, mut tag) = ([0u8; 32], [0u8; 8]);
+    getrandom::fill(&mut key).map_err(|e| anyhow::anyhow!("random key: {e}"))?;
+    getrandom::fill(&mut tag).map_err(|e| anyhow::anyhow!("random key: {e}"))?;
+    std::fs::create_dir_all(home.join("state"))?;
+    let tag: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+    let tmp = home.join("state").join(format!("my-work.key.{tag}"));
+    std::fs::write(&tmp, key)?;
+    // Published whole: a link fails on a name another read took first, whose key stays.
+    if let Err(e) = std::fs::hard_link(&tmp, &path) {
+        if let Some(theirs) = (e.kind() == std::io::ErrorKind::AlreadyExists)
+            .then(read)
+            .flatten()
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(theirs);
+        }
+        // No links on this filesystem, or a file of the name that holds no key: this one's.
+        std::fs::rename(&tmp, &path)?;
+        return Ok(key.to_vec());
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Ok(key.to_vec())
 }
 
 /// One request as the route gives it, every text through the gate; none when its newest update is
@@ -809,6 +854,7 @@ fn answer(
     convs: &BTreeMap<Key, Conversation>,
     work: &[Work],
     (raw, k, rules): (&Raw, &Connection, &Rules),
+    (home, key): (&Path, &mut Option<Vec<u8>>),
     (since, now): (i64, i64),
 ) -> Result<Option<Value>> {
     let items: Vec<&Work> = r.work.iter().map(|&i| &work[i]).collect();
@@ -962,11 +1008,17 @@ fn answer(
         ),
     };
     // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
-    // two and each keeps its id from read to read (Codex on #574).
+    // two and each keeps its id from read to read (Codex on #574), keyed by the home's own key so
+    // that it tells nothing of a guess at the id (CodeRabbit on #574).
     let id = if id == held {
         id
     } else {
-        format!("{id}#{}", &crate::forget::hash(held.as_bytes())[..12])
+        let key = match key {
+            Some(key) => key,
+            None => key.insert(mask_key(home)?),
+        };
+        let keyed = [key.as_slice(), held.as_bytes()].concat();
+        format!("{id}#{}", &crate::forget::hash(&keyed)[..12])
     };
     Ok(Some(json!({
         "id": id,
@@ -2147,5 +2199,39 @@ mod tests {
             "{first:?}"
         );
         assert_eq!(read(), first);
+    }
+
+    /// CodeRabbit on #574: the fingerprint of a masked id is keyed by the home's own key, made the
+    /// first time an id is masked, so that it tells nothing of a guess at the id: a hash of the id
+    /// alone is not it, and another home's fingerprint of the same id differs.
+    #[test]
+    fn a_masked_ids_fingerprint_is_keyed_by_the_homes_own_key() {
+        let homes: Vec<Home> = (0..2)
+            .map(|_| {
+                let mut h = Home::new();
+                h.write(
+                    "plan",
+                    json!({"task": "t", "request_id": "sess-7", "request": "Fix the release notes",
+                        "status": "doing"}),
+                );
+                h.s.run();
+                h
+            })
+            .collect();
+        let key = |h: &Home| h.s.home.path().join("state").join("my-work.key");
+        let read = |h: &Home| ids(&super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap());
+        assert_eq!(read(&homes[0]), ["r:sess-7"]);
+        assert!(!key(&homes[0]).exists(), "a key with no id masked");
+        let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
+        for h in &homes {
+            std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        }
+        let (a, b) = (read(&homes[0]), read(&homes[1]));
+        assert!(a[0].starts_with("r:[REDACTED]#") && b[0].starts_with("r:[REDACTED]#"));
+        assert_ne!(a, b);
+        let unkeyed = &crate::forget::hash(b"r:sess-7")[..12];
+        assert!(!a[0].ends_with(unkeyed), "{a:?}");
+        assert!(key(&homes[0]).exists());
+        assert_eq!(read(&homes[0]), a);
     }
 }

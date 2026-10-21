@@ -206,6 +206,12 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   OpenRouter as its provider; the owner's writes none).
 - TeamBrain and claude-mem's cloud links.
 - Server-sent events: the page polls, as it does for its other views (row 49).
+- The tie of work to its session past retention: an expired `work_state_write` call keeps its
+  labels but not what it sent, so the work it wrote counts among the unlinked (docs/retention.md).
+  Keeping the tie needs it stored where expiry leaves it, which knowledge.db is not (a rebuild
+  reads raw.db again): in raw.db, or in retention keeping such a call's input, which work state
+  holds anyway; either changes the store's format. claude-mem keeps every record, so it has no
+  such case. It is an acceptance item of #570, to build before a release (Codex on #574).
 
 ## As built
 
@@ -240,7 +246,8 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   excluded, or by an excluded session's call: an excluded session's write may be newer than
   another session's linked write, or between two of them (Codex on #574). On this PC each of the
   77 writes had exactly one such call, 14 to 158 ms after it. Each tool record is read once in a read, however many writes it is near.
-  A write whose fields the gate stored otherwise than its call's input links to nothing.
+  A write whose fields the gate stored otherwise than its call's input links to nothing, nor does
+  a call that retention expired, which keeps its labels but not what it sent (Not built).
 - **The request's own status** (#570): the newest record among its items of `request_complete` or
   `request_status`, each from the item's own fields, else its list's, `request_complete` first at
   the same time, decides first; then its work's, claude-mem's `statusFor`. A recorded
@@ -253,8 +260,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   written as its text, so `7` and `"7"` are one request. A session is known by its labels as the
   stores hold them, and the gate only shows them in the answer, so two sessions that a rule masks
   alike stay two requests and an excluded session's mask hides no other session (Codex on #574).
-  An id the gate masks takes `#` and the first 12 hex digits of the SHA-256 of the stored id, so
-  that two masked alike stay two and each keeps its id from read to read (Codex on #574).
+  An id the gate masks takes `#` and the first 12 hex digits of the SHA-256 of the home's own key
+  and the stored id, so that two masked alike stay two and each keeps its id from read to read
+  (Codex on #574), and the fingerprint tells nothing of a guess at the id (CodeRabbit on #574):
+  the key is 32 random bytes in `state/my-work.key`, made the first time an id is masked and
+  never in an answer; whoever can read it can read the stores, which hold the ids themselves.
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
