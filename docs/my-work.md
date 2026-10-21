@@ -185,8 +185,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   matching calls, or none, tie it to no session, and it is unlinked and counted unless it names a
   `request_id` with a recorded request, which is then a request of its own on that wording, as
   claude-mem's `explicit-work-state-request`; while a session is excluded such work is neither
-  shown nor counted, since it may be that session's; work state imported from claude-mem is
-  neither read nor counted.
+  shown nor counted, since it may be that session's, nor is an item with a write, its own or of
+  its list's state, that no call of a session not excluded sent or that an excluded session's
+  call sent; work state imported from claude-mem is neither read nor counted.
 - Each status and alias above, from the request's recorded status and its work state; work that is
   all done, or an ended session, alone is not "Ready to check"; 6 quiet hours is "No recent
   update"; attention first orders them.
@@ -233,8 +234,12 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   has made it, nothing links. An item no call ties to a session may be an excluded session's
   write in a shown repository (capture refuses that session's later tool calls), so while a
   session is excluded it is neither shown nor counted, in every repository, and before the index
-  no work is (Codex on #574). On this PC each of the 77 writes had exactly one such call,
-  14 to 158 ms after it. Each tool record is read once in a read, however many writes it is near.
+  no work is (Codex on #574). An item shows what each of its writes left, and a task the state of
+  its list too, which its request fields fall back to, so while a session is excluded an item is
+  also neither shown nor counted when one of those writes was sent by no call of a session not
+  excluded, or by an excluded session's call: an excluded session's write may be newer than
+  another session's linked write, or between two of them (Codex on #574). On this PC each of the
+  77 writes had exactly one such call, 14 to 158 ms after it. Each tool record is read once in a read, however many writes it is near.
   A write whose fields the gate stored otherwise than its call's input links to nothing.
 - **The request's own status** (#570): the newest record among its items of `request_complete` or
   `request_status`, each from the item's own fields, else its list's, `request_complete` first at

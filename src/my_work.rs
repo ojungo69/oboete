@@ -210,6 +210,8 @@ struct Work {
     updated: i64,
     /// The oldest first.
     writes: Vec<WorkWrite>,
+    /// The writes of the list's own fields, for a task; none for the list itself.
+    list_writes: Vec<WorkWrite>,
     /// The conversation of the newest write that one call made (claude-mem's attribution), and
     /// that call's record.
     by: Option<(Key, String, i64)>,
@@ -365,6 +367,7 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 list_fields: l.state.fields.clone(),
                 updated: task.updated,
                 writes: task.writes,
+                list_writes: l.state.writes.clone(),
                 by: None,
             });
         }
@@ -377,6 +380,7 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 list_fields: l.state.fields,
                 updated: l.state.updated,
                 writes: l.state.writes,
+                list_writes: Vec::new(),
                 by: None,
             });
         }
@@ -433,15 +437,45 @@ fn call(raw: &Raw, (device, seq): (&str, i64)) -> Result<Option<Call>> {
     }))
 }
 
+/// The calls that sent `write`: of its repository, list and fields, within `CALL_MS`, each with
+/// its conversation and record. The tool records near a write are found by time through the fts
+/// consumer's index `raw_docs_tools`, and each is read once (CodeRabbit on #574).
+fn senders(
+    raw: &Raw,
+    near: &mut rusqlite::CachedStatement<'_>,
+    read: &mut HashMap<(String, i64), Option<Call>>,
+    write: &WorkWrite,
+) -> Result<Vec<(Key, String, i64)>> {
+    let span = params![write.ts - CALL_MS, write.ts + CALL_MS];
+    let rows: Vec<(String, i64)> = near
+        .query_map(span, |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut sent = Vec::new();
+    for record in rows {
+        if !read.contains_key(&record) {
+            let c = call(raw, (&record.0, record.1))?;
+            read.insert(record.clone(), c);
+        }
+        if let Some(c) = &read[&record]
+            && c.repo.as_deref() == Some(write.repo.as_str())
+            && c.list == write.list
+            && c.fields == write.fields
+        {
+            sent.push((c.key.clone(), c.device.clone(), c.seq));
+        }
+    }
+    Ok(sent)
+}
+
 /// claude-mem's attribution: each item is the work of the conversation of its newest write that
-/// exactly one call matches, by repository, list and fields, within `CALL_MS`. The tool records
-/// near a write are found by time through the fts consumer's index `raw_docs_tools`, none before
-/// the worker has made it, and each is read once (CodeRabbit on #574). The newest `WORK` items
-/// of `work`, newest first, that no `excluded` conversation wrote: only the link names an
-/// excluded session's work, so its items are linked and left out until `WORK` are kept, and
-/// take no part in the bound (Codex on #574). An item no call ties to a session may be an
-/// excluded session's too, so while a session is excluded it is left out as well; before the
-/// index every item is such (Codex on #574).
+/// exactly one call sent (`senders`), none before the worker has made `raw_docs_tools`. The
+/// newest `WORK` items of `work`, newest first, that no `excluded` conversation wrote: only the
+/// link names an excluded session's work, so its items are linked and left out until `WORK` are
+/// kept, and take no part in the bound (Codex on #574). An item no call ties to a session may be
+/// an excluded session's too, so while a session is excluded it is left out as well; before the
+/// index every item is such. An item shows what each of its writes left, a task the state of its
+/// list too, so while a session is excluded it is also left out unless a call of a session not
+/// excluded, and none of an excluded one's, sent each of those writes (Codex on #574).
 fn link(raw: &Raw, k: &Connection, work: Vec<Work>, excluded: &HashSet<Key>) -> Result<Vec<Work>> {
     if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
         let shown = if excluded.is_empty() { WORK } else { 0 };
@@ -451,40 +485,33 @@ fn link(raw: &Raw, k: &Connection, work: Vec<Work>, excluded: &HashSet<Key>) -> 
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
          WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
     )?;
-    let mut read: HashMap<(String, i64), Option<Call>> = HashMap::new();
+    let mut read = HashMap::new();
     let mut kept = Vec::new();
     for mut w in work {
         if kept.len() == WORK {
             break;
         }
         for write in w.writes.iter().rev() {
-            let span = params![write.ts - CALL_MS, write.ts + CALL_MS];
-            let rows: Vec<(String, i64)> = near
-                .query_map(span, |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            for record in &rows {
-                if !read.contains_key(record) {
-                    let c = call(raw, (&record.0, record.1))?;
-                    read.insert(record.clone(), c);
-                }
-            }
-            let matching: Vec<&Call> = (rows.iter())
-                .filter_map(|record| read[record].as_ref())
-                .filter(|c| {
-                    c.repo.as_deref() == Some(write.repo.as_str())
-                        && c.list == write.list
-                        && c.fields == write.fields
-                })
-                .collect();
-            if let [c] = matching[..] {
-                w.by = Some((c.key.clone(), c.device.clone(), c.seq));
+            if let [c] = &senders(raw, &mut near, &mut read, write)?[..] {
+                w.by = Some(c.clone());
                 break;
             }
         }
-        // shortcut: while a session is excluded, work of no known session is left out in every
-        // repository, not only those an excluded session touched; narrow it when a home with an
-        // exclusion loses work it should show.
-        if (w.by.as_ref()).map_or(excluded.is_empty(), |(key, ..)| !excluded.contains(key)) {
+        // shortcut: while a session is excluded, work of no known session, and a write no call
+        // sent, are taken as possibly that session's in every repository, not only those it
+        // touched; narrow it when a home with an exclusion loses work it should show.
+        let mut shown =
+            (w.by.as_ref()).map_or(excluded.is_empty(), |(key, ..)| !excluded.contains(key));
+        if shown && !excluded.is_empty() {
+            for write in w.writes.iter().chain(&w.list_writes) {
+                let sent = senders(raw, &mut near, &mut read, write)?;
+                if sent.is_empty() || sent.iter().any(|(key, ..)| excluded.contains(key)) {
+                    shown = false;
+                    break;
+                }
+            }
+        }
+        if shown {
             kept.push(w);
         }
     }
@@ -1992,6 +2019,55 @@ mod tests {
             assert_eq!(ids(&v), ["c:claude:s1"]);
             assert_eq!(v["unlinked"], 0);
         }
+    }
+
+    /// The design's 1: an item shows what each of its writes left, and a task the state of its
+    /// list too, so while a session is excluded it is read only when a call of a session not
+    /// excluded, and none of an excluded one's, sent each of those writes: an excluded session's
+    /// write, of which capture keeps no call, may be newer than another session's linked one or
+    /// between two of them (Codex on #574).
+    #[test]
+    fn an_item_is_read_only_when_no_write_it_shows_may_be_an_excluded_sessions() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let private = "github.com/o/private";
+        h.s.said("x", private, h.t - 60_000, "Fix the private thing.");
+        // A newer write no call sent.
+        h.wrote("s1", "plan", json!({"task": "parser", "status": "doing"}));
+        h.write("plan", json!({"task": "parser", "status": "canary-1"}));
+        // The excluded session's write between two of s1's.
+        h.wrote("s1", "plan", json!({"task": "lexer", "status": "doing"}));
+        h.wrote(
+            "x",
+            "plan",
+            json!({"task": "lexer", "next_step": "canary-2"}),
+        );
+        h.wrote("s1", "plan", json!({"task": "lexer", "status": "blocked"}));
+        // The state of a task's list, which its request fields fall back to.
+        h.wrote("s1", "fixes", json!({"task": "index", "status": "doing"}));
+        h.write("fixes", json!({"request": "Fix the canary-3 thing"}));
+        // A write both sessions' calls sent.
+        h.wrote("s1", "plan", json!({"task": "both", "status": "doing"}));
+        let (ts, f) = h.write("plan", json!({"task": "both", "status": "canary-4"}));
+        h.call("s1", ts + 20, "plan", &f);
+        h.call("x", ts + 30, "plan", &f);
+        h.wrote("s1", "own", json!({"task": "kept", "status": "doing"}));
+        let sorted = |v: &Value| {
+            let mut t = tasks(by_id(v, "c:claude:s1"));
+            t.sort_unstable();
+            t.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(sorted(&v), ["both", "index", "kept", "lexer", "parser"]);
+        for canary in ["canary-1", "canary-2", "canary-3", "canary-4"] {
+            assert!(v.to_string().contains(canary), "{canary} in {v}");
+        }
+        h.s.exclude(private);
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(ids(&v), ["c:claude:s1"]);
+        assert_eq!(sorted(&v), ["kept"]);
+        assert_eq!(v["unlinked"], 0);
+        assert!(!v.to_string().contains("canary"), "{v}");
     }
 
     /// A session is known by its labels as the stores hold them, and the gate only shows them:
