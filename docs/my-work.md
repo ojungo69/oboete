@@ -182,8 +182,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   its work; a reply of neither, with cards, counts once among the unlinked records. One id in a
   session takes all of it.
 - Work state ties to the session whose single matching `work_state_write` call is within 5 s; two
-  matching calls, or none, leave it unlinked and counted; work state imported from claude-mem is
-  neither read nor counted.
+  matching calls, or none, tie it to no session, and it is unlinked and counted unless it names a
+  `request_id` with a recorded request, which is then a request of its own on that wording, as
+  claude-mem's `explicit-work-state-request`; work state imported from claude-mem is neither read
+  nor counted.
 - Each status and alias above, from the request's recorded status and its work state; work that is
   all done, or an ended session, alone is not "Ready to check"; 6 quiet hours is "No recent
   update"; attention first orders them.
@@ -216,7 +218,8 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   itself when its state has a key besides `task`), of which the newest 240 that no excluded
   repository or session wrote are read: what is excluded takes no part in a bound, so it pushes out
   no older record (Codex on #574). Each reader pages on past an excluded session's prompts,
-  summaries and cards until its bound holds; an excluded session's items are known only once
+  summaries and cards, and past a card of no session (its window spans two sessions' records, so
+  it is no request's), until its bound holds; an excluded session's items are known only once
   linked, so they are linked and left out until 240 are kept.
   The 2,000 prompts are a shortcut: claude-mem reads every prompt of the sessions it loaded, so a
   session whose first prompt is older than them has its oldest read prompt as its ask.

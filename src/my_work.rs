@@ -628,7 +628,7 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         CARDS,
         |before| crate::cards::page(&k, &raw, None, before, CARDS, &rules),
         Card::position,
-        |c| (c.agent.clone().zip(c.session.clone())).is_none_or(|key| !excluded.contains(&key)),
+        |c| (c.agent.clone().zip(c.session.clone())).is_some_and(|key| !excluded.contains(&key)),
     )?;
     for card in cards {
         let (Some(agent), Some(session)) = (card.agent.clone(), card.session.clone()) else {
@@ -1881,5 +1881,48 @@ mod tests {
         s1.reverse();
         s1.truncate(SUMMARIES);
         assert_eq!(by_id(&v, "c:claude:s1")["summaries"], json!(s1));
+    }
+
+    /// The design's 5: a card of no session, whose window spans two sessions' records, is no
+    /// request's, so it takes no part in the `CARDS` read either (Codex on #574).
+    #[test]
+    fn a_card_of_no_session_takes_no_part_in_the_bound() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Fix the parser.");
+        let card = h.s.cards(
+            p,
+            p,
+            json!([{"type": "change", "title": "Parser fixed", "narrative": "x"}]),
+            false,
+        );
+        let a = h.said("s2", -50_000, "Look at the lexer.");
+        let b = h.said("s3", -49_000, "Look at the index.");
+        let many = vec![json!({"type": "change", "title": "Both", "narrative": "x"}); CARDS];
+        h.s.cards(a, b, Value::Array(many), false);
+        let v = h.read(Range::Day, h.t);
+        assert_eq!(by_id(&v, "c:claude:s1")["cards"], json!(card));
+    }
+
+    /// claude-mem's `buildHumanRequests`: a work item whose write no single call links, with a
+    /// `request_id` and a recorded request, is a request of its own on that wording
+    /// (`explicit-work-state-request`); one without an id is unlinked and counted (Codex on #574).
+    #[test]
+    fn an_unlinked_item_with_a_request_id_and_a_recorded_request_is_its_own_request() {
+        let mut h = Home::new();
+        h.write(
+            "plan",
+            json!({"task": "a", "request_id": "R", "request": "Fix the release notes",
+                "status": "doing"}),
+        );
+        h.write("plan", json!({"task": "b", "status": "doing"}));
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(ids(&v), ["r:R"]);
+        let r = by_id(&v, "r:R");
+        assert_eq!(
+            (&r["ask"]["from"], &r["ask"]["text"]),
+            (&json!("work"), &json!("Fix the release notes"))
+        );
+        assert_eq!(tasks(r), ["a"]);
+        assert_eq!(v["unlinked"], 1);
     }
 }
