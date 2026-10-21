@@ -94,8 +94,9 @@ impl Range {
     }
 }
 
-/// An agent's session, by its agent and session as the readers gate them: claude-mem's
-/// conversation (`conversationKey`).
+/// An agent's session, by its agent and session as the stores hold them, which the gate only
+/// shows (two that a rule masks alike stay two; Codex on #574): claude-mem's conversation
+/// (`conversationKey`).
 type Key = (String, String);
 
 /// A live prompt as a request shows it.
@@ -397,7 +398,7 @@ struct Call {
 
 /// The call of oboete's `work_state_write` that live record `(device, seq)` is, if it is one: its
 /// conversation, repository, and the list and fields it sent.
-fn call(raw: &Raw, (device, seq): (&str, i64), rules: &Rules) -> Result<Option<Call>> {
+fn call(raw: &Raw, (device, seq): (&str, i64)) -> Result<Option<Call>> {
     let Some(Item::Event(e)) = (raw.after(device, seq - 1, 1)?.pop())
         .filter(|r| r.seq == seq)
         .map(|r| r.item)
@@ -422,9 +423,8 @@ fn call(raw: &Raw, (device, seq): (&str, i64), rules: &Rules) -> Result<Option<C
     let (Some(list), Some(fields)) = (sent["list"].as_str(), sent["fields"].as_object()) else {
         return Ok(None);
     };
-    let gate = |s: &str| crate::redact::outbound_with(s, rules);
     Ok(Some(Call {
-        key: (gate(&e.agent), gate(&e.session)),
+        key: (e.agent.clone(), e.session.clone()),
         device: device.to_owned(),
         seq,
         repo: e.repo.clone(),
@@ -442,13 +442,7 @@ fn call(raw: &Raw, (device, seq): (&str, i64), rules: &Rules) -> Result<Option<C
 /// take no part in the bound (Codex on #574). An item no call ties to a session may be an
 /// excluded session's too, so while a session is excluded it is left out as well; before the
 /// index every item is such (Codex on #574).
-fn link(
-    raw: &Raw,
-    k: &Connection,
-    rules: &Rules,
-    work: Vec<Work>,
-    excluded: &HashSet<Key>,
-) -> Result<Vec<Work>> {
+fn link(raw: &Raw, k: &Connection, work: Vec<Work>, excluded: &HashSet<Key>) -> Result<Vec<Work>> {
     if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
         let shown = if excluded.is_empty() { WORK } else { 0 };
         return Ok(work.into_iter().take(shown).collect());
@@ -470,7 +464,7 @@ fn link(
                 .collect::<rusqlite::Result<_>>()?;
             for record in &rows {
                 if !read.contains_key(record) {
-                    let c = call(raw, (&record.0, record.1), rules)?;
+                    let c = call(raw, (&record.0, record.1))?;
                     read.insert(record.clone(), c);
                 }
             }
@@ -537,8 +531,16 @@ struct Original {
     from: &'static str,
 }
 
+/// A request's identity (#570): an agent's session, or a `request_id`, as the stores hold them;
+/// the answer gates it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Id {
+    Conversation(Key),
+    Explicit(String),
+}
+
 struct Request {
-    id: String,
+    id: Id,
     original: Original,
     explicit_text: Option<String>,
     owns: Vec<(Key, Owns)>,
@@ -546,7 +548,7 @@ struct Request {
 }
 
 impl Request {
-    fn new(id: String, original: Original) -> Self {
+    fn new(id: Id, original: Original) -> Self {
         Self {
             id,
             original,
@@ -572,10 +574,6 @@ impl Request {
     }
 }
 
-fn conversation_id((agent, session): &Key) -> String {
-    format!("c:{agent}:{session}")
-}
-
 /// The requests of `range` at `now`, the newest update first, and how many work records no
 /// request takes (claude-mem's "N work records need a linked human request").
 pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
@@ -588,17 +586,19 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
     let excluded_repos = raw.exclusions_now()?;
     let excluded: HashSet<Key> = (raw.sessions_in(&excluded_repos)?.iter())
         .filter_map(|s| s.split_once('\0'))
-        .map(|(a, s)| (gate(a), gate(s)))
+        .map(|(a, s)| (a.to_owned(), s.to_owned()))
         .collect();
     let mut convs: BTreeMap<Key, Conversation> = BTreeMap::new();
     let prompts = newest(
         PROMPTS,
         |before| raw.prompt_events(None, before, PROMPTS),
         |(device, seq, e)| (e.ts, device.clone(), *seq),
-        |(_, _, e)| !excluded.contains(&(gate(&e.agent), gate(&e.session))),
+        |(_, _, e)| !excluded.contains(&(e.agent.clone(), e.session.clone())),
     )?;
     for (device, seq, e) in prompts.into_iter().rev() {
-        let c = convs.entry((gate(&e.agent), gate(&e.session))).or_default();
+        let c = convs
+            .entry((e.agent.clone(), e.session.clone()))
+            .or_default();
         c.repos.extend(e.repo.as_deref().map(gate));
         let text = crate::curate::long_text(&e).unwrap_or_default();
         c.prompts.push(Said {
@@ -609,47 +609,64 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
             ts: e.ts,
         });
     }
+    // A summary's and a card's span and session as their tables hold them: the readers gate the
+    // labels they return.
     let summaries = newest(
         SUMMARIES,
-        |before| crate::turns::page(&k, &raw, None, before, SUMMARIES, &rules),
-        TurnSummary::position,
-        |s| !excluded.contains(&(s.agent.clone(), s.session.clone())),
+        |before| {
+            let (page, more) = crate::turns::page(&k, &raw, None, before, SUMMARIES, &rules)?;
+            let rows = (page.into_iter())
+                .map(|s| {
+                    let (span, key) = k.query_row(
+                        "SELECT from_seq, through, agent, session FROM turns
+                         WHERE device = ?1 AND op_seq = ?2",
+                        params![s.device, s.op_seq],
+                        |r| Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?))),
+                    )?;
+                    Ok((s, span, key))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((rows, more))
+        },
+        |(s, ..)| s.position(),
+        |(_, _, key)| !excluded.contains(key),
     )?;
-    for s in summaries {
-        let span = k.query_row(
-            "SELECT from_seq, through FROM turns WHERE device = ?1 AND op_seq = ?2",
-            params![s.device, s.op_seq],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let c = convs
-            .entry((s.agent.clone(), s.session.clone()))
-            .or_default();
+    for (s, span, key) in summaries {
+        let c = convs.entry(key).or_default();
         c.repos.extend(s.repo.clone());
         c.turns.push(Turn { s, span });
     }
     let cards = newest(
         CARDS,
-        |before| crate::cards::page(&k, &raw, None, before, CARDS, &rules),
-        Card::position,
-        |c| (c.agent.clone().zip(c.session.clone())).is_some_and(|key| !excluded.contains(&key)),
+        |before| {
+            let (page, more) = crate::cards::page(&k, &raw, None, before, CARDS, &rules)?;
+            let rows = (page.into_iter())
+                .map(|c| {
+                    let (span, agent, session): ((i64, i64), Option<String>, Option<String>) = k
+                        .query_row(
+                            "SELECT from_seq, to_seq, agent, session FROM cards
+                             WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+                            params![c.device, c.op_seq, c.n],
+                            |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?, r.get(3)?)),
+                        )?;
+                    Ok((c, span, agent.zip(session)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((rows, more))
+        },
+        |(c, ..)| c.position(),
+        |(_, _, key)| key.as_ref().is_some_and(|key| !excluded.contains(key)),
     )?;
-    for card in cards {
-        let (Some(agent), Some(session)) = (card.agent.clone(), card.session.clone()) else {
-            continue;
-        };
-        let span = k.query_row(
-            "SELECT from_seq, to_seq FROM cards WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
-            params![card.device, card.op_seq, card.n],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let c = convs.entry((agent, session)).or_default();
+    for (card, span, key) in cards {
+        let Some(key) = key else { continue };
+        let c = convs.entry(key).or_default();
         c.repos.extend(card.repo.clone());
         c.cards.push(Shown { c: card, span });
     }
     let writes = (raw.native_work_writes()?.into_iter())
         .filter(|w| !excluded_repos.contains(&w.repo))
         .collect();
-    let work = link(&raw, &k, &rules, fold(writes), &excluded)?;
+    let work = link(&raw, &k, fold(writes), &excluded)?;
 
     // claude-mem's `buildHumanRequests`: the request ids each conversation's work names, then
     // each item's request, then the conversations' own records.
@@ -660,7 +677,7 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         }
     }
     let mut requests: Vec<Request> = Vec::new();
-    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut at: HashMap<Id, usize> = HashMap::new();
     let mut unlinked = 0;
     for (i, w) in work.iter().enumerate() {
         let key = w.by.as_ref().map(|(key, ..)| key);
@@ -687,7 +704,7 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
             unlinked += 1;
             continue;
         };
-        let id = explicit.map_or_else(|| conversation_id(key.unwrap()), |e| format!("r:{e}"));
+        let id = explicit.map_or_else(|| Id::Conversation(key.unwrap().clone()), Id::Explicit);
         let r = match at.get(&id) {
             Some(&j) => &mut requests[j],
             None => {
@@ -713,7 +730,7 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
             // Each request owns the replies its writes were made in (the design's 1).
             let mut owned = HashSet::new();
             for id in &ids {
-                let Some(&j) = at.get(&format!("r:{id}")) else {
+                let Some(&j) = at.get(&Id::Explicit(id.clone())) else {
                     continue;
                 };
                 let calls: Vec<(String, i64)> = (requests[j].work.iter())
@@ -734,9 +751,7 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
             unlinked += c.units(&owned);
             continue;
         }
-        let id = ids
-            .first()
-            .map_or_else(|| conversation_id(key), |e| format!("r:{e}"));
+        let id = (ids.first().cloned()).map_or_else(|| Id::Conversation(key.clone()), Id::Explicit);
         match at.get(&id) {
             Some(&j) => requests[j].take(key, Owns::All),
             None => match c.original(raw.device()) {
@@ -780,7 +795,7 @@ fn answer(
     let mut latest_prompt: Option<&Said> = None;
     for (key, own) in &r.owns {
         let Some(c) = convs.get(key) else { continue };
-        agents.insert(key.0.clone());
+        agents.insert(crate::redact::outbound_with(&key.0, rules));
         repos.extend(c.repos.iter().cloned());
         prompts.extend(c.prompts.iter());
         match own {
@@ -908,9 +923,12 @@ fn answer(
                 "status": status, "updated": w.updated})
         })
         .collect();
-    let id = match r.id.strip_prefix("r:") {
-        Some(e) => format!("r:{}", crate::work_state::beside("request_id", e, rules)),
-        None => r.id.clone(),
+    let id = match &r.id {
+        Id::Conversation((agent, session)) => {
+            let gate = |s: &str| crate::redact::outbound_with(s, rules);
+            format!("c:{}:{}", gate(agent), gate(session))
+        }
+        Id::Explicit(e) => format!("r:{}", crate::work_state::beside("request_id", e, rules)),
     };
     Ok(Some(json!({
         "id": id,
@@ -1962,6 +1980,59 @@ mod tests {
         for v in [h.read(Range::All, h.t + 10_000), unindexed(&h)] {
             assert_eq!(ids(&v), ["c:claude:s1"]);
             assert_eq!(v["unlinked"], 0);
+        }
+    }
+
+    /// A session is known by its labels as the stores hold them, and the gate only shows them:
+    /// two sessions a rule added later masks alike stay two requests, with their own summaries,
+    /// cards and work, and neither takes an excluded session's exclusion (Codex on #574).
+    #[test]
+    fn sessions_the_gate_labels_alike_stay_apart() {
+        let mut h = Home::new();
+        let p = h.said("sess-1", -60_000, "Fix the parser.");
+        let r = h.reply("sess-1", -59_000);
+        let summary = h.turn(
+            "sess-1",
+            (p, r),
+            -59_000,
+            json!({"request": "Parser work", "completed": "Fixed."}),
+        );
+        h.wrote(
+            "sess-1",
+            "plan",
+            json!({"task": "parser", "status": "doing"}),
+        );
+        let q = h.said("sess-2", -50_000, "Fix the lexer.");
+        let card = h.s.cards(
+            q,
+            q,
+            json!([{"type": "change", "title": "Lexer fixed", "narrative": "x"}]),
+            false,
+        );
+        let private = "github.com/o/private";
+        h.s.said("sess-3", private, h.t - 40_000, "Fix the private thing.");
+        h.s.exclude(private);
+        h.s.run();
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"id\", regex = '^(claude|sess-[0-9]+)$' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let v = super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
+        let shown = v["requests"].as_array().unwrap();
+        assert_eq!(shown.len(), 2, "{v}");
+        assert_eq!(shown[0]["ask"]["text"], "Fix the parser.");
+        assert_eq!(
+            (tasks(&shown[0]), &shown[0]["summaries"]),
+            (vec!["parser"], &json!([summary]))
+        );
+        assert_eq!(
+            (&shown[1]["ask"]["text"], &shown[1]["cards"]),
+            (&json!("Fix the lexer."), &json!(card))
+        );
+        for r in shown {
+            assert_eq!(
+                (&r["id"], &r["agents"]),
+                (&json!("c:[REDACTED]:[REDACTED]"), &json!(["[REDACTED]"]))
+            );
         }
     }
 }

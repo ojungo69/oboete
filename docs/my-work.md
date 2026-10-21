@@ -245,7 +245,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   replies and cards are one more row of its work, as claude-mem's observations are, so work that
   is all done reads "Update recorded" until it has been quiet for 6 hours.
 - **Its identity** (#570): `c:<agent>:<session>`, or `r:<request_id>`, the id trimmed and a number
-  written as its text, so `7` and `"7"` are one request.
+  written as its text, so `7` and `"7"` are one request. A session is known by its labels as the
+  stores hold them, and the gate only shows them in the answer, so two sessions that a rule masks
+  alike stay two requests and an excluded session's mask hides no other session (Codex on #574).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
