@@ -292,7 +292,7 @@ fn normalized(status: &str) -> String {
 }
 
 /// The work state of `writes`, folded into claude-mem's candidates: each list's tasks, and the
-/// list itself when its state has a key besides `task`; the newest `WORK`.
+/// list itself when its state has a key besides `task`, newest first.
 fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
     /// A list's state or one of its tasks: what its writes left, when, and the writes.
     #[derive(Default)]
@@ -380,7 +380,6 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
         }
     }
     out.sort_by_key(|w| std::cmp::Reverse(w.updated));
-    out.truncate(WORK);
     out
 }
 
@@ -436,17 +435,30 @@ fn call(raw: &Raw, (device, seq): (&str, i64), rules: &Rules) -> Result<Option<C
 /// claude-mem's attribution: each item is the work of the conversation of its newest write that
 /// exactly one call matches, by repository, list and fields, within `CALL_MS`. The tool records
 /// near a write are found by time through the fts consumer's index `raw_docs_tools`, none before
-/// the worker has made it, and each is read once (CodeRabbit on #574).
-fn link(raw: &Raw, k: &Connection, rules: &Rules, work: &mut [Work]) -> Result<()> {
+/// the worker has made it, and each is read once (CodeRabbit on #574). The newest `WORK` items
+/// of `work`, newest first, that no `excluded` conversation wrote: only the link names an
+/// excluded session's work, so its items are linked and left out until `WORK` are kept, and
+/// take no part in the bound (Codex on #574).
+fn link(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    work: Vec<Work>,
+    excluded: &HashSet<Key>,
+) -> Result<Vec<Work>> {
     if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
-        return Ok(());
+        return Ok(work.into_iter().take(WORK).collect());
     }
     let mut near = k.prepare_cached(
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
          WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
     )?;
     let mut read: HashMap<(String, i64), Option<Call>> = HashMap::new();
-    for w in work.iter_mut() {
+    let mut kept = Vec::new();
+    for mut w in work {
+        if kept.len() == WORK {
+            break;
+        }
         for write in w.writes.iter().rev() {
             let span = params![write.ts - CALL_MS, write.ts + CALL_MS];
             let rows: Vec<(String, i64)> = near
@@ -471,8 +483,14 @@ fn link(raw: &Raw, k: &Connection, rules: &Rules, work: &mut [Work]) -> Result<(
                 break;
             }
         }
+        if w.by
+            .as_ref()
+            .is_none_or(|(key, ..)| !excluded.contains(key))
+        {
+            kept.push(w);
+        }
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// What a request takes of a conversation: all of it, or the replies its writes were made in.
@@ -589,13 +607,10 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         c.cards.push(Shown { c: card, span });
     }
     convs.retain(|key, _| !excluded.contains(key));
-    let mut work = fold(raw.native_work_writes()?);
-    work.retain(|w| !excluded_repos.contains(&w.repo));
-    link(&raw, &k, &rules, &mut work)?;
-    work.retain(|w| {
-        w.by.as_ref()
-            .is_none_or(|(key, ..)| !excluded.contains(key))
-    });
+    let writes = (raw.native_work_writes()?.into_iter())
+        .filter(|w| !excluded_repos.contains(&w.repo))
+        .collect();
+    let work = link(&raw, &k, &rules, fold(writes), &excluded)?;
 
     // claude-mem's `buildHumanRequests`: the request ids each conversation's work names, then
     // each item's request, then the conversations' own records.
@@ -1732,5 +1747,34 @@ mod tests {
         let v = h.read(Range::Day, h.t);
         assert_eq!(by_id(&v, "c:claude:s1")["ask"]["text"], "Fix the parser.");
         assert!(!v.to_string().contains("canary-4827"), "{v}");
+    }
+
+    /// The design's 1 and 5: an excluded repository's work, and the work an excluded session
+    /// wrote elsewhere, take no part in the `WORK` items read either, so they hide no older work
+    /// (Codex on #574).
+    #[test]
+    fn excluded_work_takes_no_part_in_the_bound() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        h.wrote("s1", "plan", json!({"task": "parser", "status": "doing"}));
+        // So that every later write is newer than this one.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let private = "github.com/o/private";
+        h.s.said("x", private, h.t - 60_000, "Fix the private thing.");
+        for i in 0..WORK {
+            let f = json!({"task": format!("p{i}"), "status": "todo"});
+            let f = f.as_object().unwrap();
+            h.s.raw.work_state(private, "plan", f, None).unwrap();
+            h.wrote(
+                "x",
+                "plan",
+                json!({"task": format!("x{i}"), "status": "todo"}),
+            );
+        }
+        h.s.exclude(private);
+        let v = h.read(Range::All, h.t + 60_000);
+        assert_eq!(ids(&v), ["c:claude:s1"]);
+        assert_eq!(tasks(by_id(&v, "c:claude:s1")), ["parser"]);
+        assert_eq!(v["unlinked"], 0);
     }
 }

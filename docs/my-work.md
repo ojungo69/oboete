@@ -213,9 +213,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 - **What is read**: the newest 2,000 live prompts, 100 session summaries (`turns::page`), 300 cards
   (`cards::page`), and this store's own work state writes (`Raw::native_work_writes`), folded as
   claude-mem folds them (each list's tasks, and the list itself when its state has a key besides
-  `task`) into the newest 240 items. The 2,000 prompts are a shortcut: claude-mem reads every
-  prompt of the sessions it loaded, so a session whose first prompt is older than them has its
-  oldest read prompt as its ask.
+  `task`), of which the newest 240 that no excluded repository or session wrote are read: what is
+  excluded takes no part in the bound either, so it hides no older work (Codex on #574). An excluded
+  session's items are known only once linked, so they are linked and left out until 240 are kept.
+  The 2,000 prompts are a shortcut: claude-mem reads every prompt of the sessions it loaded, so a
+  session whose first prompt is older than them has its oldest read prompt as its ask.
 - **The link**: a write is the work of the session whose call of oboete's `work_state_write`
   (named as `curate::served` and `curate::oboete` read a tool: `mcp__oboete__…`, `oboete__…`,
   `oboete.…`) sent the same repository, list and fields within 5 s, when exactly one did; an item
