@@ -923,12 +923,23 @@ fn answer(
                 "status": status, "updated": w.updated})
         })
         .collect();
-    let id = match &r.id {
-        Id::Conversation((agent, session)) => {
-            let gate = |s: &str| crate::redact::outbound_with(s, rules);
-            format!("c:{}:{}", gate(agent), gate(session))
-        }
-        Id::Explicit(e) => format!("r:{}", crate::work_state::beside("request_id", e, rules)),
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
+    let (id, held) = match &r.id {
+        Id::Conversation((agent, session)) => (
+            format!("c:{}:{}", gate(agent), gate(session)),
+            format!("c:{agent}:{session}"),
+        ),
+        Id::Explicit(e) => (
+            format!("r:{}", crate::work_state::beside("request_id", e, rules)),
+            format!("r:{e}"),
+        ),
+    };
+    // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
+    // two and each keeps its id from read to read (Codex on #574).
+    let id = if id == held {
+        id
+    } else {
+        format!("{id}#{}", &crate::forget::hash(held.as_bytes())[..12])
     };
     Ok(Some(json!({
         "id": id,
@@ -2028,11 +2039,37 @@ mod tests {
             (&shown[1]["ask"]["text"], &shown[1]["cards"]),
             (&json!("Fix the lexer."), &json!(card))
         );
-        for r in shown {
-            assert_eq!(
-                (&r["id"], &r["agents"]),
-                (&json!("c:[REDACTED]:[REDACTED]"), &json!(["[REDACTED]"]))
+        let first = ids(&v);
+        assert_ne!(first[0], first[1]);
+        for (id, r) in first.iter().zip(shown) {
+            assert!(id.starts_with("c:[REDACTED]:[REDACTED]#") && !id.contains("sess-"));
+            assert_eq!(r["agents"], json!(["[REDACTED]"]));
+        }
+    }
+
+    /// Codex on #574: an id the gate masks takes a fingerprint of the stored one, so that two
+    /// masked alike stay two, each the same from read to read, and the stored one is not shown.
+    #[test]
+    fn ids_masked_alike_stay_two_and_keep_from_read_to_read() {
+        let mut h = Home::new();
+        for id in ["sess-7", "sess-8"] {
+            h.write(
+                "plan",
+                json!({"task": id, "request_id": id, "request": "Fix the release notes",
+                    "status": "doing"}),
             );
         }
+        h.s.run();
+        let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let read = || ids(&super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap());
+        let first = read();
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0], first[1]);
+        assert!(
+            (first.iter()).all(|id| id.starts_with("r:[REDACTED]#") && !id.contains("sess-")),
+            "{first:?}"
+        );
+        assert_eq!(read(), first);
     }
 }

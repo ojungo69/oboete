@@ -248,11 +248,15 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   written as its text, so `7` and `"7"` are one request. A session is known by its labels as the
   stores hold them, and the gate only shows them in the answer, so two sessions that a rule masks
   alike stay two requests and an excluded session's mask hides no other session (Codex on #574).
+  An id the gate masks takes `#` and the first 12 hex digits of the SHA-256 of the stored id, so
+  that two masked alike stay two and each keeps its id from read to read (Codex on #574).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
-- **"Summary updating"**: the request's newest prompt has no turn op yet, kept or skipped, that
-  covers it.
+- **"Summary updating"**: the request shows a summary and its newest prompt has no turn op yet,
+  kept or skipped, that covers it. Before its first summary the recorded wording carries no such
+  note, as claude-mem 14.0.1's card shows "Summary updating" only beside a copy it already has
+  (`request-views.js`); a home with no curator would otherwise say it forever.
 - **The recorded wording**, before any summary: the newest of its work items' outcome or progress
   and its cards' subtitles, else its ask, is the summary, as claude-mem's newest recorded update.
 - **The unlinked count**: the work items no request takes; and, of a conversation with no request
