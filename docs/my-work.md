@@ -290,7 +290,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   part's mask may hide what that rule would match: then nothing of the id is shown but its kind
   and the fingerprint (Codex on #574, #570; Codex and CodeRabbit on #575). The route gates what is
   before the fingerprint and keeps the fingerprint as it came, as it keeps a claim's uid, so a rule
-  matching its 12 hex digits does not make two ids one (Sourcery and Codex on #575, #570).
+  matching its 12 hex digits does not make two ids one (Sourcery and Codex on #575, #570). It knows
+  the fingerprint by the answer's `fingerprint` field, which it takes out, not by the id's text, so
+  an id of its own ending in `#` and 12 hex digits is gated whole; and it puts the id back under
+  its key, which a rule matching `id` does not take away (Codex and Sourcery on #576).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.

@@ -1999,12 +1999,14 @@ fn answered(name: &str, mut answer: Value) -> Value {
     let next = matches!(name, "feed" | "timeline")
         .then(|| answer.get_mut("next").map(Value::take))
         .flatten();
-    // A masked My Work id's fingerprint is its selector, as a claim's uid is: it tells apart ids
-    // the gate masked alike, from read to read, so the gate takes only what is before it (#570).
-    let prints: Vec<Option<String>> = match answer.get_mut("requests") {
-        Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
-            .map(|r| r.get_mut("id").and_then(fingerprint))
-            .collect(),
+    // A My Work request's id leaves the gate's walk and comes back under its key: a masked id's
+    // fingerprint is its selector, as a claim's uid is, so the gate takes only what is before it
+    // (#570), known by the answer's own field, as no id's own text can pass for it (Codex and
+    // Sourcery on #576).
+    let ids: Vec<Option<String>> = match answer.get_mut("requests") {
+        Some(Value::Array(requests)) if name == "my-work" => {
+            requests.iter_mut().map(request_id).collect()
+        }
         _ => Vec::new(),
     };
     let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc") {
@@ -2016,21 +2018,29 @@ fn answered(name: &str, mut answer: Value) -> Value {
         answer["next"] = next;
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
-        for (request, print) in requests.iter_mut().zip(prints) {
-            if let (Some(Value::String(id)), Some(print)) = (request.get_mut("id"), print) {
-                id.push_str(&print);
+        for (request, id) in requests.iter_mut().zip(ids) {
+            if let (Value::Object(request), Some(id)) = (request, id) {
+                request.insert("id".to_owned(), Value::String(id));
             }
         }
     }
     answer
 }
 
-/// A My Work id's fingerprint (`#` and 12 hex digits, `my_work::answer`), taken off the id.
-fn fingerprint(id: &mut Value) -> Option<String> {
-    let Value::String(id) = id else { return None };
-    let at = id.len().checked_sub(13)?;
-    let print = id.get(at..)?.strip_prefix('#')?;
-    lower_hex(print).then(|| id.split_off(at))
+/// A My Work request's id, taken out of it with its `fingerprint`, and gated but for that.
+fn request_id(request: &mut Value) -> Option<String> {
+    let request = request.as_object_mut()?;
+    let print = match request.remove("fingerprint") {
+        Some(Value::String(print)) => format!("#{print}"),
+        _ => String::new(),
+    };
+    let Some(Value::String(id)) = request.remove("id") else {
+        return None;
+    };
+    Some(match id.strip_suffix(print.as_str()) {
+        Some(shown) => format!("{}{print}", redact::outbound(shown)),
+        None => redact::outbound(&id),
+    })
 }
 
 fn gated(v: Value) -> Value {
@@ -2066,17 +2076,17 @@ fn gated_with_ids(v: Value, ids: bool) -> Value {
 
 fn canonical_uid_value(v: &Value) -> bool {
     match v {
-        Value::String(uid) => uid.len() == 64 && lower_hex(uid),
+        Value::String(uid) => {
+            uid.len() == 64
+                && uid
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
         Value::Array(ids) => ids
             .iter()
             .all(|id| matches!(id, Value::String(_)) && canonical_uid_value(id)),
         _ => false,
     }
-}
-
-fn lower_hex(s: &str) -> bool {
-    s.bytes()
-        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn bad(name: &str) -> Response {
@@ -4154,25 +4164,34 @@ curate = false
 
     /// #570 (Sourcery and Codex on #575): a masked My Work id's fingerprint is its selector, as a
     /// claim's uid is, so a rule that matches its 12 hex digits leaves it: two ids the gate masks
-    /// alike stay two through the route, the same from read to read.
+    /// alike stay two through the route, the same from read to read. Codex and Sourcery on #576:
+    /// an id's own text that looks like one is no fingerprint, and a rule that masks the key `id`
+    /// does not take the id's fingerprint away.
     #[test]
     fn a_my_work_ids_fingerprint_leaves_the_route_as_it_came() {
         if !in_child("view::tests::a_my_work_ids_fingerprint_leaves_the_route_as_it_came") {
             return;
         }
         let (mut s, v) = feed_fixture();
-        for id in ["ticket-1", "ticket-2"] {
+        for id in ["ticket-1", "ticket-2", "customer#deadbeefcafe"] {
             let fields = json!({"task": id, "request_id": id, "request": "Fix the release notes",
                 "status": "doing"});
-            (s.raw
-                .work_state(R, "plan", fields.as_object().unwrap(), None))
-            .unwrap();
+            let fields = fields.as_object().unwrap();
+            s.raw.work_state(R, "plan", fields, None).unwrap();
         }
         s.run();
-        let rules = "[redaction]\nextra_rules = [{ id = 'ticket', regex = 'ticket-[0-9]' }, \
-            { id = 'hex', regex = '[0-9a-f]{12}' }]\n";
-        std::fs::write(s.home.path().join("config.toml"), rules).unwrap();
-        redact::set_home(s.home.path()).unwrap();
+        // Read before the rules below are written, as a read the route's gate outlives.
+        let home = s.home.path();
+        let before = crate::my_work::read(home, crate::my_work::Range::All, crate::db::now_ms());
+        let rules =
+            "{ id = 'ticket', regex = 'ticket-[0-9]' }, { id = 'hex', regex = '[0-9a-f]{12}' }";
+        let config = |rules: &str| format!("[redaction]\nextra_rules = [{rules}]\n");
+        std::fs::write(home.join("config.toml"), config(rules)).unwrap();
+        redact::set_home(home).unwrap();
+        let early = answered("my-work", before.unwrap());
+        assert!(!early.to_string().contains("deadbeefcafe"), "{early}");
+        let key = format!("{rules}, {{ id = 'key', regex = '^id$' }}");
+        std::fs::write(home.join("config.toml"), config(&key)).unwrap();
         let ids = || -> Vec<String> {
             let answer = get(&v, "/api/my-work?range=all");
             (answer["requests"].as_array().unwrap().iter())
@@ -4180,8 +4199,8 @@ curate = false
                 .collect()
         };
         let read = ids();
-        assert_eq!(read.len(), 2, "{read:?}");
-        assert_ne!(read[0], read[1]);
+        let distinct: std::collections::HashSet<&String> = read.iter().collect();
+        assert_eq!((read.len(), distinct.len()), (3, 3), "{read:?}");
         assert_eq!(ids(), read);
         for id in &read {
             let (shown, print) = id.split_once('#').unwrap();
@@ -4775,13 +4794,15 @@ curate = false
     /// process, without changing the rules seen by unrelated tests running in this process. True
     /// in the child; here, false once the child passed.
     fn in_child(test: &str) -> bool {
+        // The test's own name, so that a value this process inherited runs nothing here
+        // (Sourcery on #576).
         const CHILD: &str = "OBOETE_EGRESS_TEST_CHILD";
-        if std::env::var_os(CHILD).is_some() {
+        if std::env::var(CHILD).is_ok_and(|t| t == test) {
             return true;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture"])
-            .env(CHILD, "1")
+            .env(CHILD, test)
             .output()
             .unwrap();
         assert!(

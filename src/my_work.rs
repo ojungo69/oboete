@@ -1110,19 +1110,26 @@ fn answer(
     };
     // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
     // two and each keeps its id from read to read (Codex on #574), keyed by the home's own key so
-    // that it tells nothing of a guess at the id (CodeRabbit on #574).
-    let id = if id == held {
-        id
+    // that it tells nothing of a guess at the id (CodeRabbit on #574). It is named in a field of
+    // its own too, which the route takes out, so that no id's own text passes for one there
+    // (Codex and Sourcery on #576).
+    let fingerprint = if id == held {
+        None
     } else {
         let key = match key {
             Some(key) => key,
             None => key.insert(mask_key(home)?),
         };
         let keyed = [key.as_slice(), held.as_bytes()].concat();
-        format!("{id}#{}", &crate::forget::hash(&keyed)[..12])
+        Some(crate::forget::hash(&keyed)[..12].to_owned())
+    };
+    let id = match &fingerprint {
+        Some(print) => format!("{id}#{print}"),
+        None => id,
     };
     Ok(Some(json!({
         "id": id,
+        "fingerprint": fingerprint,
         "title": title,
         "summary": summary,
         "next": next,
