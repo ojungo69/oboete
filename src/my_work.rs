@@ -156,6 +156,9 @@ struct Conversation {
     repos: BTreeSet<String>,
     /// The oldest first.
     prompts: Vec<Said>,
+    /// Where each of its live prompts is, a forgotten or expired one too, whose text is not read:
+    /// what ends one prompt's records and starts the next's (Greptile on #574).
+    bounds: Vec<(String, i64)>,
     /// The newest first, as `turns::page` reads them.
     turns: Vec<Turn>,
     /// The newest first, as `cards::page` reads them.
@@ -189,10 +192,11 @@ impl Conversation {
 
     /// Its prompts' spans, each through the record before the next prompt on its device.
     fn spans(&self) -> Vec<Span> {
-        let mut at: Vec<(&str, i64)> = (self.prompts.iter())
-            .map(|p| (p.device.as_str(), p.seq))
+        let mut at: Vec<(&str, i64)> = (self.bounds.iter())
+            .map(|(device, seq)| (device.as_str(), *seq))
             .collect();
         at.sort_unstable();
+        at.dedup();
         (at.iter().enumerate())
             .map(|(i, &(device, seq))| {
                 let end = match at.get(i + 1) {
@@ -767,6 +771,24 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         c.repos.extend(repo.as_deref().map(gate));
         c.prompts.push(p);
     }
+    // Where each conversation's prompts are, a forgotten or expired one's too, whose text is not
+    // read: by its row until a purge, then by what the forget keeps (Greptile on #574).
+    for (device, seq, key) in &labels {
+        if let Some(c) = convs.get_mut(key) {
+            c.bounds.push((device.clone(), *seq));
+        }
+    }
+    let forgotten = raw.forgotten_prompts()?;
+    if !forgotten.is_empty() {
+        let hashes: HashMap<String, Key> = (convs.keys())
+            .map(|k| (crate::forget::session(&k.0, &k.1), k.clone()))
+            .collect();
+        for (hash, device, seq) in forgotten {
+            if let Some(c) = hashes.get(&hash).and_then(|k| convs.get_mut(k)) {
+                c.bounds.push((device, seq));
+            }
+        }
+    }
 
     // claude-mem's `buildHumanRequests`: the request ids each conversation's work names, then
     // each item's request, then the conversations' own records.
@@ -959,6 +981,12 @@ fn answer(
                 // and the next prompt are the next reply's too.
                 turns.extend((c.turns.iter()).filter(|t| ours(&t.s.device, (t.span.1, t.span.1))));
                 cards.extend((c.cards.iter()).filter(|card| ours(&card.c.device, card.span)));
+                // Its own newest prompt tells whether its summary is behind (Codex on #574).
+                if let Some(p) = (c.prompts.iter()).rfind(|p| ours(&p.device, (p.seq, p.seq)))
+                    && latest_prompt.is_none_or(|l| p.ts > l.ts)
+                {
+                    latest_prompt = Some(p);
+                }
             }
         }
     }
@@ -1725,6 +1753,98 @@ mod tests {
         );
         assert_eq!((&b["cards"], &b["copy"]), (&json!(tag), &json!("recorded")));
         assert_eq!(v["unlinked"], 1);
+    }
+
+    /// The design's 1: a forgotten prompt still ends the prompt before it, by its row until the
+    /// purge and by what the forget keeps after it (`denied_records`), with no text read, so the
+    /// requests of a session do not share the cards after it (Greptile on #574).
+    #[test]
+    fn a_forgotten_prompt_still_ends_the_prompt_before_it() {
+        let mut h = Home::new();
+        let card = |title: &str| json!([{"type": "change", "title": title, "subtitle": title, "narrative": "x"}]);
+        let p = h.said("s1", -60_000, "Ship the release.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "A", "status": "doing"}),
+        );
+        let r = h.reply("s1", -50_000);
+        let notes = h.s.cards(p, r, card("Notes written"), false);
+        let gone = h.said("s1", -40_000, "Now tag it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "B", "status": "doing"}),
+        );
+        let t = (h.s).event(
+            "tool",
+            "s1",
+            (R, "main"),
+            h.t - 36_000,
+            json!({"tool": "Bash"}),
+        );
+        let tag = h.s.cards(t, t, card("Tagged"), false);
+        let path = h.s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: h.s.raw.device().to_owned(),
+            seq: gone,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        let shown = |v: &Value| {
+            (
+                by_id(v, "r:A")["cards"].clone(),
+                by_id(v, "r:B")["cards"].clone(),
+            )
+        };
+        assert_eq!(
+            shown(&h.read(Range::All, h.t + 10_000)),
+            (json!(notes), json!(tag))
+        );
+        // The purge has raw.db to itself, as `oboete forget` has it.
+        let Home { s, t } = h;
+        let crate::search::b::fixture::Store { home, raw } = s;
+        drop(raw);
+        assert!(crate::forget::purge(home.path()).unwrap().is_some());
+        crate::worker::run_once(home.path()).unwrap();
+        let v = super::read(home.path(), Range::All, t + 10_000).unwrap();
+        assert_eq!(shown(&v), (json!(notes), json!(tag)));
+        assert!(!v.to_string().contains("Now tag it"), "{v}");
+    }
+
+    /// The design's 3: a request of several ids says "Summary updating" when the newest of its own
+    /// prompts has no reply summarized yet, as a request of a whole session does (Codex on #574).
+    #[test]
+    fn a_request_of_several_ids_is_updating_by_its_own_newest_prompt() {
+        let mut h = Home::new();
+        let summary = |c: &str| json!({"request": c, "completed": c});
+        let p = h.said("s1", -60_000, "Ship the release.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "A", "status": "doing"}),
+        );
+        let r = h.reply("s1", -55_000);
+        h.turn("s1", (p, r), -55_000, summary("Notes written."));
+        let p = h.said("s1", -50_000, "Now tag it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "B", "status": "doing"}),
+        );
+        let r = h.reply("s1", -45_000);
+        h.turn("s1", (p, r), -45_000, summary("Tagged."));
+        h.said("s1", -40_000, "Add the changelog to the notes.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "changelog", "request_id": "A", "status": "doing"}),
+        );
+        let v = h.read(Range::All, h.t + 10_000);
+        let updating = |id: &str| by_id(&v, id)["updating"].clone();
+        assert_eq!(
+            (updating("r:A"), updating("r:B")),
+            (json!(true), json!(false))
+        );
     }
 
     /// The design's 4, claude-mem's `statusFor` and its lifecycle: needs you (and its aliases),

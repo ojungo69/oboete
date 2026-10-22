@@ -4695,6 +4695,22 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The forgotten live prompts' places, each with its session's hash (`forget::session`): a
+    /// purge leaves a forgotten prompt's row with no labels, and `denied_records` keeps whose it
+    /// was. X10 (`my_work`) ends a session's prompts at them, reading no text (Greptile on #574).
+    pub(crate) fn forgotten_prompts(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT d.session, r.device, r.seq FROM denied_records d
+             JOIN records r ON r.device = d.device AND r.seq = d.seq
+             WHERE r.type = 'removed' AND r.kind = 'prompt'
+               AND r.source IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
     /// device: the session's first live event after its previous live reply, or its first live
     /// event (docs/summaries.md T1). A scan by label, as `turns`. Live alone: an import of the

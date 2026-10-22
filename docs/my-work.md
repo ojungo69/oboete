@@ -115,10 +115,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    each owns only the prompts in which its own work items were written (the prompt before the
    linked `work_state_write` call, through the record before the next prompt), with the replies that
    end in them and the cards that overlap them, as claude-mem gives such a request only the
-   observations of the prompts that wrote its work (`prompt_number`), which needs no summary; and
-   each prompt that none owns, with cards, counts once among the unlinked records, as claude-mem
-   counts each of the conversation's prompts with observations (amended with slice 1: a reply's
-   summary was needed to tell them apart, so before one a request had no cards). A request of
+   observations of the prompts that wrote its work (`prompt_number`), which needs no summary, a
+   forgotten or expired prompt still ending the one before it; and each prompt that none owns,
+   with cards, counts once among the unlinked records, as claude-mem counts each of the
+   conversation's prompts with observations (amended with slice 1: a reply's summary was needed
+   to tell them apart, so before one a request had no cards). A request of
    several conversations takes the earliest of their original asks (claude-mem takes the first it
    reads) and the newest 6 of their follow-ups.
 2. **Its work**: each work-state entry is tied to the session whose `tool` record of
@@ -283,8 +284,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
-- **"Summary updating"**: the request shows a summary and its newest prompt has no turn op yet,
-  kept or skipped, that covers it. Before its first summary the recorded wording carries no such
+- **"Summary updating"**: the request shows a summary and its newest prompt (of a request of
+  several ids, its own newest; Codex on #574) has no turn op yet, kept or skipped, that covers it.
+  Before its first summary the recorded wording carries no such
   note, as claude-mem 14.0.1's card shows "Summary updating" only beside a copy it already has
   (`request-views.js`); a home with no curator would otherwise say it forever.
 - **The recorded wording**, before any summary: the newest of its work items' outcome or progress
@@ -298,7 +300,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   end in them (the records between a reply and the next prompt start the next reply's turn, so a
   reply is placed by its last record) and the cards that overlap them, so it has its cards before
   any reply is summarized (Greptile on #574). A prompt is a live one of the conversation, all of
-  which are read (What is read).
+  which are read (What is read); a forgotten or expired prompt, whose text is not read, still ends
+  the one before it, by its row until a purge, then by the place the forget keeps in
+  `denied_records` with the session's hash (`Raw::forgotten_prompts`), so the requests of a session
+  do not share the cards after it (Greptile on #574).
 - **The gate**: an ask is told from an acknowledgement on the prompt's own text, and only what is
   shown goes through the gate, as the rules are now: an ask's first 1,200 characters, or a
   follow-up's first 500, and 4,000 more, so that a value the cut splits is whole when the rules
