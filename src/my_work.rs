@@ -240,6 +240,8 @@ struct Work {
     list_fields: Map<String, Value>,
     list_set: HashMap<String, Stamp>,
     updated: i64,
+    /// Its last write's place among the writes, which orders writes of one millisecond.
+    last: usize,
     /// The oldest first.
     writes: Vec<WorkWrite>,
     /// The writes of the list's own fields, for a task; none for the list itself.
@@ -348,6 +350,7 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
         /// The stamp of the write that set each of `fields`.
         set: HashMap<String, Stamp>,
         updated: i64,
+        last: usize,
         writes: Vec<WorkWrite>,
     }
     impl Kept {
@@ -365,6 +368,7 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 }
             }
             self.updated = w.ts;
+            self.last = order;
             self.writes.push(w);
         }
     }
@@ -419,6 +423,7 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 list_fields: l.state.fields.clone(),
                 list_set: l.state.set.clone(),
                 updated: task.updated,
+                last: task.last,
                 writes: task.writes,
                 list_writes: l.state.writes.clone(),
                 by: None,
@@ -434,13 +439,16 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 list_fields: l.state.fields,
                 list_set: l.state.set,
                 updated: l.state.updated,
+                last: l.state.last,
                 writes: l.state.writes,
                 list_writes: Vec::new(),
                 by: None,
             });
         }
     }
-    out.sort_by_key(|w| std::cmp::Reverse(w.updated));
+    // Newest first, and of writes in one millisecond the later, as claude-mem reads its events
+    // newest first.
+    out.sort_by_key(|w| std::cmp::Reverse((w.updated, w.last)));
     out
 }
 
@@ -1906,6 +1914,25 @@ mod tests {
         assert_eq!(by_id(&later, "c:claude:s5")["status"], "quiet");
         assert_eq!(by_id(&later, "c:claude:s2")["status"], "quiet");
         assert_eq!(by_id(&later, "c:claude:s0")["status"], "needs");
+    }
+
+    /// Of two writes in one millisecond, the later one's item is the newer, as claude-mem reads its
+    /// events newest first: the stable sort by time alone kept the first written first (the CI
+    /// coverage run met it in `the_newest_record_of_the_request_decides_and_its_id_is_one_text`).
+    #[test]
+    fn of_two_writes_in_one_millisecond_the_later_is_the_newer() {
+        let write = |task: &str| WorkWrite {
+            repo: R.into(),
+            list: "docs".into(),
+            fields: json!({"task": task, "status": "doing"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ts: 1_000,
+        };
+        let work = fold(vec![write("a"), write("b")]);
+        let tasks: Vec<&str> = work.iter().filter_map(|w| w.task.as_deref()).collect();
+        assert_eq!(tasks, ["b", "a"]);
     }
 
     /// #570 (CodeRabbit on #573): the request's own status is the newest record of its items'
