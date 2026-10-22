@@ -1097,6 +1097,9 @@ fn answer(
             format!("r:{e}"),
         ),
     };
+    // The id as assembled through the gate too: a rule may match it and neither of its parts, and
+    // the route's own gate (`view::answered`) would then mask two ids alike (Codex on #574).
+    let id = gate(&id);
     // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
     // two and each keeps its id from read to read (Codex on #574), keyed by the home's own key so
     // that it tells nothing of a guess at the id (CodeRabbit on #574).
@@ -2628,6 +2631,32 @@ mod tests {
             "{first:?}"
         );
         assert_eq!(read(), first);
+    }
+
+    /// Codex on #574 (#570): a rule may match an id as assembled and neither of its parts. The
+    /// answer's ids are the gate's already, so the route's own gate (`view::answered`, the same
+    /// rules) masks nothing more in them, and two such ids stay two.
+    #[test]
+    fn an_id_a_rule_masks_as_assembled_is_masked_before_the_route_gates_it() {
+        let mut h = Home::new();
+        for id in ["ticket-1", "ticket-2"] {
+            h.write(
+                "plan",
+                json!({"task": id, "request_id": id, "request": "Fix the release notes",
+                    "status": "doing"}),
+            );
+        }
+        h.s.run();
+        let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = 'r:ticket-[0-9]' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let rules = Rules::load(h.s.home.path()).unwrap();
+        let read = ids(&super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap());
+        let routed: Vec<String> = (read.iter())
+            .map(|id| crate::redact::outbound_with(id, &rules))
+            .collect();
+        assert_eq!((routed.len(), &routed), (2, &read));
+        assert_ne!(routed[0], routed[1]);
+        assert!(!routed.concat().contains("ticket-"), "{routed:?}");
     }
 
     /// CodeRabbit on #574: the fingerprint of a masked id is keyed by the home's own key, made the

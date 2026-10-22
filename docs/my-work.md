@@ -272,7 +272,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   `running` in progress, `queued` to do, `dropped` closed), where claude-mem's lifecycle takes only
   its exact status names and leaves the rest to the work (Codex on #574). A request's prompts,
   replies and cards are one more row of its work, as claude-mem's observations are, so work that
-  is all done reads "Update recorded" until it has been quiet for 6 hours.
+  is all done reads "Update recorded" until it has been quiet for 6 hours. A task's update time is
+  its own writes', as claude-mem's (`reduceWorkState`; the 240 read and `lastUpdateEpoch` go by
+  it), while a status it takes from its list is dated by the list's write; the list's state
+  reaches the request as an item of its own (Codex on #574).
 - **Its identity** (#570): `c:<agent>:<session>`, or `r:<request_id>`, the id trimmed and a number
   written as its text, so `7` and `"7"` are one request. A session is known by its labels as the
   stores hold them, and the gate only shows them in the answer, so two sessions that a rule masks
@@ -281,7 +284,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   and the stored id, so that two masked alike stay two and each keeps its id from read to read
   (Codex on #574), and the fingerprint tells nothing of a guess at the id (CodeRabbit on #574):
   the key is 32 random bytes in `state/my-work.key`, made the first time an id is masked and
-  never in an answer; whoever can read it can read the stores, which hold the ids themselves.
+  never in an answer; whoever can read it can read the stores, which hold the ids themselves. The
+  id goes through the gate as assembled too, since a rule may match it and neither of its parts:
+  the route's own gate (`view::answered`) then finds nothing more to mask in it, which would
+  make two ids alike (Codex on #574, #570).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
