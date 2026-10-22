@@ -245,6 +245,20 @@ pub struct Prompt {
 /// A prompt page's last kept record: its own time and stored ID, descending (page.md P3).
 pub type PromptPosition = (i64, String, i64);
 
+/// A live prompt's device and seq, its agent and session as its row holds them, and whether its
+/// text is there to read: neither a forget's nor expired (`Raw::prompt_labels`).
+pub(crate) type PromptLabel = (String, i64, (String, String), bool);
+
+/// One of this store's own work state writes (`Raw::native_work_writes`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkWrite {
+    pub repo: String,
+    pub list: String,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    /// When it was appended, unix ms: its tool call is recorded within moments of it.
+    pub ts: i64,
+}
+
 impl Prompt {
     pub fn position(&self) -> PromptPosition {
         (self.ts, self.device.clone(), self.seq)
@@ -4662,6 +4676,48 @@ impl Raw {
         Ok((out, false))
     }
 
+    /// The live prompts, newest first, each by its row's device, seq, agent and session, and
+    /// whether `at` would show its text: no body is read, so a prompt a forget took before the
+    /// purge, or one whose text expired, is among them, marked. X10 (`my_work`) picks the sessions
+    /// it reads from the shown ones and reads every prompt of those, as claude-mem reads every
+    /// prompt of the sessions it loaded, and ends a session's prompts at each (Codex on #574).
+    /// Only this viewer read creates the index, as `prompts`', never a hook.
+    pub(crate) fn prompt_labels(&self) -> Result<Vec<PromptLabel>> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        // As `hide` reads a tombstone: one with no range takes the record whole.
+        let mut st = self.conn.prepare(
+            "SELECT r.device, r.seq, r.agent, r.session,
+                    r.expired IS NULL AND NOT EXISTS (
+                      SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                        AND t.target_device = r.device AND t.target_seq = r.seq
+                        AND t.target_offset IS NULL)
+             FROM records r
+             WHERE r.type = 'event' AND r.kind = 'prompt'
+               AND r.source IN (SELECT value FROM json_each(?1))
+             ORDER BY r.ts DESC, r.device DESC, r.seq DESC",
+        )?;
+        let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
+            Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?), r.get(4)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The forgotten live prompts' places, each with its session's hash (`forget::session`): a
+    /// purge leaves a forgotten prompt's row with no labels, and `denied_records` keeps whose it
+    /// was. X10 (`my_work`) ends a session's prompts at them, reading no text (Greptile on #574).
+    pub(crate) fn forgotten_prompts(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT d.session, r.device, r.seq FROM denied_records d
+             JOIN records r ON r.device = d.device AND r.seq = d.seq
+             WHERE r.type = 'removed' AND r.kind = 'prompt'
+               AND r.source IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
     /// device: the session's first live event after its previous live reply, or its first live
     /// event (docs/summaries.md T1). A scan by label, as `turns`. Live alone: an import of the
@@ -5755,6 +5811,50 @@ impl Raw {
     /// `work_state_in` on this store.
     pub fn work_state_entries(&self, repo: &str) -> Result<Vec<crate::work_state::Entry>> {
         work_state_in(&self.conn, repo)
+    }
+
+    /// X10 (docs/my-work.md): this store's own work state writes, every repository's, in the order
+    /// they fold (`work_state_in`'s clock order), each at the time it was appended: none imported
+    /// from claude-mem (row N1), which has no tool call in a session.
+    pub(crate) fn native_work_writes(&self) -> Result<Vec<WorkWrite>> {
+        let mut st = self.conn.prepare(
+            "SELECT device, ts, body FROM main.ops
+             WHERE type = 'work_state' AND json_extract(body, '$.source') IS NULL
+             ORDER BY device, op_seq",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut writes = Vec::new();
+        let (mut device, mut clock) = (String::new(), i64::MIN);
+        for (i, row) in rows.enumerate() {
+            let (from, ts, body) = row?;
+            let v: serde_json::Value = serde_json::from_str(&body)?;
+            if from != device {
+                (device, clock) = (from.clone(), i64::MIN);
+            }
+            clock = clock.max(v["clock"].as_i64().unwrap_or(ts));
+            let (Some(repo), Some(list), Some(fields)) = (
+                v["repo"].as_str(),
+                v["list"].as_str(),
+                v["fields"].as_object(),
+            ) else {
+                continue;
+            };
+            let write = WorkWrite {
+                repo: repo.to_owned(),
+                list: list.to_owned(),
+                fields: fields.clone(),
+                ts,
+            };
+            writes.push((clock, from, i, write));
+        }
+        writes.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+        Ok(writes.into_iter().map(|w| w.3).collect())
     }
 
     /// The sessions, as `agent` NUL `session`, with a record in one of `repos`: what an excluded

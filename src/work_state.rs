@@ -443,7 +443,7 @@ fn gated(s: &str, rules: &Rules) -> String {
 }
 
 /// `value` as the gate shows it beside `key`, out of any line.
-fn beside(key: &str, value: &str, rules: &Rules) -> String {
+pub(crate) fn beside(key: &str, value: &str, rules: &Rules) -> String {
     let mut raw = Raw::default();
     raw.line(|raw| raw.pair(key, value, false));
     raw.shown(rules)
