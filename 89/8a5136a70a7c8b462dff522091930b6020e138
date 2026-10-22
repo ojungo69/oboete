@@ -1,0 +1,34 @@
+src/raw.rs
+  s_23ba4f313f5155::t_5fb9dbad41428c 4666-4674,4679-4683,4685-4695
+  s_23ba4f313f5155::t_158d3798d97480 248-250
+  s_23ba4f313f5155::t_f91e0171304a00 4696-4697
+  s_23ba4f313f5155::t_0c2000773fb1ae 4684
+src/my_work.rs
+  s_23ba4f313f5155::t_060cdc35034d0f 1984
+  s_23ba4f313f5155::t_5b46c268a137af 681-684,686-689,692-693,695-701,703-719
+  s_23ba4f313f5155::t_5d011d2609da9f 685,690-691,694,702
+  s_23ba4f313f5155::t_4c102e404ce370 26-30
+  s_23ba4f313f5155::t_9a3bb1d970bc5b 2039-2073,2077,2079
+  s_23ba4f313f5155::t_494efe8003d193 2074-2076,2078,2080-2083
+  s_23ba4f313f5155::t_c08b8b783b2d48 1950-1951,1955
+docs/my-work.md
+  s_23ba4f313f5155::t_a178a91edeb7d2 295-296,298-301
+  s_23ba4f313f5155::t_38254707a53f1a 297
+  s_23ba4f313f5155::t_4a39c2f29cbc5d 223-241
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "898a5136a70a7c8b462dff522091930b6020e138",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
