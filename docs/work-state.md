@@ -105,8 +105,8 @@ the gate leaves that text). Every answer and the session start section pass the 
 gate with the rules as they are then (6.4), so a rule added later hides a value written before it.
 The lines are built from the text as stored, and the gate reads them in several views, each as
 written: all the lines together, each line, each name, key and value alone (a rule anchored to a
-whole field matches it), and each value (a task's name and its status among them) in the
-assignment `key = "value"`, which the rules that look for a key before a secret (gitleaks'
+whole field matches it), and each value (a list's name, a task's name and its status among them)
+in the assignment `key = "value"`, which the rules that look for a key before a secret (gitleaks'
 generic-api-key) need. What any view hides is hidden where the lines show it, so no view's mask
 takes the context another view's rule needs (as search gates an imported document's title and
 body). In the assignment, a mask is placed by its position, since the masked text can spell the
@@ -121,11 +121,12 @@ gated, so a rule never turns a task into the list's state; a closing status (`do
 stored as sent too, one of two words and no recorded text, so a rule that masks the word never
 leaves open what a write closed (the line that shows it is gated as any is). The capture gate
 scans a value beside its key as well, as written (a rule that masks the key leaves the context):
-every value of a work state write, and a string value of up to 256 bytes in any other stored JSON;
+every value of a work state write and its list's name, beside the key `list`, and a string value
+of up to 256 bytes in any other stored JSON;
 a mask that starts in the key, or in the ` = "` after it, hides the key and the value whole.
 Ops keep no ledger rows; the masks are in the text. A list is named as the egress gate shows its
-name now, wherever lists are told apart: a rule added later that masks part of a list's name leaves
-one list, whose next write is stored under the masked name.
+name beside its key now, wherever lists are told apart: a rule added later that masks part of a
+list's name leaves one list, whose next write is stored under the masked name.
 
 L6. **Fold, lines and answers.** claude-mem's, with "repository" for "project" and oboete's
 repository key as the name; "updated <N> ago" counts from the op's time when the text is read, and
@@ -187,7 +188,8 @@ with its own (docs/claude-mem-import.md I4, I5).
   only generic-api-key's key context finds is masked in the op, however long the value; a rule
   added later that needs the key, or anchors to the whole value, hides it in the read; two rules
   added later, one anchored to the value and one needing its key, each find theirs; a task's name
-  and status are hidden by a rule that needs their key. A rule added later still has the context
+  and status, and a list's name, are hidden by a rule that needs their key, which masks a list's
+  name in the op too. A rule added later still has the context
   that a rule masking a key or a list's name alone would take, that a line the cut leaves out
   holds, and that a line holds where another rule masks part of a value (#411); a key whose masked
   assignment spells it again is hidden, at capture and when shown; two keys a rule masks alike are
