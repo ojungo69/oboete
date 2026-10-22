@@ -1087,15 +1087,26 @@ fn answer(
         })
         .collect();
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
-    let (id, held) = match &r.id {
+    let (id, held, kind) = match &r.id {
         Id::Conversation((agent, session)) => (
             format!("c:{}:{}", gate(agent), gate(session)),
             format!("c:{agent}:{session}"),
+            "c",
         ),
         Id::Explicit(e) => (
             format!("r:{}", crate::work_state::beside("request_id", e, rules)),
             format!("r:{e}"),
+            "r",
         ),
+    };
+    // The stored id through the gate as assembled too, since a rule may match it and neither of
+    // its parts, which the route's own gate (`view::answered`) would then mask alike in two ids
+    // (Codex on #574), or a part's mask may hide what that rule would match: then nothing of it is
+    // shown but its kind (Codex and CodeRabbit on #575).
+    let id = if gate(&held) == held {
+        id
+    } else {
+        format!("{kind}:{}", crate::redact::MASK)
     };
     // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
     // two and each keeps its id from read to read (Codex on #574), keyed by the home's own key so
@@ -2628,6 +2639,72 @@ mod tests {
             "{first:?}"
         );
         assert_eq!(read(), first);
+    }
+
+    /// Codex on #574 (#570): a rule may match an id as assembled and neither of its parts. The
+    /// answer's ids are the gate's already, so the route's own gate (`view::answered`, the same
+    /// rules) masks nothing more in them, and two such ids stay two.
+    #[test]
+    fn an_id_a_rule_masks_as_assembled_is_masked_before_the_route_gates_it() {
+        let mut h = Home::new();
+        for id in ["ticket-1", "ticket-2"] {
+            h.write(
+                "plan",
+                json!({"task": id, "request_id": id, "request": "Fix the release notes",
+                    "status": "doing"}),
+            );
+        }
+        h.s.run();
+        let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = 'r:ticket-[0-9]' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let rules = Rules::load(h.s.home.path()).unwrap();
+        let read = ids(&super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap());
+        let routed: Vec<String> = (read.iter())
+            .map(|id| crate::redact::outbound_with(id, &rules))
+            .collect();
+        assert_eq!((routed.len(), &routed), (2, &read));
+        assert_ne!(routed[0], routed[1]);
+        assert!(!routed.concat().contains("ticket-"), "{routed:?}");
+    }
+
+    /// Codex and CodeRabbit on #575: a part's mask may hide what a rule of the assembled id would
+    /// match, so the stored id is put through the gate as assembled too; when a rule matches it,
+    /// nothing of it is shown but its kind and the fingerprint.
+    #[test]
+    fn an_id_a_rule_matches_as_stored_shows_nothing_of_it() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        for id in ["ticket-1", "ticket-2"] {
+            h.write(
+                "plan",
+                json!({"task": id, "request_id": id, "request": "Fix the release notes",
+                    "status": "doing"}),
+            );
+        }
+        h.s.run();
+        let rule = |id: &str, regex: &str| format!("{{ id = \"{id}\", regex = '{regex}' }}");
+        let rules = [
+            rule("tail", "-[0-9]$"),
+            rule("ticket", "r:ticket-[0-9]"),
+            rule("agent", "^claude$"),
+            rule("conversation", "^c:claude:s1$"),
+        ];
+        let config = format!("[redaction]\nextra_rules = [{}]\n", rules.join(", "));
+        std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
+        let rules = Rules::load(h.s.home.path()).unwrap();
+        let read = ids(&super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap());
+        let routed: Vec<String> = (read.iter())
+            .map(|id| crate::redact::outbound_with(id, &rules))
+            .collect();
+        assert_eq!((routed.len(), &routed), (3, &read));
+        assert_eq!(routed.iter().collect::<HashSet<_>>().len(), 3, "{routed:?}");
+        for id in &routed {
+            let shown = id.split('#').next().unwrap();
+            assert!(
+                ["c:[REDACTED]", "r:[REDACTED]"].contains(&shown),
+                "{routed:?}"
+            );
+        }
     }
 
     /// CodeRabbit on #574: the fingerprint of a masked id is keyed by the home's own key, made the
