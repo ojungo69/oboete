@@ -142,10 +142,13 @@ struct Shown {
     span: (i64, i64),
 }
 
-impl Shown {
-    fn in_turn(&self, t: &Turn) -> bool {
-        self.c.device == t.s.device && self.span.0 <= t.span.1 && self.span.1 >= t.span.0
-    }
+/// A prompt's records on its device: from the prompt through the record before the next prompt of
+/// its conversation there, claude-mem's prompt (`prompt_number`), which needs no summary.
+type Span = (String, i64, i64);
+
+/// Whether prompt span `s` holds any of `device`'s records `from` to `to`.
+fn holds(s: &Span, device: &str, (from, to): (i64, i64)) -> bool {
+    s.0 == device && s.1 <= to && from <= s.2
 }
 
 #[derive(Default)]
@@ -184,21 +187,41 @@ impl Conversation {
         })
     }
 
-    /// The replies that no request owns and that have a card, and the cards of no reply yet,
-    /// once: what of the conversation is counted among the unlinked.
-    fn units(&self, owned: &HashSet<(String, i64)>) -> usize {
-        let turns = self.turns.iter().filter(|t| !owned.contains(&turn_key(t)));
-        let with_cards = turns
-            .filter(|t| self.cards.iter().any(|c| c.in_turn(t)))
+    /// Its prompts' spans, each through the record before the next prompt on its device.
+    fn spans(&self) -> Vec<Span> {
+        let mut at: Vec<(&str, i64)> = (self.prompts.iter())
+            .map(|p| (p.device.as_str(), p.seq))
+            .collect();
+        at.sort_unstable();
+        (at.iter().enumerate())
+            .map(|(i, &(device, seq))| {
+                let end = match at.get(i + 1) {
+                    Some(&(next, s)) if next == device => s - 1,
+                    _ => i64::MAX,
+                };
+                (device.to_owned(), seq, end)
+            })
+            .collect()
+    }
+
+    /// The prompts that no request owns and that hold a card, and the cards before any prompt,
+    /// once: what of the conversation is counted among the unlinked (claude-mem counts each
+    /// prompt with observations).
+    fn units(&self, owned: &HashSet<Span>) -> usize {
+        let spans = self.spans();
+        let card_in = |s: &Span| (self.cards.iter()).any(|c| holds(s, &c.c.device, c.span));
+        let with_cards = (spans.iter())
+            .filter(|s| !owned.contains(*s) && card_in(s))
             .count();
-        let tail = (self.cards.iter()).any(|c| !self.turns.iter().any(|t| c.in_turn(t)));
-        with_cards + usize::from(tail)
+        let before =
+            (self.cards.iter()).any(|c| !spans.iter().any(|s| holds(s, &c.c.device, c.span)));
+        with_cards + usize::from(before)
     }
 }
 
-fn turn_key(t: &Turn) -> (String, i64) {
-    (t.s.device.clone(), t.s.op_seq)
-}
+/// When a write was made and its place in the order the writes fold in: claude-mem's `atEpoch`
+/// and `sourceOrder` of a work state event.
+type Stamp = (i64, usize);
 
 /// A list's state or one of its tasks, folded as claude-mem folds them: the latest value of each
 /// key, a null clearing it.
@@ -207,8 +230,11 @@ struct Work {
     list: String,
     task: Option<String>,
     fields: Map<String, Value>,
-    /// The list's own fields, which a task's request fields fall back to.
+    /// The stamp of the write that set each of `fields`.
+    set: HashMap<String, Stamp>,
+    /// The list's own fields, which a task's request fields fall back to, and their stamps.
     list_fields: Map<String, Value>,
+    list_set: HashMap<String, Stamp>,
     updated: i64,
     /// The oldest first.
     writes: Vec<WorkWrite>,
@@ -263,16 +289,27 @@ impl Work {
             .map_or_else(String::new, |s| normalized(&crate::work_state::text(s)))
     }
 
-    /// The request's own completion or status as this item records it (claude-mem's lifecycle),
-    /// and whether it is `request_complete`'s, which comes first at the same time.
-    fn lifecycle(&self) -> Option<(bool, String)> {
-        if let Some(Value::Bool(done)) = self.either("request_complete") {
-            return Some((true, if *done { "done" } else { "open" }.into()));
+    /// The request's own completion and status as this item records them (claude-mem's lifecycle
+    /// records), each its own field else its list's, with the stamp of the write that set it, not
+    /// the item's newest (Greptile on #574), and whether it is `request_complete`'s, which comes
+    /// first at the same stamp.
+    fn lifecycle(&self) -> Vec<(Stamp, bool, String)> {
+        let field = |key: &str| match self.fields.get(key).filter(|v| !v.is_null()) {
+            Some(v) => Some((v, self.set.get(key))),
+            None => (self.list_fields.get(key).filter(|v| !v.is_null()))
+                .map(|v| (v, self.list_set.get(key))),
+        };
+        let mut out = Vec::new();
+        if let Some((Value::Bool(done), at)) = field("request_complete") {
+            let status = if *done { "done" } else { "open" };
+            out.push((at.copied().unwrap_or_default(), true, status.into()));
         }
-        match self.either("request_status") {
-            Some(Value::String(s)) if !s.trim().is_empty() => Some((false, normalized(s))),
-            _ => None,
+        if let Some((Value::String(s), at)) = field("request_status")
+            && !s.trim().is_empty()
+        {
+            out.push((at.copied().unwrap_or_default(), false, normalized(s)));
         }
+        out
     }
 }
 
@@ -304,16 +341,24 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
     #[derive(Default)]
     struct Kept {
         fields: Map<String, Value>,
+        /// The stamp of the write that set each of `fields`.
+        set: HashMap<String, Stamp>,
         updated: i64,
         writes: Vec<WorkWrite>,
     }
     impl Kept {
-        fn put(&mut self, w: WorkWrite) {
+        fn put(&mut self, w: WorkWrite, order: usize) {
             for (k, v) in &w.fields {
                 match v {
-                    Value::Null => self.fields.remove(k),
-                    v => self.fields.insert(k.clone(), v.clone()),
-                };
+                    Value::Null => {
+                        self.fields.remove(k);
+                        self.set.remove(k);
+                    }
+                    v => {
+                        self.fields.insert(k.clone(), v.clone());
+                        self.set.insert(k.clone(), (w.ts, order));
+                    }
+                }
             }
             self.updated = w.ts;
             self.writes.push(w);
@@ -328,7 +373,7 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
     }
     let mut lists: Vec<List> = Vec::new();
     let mut at: HashMap<(String, String), usize> = HashMap::new();
-    for w in writes {
+    for (order, w) in writes.into_iter().enumerate() {
         let i = *at
             .entry((w.repo.clone(), w.list.clone()))
             .or_insert_with(|| {
@@ -348,13 +393,13 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
             Some(t) => Some(crate::work_state::text(t)),
         };
         match task {
-            None => l.state.put(w),
+            None => l.state.put(w, order),
             Some(t) => {
                 let j = *l.at.entry(t.clone()).or_insert_with(|| {
                     l.tasks.push((t, Kept::default()));
                     l.tasks.len() - 1
                 });
-                l.tasks[j].1.put(w);
+                l.tasks[j].1.put(w, order);
             }
         }
     }
@@ -366,7 +411,9 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 list: l.list.clone(),
                 task: Some(name),
                 fields: task.fields,
+                set: task.set,
                 list_fields: l.state.fields.clone(),
+                list_set: l.state.set.clone(),
                 updated: task.updated,
                 writes: task.writes,
                 list_writes: l.state.writes.clone(),
@@ -379,7 +426,9 @@ fn fold(writes: Vec<WorkWrite>) -> Vec<Work> {
                 list: l.list,
                 task: None,
                 fields: l.state.fields.clone(),
+                set: l.state.set.clone(),
                 list_fields: l.state.fields,
+                list_set: l.state.set,
                 updated: l.state.updated,
                 writes: l.state.writes,
                 list_writes: Vec::new(),
@@ -543,10 +592,11 @@ fn newest<T, P>(
     }
 }
 
-/// What a request takes of a conversation: all of it, or the replies its writes were made in.
+/// What a request takes of a conversation: all of it, or the prompts its writes were made in,
+/// with their replies and cards.
 enum Owns {
     All,
-    Turns(HashSet<(String, i64)>),
+    Prompts(HashSet<Span>),
 }
 
 /// A request's original ask: a prompt, the oldest reply's `request` of a session none of whose
@@ -593,11 +643,11 @@ impl Request {
         match self.owns.iter_mut().find(|(k, _)| k == key) {
             None => self.owns.push((key.clone(), own)),
             Some((_, Owns::All)) => {}
-            Some((_, have @ Owns::Turns(_))) => match own {
+            Some((_, have @ Owns::Prompts(_))) => match own {
                 Owns::All => *have = Owns::All,
-                Owns::Turns(more) => {
-                    if let Owns::Turns(t) = have {
-                        t.extend(more);
+                Owns::Prompts(more) => {
+                    if let Owns::Prompts(p) = have {
+                        p.extend(more);
                     }
                 }
             },
@@ -777,7 +827,10 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
             .map(|s| s.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         if ids.len() > 1 {
-            // Each request owns the replies its writes were made in (the design's 1).
+            // Each request owns the prompts its writes were made in (the design's 1), as
+            // claude-mem gives such a request the observations of those prompts: a prompt runs to
+            // the next, so no summary is needed to tell them (Greptile on #574).
+            let spans = c.spans();
             let mut owned = HashSet::new();
             for id in &ids {
                 let Some(&j) = at.get(&Id::Explicit(id.clone())) else {
@@ -788,15 +841,12 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
                     .filter(|(k, ..)| k == key)
                     .map(|(_, device, seq)| (device.clone(), *seq))
                     .collect();
-                let turns: HashSet<(String, i64)> = (c.turns.iter())
-                    .filter(|t| {
-                        (calls.iter())
-                            .any(|(d, s)| *d == t.s.device && t.span.0 <= *s && *s <= t.span.1)
-                    })
-                    .map(turn_key)
+                let mine: HashSet<Span> = (spans.iter())
+                    .filter(|s| calls.iter().any(|(d, q)| holds(s, d, (*q, *q))))
+                    .cloned()
                     .collect();
-                owned.extend(turns.iter().cloned());
-                requests[j].take(key, Owns::Turns(turns));
+                owned.extend(mine.iter().cloned());
+                requests[j].take(key, Owns::Prompts(mine));
             }
             unlinked += c.units(&owned);
             continue;
@@ -903,16 +953,12 @@ fn answer(
                     latest_prompt = Some(p);
                 }
             }
-            Owns::Turns(owned) => {
-                let mine: Vec<&Turn> = (c.turns.iter())
-                    .filter(|t| owned.contains(&turn_key(t)))
-                    .collect();
-                cards.extend(
-                    c.cards
-                        .iter()
-                        .filter(|card| mine.iter().any(|t| card.in_turn(t))),
-                );
-                turns.extend(mine);
+            Owns::Prompts(owned) => {
+                let ours = |device: &str, span| owned.iter().any(|s| holds(s, device, span));
+                // A reply is its prompt's, by the record it ends with: the records between a reply
+                // and the next prompt are the next reply's too.
+                turns.extend((c.turns.iter()).filter(|t| ours(&t.s.device, (t.span.1, t.span.1))));
+                cards.extend((c.cards.iter()).filter(|card| ours(&card.c.device, card.span)));
             }
         }
     }
@@ -1013,8 +1059,9 @@ fn answer(
                     }
                 });
             let task = (w.task.as_deref()).map(|t| crate::work_state::beside("task", t, rules));
-            json!({"list": crate::redact::outbound_with(&w.list, rules), "task": task,
-                "status": status, "updated": w.updated})
+            // As capture keeps the list's name: beside its key (Codex on #574).
+            let list = crate::work_state::beside("list", &w.list, rules);
+            json!({"list": list, "task": task, "status": status, "updated": w.updated})
         })
         .collect();
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
@@ -1093,13 +1140,10 @@ fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
     } else {
         "unknown"
     };
-    // The newest item's record of the request's own state decides (claude-mem's lifecycle).
-    let mut recorded: Vec<(i64, bool, String)> = (items.iter())
-        .filter_map(|w| {
-            let (complete, status) = w.lifecycle()?;
-            Some((w.updated, complete, status))
-        })
-        .collect();
+    // The newest record of the request's own state among its items decides (claude-mem's
+    // lifecycle): by the write that set it, then `request_complete`'s at the same write.
+    let mut recorded: Vec<(Stamp, bool, String)> =
+        items.iter().flat_map(|w| w.lifecycle()).collect();
     recorded.sort_by_key(|r| std::cmp::Reverse((r.0, r.1)));
     let lifecycle = recorded.into_iter().next().map(|r| r.2);
     let complete = lifecycle
@@ -1466,19 +1510,26 @@ mod tests {
         );
     }
 
-    /// A session whose prompts never ask is no request; its card counts among the unlinked.
+    /// A session whose prompts never ask is no request; its card counts among the unlinked, and
+    /// so, once, do the cards before its first prompt.
     #[test]
     fn a_session_that_never_asks_is_no_request() {
         let mut h = Home::new();
+        let card =
+            json!([{"type": "change", "title": "Went on", "subtitle": "s", "narrative": "n"}]);
         let p = h.said("s1", -60_000, "続けて");
-        h.s.cards(
-            p,
-            p,
-            json!([{"type": "change", "title": "Went on", "subtitle": "s", "narrative": "n"}]),
-            false,
+        h.s.cards(p, p, card.clone(), false);
+        let t = (h.s).event(
+            "tool",
+            "s2",
+            (R, "main"),
+            h.t - 59_000,
+            json!({"tool": "Bash"}),
         );
+        h.s.cards(t, t, card, false);
+        h.said("s2", -58_000, "続けて");
         let v = h.read(Range::All, h.t);
-        assert_eq!((ids(&v), &v["unlinked"]), (Vec::<String>::new(), &json!(1)));
+        assert_eq!((ids(&v), &v["unlinked"]), (Vec::<String>::new(), &json!(2)));
     }
 
     /// Its work (claude-mem's `uniqueCall`): a work state write is the work of the session whose
@@ -1565,7 +1616,9 @@ mod tests {
             -50_000,
             json!({"request": "Release notes", "completed": "Notes written."}),
         );
-        let p = h.said("s1", -40_000, "Now tag it.");
+        // A record between a reply and the next prompt: the next reply's turn starts with it.
+        let gap = (h.s).event("compaction", "s1", (R, "main"), h.t - 45_000, json!({}));
+        h.said("s1", -40_000, "Now tag it.");
         h.wrote(
             "s1",
             "release",
@@ -1575,7 +1628,7 @@ mod tests {
         let r = h.reply("s1", -35_000);
         let tag = h.turn(
             "s1",
-            (p, r),
+            (gap, r),
             -35_000,
             json!({"request": "Tag", "completed": "Tagged."}),
         );
@@ -1633,6 +1686,45 @@ mod tests {
         assert!(!ids(&v).contains(&"c:claude:s1".to_owned()));
         assert_eq!(v["unlinked"], 1);
         assert_eq!(by_id(&v, "r:C")["summaries"], json!([changelog, docs]));
+    }
+
+    /// The design's 1: in a session of two `request_id`s, each request owns the prompts its work
+    /// was written in, with their cards, before any reply is summarized, as claude-mem gives such
+    /// a request the observations of its prompts; a prompt of neither, with a card, counts once
+    /// among the unlinked (Greptile on #574).
+    #[test]
+    fn two_request_ids_own_their_prompts_cards_before_any_summary() {
+        let mut h = Home::new();
+        let card = |title: &str| json!([{"type": "change", "title": title, "subtitle": title, "narrative": "x"}]);
+        let p = h.said("s1", -60_000, "Ship the release.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "A", "request": "Write the release notes",
+                "status": "doing"}),
+        );
+        let r = h.reply("s1", -50_000);
+        let notes = h.s.cards(p, r, card("Notes written"), false);
+        let p = h.said("s1", -40_000, "Now tag it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "B", "request": "Tag the release",
+                "status": "doing"}),
+        );
+        let r = h.reply("s1", -35_000);
+        let tag = h.s.cards(p, r, card("Tagged"), false);
+        let p = h.said("s1", -30_000, "Check the build.");
+        let r = h.reply("s1", -25_000);
+        h.s.cards(p, r, card("CI passed"), false);
+        let v = h.read(Range::All, h.t + 10_000);
+        let (a, b) = (by_id(&v, "r:A"), by_id(&v, "r:B"));
+        assert_eq!(
+            (&a["cards"], &a["copy"]),
+            (&json!(notes), &json!("recorded"))
+        );
+        assert_eq!((&b["cards"], &b["copy"]), (&json!(tag), &json!("recorded")));
+        assert_eq!(v["unlinked"], 1);
     }
 
     /// The design's 4, claude-mem's `statusFor` and its lifecycle: needs you (and its aliases),
@@ -1718,6 +1810,92 @@ mod tests {
         let seven = by_id(&v, "r:7");
         assert_eq!(tasks(seven), ["b", "a"]);
         assert_eq!(seven["ask"]["text"], "Fix the docs.");
+    }
+
+    /// claude-mem's lifecycle records: each recorded completion or status is dated by the write
+    /// that set it, its own item's or its list's, not by its item's newest write, so a later
+    /// write of another field changes nothing, and a newer status of the same item outranks an
+    /// older completion (Greptile on #574).
+    #[test]
+    fn a_request_status_is_dated_by_the_write_that_set_it() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "R", "request_status": "done"}),
+        );
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "R", "request_status": "blocked"}),
+        );
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "next_step": "Post them."}),
+        );
+        h.said("s2", -50_000, "Ship the docs.");
+        h.wrote(
+            "s2",
+            "docs",
+            json!({"task": "site", "request_id": "Q", "request_complete": true}),
+        );
+        h.wrote(
+            "s2",
+            "docs",
+            json!({"task": "site", "request_status": "blocked"}),
+        );
+        // Both in one write: the completion comes first.
+        h.said("s3", -40_000, "Ship the site.");
+        h.wrote(
+            "s3",
+            "site",
+            json!({"task": "deploy", "request_id": "P", "request_status": "blocked",
+                "request_complete": true}),
+        );
+        // A task's status from its list's state is dated by the list's write.
+        h.said("s4", -30_000, "Ship the app.");
+        h.wrote("s4", "app", json!({"request_status": "blocked"}));
+        h.wrote(
+            "s4",
+            "app",
+            json!({"task": "build", "request_id": "L", "request_status": "done"}),
+        );
+        h.wrote("s4", "app", json!({"task": "sign", "request_id": "L"}));
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(by_id(&v, "r:R")["status"], "blocked");
+        assert_eq!(by_id(&v, "r:Q")["status"], "blocked");
+        assert_eq!(by_id(&v, "r:P")["status"], "ready");
+        assert_eq!(by_id(&v, "r:L")["status"], "ready");
+    }
+
+    /// Of two statuses set at the same millisecond, the later write's decides, as claude-mem
+    /// orders its records by where they were written (`compareSourceOrder`).
+    #[test]
+    fn of_two_statuses_set_at_once_the_later_write_decides() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "R", "request_status": "done"}),
+        );
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "R", "request_status": "blocked"}),
+        );
+        rusqlite::Connection::open(h.s.home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET ts = (SELECT MIN(ts) FROM ops WHERE type = 'work_state')
+                 WHERE type = 'work_state'",
+                [],
+            )
+            .unwrap();
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(by_id(&v, "r:R")["status"], "blocked");
     }
 
     /// The design's 3: the card's copy is the session summaries: the title the first reply's
@@ -1869,6 +2047,27 @@ mod tests {
         let s1 = by_id(&v, "c:claude:s1");
         assert_eq!(s1["work"][0]["task"], crate::redact::MASK);
         assert_eq!(s1["summary"], crate::redact::MASK);
+        assert!(!v.to_string().contains("canary-"), "{v}");
+    }
+
+    /// A list's name goes out beside its key too, as capture keeps it (`capture::work_state`): a
+    /// rule added after the write that matches it only with its key masks it (Codex on #574).
+    #[test]
+    fn a_list_name_a_rule_masks_beside_its_key_is_masked() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Rotate the keys.");
+        h.wrote(
+            "s1",
+            "canary-4827",
+            json!({"task": "rotate", "status": "doing"}),
+        );
+        h.s.run();
+        let config =
+            "[redaction]\nextra_rules = [{ id = \"l\", regex = 'list = \"canary-[0-9]{4}' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
+        let v = super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["work"][0]["list"], crate::redact::MASK);
         assert!(!v.to_string().contains("canary-"), "{v}");
     }
 

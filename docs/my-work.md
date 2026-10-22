@@ -112,18 +112,21 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    request, its work counted among the unlinked). A prompt kept private, a session in an excluded
    repository and a forgotten record take no part, as everywhere. A request owns the replies (turns)
    of its conversations, with their summaries and cards; in a conversation of several `request_id`s,
-   each owns only the replies in which its own work items were written (the reply of the linked
-   `work_state_write` call), as claude-mem gives such a request only the observations of the prompts
-   that wrote its work, and each reply that none owns, with cards, counts once among the unlinked
-   records (claude-mem counts each of the conversation's prompts with observations). A request of
+   each owns only the prompts in which its own work items were written (the prompt before the
+   linked `work_state_write` call, through the record before the next prompt), with the replies that
+   end in them and the cards that overlap them, as claude-mem gives such a request only the
+   observations of the prompts that wrote its work (`prompt_number`), which needs no summary; and
+   each prompt that none owns, with cards, counts once among the unlinked records, as claude-mem
+   counts each of the conversation's prompts with observations (amended with slice 1: a reply's
+   summary was needed to tell them apart, so before one a request had no cards). A request of
    several conversations takes the earliest of their original asks (claude-mem takes the first it
    reads) and the newest 6 of their follow-ups.
 2. **Its work**: each work-state entry is tied to the session whose `tool` record of
    `work_state_write` names the same list and the same fields within 5 s of the op, and only when
    exactly one does (claude-mem's rule). The rest is the unlinked count. Only the work state this
    home's agents wrote is read: the work state imported from claude-mem (sourced ops, row N1) has no
-   tool call in a session and stays out with the rest of the imported history (8). The cards of the
-   replies it owns (1) are its activity, the newest first.
+   tool call in a session and stays out with the rest of the imported history (8). The cards it
+   owns (1) are its activity, the newest first.
 3. **The copy is the session summaries**, so My Work adds no model call. The card's title is a
    work item's recorded request when one reads as a request (claude-mem's rule, read as in 1), else
    the first reply's `request` (a short title the curator wrote, claude-mem's own field), cut to 100
@@ -178,9 +181,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   Japanese) is its request's original ask, its later prompts the follow-ups (the newest 6); a
   private prompt, an envelope, an excluded repository and a forgotten record are not shown.
 - Two `request_id`s in a session make two requests with the same original ask and follow-ups, each
-  titled by its own recorded request, each with the summaries and cards of the replies that wrote
-  its work; a reply of neither, with cards, counts once among the unlinked records. One id in a
-  session takes all of it.
+  titled by its own recorded request, each with the summaries and cards of the prompts that wrote
+  its work, before any summary too; a prompt of neither, with cards, counts once among the unlinked
+  records. One id in a session takes all of it.
 - Work state ties to the session whose single matching `work_state_write` call is within 5 s; two
   matching calls, or none, tie it to no session, and it is unlinked and counted unless it names a
   `request_id` with a recorded request, which is then a request of its own on that wording, as
@@ -188,9 +191,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   shown nor counted, since it may be that session's, nor is an item with a write, its own or of
   its list's state, that no call of a session not excluded sent or that an excluded session's
   call sent; work state imported from claude-mem is neither read nor counted.
-- Each status and alias above, from the request's recorded status and its work state; work that is
-  all done, or an ended session, alone is not "Ready to check"; 6 quiet hours is "No recent
-  update"; attention first orders them.
+- Each status and alias above, from the request's recorded status and its work state, each
+  recorded status dated by the write that set it and, at the same millisecond, the later write
+  first; work that is all done, or an ended session, alone is not "Ready to check"; 6 quiet hours
+  is "No recent update"; attention first orders them.
 - The card's title, summary and next step come from the session summaries in their order, cut at a
   word; a newer reply not summarized keeps the last summary and says "Summary updating"; a request
   with none shows its recorded wording.
@@ -257,8 +261,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   A write whose fields the gate stored otherwise than its call's input links to nothing, nor does
   a call that retention expired, which keeps its labels but not what it sent (Not built).
 - **The request's own status** (#570): the newest record among its items of `request_complete` or
-  `request_status`, each from the item's own fields, else its list's, `request_complete` first at
-  the same time, decides first; then its work's, claude-mem's `statusFor`. A recorded
+  `request_status`, each from the item's own fields, else its list's, and each dated by the write
+  that set it, not by its item's newest write (Greptile on #574): of two at the same millisecond
+  the later write's, then `request_complete` first at the same write, as claude-mem's lifecycle
+  records sort (`atEpoch`, `compareSourceOrder`); it decides first; then its work's, claude-mem's
+  `statusFor`. A recorded
   `request_status` reads with the aliases an item's status reads with (`failed` is blocked,
   `running` in progress, `queued` to do, `dropped` closed), where claude-mem's lifecycle takes only
   its exact status names and leaves the rest to the work (Codex on #574). A request's prompts,
@@ -283,15 +290,23 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 - **The recorded wording**, before any summary: the newest of its work items' outcome or progress
   and its cards' subtitles, else its ask, is the summary, as claude-mem's newest recorded update.
 - **The unlinked count**: the work items no request takes; and, of a conversation with no request
-  or with several `request_id`s, each reply no request owns that has a card, and the cards of no
-  reply yet, once.
+  or with several `request_id`s, each prompt no request owns that a card overlaps, and the cards
+  before its first prompt, once (Greptile on #574).
+- **A request of several ids' prompts**: a prompt runs from itself through the record before the
+  next prompt of its conversation on its device, as claude-mem's `prompt_number` groups a
+  session's observations; a request owns the prompts that hold its linked calls, the replies that
+  end in them (the records between a reply and the next prompt start the next reply's turn, so a
+  reply is placed by its last record) and the cards that overlap them, so it has its cards before
+  any reply is summarized (Greptile on #574). A prompt is a live one of the conversation, all of
+  which are read (What is read).
 - **The gate**: an ask is told from an acknowledgement on the prompt's own text, and only what is
   shown goes through the gate, as the rules are now: an ask's first 1,200 characters, or a
   follow-up's first 500, and 4,000 more, so that a value the cut splits is whole when the rules
   read it, a key block the cut leaves open left out, as `hook::clip` keeps a field. The live
   prompts on this PC are 226,000 characters (39 prompts, most of them delegated reviews), which the
-  gate read whole in 1.1 s. Work state's names and values go out as its own lines show them, each
-  beside its key (`work_state::beside`); an item's other fields are not in the answer.
+  gate read whole in 1.1 s. Work state's names and values go out each beside its key
+  (`work_state::beside`), as capture keeps them, the list's name too (Codex on #574); an item's
+  other fields are not in the answer.
 - **Speed**, on a copy of this PC's store of 2026-10-21 (18 requests in all), read on 2026-10-22:
   3.2 s for the first read, cold, and 1.5 to 1.8 s warm, most of it the gate the summaries' and
   the cards' readers put every field through; the labels' pass over the prompts took 13 ms warm.
