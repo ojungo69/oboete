@@ -285,9 +285,10 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   (Codex on #574), and the fingerprint tells nothing of a guess at the id (CodeRabbit on #574):
   the key is 32 random bytes in `state/my-work.key`, made the first time an id is masked and
   never in an answer; whoever can read it can read the stores, which hold the ids themselves. The
-  id goes through the gate as assembled too, since a rule may match it and neither of its parts:
-  the route's own gate (`view::answered`) then finds nothing more to mask in it, which would
-  make two ids alike (Codex on #574, #570).
+  stored id goes through the gate as assembled too, since a rule may match it and neither of its
+  parts, which the route's own gate (`view::answered`) would then mask alike in two ids, or a
+  part's mask may hide what that rule would match: then nothing of the id is shown but its kind
+  and the fingerprint (Codex on #574, #570; Codex and CodeRabbit on #575).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
