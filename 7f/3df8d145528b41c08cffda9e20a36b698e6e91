@@ -1,0 +1,36 @@
+docs/my-work.md
+  s_23ba4f313f5155::t_1dd1f492c02e9d 118
+  s_23ba4f313f5155::t_fce0cd44ebbf39 287-289
+  s_23ba4f313f5155::t_4fcf70adc3e2ce 119-122
+  s_23ba4f313f5155::t_510c91a1830926 303-306
+src/my_work.rs
+  s_23ba4f313f5155::t_42969c45749a7f 195-196,199
+  s_23ba4f313f5155::t_f4f35157abaa82 1782-1784
+  s_23ba4f313f5155::t_4f9103b7f4d36c 159-161
+  s_23ba4f313f5155::t_44270e5ceb083b 1798
+  s_23ba4f313f5155::t_57ccc4532a7f75 774-791
+  s_23ba4f313f5155::t_3e4b6bf4632bc1 1787,1792,1803-1809
+  s_23ba4f313f5155::t_3953bc94bae4a5 1758-1777,1781,1785-1786,1788-1791,1794-1795,1797,1799-1802,1810-1849
+  s_23ba4f313f5155::t_25c9fc18ac3601 1793
+  s_23ba4f313f5155::t_f8043d4a17a53a 984-989
+  s_23ba4f313f5155::t_b3a667d1aa1afe 1796
+  s_23ba4f313f5155::t_6cb697125448a3 1778-1780
+src/raw.rs
+  s_23ba4f313f5155::t_8c473d4fa1e5ee 4698-4713
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7f3df8d145528b41c08cffda9e20a36b698e6e91",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
