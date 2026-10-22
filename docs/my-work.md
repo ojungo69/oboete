@@ -288,7 +288,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   stored id goes through the gate as assembled too, since a rule may match it and neither of its
   parts, which the route's own gate (`view::answered`) would then mask alike in two ids, or a
   part's mask may hide what that rule would match: then nothing of the id is shown but its kind
-  and the fingerprint (Codex on #574, #570; Codex and CodeRabbit on #575).
+  and the fingerprint (Codex on #574, #570; Codex and CodeRabbit on #575). The route gates what is
+  before the fingerprint and keeps the fingerprint as it came, as it keeps a claim's uid, so a rule
+  matching its 12 hex digits does not make two ids one (Sourcery and Codex on #575, #570).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
   `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
   its own for the rest. Checked comes with slice 3.
