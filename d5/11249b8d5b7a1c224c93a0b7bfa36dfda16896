@@ -1,0 +1,23 @@
+docs/my-work.md
+  s_23ba4f313f5155::t_91275cc8486863 293-296
+src/my_work.rs
+  s_23ba4f313f5155::t_5def6f0597a0ec 1113-1117,1124-1128,1132
+src/view.rs
+  s_23ba4f313f5155::t_0569d324bbad42 2002-2009,2021-2023,2030-2043,2079-2084,4167-4169,4176,4179-4180,4183-4194,4202-4203,4797-4798,4800,4805
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d511249b8d5b7a1c224c93a0b7bfa36dfda16896",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
