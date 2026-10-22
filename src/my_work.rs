@@ -23,9 +23,11 @@ use crate::turns::TurnSummary;
 const WORK: usize = 240;
 const CARDS: usize = 300;
 const SUMMARIES: usize = 100;
-/// shortcut: the newest 2,000 live prompts no exclusion takes, where claude-mem reads every prompt
-/// of the sessions it loaded; a session whose first prompt is older has its oldest one read as its
-/// ask. Read them by session when a home holds more.
+/// The sessions found by their prompts alone: those of the newest 2,000 live prompts no exclusion
+/// takes, beyond claude-mem, which reads a session only for its work, observations or summaries.
+/// Every prompt of a session read is read, as claude-mem reads every prompt of the sessions it
+/// loaded, but with no bound of the newest 12,000: the sessions are bounded, and a bound would
+/// show a later prompt of a long session as its ask (Codex on #574).
 const PROMPTS: usize = 2_000;
 /// An ask and a follow-up, in characters, and the follow-ups kept (`requestText`, scope updates).
 const ASK: usize = 1_200;
@@ -618,26 +620,6 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         .map(|(a, s)| (a.to_owned(), s.to_owned()))
         .collect();
     let mut convs: BTreeMap<Key, Conversation> = BTreeMap::new();
-    let prompts = newest(
-        PROMPTS,
-        |before| raw.prompt_events(None, before, PROMPTS),
-        |(device, seq, e)| (e.ts, device.clone(), *seq),
-        |(_, _, e)| !excluded.contains(&(e.agent.clone(), e.session.clone())),
-    )?;
-    for (device, seq, e) in prompts.into_iter().rev() {
-        let c = convs
-            .entry((e.agent.clone(), e.session.clone()))
-            .or_default();
-        c.repos.extend(e.repo.as_deref().map(gate));
-        let text = crate::curate::long_text(&e).unwrap_or_default();
-        c.prompts.push(Said {
-            id: format!("{device}:{seq}"),
-            text: request_text(&text, usize::MAX),
-            device,
-            seq,
-            ts: e.ts,
-        });
-    }
     // A summary's and a card's span and session as their tables hold them: the readers gate the
     // labels they return.
     let summaries = newest(
@@ -696,6 +678,45 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         .filter(|w| !excluded_repos.contains(&w.repo))
         .collect();
     let work = link(&raw, &k, fold(writes), &excluded)?;
+    // Every prompt of the sessions read (`PROMPTS`): the work's, the summaries', the cards', and
+    // those of the newest live prompts, each prompt kept only as `at` returns it, which hides what
+    // a forget took.
+    let labels = raw.prompt_labels()?;
+    let mut sessions: HashSet<Key> = (labels.iter().map(|(.., key)| key))
+        .filter(|key| !excluded.contains(*key))
+        .take(PROMPTS)
+        .cloned()
+        .collect();
+    sessions.extend(convs.keys().cloned());
+    sessions.extend(work.iter().filter_map(|w| Some(w.by.as_ref()?.0.clone())));
+    let mut seqs: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+    for (device, seq, key) in &labels {
+        if sessions.contains(key) {
+            seqs.entry(device).or_default().push(*seq);
+        }
+    }
+    let mut said = Vec::new();
+    for (device, seqs) in seqs {
+        for r in raw.at(device, &seqs)? {
+            let Item::Event(e) = r.item else { continue };
+            let e = *e;
+            let text = crate::curate::long_text(&e).unwrap_or_default();
+            let p = Said {
+                id: format!("{device}:{}", r.seq),
+                device: device.to_owned(),
+                seq: r.seq,
+                ts: e.ts,
+                text: request_text(&text, usize::MAX),
+            };
+            said.push(((e.agent, e.session), e.repo, p));
+        }
+    }
+    said.sort_by(|(.., a), (.., b)| (a.ts, &a.device, a.seq).cmp(&(b.ts, &b.device, b.seq)));
+    for (key, repo, p) in said {
+        let c = convs.entry(key).or_default();
+        c.repos.extend(repo.as_deref().map(gate));
+        c.prompts.push(p);
+    }
 
     // claude-mem's `buildHumanRequests`: the request ids each conversation's work names, then
     // each item's request, then the conversations' own records.
@@ -1926,11 +1947,12 @@ mod tests {
     }
 
     /// The design's 1 and 5: an excluded session's prompts, summaries and cards take no part in
-    /// the `PROMPTS`, `SUMMARIES` and `CARDS` read either, so newer ones push out no request's
-    /// ask, summary or activity (Codex on #574).
+    /// the `PROMPTS`, `SUMMARIES` and `CARDS` read either, so newer ones push out no session found
+    /// by its prompts, nor a request's ask, summary or activity (Codex on #574).
     #[test]
     fn excluded_sessions_take_no_part_in_the_readers_bounds() {
         let mut h = Home::new();
+        h.said("s0", -61_000, "Fix the lexer.");
         let p = h.said("s1", -60_000, "Fix the parser.");
         let r = h.reply("s1", -59_000);
         let summary = h.turn(
@@ -1959,7 +1981,7 @@ mod tests {
         h.s.cards(x[0], x[0], Value::Array(many), false);
         h.s.exclude(private);
         let v = h.read(Range::Day, h.t);
-        assert_eq!(ids(&v), ["c:claude:s1"]);
+        assert_eq!(ids(&v), ["c:claude:s1", "c:claude:s0"]);
         let s1 = by_id(&v, "c:claude:s1");
         assert_eq!(
             (&s1["ask"]["from"], &s1["ask"]["text"]),
@@ -2012,6 +2034,51 @@ mod tests {
         h.s.cards(a, b, Value::Array(many), false);
         let v = h.read(Range::Day, h.t);
         assert_eq!(by_id(&v, "c:claude:s1")["cards"], json!(card));
+    }
+
+    /// claude-mem's `readAgentRecords`: every prompt of a session read for its work, a summary or
+    /// a card is read, however many newer prompts other sessions have, so it keeps its request,
+    /// its own first ask and its follow-ups; `PROMPTS` bounds only the sessions found by their
+    /// prompts alone (Codex on #574).
+    #[test]
+    fn a_session_read_has_every_prompt_read_however_many_are_newer() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        h.wrote("s1", "plan", json!({"task": "parser", "status": "doing"}));
+        let p = h.said("s3", -59_000, "Fix the docs.");
+        h.s.cards(
+            p,
+            p,
+            json!([{"type": "change", "title": "Docs fixed", "narrative": "x"}]),
+            false,
+        );
+        h.said("s4", -58_000, "Fix the index.");
+        h.said("s5", -57_000, "Fix the cache.");
+        for i in 0..PROMPTS as i64 {
+            h.said("s2", -50_000 + i, &format!("Look at the lexer, part {i}."));
+        }
+        h.said("s4", -10_000, "And its tests.");
+        let v = h.read(Range::All, h.t + 10_000);
+        let s4 = by_id(&v, "c:claude:s4");
+        let follow: Vec<&str> = (s4["follow_ups"].as_array().unwrap().iter())
+            .map(|f| f["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            (&s4["ask"]["text"], follow),
+            (&json!("Fix the index."), vec!["And its tests."])
+        );
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(
+            (&s1["ask"]["text"], tasks(s1)),
+            (&json!("Fix the parser."), vec!["parser"])
+        );
+        assert_eq!(by_id(&v, "c:claude:s3")["ask"]["text"], "Fix the docs.");
+        assert!(
+            !ids(&v).contains(&"c:claude:s5".to_owned()),
+            "{:?}",
+            ids(&v)
+        );
+        assert_eq!(v["unlinked"], 0);
     }
 
     /// claude-mem's `buildHumanRequests`: a work item whose write no single call links, with a

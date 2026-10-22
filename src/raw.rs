@@ -245,8 +245,9 @@ pub struct Prompt {
 /// A prompt page's last kept record: its own time and stored ID, descending (page.md P3).
 pub type PromptPosition = (i64, String, i64);
 
-/// A live prompt's device, seq and event, before any gate (`Raw::prompt_events`).
-pub(crate) type PromptEvent = (String, i64, Event);
+/// A live prompt's device and seq, and its agent and session, as its row holds them
+/// (`Raw::prompt_labels`).
+pub(crate) type PromptLabel = (String, i64, (String, String));
 
 /// One of this store's own work state writes (`Raw::native_work_writes`).
 #[derive(Debug, Clone, PartialEq)]
@@ -4630,30 +4631,6 @@ impl Raw {
         limit: usize,
         rules: &crate::redact::Rules,
     ) -> Result<(Vec<Prompt>, bool)> {
-        let (events, more) = self.prompt_events(repo, before, limit)?;
-        let gate = |s: &str| crate::redact::outbound_with(s, rules);
-        let prompts = events
-            .into_iter()
-            .map(|(device, seq, e)| Prompt {
-                device,
-                seq,
-                ts: e.ts,
-                agent: gate(&e.agent),
-                repo: e.repo.as_deref().map(gate),
-                text: gate(&crate::curate::long_text(&e).unwrap_or_default()),
-            })
-            .collect();
-        Ok((prompts, more))
-    }
-
-    /// `prompts`' records, each with its device and seq, as `after` returns them and before any
-    /// gate: a reader that shows a part of a prompt gates that part (X10, `my_work`).
-    pub(crate) fn prompt_events(
-        &self,
-        repo: Option<&str>,
-        before: Option<&PromptPosition>,
-        limit: usize,
-    ) -> Result<(Vec<PromptEvent>, bool)> {
         self.conn.execute_batch(PROMPT_INDEX)?;
         let mut st = self.conn.prepare(
             "SELECT device, seq FROM records
@@ -4686,9 +4663,36 @@ impl Raw {
             if out.len() == limit {
                 return Ok((out, true));
             }
-            out.push((device, seq, *e));
+            let gate = |s: &str| crate::redact::outbound_with(s, rules);
+            out.push(Prompt {
+                device,
+                seq,
+                ts: e.ts,
+                agent: gate(&e.agent),
+                repo: e.repo.as_deref().map(gate),
+                text: gate(&crate::curate::long_text(&e).unwrap_or_default()),
+            });
         }
         Ok((out, false))
+    }
+
+    /// The live prompts, newest first, each by its row's device, seq, agent and session: no
+    /// body is read, so a prompt a forget or an expiry took is among them, for `at` to hide.
+    /// X10 (`my_work`) picks the sessions it reads from them and reads every prompt of those, as
+    /// claude-mem reads every prompt of the sessions it loaded (Codex on #574). Only this viewer
+    /// read creates the index, as `prompts`', never a hook.
+    pub(crate) fn prompt_labels(&self) -> Result<Vec<PromptLabel>> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        let mut st = self.conn.prepare(
+            "SELECT device, seq, agent, session FROM records
+             WHERE type = 'event' AND kind = 'prompt'
+               AND source IN (SELECT value FROM json_each(?1))
+             ORDER BY ts DESC, device DESC, seq DESC",
+        )?;
+        let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
+            Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?)))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this

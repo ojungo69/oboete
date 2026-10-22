@@ -220,17 +220,25 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 - `src/my_work.rs` reads the requests, and `GET /api/my-work?range=day|week|all` answers with them:
   a day by default, another value refused with 400 before anything is read, the newest update
   first, with the unlinked count.
-- **What is read**: the newest 2,000 live prompts, 100 session summaries (`turns::page`) and 300
-  cards (`cards::page`) of the sessions no exclusion takes, and this store's own work state writes
-  (`Raw::native_work_writes`), folded as claude-mem folds them (each list's tasks, and the list
-  itself when its state has a key besides `task`), of which the newest 240 that no excluded
-  repository or session wrote are read: what is excluded takes no part in a bound, so it pushes out
-  no older record (Codex on #574). Each reader pages on past an excluded session's prompts,
-  summaries and cards, and past a card of no session (its window spans two sessions' records, so
-  it is no request's), until its bound holds; an excluded session's items are known only once
-  linked, so they are linked and left out until 240 are kept.
-  The 2,000 prompts are a shortcut: claude-mem reads every prompt of the sessions it loaded, so a
-  session whose first prompt is older than them has its oldest read prompt as its ask.
+- **What is read**: 100 session summaries (`turns::page`) and 300 cards (`cards::page`) of the
+  sessions no exclusion takes, and this store's own work state writes (`Raw::native_work_writes`),
+  folded as claude-mem folds them (each list's tasks, and the list itself when its state has a key
+  besides `task`), of which the newest 240 that no excluded repository or session wrote are read:
+  what is excluded takes no part in a bound, so it pushes out no older record (Codex on #574).
+  Each reader pages on past an excluded session's summaries and cards, and past a card of no
+  session (its window spans two sessions' records, so it is no request's), until its bound holds;
+  an excluded session's items are known only once linked, so they are linked and left out until
+  240 are kept.
+  Then every live prompt of the sessions read, as claude-mem reads every prompt of the sessions it
+  loaded (`readAgentRecords`), so that a session keeps its own first ask however many newer
+  prompts other sessions have (Codex on #574): the sessions of that work, those summaries and
+  cards, and, beyond claude-mem, which shows no session of prompts alone, those of the newest
+  2,000 live prompts no exclusion takes, so that a session not curated yet shows its ask. The
+  prompts are found by their rows' labels in one pass through the prompts' index
+  (`Raw::prompt_labels`, which reads no body, so a prompt a forget took counts among the 2,000,
+  unshown), and only the read sessions' bodies are read (`Raw::at`). claude-mem reads the newest
+  12,000 of them; here they have no bound, since the sessions have one, and a bound would show a
+  later prompt of a long session as its ask.
 - **The link**: a write is the work of the session whose call of oboete's `work_state_write`
   (named as `curate::served` and `curate::oboete` read a tool: `mcp__oboete__…`, `oboete__…`,
   `oboete.…`) sent the same repository, list and fields within 5 s, when exactly one did; an item
@@ -284,10 +292,13 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   prompts on this PC are 226,000 characters (39 prompts, most of them delegated reviews), which the
   gate read whole in 1.1 s. Work state's names and values go out as its own lines show them, each
   beside its key (`work_state::beside`); an item's other fields are not in the answer.
-- **Speed**, on a copy of this PC's store (10 requests in a day, 18 in all): 2.4 s cold and 1.0 s
-  warm, most of it the gate the summaries' and the cards' readers put every field through. The
-  page reads it only when the store's version moves (row 49), and each connection to the viewer
-  has a thread of its own, so a hook's request does not wait on it.
+- **Speed**, on a copy of this PC's store of 2026-10-21 (18 requests in all), read on 2026-10-22:
+  3.2 s for the first read, cold, and 1.5 to 1.8 s warm, most of it the gate the summaries' and
+  the cards' readers put every field through; the labels' pass over the prompts took 13 ms warm.
+  Reading the newest 2,000 prompts instead, as before, took as long (3.0 s, 1.6 to 1.9 s) and
+  gave the same answer, byte for byte: the copy's 39 live prompts were all among them. The page
+  reads it only when the store's version moves (row 49), and each connection to the viewer has a
+  thread of its own, so a hook's request does not wait on it.
 - **The answer** of a request: `id`, `title`, `summary`, `next`, `copy` (`summary` or `recorded`),
   `updating`, `status`, `updated`, `started`, `agents`, `projects`, `repos`, `ask` (`id`, `ts`,
   `text`, and `from`: `prompt`, `summary` or `work`), `follow_ups` (each `id`, `ts`, `text`), `work`
