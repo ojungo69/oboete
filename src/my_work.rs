@@ -733,18 +733,18 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         .collect();
     let work = link(&raw, &k, fold(writes), &excluded)?;
     // Every prompt of the sessions read (`PROMPTS`): the work's, the summaries', the cards', and
-    // those of the newest live prompts, each prompt kept only as `at` returns it, which hides what
-    // a forget took.
+    // those of the newest live prompts whose text is there, each prompt kept only as `at`
+    // returns it: what a forget took or an expiry left without text takes no part (Codex on #574).
     let labels = raw.prompt_labels()?;
-    let mut sessions: HashSet<Key> = (labels.iter().map(|(.., key)| key))
-        .filter(|key| !excluded.contains(*key))
+    let mut sessions: HashSet<Key> = (labels.iter())
+        .filter(|(.., key, shown)| *shown && !excluded.contains(key))
         .take(PROMPTS)
-        .cloned()
+        .map(|(_, _, key, _)| key.clone())
         .collect();
     sessions.extend(convs.keys().cloned());
     sessions.extend(work.iter().filter_map(|w| Some(w.by.as_ref()?.0.clone())));
     let mut seqs: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
-    for (device, seq, key) in &labels {
+    for (device, seq, key, _) in &labels {
         if sessions.contains(key) {
             seqs.entry(device).or_default().push(*seq);
         }
@@ -773,7 +773,7 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
     }
     // Where each conversation's prompts are, a forgotten or expired one's too, whose text is not
     // read: by its row until a purge, then by what the forget keeps (Greptile on #574).
-    for (device, seq, key) in &labels {
+    for (device, seq, key, _) in &labels {
         if let Some(c) = convs.get_mut(key) {
             c.bounds.push((device.clone(), *seq));
         }
@@ -1073,19 +1073,13 @@ fn answer(
         .collect();
     let ask = json!({"id": original.id, "ts": original.ts, "text": ask,
         "from": original.from});
-    // Each name and value as the gate shows it beside its key, as work state's own lines do; a
-    // closing status is one of two words, no recorded text (`capture::work_state`).
+    // Each name and value as the gate shows it beside its key, as work state's own lines do, a
+    // closing status too: capture keeps it as sent, and the line that shows it gates it as any
+    // (`capture::work_state`; Codex on #574).
     let work: Vec<Value> = (items.iter())
         .map(|w| {
-            let status = w
-                .fields
-                .get("status")
-                .map(|s| match crate::work_state::closed(Some(s)) {
-                    true => crate::work_state::text(s),
-                    false => {
-                        crate::work_state::beside("status", &crate::work_state::text(s), rules)
-                    }
-                });
+            let status = (w.fields.get("status"))
+                .map(|s| crate::work_state::beside("status", &crate::work_state::text(s), rules));
             let task = (w.task.as_deref()).map(|t| crate::work_state::beside("task", t, rules));
             // As capture keeps the list's name: beside its key (Codex on #574).
             let list = crate::work_state::beside("list", &w.list, rules);
@@ -2191,6 +2185,23 @@ mod tests {
         assert!(!v.to_string().contains("canary-"), "{v}");
     }
 
+    /// A closing status is kept as sent (`capture::work_state`), and goes out beside its key as
+    /// work state's own lines show it: a rule added after the write that matches it only with its
+    /// key masks it, and the item is still closed (Codex on #574).
+    #[test]
+    fn a_closing_status_a_rule_masks_beside_its_key_is_masked() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Rotate the keys.");
+        h.wrote("s1", "keys", json!({"task": "rotate", "status": "done"}));
+        h.s.run();
+        let config = "[redaction]\nextra_rules = [{ id = \"s\", regex = 'status = \"done' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
+        let v = super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["work"][0]["status"], crate::redact::MASK);
+        assert_eq!(s1["status"], "unknown");
+    }
+
     /// The design's 3 (#570's measurement): a read makes no provider call.
     #[test]
     fn a_read_makes_no_provider_call() {
@@ -2308,6 +2319,38 @@ mod tests {
         );
         assert_eq!(s1["summaries"], json!([summary]));
         assert_eq!(s1["cards"], json!(card));
+    }
+
+    /// The design's 5: a prompt a forget took, before the purge rewrites its row, or one whose text
+    /// expired takes no part in the `PROMPTS` that find a session of prompts alone either, so
+    /// newer ones push out no older session (Codex on #574).
+    #[test]
+    fn hidden_prompts_take_no_part_in_the_prompts_bound() {
+        let mut h = Home::new();
+        h.said("s0", -61_000, "Fix the lexer.");
+        for i in 0..PROMPTS as i64 {
+            h.said("x", -50_000 + i, "Fix the old thing.");
+        }
+        let gone: Vec<i64> = (0..PROMPTS as i64)
+            .map(|i| h.said("y", -40_000 + i, "Fix the gone thing."))
+            .collect();
+        let device = h.s.raw.device().to_owned();
+        for seq in gone {
+            let device = device.clone();
+            (h.s.raw)
+                .append_tombstone(Target::Record { device, seq })
+                .unwrap();
+        }
+        // As retention leaves an expired record (docs/retention.md).
+        rusqlite::Connection::open(h.s.home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE records SET enc = 'plain', body = X'', original_bytes = NULL, expired = 1
+                 WHERE type = 'event' AND session = 'x'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(ids(&h.read(Range::Day, h.t)), ["c:claude:s0"]);
     }
 
     /// The design's 5: a reader that pages on past an excluded session's records reads its bound

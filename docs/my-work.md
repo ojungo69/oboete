@@ -240,8 +240,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   cards, and, beyond claude-mem, which shows no session of prompts alone, those of the newest
   2,000 live prompts no exclusion takes, so that a session not curated yet shows its ask. The
   prompts are found by their rows' labels in one pass through the prompts' index
-  (`Raw::prompt_labels`, which reads no body, so a prompt a forget took counts among the 2,000,
-  unshown), and only the read sessions' bodies are read (`Raw::at`). claude-mem reads the newest
+  (`Raw::prompt_labels`, which reads no body but marks a prompt a forget took before its purge,
+  or one whose text expired: such a one takes no slot of the 2,000; Codex on #574), and only the
+  read sessions' bodies are read (`Raw::at`). claude-mem reads the newest
   12,000 of them; here they have no bound, since the sessions have one, and a bound would show a
   later prompt of a long session as its ask.
 - **The link**: a write is the work of the session whose call of oboete's `work_state_write`
@@ -310,8 +311,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   read it, a key block the cut leaves open left out, as `hook::clip` keeps a field. The live
   prompts on this PC are 226,000 characters (39 prompts, most of them delegated reviews), which the
   gate read whole in 1.1 s. Work state's names and values go out each beside its key
-  (`work_state::beside`), as capture keeps them, the list's name too (Codex on #574); an item's
-  other fields are not in the answer.
+  (`work_state::beside`), as capture keeps them, the list's name too, and a closing status, which
+  capture keeps as sent and work state's own line gates as any (Codex on #574); an item's other
+  fields are not in the answer.
 - **Speed**, on a copy of this PC's store of 2026-10-21 (18 requests in all), read on 2026-10-22:
   3.2 s for the first read, cold, and 1.5 to 1.8 s warm, most of it the gate the summaries' and
   the cards' readers put every field through; the labels' pass over the prompts took 13 ms warm.

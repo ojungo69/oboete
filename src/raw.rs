@@ -245,9 +245,9 @@ pub struct Prompt {
 /// A prompt page's last kept record: its own time and stored ID, descending (page.md P3).
 pub type PromptPosition = (i64, String, i64);
 
-/// A live prompt's device and seq, and its agent and session, as its row holds them
-/// (`Raw::prompt_labels`).
-pub(crate) type PromptLabel = (String, i64, (String, String));
+/// A live prompt's device and seq, its agent and session as its row holds them, and whether its
+/// text is there to read: neither a forget's nor expired (`Raw::prompt_labels`).
+pub(crate) type PromptLabel = (String, i64, (String, String), bool);
 
 /// One of this store's own work state writes (`Raw::native_work_writes`).
 #[derive(Debug, Clone, PartialEq)]
@@ -4676,21 +4676,28 @@ impl Raw {
         Ok((out, false))
     }
 
-    /// The live prompts, newest first, each by its row's device, seq, agent and session: no
-    /// body is read, so a prompt a forget or an expiry took is among them, for `at` to hide.
-    /// X10 (`my_work`) picks the sessions it reads from them and reads every prompt of those, as
-    /// claude-mem reads every prompt of the sessions it loaded (Codex on #574). Only this viewer
-    /// read creates the index, as `prompts`', never a hook.
+    /// The live prompts, newest first, each by its row's device, seq, agent and session, and
+    /// whether `at` would show its text: no body is read, so a prompt a forget took before the
+    /// purge, or one whose text expired, is among them, marked. X10 (`my_work`) picks the sessions
+    /// it reads from the shown ones and reads every prompt of those, as claude-mem reads every
+    /// prompt of the sessions it loaded, and ends a session's prompts at each (Codex on #574).
+    /// Only this viewer read creates the index, as `prompts`', never a hook.
     pub(crate) fn prompt_labels(&self) -> Result<Vec<PromptLabel>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
+        // As `hide` reads a tombstone: one with no range takes the record whole.
         let mut st = self.conn.prepare(
-            "SELECT device, seq, agent, session FROM records
-             WHERE type = 'event' AND kind = 'prompt'
-               AND source IN (SELECT value FROM json_each(?1))
-             ORDER BY ts DESC, device DESC, seq DESC",
+            "SELECT r.device, r.seq, r.agent, r.session,
+                    r.expired IS NULL AND NOT EXISTS (
+                      SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                        AND t.target_device = r.device AND t.target_seq = r.seq
+                        AND t.target_offset IS NULL)
+             FROM records r
+             WHERE r.type = 'event' AND r.kind = 'prompt'
+               AND r.source IN (SELECT value FROM json_each(?1))
+             ORDER BY r.ts DESC, r.device DESC, r.seq DESC",
         )?;
         let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
-            Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?)))
+            Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?), r.get(4)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
