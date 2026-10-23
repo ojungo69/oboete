@@ -3261,10 +3261,11 @@ fn opens(after: &str) -> bool {
 }
 
 /// What follows `</tag` makes it the closer, as claude-mem 15.0 reads `</tag\s*>`: the length of
-/// the spaces and the `>` after the name.
+/// the spaces (ECMAScript's `\s`, which takes U+FEFF too) and the `>` after the name.
 fn closes(after: &str) -> Option<usize> {
-    let spaces = after.len() - after.trim_start().len();
-    after[spaces..].starts_with('>').then_some(spaces + 1)
+    let rest = after.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    rest.starts_with('>')
+        .then_some(after.len() - rest.len() + 1)
 }
 
 /// A prompt the harness sent rather than the developer typed (see `ENVELOPES`).
@@ -10755,6 +10756,12 @@ mod tests {
     fn a_closer_with_spaces_before_its_bracket_closes_the_block() {
         assert_eq!(strip_blocks("a <private>x</private > b", false), "a  b");
         assert_eq!(strip_blocks("a <private>x</private\n\t> b", false), "a  b");
+        // ECMAScript's `\s` takes U+FEFF, which Rust's whitespace does not (Sourcery and
+        // CodeRabbit on #587).
+        assert_eq!(
+            strip_blocks("a <private>x</private\u{feff}> b", false),
+            "a  b"
+        );
         assert_eq!(
             strip_blocks("a <private>x</privateer> b", false),
             "a <private>x</privateer> b"
