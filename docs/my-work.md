@@ -66,9 +66,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   with an OpenRouter key (`WorkViewRoutes.ts`); the default provider (`claude`) writes none, and
   the owner's claude-mem runs with `claude`, so it has written none. Without it (`presentation.js`)
   a card shows the recorded wording: the request's title above, the newest recorded update (a work
-  item's progress or outcome, an observation's subtitle) as its summary, else the original ask, and
-  the newest recorded next step (a work item's `next_step`, a prompt's `next_steps`), else a line
-  for its status ("Follow the latest recorded activity.").
+  item's progress or outcome, else its name; an observation's subtitle, else its title) as its
+  summary, else the original ask, and the newest recorded next step (a work item's `next_step`, a
+  prompt's `next_steps`), else a line for its status ("Follow the latest recorded activity.").
 - **Checked** (`review-store.ts`): a separate database, `work-view-reviews.db`, one row per request
   (its id, a SHA-256 of the request's recorded content, the time, `local-user`), never in the memory
   database and never synced. The content is the original ask, the follow-ups, the title, the
@@ -140,8 +140,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    updating". A request with no summary yet (no curator configured, none answering, or not curated
    yet) shows its recorded wording, as claude-mem's cards do without their copy (decision 53): the
    recorded request, else the original ask's first sentence, as the title; the newest recorded
-   update (a work item's progress or outcome, a card's subtitle), else the original ask, as the
-   summary; the newest recorded next step (a work item's `next_step`), else a line for its status.
+   update (a work item's outcome, else its progress, else its name; a card's subtitle, else its
+   title), else the original ask, as the summary; the newest recorded next step (a work item's
+   `next_step`), else a line for its status.
    There is no stage and no per-stream copy, which claude-mem writes only with a model either.
    Issue #570's measurement before turning summaries on is then zero added calls; that is stated,
    not assumed: the slice's test counts the provider calls a My Work read makes (none).
@@ -162,10 +163,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    not reported complete, is refused with 409, and the page reloads the request. Undo is the same
    route with `checked: false`.
 7. **The page**: a My Work tab, first and opened by default, as claude-mem opens on My Work; the
-   Timeline is one tab away. Cards, list and by agent; search, project, time range, sort and the
-   status tabs with counts; the drill-down with the original ask, the follow-ups, the summaries
-   (the result), the linked work's changes and the cards, each named by the ID `get` takes, and
-   "Copy handoff". New data waits behind "Show updates" while a person reads, scrolls or uses a
+   Timeline is one tab away. Cards, list and by agent (one card a conversation, as claude-mem's;
+   decision 55); search, project, time range, sort and the status tabs with counts; the drill-down
+   with the original ask, the follow-ups, the summaries (the result), the linked work's changes and
+   the cards, each named by the ID `get` takes, and "Copy handoff" in the page's language
+   (decision 55). New data waits behind "Show updates" while a person reads, scrolls or uses a
    control, and applied cards keep their order. Labels in Japanese and English.
 8. **Imported claude-mem history** stays out: its sessions end before the switch (2026-10-15), past
    claude-mem's own default ranges, and claude-mem's My Work shows them where they were written.
@@ -340,3 +342,42 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   `text`, and `from`: `prompt`, `summary` or `work`), `follow_ups` (each `id`, `ts`, `text`), `work`
   (each item's `list`, `task`, `status`, `updated`), and `summaries` and `cards`, the IDs `get`
   takes, the newest first, at most 40 cards.
+
+### Slice 2, the page's answer (2026-10-24)
+
+The page (decision 55) needs three things the answer of slice 1 did not hold. The route adds
+them; nothing else in it changes.
+
+- **`updates`**: a request's recorded updates, as claude-mem's `presentWork` lists them without
+  its copy. Each linked work item gives its outcome, else its progress, else its name: its task's,
+  else its list's, beside its key as capture keeps it. A name that is only a number, `true`,
+  `false` or `null` says nothing, as claude-mem's `cleanText` reads one, and gives none. Each of
+  its cards gives its subtitle, else its title. They come the newest first, each text once (the
+  first kept), at most 8, each cut to 240 characters at a word. They are listed whichever copy the
+  request has. Without a summary, the first of them is the request's summary, as in slice 1; now
+  that may be an item's name, as on claude-mem's card.
+  - Not copied, on purpose: claude-mem lists an item twice, once with its outcome first (its
+    activity) and once with its progress first (the item itself), and an item's activity takes its
+    next step when it has neither. Here an item is listed once, by its detail.
+  - claude-mem cuts a field at 260 characters (`compactText`), which its cut of an update at 400
+    never reaches. Here the cut is 240, the summary's, so that the summary is the first update.
+- **`work[].detail`**: each work item's outcome, else its progress, cut to 240 characters as the
+  summary is; none when it has neither, a next step alone too. It is the recorded change that
+  claude-mem's page of a work stream lists.
+- **`sessions`**: the conversations the request owns (decision 55), each as `agent`, `id` and
+  `fingerprint`. They come the newest first, each dated by its own records of the ones the
+  request's `updated` counts: a summary, a card, a prompt of a conversation the request owns whole,
+  and the work the conversation wrote. Of one time, they come in the stores' order. A request of
+  no conversation has none: one made by an item that no call ties to a session, from its
+  `request_id` and its recorded request.
+  - The agent is as the gate shows it. The id is the one the conversation's own request has, or
+    would have where its work names a `request_id`, made by the request's own function
+    (`shown_id`): a conversation has the same id in every request that names it, a masked one with
+    the same fingerprint, and two conversations masked alike stay two.
+  - The route takes each one's fingerprint out and puts its id back after its gate, as it does the
+    request's (`view::answered`).
+- **The gate**: an update and a detail are gated before their cut, as before: an item's field
+  beside its key (`Work::text`), a name beside its key, a card's text by its reader. Updates that
+  the gate masks alike are one text, shown once.
+- **The answer** of a request gains `updates` (each `ts` and `text`), `sessions` (each `agent` and
+  `id`) and each work item's `detail`.
