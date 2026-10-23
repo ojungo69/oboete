@@ -111,7 +111,8 @@ generic-api-key) need. What any view hides is hidden where the lines show it, so
 takes the context another view's rule needs (as search gates an imported document's title and
 body). In the assignment, a mask is placed by its position, since the masked text can spell the
 key again: one that starts in the key or in the ` = "` after it hides the key and the value whole,
-as the capture gate does. Only then are the lines cut to their room; each shown line
+as the capture gate does, and where the value alone and the assignment hide different parts of it,
+the value is hidden whole, as the capture gate keeps it (#580). Only then are the lines cut to their room; each shown line
 passes the gate once more, and the section's lines as a whole. A list, a task and a key are folded
 under their names as the gate shows them now, so a rule added later that masks one leaves one that
 a later write replaces or clears. A key shows as it was written with the value it holds, and a list

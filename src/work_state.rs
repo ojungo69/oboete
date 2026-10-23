@@ -397,6 +397,7 @@ impl Raw {
             let head = format!("{key} = \"");
             let probe = format!("{head}{}\"", &self.text[value.clone()]);
             let (h, v) = (head.len(), value.len());
+            let mut inside = Vec::new();
             for (s, e) in redact::hidden(&probe, rules).unwrap_or(vec![(0, probe.len())]) {
                 if s < h {
                     runs.extend(at.iter().map(|at| (at.start, at.end)));
@@ -410,8 +411,15 @@ impl Raw {
                     continue;
                 }
                 if s < e {
+                    inside.push((s - h, e - h));
                     runs.push((value.start + s - h, value.start + e - h));
                 }
+            }
+            // Where the value alone and the assignment hide different parts of it, capture keeps
+            // it as [REDACTED] whole (`capture::Gate::both`), and so is it shown (#580).
+            let alone = redact::hidden(&self.text[value.clone()], rules).unwrap_or(vec![(0, v)]);
+            if !inside.is_empty() && !alone.is_empty() && redact::merged_runs(inside) != alone {
+                runs.push((value.start, value.end));
             }
         }
         let runs = redact::merged_runs(runs);
@@ -1083,8 +1091,60 @@ mod tests {
             !before.contains("canary-") && before.contains("rotate"),
             "{before}"
         );
+        // The name shows as the mask, not left out (Sourcery on #579).
+        let text = read(None, false, "r", &entries, now, &rules);
+        assert!(text.starts_with("- [REDACTED]\n"), "{text}");
+        assert!(before.starts_with("- [REDACTED]\n"), "{before}");
+        let saved = written("canary-4827", "r", &entries, now, &rules);
+        assert!(
+            saved.starts_with("Saved to \"[REDACTED]\" in r. Still open in it:\n- [REDACTED]\n"),
+            "{saved}"
+        );
         let none = read(Some("canary-1111"), false, "r", &[], now, &rules);
-        assert!(!none.contains("canary-"), "{none}");
+        assert_eq!(
+            none,
+            "Nothing open in \"[REDACTED]\" for r. Pass includeClosed to see closed items."
+        );
+    }
+
+    /// Where a name alone and the name beside its key are masked in different parts, capture keeps
+    /// it as [REDACTED] whole (`capture::Gate::both`), and work state reads it so: a list's and a
+    /// task's writes before the rules and after them are one, and a later `done` closes the task
+    /// (#580; Codex and Greptile on #579).
+    #[test]
+    fn a_name_the_views_mask_differently_is_hidden_whole_as_capture_keeps_it() {
+        for key in ["list", "task"] {
+            let extra = format!(
+                r#"{{ id = "a", regex = '^alpha' }}, {{ id = "k", regex = '{key} = "alpha (teal-[0-9]{{4}})', secret_group = 1 }}"#
+            );
+            let home = tempfile::tempdir().unwrap();
+            let config = format!("[redaction]\nextra_rules = [{extra}]\n");
+            std::fs::write(home.path().join("config.toml"), config).unwrap();
+            let settings = crate::capture::Settings::load(home.path()).unwrap();
+            let (list, task) = match key {
+                "list" => ("alpha teal-1234", "rotate"),
+                _ => ("l", "alpha teal-1234"),
+            };
+            let done = json!({"task": task, "status": "done"});
+            let (later_list, later) =
+                crate::capture::work_state(list, done.as_object().unwrap(), &settings);
+            let stored = if key == "list" {
+                later_list.clone()
+            } else {
+                text(&later["task"])
+            };
+            assert_eq!(stored, redact::MASK, "{key}");
+            let entries = [
+                entry(list, json!({"task": task, "status": "todo"}), 0),
+                Entry {
+                    list: later_list,
+                    fields: later,
+                    ts: MIN,
+                },
+            ];
+            let shown = read(None, false, "r", &entries, 2 * MIN, &user(&extra));
+            assert!(shown.starts_with("Nothing open for r."), "{key}: {shown}");
+        }
     }
 
     /// A rule that masks the closing quote of `task = "…"` leaves capture no value to keep, so
