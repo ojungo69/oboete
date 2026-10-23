@@ -3261,9 +3261,11 @@ fn opens(after: &str) -> bool {
 }
 
 /// What follows `</tag` makes it the closer, as claude-mem 15.0 reads `</tag\s*>`: the length of
-/// the spaces (ECMAScript's `\s`, which takes U+FEFF too) and the `>` after the name.
+/// the spaces (ECMAScript's `\s`: Rust's whitespace but U+0085, and U+FEFF) and the `>` after the
+/// name.
 fn closes(after: &str) -> Option<usize> {
-    let rest = after.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let rest =
+        after.trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     rest.starts_with('>')
         .then_some(after.len() - rest.len() + 1)
 }
@@ -10766,6 +10768,21 @@ mod tests {
             strip_blocks("a <private>x</privateer> b", false),
             "a <private>x</privateer> b"
         );
+        // Each of ECMAScript's `\s` closes, and U+0085, which Rust's whitespace takes and
+        // ECMAScript's does not, closes nothing (Codex on #587).
+        let spaces = "\t\n\u{b}\u{c}\r \u{a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\
+                      \u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
+        for c in spaces.chars() {
+            assert_eq!(
+                strip_blocks(&format!("a <private>x</private{c}> b"), false),
+                "a  b",
+                "{:?}",
+                c
+            );
+        }
+        let nel = "a <private>x</private\u{85}> b";
+        assert_eq!(strip_blocks(nel, false), nel);
+        assert_eq!(strip_blocks(nel, true), "a");
     }
 
     /// claude-mem writes its context block into instruction files (AGENTS.md, CLAUDE.md): a file an
