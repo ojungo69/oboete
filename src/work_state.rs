@@ -261,8 +261,9 @@ struct Lists {
 /// The lists of `entries` (only `list` when it names one), as `render` shows them (claude-mem's
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
 /// it; `all` shows everything. Lists, tasks and keys are told apart as the egress gate shows them
-/// now (a task's name beside its key), so the writes before and after a rule that masks part of a
-/// name are one list, or one task (Codex on #408); each shows the name last written.
+/// now (a list's and a task's name beside its key), so the writes before and after a rule that
+/// masks part of a name are one list, or one task (Codex on #408); each shows the name last
+/// written.
 fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
     let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
@@ -279,13 +280,13 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         "task" | "status" => k.to_owned(),
         k => keys.entry(k.to_owned()).or_insert_with(|| gate(k)).clone(),
     };
-    let wanted = list.map(gate);
+    let wanted = list.map(|l| beside("list", l, rules));
     let mut written: Vec<(&str, Vec<&Entry>, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         let name = names
             .entry(&e.list)
-            .or_insert_with(|| gate(&e.list))
+            .or_insert_with(|| beside("list", &e.list, rules))
             .clone();
         if wanted.as_ref().is_some_and(|w| *w != name) {
             continue;
@@ -457,7 +458,7 @@ fn render(raw: &mut Raw, l: &Lists, (list, task): (usize, Option<usize>), now: i
     raw.line(|raw| match task {
         None => {
             raw.push("- ");
-            raw.part(name);
+            raw.pair("list", name, false);
             if *state {
                 raw.push(": ");
                 pairs(raw, f.state.visible(&["task"]));
@@ -621,7 +622,7 @@ pub fn written(list: &str, repo: &str, entries: &[Entry], now: i64, rules: &Rule
     let l = lists(entries, Some(list), false, rules);
     let heading = |raw: &mut Raw| {
         raw.push("Saved to \"");
-        raw.part(list);
+        raw.pair("list", list, false);
         raw.push("\" in ");
         raw.part(repo);
         raw.push(match l.rows.is_empty() {
@@ -654,7 +655,9 @@ pub fn read(
             None => redact::MASK.to_owned(),
         };
     }
-    let named = list.map(|l| format!(" in \"{l}\"")).unwrap_or_default();
+    let named = list
+        .map(|l| format!(" in \"{}\"", beside("list", l, rules)))
+        .unwrap_or_default();
     redact::outbound_with(
         &if all {
             format!("Nothing recorded{named} for {repo}.")
@@ -1036,6 +1039,52 @@ mod tests {
             text.starts_with("- release: [REDACTED]=[REDACTED],"),
             "{text}"
         );
+    }
+
+    /// A list's name is read beside its key, as capture stores it (`capture::work_state`): a rule
+    /// added later that needs `list = "…"` hides the name in a read, the section and a write's
+    /// answer, the writes before the rule and the one after it (stored under the masked name) are
+    /// one list, a read by the name finds that list, and a list written only before the rule shows
+    /// its name hidden.
+    #[test]
+    fn a_list_name_a_rule_masks_beside_its_key_is_hidden_and_one_list() {
+        let rules = user(r#"{ id = "l", regex = 'list = "canary-[0-9]{4}' }"#);
+        let entries = [
+            entry(
+                "canary-4827",
+                json!({"task": "rotate", "status": "todo"}),
+                0,
+            ),
+            entry(
+                "canary-4827",
+                json!({"task": "audit", "status": "doing"}),
+                MIN,
+            ),
+            entry(
+                redact::MASK,
+                json!({"task": "rotate", "status": "done"}),
+                2 * MIN,
+            ),
+        ];
+        let now = 3 * MIN;
+        for text in [
+            read(None, false, "r", &entries, now, &rules),
+            section(&entries, now, SECTION, &rules).text(),
+            read(Some("canary-4827"), false, "r", &entries, now, &rules),
+            written("canary-4827", "r", &entries, now, &rules),
+        ] {
+            assert!(
+                !text.contains("canary-") && !text.contains("rotate") && text.contains("audit"),
+                "{text}"
+            );
+        }
+        let before = read(None, false, "r", &entries[..2], now, &rules);
+        assert!(
+            !before.contains("canary-") && before.contains("rotate"),
+            "{before}"
+        );
+        let none = read(Some("canary-1111"), false, "r", &[], now, &rules);
+        assert!(!none.contains("canary-"), "{none}");
     }
 
     /// A rule that masks the closing quote of `task = "…"` leaves capture no value to keep, so

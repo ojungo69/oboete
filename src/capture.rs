@@ -722,7 +722,8 @@ pub fn note(title: &str, text: &str, settings: &Settings) -> (String, String) {
 
 /// A work state write's list name and fields (docs/work-state.md L5) through the same gate as
 /// every stored string, keys and values alike, a closed opt-out block taken out of each first (as
-/// labels). Its ledger is not kept: an op has none.
+/// labels), the list's name beside its key `list` as each value beside its own. Its ledger is not
+/// kept: an op has none.
 pub fn work_state(
     list: &str,
     fields: &Map<String, Value>,
@@ -732,7 +733,7 @@ pub fn work_state(
     // Every value beside its key, however long: the fields are at most 2,000 characters (L3).
     gate.paired = usize::MAX;
     let cap = gate.cap;
-    let list = gate.text("list", &without_blocks(list, false), cap);
+    let (list, _) = gate.both("list", "list", &without_blocks(list, false), cap);
     let mut stored = Map::new();
     for (k, v) in fields {
         // A closing status (`done`, `dropped`) is one of two words, no recorded text: kept as
@@ -1628,6 +1629,16 @@ mod tests {
         let open = json!({"task": "t", "status": "wip"});
         let (_, stored) = work_state("l", open.as_object().unwrap(), &s);
         assert_eq!(stored["status"], "[REDACTED]");
+    }
+
+    /// A list's name is gated beside its key `list`, as a field's value is beside its own: a rule
+    /// that needs the key masks it in the op.
+    #[test]
+    fn a_work_state_list_name_is_gated_beside_its_key() {
+        let s = with("[[redaction.extra_rules]]\nid = \"l\"\nregex = 'list = \"canary-[0-9]{4}'\n");
+        let fields = json!({"task": "rotate"});
+        let (list, _) = work_state("canary-4827", fields.as_object().unwrap(), &s);
+        assert_eq!(list, crate::redact::MASK);
     }
 
     #[test]
