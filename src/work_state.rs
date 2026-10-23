@@ -381,10 +381,15 @@ fn showing(l: &Lists, asked: &str, now: i64, rules: &Rules) -> Vec<bool> {
             continue;
         };
         for (line, &(list, task)) in raw.lines.iter().zip(rows) {
+            // A task's line holds no list name: its range would run past it (Greptile and Codex on
+            // #593).
+            if task.is_some() {
+                continue;
+            }
             let start = line.start + "- ".len();
             let name = start..start + l.lists[list].0.len();
             let shown = redact::masked_part(&raw.text, name.clone(), within(&runs, &name));
-            if task.is_some() || gated(&shown, rules) != asked {
+            if gated(&shown, rules) != asked {
                 continue;
             }
             let written = redact::masked_part(&raw.text, line.clone(), within(&runs, line));
@@ -1442,6 +1447,24 @@ mod tests {
             read(Some("[REDACTED] beta"), false, "r", &entries, now, &rules),
             "Nothing open in \"[REDACTED] beta\" for r. Pass includeClosed to see closed items."
         );
+    }
+
+    /// A read by a masked name reads no list name in a task's line: a list name longer than its
+    /// last task's line, or one of several bytes a character, is found by the name its line shows
+    /// (Greptile and Codex on #593).
+    #[test]
+    fn a_long_or_wide_list_name_is_read_by_its_shown_name() {
+        let rules = user(r#"{ id = "l", regex = '^- (alpha) ', secret_group = 1 }"#);
+        for rest in ["x".repeat(80), "ä".repeat(40)] {
+            let name = format!("alpha {rest}");
+            let entries = [entry(&name, json!({"task": "a", "status": "todo"}), 0)];
+            let shown = format!("[REDACTED] {rest}");
+            let named = read(Some(&shown), false, "r", &entries, MIN, &rules);
+            assert_eq!(
+                named,
+                format!("- {shown}\n  - [todo] a, updated 1 minute ago")
+            );
+        }
     }
 
     /// A numeric task written before rules that need two passes and again after them reads as one
