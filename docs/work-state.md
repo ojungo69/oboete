@@ -114,14 +114,19 @@ key again: one that starts in the key or in the ` = "` after it hides the key an
 as the capture gate does. Only then are the lines cut to their room; each shown line
 passes the gate once more, and the section's lines as a whole. A name or a value the views mask
 any of is shown as [REDACTED] whole where the capture gate would keep it whole (the views
-disagree) or where the gate finds more in it as masked (a rule that matches what an earlier mask
-made), so no line shows what the capture gate hides (#584). A list and a task are
-folded under their names as the capture gate would keep them now, the gate applied again until a
-name holds, since a rule can match what an earlier mask made (`capture::kept_beside`), and a key
-under its name as the gate shows it now, so a rule added later that masks one leaves one that a
-later write replaces or clears (#580, #582, #584). A read of one list finds it by that name, or
-by the name a read shows for it. A key shows as it was written with the value it holds, and a list
-and a task with the name last written. The keys `task`
+disagree) or where the gate finds more in it as masked, alone or beside its key (a rule that
+matches what an earlier mask made), so no line shows what the capture gate hides (#584, #586). A
+list and a task are folded under their names as the capture gate would keep them now, the gate
+applied again until a name holds, since a rule can match what an earlier mask made
+(`capture::kept_beside`), and a key under its name as the gate shows it now, so a rule added later
+that masks one leaves one that a later write replaces or clears (#580, #582, #584); capture stores a
+list's and a task's name so settled, so a write and its stored form fold as one (#586). A read of
+one list keeps the lists, once folded, whose fold name is the name asked's or whose line shows the
+name asked, the name compared as given, each with its whole history (#586). A key shows as it was
+written with the value it holds, and a list and a task with the name last written. A rule that
+matches the gate's own mask (`[REDACTED]`) is outside what names are told apart and shown by: such
+a name may fold with another or show as [REDACTED] whole, and a name that does not settle within
+eight passes is [REDACTED] whole and folds with any other so masked (#586). The keys `task`
 and `status`, claude-mem's own, are stored as they are wherever a rule matches them, their values
 gated, so a rule never turns a task into the list's state; a closing status (`done`, `dropped`) is
 stored as sent too, one of two words and no recorded text, so a rule that masks the word never

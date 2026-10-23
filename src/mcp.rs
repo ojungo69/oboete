@@ -605,10 +605,13 @@ impl Oboete {
             None => None,
         };
         let (repo, settings) = self.checkout()?;
-        // Named as it was stored: through the gate its writes passed, and refused as a write's is
-        // when that leaves it empty (a name that was only a private block: Codex on #408).
-        let list = list.map(|l| crate::capture::work_state(&l, &Default::default(), &settings).0);
-        if list.as_deref().is_some_and(|l| l.trim().is_empty()) {
+        // Refused as a write's is when the gate its writes passed leaves it empty (a name that was
+        // only a private block: Codex on #408); compared as given, with the names a read shows and,
+        // through that gate, with the lists' names (#586).
+        let stored = list
+            .as_ref()
+            .map(|l| crate::capture::work_state(l, &Default::default(), &settings).0);
+        if stored.as_deref().is_some_and(|l| l.trim().is_empty()) {
             return failed(format!(
                 "list must be 1 to {} characters",
                 crate::work_state::MAX_LIST
@@ -2911,6 +2914,14 @@ mod tests {
         );
         assert_eq!(
             read_state(&server, json!({"list": list, "includeClosed": true})),
+            search::fenced("- deploy [REDACTED]\n  - [done] notes, updated 1 minute ago")
+        );
+        // By the name a read shows, as given (#586).
+        assert_eq!(
+            read_state(
+                &server,
+                json!({"list": "deploy [REDACTED]", "includeClosed": true})
+            ),
             search::fenced("- deploy [REDACTED]\n  - [done] notes, updated 1 minute ago")
         );
     }

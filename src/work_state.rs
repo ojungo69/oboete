@@ -258,14 +258,33 @@ struct Lists {
     rows: Vec<(usize, Option<usize>)>,
 }
 
+impl Lists {
+    /// The lists `keep` holds, with their rows.
+    fn only(self, keep: &[bool]) -> Lists {
+        let mut at = vec![None; self.lists.len()];
+        let mut lists = Vec::new();
+        for (i, l) in self.lists.into_iter().enumerate() {
+            if keep[i] {
+                at[i] = Some(lists.len());
+                lists.push(l);
+            }
+        }
+        let rows = (self.rows.into_iter())
+            .filter_map(|(l, t)| at[l].map(|l| (l, t)))
+            .collect();
+        Lists { lists, rows }
+    }
+}
+
 /// The lists of `entries` (only `list` when it names one), as `render` shows them (claude-mem's
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
 /// it; `all` shows everything. Lists and tasks are told apart by their names as capture keeps them
 /// now (`capture::kept_beside`), and keys as the egress gate shows them now, so the writes before
 /// and after a rule that masks part of a name are one list, or one task (Codex on #408, #580, #582,
-/// #584); each shows the name last written. A read of one list finds it by that name, or by the
-/// name a read shows for it (#584).
-fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
+/// #584); each shows the name last written. A read of one list keeps the lists, once folded,
+/// whose fold name is the name asked's or whose line at `now` shows the name asked, each with its
+/// whole history (#584, #586).
+fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules, now: i64) -> Lists {
     let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
     let mut tasks: HashMap<String, String> = HashMap::new();
@@ -281,24 +300,13 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         "task" | "status" => k.to_owned(),
         k => keys.entry(k.to_owned()).or_insert_with(|| gate(k)).clone(),
     };
-    let wanted = list.map(|l| (crate::capture::kept_beside("list", l, rules), l));
-    let mut shown: HashMap<&str, String> = HashMap::new();
-    let mut written: Vec<(&str, Vec<&Entry>, usize)> = Vec::new();
+    let mut written: Vec<(&str, Vec<&Entry>, usize, String)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         let name = names
             .entry(&e.list)
             .or_insert_with(|| crate::capture::kept_beside("list", &e.list, rules))
             .clone();
-        if let Some((id, asked)) = &wanted
-            && *id != name
-            && shown
-                .entry(&e.list)
-                .or_insert_with(|| beside("list", &e.list, rules))
-                != asked
-        {
-            continue;
-        }
         match at.get(&name) {
             Some(&j) => {
                 let w = &mut written[j];
@@ -307,8 +315,8 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
                 w.2 = i;
             }
             None => {
-                at.insert(name, written.len());
-                written.push((&e.list, vec![e], i));
+                at.insert(name.clone(), written.len());
+                written.push((&e.list, vec![e], i, name));
             }
         }
     }
@@ -317,7 +325,8 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         lists: Vec::new(),
         rows: Vec::new(),
     };
-    for (name, entries, _) in written {
+    let mut ids = Vec::new();
+    for (name, entries, _, id) in written {
         let f = fold(entries, &mut task, &mut key);
         let state = f.state_ts.is_some()
             && f.state.visible(&["task"]).next().is_some()
@@ -332,8 +341,46 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         out.rows.push((at, None));
         out.rows.extend(shown.into_iter().map(|t| (at, Some(t))));
         out.lists.push((name.to_owned(), f, state));
+        ids.push(id);
+    }
+    let Some(asked) = list else {
+        return out;
+    };
+    let id = crate::capture::kept_beside("list", asked, rules);
+    let shown = shown_names(&out, now, rules);
+    let keep: Vec<bool> = (0..ids.len())
+        .map(|i| ids[i] == id || shown[i] == asked)
+        .collect();
+    out.only(&keep)
+}
+
+/// The name each list's line shows among the lines of `l` at `now`, as a read writes them: its
+/// part of the line, what the views hide there masked, then gated (#586).
+fn shown_names(l: &Lists, now: i64, rules: &Rules) -> Vec<String> {
+    let raw = raw(l, None, now);
+    let mut out = vec![redact::MASK.to_owned(); l.lists.len()];
+    let Some(runs) = raw.runs(rules) else {
+        return out;
+    };
+    for (line, &(list, task)) in raw.lines.iter().zip(&l.rows) {
+        if task.is_none() {
+            let start = line.start + "- ".len();
+            let name = start..start + l.lists[list].0.len();
+            out[list] = gated(
+                &redact::masked_part(&raw.text, name.clone(), within(&runs, &name)),
+                rules,
+            );
+        }
     }
     out
+}
+
+/// The runs of the sorted `runs` that reach into `r`: applying all of them to every line is
+/// quadratic (Codex's security review of #408).
+fn within<'a>(runs: &'a [(usize, usize)], r: &Range<usize>) -> &'a [(usize, usize)] {
+    let from = runs.partition_point(|&(_, e)| e <= r.start);
+    let to = from + runs[from..].partition_point(|&(s, _)| s < r.end);
+    &runs[from..to]
 }
 
 /// Lines made of what agents wrote, and where each name, key and value stands in them. The gate
@@ -387,6 +434,18 @@ impl Raw {
     /// Each line as the gate shows it: what it hides in any view hidden, then the line through the
     /// gate (`gated`). `None` when it hides the lines whole.
     fn shown(&self, rules: &Rules) -> Option<Vec<String>> {
+        let runs = self.runs(rules)?;
+        let shown = |r: &Range<usize>| {
+            gated(
+                &redact::masked_part(&self.text, r.clone(), within(&runs, r)),
+                rules,
+            )
+        };
+        Some(self.lines.iter().map(shown).collect())
+    }
+
+    /// What the lines hide, as `shown` reads it, sorted and apart. `None` when it hides them whole.
+    fn runs(&self, rules: &Rules) -> Option<Vec<(usize, usize)>> {
         let mut runs = redact::hidden(&self.text, rules)?;
         let alone = |r: &Range<usize>| match redact::hidden(&self.text[r.clone()], rules) {
             Some(h) => h.iter().map(|&(s, e)| (r.start + s, r.start + e)).collect(),
@@ -435,26 +494,16 @@ impl Raw {
             let masked = redact::masked_part(&self.text, value.clone(), &runs[from..to]);
             if masked != written
                 && (redact::hidden(&masked, rules).is_none_or(|h| !h.is_empty())
-                    || crate::capture::kept_beside(key, written, rules) == redact::MASK)
+                    || crate::capture::kept_beside(key, written, rules) == redact::MASK
+                    || crate::capture::kept_beside(key, &masked, rules) != masked)
             {
                 whole.push((value.start, value.end));
             }
         }
-        let runs = match whole.is_empty() {
+        Some(match whole.is_empty() {
             true => runs,
             false => redact::merged_runs([runs, whole].concat()),
-        };
-        let shown = |r: &Range<usize>| {
-            // Only the runs that reach into the line, found in the sorted runs: applying all of
-            // them to every line is quadratic (Codex's security review of #408).
-            let from = runs.partition_point(|&(_, e)| e <= r.start);
-            let to = from + runs[from..].partition_point(|&(s, _)| s < r.end);
-            gated(
-                &redact::masked_part(&self.text, r.clone(), &runs[from..to]),
-                rules,
-            )
-        };
-        Some(self.lines.iter().map(shown).collect())
+        })
     }
 }
 
@@ -539,7 +588,11 @@ fn raw(l: &Lists, heading: Option<&dyn Fn(&mut Raw)>, now: i64) -> Raw {
 /// Every list's lines in `entries`, as `lists` keeps and `render` writes them, with no gate.
 #[cfg(test)]
 pub fn lines(entries: &[Entry], now: i64, all: bool) -> Vec<String> {
-    let raw = raw(&lists(entries, None, all, &Rules::default()), None, now);
+    let raw = raw(
+        &lists(entries, None, all, &Rules::default(), now),
+        None,
+        now,
+    );
     raw.lines
         .iter()
         .map(|r| raw.text[r.clone()].to_owned())
@@ -615,7 +668,7 @@ pub fn nothing_open() -> String {
 /// The section for `entries` at `now`, at most `limit` UTF-16 units, its open lines as the egress
 /// gate with `rules` shows them (`Raw::shown`) before they are cut, then cut, then gated whole.
 pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Section {
-    let l = lists(entries, None, false, rules);
+    let l = lists(entries, None, false, rules, now);
     let n = l.rows.len();
     if n == 0 {
         return Section {
@@ -648,7 +701,7 @@ pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Sect
 /// A write's answer: what is still open in its list among the repository's `entries`, cut as the
 /// section is, as the egress gate with `rules` shows it.
 pub fn written(list: &str, repo: &str, entries: &[Entry], now: i64, rules: &Rules) -> String {
-    let l = lists(entries, Some(list), false, rules);
+    let l = lists(entries, Some(list), false, rules, now);
     let heading = |raw: &mut Raw| {
         raw.push("Saved to \"");
         raw.pair("list", list, false);
@@ -675,7 +728,7 @@ pub fn read(
     now: i64,
     rules: &Rules,
 ) -> String {
-    let l = lists(entries, list, all, rules);
+    let l = lists(entries, list, all, rules, now);
     if !l.rows.is_empty() {
         // ponytail: every line is gated before the cut, so a history the gate finds too much in
         // (`redact::hidden`'s limits) is hidden whole; a read of one list shows less.
@@ -1139,30 +1192,37 @@ mod tests {
         let pair = |key: &str, rule: &str| {
             format!(r#"{{ id = "k", regex = '{key} = "{rule}', secret_group = 1 }}"#)
         };
+        // Each case: the key, the name, the rule on the name alone, the rule beside its key, and
+        // the name shown before the write after the rules and after it, where the name settles;
+        // where a rule matches the gate's own mask, the name before may show as [REDACTED] whole.
         let cases = [
             (
                 "list",
                 "alpha teal-1234",
                 r#"{ id = "a", regex = '^alpha' }"#,
                 r"alpha (teal-[0-9]{4})",
+                Some("[REDACTED]"),
             ),
             (
                 "task",
                 "alpha teal-1234",
                 r#"{ id = "a", regex = '^alpha' }"#,
                 r"alpha (teal-[0-9]{4})",
+                Some("[REDACTED]"),
             ),
             (
                 "task",
                 "[REDACTED]:q:q:[REDACTED]",
                 r#"{ id = "a", regex = '^\[REDACTED\]:q' }"#,
                 r"\[REDACTED\]:q:(q:\[REDACTED\])",
+                None,
             ),
             (
                 "task",
                 " alpha teal-1234",
                 r#"{ id = "a", regex = '^alpha' }"#,
                 r" alpha (teal-[0-9]{4})",
+                Some(" [REDACTED] [REDACTED]"),
             ),
             // A rule that matches what an earlier mask made (Greptile on #583).
             (
@@ -1170,12 +1230,14 @@ mod tests {
                 "alpha teal-1234",
                 r#"{ id = "a", regex = '^\[REDACTED\] (teal-[0-9]{4})', secret_group = 1 }"#,
                 r"(alpha)",
+                None,
             ),
             (
                 "task",
                 "alpha teal-1234",
                 r#"{ id = "a", regex = '^\[REDACTED\] (teal-[0-9]{4})', secret_group = 1 }"#,
                 r"(alpha)",
+                None,
             ),
         ];
         // A read's list name and task name.
@@ -1185,7 +1247,7 @@ mod tests {
             let task = lines[1].split_once("] ").unwrap().1;
             (list, task.rsplit_once(", updated ").unwrap().0.to_owned())
         };
-        for (key, name, alone, keyed) in cases {
+        for (key, name, alone, keyed, settled) in cases {
             let extra = format!("{alone}, {}", pair(key, keyed));
             let home = tempfile::tempdir().unwrap();
             let config = format!("[redaction]\nextra_rules = [{extra}]\n");
@@ -1225,21 +1287,66 @@ mod tests {
                 let named = read(Some(name), true, "r", &entries, 2 * MIN, &rules);
                 assert_eq!(named, all, "{name:?}");
             }
-            // Before the write after the rules, a name shows no more than after it: as there, or
-            // [REDACTED] whole; and a read by the list's name as shown finds it (#584).
+            // Before the write after the rules, a name shows as after it where it settles, else no
+            // more than after it; and a read by the list's name as shown finds it (#584, #586).
             let before = read(None, true, "r", &entries[..1], 2 * MIN, &rules);
             assert!(!before.contains("teal-"), "{key} {name:?}: {before}");
-            let (b, a) = (names(&before), names(&all));
-            for (b, a) in [(&b.0, &a.0), (&b.1, &a.1)] {
-                assert!(
+            let ((bl, bt), (al, at)) = (names(&before), names(&all));
+            let (b, a) = if key == "list" { (bl, al) } else { (bt, at) };
+            match settled {
+                Some(shown) => assert!(b == shown && a == shown, "{key} {name:?}: {before}\n{all}"),
+                None => assert!(
                     b == a || b == redact::MASK,
                     "{key} {name:?}: {before}\n{all}"
-                );
+                ),
             }
             let (shown, _) = names(&before);
             let named = read(Some(&shown), true, "r", &entries[..1], 2 * MIN, &rules);
             assert_eq!(named, before, "{key} {name:?} {shown:?}");
         }
+    }
+
+    /// A read by name matches lists once folded, by the name the list's line shows or by its fold
+    /// name, and keeps the matching list's whole history: a list folded from two names, whose line
+    /// a rule written against it masks (`^- `, as #411's rules are written), read by the name the
+    /// line shows (Greptile, Sourcery and CodeRabbit on #585).
+    #[test]
+    fn a_read_by_the_name_a_line_shows_finds_the_whole_list() {
+        let rules = user(
+            r#"{ id = "t", regex = 'teal-[0-9]{4}' }, { id = "l", regex = '^- (alpha) ', secret_group = 1 }"#,
+        );
+        let entries = [
+            entry("alpha teal-1234", json!({"task": "a", "status": "todo"}), 0),
+            entry(
+                "alpha teal-5678",
+                json!({"task": "b", "status": "todo"}),
+                MIN,
+            ),
+        ];
+        let now = 2 * MIN;
+        let all = read(None, false, "r", &entries, now, &rules);
+        assert!(all.starts_with("- [REDACTED] [REDACTED]\n"), "{all}");
+        assert_eq!(all.lines().count(), 3, "{all}");
+        for asked in [
+            "[REDACTED] [REDACTED]",
+            "alpha teal-1234",
+            "alpha [REDACTED]",
+        ] {
+            let named = read(Some(asked), false, "r", &entries, now, &rules);
+            assert_eq!(named, all, "{asked:?}");
+        }
+    }
+
+    /// A value the gate masks more of beside its key once masked is hidden whole: what it would
+    /// mask there does not show (Sourcery on #585).
+    #[test]
+    fn a_masked_value_the_gate_masks_more_of_beside_its_key_is_hidden_whole() {
+        let rules = user(
+            r#"{ id = "a", regex = '^alpha' }, { id = "k", regex = 'note = "\[REDACTED\] (teal-[0-9]{4})', secret_group = 1 }"#,
+        );
+        let entries = [entry("l", json!({"note": "alpha teal-1234"}), 0)];
+        let text = read(None, false, "r", &entries, MIN, &rules);
+        assert_eq!(text, "- l: note=[REDACTED], updated 1 minute ago");
     }
 
     /// A rule that masks the closing quote of `task = "…"` leaves capture no value to keep, so
