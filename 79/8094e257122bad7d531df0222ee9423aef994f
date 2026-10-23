@@ -1,0 +1,21 @@
+docs/work-state.md
+  s_23ba4f313f5155::t_20b3ee9bf1bf8d 114-115
+src/work_state.rs
+  s_23ba4f313f5155::t_f5c94d5c53ab48 400,414,418-423,1094-1102,1104-1147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "798094e257122bad7d531df0222ee9423aef994f",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
