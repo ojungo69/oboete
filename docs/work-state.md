@@ -112,10 +112,15 @@ takes the context another view's rule needs (as search gates an imported documen
 body). In the assignment, a mask is placed by its position, since the masked text can spell the
 key again: one that starts in the key or in the ` = "` after it hides the key and the value whole,
 as the capture gate does. Only then are the lines cut to their room; each shown line
-passes the gate once more, and the section's lines as a whole. A list and a task are folded under
-their names as the capture gate would keep them now (`capture::kept_beside`), and a key under its
-name as the gate shows it now, so a rule added later that masks one leaves one that a later write
-replaces or clears (#580, #582). A key shows as it was written with the value it holds, and a list
+passes the gate once more, and the section's lines as a whole. A name or a value the views mask
+any of is shown as [REDACTED] whole where the capture gate would keep it whole (the views
+disagree) or where the gate finds more in it as masked (a rule that matches what an earlier mask
+made), so no line shows what the capture gate hides (#584). A list and a task are
+folded under their names as the capture gate would keep them now, the gate applied again until a
+name holds, since a rule can match what an earlier mask made (`capture::kept_beside`), and a key
+under its name as the gate shows it now, so a rule added later that masks one leaves one that a
+later write replaces or clears (#580, #582, #584). A read of one list finds it by that name, or
+by the name a read shows for it. A key shows as it was written with the value it holds, and a list
 and a task with the name last written. The keys `task`
 and `status`, claude-mem's own, are stored as they are wherever a rule matches them, their values
 gated, so a rule never turns a task into the list's state; a closing status (`done`, `dropped`) is

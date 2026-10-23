@@ -262,8 +262,9 @@ struct Lists {
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
 /// it; `all` shows everything. Lists and tasks are told apart by their names as capture keeps them
 /// now (`capture::kept_beside`), and keys as the egress gate shows them now, so the writes before
-/// and after a rule that masks part of a name are one list, or one task (Codex on #408, #580,
-/// #582); each shows the name last written.
+/// and after a rule that masks part of a name are one list, or one task (Codex on #408, #580, #582,
+/// #584); each shows the name last written. A read of one list finds it by that name, or by the
+/// name a read shows for it (#584).
 fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
     let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
@@ -280,7 +281,8 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         "task" | "status" => k.to_owned(),
         k => keys.entry(k.to_owned()).or_insert_with(|| gate(k)).clone(),
     };
-    let wanted = list.map(|l| crate::capture::kept_beside("list", l, rules));
+    let wanted = list.map(|l| (crate::capture::kept_beside("list", l, rules), l));
+    let mut shown: HashMap<&str, String> = HashMap::new();
     let mut written: Vec<(&str, Vec<&Entry>, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
@@ -288,7 +290,13 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
             .entry(&e.list)
             .or_insert_with(|| crate::capture::kept_beside("list", &e.list, rules))
             .clone();
-        if wanted.as_ref().is_some_and(|w| *w != name) {
+        if let Some((id, asked)) = &wanted
+            && *id != name
+            && shown
+                .entry(&e.list)
+                .or_insert_with(|| beside("list", &e.list, rules))
+                != asked
+        {
             continue;
         }
         match at.get(&name) {
@@ -415,6 +423,27 @@ impl Raw {
             }
         }
         let runs = redact::merged_runs(runs);
+        // A value the views mask any of is hidden whole where it could show what capture's gate
+        // hides: where capture would keep it as [REDACTED] whole (the views disagree), and where
+        // the gate finds more in the value as masked (a rule that matches what an earlier mask
+        // made). Masks the views add from the lines' context stay as they are (Sourcery on #583).
+        let mut whole = Vec::new();
+        for (key, _, value) in &self.pairs {
+            let written = &self.text[value.clone()];
+            let from = runs.partition_point(|&(_, e)| e <= value.start);
+            let to = from + runs[from..].partition_point(|&(s, _)| s < value.end);
+            let masked = redact::masked_part(&self.text, value.clone(), &runs[from..to]);
+            if masked != written
+                && (redact::hidden(&masked, rules).is_none_or(|h| !h.is_empty())
+                    || crate::capture::kept_beside(key, written, rules) == redact::MASK)
+            {
+                whole.push((value.start, value.end));
+            }
+        }
+        let runs = match whole.is_empty() {
+            true => runs,
+            false => redact::merged_runs([runs, whole].concat()),
+        };
         let shown = |r: &Range<usize>| {
             // Only the runs that reach into the line, found in the sorted runs: applying all of
             // them to every line is quadratic (Codex's security review of #408).
@@ -1135,7 +1164,27 @@ mod tests {
                 r#"{ id = "a", regex = '^alpha' }"#,
                 r" alpha (teal-[0-9]{4})",
             ),
+            // A rule that matches what an earlier mask made (Greptile on #583).
+            (
+                "list",
+                "alpha teal-1234",
+                r#"{ id = "a", regex = '^\[REDACTED\] (teal-[0-9]{4})', secret_group = 1 }"#,
+                r"(alpha)",
+            ),
+            (
+                "task",
+                "alpha teal-1234",
+                r#"{ id = "a", regex = '^\[REDACTED\] (teal-[0-9]{4})', secret_group = 1 }"#,
+                r"(alpha)",
+            ),
         ];
+        // A read's list name and task name.
+        let names = |text: &str| -> (String, String) {
+            let lines: Vec<&str> = text.lines().collect();
+            let list = lines[0].strip_prefix("- ").unwrap().to_owned();
+            let task = lines[1].split_once("] ").unwrap().1;
+            (list, task.rsplit_once(", updated ").unwrap().0.to_owned())
+        };
         for (key, name, alone, keyed) in cases {
             let extra = format!("{alone}, {}", pair(key, keyed));
             let home = tempfile::tempdir().unwrap();
@@ -1176,6 +1225,20 @@ mod tests {
                 let named = read(Some(name), true, "r", &entries, 2 * MIN, &rules);
                 assert_eq!(named, all, "{name:?}");
             }
+            // Before the write after the rules, a name shows no more than after it: as there, or
+            // [REDACTED] whole; and a read by the list's name as shown finds it (#584).
+            let before = read(None, true, "r", &entries[..1], 2 * MIN, &rules);
+            assert!(!before.contains("teal-"), "{key} {name:?}: {before}");
+            let (b, a) = (names(&before), names(&all));
+            for (b, a) in [(&b.0, &a.0), (&b.1, &a.1)] {
+                assert!(
+                    b == a || b == redact::MASK,
+                    "{key} {name:?}: {before}\n{all}"
+                );
+            }
+            let (shown, _) = names(&before);
+            let named = read(Some(&shown), true, "r", &entries[..1], 2 * MIN, &rules);
+            assert_eq!(named, before, "{key} {name:?} {shown:?}");
         }
     }
 
