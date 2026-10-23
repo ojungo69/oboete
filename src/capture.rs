@@ -774,18 +774,31 @@ pub fn work_state(
     (list, stored)
 }
 
-/// A name of work state beside its key as `work_state` keeps it now (`Gate::both`): what work
-/// state tells its lists and tasks apart by, so a write before a rule and the one after it, stored
-/// as the gate kept it, are one (#580, #582).
+/// A name of work state beside its key as `work_state` keeps it now (`Gate::both`), kept again
+/// until it holds, since a rule can match what an earlier mask made: what work state tells its
+/// lists and tasks apart by and shows them as, so a write before a rule and the one after it,
+/// stored as the gate kept it, are one (#580, #582, #584). A name that does not settle within
+/// `KEPT_PASSES` is [REDACTED] whole.
 pub(crate) fn kept_beside(key: &str, value: &str, rules: &redact::Rules) -> String {
     let settings = Settings {
         rules: rules.clone(),
         ..Settings::default()
     };
-    let mut gate = Gate::new(&settings);
-    let cap = gate.cap;
-    gate.both(key, key, &without_blocks(value, false), cap).0
+    let mut name = without_blocks(value, false);
+    for _ in 0..KEPT_PASSES {
+        let mut gate = Gate::new(&settings);
+        let cap = gate.cap;
+        let next = gate.both(key, key, &name, cap).0;
+        if next == name {
+            return name;
+        }
+        name = next;
+    }
+    redact::MASK.to_owned()
 }
+
+/// How many times `kept_beside` applies the gate before it gives a name up as [REDACTED].
+const KEPT_PASSES: usize = 8;
 
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
 /// length (head and tail above the cap), each finding kept with the field it is in.
