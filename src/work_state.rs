@@ -362,8 +362,9 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules, now: i
 /// Whether each list's line shows `asked` at `now`, its part of the line with what the views hide
 /// there masked, then gated: among this read's lines, where a rule's mask can come from another
 /// list's lines (a keyword it needs), or in a read of that list alone, which no other list's lines
-/// change (Greptile on #589). A line the gate hides from its bullet on, or a read it hides whole,
-/// shows no name.
+/// change (Greptile on #589). The name counts only where the line, as the read writes it, begins
+/// with its bullet and that name: a line the gate hides from its bullet on, or whose name a rule
+/// on the masked line hides more of, or a read it hides whole, shows no such name (Codex on #593).
 fn showing(l: &Lists, asked: &str, now: i64, rules: &Rules) -> Vec<bool> {
     let mut found = vec![false; l.lists.len()];
     // A list's rows follow one another, its own line first.
@@ -381,13 +382,13 @@ fn showing(l: &Lists, asked: &str, now: i64, rules: &Rules) -> Vec<bool> {
         };
         for (line, &(list, task)) in raw.lines.iter().zip(rows) {
             let start = line.start + "- ".len();
-            // A line whose bullet the gate hides shows no name, as where it hides the read whole.
-            if task.is_some() || !within(&runs, &(line.start..start)).is_empty() {
-                continue;
-            }
             let name = start..start + l.lists[list].0.len();
             let shown = redact::masked_part(&raw.text, name.clone(), within(&runs, &name));
-            found[list] |= gated(&shown, rules) == asked;
+            if task.is_some() || gated(&shown, rules) != asked {
+                continue;
+            }
+            let written = redact::masked_part(&raw.text, line.clone(), within(&runs, line));
+            found[list] |= gated(&written, rules).starts_with(&format!("- {asked}"));
         }
     }
     found
@@ -1387,7 +1388,7 @@ mod tests {
         // A line the gate hides from its bullet on shows no name: every line of every list read
         // together is one mask here.
         let all = read(None, true, "r", &entries, now, &rules);
-        assert!(all.lines().all(|l| l == redact::MASK), "{all}");
+        assert_eq!(all, vec![redact::MASK; 104].join("\n"));
         assert_eq!(
             read(Some("[REDACTED]"), true, "r", &entries, now, &rules),
             "Nothing recorded in \"[REDACTED]\" for r."
@@ -1410,13 +1411,37 @@ mod tests {
         ];
         let now = 2 * MIN;
         let all = read(None, false, "r", &entries, now, &rules);
-        assert!(
-            all.ends_with("\n- [REDACTED] beta\n  - [todo] a, updated 2 minutes ago"),
-            "{all}"
+        assert_eq!(
+            all,
+            "- other\n  - [todo] trigger it, updated 1 minute ago\n\
+             - [REDACTED] beta\n  - [todo] a, updated 2 minutes ago"
         );
         // Read alone, its lines hold no keyword, so the rule masks nothing in them, as on main.
         let named = read(Some("[REDACTED] beta"), false, "r", &entries, now, &rules);
         assert_eq!(named, "- alpha beta\n  - [todo] a, updated 2 minutes ago");
+    }
+
+    /// A name counts as shown only where the line, as a read writes it, begins with its bullet and
+    /// that name: a rule on the masked line that hides the name again leaves no line showing it,
+    /// so a read by the name masked once finds nothing; the list's fold name is `alpha beta`, as
+    /// the first rule needs the line (Codex on #593).
+    #[test]
+    fn a_name_counts_only_where_the_line_as_written_shows_it() {
+        let rules = user(
+            r#"{ id = "a", regex = '^- (alpha) ', secret_group = 1 }, { id = "m", regex = '^- \[REDACTED\] beta' }"#,
+        );
+        let entries = [entry(
+            "alpha beta",
+            json!({"task": "a", "status": "todo"}),
+            0,
+        )];
+        let now = MIN;
+        let all = read(None, false, "r", &entries, now, &rules);
+        assert!(all.starts_with("[REDACTED]\n"), "{all}");
+        assert_eq!(
+            read(Some("[REDACTED] beta"), false, "r", &entries, now, &rules),
+            "Nothing open in \"[REDACTED] beta\" for r. Pass includeClosed to see closed items."
+        );
     }
 
     /// A numeric task written before rules that need two passes and again after them reads as one

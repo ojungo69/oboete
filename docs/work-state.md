@@ -127,8 +127,9 @@ that text holds), so a write and its stored form fold as one (#586, #589). A rea
 the lists, once folded, whose fold name is the name asked's or whose line shows the name asked,
 among the read's lines (where a rule's mask can come from another list's lines, a keyword it
 needs) or in a read of that list alone (which no other list's lines change), the name compared as
-given, each with its whole history (#586, #589); a line the gate hides from its bullet on, or a
-read it hides whole, shows no name. A line changes a name only where it puts
+given, each with its whole history (#586, #589); a name counts only where the line, as the read
+writes it, begins with its bullet and that name, so a line the gate hides from its bullet on, or a
+read it hides whole, shows none (#593). A line changes a name only where it puts
 the gate's mask, so a name asked without the mask that a line shows is a name written to that
 list: the lines are read for the names they show only when the name asked holds the mask (#589).
 A key shows as it was
