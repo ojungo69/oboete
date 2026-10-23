@@ -1,0 +1,19 @@
+docs/claude-mem-parity.md
+  s_23ba4f313f5155::t_4bce852de8d696 8,12,20-22,24,42,50,59,69,83,100-102,110,115,220-226
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "40f6fc63196e2b55727ae7b39cba6aba21adf83e",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
