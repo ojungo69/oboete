@@ -282,8 +282,9 @@ impl Lists {
 /// now (`capture::kept_beside`), and keys as the egress gate shows them now, so the writes before
 /// and after a rule that masks part of a name are one list, or one task (Codex on #408, #580, #582,
 /// #584); each shows the name last written. A read of one list keeps the lists, once folded,
-/// whose fold name is the name asked's or whose line at `now` shows the name asked, each with its
-/// whole history (#584, #586).
+/// whose fold name is the name asked's or whose line, among this read's lines or in a read of
+/// that list alone at `now`, shows the name asked, each with its whole history (#584, #586,
+/// #589).
 fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules, now: i64) -> Lists {
     let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
@@ -347,32 +348,49 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules, now: i
         return out;
     };
     let id = crate::capture::kept_beside("list", asked, rules);
-    let shown = shown_names(&out, now, rules);
-    let keep: Vec<bool> = (0..ids.len())
-        .map(|i| ids[i] == id || shown[i] == asked)
-        .collect();
+    // A line changes a list's name only where it puts the gate's mask, so a name asked without the
+    // mask that a line shows is the name last written, of the same fold name: the lines are read
+    // for the names they show only for a name that holds the mask (CodeRabbit on #589).
+    let shows = match asked.contains(redact::MASK) {
+        true => showing(&out, asked, now, rules),
+        false => vec![false; ids.len()],
+    };
+    let keep: Vec<bool> = (0..ids.len()).map(|i| ids[i] == id || shows[i]).collect();
     out.only(&keep)
 }
 
-/// The name each list's line shows among the lines of `l` at `now`, as a read writes them: its
-/// part of the line, what the views hide there masked, then gated (#586).
-fn shown_names(l: &Lists, now: i64, rules: &Rules) -> Vec<String> {
-    let raw = raw(l, None, now);
-    let mut out = vec![redact::MASK.to_owned(); l.lists.len()];
-    let Some(runs) = raw.runs(rules) else {
-        return out;
-    };
-    for (line, &(list, task)) in raw.lines.iter().zip(&l.rows) {
-        if task.is_none() {
+/// Whether each list's line shows `asked` at `now`, its part of the line with what the views hide
+/// there masked, then gated: among this read's lines, where a rule's mask can come from another
+/// list's lines (a keyword it needs), or in a read of that list alone, which no other list's lines
+/// change (Greptile on #589). A line the gate hides from its bullet on, or a read it hides whole,
+/// shows no name.
+fn showing(l: &Lists, asked: &str, now: i64, rules: &Rules) -> Vec<bool> {
+    let mut found = vec![false; l.lists.len()];
+    // A list's rows follow one another, its own line first.
+    let alone = l
+        .rows
+        .chunk_by(|a, b| a.0 == b.0)
+        .filter(|_| l.lists.len() > 1);
+    for rows in std::iter::once(&l.rows[..]).chain(alone) {
+        let mut raw = Raw::default();
+        for &row in rows {
+            render(&mut raw, l, row, now);
+        }
+        let Some(runs) = raw.runs(rules) else {
+            continue;
+        };
+        for (line, &(list, task)) in raw.lines.iter().zip(rows) {
             let start = line.start + "- ".len();
+            // A line whose bullet the gate hides shows no name, as where it hides the read whole.
+            if task.is_some() || !within(&runs, &(line.start..start)).is_empty() {
+                continue;
+            }
             let name = start..start + l.lists[list].0.len();
-            out[list] = gated(
-                &redact::masked_part(&raw.text, name.clone(), within(&runs, &name)),
-                rules,
-            );
+            let shown = redact::masked_part(&raw.text, name.clone(), within(&runs, &name));
+            found[list] |= gated(&shown, rules) == asked;
         }
     }
-    out
+    found
 }
 
 /// The runs of the sorted `runs` that reach into `r`: applying all of them to every line is
@@ -1325,8 +1343,11 @@ mod tests {
         ];
         let now = 2 * MIN;
         let all = read(None, false, "r", &entries, now, &rules);
-        assert!(all.starts_with("- [REDACTED] [REDACTED]\n"), "{all}");
-        assert_eq!(all.lines().count(), 3, "{all}");
+        assert_eq!(
+            all,
+            "- [REDACTED] [REDACTED]\n  - [todo] a, updated 2 minutes ago\n  \
+             - [todo] b, updated 1 minute ago"
+        );
         for asked in [
             "[REDACTED] [REDACTED]",
             "alpha teal-1234",
@@ -1334,6 +1355,97 @@ mod tests {
         ] {
             let named = read(Some(asked), false, "r", &entries, now, &rules);
             assert_eq!(named, all, "{asked:?}");
+        }
+    }
+
+    /// A list's shown name is the name its line shows in a read of that list alone, so no other
+    /// list's history changes it: an archive whose own lines pass the gate's finding limit leaves
+    /// `alpha beta` found by `[REDACTED] beta`, the name an open read shows (Greptile on #589).
+    #[test]
+    fn a_list_is_found_by_its_shown_name_whatever_the_other_lists_hold() {
+        let rules = user(
+            r#"{ id = "l", regex = '^- (alpha) ', secret_group = 1 }, { id = "s", regex = 'secret-[0-9]+' }"#,
+        );
+        let note: String = (0..10).map(|j| format!("secret-{j} ")).collect();
+        let mut entries = vec![entry(
+            "alpha beta",
+            json!({"task": "a", "status": "todo"}),
+            0,
+        )];
+        for i in 0..101 {
+            let fields = json!({"task": format!("t{i}"), "status": "done", "note": note});
+            entries.push(entry("archive", fields, MIN));
+        }
+        let now = 2 * MIN;
+        let open = read(None, false, "r", &entries, now, &rules);
+        assert_eq!(
+            open,
+            "- [REDACTED] beta\n  - [todo] a, updated 2 minutes ago"
+        );
+        let named = read(Some("[REDACTED] beta"), true, "r", &entries, now, &rules);
+        assert_eq!(named, open);
+        // A line the gate hides from its bullet on shows no name: every line of every list read
+        // together is one mask here.
+        let all = read(None, true, "r", &entries, now, &rules);
+        assert!(all.lines().all(|l| l == redact::MASK), "{all}");
+        assert_eq!(
+            read(Some("[REDACTED]"), true, "r", &entries, now, &rules),
+            "Nothing recorded in \"[REDACTED]\" for r."
+        );
+    }
+
+    /// A rule that needs a keyword masks a name where the keyword is among the lines read with it:
+    /// a read of every list shows `alpha beta` as `[REDACTED] beta` where another list's line holds
+    /// the keyword, and a read by that name finds the list (#590's review).
+    #[test]
+    fn a_list_is_found_by_the_name_a_read_of_every_list_shows() {
+        let rules = user(r#"{ id = "l", regex = 'alpha', keywords = ["trigger"] }"#);
+        let entries = [
+            entry("alpha beta", json!({"task": "a", "status": "todo"}), 0),
+            entry(
+                "other",
+                json!({"task": "trigger it", "status": "todo"}),
+                MIN,
+            ),
+        ];
+        let now = 2 * MIN;
+        let all = read(None, false, "r", &entries, now, &rules);
+        assert!(
+            all.ends_with("\n- [REDACTED] beta\n  - [todo] a, updated 2 minutes ago"),
+            "{all}"
+        );
+        // Read alone, its lines hold no keyword, so the rule masks nothing in them, as on main.
+        let named = read(Some("[REDACTED] beta"), false, "r", &entries, now, &rules);
+        assert_eq!(named, "- alpha beta\n  - [todo] a, updated 2 minutes ago");
+    }
+
+    /// A numeric task written before rules that need two passes and again after them reads as one
+    /// task, as a string task does (Sourcery on #589).
+    #[test]
+    fn a_numeric_task_written_before_and_after_rules_is_one_task() {
+        let extra = r#"{ id = "k", regex = 'task = "(12)', secret_group = 1 }, { id = "a", regex = '^\[REDACTED\](34)', secret_group = 1 }"#;
+        let home = tempfile::tempdir().unwrap();
+        let config = format!("[redaction]\nextra_rules = [{extra}]\n");
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let rules = user(extra);
+        for task in [json!(1234), json!("1234")] {
+            let doing = json!({"task": task, "status": "doing"});
+            let (list, later) =
+                crate::capture::work_state("l", doing.as_object().unwrap(), &settings);
+            let entries = [
+                entry("l", json!({"task": task, "status": "todo"}), 0),
+                Entry {
+                    list,
+                    fields: later,
+                    ts: MIN,
+                },
+            ];
+            let text = read(None, false, "r", &entries, 2 * MIN, &rules);
+            assert_eq!(
+                text, "- l\n  - [doing] [REDACTED][REDACTED], updated 1 minute ago",
+                "{task}"
+            );
         }
     }
 

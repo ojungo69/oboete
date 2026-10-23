@@ -734,7 +734,8 @@ pub fn note(title: &str, text: &str, settings: &Settings) -> (String, String) {
 /// A work state write's list name and fields (docs/work-state.md L5) through the same gate as
 /// every stored string, keys and values alike, a closed opt-out block taken out of each first (as
 /// labels), each value beside its key, and a list's and a task's name settled as work state folds
-/// it (`kept_beside`, #586). Its ledger is not kept: an op has none.
+/// it (`kept_beside`, #586), a task's number or boolean as its text (#589). Its ledger is not
+/// kept: an op has none.
 pub fn work_state(
     list: &str,
     fields: &Map<String, Value>,
@@ -761,6 +762,14 @@ pub fn work_state(
             );
             continue;
         }
+        // A number or a boolean names a task as the text it shows as: settled as a string task
+        // is, and kept as it is where that text holds (Sourcery on #589).
+        if let ("task", Value::Number(_) | Value::Bool(_)) = (k.as_str(), v) {
+            let text = crate::work_state::text(v);
+            let kept = kept_beside("task", &text, &settings.rules);
+            stored.insert(k.clone(), as_written(v, &text, kept));
+            continue;
+        }
         // A number or a boolean is text where it is shown: gated as that text, and kept as it is
         // where the gate leaves it (Codex's security review of #408).
         let (v, as_text) = match v {
@@ -782,14 +791,28 @@ pub fn work_state(
                 "task" | "status" => k.clone(),
                 _ => key,
             };
-            let v = match &as_text {
-                Some((text, was)) if v.as_str() == Some(text.as_str()) => (*was).clone(),
-                _ => v,
+            let v = match (&as_text, v) {
+                (Some((text, was)), Value::String(kept)) => as_written(was, text, kept),
+                (_, v) => v,
             };
             stored.insert(key, v);
         }
     }
     (list, stored)
+}
+
+/// A number or a boolean of a work state write as stored: as written where the gate leaves `text`,
+/// the text it shows as, and that text is all its JSON holds, else `kept`, the text the gate saw,
+/// so no digit the gate never read is stored (a number past a double's digits, or one whose JSON
+/// text JavaScript writes otherwise, `100.0` as `100`; #590's review).
+fn as_written(was: &Value, text: &str, kept: String) -> Value {
+    // Its JSON text, not `was == text`: a `Value` equals a `str` only as a string.
+    let json = was.to_string();
+    if kept == text && json == text {
+        was.clone()
+    } else {
+        Value::String(kept)
+    }
 }
 
 /// A name of work state beside its key as `work_state` keeps it now (`Gate::both`), kept again
@@ -1699,6 +1722,48 @@ mod tests {
             assert_eq!(name, "[REDACTED] [REDACTED]", "{key}");
             assert_eq!(kept_beside(key, &name, &s.rules), name, "{key}");
         }
+    }
+
+    /// A number or a boolean names a task as the text it shows as: stored as that text settles, as
+    /// a string task is, and kept as it is where the gate leaves it (Sourcery on #589).
+    #[test]
+    fn a_numeric_or_boolean_task_is_stored_settled() {
+        for (task, head, tail) in [(json!(1234), "12", "34"), (json!(true), "tr", "ue")] {
+            let s = with(&format!(
+                "[[redaction.extra_rules]]\nid = \"a\"\nregex = '^\\[REDACTED\\]({tail})'\n\
+                 secret_group = 1\n\n[[redaction.extra_rules]]\nid = \"k\"\n\
+                 regex = 'task = \"({head})'\nsecret_group = 1\n"
+            ));
+            let fields = json!({ "task": task });
+            let (_, stored) = work_state("l", fields.as_object().unwrap(), &s);
+            assert_eq!(stored["task"], "[REDACTED][REDACTED]", "{task}");
+            assert_eq!(
+                kept_beside("task", "[REDACTED][REDACTED]", &s.rules),
+                "[REDACTED][REDACTED]"
+            );
+            let (_, kept) = work_state("l", fields.as_object().unwrap(), &with(""));
+            assert_eq!(kept["task"], task);
+        }
+    }
+
+    /// A number whose JSON holds more than the text it shows as is stored as that text, the text
+    /// the gate saw, a task's and any field's, so no digit the gate never read is kept (#590's
+    /// review); one whose JSON is that text is kept as written.
+    #[test]
+    fn a_number_is_stored_as_the_text_the_gate_saw() {
+        let s = with("[[redaction.extra_rules]]\nid = \"n\"\nregex = '1234567890123456789'\n");
+        let fields = json!({"task": 1_234_567_890_123_456_789_u64, "n": 1_234_567_890_123_456_789_u64,
+            "w": 100.0, "e": 1e21, "m": 5, "f": 0.5, "b": false});
+        let (_, stored) = work_state("l", fields.as_object().unwrap(), &s);
+        let op = serde_json::to_string(&stored).unwrap();
+        assert!(!op.contains("1234567890123456789"), "{op}");
+        assert_eq!(stored["task"], "1234567890123456800");
+        assert_eq!(stored["n"], "1234567890123456800");
+        assert_eq!(stored["w"], "100");
+        assert_eq!(
+            (&stored["e"], &stored["m"], &stored["f"], &stored["b"]),
+            (&json!(1e21), &json!(5), &json!(0.5), &json!(false))
+        );
     }
 
     /// A list's name is gated beside its key `list`, as a field's value is beside its own: a rule
