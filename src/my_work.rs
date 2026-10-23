@@ -1311,8 +1311,9 @@ fn clip(text: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// claude-mem's `isHumanActionRequest`, without its list of English action words (the design's
-/// 1): not an acknowledgement, a greeting or the harness's text, in English or Japanese.
+/// claude-mem's `isHumanActionRequest` (15.0, with no list of English action words since): two
+/// letters in any language that are not an acknowledgement, a greeting or the harness's text, in
+/// English or Japanese.
 fn asks(text: &str) -> bool {
     static REJECTED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         [
@@ -1326,6 +1327,7 @@ fn asks(text: &str) -> bool {
         .map(|r| Regex::new(r).unwrap())
         .collect()
     });
+    static LETTERS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{L}.*\p{L}").unwrap());
     static TESTS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)^you can (?:def(?:initely)? )?do (?:real )?tests?[,;.!\s]").unwrap()
     });
@@ -1335,7 +1337,7 @@ fn asks(text: &str) -> bool {
     });
     let plain = text.replace(['*', '_', '`', '#'], "");
     let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-    !plain.is_empty()
+    LETTERS.is_match(&plain)
         && !REJECTED.iter().any(|r| r.is_match(&plain))
         && !(TESTS.is_match(&plain) && !WORK_WORD.is_match(&plain))
 }
@@ -1578,6 +1580,24 @@ mod tests {
         h.said("s2", -58_000, "続けて");
         let v = h.read(Range::All, h.t);
         assert_eq!((ids(&v), &v["unlinked"]), (Vec::<String>::new(), &json!(2)));
+    }
+
+    /// A prompt asks once it holds two letters, in any language, as claude-mem 15.0's
+    /// `isHumanActionRequest` reads one past its exclusions: a mark or a number alone does not.
+    #[test]
+    fn a_prompt_asks_with_two_letters_in_any_language() {
+        for (text, asked) in [
+            ("?", false),
+            ("1", false),
+            ("a?", false),
+            ("42!", false),
+            ("ok?", true),
+            ("直して", true),
+            ("Fix it", true),
+            ("再開して", false),
+        ] {
+            assert_eq!(asks(text), asked, "{text}");
+        }
     }
 
     /// Its work (claude-mem's `uniqueCall`): a work state write is the work of the session whose

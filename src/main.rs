@@ -255,7 +255,7 @@ enum Cmd {
         /// Rank the claims later ones ended where their words rank them
         #[arg(long)]
         history: bool,
-        /// Comma-separated categories or kinds (observations, sessions, prompts, claims, bugfix, ...)
+        /// Comma-separated categories or kinds (all, observations, sessions, prompts, claims, bugfix, ...)
         #[arg(long = "type")]
         kind: Option<String>,
         /// relevance (default), date_desc or date_asc
@@ -567,7 +567,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 since: since.map(|s| search::b::time(&s, false)).transpose()?,
                 until: until.map(|s| search::b::time(&s, true)).transpose()?,
                 history,
-                types: kind.as_deref().map(str::parse).transpose()?,
+                types: search::b::types(kind.as_deref())?,
                 order: order.parse()?,
                 raw: match raw.as_str() {
                     "below" => search::b::RawArm::Below,

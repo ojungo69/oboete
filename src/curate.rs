@@ -616,8 +616,12 @@ const MEMORY_READ: &str = " (a read of stored memory, not shown)";
 const MEMORY_WRITE: &str = "(a note saved to memory, not shown)";
 
 /// claude-mem's retrieval tools (`RETRIEVAL_TOOLS`, src/shared/memory-retrieval-tools.ts at
-/// v13.39.0, Apache-2.0; NOTICE).
+/// v15.0.1, Apache-2.0; NOTICE).
 const CLAUDE_MEM_READS: &[&str] = &[
+    "dumb_search",
+    "claude_mem_search",
+    "claude_mem_timeline",
+    "claude_mem_get_observations",
     "mem_search",
     "search",
     "timeline",
@@ -634,8 +638,9 @@ const CLAUDE_MEM_READS: &[&str] = &[
 /// oboete's own retrieval tools.
 const OBOETE_READS: &[&str] = &["search", "get", "timeline", "mem_search"];
 
-/// A read of stored memory, as claude-mem's `isRecursiveMemoryTool` finds one (v13.39.0): a bare
-/// `mem_search`, `get_summaries` or `memory_*` tool, or a retrieval tool of a server whose name
+/// A read of stored memory, as claude-mem's `isRecursiveMemoryTool` finds one (v15.0.1): a bare
+/// `mem_search`, `dumb_search`, `get_summaries`, `claude_mem_search`, `claude_mem_timeline`,
+/// `claude_mem_get_observations` or `memory_*` tool, or a retrieval tool of a server whose name
 /// says claude-mem (`claude-mem`, `claude_mem`, `mcp-search`, `mcp_search`, `cmem`); and oboete's
 /// own: a retrieval tool of a server named oboete (Cursor names one `MCP:<tool>`, without its
 /// server), or `oboete search|get|timeline` run as a command. Its output repeats what memory
@@ -648,7 +653,17 @@ pub(crate) fn memory_read(tool: &str, body: &Value) -> bool {
         return true;
     }
     let tool = tool.to_ascii_lowercase();
-    if tool.starts_with("memory_") || matches!(tool.as_str(), "mem_search" | "get_summaries") {
+    if tool.starts_with("memory_")
+        || matches!(
+            tool.as_str(),
+            "mem_search"
+                | "dumb_search"
+                | "get_summaries"
+                | "claude_mem_search"
+                | "claude_mem_timeline"
+                | "claude_mem_get_observations"
+        )
+    {
         return true;
     }
     if let Some((server, name)) = served(&tool)
@@ -5104,6 +5119,13 @@ mod tests {
             "mcp__oboete__mem_search",
             "oboete__timeline",
             "MCP:get",
+            // claude-mem 15.0's lookup and its other servers' names, bare too.
+            "dumb_search",
+            "claude_mem_search",
+            "claude_mem_timeline",
+            "claude_mem_get_observations",
+            "mcp__plugin_claude-mem_mcp-search__dumb_search",
+            "mcp__claude-mem__claude_mem_get_observations",
         ] {
             assert!(memory_read(read, &none), "{read}");
         }

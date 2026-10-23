@@ -127,7 +127,9 @@ run across parts, `?` one character within a part, a leading `~` the home folder
 as `/`; it names a working folder when it matches the whole path or, for a pattern that does not
 start at a root (`/`, `C:/`, or `~` once expanded), the end of one in whole parts: `work/secret`
 names `/home/u/work/secret` and `secret/**` names `/work/secret/src`, where claude-mem tries the
-last part alone, which no pattern with a `/` names (Codex on #563). `dir/**` names `dir` too. A
+last part alone, which no pattern with a `/` names (Codex on #563). `dir/**` names `dir` too, and
+a whole `**/` part no folder, as claude-mem 15.0 reads it (`/work/**/private` names
+`/work/private`). A
 pattern with no `/` also names every folder inside one it names, where
 claude-mem reads the last part alone, so a session started below an excluded project is not
 recorded either; letter case is ignored where the platform ignores it, as for a folder. Each event
