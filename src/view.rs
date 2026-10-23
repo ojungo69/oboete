@@ -2002,11 +2002,18 @@ fn answered(name: &str, mut answer: Value) -> Value {
     // A My Work request's id leaves the gate's walk and comes back under its key: a masked id's
     // fingerprint is its selector, as a claim's uid is, so the gate takes only what is before it
     // (#570), known by the answer's own field, as no id's own text can pass for it (Codex and
-    // Sourcery on #576).
-    let ids: Vec<Option<String>> = match answer.get_mut("requests") {
-        Some(Value::Array(requests)) if name == "my-work" => {
-            requests.iter_mut().map(request_id).collect()
-        }
+    // Sourcery on #576). So does the id of each of its conversations (`sessions`), which is the
+    // id of that conversation's own request (decision 55).
+    let ids: Vec<(Option<String>, Vec<Option<String>>)> = match answer.get_mut("requests") {
+        Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
+            .map(|request| {
+                let sessions = match request.get_mut("sessions") {
+                    Some(Value::Array(sessions)) => sessions.iter_mut().map(request_id).collect(),
+                    _ => Vec::new(),
+                };
+                (request_id(request), sessions)
+            })
+            .collect(),
         _ => Vec::new(),
     };
     let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc") {
@@ -2018,16 +2025,27 @@ fn answered(name: &str, mut answer: Value) -> Value {
         answer["next"] = next;
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
-        for (request, id) in requests.iter_mut().zip(ids) {
-            if let (Value::Object(request), Some(id)) = (request, id) {
-                request.insert("id".to_owned(), Value::String(id));
+        for (request, (id, sessions)) in requests.iter_mut().zip(ids) {
+            if let Some(Value::Array(shown)) = request.get_mut("sessions") {
+                for (session, id) in shown.iter_mut().zip(sessions) {
+                    put_id(session, id);
+                }
             }
+            put_id(request, id);
         }
     }
     answer
 }
 
-/// A My Work request's id, taken out of it with its `fingerprint`, and gated but for that.
+/// A My Work id put back under its key, after the gate's walk.
+fn put_id(v: &mut Value, id: Option<String>) {
+    if let (Value::Object(v), Some(id)) = (v, id) {
+        v.insert("id".to_owned(), Value::String(id));
+    }
+}
+
+/// A My Work request's id, or its conversation's, taken out of it with its `fingerprint`, and
+/// gated but for that.
 fn request_id(request: &mut Value) -> Option<String> {
     let request = request.as_object_mut()?;
     let print = match request.remove("fingerprint") {
@@ -4179,12 +4197,17 @@ curate = false
             let fields = fields.as_object().unwrap();
             s.raw.work_state(R, "plan", fields, None).unwrap();
         }
+        // Two conversations whose sessions a rule below masks alike, each a request of its own,
+        // which names its conversation by its own id (`sessions`).
+        for session in ["sess-1", "sess-2"] {
+            s.said(session, R, crate::db::now_ms() - 60_000, "Fix the parser.");
+        }
         s.run();
         // Read before the rules below are written, as a read the route's gate outlives.
         let home = s.home.path();
         let before = crate::my_work::read(home, crate::my_work::Range::All, crate::db::now_ms());
-        let rules =
-            "{ id = 'ticket', regex = 'ticket-[0-9]' }, { id = 'hex', regex = '[0-9a-f]{12}' }";
+        let rules = "{ id = 'ticket', regex = 'ticket-[0-9]' }, \
+                     { id = 'hex', regex = '[0-9a-f]{12}' }, { id = 'sess', regex = 'sess-[0-9]' }";
         let config = |rules: &str| format!("[redaction]\nextra_rules = [{rules}]\n");
         std::fs::write(home.join("config.toml"), config(rules)).unwrap();
         redact::set_home(home).unwrap();
@@ -4192,20 +4215,33 @@ curate = false
         assert!(!early.to_string().contains("deadbeefcafe"), "{early}");
         let key = format!("{rules}, {{ id = 'key', regex = '^id$' }}");
         std::fs::write(home.join("config.toml"), config(&key)).unwrap();
-        let ids = || -> Vec<String> {
-            let answer = get(&v, "/api/my-work?range=all");
+        let answer = || get(&v, "/api/my-work?range=all");
+        let ids = |answer: &Value| -> Vec<String> {
             (answer["requests"].as_array().unwrap().iter())
                 .map(|r| r["id"].as_str().unwrap().to_owned())
                 .collect()
         };
-        let read = ids();
+        let first = answer();
+        let read = ids(&first);
         let distinct: std::collections::HashSet<&String> = read.iter().collect();
-        assert_eq!((read.len(), distinct.len()), (3, 3), "{read:?}");
-        assert_eq!(ids(), read);
+        assert_eq!((read.len(), distinct.len()), (5, 5), "{read:?}");
+        assert_eq!(ids(&answer()), read);
         for id in &read {
             let (shown, print) = id.split_once('#').unwrap();
-            assert_eq!((shown, print.len()), ("r:[REDACTED]", 12), "{read:?}");
+            assert!(
+                ["r:[REDACTED]", "c:[REDACTED]"].contains(&shown),
+                "{read:?}"
+            );
+            assert_eq!(print.len(), 12, "{read:?}");
         }
+        for r in first["requests"].as_array().unwrap() {
+            let sessions = match r["id"].as_str().unwrap().starts_with("c:") {
+                true => json!([{"agent": "claude", "id": r["id"]}]),
+                false => json!([]),
+            };
+            assert_eq!(r["sessions"], sessions, "{first}");
+        }
+        assert!(!first.to_string().contains("fingerprint"), "{first}");
     }
 
     /// A feed over invented records, without the older timeline fixture's claims or imports.

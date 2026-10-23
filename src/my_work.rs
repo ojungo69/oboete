@@ -43,6 +43,8 @@ const CALL_MS: i64 = 5_000;
 const QUIET_MS: i64 = 6 * 3_600_000;
 /// The cards a request names, at most (claude-mem's activity of a request).
 const ACTIVITY: usize = 40;
+/// A request's recorded updates, at most (claude-mem's `presentWork`).
+const UPDATES: usize = 8;
 /// The characters past a shown part of a prompt that the gate reads too, so that a value the cut
 /// splits is whole when the rules read it (`hook::clip`'s overlap).
 const OVERLAP: usize = 4_000;
@@ -948,6 +950,53 @@ fn mask_key(home: &Path) -> Result<Vec<u8>> {
     Ok(key.to_vec())
 }
 
+/// A request's id as the answer shows it, and the fingerprint of the stored one when the gate
+/// masks it: what a request of a conversation is known by, and its conversation in any request.
+fn shown_id(
+    id: &Id,
+    rules: &Rules,
+    home: &Path,
+    key: &mut Option<Vec<u8>>,
+) -> Result<(String, Option<String>)> {
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
+    let (shown, held, kind) = match id {
+        Id::Conversation((agent, session)) => (
+            format!("c:{}:{}", gate(agent), gate(session)),
+            format!("c:{agent}:{session}"),
+            "c",
+        ),
+        Id::Explicit(e) => (
+            format!("r:{}", crate::work_state::beside("request_id", e, rules)),
+            format!("r:{e}"),
+            "r",
+        ),
+    };
+    // The stored id through the gate as assembled too, since a rule may match it and neither of
+    // its parts, which the route's own gate (`view::answered`) would then mask alike in two ids
+    // (Codex on #574), or a part's mask may hide what that rule would match: then nothing of it is
+    // shown but its kind (Codex and CodeRabbit on #575).
+    let shown = if gate(&held) == held {
+        shown
+    } else {
+        format!("{kind}:{}", crate::redact::MASK)
+    };
+    // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
+    // two and each keeps its id from read to read (Codex on #574), keyed by the home's own key so
+    // that it tells nothing of a guess at the id (CodeRabbit on #574). It is named in a field of
+    // its own too, which the route takes out, so that no id's own text passes for one there
+    // (Codex and Sourcery on #576).
+    if shown == held {
+        return Ok((shown, None));
+    }
+    let key = match key {
+        Some(key) => key,
+        None => key.insert(mask_key(home)?),
+    };
+    let keyed = [key.as_slice(), held.as_bytes()].concat();
+    let print = crate::forget::hash(&keyed)[..12].to_owned();
+    Ok((format!("{shown}#{print}"), Some(print)))
+}
+
 /// One request as the route gives it, every text through the gate; none when its newest update is
 /// before `since`, which then gates nothing.
 fn answer(
@@ -966,12 +1015,15 @@ fn answer(
     let mut active: Vec<i64> = Vec::new();
     let mut repos = BTreeSet::new();
     let mut agents = BTreeSet::new();
+    // Each conversation it owns, with its newest record of the ones `updated` counts.
+    let mut sessions: Vec<(Option<i64>, &Key)> = Vec::new();
     let mut latest_prompt: Option<&Said> = None;
     for (key, own) in &r.owns {
         let Some(c) = convs.get(key) else { continue };
         agents.insert(crate::redact::outbound_with(&key.0, rules));
         repos.extend(c.repos.iter().cloned());
         prompts.extend(c.prompts.iter());
+        let (from_turn, from_card, from_active) = (turns.len(), cards.len(), active.len());
         match own {
             Owns::All => {
                 turns.extend(c.turns.iter());
@@ -997,7 +1049,19 @@ fn answer(
                 }
             }
         }
+        let wrote = (items.iter())
+            .filter(|w| w.by.as_ref().is_some_and(|(by, ..)| by == key))
+            .map(|w| w.updated);
+        let latest = (turns[from_turn..].iter().map(|t| t.s.ts))
+            .chain(cards[from_card..].iter().map(|c| c.c.ts))
+            .chain(active[from_active..].iter().copied())
+            .chain(wrote)
+            .max();
+        sessions.push((latest, key));
     }
+    // The newest first, as the requests are; of one time, in the order the stores hold them
+    // (`read` takes them in `convs`' order).
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.0));
     for w in &items {
         repos.insert(crate::redact::outbound_with(&w.repo, rules));
     }
@@ -1033,24 +1097,40 @@ fn answer(
     let status = status(&items, activity, now);
     let recorded = (r.explicit_text.as_deref()).map(|t| title(&shown(t, ASK, rules)));
     let ask = shown(&original.text, ASK, rules);
+    // Each work item's names as capture keeps them, beside their keys (Codex on #574), and its
+    // detail, claude-mem's recorded change of it: its outcome, else its progress.
+    let named: Vec<(String, Option<String>, Option<String>)> = (items.iter())
+        .map(|w| {
+            let list = crate::work_state::beside("list", &w.list, rules);
+            let task = (w.task.as_deref()).map(|t| crate::work_state::beside("task", t, rules));
+            let detail = (w.text(OUTCOME_KEYS, SUMMARY, rules))
+                .or_else(|| w.text(PROGRESS_KEYS, SUMMARY, rules));
+            (list, task, detail)
+        })
+        .collect();
+    // claude-mem's `updates` (`presentWork`): each item's detail, else its name, and each card's
+    // subtitle, else its title, the newest first, each text once.
+    let mut updates: Vec<(i64, String)> = (items.iter().zip(&named))
+        .filter_map(|(w, (list, task, detail))| {
+            let name = || {
+                meaningful(&json!(w.task.as_deref().unwrap_or(&w.list)))?;
+                Some(cut(task.as_ref().unwrap_or(list), SUMMARY))
+            };
+            Some((w.updated, detail.clone().or_else(name)?))
+        })
+        .collect();
+    updates.extend(cards.iter().filter_map(|c| {
+        let text = [&c.c.subtitle, &c.c.title]
+            .into_iter()
+            .find(|t| !t.trim().is_empty())?;
+        Some((c.c.ts, cut(text, SUMMARY)))
+    }));
+    updates.sort_by_key(|u| std::cmp::Reverse(u.0));
+    let mut seen = HashSet::new();
+    updates.retain(|u| seen.insert(u.1.clone()));
+    updates.truncate(UPDATES);
     let (copy, title, summary, next, updating) = if turns.is_empty() {
-        let mut updates: Vec<(i64, String)> = (items.iter())
-            .filter_map(|w| {
-                let text = w
-                    .text(OUTCOME_KEYS, SUMMARY, rules)
-                    .or_else(|| w.text(PROGRESS_KEYS, SUMMARY, rules));
-                text.map(|t| (w.updated, t))
-            })
-            .collect();
-        updates.extend(cards.iter().filter_map(|c| {
-            let text = [&c.c.subtitle, &c.c.title]
-                .into_iter()
-                .find(|t| !t.trim().is_empty())?;
-            Some((c.c.ts, cut(text, SUMMARY)))
-        }));
-        updates.sort_by_key(|u| std::cmp::Reverse(u.0));
-        let summary =
-            (updates.into_iter().next().map(|u| u.1)).unwrap_or_else(|| cut(&ask, SUMMARY));
+        let summary = (updates.first().map(|u| u.1.clone())).unwrap_or_else(|| cut(&ask, SUMMARY));
         let next = items.iter().find_map(|w| w.text(NEXT_KEYS, NEXT, rules));
         let title = recorded.unwrap_or_else(|| title(&ask));
         ("recorded", title, Some(summary), next, false)
@@ -1084,57 +1164,27 @@ fn answer(
     // Each name and value as the gate shows it beside its key, as work state's own lines do, a
     // closing status too: capture keeps it as sent, and the line that shows it gates it as any
     // (`capture::work_state`; Codex on #574).
-    let work: Vec<Value> = (items.iter())
-        .map(|w| {
+    let work: Vec<Value> = (items.iter().zip(named))
+        .map(|(w, (list, task, detail))| {
             let status = (w.fields.get("status"))
                 .map(|s| crate::work_state::beside("status", &crate::work_state::text(s), rules));
-            let task = (w.task.as_deref()).map(|t| crate::work_state::beside("task", t, rules));
-            // As capture keeps the list's name: beside its key (Codex on #574).
-            let list = crate::work_state::beside("list", &w.list, rules);
-            json!({"list": list, "task": task, "status": status, "updated": w.updated})
+            json!({"list": list, "task": task, "status": status, "detail": detail,
+                "updated": w.updated})
         })
         .collect();
-    let gate = |s: &str| crate::redact::outbound_with(s, rules);
-    let (id, held, kind) = match &r.id {
-        Id::Conversation((agent, session)) => (
-            format!("c:{}:{}", gate(agent), gate(session)),
-            format!("c:{agent}:{session}"),
-            "c",
-        ),
-        Id::Explicit(e) => (
-            format!("r:{}", crate::work_state::beside("request_id", e, rules)),
-            format!("r:{e}"),
-            "r",
-        ),
-    };
-    // The stored id through the gate as assembled too, since a rule may match it and neither of
-    // its parts, which the route's own gate (`view::answered`) would then mask alike in two ids
-    // (Codex on #574), or a part's mask may hide what that rule would match: then nothing of it is
-    // shown but its kind (Codex and CodeRabbit on #575).
-    let id = if gate(&held) == held {
-        id
-    } else {
-        format!("{kind}:{}", crate::redact::MASK)
-    };
-    // An id the gate masks takes a fingerprint of the stored one, so that two masked alike stay
-    // two and each keeps its id from read to read (Codex on #574), keyed by the home's own key so
-    // that it tells nothing of a guess at the id (CodeRabbit on #574). It is named in a field of
-    // its own too, which the route takes out, so that no id's own text passes for one there
-    // (Codex and Sourcery on #576).
-    let fingerprint = if id == held {
-        None
-    } else {
-        let key = match key {
-            Some(key) => key,
-            None => key.insert(mask_key(home)?),
-        };
-        let keyed = [key.as_slice(), held.as_bytes()].concat();
-        Some(crate::forget::hash(&keyed)[..12].to_owned())
-    };
-    let id = match &fingerprint {
-        Some(print) => format!("{id}#{print}"),
-        None => id,
-    };
+    let (id, fingerprint) = shown_id(&r.id, rules, home, key)?;
+    // Each conversation by the id its own request has or would have, so that the page shows one
+    // card a conversation, as claude-mem's agent view does (decision 55).
+    let mut conversations = Vec::new();
+    for (_, (agent, session)) in &sessions {
+        let conversation = Id::Conversation((agent.clone(), session.clone()));
+        let (id, fingerprint) = shown_id(&conversation, rules, home, key)?;
+        let agent = crate::redact::outbound_with(agent, rules);
+        conversations.push(json!({"agent": agent, "id": id, "fingerprint": fingerprint}));
+    }
+    let updates: Vec<Value> = (updates.iter())
+        .map(|(ts, text)| json!({"ts": ts, "text": text}))
+        .collect();
     Ok(Some(json!({
         "id": id,
         "fingerprint": fingerprint,
@@ -1147,10 +1197,12 @@ fn answer(
         "updated": updated,
         "started": original.ts,
         "agents": agents,
+        "sessions": conversations,
         "projects": names,
         "repos": repos,
         "ask": ask,
         "follow_ups": follow_ups,
+        "updates": updates,
         "work": work,
         "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
         "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
@@ -2152,6 +2204,124 @@ mod tests {
         assert_eq!(by_id(&v, "c:claude:s3")["title"], "Make cold reads fast");
     }
 
+    /// claude-mem's `updates` (`presentWork`): each work item's outcome, else its progress, else
+    /// its name, and each card's subtitle, else its title, the newest first, each text once, at
+    /// most 8, each cut to 240, whichever copy the request has; without a summary the newest is
+    /// the card's summary.
+    #[test]
+    fn the_updates_are_the_newest_eight_of_the_work_and_the_cards_each_once() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Ship the release.");
+        let r = h.reply("s1", -55_000);
+        let shipped = json!({"request": "Release", "completed": "Shipped."});
+        h.turn("s1", (p, r), -55_000, shipped);
+        for i in 1..=9 {
+            let fields = json!({"task": format!("step {i}"), "status": "done",
+                "outcome": format!("Step {i} done.")});
+            h.wrote("s1", "release", fields);
+        }
+        let again = json!({"task": "again", "status": "done", "outcome": "Step 9 done."});
+        h.wrote("s1", "release", again);
+        let q = h.said("s2", -50_000, "Speed up search.");
+        let cold = json!([{"type": "discovery", "title": "Cold reads",
+            "subtitle": "The first read takes 3 s.", "narrative": "x"}]);
+        h.s.cards(q, q, cold, false);
+        let t = (h.s).event(
+            "tool",
+            "s2",
+            (R, "main"),
+            h.t - 45_000,
+            json!({"tool": "Bash"}),
+        );
+        let rebuilt = json!([{"type": "change", "title": "Index rebuilt", "subtitle": " ", "narrative": "x"}]);
+        h.s.cards(t, t, rebuilt, false);
+        let long = "The index is rebuilt in the background. ".repeat(10);
+        h.wrote(
+            "s2",
+            "search",
+            json!({"task": "rebuild", "status": "doing", "progress": long}),
+        );
+        h.wrote(
+            "s2",
+            "search",
+            json!({"task": "tag", "status": "doing", "outcome": "Tagged.", "progress": "Tagging."}),
+        );
+        h.wrote("s2", "search", json!({"task": "publish", "status": "todo"}));
+        // A name that is a number alone says nothing, as claude-mem's `cleanText` reads one.
+        h.wrote("s2", "search", json!({"task": "7", "status": "todo"}));
+        h.wrote("s2", "search", json!({"status": "doing"}));
+        let v = h.read(Range::All, h.t + 10_000);
+        let updates = |id: &str| by_id(&v, id)["updates"].as_array().unwrap().clone();
+        let texts = |id: &str| -> Vec<String> {
+            (updates(id).iter())
+                .map(|u| u["text"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let steps: Vec<String> = (2..=9).rev().map(|i| format!("Step {i} done.")).collect();
+        assert_eq!(texts("c:claude:s1"), steps);
+        assert_eq!(by_id(&v, "c:claude:s1")["summary"], "Shipped.");
+        let s2 = texts("c:claude:s2");
+        assert_eq!(s2.len(), 6, "{s2:?}");
+        assert_eq!(s2[..3], ["search", "publish", "Tagged."]);
+        assert!(
+            s2[3].starts_with("The index is rebuilt") && s2[3].ends_with('…'),
+            "{s2:?}"
+        );
+        assert!(s2[3].chars().count() <= SUMMARY, "{s2:?}");
+        assert_eq!(s2[4..], ["Index rebuilt", "The first read takes 3 s."]);
+        let s2r = by_id(&v, "c:claude:s2");
+        assert_eq!(
+            (&s2r["copy"], &s2r["summary"]),
+            (&json!("recorded"), &json!(s2[0]))
+        );
+        for id in ["c:claude:s1", "c:claude:s2"] {
+            let ts: Vec<i64> = (updates(id).iter())
+                .map(|u| u["ts"].as_i64().unwrap())
+                .collect();
+            assert!(ts.windows(2).all(|w| w[0] >= w[1]), "{ts:?}");
+        }
+    }
+
+    /// A work item's detail, its recorded change on the request's page (claude-mem's
+    /// `request-views.js`): its outcome, else its progress, cut to 240; none for an item with
+    /// neither, one with a next step alone too.
+    #[test]
+    fn a_work_items_detail_is_its_outcome_else_its_progress() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship the release.");
+        let long = "The changelog is long. ".repeat(20);
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "changelog", "status": "doing", "progress": long}),
+        );
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "status": "doing", "outcome": "Tagged.", "progress": "Tagging."}),
+        );
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "publish", "status": "todo", "next_step": "Publish it."}),
+        );
+        let v = h.read(Range::All, h.t + 10_000);
+        let work = by_id(&v, "c:claude:s1")["work"].as_array().unwrap().clone();
+        let detail =
+            |task: &str| work.iter().find(|w| w["task"] == task).unwrap()["detail"].clone();
+        assert_eq!(
+            (detail("tag"), detail("publish")),
+            (json!("Tagged."), Value::Null)
+        );
+        let changelog = detail("changelog");
+        let changelog = changelog.as_str().unwrap();
+        assert!(
+            changelog.starts_with("The changelog is long.") && changelog.ends_with('…'),
+            "{changelog}"
+        );
+        assert!(changelog.chars().count() <= SUMMARY, "{changelog}");
+    }
+
     /// The design's 1, beyond claude-mem's rule: a session none of whose prompts asks (resumed with
     /// an acknowledgement) takes its oldest reply's `request` as its ask, and all of its prompts
     /// follow it up.
@@ -2218,13 +2388,33 @@ mod tests {
             "keys",
             json!({"task": "canary-4827", "status": "doing", "outcome": "canary-1234 rotated"}),
         );
+        // A task's name is its update when it records no outcome or progress, and a progress is.
+        h.wrote(
+            "s1",
+            "keys",
+            json!({"task": "canary-5555", "status": "todo"}),
+        );
+        h.wrote(
+            "s1",
+            "keys",
+            json!({"task": "revoke", "status": "doing", "progress": "canary-9999 next"}),
+        );
         h.s.run();
         let config = "[redaction]\nextra_rules = [{ id = \"t\", regex = 'task = \"canary-[0-9]{4}' }, \
-                      { id = \"o\", regex = 'outcome = \"canary-[0-9]{4}' }]\n";
+                      { id = \"o\", regex = 'outcome = \"canary-[0-9]{4}' }, \
+                      { id = \"p\", regex = 'progress = \"canary-[0-9]{4}' }]\n";
         std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
         let v = super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
         let s1 = by_id(&v, "c:claude:s1");
-        assert_eq!(s1["work"][0]["task"], crate::redact::MASK);
+        let mask = json!(crate::redact::MASK);
+        let work = s1["work"].as_array().unwrap();
+        let tasks: Vec<&Value> = work.iter().map(|w| &w["task"]).collect();
+        assert_eq!(tasks, [&json!("revoke"), &mask, &mask]);
+        let details: Vec<&Value> = work.iter().map(|w| &w["detail"]).collect();
+        assert_eq!(details, [&mask, &Value::Null, &mask]);
+        // Masked alike, the three updates are one text, shown once.
+        let updates = s1["updates"].as_array().unwrap();
+        assert_eq!((updates.len(), &updates[0]["text"]), (1, &mask));
         assert_eq!(s1["summary"], crate::redact::MASK);
         assert!(!v.to_string().contains("canary-"), "{v}");
     }
@@ -2666,7 +2856,74 @@ mod tests {
         for (id, r) in first.iter().zip(shown) {
             assert!(id.starts_with("c:[REDACTED]:[REDACTED]#") && !id.contains("sess-"));
             assert_eq!(r["agents"], json!(["[REDACTED]"]));
+            // Its conversation is named by the id its own request has, the fingerprint too.
+            let session = json!({"agent": "[REDACTED]", "id": id, "fingerprint": r["fingerprint"]});
+            assert_eq!(r["sessions"], json!([session]));
         }
+    }
+
+    /// Decision 55 (claude-mem's agent view, one card a conversation): a request names the
+    /// conversations it owns, the newest activity first, each by its own records of the ones its
+    /// `updated` counts (a summary, a card, a prompt, a write), and by the id its own request has
+    /// or would have: a request of several conversations each, and two requests of one
+    /// conversation that one.
+    #[test]
+    fn a_request_names_its_conversations_by_their_own_ids_the_newest_first() {
+        let mut h = Home::new();
+        // Of `rel-1`'s conversations, in the order the stores hold them, the newest record of
+        // `s1` is a card, of `s2` a summary, of `s3` and `s4` a prompt, `s4`'s the later, and of
+        // `s5` and `s6` a write, `s6`'s the later: a record of one counts for no other.
+        h.said("s1", -90_000, "Check the links.");
+        let t = (h.s).event(
+            "tool",
+            "s1",
+            (R, "main"),
+            h.t + 50_000,
+            json!({"tool": "Bash"}),
+        );
+        let checked = json!([{"type": "change", "title": "Links checked", "narrative": "x"}]);
+        h.s.cards(t, t, checked, false);
+        let p = h.said("s2", -90_000, "Draft the release notes.");
+        let r = h.reply("s2", -89_000);
+        let drafted = json!({"request": "Notes", "completed": "Drafted."});
+        h.turn("s2", (p, r), 40_000, drafted);
+        h.said("s3", 10_000, "Check the dates.");
+        h.said("s4", 30_000, "Check the names.");
+        h.said("s5", -60_000, "Write the release notes.");
+        h.said("s6", -95_000, "Check the release notes.");
+        for s in ["s1", "s2", "s3", "s4", "s5", "s6"] {
+            // Each write a millisecond of its own, which its item is dated by.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let fields = json!({"task": s, "status": "doing", "request_id": "rel-1"});
+            h.wrote(s, "notes", fields);
+        }
+        h.said("t1", -50_000, "Fix the parser.");
+        h.said("t2", -40_000, "Fix the lexer and the docs.");
+        h.wrote(
+            "t2",
+            "lexer",
+            json!({"task": "lexer", "status": "doing", "request_id": "a",
+                "request": "Fix the lexer"}),
+        );
+        h.wrote(
+            "t2",
+            "docs",
+            json!({"task": "docs", "status": "doing", "request_id": "b",
+                "request": "Fix the docs"}),
+        );
+        let v = h.read(Range::All, h.t + 120_000);
+        let of = |s: &str| {
+            let id = format!("c:claude:{s}");
+            json!({"agent": "claude", "id": id, "fingerprint": null})
+        };
+        let sessions = |id: &str| by_id(&v, id)["sessions"].clone();
+        let newest_first: Vec<Value> = ["s1", "s2", "s4", "s3", "s6", "s5"].map(of).to_vec();
+        assert_eq!(sessions("r:rel-1"), json!(newest_first));
+        assert_eq!(sessions("c:claude:t1"), json!([of("t1")]));
+        assert_eq!(
+            (sessions("r:a"), sessions("r:b")),
+            (json!([of("t2")]), json!([of("t2")]))
+        );
     }
 
     /// Codex on #574: an id the gate masks takes a fingerprint of the stored one, so that two
