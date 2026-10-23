@@ -3226,20 +3226,24 @@ fn strip_tag(s: &str, tag: &str, hide_unclosed: bool) -> String {
 
 /// `tag`'s paired blocks in `s`, sorted, and where its text ends (see `strip_tag`).
 pub(crate) fn tag_blocks(s: &str, tag: &str, hide_unclosed: bool) -> (Vec<(usize, usize)>, usize) {
-    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
-    let mut marks: Vec<(usize, bool)> = s
+    let (open, close) = (format!("<{tag}"), format!("</{tag}"));
+    // Each mark with where it ends: an opener's end is not read.
+    let mut marks: Vec<(usize, bool, usize)> = s
         .match_indices(&open)
         .filter(|(i, _)| opens(&s[i + open.len()..]))
-        .map(|(i, _)| (i, true))
-        .chain(s.match_indices(&close).map(|(i, _)| (i, false)))
+        .map(|(i, _)| (i, true, i))
+        .chain(s.match_indices(&close).filter_map(|(i, _)| {
+            let after = i + close.len();
+            closes(&s[after..]).map(|n| (i, false, after + n))
+        }))
         .collect();
     marks.sort_unstable();
     let (mut stack, mut blocks) = (Vec::new(), Vec::new());
-    for (i, is_open) in marks {
+    for (i, is_open, end) in marks {
         if is_open {
             stack.push(i);
         } else if let Some(start) = stack.pop() {
-            blocks.push((start, i + close.len()));
+            blocks.push((start, end));
         }
     }
     // No paired block spans a leftover opener: the closer would have paired with it instead.
@@ -3254,6 +3258,14 @@ pub(crate) fn tag_blocks(s: &str, tag: &str, hide_unclosed: bool) -> (Vec<(usize
 /// What follows `<tag` makes it the tag (`<privateer>` is not `<private`).
 fn opens(after: &str) -> bool {
     after.starts_with(|c: char| c == '>' || c.is_whitespace())
+}
+
+/// What follows `</tag` makes it the closer, as claude-mem 15.0 reads `</tag\s*>`: the length of
+/// the spaces (ECMAScript's `\s`, which takes U+FEFF too) and the `>` after the name.
+fn closes(after: &str) -> Option<usize> {
+    let rest = after.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    rest.starts_with('>')
+        .then_some(after.len() - rest.len() + 1)
 }
 
 /// A prompt the harness sent rather than the developer typed (see `ENVELOPES`).
@@ -10736,6 +10748,24 @@ mod tests {
         let start = std::time::Instant::now();
         strip_blocks(&many, true);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// A closer with spaces before its `>` closes the block, as claude-mem 15.0 reads `</tag\s*>`;
+    /// a tag that only starts with the name does not.
+    #[test]
+    fn a_closer_with_spaces_before_its_bracket_closes_the_block() {
+        assert_eq!(strip_blocks("a <private>x</private > b", false), "a  b");
+        assert_eq!(strip_blocks("a <private>x</private\n\t> b", false), "a  b");
+        // ECMAScript's `\s` takes U+FEFF, which Rust's whitespace does not (Sourcery and
+        // CodeRabbit on #587).
+        assert_eq!(
+            strip_blocks("a <private>x</private\u{feff}> b", false),
+            "a  b"
+        );
+        assert_eq!(
+            strip_blocks("a <private>x</privateer> b", false),
+            "a <private>x</privateer> b"
+        );
     }
 
     /// claude-mem writes its context block into instruction files (AGENTS.md, CLAUDE.md): a file an

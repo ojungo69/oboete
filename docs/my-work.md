@@ -14,8 +14,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   `conversationKey`), made of the work tied to it (below); a conversation with none is not shown.
   Its original ask is the session's first prompt that reads as a person's request for action
   (`isHumanActionRequest`: envelopes, greetings and acknowledgements such as "ok", "continue" or
-  "resume" are not; a prompt with no English action word in a list of about 45, "fix", "add", "can
-  you" and the like, is not either); its later prompts are its follow-ups (scope updates, the newest
+  "resume" are not; a prompt with no English action word from a list of about 45, "fix", "add",
+  "can you" and the like, is not either; 15.0 drops the list and takes, past those exclusions, any
+  prompt of two letters in any language); its later prompts are its follow-ups (scope updates, the newest
   6, 500 characters each). Its title is a work item's `human_request`, `request` or `user_request`
   when one is recorded and reads as a request, else the original ask's first sentence (100
   characters). A work-state field `request_id` names a request of its own: the work items that
@@ -104,8 +105,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    original ask is the session's first prompt with its text recorded (1,200 characters) that is not
    an envelope, a greeting or an acknowledgement, in English or Japanese ("ok", "continue",
    "resume", "はい", "続けて", "再開して" and the like); the follow-ups its later prompts (the newest 6, 500
-   characters each). Unlike claude-mem, a prompt needs no English action word: most of the owner's
-   prompts are Japanese, and claude-mem's list of words would leave them out. A session none of
+   characters each). A prompt needs two letters, in any language, without requiring an English
+   action word, as claude-mem 15.0 reads one: most of the owner's prompts are Japanese, and 14.0.1's list of words
+   would leave them out. A session none of
    whose prompts asks, one resumed with "再開して", takes its oldest reply's `request`, which the
    curator wrote, as its ask, and all of its prompts follow it up (added with slice 1: of the six
    live Claude sessions on this PC on 2026-10-21 one was so, which claude-mem shows under no

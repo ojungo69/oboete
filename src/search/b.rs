@@ -132,7 +132,7 @@ impl std::str::FromStr for TypeFilter {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let known: Vec<&str> = ["observations", "sessions", "prompts", "claims"]
+        let known: Vec<&str> = ["all", "observations", "sessions", "prompts", "claims"]
             .into_iter()
             .chain(crate::cards::TYPES.iter().copied())
             .chain(claims::KINDS)
@@ -147,6 +147,13 @@ impl std::str::FromStr for TypeFilter {
         }
         Ok(Self(words))
     }
+}
+
+/// Q5's `type` as a query takes it: no filter when it names `all`, every kind, as claude-mem 15.0
+/// reads it.
+pub fn types(kind: Option<&str>) -> Result<Option<TypeFilter>> {
+    let filter: Option<TypeFilter> = kind.map(str::parse).transpose()?;
+    Ok(filter.filter(|f| !f.0.iter().any(|word| word == "all")))
 }
 
 impl TypeFilter {

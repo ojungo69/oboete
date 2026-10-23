@@ -257,7 +257,8 @@ fn expanded(pattern: String, home: &str) -> String {
 }
 
 /// `s` as `glob` matches it whole, as claude-mem's glob becomes a regular expression: `**` any
-/// characters, `*` any but `/`, `?` one that is not `/`, any other character itself.
+/// characters, a whole `**/` folder part any characters ending in `/` or none (15.0), `*` any but
+/// `/`, `?` one that is not `/`, any other character itself.
 fn globbed(glob: &[char], s: &[char]) -> bool {
     // `at[j]`: whether the glob read so far matches `s[..j]`; two rows, reused.
     let mut at = vec![false; s.len() + 1];
@@ -267,6 +268,16 @@ fn globbed(glob: &[char], s: &[char]) -> bool {
     while i < glob.len() {
         next.fill(false);
         let across = glob[i] == '*' && glob.get(i + 1) == Some(&'*');
+        if across && glob.get(i + 2) == Some(&'/') && (i == 0 || glob[i - 1] == '/') {
+            let mut before = false;
+            for j in 0..=s.len() {
+                before |= j > 0 && at[j - 1];
+                next[j] = at[j] || (before && s[j - 1] == '/');
+            }
+            std::mem::swap(&mut at, &mut next);
+            i += 3;
+            continue;
+        }
         match glob[i] {
             '*' => {
                 for j in 0..=s.len() {
@@ -1307,6 +1318,10 @@ mod tests {
             ("/work/*/private", "/work/a/private", true),
             ("/work/*/private", "/work/a/b/private", false),
             ("/work/**/private", "/work/a/b/private", true),
+            // A whole `**/` folder part also names no folder, as claude-mem 15.0 reads it.
+            ("/work/**/private", "/work/private", true),
+            ("/**/private", "/private", true),
+            ("/work/**/private", "/work/privacy", false),
             ("/work/**", "/work", true),
             ("/work/**", "/work/a/b", true),
             ("/work/**", "/other", false),

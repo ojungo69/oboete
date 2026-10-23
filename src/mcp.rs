@@ -55,8 +55,8 @@ pub struct SearchArgs {
     /// their words rank them, for what was decided before (by default they come last).
     #[serde(default)]
     history: Option<bool>,
-    /// Comma-separated: observations, sessions, prompts, claims, a card type (bugfix,
-    /// feature, refactor, change, discovery, decision, security_alert, security_note,
+    /// Comma-separated: all (the default), observations, sessions, prompts, claims, a card type
+    /// (bugfix, feature, refactor, change, discovery, decision, security_alert, security_note,
     /// sensitive), or a claim kind (decision, preference, lesson, fix, open item, repo fact, change).
     #[serde(default, rename = "type")]
     kind: Option<String>,
@@ -247,7 +247,7 @@ impl Oboete {
             since,
             until,
             history: a.history == Some(true),
-            types: match a.kind.as_deref().map(str::parse).transpose() {
+            types: match search::types(a.kind.as_deref()) {
                 Ok(types) => types,
                 Err(e) => return failed(format!("{e:#}")),
             },
@@ -1107,6 +1107,20 @@ mod tests {
             .collect::<Vec<_>>();
         wanted.sort();
         assert_eq!(actual, wanted);
+        // `all` is every kind, as claude-mem 15.0 reads it.
+        let every = |kind: Option<&str>| {
+            let mut a = json!({"query": "lattice", "all": true, "limit": 100});
+            if let Some(kind) = kind {
+                a["type"] = json!(kind);
+            }
+            let a: SearchArgs = serde_json::from_value(a).unwrap();
+            let mut ids = hit_ids(&body(server.search(Parameters(a)).unwrap()));
+            ids.sort();
+            ids
+        };
+        let all = every(None);
+        assert!(!all.is_empty());
+        assert_eq!(every(Some("all")), all);
         let a = serde_json::from_value(json!({"query": "lattice", "type": "mystery"})).unwrap();
         let bad = server.search(Parameters(a)).unwrap();
         assert_eq!(bad.is_error, Some(true));
