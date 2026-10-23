@@ -101,7 +101,9 @@ taken: a work state write orders against no provider call (the dispatch lock's p
 
 L5. **Redaction.** The list name and every key and value pass the gate every stored string passes
 (2.2) before the op is written, a number or a boolean as the text it shows as (kept as it is where
-the gate leaves that text). Every answer and the session start section pass the egress
+the gate leaves that text and its JSON text, so the op keeps what the tool call sent, which My Work
+ties it by; a number in whose JSON a rule finds digits is stored as that text, #590, #593).
+Every answer and the session start section pass the egress
 gate with the rules as they are then (6.4), so a rule added later hides a value written before it.
 The lines are built from the text as stored, and the gate reads them in several views, each as
 written: all the lines together, each line, each name, key and value alone (a rule anchored to a
@@ -120,9 +122,17 @@ list and a task are folded under their names as the capture gate would keep them
 applied again until a name holds, since a rule can match what an earlier mask made
 (`capture::kept_beside`), and a key under its name as the gate shows it now, so a rule added later
 that masks one leaves one that a later write replaces or clears (#580, #582, #584); capture stores a
-list's and a task's name so settled, so a write and its stored form fold as one (#586). A read of
-one list keeps the lists, once folded, whose fold name is the name asked's or whose line shows the
-name asked, the name compared as given, each with its whole history (#586). A key shows as it was
+list's and a task's name so settled, a task's number or boolean as its text (kept as it is where
+that text holds), so a write and its stored form fold as one (#586, #589). A read of one list keeps
+the lists, once folded, whose fold name is the name asked's or whose line shows the name asked,
+among the read's lines (where a rule's mask can come from another list's lines, a keyword it
+needs) or in a read of that list alone (which no other list's lines change), the name compared as
+given, each with its whole history (#586, #589); a name counts only where the line, as the read
+writes it, begins with its bullet and that name, so a line the gate hides from its bullet on, or a
+read it hides whole, shows none (#593). A line changes a name only where it puts
+the gate's mask, so a name asked without the mask that a line shows is a name written to that
+list: the lines are read for the names they show only when the name asked holds the mask (#589).
+A key shows as it was
 written with the value it holds, and a list and a task with the name last written. A rule that
 matches the gate's own mask (`[REDACTED]`) is outside what names are told apart and shown by: such
 a name may fold with another or show as [REDACTED] whole, and a name that does not settle within
@@ -205,6 +215,13 @@ with its own (docs/claude-mem-import.md I4, I5).
   holds, and that a line holds where another rule masks part of a value (#411); a key whose masked
   assignment spells it again is hidden, at capture and when shown; two keys a rule masks alike are
   one key, shown as written with its value; a number that a rule finds is stored masked.
+- A read by name finds a list by the name it was written under, by its fold name, by the name its
+  line shows in a read of every list (a rule that needs a keyword another list's line holds), and
+  by the name it shows in a read of that list alone, whatever another list's history holds (an
+  archive past the gate's limits), with its whole history; a line hidden from its bullet on shows
+  no name. A task named by a number or a boolean is stored as its text settles, as a string task
+  is, and kept as it is where the gate leaves it; any number is stored as the tool call sent it
+  unless a rule finds digits in its JSON, then as the text it shows as.
 - No size puts recorded text outside the fence; every cut fits its limit with its count line.
 - The session start: the section first, the rule outside the fence and the lines inside it, the
   manifest's room smaller by the section, `Nothing open yet.` with no fence, the 3,000-character
@@ -226,6 +243,10 @@ with its own (docs/claude-mem-import.md I4, I5).
 - Every open line is gated before the cut, so the time grows with the open lines (about 50 µs a
   line: 50 ms for 1,000), and lines the gate finds too much in (`redact::hidden`'s limits) are
   shown as a mask alone, a session start's as the count line.
+- A read by a name that holds the mask renders and gates the lists it may find, closed ones too
+  with `includeClosed`, together and each alone, to learn the names their lines show, so its time
+  grows with the history, about twice a read of every list's; a read or a write by any other name
+  does not.
 - The egress gate trims what it scans, so a rule added later that is anchored on a value's outer
   spaces does not match it on the way out, where the capture gate's would (#415, every egress path).
 - A value written under an older name of its list or task, which a rule added later masks alike, is
