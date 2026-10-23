@@ -101,8 +101,8 @@ taken: a work state write orders against no provider call (the dispatch lock's p
 
 L5. **Redaction.** The list name and every key and value pass the gate every stored string passes
 (2.2) before the op is written, a number or a boolean as the text it shows as (kept as it is where
-the gate leaves that text and that text is all its JSON holds; a number written with more, digits
-past a double's or `100.0`, is stored as that text, so no digit the gate never read is kept, #590).
+the gate leaves that text and its JSON text, so the op keeps what the tool call sent, which My Work
+ties it by; a number in whose JSON a rule finds digits is stored as that text, #590, #593).
 Every answer and the session start section pass the egress
 gate with the rules as they are then (6.4), so a rule added later hides a value written before it.
 The lines are built from the text as stored, and the gate reads them in several views, each as
@@ -220,8 +220,8 @@ with its own (docs/claude-mem-import.md I4, I5).
   by the name it shows in a read of that list alone, whatever another list's history holds (an
   archive past the gate's limits), with its whole history; a line hidden from its bullet on shows
   no name. A task named by a number or a boolean is stored as its text settles, as a string task
-  is, and kept as it is where the gate leaves it; a number whose JSON holds more than its text is
-  stored as its text.
+  is, and kept as it is where the gate leaves it; any number is stored as the tool call sent it
+  unless a rule finds digits in its JSON, then as the text it shows as.
 - No size puts recorded text outside the fence; every cut fits its limit with its count line.
 - The session start: the section first, the rule outside the fence and the lines inside it, the
   manifest's room smaller by the section, `Nothing open yet.` with no fence, the 3,000-character

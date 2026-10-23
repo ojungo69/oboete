@@ -767,7 +767,8 @@ pub fn work_state(
         if let ("task", Value::Number(_) | Value::Bool(_)) = (k.as_str(), v) {
             let text = crate::work_state::text(v);
             let kept = kept_beside("task", &text, &settings.rules);
-            stored.insert(k.clone(), as_written(v, &text, kept));
+            let leaves = |json: &str| kept_beside("task", json, &settings.rules) == json;
+            stored.insert(k.clone(), as_written(v, &text, kept, leaves));
             continue;
         }
         // A number or a boolean is text where it is shown: gated as that text, and kept as it is
@@ -792,7 +793,11 @@ pub fn work_state(
                 _ => key,
             };
             let v = match (&as_text, v) {
-                (Some((text, was)), Value::String(kept)) => as_written(was, text, kept),
+                (Some((text, was)), Value::String(kept)) => {
+                    let named = without_blocks(k, false);
+                    let leaves = |json: &str| gate.both("", &named, json, cap).0 == json;
+                    as_written(was, text, kept, leaves)
+                }
                 (_, v) => v,
             };
             stored.insert(key, v);
@@ -801,14 +806,15 @@ pub fn work_state(
     (list, stored)
 }
 
-/// A number or a boolean of a work state write as stored: as written where the gate leaves `text`,
-/// the text it shows as, and that text is all its JSON holds, else `kept`, the text the gate saw,
-/// so no digit the gate never read is stored (a number past a double's digits, or one whose JSON
-/// text JavaScript writes otherwise, `100.0` as `100`; #590's review).
-fn as_written(was: &Value, text: &str, kept: String) -> Value {
+/// A number or a boolean of a work state write as stored: as written where the gate leaves both
+/// `text`, the text it shows as, and its JSON text (`leaves`), so the op keeps the value the tool
+/// call sent, which My Work ties it by (`my_work::senders`; Codex on #593); else `kept`, the text
+/// the gate saw, so no digit a rule finds in the JSON is stored (a number past a double's digits;
+/// #590's review).
+fn as_written(was: &Value, text: &str, kept: String, leaves: impl FnOnce(&str) -> bool) -> Value {
     // Its JSON text, not `was == text`: a `Value` equals a `str` only as a string.
     let json = was.to_string();
-    if kept == text && json == text {
+    if kept == text && (json == text || leaves(&json)) {
         was.clone()
     } else {
         Value::String(kept)
@@ -1746,24 +1752,23 @@ mod tests {
         }
     }
 
-    /// A number whose JSON holds more than the text it shows as is stored as that text, the text
-    /// the gate saw, a task's and any field's, so no digit the gate never read is kept (#590's
-    /// review); one whose JSON is that text is kept as written.
+    /// A number a rule finds in its JSON is stored as the text it shows as, the text the gate saw,
+    /// a task's and any field's, so no digit the gate masks is kept (#590's review); every other
+    /// number is kept as the tool call sent it, which My Work ties the write by (Codex on #593).
     #[test]
-    fn a_number_is_stored_as_the_text_the_gate_saw() {
+    fn a_number_is_stored_as_sent_unless_a_rule_finds_its_digits() {
         let s = with("[[redaction.extra_rules]]\nid = \"n\"\nregex = '1234567890123456789'\n");
-        let fields = json!({"task": 1_234_567_890_123_456_789_u64, "n": 1_234_567_890_123_456_789_u64,
-            "w": 100.0, "e": 1e21, "m": 5, "f": 0.5, "b": false});
+        let fields =
+            json!({"task": 1_234_567_890_123_456_789_u64, "n": 1_234_567_890_123_456_789_u64});
         let (_, stored) = work_state("l", fields.as_object().unwrap(), &s);
         let op = serde_json::to_string(&stored).unwrap();
         assert!(!op.contains("1234567890123456789"), "{op}");
         assert_eq!(stored["task"], "1234567890123456800");
         assert_eq!(stored["n"], "1234567890123456800");
-        assert_eq!(stored["w"], "100");
-        assert_eq!(
-            (&stored["e"], &stored["m"], &stored["f"], &stored["b"]),
-            (&json!(1e21), &json!(5), &json!(0.5), &json!(false))
-        );
+        let sent = json!({"task": 100.0, "w": 100.0, "big": 9_007_199_254_740_993_u64,
+            "e": 1e21, "m": 5, "f": 0.5, "b": false});
+        let (_, stored) = work_state("l", sent.as_object().unwrap(), &s);
+        assert_eq!(&Value::Object(stored), &sent);
     }
 
     /// A list's name is gated beside its key `list`, as a field's value is beside its own: a rule
