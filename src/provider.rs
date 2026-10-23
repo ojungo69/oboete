@@ -2221,10 +2221,18 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
 /// `browser_annotation_api` and `in_app_voice` are the desktop apps', set by requirements;
 /// `code_mode_interrupt` and `instant_interrupt` end or yield code mode cells, which stay off;
 /// `ultrafast_mode` is a service tier, as `fast_mode`.
-pub(crate) const CODEX_ON: [&str; 55] = [
+/// Those of 0.164.0 (codex-rs/features/src/lib.rs at rust-v0.164.0), none of them a tool:
+/// `bedrock_setup_wizard` offers Amazon Bedrock setup at the TUI's sign-in (tui/src/lib.rs), which
+/// `codex exec` never shows; `incremental_tools` declares a Responses Lite model's tools once a
+/// context window, then only those added or changed, from the same tool plan and in the same
+/// `additional_tools` items the probe reads (core/src/context/world_state/top_level_tools.rs);
+/// `mcp_oauth_refresh_coordination` has the MCP client refresh OAuth through codex's credential
+/// store (rmcp-client/src/oauth_refresh_mode.rs), and the curator loads no MCP server.
+pub(crate) const CODEX_ON: [&str; 58] = [
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
     "auth_elicitation",
+    "bedrock_setup_wizard",
     "browser_annotation_api",
     "browser_use_full_cdp_access",
     "cli_daybreak",
@@ -2246,8 +2254,10 @@ pub(crate) const CODEX_ON: [&str; 55] = [
     "in_app_local_automation",
     "in_app_updates",
     "in_app_voice",
+    "incremental_tools",
     "instant_interrupt",
     "item_ids",
+    "mcp_oauth_refresh_coordination",
     "mentions_v2",
     "multi_agent",
     "personality",

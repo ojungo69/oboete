@@ -682,6 +682,26 @@ mod tests {
         assert_eq!(g, Gate::Passed);
     }
 
+    /// codex 0.164.0 turns three more features on by default, none of them a tool the model is
+    /// offered (`provider::CODEX_ON`): the gate passes with them on.
+    #[test]
+    fn the_features_of_codex_0_164_do_not_fail_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let on: String = [
+            "bedrock_setup_wizard",
+            "incremental_tools",
+            "mcp_oauth_refresh_coordination",
+        ]
+        .iter()
+        .map(|f| format!("; echo '{f}  stable  true'"))
+        .collect();
+        let (_, g) = gate_with(
+            &fake(dir.path(), &(FEATURES.to_owned() + &on), REFUSES),
+            dir.path(),
+        );
+        assert_eq!(g, Gate::Passed);
+    }
+
     #[test]
     fn a_hosted_tool_left_on_fails_the_gate() {
         let dir = tempfile::tempdir().unwrap();
