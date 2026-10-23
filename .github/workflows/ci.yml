@@ -46,6 +46,8 @@ jobs:
           Get-Process -Name oboete -ErrorAction SilentlyContinue | ForEach-Object {
             try { $_.Kill(); $_.WaitForExit(30000) | Out-Null } catch {}
           }
+          # One still running would hold the exe the next build links: the step says so instead.
+          if (Get-Process -Name oboete -ErrorAction SilentlyContinue) { throw "an oboete process is still running" }
       - run: cargo test --features local-embed
   # SonarQube Cloud: Rust is not covered by its automatic analysis, so the scanner runs here.
   # Forks and Dependabot get no SONAR_TOKEN, so their pull requests skip this job.
