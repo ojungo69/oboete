@@ -733,8 +733,8 @@ pub fn note(title: &str, text: &str, settings: &Settings) -> (String, String) {
 
 /// A work state write's list name and fields (docs/work-state.md L5) through the same gate as
 /// every stored string, keys and values alike, a closed opt-out block taken out of each first (as
-/// labels), the list's name beside its key `list` as each value beside its own. Its ledger is not
-/// kept: an op has none.
+/// labels), each value beside its key, and a list's and a task's name settled as work state folds
+/// it (`kept_beside`, #586). Its ledger is not kept: an op has none.
 pub fn work_state(
     list: &str,
     fields: &Map<String, Value>,
@@ -744,7 +744,7 @@ pub fn work_state(
     // Every value beside its key, however long: the fields are at most 2,000 characters (L3).
     gate.paired = usize::MAX;
     let cap = gate.cap;
-    let (list, _) = gate.both("list", "list", &without_blocks(list, false), cap);
+    let list = kept_beside("list", list, &settings.rules);
     let mut stored = Map::new();
     for (k, v) in fields {
         // A closing status (`done`, `dropped`) is one of two words, no recorded text: kept as
@@ -752,6 +752,13 @@ pub fn work_state(
         // masks the word. The line that shows it is gated as any is (Codex on #408).
         if k == "status" && crate::work_state::closed(Some(v)) {
             stored.insert(k.clone(), v.clone());
+            continue;
+        }
+        if let ("task", Value::String(task)) = (k.as_str(), v) {
+            stored.insert(
+                k.clone(),
+                Value::String(kept_beside("task", task, &settings.rules)),
+            );
             continue;
         }
         // A number or a boolean is text where it is shown: gated as that text, and kept as it is
@@ -1670,6 +1677,28 @@ mod tests {
         let open = json!({"task": "t", "status": "wip"});
         let (_, stored) = work_state("l", open.as_object().unwrap(), &s);
         assert_eq!(stored["status"], "[REDACTED]");
+    }
+
+    /// A list's and a task's name are stored settled, as the fold reads them (`kept_beside`), so a
+    /// write and its stored form fold as one whatever the passes (Sourcery on #585).
+    #[test]
+    fn a_work_state_name_is_stored_settled() {
+        for key in ["list", "task"] {
+            let s = with(&format!(
+                "[[redaction.extra_rules]]\nid = \"a\"\nregex = '^\\[REDACTED\\] (teal-[0-9]{{4}})'\n\
+                 secret_group = 1\n\n[[redaction.extra_rules]]\nid = \"k\"\n\
+                 regex = '{key} = \"(alpha)'\nsecret_group = 1\n"
+            ));
+            let fields = json!({"task": "alpha teal-1234"});
+            let (list, stored) = work_state("alpha teal-1234", fields.as_object().unwrap(), &s);
+            let name = if key == "list" {
+                list
+            } else {
+                stored["task"].as_str().unwrap().to_owned()
+            };
+            assert_eq!(name, "[REDACTED] [REDACTED]", "{key}");
+            assert_eq!(kept_beside(key, &name, &s.rules), name, "{key}");
+        }
     }
 
     /// A list's name is gated beside its key `list`, as a field's value is beside its own: a rule
