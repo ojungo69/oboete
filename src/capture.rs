@@ -774,6 +774,19 @@ pub fn work_state(
     (list, stored)
 }
 
+/// A name of work state beside its key as `work_state` keeps it now (`Gate::both`): what work
+/// state tells its lists and tasks apart by, so a write before a rule and the one after it, stored
+/// as the gate kept it, are one (#580, #582).
+pub(crate) fn kept_beside(key: &str, value: &str, rules: &redact::Rules) -> String {
+    let settings = Settings {
+        rules: rules.clone(),
+        ..Settings::default()
+    };
+    let mut gate = Gate::new(&settings);
+    let cap = gate.cap;
+    gate.both(key, key, &without_blocks(value, false), cap).0
+}
+
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
 /// length (head and tail above the cap), each finding kept with the field it is in.
 struct Gate<'a> {
