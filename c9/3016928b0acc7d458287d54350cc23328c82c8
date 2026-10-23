@@ -1,0 +1,21 @@
+docs/my-work.md
+  s_23ba4f313f5155::t_30026013d2a2b0 17-19,108-109
+src/hook.rs
+  s_23ba4f313f5155::t_f1a18544c24d3c 3264,3266-3268,10759-10764
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c93016928b0acc7d458287d54350cc23328c82c8",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
