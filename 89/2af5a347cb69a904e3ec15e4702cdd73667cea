@@ -1,0 +1,25 @@
+docs/work-state.md
+  s_23ba4f313f5155::t_fff9cced8a4fc0 117-129
+src/mcp.rs
+  s_23ba4f313f5155::t_1469a01942ca20 608-614,2905-2912
+src/capture.rs
+  s_23ba4f313f5155::t_932908ca0e5b4d 725-726,736,746-752,1667-1688
+src/work_state.rs
+  s_23ba4f313f5155::t_cabc6448506dbe 261-278,284-287,303,318-319,328-329,344-373,378-385,437-448,497-498,503,506,591-595,671,704,731,1195-1197,1204,1211,1218,1225,1233,1240,1250,1290-1291,1294-1298,1301,1309-1351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "892af5a347cb69a904e3ec15e4702cdd73667cea",
+  "prompts": {},
+  "sessions": {
+    "s_23ba4f313f5155": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96ea3f34-c2f8-41e1-9495-1ed1b06465a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
