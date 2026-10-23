@@ -260,10 +260,10 @@ struct Lists {
 
 /// The lists of `entries` (only `list` when it names one), as `render` shows them (claude-mem's
 /// `renderWorkStateList`): a closed list hides its state line and still shows a task left open in
-/// it; `all` shows everything. Lists, tasks and keys are told apart as the egress gate shows them
-/// now (a list's and a task's name beside its key), so the writes before and after a rule that
-/// masks part of a name are one list, or one task (Codex on #408); each shows the name last
-/// written.
+/// it; `all` shows everything. Lists and tasks are told apart by their names as capture keeps them
+/// now (`capture::kept_beside`), and keys as the egress gate shows them now, so the writes before
+/// and after a rule that masks part of a name are one list, or one task (Codex on #408, #580,
+/// #582); each shows the name last written.
 fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lists {
     let gate = |s: &str| gated(s, rules);
     let mut names: HashMap<&str, String> = HashMap::new();
@@ -271,7 +271,7 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
     let mut task = |t: &str| {
         tasks
             .entry(t.to_owned())
-            .or_insert_with(|| beside("task", t, rules))
+            .or_insert_with(|| crate::capture::kept_beside("task", t, rules))
             .clone()
     };
     let mut keys: HashMap<String, String> = HashMap::new();
@@ -280,13 +280,13 @@ fn lists(entries: &[Entry], list: Option<&str>, all: bool, rules: &Rules) -> Lis
         "task" | "status" => k.to_owned(),
         k => keys.entry(k.to_owned()).or_insert_with(|| gate(k)).clone(),
     };
-    let wanted = list.map(|l| beside("list", l, rules));
+    let wanted = list.map(|l| crate::capture::kept_beside("list", l, rules));
     let mut written: Vec<(&str, Vec<&Entry>, usize)> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         let name = names
             .entry(&e.list)
-            .or_insert_with(|| beside("list", &e.list, rules))
+            .or_insert_with(|| crate::capture::kept_beside("list", &e.list, rules))
             .clone();
         if wanted.as_ref().is_some_and(|w| *w != name) {
             continue;
@@ -397,7 +397,6 @@ impl Raw {
             let head = format!("{key} = \"");
             let probe = format!("{head}{}\"", &self.text[value.clone()]);
             let (h, v) = (head.len(), value.len());
-            let mut inside = Vec::new();
             for (s, e) in redact::hidden(&probe, rules).unwrap_or(vec![(0, probe.len())]) {
                 if s < h {
                     runs.extend(at.iter().map(|at| (at.start, at.end)));
@@ -411,15 +410,8 @@ impl Raw {
                     continue;
                 }
                 if s < e {
-                    inside.push((s - h, e - h));
                     runs.push((value.start + s - h, value.start + e - h));
                 }
-            }
-            // Where the value alone and the assignment hide different parts of it, capture keeps
-            // it as [REDACTED] whole (`capture::Gate::both`), and so is it shown (#580).
-            let alone = redact::hidden(&self.text[value.clone()], rules).unwrap_or(vec![(0, v)]);
-            if !inside.is_empty() && !alone.is_empty() && redact::merged_runs(inside) != alone {
-                runs.push((value.start, value.end));
             }
         }
         let runs = redact::merged_runs(runs);
@@ -1107,33 +1099,56 @@ mod tests {
         );
     }
 
-    /// Where a name alone and the name beside its key are masked in different parts, capture keeps
-    /// it as [REDACTED] whole (`capture::Gate::both`), and work state reads it so: a list's and a
-    /// task's writes before the rules and after them are one, and a later `done` closes the task
-    /// (#580; Codex and Greptile on #579).
+    /// A name is told apart as capture keeps it now: a list's and a task's writes before rules
+    /// that mask its name and the write after them, stored as capture kept it, are one, and a later
+    /// `done` closes the task, kept in the closed history (#580, #582): where the name alone and
+    /// beside its key are masked in different parts (Codex and Greptile on #579), where they are
+    /// masked in different parts that read alike (Codex on #581), and where a rule anchored on the
+    /// name's start matches it only trimmed (CodeRabbit on #581).
     #[test]
-    fn a_name_the_views_mask_differently_is_hidden_whole_as_capture_keeps_it() {
-        for key in ["list", "task"] {
-            let extra = format!(
-                r#"{{ id = "a", regex = '^alpha' }}, {{ id = "k", regex = '{key} = "alpha (teal-[0-9]{{4}})', secret_group = 1 }}"#
-            );
+    fn a_name_is_one_list_or_task_before_and_after_rules_as_capture_keeps_it() {
+        let pair = |key: &str, rule: &str| {
+            format!(r#"{{ id = "k", regex = '{key} = "{rule}', secret_group = 1 }}"#)
+        };
+        let cases = [
+            (
+                "list",
+                "alpha teal-1234",
+                r#"{ id = "a", regex = '^alpha' }"#,
+                r"alpha (teal-[0-9]{4})",
+            ),
+            (
+                "task",
+                "alpha teal-1234",
+                r#"{ id = "a", regex = '^alpha' }"#,
+                r"alpha (teal-[0-9]{4})",
+            ),
+            (
+                "task",
+                "[REDACTED]:q:q:[REDACTED]",
+                r#"{ id = "a", regex = '^\[REDACTED\]:q' }"#,
+                r"\[REDACTED\]:q:(q:\[REDACTED\])",
+            ),
+            (
+                "task",
+                " alpha teal-1234",
+                r#"{ id = "a", regex = '^alpha' }"#,
+                r" alpha (teal-[0-9]{4})",
+            ),
+        ];
+        for (key, name, alone, keyed) in cases {
+            let extra = format!("{alone}, {}", pair(key, keyed));
             let home = tempfile::tempdir().unwrap();
             let config = format!("[redaction]\nextra_rules = [{extra}]\n");
             std::fs::write(home.path().join("config.toml"), config).unwrap();
             let settings = crate::capture::Settings::load(home.path()).unwrap();
             let (list, task) = match key {
-                "list" => ("alpha teal-1234", "rotate"),
-                _ => ("l", "alpha teal-1234"),
+                "list" => (name, "rotate"),
+                _ => ("l", name),
             };
             let done = json!({"task": task, "status": "done"});
             let (later_list, later) =
                 crate::capture::work_state(list, done.as_object().unwrap(), &settings);
-            let stored = if key == "list" {
-                later_list.clone()
-            } else {
-                text(&later["task"])
-            };
-            assert_eq!(stored, redact::MASK, "{key}");
             let entries = [
                 entry(list, json!({"task": task, "status": "todo"}), 0),
                 Entry {
@@ -1142,8 +1157,25 @@ mod tests {
                     ts: MIN,
                 },
             ];
-            let shown = read(None, false, "r", &entries, 2 * MIN, &user(&extra));
-            assert!(shown.starts_with("Nothing open for r."), "{key}: {shown}");
+            let rules = user(&extra);
+            let open = read(None, false, "r", &entries, 2 * MIN, &rules);
+            assert!(
+                open.starts_with("Nothing open for r."),
+                "{key} {name:?}: {open}"
+            );
+            let all = read(None, true, "r", &entries, 2 * MIN, &rules);
+            let lines: Vec<&str> = all.lines().collect();
+            assert!(
+                lines.len() == 2
+                    && lines[0].starts_with("- ")
+                    && lines[1].starts_with("  - [done] "),
+                "{key} {name:?}: {all}"
+            );
+            assert!(!all.contains("teal-"), "{key} {name:?}: {all}");
+            if key == "list" {
+                let named = read(Some(name), true, "r", &entries, 2 * MIN, &rules);
+                assert_eq!(named, all, "{name:?}");
+            }
         }
     }
 
