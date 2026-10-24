@@ -7006,7 +7006,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         // Another program's of a like name (Node's mkdtemp gives six characters) is not oboete's.
         for name in [
             "oboete-cli-a1b2c3",
-            "oboete-cli-00000000000000A1",
+            "oboete-cli-0000000000000ABC",
             "oboete-cli-00000000000000a10",
         ] {
             std::fs::create_dir(at(name)).unwrap();
@@ -7029,7 +7029,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         );
         for name in [
             "oboete-cli-a1b2c3",
-            "oboete-cli-00000000000000A1",
+            "oboete-cli-0000000000000ABC",
             "oboete-cli-00000000000000a10",
         ] {
             assert!(at(name).exists(), "{name}");

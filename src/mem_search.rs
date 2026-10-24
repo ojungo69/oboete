@@ -53,13 +53,10 @@ pub const MEMORY_USE: &str = "# oboete memory use\n\
 /// claude-mem's stop words (`STOP_WORDS`).
 const STOP_WORDS: &str = "a an and are as at be been by can did do for from had has have how i in is it last me memory my of on or our previous search session sessions that the their this to was we were what when where which who why with work you your";
 
-/// The arguments, as claude-mem's tool takes them.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+/// The search's own arguments, as claude-mem's tools take them: mem_search's and dumb_search's.
+#[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct Args {
-    /// Guided by default; auto completes index, context and filtered details in one call.
-    #[serde(default)]
-    pub mode: Option<String>,
+pub struct Fields {
     /// Search query; required for a new search, up to 500 characters.
     #[serde(default)]
     pub query: Option<String>,
@@ -82,6 +79,17 @@ pub struct Args {
     #[serde(default)]
     #[schemars(range(min = 0, max = 3))]
     pub depth_after: Option<i64>,
+}
+
+/// The arguments, as claude-mem's tool takes them.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Args {
+    /// Guided by default; auto completes index, context and filtered details in one call.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(flatten)]
+    pub fields: Fields,
     /// Short opaque continuation from the previous mem_search response.
     #[serde(default)]
     pub continuation: Option<String>,
@@ -94,28 +102,8 @@ pub struct Args {
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DumbArgs {
-    /// Search query, up to 500 characters.
-    #[serde(default)]
-    pub query: Option<String>,
-    /// Optional repository filter: its path, or its key as results show it.
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Index result count, default 20.
-    #[serde(default)]
-    #[schemars(range(min = 1, max = 20))]
-    pub limit: Option<i64>,
-    /// Maximum full details, default 3.
-    #[serde(default)]
-    #[schemars(range(min = 1, max = 5))]
-    pub max_details: Option<i64>,
-    /// Context rows before each selected anchor, default 2.
-    #[serde(default)]
-    #[schemars(range(min = 0, max = 3))]
-    pub depth_before: Option<i64>,
-    /// Context rows after each selected anchor, default 2.
-    #[serde(default)]
-    #[schemars(range(min = 0, max = 3))]
-    pub depth_after: Option<i64>,
+    #[serde(flatten)]
+    pub fields: Fields,
     /// mem_search's, refused here as claude-mem 15.0 refuses them.
     #[serde(default)]
     #[schemars(skip)]
@@ -295,12 +283,7 @@ impl Search<'_> {
         }
         let args = Args {
             mode: Some("auto".into()),
-            query: input.query.clone(),
-            project: input.project.clone(),
-            limit: input.limit,
-            max_details: input.max_details,
-            depth_before: input.depth_before,
-            depth_after: input.depth_after,
+            fields: input.fields.clone(),
             ..Default::default()
         };
         match self.answer(&args, true) {
@@ -343,19 +326,13 @@ impl Search<'_> {
                 Ok(state) => state,
                 Err(r) => return Ok(Err(r)),
             };
-            let o = &state.options;
-            let changed = input.query.as_ref().is_some_and(|q| *q != o.query)
-                || input.project.is_some() && input.project != o.project
-                || input.limit.is_some_and(|v| v as usize != o.limit)
-                || input
-                    .max_details
-                    .is_some_and(|v| v as usize != o.max_details)
-                || input
-                    .depth_before
-                    .is_some_and(|v| v as usize != o.depth_before)
-                || input
-                    .depth_after
-                    .is_some_and(|v| v as usize != o.depth_after);
+            let (o, f) = (&state.options, &input.fields);
+            let changed = f.query.as_ref().is_some_and(|q| *q != o.query)
+                || f.project.is_some() && f.project != o.project
+                || f.limit.is_some_and(|v| v as usize != o.limit)
+                || f.max_details.is_some_and(|v| v as usize != o.max_details)
+                || f.depth_before.is_some_and(|v| v as usize != o.depth_before)
+                || f.depth_after.is_some_and(|v| v as usize != o.depth_after);
             if changed {
                 return Ok(refuse(
                     "scope_changed",
@@ -584,6 +561,7 @@ impl Search<'_> {
     }
 
     fn options(&self, input: &Args, dumb: bool) -> Result<Options, Refused> {
+        let input = &input.fields;
         let Some(query) = &input.query else {
             let tool = if dumb { "dumb_search" } else { "mem_search" };
             return refuse("invalid_input", format!("Start {tool} with a query."));
