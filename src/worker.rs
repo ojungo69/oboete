@@ -3533,7 +3533,7 @@ mod tests {
             Ok(match calls.get() {
                 1 => Phase::Waiting { until, up: true },
                 2 => {
-                    again.set(Some(started.elapsed()));
+                    again.set(Some((started.elapsed(), crate::db::now_ms())));
                     Phase::Covered
                 }
                 _ => Phase::Idle,
@@ -3550,9 +3550,20 @@ mod tests {
             curating(p),
         )
         .unwrap();
-        let again = again.get().expect("the phase did not run again");
-        assert!(again >= Duration::from_millis(350), "{again:?}");
-        assert!(again < Duration::from_millis(1_200), "{again:?}");
+        let (again, at) = again.get().expect("the phase did not run again");
+        // The worker turns the window's time, by the wall clock, into a wait on the monotonic one:
+        // a step of the wall clock (WSL's time sync under load) moves one of the two readings,
+        // never both, so each bound holds by one of them.
+        let late = at + 10 >= until;
+        assert!(
+            again >= Duration::from_millis(350) || late,
+            "{again:?} {at} {until}"
+        );
+        let early = at < until + 800;
+        assert!(
+            again < Duration::from_millis(1_200) || early,
+            "{again:?} {at} {until}"
+        );
         assert_eq!(calls.get(), 3);
 
         calls.set(0);
