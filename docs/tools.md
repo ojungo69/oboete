@@ -204,10 +204,12 @@ list, count the cards and the summaries beside the claims, imported documents an
 8. A card and a summary the rules leave blank are sent once the rule goes; doctor counts them as
    `empty` until then.
 
-## mem_search
+## mem_search and dumb_search
 
 claude-mem 13.35's guided search over these three tools' readers: [mem-search.md](mem-search.md).
-`search`, `timeline` and `get` stay, and their descriptions say to prefer it.
+Since N4, as claude-mem 15.0 teaches, `search`, `timeline` and `get` are Smart search's steps 1 to
+3 and the default; `dumb_search` is the optional one-call lookup by title words, and `mem_search`
+stays for an agent or a note that names it.
 
 ## Slice 4: save_memory
 

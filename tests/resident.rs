@@ -1520,11 +1520,13 @@ fn a_worker_at_its_start_removes_what_a_killed_run_left() {
     let temp = tempfile::tempdir().unwrap();
     let at = |name: &str| temp.path().join(name);
     let names = [
-        "oboete-run-dead",
-        "oboete-run-live",
-        "oboete-run-young",
-        "oboete-cli-old",
-        "oboete-cli-new",
+        "oboete-run-00000000000000d1",
+        "oboete-run-00000000000000d2",
+        "oboete-run-00000000000000d3",
+        "oboete-cli-00000000000000d4",
+        "oboete-cli-00000000000000d5",
+        // Another program's of a like name: Node's mkdtemp gives six characters.
+        "oboete-run-a1b2c3",
     ];
     for name in names {
         std::fs::create_dir(at(name)).unwrap();
@@ -1537,11 +1539,15 @@ fn a_worker_at_its_start_removes_what_a_killed_run_left() {
             .unwrap();
     };
     let day = Duration::from_secs(24 * 60 * 60);
-    back("oboete-run-dead", Duration::from_secs(60));
-    back("oboete-run-live", day);
-    back("oboete-cli-old", day);
-    back("oboete-cli-new", Duration::from_secs(5 * 60 * 60));
-    let live = std::fs::File::open(at("oboete-run-live")).unwrap();
+    back("oboete-run-00000000000000d1", Duration::from_secs(60));
+    back("oboete-run-00000000000000d2", day);
+    back("oboete-cli-00000000000000d4", day);
+    back("oboete-run-a1b2c3", day);
+    back(
+        "oboete-cli-00000000000000d5",
+        Duration::from_secs(5 * 60 * 60),
+    );
+    let live = std::fs::File::open(at("oboete-run-00000000000000d2")).unwrap();
     live.try_lock().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
@@ -1557,21 +1563,28 @@ fn a_worker_at_its_start_removes_what_a_killed_run_left() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !at("oboete-run-dead").exists(),
+        !at("oboete-run-00000000000000d1").exists(),
         "a run nobody holds was left"
     );
-    assert!(!at("oboete-cli-old").exists(), "an old one was left");
     assert!(
-        at("oboete-run-live").join("last.json").exists(),
+        !at("oboete-cli-00000000000000d4").exists(),
+        "an old one was left"
+    );
+    assert!(
+        at("oboete-run-00000000000000d2").join("last.json").exists(),
         "a held one was removed"
     );
     assert!(
-        at("oboete-run-young").join("last.json").exists(),
+        at("oboete-run-00000000000000d3").join("last.json").exists(),
         "a new run's was removed"
     );
     assert!(
-        at("oboete-cli-new").join("last.json").exists(),
+        at("oboete-cli-00000000000000d5").join("last.json").exists(),
         "a newer one was removed"
+    );
+    assert!(
+        at("oboete-run-a1b2c3").join("last.json").exists(),
+        "another program's was removed"
     );
     drop(live);
 }

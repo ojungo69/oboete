@@ -636,7 +636,7 @@ const CLAUDE_MEM_READS: &[&str] = &[
 ];
 
 /// oboete's own retrieval tools.
-const OBOETE_READS: &[&str] = &["search", "get", "timeline", "mem_search"];
+const OBOETE_READS: &[&str] = &["search", "get", "timeline", "mem_search", "dumb_search"];
 
 /// A read of stored memory, as claude-mem's `isRecursiveMemoryTool` finds one (v15.0.1): a bare
 /// `mem_search`, `dumb_search`, `get_summaries`, `claude_mem_search`, `claude_mem_timeline`,
@@ -5126,6 +5126,9 @@ mod tests {
             "claude_mem_get_observations",
             "mcp__plugin_claude-mem_mcp-search__dumb_search",
             "mcp__claude-mem__claude_mem_get_observations",
+            // oboete's own dumb_search (N4).
+            "mcp__oboete__dumb_search",
+            "MCP:dumb_search",
         ] {
             assert!(memory_read(read, &none), "{read}");
         }
