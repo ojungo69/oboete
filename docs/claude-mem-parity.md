@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 29 |
-| partial | 25 |
+| equal_or_better | 30 |
+| partial | 24 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
@@ -48,7 +48,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 12 | Hooks write raw.db themselves and always exit 0. A failed write is kept under `unwritten/` and written back later. A busy database is waited out. claude-mem uses a hook spool for the same purpose. | equal_or_better | none | hook-spool.ts:10 / src/unwritten.rs:1 |
 | 13 | Money spent is shown. The session-start "N obs, tokens read, work, % savings" line is missing. | partial | rare | AgentFormatter.ts:46 / assets/viewer/app.js:1036 |
 | 14 | Since 2026-10-17 oboete also excludes by a folder name or claude-mem pattern (`*`, `**`, `?`, a leading `~`), read as claude-mem reads one (since #587 a whole `**/` part also stands for no folder, as in claude-mem 15.0), and a name with no `/` also covers the folders inside one so named; a pattern that does not start at a root also names the end of a path (`secret/**` names `/work/secret` and the folders in it), where claude-mem tries it against the whole path and the last part alone, so such a pattern with a `/` names no folder there; `oboete import claude-mem` brings claude-mem's patterns over once (docs/settings-privacy.md, docs/claude-mem-import.md I8). | equal_or_better | none | project-filter.ts:68 / src/capture.rs:203 |
-| 15 | Private prompts behave the same. oboete strips 4 block names. claude-mem strips 6, and also removes `system-reminder` and `persisted-output` from tool fields. One edge of nested tags differs. | partial | rare | tag-stripping.ts:5 / src/hook.rs:32 |
+| 15 | Private prompts behave the same. oboete strips claude-mem 15.0's six block names (`private`, `claude-mem-context`, `system-reminder`, `persisted-output`, `system_instruction`, `system-instruction`) and two of its own (`ide_opened_file`, `hook_context`) from a prompt and from every tool field before anything is stored or sent, a block only with its closing tag. One edge differs, on the private side: an unclosed `<private>` in a typed prompt hides the rest, where claude-mem keeps it all. | equal_or_better | rare | tag-stripping.ts:5 / src/hook.rs:32 |
 | 16 | The page has no sessions list, no per-session page and no category chips. Feed items carry no session id. | missing | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2078 |
 | 17 | Summaries have the same six fields and can be searched. A summary appears after the turn's windows are curated. Since 2026-10-17 a window whose sessions have all replied goes at once (#557, docs/curation-timing.md), so the summary comes about one curator call after the reply, where it could wait about 10 minutes before; a turn that ends with no reply still waits the idle time. claude-mem writes it at Stop. Since 2026-10-17 a Stop whose message is empty (Claude Code's when a session ends in a tool call) takes the transcript's last assistant text, as claude-mem does. | partial | rare | summarize.ts:103 / src/curate.rs:1471 |
 | 18 | oboete has no tool, Bash-pattern or agent-type skip settings. The only switch is the coarse `OBOETE_SKIP` (it also skips reads), and it is not documented for users. The owner uses only claude-mem's default skip list, which covers about 0.5% of tool rows. | partial | rare | SettingsDefaultsManager.ts:433 / src/hook.rs:22 |
@@ -290,7 +290,7 @@ each milestone and new features are added here.
 
 | # | Difference | Size |
 |---|---|---|
-| 15 | **A fully private prompt still leaves that turn's work in memory.** No difference: in claude-mem 13.28.0 a prompt written wholly inside <private> does not keep the turn's tool calls out either (the turn is matched to the previous saved prompt). Both hide the prompt text. Stripping harness blocks from tool output stays unbuilt until such blocks are seen in captured fields (docs/m1.md). | S |
+| 15 | **A fully private prompt still leaves that turn's work in memory.** No difference: in claude-mem 13.28.0 a prompt written wholly inside <private> does not keep the turn's tool calls out either (the turn is matched to the previous saved prompt). Both hide the prompt text. Stripping harness blocks from tool output stays unbuilt until such blocks are seen in captured fields (docs/m1.md). Built (2026-10-25): claude-mem 15.0's four harness blocks are stripped from prompts and tool fields too (row 15). | S |
 | 20 | **Facts inside very large tool outputs do not become memories.** claude-mem has a model shorten a very long tool output so its content can be summarised. In oboete an output past the window (about 17,800 characters by default) is recorded as 'seen, elided' for curation (spec 3.1) and stays findable by raw search. | M |
 | 22 | **Team server (shared store, API keys, job commands).** claude-mem has a beta server that a team can share, with a database server, API keys and commands to manage jobs. oboete plans a single-owner sync hub and a local API, not a shared team server. | XL |
 | 24 | **Code structure tools (smart_search, smart_outline, smart_unfold).** claude-mem's plugin also brings tools that search code by symbol and show a file's outline. oboete is a memory tool and has none. | L |
