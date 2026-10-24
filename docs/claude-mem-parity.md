@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 31 |
-| partial | 23 |
+| equal_or_better | 32 |
+| partial | 22 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
@@ -83,7 +83,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 47 | oboete has a multi-provider chain with fallback and stored cooldowns. It has no key rotation, no named presets, no parallel calls, no separate summary model and no `<think>` stripping. It does not retry without a rejected parameter, does not stream, and sends no cache labels. Prompt caching is not on for the owner's Anthropic entry. claude-mem 15.0 moves between Claude's API key and subscription login when one runs out of credit and tries the first again after 30 minutes; oboete moves to the chain's next entry and rests an entry whose credits are spent until the month starts or `oboete resume`. claude-mem 15.0.2 turns reasoning off on its OpenRouter and OpenAI-compatible observer calls by default, and retries once without it a reply that comes back empty at the length limit; oboete sends OpenAI-compatible providers no such switch (its codex lane asks for low reasoning effort). | partial | rare | api-key-pool.ts:3 / src/provider.rs:1381 |
 | 48 | No per-attempt log of what a curator tried to do. The codex curator still receives `~/.codex/AGENTS.md`. | partial | rare | observer-audit.ts:1 / src/provider.rs:2403 |
 | 49 | The page polls every 3 s instead of being pushed updates. | partial | none | useSSE.ts:31 / assets/viewer/app.js:5865 |
-| 50 | Uninstall does not stop the worker and says nothing about the data left behind. | partial | rare | uninstall.ts:222 / src/setup.rs:194 |
+| 50 | `setup all --remove` turns the resident worker off (the page leaves within a minute), stops the worker and names the memory's folder with the command that deletes it, as claude-mem stops its worker and names the data directory it keeps. It names the program's file instead of deleting it: cargo, or the user, owns it. | equal_or_better | rare | uninstall.ts:222 / src/setup.rs:268 |
 | 51 | No README, no `oboete update` and no release pipeline. The installer does not preselect detected agents. A JSON config that starts with a BOM stops setup safely. | missing | rare | npx-cli/index.ts:141 / src/main.rs:70 |
 | 52 | No log files and no log view on the page. Doctor, the provider-call table and the last outcome stand in for them. | partial | rare | LogsRoutes.ts:73 / src/providers_db.rs:22 |
 | 53 | No status-line counter. The owner's status line does not use claude-mem's. | missing | none | statusline-counts.js:1 / src/main.rs:78 |
@@ -282,7 +282,7 @@ each milestone and new features are added here.
 | 47 | **Provider options oboete lacks (Claude by API key, presets, key rotation, parallel calls, reasoning text).** claude-mem offers Claude through an API key or gateway, ready-made presets for many services and local models, several keys per provider, two summarisers at once and a separate model for summaries. oboete uses the owner's subscription logins and one key per provider, one call at a time, and rejects a model that prints its reasoning before the answer. | M |
 | 48 | **No log of what a summariser tried to do, and Codex's summariser reads the owner's AGENTS.md.** claude-mem logs any tool a summariser tried to use and refuses a Codex call if any instruction file was loaded. oboete blocks the tools just as firmly but keeps no such log, and the owner's own ~/.codex/AGENTS.md still reaches the Codex summariser. | S |
 | 49 | **The page updates every 3 seconds instead of instantly.** claude-mem's page receives new memory the moment it is stored. oboete's page checks every 3 seconds, only while it is the visible tab. | S |
-| 50 | **Uninstall says nothing about the data left behind.** claude-mem's uninstall asks for confirmation and removes the program. oboete's `setup --remove` takes the hooks out and keeps the data, but does not say that ~/.oboete still holds everything, does not remove the program file and does not stop a running worker. | S |
+| 50 | **Uninstall says nothing about the data left behind.** claude-mem's uninstall asks for confirmation and removes the program. oboete's `setup --remove` takes the hooks out and keeps the data, but does not say that ~/.oboete still holds everything, does not remove the program file and does not stop a running worker. Built: `setup all --remove` turns the resident worker off, stops the worker, and names the kept memory with the command that deletes it and the program's file (docs/spec.md, Uninstall). It asks no confirmation: it deletes nothing. | S |
 | 52 | **No log history, and no log view in the page.** claude-mem keeps daily log files and shows them in a console on its page. oboete keeps only the latest error and a record of provider calls, read through `oboete doctor`. | M |
 | 53 | **Status-line counter script and document batch runner.** claude-mem ships a small script that prints a project's memory counts for a status line, and its repository has a developer script that feeds a folder of documents through sessions. oboete has neither. | S |
 

@@ -990,7 +990,41 @@ pub(crate) fn set_embedding_provider_held(home: &Path, provider: &str) -> anyhow
     Ok(true)
 }
 
-/// R2/A111: setup fills only absent values. Reading or removing agent wiring never does this.
+/// Parity row 50: `setup all --remove` takes `[worker] resident = true` out of config.toml, so the
+/// resident page leaves at its next tick (R4) and no worker stays when idle; a later setup puts it
+/// back (`resident_defaults`). Any other value is left as it is. Whether it was taken out.
+pub fn resident_off(home: &Path) -> anyhow::Result<bool> {
+    let _config = config_lock(home)?;
+    let path = home.join("config.toml");
+    let was = bytes(home)?;
+    let text = utf8(was.as_deref()).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    let on = doc
+        .get("worker")
+        .and_then(|t| t.get("resident"))
+        .and_then(|v| v.as_bool());
+    if on != Some(true) {
+        return Ok(false);
+    }
+    if let Some(worker) = doc.get_mut("worker").and_then(|t| t.as_table_like_mut()) {
+        worker.remove("resident");
+    }
+    let candidate = doc.to_string();
+    anyhow::ensure!(
+        parsed(&path, &candidate).is_some(),
+        "config.toml is invalid"
+    );
+    let staged = crate::setup::stage(&path, &candidate)?;
+    anyhow::ensure!(
+        version(bytes(home)?.as_deref()) == version(was.as_deref()),
+        "config.toml changed during setup; try again"
+    );
+    staged.commit()?;
+    Ok(true)
+}
+
+/// R2/A111: setup fills only absent values. Reading agent wiring or removing one agent's never
+/// does this; removing every agent's takes `resident` out (`resident_off`).
 #[cfg(target_os = "linux")]
 pub fn resident_defaults(home: &Path) -> anyhow::Result<(config::Worker, config::View)> {
     let _config = config_lock(home)?;
@@ -1600,6 +1634,27 @@ mod tests {
             std::fs::write(home.path().join("config.toml"), t).unwrap();
         }
         home
+    }
+
+    /// Parity row 50: only `resident = true` is taken out, and every other line stays as it was.
+    #[test]
+    fn resident_off_takes_out_only_a_resident_worker() {
+        let none = home_with(None);
+        assert!(!resident_off(none.path()).unwrap());
+        assert_eq!(file(&none), None);
+        let kept = "# mine\n[worker]\nresident = false # off\n";
+        let off = home_with(Some(kept));
+        assert!(!resident_off(off.path()).unwrap());
+        assert_eq!(file(&off).as_deref(), Some(kept));
+        let on = home_with(Some(
+            "# mine\n[worker]\nresident = true\n[view]\nport = 17374\n",
+        ));
+        assert!(resident_off(on.path()).unwrap());
+        assert_eq!(
+            file(&on).as_deref(),
+            Some("# mine\n[worker]\n[view]\nport = 17374\n")
+        );
+        assert!(!crate::config::worker(on.path()).unwrap().resident);
     }
 
     fn file(home: &tempfile::TempDir) -> Option<String> {

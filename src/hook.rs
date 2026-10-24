@@ -10763,8 +10763,9 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// Parity row 15: what the harness adds to a tool's output is not stored, as claude-mem 15.0
-    /// strips it; an unclosed tag is text an agent read, and stays.
+    /// Parity row 15: what the harness adds to a tool's input or output is not stored, as
+    /// claude-mem 15.0 strips it; an unclosed tag is text an agent read, and stays (#617: the
+    /// input too).
     #[test]
     fn harness_blocks_in_a_tool_output_are_not_stored() {
         let dir = tmp("harness-blocks");
@@ -10772,14 +10773,28 @@ mod tests {
                       <persisted-output>Output too large. Full output saved to: /x</persisted-output> \
                       <system_instruction>ONE</system_instruction><system-instruction>TWO</system-instruction> \
                       end <system-reminder> unclosed";
+        let input = "given <system-reminder>IN_REMINDER</system-reminder> \
+                     <persisted-output>IN_PERSISTED</persisted-output> \
+                     <system_instruction>IN_ONE</system_instruction>\
+                     <system-instruction>IN_TWO</system-instruction> asked";
         let payload = json!({"session_id": "c1", "cwd": &*dir, "tool_name": "Read",
-                             "tool_input": {}, "tool_response": output});
+                             "tool_input": {"instruction": input}, "tool_response": output});
         hook(&dir, "claude", "PostToolUse", &payload);
         let stored = &recorded(&dir, "claude", "c1")[0].body;
-        for gone in ["REMINDER", "Full output saved", "ONE", "TWO"] {
+        for gone in [
+            "REMINDER",
+            "Full output saved",
+            "ONE",
+            "TWO",
+            "IN_REMINDER",
+            "IN_PERSISTED",
+            "IN_ONE",
+            "IN_TWO",
+        ] {
             assert!(!stored.contains(gone), "{gone} stored: {stored}");
         }
         assert!(stored.contains("kept") && stored.contains("end <system-reminder> unclosed"));
+        assert!(stored.contains("given") && stored.contains("asked"));
         std::fs::remove_dir_all(dir).ok();
     }
 

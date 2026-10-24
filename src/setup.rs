@@ -247,12 +247,75 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         if remove { "removal" } else { "setup" },
         failed.join(", ")
     );
+    if remove && agent == "all" {
+        // Taken again to take `resident` out.
+        drop(config_hold);
+        uninstalled(home);
+    }
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
         defaults_error.is_none(),
         "agent wiring finished, but resident defaults were not written (see above)"
     );
     Ok(())
+}
+
+/// Parity row 50, once every agent's wiring is out: nothing of oboete keeps running, and what is
+/// left is named, as claude-mem's uninstall stops its worker and keeps its data directory. A
+/// resident worker is turned off (`settings::resident_off`), so the page leaves at its next tick
+/// (R4) and setup turns it on again; the worker is asked to step aside (R12). Neither stops the
+/// removal. The memory and the program stay, each named with how to remove it.
+fn uninstalled(home: &Path) {
+    match crate::settings::resident_off(home) {
+        Ok(true) => println!(
+            "page: closes within a minute ([worker] resident = true is out of config.toml; setup \
+             puts it back)"
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("[worker] resident not changed: {e:#}"),
+    }
+    // A page a tab polls is never quiet for the minute R4 waits for: the viewer is asked to leave
+    // at its next look (Codex on #618).
+    let state = home.join("state");
+    if state.is_dir()
+        && let Err(e) = std::fs::write(
+            state.join(crate::view::LEAVE),
+            crate::db::now_ms().to_string(),
+        )
+    {
+        eprintln!("page: not asked to leave: {e}");
+    }
+    match crate::worker::step_aside(home) {
+        Ok(true) => println!("worker: stopped"),
+        Ok(false) => println!("worker: was not running"),
+        Err(e) => eprintln!("worker: {e:#}"),
+    }
+    println!(
+        "Your memory is kept in {}. To delete it too: {}",
+        home.display(),
+        delete_command(home, cfg!(windows))
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        println!(
+            "The program is {}: delete it, or run `cargo uninstall oboete` if cargo installed it.",
+            exe.display()
+        );
+    }
+}
+
+/// The command that deletes `home`, to copy as it is: in PowerShell single quotes, inside which
+/// neither `$` nor a backtick expands, and as a literal path (CodeRabbit on #618); in a POSIX shell
+/// after `--`.
+fn delete_command(home: &Path, windows: bool) -> String {
+    let path = home.to_string_lossy();
+    if windows {
+        format!(
+            "Remove-Item -Recurse -Force -LiteralPath '{}'",
+            path.replace('\'', "''")
+        )
+    } else {
+        format!("rm -rf -- {}", shell_quote(&path))
+    }
 }
 
 /// `oboete setup --embeddings <none|local|workers-ai>` (spec 7.1, 7.2): the choice's line says what
@@ -3823,6 +3886,25 @@ fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parity row 50 (CodeRabbit on #618): the delete command is copied as it is, so neither
+    /// PowerShell nor a POSIX shell reads anything in the home's path.
+    #[test]
+    fn the_delete_command_quotes_the_home_for_its_shell() {
+        let home = Path::new("/h/it's $x `y` -z");
+        assert_eq!(
+            delete_command(home, true),
+            "Remove-Item -Recurse -Force -LiteralPath '/h/it''s $x `y` -z'"
+        );
+        assert_eq!(
+            delete_command(home, false),
+            "rm -rf -- '/h/it'\\''s $x `y` -z'"
+        );
+        assert_eq!(
+            delete_command(Path::new("/home/u/.oboete"), false),
+            "rm -rf -- /home/u/.oboete"
+        );
+    }
 
     /// docs/unwritten.md U5: a hook whose store does not open waits for it, then for a keep in
     /// progress, and still has time for its file and its marker within the shortest deadline it

@@ -1711,14 +1711,7 @@ fn status_lines(home: &Path) -> Vec<String> {
 /// `oboete worker stop` (R15): the worker steps aside as for a command (R12), and the next hook
 /// starts one again, as claude-mem's `stop` leaves it to the next hook. The page stays (R1).
 pub fn stop(home: &Path) -> Result<()> {
-    let was = running(home);
-    let held = lock_asking(home).map_err(|e| {
-        anyhow::anyhow!(
-            "{e:#}; a worker whose loop makes no progress leaves by itself within {} min",
-            minutes(crate::watchdog::STILL)
-        )
-    })?;
-    drop(held);
+    let was = step_aside(home)?;
     println!(
         "{}",
         if was {
@@ -1728,6 +1721,20 @@ pub fn stop(home: &Path) -> Result<()> {
         }
     );
     Ok(())
+}
+
+/// A running worker asked to step aside, as a command asks (R12), and its lock waited for:
+/// whether one was running.
+pub(crate) fn step_aside(home: &Path) -> Result<bool> {
+    let was = running(home);
+    let held = lock_asking(home).map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#}; a worker whose loop makes no progress leaves by itself within {} min",
+            minutes(crate::watchdog::STILL)
+        )
+    })?;
+    drop(held);
+    Ok(was)
 }
 
 /// `oboete worker restart` (R15): `stop`, then a worker started as a hook starts one (D6).
