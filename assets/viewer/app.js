@@ -2168,6 +2168,7 @@ const TEXT = {
   my_work_check_undone: ['Check undone. The result is ready to review.', '確認を取り消しました。結果をもう一度確認できます。'],
   my_work_review_stale: ['This work changed while you were reading. Review the latest version before checking.', '読んでいる間に作業が変わりました。最新の版を見てから確認してください。'],
   my_work_review_failed: ['The local review could not be saved. Try again.', '確認を保存できませんでした。もう一度試してください。'],
+  my_work_saved_unread: ['Saved. The page shows it at its next read.', '保存しました。次に読み直したときに画面に出ます。'],
 };
 
 const stored = recall('oboete-lang', '');
@@ -6477,9 +6478,14 @@ async function myWorkReview(row, checked) {
   let said = 'my_work_review_failed';
   try {
     const { res } = await memoryWrite('my-work/review', { request: row.id, version: row.version, checked });
-    if (res.ok || res.status === 409) await myWorkReread();
     if (res.status === 409) said = 'my_work_review_stale';
     else if (res.ok) said = checked ? 'my_work_checked_saved' : 'my_work_check_undone';
+    // A save the server took stays said as taken when the read after it fails (#602).
+    if (res.ok || res.status === 409) {
+      await myWorkReread().catch(() => {
+        if (res.ok) said = 'my_work_saved_unread';
+      });
+    }
   } catch {
     // The page says it was not saved; nothing changed.
   } finally {
@@ -6546,7 +6552,9 @@ function myWorkHandoff(row) {
     }
   });
   const checked = row.status === 'checked'
-    ? [myWorkReviewButton(row, false), word('span', 'my-work-checked-at', 'my_work_checked_at', { time: localTime(row.checked, lang) })]
+    ? [myWorkReviewButton(row, false),
+      // Text, which the label's variables keep through a switch of language (#602).
+      word('span', 'my-work-checked-at', 'my_work_checked_at', { time: new Date(row.checked).toLocaleString(lang) })]
     : [];
   return [el('div', 'my-work-actions', ...checked, copy, myWorkTimeline()), note, area];
 }

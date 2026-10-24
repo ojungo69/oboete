@@ -499,3 +499,7 @@ them; nothing else in it changes.
 - **#600**: an empty first answer is a baseline, so that a request arriving after it flashes and
   is marked "New update"; a list's button holds its repository's name where a request's work is
   in two, so that a screen reader tells two lists of one name apart.
+- **#602** (the findings of #601's last round): the time of a check is text in the page's
+  language, in its label and in the label's variables, so that a switch of language keeps it; a
+  save the server took is said as kept, and as shown at the page's next read, when the read after
+  it fails, where it was said as not saved.
