@@ -27,12 +27,18 @@ const READ_WAIT: Duration = Duration::from_secs(1);
 pub(crate) const STORE_WAIT: Duration = Duration::from_secs(2);
 /// Blocks that are not part of what was asked or read, removed before anything is stored, in this
 /// order: context an IDE or another memory tool puts in front of the text (it may quote
-/// `<private>`), claude-mem's copy of the past that it writes into instruction files an agent
-/// reads, then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it hides the
-/// rest, where claude-mem would keep it all).
+/// `<private>`), what the agent's harness adds to a prompt or a tool's output (a reminder, the
+/// note that a large output was saved to a file, an instruction), claude-mem's copy of the past
+/// that it writes into instruction files an agent reads, then `<private>`, the developer's opt-out
+/// (claude-mem's tag; unclosed, it hides the rest, where claude-mem would keep it all). The
+/// harness's four are claude-mem 15.0's, stripped as it strips them (parity row 15).
 pub(crate) const STRIP_BLOCKS: &[&str] = &[
     "ide_opened_file",
     "hook_context",
+    "system-reminder",
+    "persisted-output",
+    "system_instruction",
+    "system-instruction",
     "claude-mem-context",
     "private",
 ];
@@ -10742,6 +10748,26 @@ mod tests {
         assert!(!stored.contains("SSS"), "private content stored");
         assert!(!stored.contains("<private>"), "{stored}");
         assert!(stored.contains("tail"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Parity row 15: what the harness adds to a tool's output is not stored, as claude-mem 15.0
+    /// strips it; an unclosed tag is text an agent read, and stays.
+    #[test]
+    fn harness_blocks_in_a_tool_output_are_not_stored() {
+        let dir = tmp("harness-blocks");
+        let output = "kept <system-reminder>REMINDER</system-reminder> and \
+                      <persisted-output>Output too large. Full output saved to: /x</persisted-output> \
+                      <system_instruction>ONE</system_instruction><system-instruction>TWO</system-instruction> \
+                      end <system-reminder> unclosed";
+        let payload = json!({"session_id": "c1", "cwd": &*dir, "tool_name": "Read",
+                             "tool_input": {}, "tool_response": output});
+        hook(&dir, "claude", "PostToolUse", &payload);
+        let stored = &recorded(&dir, "claude", "c1")[0].body;
+        for gone in ["REMINDER", "Full output saved", "ONE", "TWO"] {
+            assert!(!stored.contains(gone), "{gone} stored: {stored}");
+        }
+        assert!(stored.contains("kept") && stored.contains("end <system-reminder> unclosed"));
         std::fs::remove_dir_all(dir).ok();
     }
 
