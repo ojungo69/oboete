@@ -217,8 +217,12 @@ claude-mem 13.35's `save_memory` (`src/servers/mcp-server.ts` and `src/services/
 at v13.39.0), before the switch by decision 45. The agent saves a durable note, decision,
 correction or handoff on purpose; search finds it, and the session start never shows it.
 
-- **Arguments**: `text` (required), `title`, `project`, claude-mem's names. claude-mem's
-  `metadata` is not read (nothing in oboete reads provenance); a call that sends it is not refused.
+- **Arguments**: `text` (required), `title`, `project` and `metadata`, claude-mem's names. Of
+  `metadata`, `sourceFingerprint` is read as claude-mem reads it (below; parity row N3). The rest
+  is not, and a call that sends it is not refused: claude-mem's server sends the checkout's
+  project with every note, so its `metadata.project` decides nothing there; its `platformSource`
+  files the note under that agent's session, and a note of oboete's has no session; nothing in
+  oboete reads the rest of its provenance.
 - **Where it goes**: the repository of the checkout the server runs in, or the one `project`
   names: a directory (its own `.oboete.toml` and the folders excluded around it are read too), or
   a repository key `search` knows (`host/owner/name`, or an imported `claude-mem:<project>`). A
@@ -239,14 +243,20 @@ correction or handoff on purpose; search finds it, and the session start never s
   repository, title and text, so a repeat answers the same uid and appends nothing once the
   first is indexed and its op is still in the op log (claude-mem's exact-repeat hash is its
   session, title and text). The op log decides, not the index: after a restore lost the op and
-  before the worker rewound the index, the note is appended again.
+  before the worker rewound the index, the note is appended again. A `metadata.sourceFingerprint`
+  (the replay key of claude-mem's memory-file bridge) takes the title and text's place in that
+  hash: a save that repeats it in the repository answers the first note, whatever its text, as
+  claude-mem's does.
 - **The answer**: `Saved memory <uid>: <title>. Repository: <repository>.`, once the worker has
   indexed it (at most 10 seconds, as `oboete pref add` waits), else the same with "The worker
   indexes it when it next runs". claude-mem answers `Saved memory #<id>: <title>. Project:
-  <project>.`
+  <project>.` A repeat answers `Memory already saved as <uid>. Repository: <repository>.`, as
+  claude-mem answers a repeated fingerprint (`Memory already saved as observation #<id>`).
 - **Found**: `search` labels it `note` (claude-mem files it as an observation of type
   `discovery`), `get` reads it whole "(saved by an agent)", `timeline` lists it with imported
-  documents. The session start never shows it (claude-mem's needs a concept, which a saved note
+  documents. The page's Feed shows it by its time among the cards, labelled `Note` with "Saved by
+  an agent" under its title, as claude-mem's feed shows a manual memory among its observations
+  (subtitle `Manual memory`; docs/page.md P2). The session start never shows it (claude-mem's needs a concept, which a saved note
   has none of); the per-prompt block takes a note saved in the calling repository, by meaning,
   with imported history (#506, docs/prompt-context.md).
 - **The call itself**: capture keeps a `save_memory` call, bare or of oboete's or claude-mem's
@@ -257,7 +267,9 @@ correction or handoff on purpose; search finds it, and the session start never s
 
 Tests: `mcp::tests::a_saved_note_is_found_by_search_and_get_and_kept_once`,
 `a_saved_note_passes_the_gate_and_an_empty_or_huge_one_is_refused`,
-`a_note_goes_where_project_says_and_nowhere_never_recorded_or_forgotten`;
+`a_note_goes_where_project_says_and_nowhere_never_recorded_or_forgotten`,
+`a_note_reads_claude_mems_metadata`;
+`view::tests::feed_shows_saved_notes_scoped_paged_and_forgotten_ones_hidden`;
 `curate::tests::a_note_saved_to_memory_is_not_shown_to_the_curator`;
 `capture::tests::a_memory_read_is_stored_without_its_output` (a saved note's call too);
 `hook::tests::a_failed_memory_read_is_no_failure_of_the_work` (a failed save too).

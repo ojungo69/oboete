@@ -23,17 +23,22 @@ X10 (decision 55, docs/my-work.md). The list it replaced (claims, imported histo
 with the search box and its filters) stays as it is under a tab of its own, `Records`, after it.
 Context, Stats and Settings follow as now.
 
-P2. **What.** Three kinds of item, each read through its one reader, so each is shown only as the
+P2. **What.** Four kinds of item, each read through its one reader, so each is shown only as the
 rest of oboete may show it:
 
 - a card: `cards::read` (K4's hide rule, K6's gate);
 - a session summary: `turns::read_row` (T7's hide rule, T8's gate), never a skip;
 - a prompt: a `prompt` record of a live source (`raw::LIVE`), read through the raw reader that
   applies tombstones (D8), gated alone as a window gates a record. A removed record is not shown.
+- a note an agent saved (`save_memory`, docs/tools.md slice 4; parity row N3): an imported
+  document of source `oboete-note`, its newest row, gated on read as search and `get` gate it,
+  never one a forget names. The page shows it as a card, labelled `Note`, with "Saved by an
+  agent" as its subtitle and its text under `narrative`, as claude-mem's feed shows a manual
+  memory among its observations (type `discovery`, subtitle `Manual memory`).
 
 P3. **Order and pages.** Newest first by each item's own time (a card's window time, a summary's
-turn end, a prompt's record time); ties by kind (card, summary, prompt) and then by ID, newest
-first. `GET /api/feed?repo=<key>|all=1&limit=<n>&before=<cursor>`, `limit` 50 by default and at
+turn end, a prompt's record time, a note's save); ties by kind (card, summary, prompt, note) and
+then by ID, newest first. `GET /api/feed?repo=<key>|all=1&limit=<n>&before=<cursor>`, `limit` 50 by default and at
 most 100, answers `{items, next}`: the server reads at most `limit` of each kind after that kind's
 own position in the cursor, merges them, keeps the first `limit`, and `next` carries each kind's
 position after the last one of its kind kept (unchanged for a kind none of which was kept), or is
@@ -135,6 +140,10 @@ built after slice 1, before the switch.
    too; the page clamps a long one behind `Show more` (P8).
 6. Without the token, with a foreign Host, or with another method, `/api/feed` is refused as every
    route is.
-7. The page (checked in a browser, `assets/viewer/`): the feed with its three kinds, the toggles,
+7. The page (checked in a browser, `assets/viewer/`): the feed with its kinds, the toggles,
    the filter, more pages, a new item appearing within seconds, the first-visit dialog and `?`, in
    both languages, in light and dark.
+8. A note an agent saved is given by its time and repository, paged once, its newest text gated
+   on read; one a forget names is not given and takes no place before the consumer catches up
+   (`feed_shows_saved_notes_scoped_paged_and_forgotten_ones_hidden`). The page draws it as a card
+   labelled `Note` (the viewer's Node harness).

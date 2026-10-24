@@ -2270,6 +2270,68 @@ struct FeedCursor {
     cards: Option<crate::cards::Position>,
     summaries: Option<crate::turns::Position>,
     prompts: Option<crate::raw::PromptPosition>,
+    notes: Option<NotePosition>,
+}
+
+/// A saved note's place in the feed: its time, then its op's device and seq.
+type NotePosition = (i64, String, i64);
+
+/// Parity row N3: the notes agents saved (`save_memory`), the newest first after `before`, at most
+/// `limit`, as claude-mem's feed shows a manual memory among its observations: each note's newest
+/// row, none a forget names, its title and text gated as every reader gates them. Whether another
+/// remains.
+fn notes_page(
+    k: &rusqlite::Connection,
+    raw: &crate::raw::Raw,
+    repo: Option<&str>,
+    before: Option<&NotePosition>,
+    limit: usize,
+    rules: &redact::Rules,
+) -> Result<(Vec<(NotePosition, Value)>, bool)> {
+    if !crate::consumer::manifest::exists(k, "table", "imported")? {
+        return Ok((Vec::new(), false));
+    }
+    let (ts, device, seq) = before
+        .cloned()
+        .unwrap_or((i64::MAX, String::new(), i64::MAX));
+    let mut st = k.prepare(
+        "SELECT i.uid, i.repo, i.ts, i.title, i.body, i.op_device, i.op_seq FROM imported i
+         WHERE i.session = ?1 AND i.source = ?2 AND (?3 IS NULL OR i.repo = ?3)
+           AND (i.ts, i.op_device, i.op_seq) < (?4, ?5, ?6)
+           AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+         ORDER BY i.ts DESC, i.op_device DESC, i.op_seq DESC",
+    )?;
+    let mut rows = st.query(rusqlite::params![
+        crate::raw::NOTE_SESSION,
+        crate::raw::NOTE_SOURCE,
+        repo,
+        ts,
+        device,
+        seq
+    ])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let uid: String = r.get(0)?;
+        if raw.forgotten(&uid)? {
+            continue;
+        }
+        if out.len() == limit {
+            return Ok((out, true));
+        }
+        let (repo, ts): (String, i64) = (r.get(1)?, r.get(2)?);
+        let gate = |s: String| redact::outbound_with(&s, rules);
+        let name = crate::consumer::manifest::repo_name(&repo, rules);
+        out.push((
+            (ts, r.get(5)?, r.get(6)?),
+            json!({
+                "kind": "note", "id": uid, "ts": ts, "agent": null,
+                "repo_name": name, "repo": repo,
+                "title": gate(r.get(3)?), "subtitle": "", "narrative": gate(r.get(4)?),
+                "facts": [], "concepts": [], "files_read": [], "files_modified": [],
+            }),
+        ));
+    }
+    Ok((out, false))
 }
 
 fn feed_page(q: &HashMap<String, String>) -> std::result::Result<FeedCursor, Response> {
@@ -2283,7 +2345,7 @@ fn feed_page(q: &HashMap<String, String>) -> std::result::Result<FeedCursor, Res
     serde_json::from_str(cursor).map_err(|_| bad("before"))
 }
 
-/// The feed's three bounded pages, merged by own time, kind, then stored ID (newest first).
+/// The feed's four bounded pages, merged by own time, kind, then stored ID (newest first).
 /// Every payload is already gated by its table's one reader; `api` gates the answer too.
 fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -> Result<Value> {
     let Some((raw, k)) = search::b::stores(home)? else {
@@ -2295,6 +2357,7 @@ fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -
     let (summaries, summaries_more) =
         crate::turns::page(&k, &raw, repo, cursor.summaries.as_ref(), limit, &rules)?;
     let (prompts, prompts_more) = raw.prompts(repo, cursor.prompts.as_ref(), limit, &rules)?;
+    let (notes, notes_more) = notes_page(&k, &raw, repo, cursor.notes.as_ref(), limit, &rules)?;
     let name =
         |repo: Option<&str>| crate::consumer::manifest::repo_name(repo.unwrap_or(""), &rules);
     // A common sort key, not another reader: summaries and prompts have no card ordinal.
@@ -2332,19 +2395,23 @@ fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -
             "agent": p.agent, "repo_name": name(p.repo.as_deref()), "repo": p.repo, "text": p.text,
         })));
     }
+    for ((ts, device, seq), value) in notes {
+        rows.push((3, (ts, device, seq, 0), value));
+    }
     rows.sort_by(|(ak, a, _), (bk, b, _)| {
         b.0.cmp(&a.0)
             .then_with(|| ak.cmp(bk))
             .then_with(|| b.cmp(a))
     });
-    let more = rows.len() > limit || cards_more || summaries_more || prompts_more;
+    let more = rows.len() > limit || cards_more || summaries_more || prompts_more || notes_more;
     rows.truncate(limit);
     let mut items = Vec::new();
     for (kind, (ts, device, seq, n), value) in rows {
         match kind {
             0 => cursor.cards = Some((ts, device, seq, n)),
             1 => cursor.summaries = Some((ts, device, seq)),
-            _ => cursor.prompts = Some((ts, device, seq)),
+            2 => cursor.prompts = Some((ts, device, seq)),
+            _ => cursor.notes = Some((ts, device, seq)),
         }
         items.push(value);
     }
@@ -4839,6 +4906,70 @@ curate = false
         let page = get(&v, "/api/feed?all=1&limit=1");
         assert_eq!(page["items"][0]["id"], s.key(seq));
         assert_eq!(page["items"][0]["text"], "keep ****** keep");
+    }
+
+    /// Parity row N3: a note an agent saved is in the feed, as claude-mem's shows a manual memory
+    /// among its observations: by its time, scoped to its repository, paged once each, its newest
+    /// text, gated on read; one a forget names is no entry and takes no slot before a consumer
+    /// catches up.
+    #[test]
+    fn feed_shows_saved_notes_scoped_paged_and_forgotten_ones_hidden() {
+        let (mut s, v) = feed_fixture();
+        let (fern, moss) = ("example.test/team/fern", "example.test/team/moss");
+        let (_, card) = feed_cards(&mut s, fern, 4_000, &["A card"]);
+        let gone = s.note("d", fern, 3_500, "Forgotten note", "Gone.");
+        let first = s.note("a", fern, 3_000, "First note", "invented-FERN");
+        let other = s.note("c", moss, 2_500, "Moss note", "Elsewhere.");
+        let second = s.note("b", fern, 2_000, "Second note", "Its old text.");
+        s.note("b", fern, 2_000, "Second note", "Its new text.");
+        // claude-mem's history is no note.
+        s.imported("x", "fern", 3_200, "Imported", "Imported.");
+        s.run();
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Forget, json!({"uid": gone, "job": "j"}))])
+            .unwrap();
+        std::fs::write(s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{id = \"invented\", regex = 'invented-([A-Z]+)$', secret_group = 1}]\n").unwrap();
+        let ids = |list: &[(&str, &String)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(kind, id)| ((*kind).to_owned(), (*id).clone()))
+                .collect()
+        };
+        let card = format!("{card}.0");
+        let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
+        assert_eq!(
+            feed_ids(&page),
+            ids(&[("card", &card), ("note", &first), ("note", &second)])
+        );
+        let note = &page["items"][1];
+        assert_eq!(
+            (&note["title"], &note["narrative"], &note["repo_name"]),
+            (
+                &json!("First note"),
+                &json!("invented-[REDACTED]"),
+                &json!("fern")
+            )
+        );
+        assert_eq!(page["items"][2]["narrative"], "Its new text.");
+        let mut page = get(&v, "/api/feed?all=1&limit=1");
+        let mut paged = feed_ids(&page);
+        for _ in 0..5 {
+            let Some(cursor) = page["next"].as_str() else {
+                break;
+            };
+            page = get(&v, &feed_before(cursor, 1));
+            paged.extend(feed_ids(&page));
+        }
+        assert!(page["next"].is_null());
+        assert_eq!(
+            paged,
+            ids(&[
+                ("card", &card),
+                ("note", &first),
+                ("note", &other),
+                ("note", &second)
+            ])
+        );
     }
 
     /// page.md test 4: a newly added field-anchored rule applies on read, not only on capture;
