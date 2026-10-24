@@ -1020,7 +1020,7 @@ fn terminal_list(text: &str) -> String {
                 .collect();
             if l.starts_with('#') {
                 format!("\x1b[1;36m{l}\x1b[0m")
-            } else if ["Legend:", "Format:", "Fetch details:"]
+            } else if ["Legend:", "Format:", "Fetch details:", "Stats:", "Access "]
                 .iter()
                 .any(|p| l.starts_with(p))
             {
@@ -7664,6 +7664,18 @@ mod tests {
         assert_eq!(
             shown,
             "\u{1b}[1;36m# Head \u{FFFD}]0;title\u{FFFD}\u{1b}[0m\nA \u{FFFD}[2J card\nB \u{FFFD}evil\tok"
+        );
+    }
+
+    /// Parity row 13: the economics line and its footer are dimmed, as the legend is.
+    #[test]
+    fn the_terminal_list_dims_the_economics_lines() {
+        assert_eq!(
+            terminal_list(
+                "Stats: 1 obs (4t read) | 3t work\nA card\nAccess 2k tokens of past work via get(ID)."
+            ),
+            "\u{1b}[2mStats: 1 obs (4t read) | 3t work\u{1b}[0m\nA card\n\
+             \u{1b}[2mAccess 2k tokens of past work via get(ID).\u{1b}[0m"
         );
     }
 

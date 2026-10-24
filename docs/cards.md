@@ -230,17 +230,20 @@ Legend: 🎯session ●bugfix ◆feature ↻refactor ✓change ○discovery ⚖d
 Format: ID TIME TYPE TITLE
 Fetch details: get(ID) | Search: search(query)
 
+Stats: 3 obs (32t read) | 24,630t work | 100% savings
+
 ### Oct 2, 2026
 412.0 9:41p ○ The worker leaves a lock it no longer holds
 413.0 " ✓ The lock file is removed on exit
 ### Oct 3, 2026
 420.1 6:05a ● Two workers no longer race for one lock
+
+Access 25k tokens of past work via get(ID) or search(query).
 ```
 
 - No `Mode:` line: oboete has one set of types. The legend starts with `🎯session` and the
-  session summaries are rows among the cards (docs/summaries.md S7, S8). No `Stats:` line and no
-  footer: claude-mem counts the tokens each observation's work took, and oboete does not count a
-  window's.
+  session summaries are rows among the cards (docs/summaries.md S7, S8). The `Stats:` line and the
+  footer are S7's.
 - The times are local, as claude-mem's are: the header's date and `h:mmam` with the offset as
   `GMT+9`, each day `Mon D, YYYY`, each row `H:MMa` or `H:MMp`, and `"` for a row in the same
   minute as the row before it that day.
@@ -287,6 +290,34 @@ S6. **`get` shows a card.** The fetch line names `get`, so `get <op seq>.<n>` (C
 prints the card in full: its type, title, subtitle, narrative, facts, concepts, files read and
 modified, date, agent and session, through the same reader (K4, K6). An ID of no current card
 says so.
+
+S7. **What the cards saved (parity row 13).** After the fetch line comes claude-mem's economics
+line at its default settings, where only the percentage is switched on: `Stats: <cards> obs
+(<read>t read) | <work>t work | <percent>% savings`. The read tokens are what the cards shown
+cost to read, counted as claude-mem's TokenCalculator counts an observation: the UTF-16 units of
+the title, subtitle, narrative and the facts' JSON, four to a token, rounded up for each card.
+The work is what the curator spent on the windows of those cards, as claude-mem's
+`discovery_tokens` are what its observer spent: the prompt and answer tokens of the call that
+made each window op's cards, from providers.db's ledger, or the estimate of what was sent where a
+CLI reports no usage. That call is the last one before the op was written, by the provider the op
+names, over the window's records, that made cards or whose refused answer the op keeps (C5): the
+windows a long record is split into share their records, and a recuration comes after (Codex on
+#616). A window op counts once however many cards it made; claude-mem stores a turn's tokens on
+each observation the turn made, so it counts them again. A card of another
+device and an imported observation have no work: the ledger is this device's, and the import
+keeps no token counts. With no work at all the line ends at `0t work`, without a percentage, as
+claude-mem's does. The percentage is rounded as JavaScript's `Math.round` rounds, and the numbers
+are grouped by thousands as `toLocaleString` groups them. When the cards saved tokens, the block
+ends with claude-mem's footer: `Access <work in thousands>k tokens of past work via get(ID) or
+search(query).` The terminal shows both lines dimmed, as it shows the legend. The hook reads the
+ledger read-only and never makes one, nor waits for it: a ledger it cannot read, or one busy at
+that moment, leaves the line without work.
+Each lookup is a seek on a partial index of the curator's calls by their records and time
+(`provider_calls_span`), which the worker makes, beside a read of the window op's time and provider
+by its key: on this PC's ledger of 80,483 calls, 50 windows take under 10 ms, where a scan of every
+call took about as long warm and reads the whole 9 MB file cold.
+claude-mem's four switches (read tokens, work tokens, the amount saved, the percentage) are not
+built: its default output is what oboete shows.
 
 ## Tests of slice 1 (through `worker::run_once` and `cards::recent`)
 

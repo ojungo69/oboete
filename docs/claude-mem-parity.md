@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 30 |
-| partial | 24 |
+| equal_or_better | 31 |
+| partial | 23 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
@@ -46,7 +46,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 10 | The first-visit welcome dialog is built. It has no "How it works" link and no docs link. | equal_or_better | none | WelcomeCard.tsx:7 / assets/viewer/app.js:2077 |
 | 11 | The stopped-curation line names a class of cause (owner, budget, no answer), not the provider's words or a remedy link. A refused key shows only after 30 minutes. The terminal note appears on Claude Code only, and there is no relay instruction for Codex or Grok. | partial | rare | observer-health.ts:351 / src/curate.rs:3100 |
 | 12 | Hooks write raw.db themselves and always exit 0. A failed write is kept under `unwritten/` and written back later. A busy database is waited out. claude-mem uses a hook spool for the same purpose. | equal_or_better | none | hook-spool.ts:10 / src/unwritten.rs:1 |
-| 13 | Money spent is shown. The session-start "N obs, tokens read, work, % savings" line is missing. | partial | rare | AgentFormatter.ts:46 / assets/viewer/app.js:1036 |
+| 13 | Money spent is shown. The session start gives claude-mem's "Stats:" line (cards, tokens read, work, % savings) and its footer, at its default settings; a window's curator spend is counted once, where claude-mem counts a turn's tokens again for each observation the turn made. | equal_or_better | rare | AgentFormatter.ts:46 / src/cards.rs:288 |
 | 14 | Since 2026-10-17 oboete also excludes by a folder name or claude-mem pattern (`*`, `**`, `?`, a leading `~`), read as claude-mem reads one (since #587 a whole `**/` part also stands for no folder, as in claude-mem 15.0), and a name with no `/` also covers the folders inside one so named; a pattern that does not start at a root also names the end of a path (`secret/**` names `/work/secret` and the folders in it), where claude-mem tries it against the whole path and the last part alone, so such a pattern with a `/` names no folder there; `oboete import claude-mem` brings claude-mem's patterns over once (docs/settings-privacy.md, docs/claude-mem-import.md I8). | equal_or_better | none | project-filter.ts:68 / src/capture.rs:203 |
 | 15 | Private prompts behave the same. oboete strips claude-mem 15.0's six block names (`private`, `claude-mem-context`, `system-reminder`, `persisted-output`, `system_instruction`, `system-instruction`) and two of its own (`ide_opened_file`, `hook_context`) from a prompt and from every tool field before anything is stored or sent, a block only with its closing tag. One edge differs, on the private side: an unclosed `<private>` in a typed prompt hides the rest, where claude-mem keeps it all. | equal_or_better | rare | tag-stripping.ts:5 / src/hook.rs:32 |
 | 16 | The page has no sessions list, no per-session page and no category chips. Feed items carry no session id. | missing | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2078 |
@@ -185,7 +185,7 @@ each milestone and new features are added here.
 | 9 | **Nothing shown in the terminal at session start.** When a session starts claude-mem prints the memory timeline and the page link in the terminal for the user to see. oboete gives the memory to the agent only; the terminal shows nothing. | S |
 | 10 | **No first-visit explanation on the page.** claude-mem's page shows a welcome card and a 'How it works' text the first time. oboete's page opens straight on the timeline with no explanation of the tabs or how to ask the agent for memory. | S |
 | 11 | **Summarising stopped: no notice with the cause where the owner looks.** When curation stops, claude-mem shows a banner with the cause at session start for its own provider failures. oboete shows 'N records not yet curated'; the cause and the command to curate what was skipped are in `oboete doctor` only. | M |
-| 13 | **Tokens and money spent are recorded but not shown.** oboete records tokens and cost of every curation call and enforces a monthly cap, and shows only the embedding spend (doctor). The month's curation spend is shown beside the cap on the settings page. claude-mem shows no money figure. | S |
+| 13 | **Tokens and money spent are recorded but not shown.** oboete records tokens and cost of every curation call and enforces a monthly cap, and shows only the embedding spend (doctor). The month's curation spend is shown beside the cap on the settings page. claude-mem shows no money figure. Built: the session start gives claude-mem's economics line and its footer at its default settings, the cards' read tokens as its TokenCalculator counts them, and the curator's tokens for each window shown as the work, each window once (docs/cards.md S7). | S |
 | 28 | **No 'memory is on' note in a brand-new project.** In a project with no memory yet claude-mem says that recording has started and where the page is. oboete says nothing. Folded into the terminal line at session start. | S |
 | 31 | **Per-prompt memory hints are more conservative.** Both tools can add matching memories to each prompt. The owner has claude-mem's on; oboete's is off by default. It adds current decisions, lessons and approved open items first, then the repository's cards and session summaries, found by meaning through the resident viewer within a capped wait or by words, each above its threshold, at most 5 (decision 44, [prompt-context.md](prompt-context.md)); claude-mem adds its 5 nearest observations with no cut. It is switched on at the switch; its thresholds are measured in the one evaluation (decision 34). | M |
 

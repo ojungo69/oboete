@@ -5617,6 +5617,21 @@ impl Raw {
         Ok(seqs)
     }
 
+    /// When `device`'s op `op_seq` was appended and the provider its body names, for a reader that
+    /// finds the call that made it (parity row 13); none for no such op.
+    pub fn op_stamp(&self, device: &str, op_seq: i64) -> Result<Option<(i64, Option<String>)>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT ts, json_extract(body, '$.provider') FROM ops
+                 WHERE device = ?1 AND op_seq = ?2",
+                params![device, op_seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
         ops_after_in(&self.conn, device, op_seq, limit)
