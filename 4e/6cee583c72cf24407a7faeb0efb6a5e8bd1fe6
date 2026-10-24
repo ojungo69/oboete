@@ -1,0 +1,27 @@
+docs/claude-mem-parity.md
+  s_52c2af97d1549e::t_d43aadc8dbe78f 20-21,100-102,224
+docs/spec.md
+  s_52c2af97d1549e::t_6660919bac3fe1 740
+src/mcp.rs
+  s_52c2af97d1549e::t_f0b98f290c17e7 2172,2219-2221
+src/provider.rs
+  s_52c2af97d1549e::t_cd4b9fe14dbd51 2190-2191,2201-2218,2915,7001-7013,7018,7023,7025-7036,7039,7083,7094,7102-7120
+tests/resident.rs
+  s_52c2af97d1549e::t_5b8c35fb8243be 1523-1529,1542-1550,1566,1570-1574,1578,1582,1585-1588
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4e6cee583c72cf24407a7faeb0efb6a5e8bd1fe6",
+  "prompts": {},
+  "sessions": {
+    "s_52c2af97d1549e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8b65c44-47d2-4c0d-bed4-d4e61d8ba668",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
