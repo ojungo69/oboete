@@ -3526,14 +3526,22 @@ mod tests {
             .append(&raw::test_event("a"))
             .unwrap();
         let calls = std::cell::Cell::new(0);
-        let (started, again) = (Instant::now(), std::cell::Cell::new(None));
-        let until = crate::db::now_ms() + 400;
+        // The window's time is taken when the phase first answers, and the wait is measured from
+        // there on the monotonic clock, which the worker sleeps by: a step of the wall clock while
+        // the first pass runs (WSL's time sync under load) no longer shortens what is measured.
+        let (first, again) = (std::cell::Cell::new(None), std::cell::Cell::new(None));
         let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
             calls.set(calls.get() + 1);
             Ok(match calls.get() {
-                1 => Phase::Waiting { until, up: true },
+                1 => {
+                    first.set(Some(Instant::now()));
+                    Phase::Waiting {
+                        until: crate::db::now_ms() + 400,
+                        up: true,
+                    }
+                }
                 2 => {
-                    again.set(Some(started.elapsed()));
+                    again.set(Some(Instant::now()));
                     Phase::Covered
                 }
                 _ => Phase::Idle,
@@ -3550,9 +3558,10 @@ mod tests {
             curating(p),
         )
         .unwrap();
-        let again = again.get().expect("the phase did not run again");
-        assert!(again >= Duration::from_millis(350), "{again:?}");
-        assert!(again < Duration::from_millis(1_200), "{again:?}");
+        let (first, again) = (first.get().unwrap(), again.get());
+        let waited = again.expect("the phase did not run again") - first;
+        assert!(waited >= Duration::from_millis(350), "{waited:?}");
+        assert!(waited < Duration::from_millis(1_200), "{waited:?}");
         assert_eq!(calls.get(), 3);
 
         calls.set(0);
