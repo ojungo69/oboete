@@ -2003,15 +2003,23 @@ fn answered(name: &str, mut answer: Value) -> Value {
     // fingerprint is its selector, as a claim's uid is, so the gate takes only what is before it
     // (#570), known by the answer's own field, as no id's own text can pass for it (Codex and
     // Sourcery on #576). So does the id of each of its conversations (`sessions`), which is the
-    // id of that conversation's own request (decision 55).
-    let ids: Vec<(Option<String>, Vec<Option<String>>)> = match answer.get_mut("requests") {
+    // id of that conversation's own request (decision 55), and each work item's `stream`, the
+    // fingerprint of a list the gate masks (CodeRabbit on #597).
+    type Taken = (Option<String>, Vec<Option<String>>, Vec<Option<Value>>);
+    let ids: Vec<Taken> = match answer.get_mut("requests") {
         Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
             .map(|request| {
                 let sessions = match request.get_mut("sessions") {
                     Some(Value::Array(sessions)) => sessions.iter_mut().map(request_id).collect(),
                     _ => Vec::new(),
                 };
-                (request_id(request), sessions)
+                let streams = match request.get_mut("work") {
+                    Some(Value::Array(work)) => (work.iter_mut())
+                        .map(|w| w.as_object_mut().and_then(|w| w.remove("stream")))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (request_id(request), sessions, streams)
             })
             .collect(),
         _ => Vec::new(),
@@ -2025,10 +2033,17 @@ fn answered(name: &str, mut answer: Value) -> Value {
         answer["next"] = next;
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
-        for (request, (id, sessions)) in requests.iter_mut().zip(ids) {
+        for (request, (id, sessions, streams)) in requests.iter_mut().zip(ids) {
             if let Some(Value::Array(shown)) = request.get_mut("sessions") {
                 for (session, id) in shown.iter_mut().zip(sessions) {
                     put_id(session, id);
+                }
+            }
+            if let Some(Value::Array(work)) = request.get_mut("work") {
+                for (item, stream) in work.iter_mut().zip(streams) {
+                    if let (Value::Object(item), Some(stream)) = (item, stream) {
+                        item.insert("stream".to_owned(), stream);
+                    }
                 }
             }
             put_id(request, id);
@@ -4242,6 +4257,42 @@ curate = false
             assert_eq!(r["sessions"], sessions, "{first}");
         }
         assert!(!first.to_string().contains("fingerprint"), "{first}");
+    }
+
+    /// CodeRabbit on #597: a work stream's fingerprint is its selector too, so a rule that matches
+    /// its 12 hex digits leaves it, and two lists the gate masks alike stay two streams through the
+    /// route, the same from read to read.
+    #[test]
+    fn a_my_work_streams_fingerprint_leaves_the_route_as_it_came() {
+        if !in_child("view::tests::a_my_work_streams_fingerprint_leaves_the_route_as_it_came") {
+            return;
+        }
+        let (mut s, v) = feed_fixture();
+        for list in ["secret-a", "secret-b"] {
+            let fields = json!({"task": "t", "request_id": "rel", "request": "Fix the release notes",
+                "status": "doing"});
+            s.raw
+                .work_state(R, list, fields.as_object().unwrap(), None)
+                .unwrap();
+        }
+        s.run();
+        let home = s.home.path();
+        let rules = "[redaction]\nextra_rules = [{ id = 'list', regex = 'secret-[a-z]' }, \
+                     { id = 'hex', regex = '[0-9a-f]{12}' }]\n";
+        std::fs::write(home.join("config.toml"), rules).unwrap();
+        redact::set_home(home).unwrap();
+        let prints = |answer: &Value| -> Vec<String> {
+            (answer["requests"][0]["work"].as_array().unwrap().iter())
+                .map(|w| w["stream"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        };
+        let first = get(&v, "/api/my-work?range=all");
+        let read = prints(&first);
+        assert_eq!(read.len(), 2, "{first}");
+        assert_ne!(read[0], read[1], "{first}");
+        let hex = |p: &String| p.len() == 12 && p.chars().all(|c| c.is_ascii_hexdigit());
+        assert!(read.iter().all(hex), "{first}");
+        assert_eq!(prints(&get(&v, "/api/my-work?range=all")), read);
     }
 
     /// A feed over invented records, without the older timeline fixture's claims or imports.

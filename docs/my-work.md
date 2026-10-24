@@ -431,5 +431,30 @@ them; nothing else in it changes.
   the last answer received, as claude-mem's `accept` keeps it: the same answer again stays held
   when the reading ends, and one like the shown one replaces it. A read that a newer drawing of
   the page overtook draws nothing.
-- **Not yet**: Copy handoff, the "New update" mark and the flash of a changed card, and the
-  times rewritten between reads come with slice 2's last PR; Checked with slice 3.
+- **Not yet**: Checked, with slice 3.
+
+### Slice 2, the last PR (2026-10-24)
+
+- **Copy handoff** (claude-mem's `handoffText`), on a request's page, in the page's language
+  (decision 55): the original request, the projects, the recorded state, the next step, the four
+  newest recorded updates and the closing line, in claude-mem's order. It goes to the clipboard,
+  and the page says so; with no clipboard, the text waits selected in a field to copy. Nothing is
+  sent.
+- **The marks of a changed request** (claude-mem's `apply` and `markRead`): when an answer is
+  applied, a request new or changed since the last one flashes once, and one whose record changed
+  (its ask, follow-ups, work, updates or cards, not the summary a model writes) is marked "New
+  update" until it is opened. The first answer marks none.
+- **The times**: each poll's tick (3 s) rewrites the cards' and rows' times and a request's
+  elapsed time, where claude-mem rewrites them each second.
+- **#598** (the findings of #597's last round):
+  - The tab's read and a poll's read share one order, the order they began in: an answer older
+    than one the page has taken replaces nothing, and the tab's drawing still draws the page.
+  - Where a request's work is in two repositories, each list's button and page name its
+    repository, as `projects` names it.
+  - The slot that holds an update is a polite live region (`role="status"`), so that a screen
+    reader says an update is held. claude-mem's banner has no role.
+  - **`work[].stream`**: an item whose repository or list the gate masks carries a fingerprint of
+    the stored pair, keyed by the home's own key as a masked id's is (`shown_id`), so that two
+    masked alike stay two streams, the same from read to read; the page groups the streams by it.
+    The route takes it out of its gate's walk and puts it back, as it does a request's id. An item
+    the gate shows as stored carries none, and no key is made for it.
