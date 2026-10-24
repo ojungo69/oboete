@@ -1382,6 +1382,10 @@ const button=label=>panel.querySelectorAll('button').find(n=>text(n)===label);
 button('Mark checked').click();await ticks();
 assert.deepEqual(sent,[['/api/my-work/review',{request:'k2',version:V,checked:true}]],'the check names the version read');
 assert(button('Undo check')&&!button('Mark checked')&&text(panel).includes('Checked locally'),'the request reads checked');
+// #602: the time of the check as text, in the label and in its variables.
+const checkedAt=panel.querySelector('.my-work-checked-at');
+assert.equal(text(checkedAt),`Checked locally ${new Date(now).toLocaleString('en')}`);
+assert.equal(typeof JSON.parse(checkedAt.dataset.i18nVars).time,'string','a switch of language keeps the time');
 assert.equal(document.getElementById('status').textContent,'Checked locally. Your review is saved.');
 checkedNow=false;
 button('Undo check').click();await ticks();
@@ -1392,6 +1396,12 @@ refuse=true;
 button('Mark checked').click();await ticks();
 assert.equal(document.getElementById('status').textContent,'This work changed while you were reading. Review the latest version before checking.');
 refuse=false;
+// #602: a save the server took is said as taken though the read after it fails.
+const kept=ctx.fetch;
+ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(200)):Promise.resolve({ok:false,status:503,json:async()=>({})});
+button('Mark checked').click();await ticks();
+assert.equal(document.getElementById('status').textContent,'Saved. The page shows it at its next read.');
+ctx.fetch=kept;
 // The read after a check outruns a poll's that began before it: the poll's older answer changes
 // nothing, and waits behind no "Show updates".
 let releasePoll=null,checkedPoll=0;
