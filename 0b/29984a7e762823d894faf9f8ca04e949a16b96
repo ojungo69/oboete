@@ -1,0 +1,35 @@
+docs/mem-search.md
+  s_52c2af97d1549e::t_49cadb3c638495 63-110
+docs/memory-lookup.md
+  s_52c2af97d1549e::t_b976f4d19f2cf9 6-7,27-30,33
+docs/spec.md
+  s_52c2af97d1549e::t_334720d8b65042 359,425,432
+docs/tools.md
+  s_52c2af97d1549e::t_60406cebcb9723 207,210-212
+src/curate.rs
+  s_52c2af97d1549e::t_5837763b86ba98 639,5129-5131
+src/hook.rs
+  s_52c2af97d1549e::t_6e6c2bcaf71e48 4697-4700,4711-4714,4717-4728,4746-4747,4752
+src/mcp.rs
+  s_52c2af97d1549e::t_831ab5d1a77e75 225,286,304,410,417-440,455,658,1728,1740-1774,1974-1978,2163-2250,2540-2548
+src/mem_search.rs
+  s_52c2af97d1549e::t_fd525b6026b7f8 7-9,23-28,32-36,43-47,51,93-127,163-164,249,280,287-332,420,428,431,450,523,532-535,586,588-589,624-636,852-871,990-993,995-1008,1011-1017,1019-1020,1022-1026,1028-1031,1033,1036,1078-1080,1095-1101,1119,1184-1202,1233,1255-1271
+src/memory_lookup.rs
+  s_52c2af97d1549e::t_6340e52834d8bd 3-7,14-18,220-221,345-347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0b29984a7e762823d894faf9f8ca04e949a16b96",
+  "prompts": {},
+  "sessions": {
+    "s_52c2af97d1549e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8b65c44-47d2-4c0d-bed4-d4e61d8ba668",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
