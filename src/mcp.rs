@@ -118,6 +118,13 @@ pub struct SaveMemoryArgs {
     project: Option<String>,
 }
 
+#[derive(Default, Deserialize, JsonSchema)]
+pub struct SessionStartContextArgs {
+    /// A checkout's directory whose session start to show; defaults to the active checkout.
+    #[serde(default)]
+    project: Option<String>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct WorkStateWriteArgs {
     /// The to-do list or tracked thing this entry belongs to, e.g. "release" or "auth-refactor"
@@ -459,6 +466,39 @@ impl Oboete {
         }
     }
 
+    /// Parity row 32, claude-mem's `session_start_context`: what session start gives an agent in
+    /// a checkout, as `oboete inject` prints it, which records nothing without a session.
+    #[tool(
+        name = "session_start_context",
+        description = "Show the session start context for a checkout: the same text the hooks inject at startup, with its decisions and open items, the work state and the recent memory list. Use it to reload that context during a session. Params: project (a checkout's directory; defaults to the active checkout).",
+        annotations(read_only_hint = true)
+    )]
+    fn session_start_context(
+        &self,
+        Parameters(a): Parameters<SessionStartContextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let dir = match a.project.as_deref().map(str::trim) {
+            None | Some("") => self.cwd.clone(),
+            Some(p) if Path::new(p).is_dir() => PathBuf::from(p),
+            Some(p) => {
+                return failed(format!(
+                    "project {p:?} is not a directory: pass a checkout's path, or leave it out for the active checkout"
+                ));
+            }
+        };
+        let shown = crate::hook::inject_text(&self.home, &dir, None);
+        if shown.trim().is_empty() {
+            return text(
+                "session start shows nothing for this checkout: injection is off, or nothing is remembered here yet".into(),
+            );
+        }
+        // Gated and fenced as a hook injects it, its blocks each in their fence: through the gate
+        // again, as every reply is, with no fence of its own around theirs.
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            crate::redact::outbound(&shown),
+        )]))
+    }
+
     #[tool(
         name = "save_memory",
         description = "Save an explicit durable note, decision, correction or handoff into oboete. Use this for your own note taking after searching with search for duplicates. Include project when the note belongs to another repository than the active checkout. Leave credentials and private material out. The note is found by search and get, never shown at session start. Params: text (required), title, project."
@@ -704,6 +744,39 @@ mod tests {
         s.run();
         let server = Oboete::new(s.home.path(), &dir);
         (s, server, uid)
+    }
+
+    /// Parity row 32: the agent reloads its checkout's session start, the text a hook injects,
+    /// or another checkout's by its directory; anything else is the caller's error.
+    #[test]
+    fn session_start_context_shows_what_session_start_injects() {
+        let (s, server, _) = seeded("Parser errors go to stderr.");
+        let shown = body(
+            server
+                .session_start_context(Parameters(SessionStartContextArgs::default()))
+                .unwrap(),
+        );
+        assert!(shown.contains("Parser errors go to stderr."), "{shown}");
+        let dir = s.home.path().join("r");
+        assert_eq!(
+            shown.trim_end(),
+            crate::hook::inject_text(s.home.path(), &dir, None).trim_end()
+        );
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = body(
+            server
+                .session_start_context(Parameters(SessionStartContextArgs {
+                    project: Some(elsewhere.path().to_string_lossy().into_owned()),
+                }))
+                .unwrap(),
+        );
+        assert!(!other.contains("Parser errors go to stderr."), "{other}");
+        let wrong = server
+            .session_start_context(Parameters(SessionStartContextArgs {
+                project: Some("no/such/dir".into()),
+            }))
+            .unwrap();
+        assert_eq!(wrong.is_error, Some(true));
     }
 
     /// Spec 6.1: a muted claim stays in search and `get`, and both say that it is muted.
@@ -1730,6 +1803,7 @@ mod tests {
                 "mem_search",
                 "save_memory",
                 "search",
+                "session_start_context",
                 "timeline",
                 "work_state_read",
                 "work_state_write"
