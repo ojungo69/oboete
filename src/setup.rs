@@ -247,12 +247,53 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         if remove { "removal" } else { "setup" },
         failed.join(", ")
     );
+    if remove && agent == "all" {
+        // Taken again to take `resident` out.
+        drop(config_hold);
+        uninstalled(home);
+    }
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
         defaults_error.is_none(),
         "agent wiring finished, but resident defaults were not written (see above)"
     );
     Ok(())
+}
+
+/// Parity row 50, once every agent's wiring is out: nothing of oboete keeps running, and what is
+/// left is named, as claude-mem's uninstall stops its worker and keeps its data directory. A
+/// resident worker is turned off (`settings::resident_off`), so the page leaves at its next tick
+/// (R4) and setup turns it on again; the worker is asked to step aside (R12). Neither stops the
+/// removal. The memory and the program stay, each named with how to remove it.
+fn uninstalled(home: &Path) {
+    match crate::settings::resident_off(home) {
+        Ok(true) => println!(
+            "page: closes within a minute ([worker] resident = true is out of config.toml; setup \
+             puts it back)"
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("[worker] resident not changed: {e:#}"),
+    }
+    match crate::worker::step_aside(home) {
+        Ok(true) => println!("worker: stopped"),
+        Ok(false) => println!("worker: was not running"),
+        Err(e) => eprintln!("worker: {e:#}"),
+    }
+    let delete = if cfg!(windows) {
+        format!("Remove-Item -Recurse -Force \"{}\"", home.display())
+    } else {
+        format!("rm -rf {}", shell_quote(&home.to_string_lossy()))
+    };
+    println!(
+        "Your memory is kept in {}. To delete it too: {delete}",
+        home.display()
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        println!(
+            "The program is {}: delete it, or run `cargo uninstall oboete` if cargo installed it.",
+            exe.display()
+        );
+    }
 }
 
 /// `oboete setup --embeddings <none|local|workers-ai>` (spec 7.1, 7.2): the choice's line says what

@@ -312,3 +312,67 @@ fn setup_fills_resident_defaults_without_overwriting_an_explicit_choice() {
     run(h, &["setup", "claude", "--remove"]);
     assert_eq!(std::fs::read_to_string(&config).unwrap(), chosen);
 }
+
+/// Parity row 50: removing every agent's wiring leaves nothing running and names what is left. A
+/// resident worker is turned off (setup turns it on again), a running worker stops, and the memory
+/// and the program are named; removing one agent changes none of it.
+#[test]
+fn removing_every_agent_stops_the_worker_and_names_what_is_left() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let config = h.join("config.toml");
+    let resident = || {
+        let parsed: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        parsed["worker"]
+            .get("resident")
+            .and_then(toml::Value::as_bool)
+    };
+    run(h, &["setup", "all"]);
+    run(h, &["setup", "claude", "--remove"]);
+    assert_eq!(resident(), Some(true));
+    let mut worker = Owned(
+        command(h, &["worker", "--idle-ms", "600000"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let started = Instant::now();
+    while !String::from_utf8_lossy(&run(h, &["worker", "status"]).stdout)
+        .starts_with("worker: running")
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the worker did not start"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let out = String::from_utf8_lossy(&run(h, &["setup", "all", "--remove"]).stdout).into_owned();
+    assert!(out.contains("page: closes within a minute"), "{out}");
+    assert!(out.contains("worker: stopped"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Your memory is kept in {}. To delete it too: rm -rf ",
+            h.display()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("The program is "), "{out}");
+    assert_eq!(resident(), None);
+    let stopped = Instant::now();
+    while worker.0.try_wait().unwrap().is_none() {
+        assert!(
+            stopped.elapsed() < Duration::from_secs(30),
+            "the worker did not leave"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Nothing runs and nothing is resident: a second removal says so.
+    let again = String::from_utf8_lossy(&run(h, &["setup", "all", "--remove"]).stdout).into_owned();
+    assert!(again.contains("worker: was not running"), "{again}");
+    assert!(!again.contains("page: closes"), "{again}");
+    run(h, &["setup", "all"]);
+    assert_eq!(resident(), Some(true));
+}

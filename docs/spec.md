@@ -949,6 +949,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
   - Setup names the host and the size before it downloads anything.
   - The model's licence goes into NOTICE when the release hosts the model.
 - **Uninstall**: `oboete setup --remove` takes every adapter entry out again (src/setup.rs:1-4; `all` is accepted, src/main.rs:81).
+  - Since 2026-10-25 (parity row 50), `setup all --remove` also leaves nothing running, as claude-mem's uninstall stops its worker. It takes `[worker] resident = true` out of config.toml, so the resident page leaves at its next tick (docs/resident.md R4) and a later setup turns it on again. It asks the worker to step aside (R12). Then it names the memory's folder, which it keeps, with the command that deletes it, and the program's file, as claude-mem names the data directory it keeps. Neither step stops the removal when it fails, and removing one agent does neither.
   - With a hub, uninstall first revokes this device's hub token (section 5's device-row delete, §5.12) and deletes the local token file.
   - Content that already synced stays on the hub and on the other devices, because uninstall is not forget. If the content must go, forget it first.
   - The docs list the local data paths to delete by hand. For the last device, they also say how to delete the Worker, DO, R2 bucket and Vectorize index from the user's own Cloudflare account.
