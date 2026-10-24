@@ -781,6 +781,12 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
         c.repos.extend(repo.as_deref().map(gate));
         c.prompts.push(p);
     }
+    // A conversation known only by its work (its prompts private, expired or forgotten, or none
+    // recorded) is still the one its writes came from, as claude-mem credits a request to the
+    // session of the call that wrote it (#596).
+    for (key, ..) in work.iter().filter_map(|w| w.by.as_ref()) {
+        convs.entry(key.clone()).or_default();
+    }
     // Where each conversation's prompts are, a forgotten or expired one's too, whose text is not
     // read: by its row until a purge, then by what the forget keeps (Greptile on #574).
     for (device, seq, key, _) in &labels {
@@ -1163,12 +1169,15 @@ fn answer(
         "from": original.from});
     // Each name and value as the gate shows it beside its key, as work state's own lines do, a
     // closing status too: capture keeps it as sent, and the line that shows it gates it as any
-    // (`capture::work_state`; Codex on #574).
+    // (`capture::work_state`; Codex on #574). Its repository as `repos` names it, so that the page
+    // keeps lists of one name in two repositories apart, as claude-mem's work streams are a
+    // project's list (`listId`).
     let work: Vec<Value> = (items.iter().zip(named))
         .map(|(w, (list, task, detail))| {
             let status = (w.fields.get("status"))
                 .map(|s| crate::work_state::beside("status", &crate::work_state::text(s), rules));
-            json!({"list": list, "task": task, "status": status, "detail": detail,
+            let repo = crate::redact::outbound_with(&w.repo, rules);
+            json!({"list": list, "repo": repo, "task": task, "status": status, "detail": detail,
                 "updated": w.updated})
         })
         .collect();
@@ -1481,10 +1490,12 @@ mod tests {
 
     const R: &str = "github.com/o/r";
 
-    /// A home whose times are near now: a work state write takes the time it is appended.
+    /// A home whose times are near now: a work state write takes the time it is appended, in
+    /// `repo`, as the call that sent it.
     struct Home {
         s: Store,
         t: i64,
+        repo: &'static str,
     }
 
     impl Home {
@@ -1492,6 +1503,7 @@ mod tests {
             Self {
                 s: Store::new(),
                 t: crate::db::now_ms(),
+                repo: R,
             }
         }
 
@@ -1510,7 +1522,11 @@ mod tests {
         /// A work state write as oboete's server appends it: its time and fields.
         fn write(&mut self, list: &str, fields: Value) -> (i64, Map<String, Value>) {
             let fields = fields.as_object().unwrap().clone();
-            let seq = self.s.raw.work_state(R, list, &fields, None).unwrap();
+            let seq = self
+                .s
+                .raw
+                .work_state(self.repo, list, &fields, None)
+                .unwrap();
             let ts = rusqlite::Connection::open(self.s.home.path().join("raw.db"))
                 .unwrap()
                 .query_row(
@@ -1527,7 +1543,7 @@ mod tests {
             let input = json!({"list": list, "fields": fields}).to_string();
             let body = json!({"tool": "mcp__oboete__work_state_write", "input": input,
                 "output": "Saved.", "failed": false});
-            self.s.event("tool", session, (R, "main"), ts, body)
+            self.s.event("tool", session, (self.repo, "main"), ts, body)
         }
 
         /// A write and the call that made it in `session`, 20 ms after it: the call's seq.
@@ -1893,7 +1909,7 @@ mod tests {
             (json!(notes), json!(tag))
         );
         // The purge has raw.db to itself, as `oboete forget` has it.
-        let Home { s, t } = h;
+        let Home { s, t, .. } = h;
         let crate::search::b::fixture::Store { home, raw } = s;
         drop(raw);
         assert!(crate::forget::purge(home.path()).unwrap().is_some());
@@ -2923,6 +2939,73 @@ mod tests {
         assert_eq!(
             (sessions("r:a"), sessions("r:b")),
             (json!([of("t2")]), json!([of("t2")]))
+        );
+    }
+
+    /// Each work item names its repository as the request's `repos` do, so that the page keeps
+    /// two lists of one name in two repositories apart, as claude-mem's work streams are a
+    /// project's list (Codex on slice 2's page).
+    #[test]
+    fn each_work_item_names_its_repository() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser in both repositories.");
+        h.wrote("s1", "fix", json!({"task": "here", "status": "doing"}));
+        h.repo = "github.com/o/other";
+        h.wrote("s1", "fix", json!({"task": "there", "status": "doing"}));
+        let v = h.read(Range::All, h.t + 10_000);
+        let r = by_id(&v, "c:claude:s1");
+        let mut shown: Vec<(&str, &str, &str)> = (r["work"].as_array().unwrap().iter())
+            .map(|w| {
+                let field = |k: &str| w[k].as_str().unwrap();
+                (field("list"), field("repo"), field("task"))
+            })
+            .collect();
+        shown.sort();
+        let other = ("fix", "github.com/o/other", "there");
+        assert_eq!(shown, [other, ("fix", R, "here")], "{r}");
+        assert_eq!(r["repos"], json!(["github.com/o/other", R]));
+    }
+
+    /// #596: a conversation known only by its work (no prompt, summary or card of its own read)
+    /// is still the one its writes came from, as claude-mem credits a request to the session of
+    /// the call that wrote it: its request names it in `sessions`, dated by its write, and its
+    /// agent in `agents`; two that a rule masks alike stay two; its item with no `request_id`
+    /// stays unlinked and counted.
+    #[test]
+    fn a_conversation_known_only_by_its_work_is_named_by_its_request() {
+        let mut h = Home::new();
+        for s in ["sess-1", "sess-2"] {
+            // Each write a millisecond of its own, which its conversation is dated by.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let fields = json!({"task": s, "status": "doing", "request_id": "rel",
+                "request": "Fix the release notes"});
+            h.wrote(s, "notes", fields);
+        }
+        h.wrote("sess-3", "plan", json!({"task": "loose", "status": "todo"}));
+        let v = h.read(Range::All, h.t + 10_000);
+        let r = by_id(&v, "r:rel");
+        let of = |s: &str| {
+            let id = format!("c:claude:{s}");
+            json!({"agent": "claude", "id": id, "fingerprint": null})
+        };
+        assert_eq!(r["sessions"], json!([of("sess-2"), of("sess-1")]));
+        assert_eq!(r["agents"], json!(["claude"]));
+        assert_eq!(
+            (ids(&v), &v["unlinked"]),
+            (vec!["r:rel".to_owned()], &json!(1))
+        );
+        let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let v = super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
+        let shown: Vec<&str> = (by_id(&v, "r:rel")["sessions"].as_array().unwrap().iter())
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(shown.len(), 2, "{v}");
+        assert_ne!(shown[0], shown[1]);
+        assert!(
+            (shown.iter())
+                .all(|id| id.starts_with("c:claude:[REDACTED]#") && !id.contains("sess-")),
+            "{shown:?}"
         );
     }
 

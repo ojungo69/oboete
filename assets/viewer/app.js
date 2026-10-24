@@ -298,8 +298,13 @@ function timelineEntry(item, all) {
 // --- Views ----------------------------------------------------------------------------------
 
 const LIMIT = 100;
-const VIEWS = ['timeline', 'records', 'context', 'stats', 'settings'];
-let view = VIEWS.includes(recall('oboete-view', 'timeline')) ? recall('oboete-view', 'timeline') : 'timeline';
+const VIEWS = ['my_work', 'timeline', 'records', 'context', 'stats', 'settings'];
+// My Work opens first once (decision 55), whatever view was stored before it existed; from then
+// on the page opens on the view last used.
+const firstMyWork = recall('oboete-tab', '') !== 'my_work';
+if (firstMyWork) remember('oboete-tab', 'my_work');
+const storedView = recall('oboete-view', 'my_work');
+let view = !firstMyWork && VIEWS.includes(storedView) ? storedView : 'my_work';
 let currentRepo = '';
 let reposLoaded = false;
 
@@ -307,7 +312,10 @@ function setView(name) {
   view = name;
   remember('oboete-view', name);
   document.querySelector('main').classList.toggle('timeline-view', name === 'timeline');
-  $('controls').hidden = name === 'settings';
+  document.querySelector('main').classList.toggle('my-work-view', name === 'my_work');
+  // My Work has its own search and filters, and its tab opens on the requests, not on one.
+  $('controls').hidden = name === 'settings' || name === 'my_work';
+  if (name === 'my_work') Object.assign(mw, { request: null, work: null, back: null });
   for (const control of document.querySelectorAll('.record-controls')) control.hidden = name === 'timeline';
   for (const b of document.querySelectorAll('#tabs .tab')) {
     b.classList.toggle('active', b.dataset.view === name);
@@ -2028,6 +2036,111 @@ const TEXT = {
   embedding_key_desc: ['Paste a Cloudflare API token limited to Workers AI. oboete chooses private storage, and the saved value is never shown. Saving sends nothing.', 'Workers AI 用に権限を絞った Cloudflare の API トークンを貼り付けます。専用の保存先は oboete が選び、保存した値は表示しません。保存時に送信は行いません。'],
   embedding_key_label: ['New Workers AI token', 'Workers AI の新しいトークン'],
 
+  my_work: ['My Work', 'マイワーク'],
+  my_work_eyebrow: ['Your workspace, at a glance', '作業の状況をひと目で'],
+  my_work_subtitle: ['Your requests. What landed. What needs you.', 'あなたの依頼と、終わったこと、あなたの対応が必要なこと。'],
+  my_work_view_group: ['Work view', '表示の切り替え'],
+  my_work_cards: ['Cards', 'カード'],
+  my_work_list: ['List', '一覧'],
+  my_work_agents: ['Agents', 'エージェント'],
+  my_work_search_label: ['Search requests and agents', '依頼とエージェントを検索'],
+  my_work_search_placeholder: ['Search requests or agents', '依頼やエージェントを検索'],
+  my_work_project_label: ['Filter by project', 'プロジェクトで絞り込む'],
+  my_work_all_projects: ['All projects', 'すべてのプロジェクト'],
+  my_work_range_label: ['Time range', '期間'],
+  my_work_range_day: ['Past 24 hours', '過去 24 時間'],
+  my_work_range_week: ['Past 7 days', '過去 7 日間'],
+  my_work_range_all: ['All recorded work', '記録されたすべての作業'],
+  my_work_sort_label: ['Sort requests', '依頼の並び順'],
+  my_work_sort_attention: ['Attention first', '対応が必要な順'],
+  my_work_sort_latest: ['Latest update', '更新が新しい順'],
+  my_work_sort_oldest: ['Oldest update', '更新が古い順'],
+  my_work_sort_title: ['Request A–Z', '依頼の名前順'],
+  my_work_filter_label: ['Filter work', '状態で絞り込む'],
+  my_work_status_all: ['All', 'すべて'],
+  my_work_status_needs: ['Needs you', '対応が必要'],
+  my_work_status_working: ['In progress', '進行中'],
+  my_work_status_quiet: ['No recent update', '最近の更新なし'],
+  my_work_status_ready: ['Ready to check', '確認待ち'],
+  my_work_status_checked: ['Checked', '確認済み'],
+  my_work_status_blocked: ['Blocked', '止まっています'],
+  my_work_status_todo: ['To do', '未着手'],
+  my_work_status_unknown: ['Update recorded', '更新を記録'],
+  my_work_status_closed: ['Closed', '終了'],
+  my_work_status_other: ['Other states', 'その他の状態'],
+  my_work_all_work: ['All work', 'すべての作業'],
+  my_work_count_one: ['{n} request', '{n} 件の依頼'],
+  my_work_count: ['{n} requests', '{n} 件の依頼'],
+  my_work_no_match: ['No matching work', '一致する作業はありません'],
+  my_work_no_match_body: ['Try another request, project or contributor.', '別の依頼名、プロジェクト、作業者で試してください。'],
+  my_work_empty: ['No requests here yet', 'まだ依頼はありません'],
+  my_work_empty_body: ['Recorded human requests appear here as your tools save work. You can also explore your existing memory in the Timeline.', 'ツールが作業を保存すると、記録された依頼がここに表示されます。これまでの記憶はタイムラインでも見られます。'],
+  my_work_unlinked: ['{n} work records need a linked human request', '依頼と結びついていない作業記録が {n} 件あります'],
+  my_work_unlinked_body: ['These records stay separate because their original human request was not captured or linked. Explore their source in the Timeline.', '元の依頼が記録されていないか、結びついていないため、分けて表示しています。元の記録はタイムラインで見られます。'],
+  my_work_unlinked_link: ['Explore recorded memory →', '記録された記憶を見る →'],
+  my_work_states_note: ['Working, reported complete, and human checked are separate states.', '作業中、完了の報告、人による確認は、それぞれ別の状態です。'],
+  my_work_copy_updating: ['Summary updating', '要約を更新しています'],
+  my_work_contributors: ['Contributors', '作業者'],
+  my_work_contributors_more: [' · {n} contributors', ' · 作業者 {n} 人'],
+  my_work_no_contributor: ['No contributor recorded', '作業者の記録はありません'],
+  my_work_contributor: ['Contributor', '作業者'],
+  my_work_next_step: ['Next step', '次の一手'],
+  my_work_open_review: ['Review result', '結果を確認'],
+  my_work_open_handoff: ['Read handoff', '引き継ぎを読む'],
+  my_work_open_request: ['Open request', '依頼を開く'],
+  my_work_open_label: ['Open request: {title}', '依頼を開く: {title}'],
+  my_work_next_ready: ['Read the reported result and recorded evidence.', '報告された結果と、記録された根拠を読んでください。'],
+  my_work_next_needs: ['Read the handoff, then continue in the original work conversation.', '引き継ぎを読んでから、元の作業の会話で続けてください。'],
+  my_work_next_other: ['Follow the latest recorded activity.', '最新の記録された作業を確認してください。'],
+  my_work_no_progress: ['No progress update has been recorded.', '進み具合の記録はまだありません。'],
+  my_work_now: ['Just now', 'たった今'],
+  my_work_minutes: ['{n}m ago', '{n} 分前'],
+  my_work_hours: ['{n}h ago', '{n} 時間前'],
+  my_work_yesterday: ['Yesterday', '昨日'],
+  my_work_days: ['{n}d ago', '{n} 日前'],
+  my_work_no_time: ['Time not recorded', '時刻の記録はありません'],
+  my_work_col_status: ['Status', '状態'],
+  my_work_col_request: ['Request', '依頼'],
+  my_work_col_next: ['Next step / outcome', '次の一手・結果'],
+  my_work_col_updated: ['Last update', '最終更新'],
+  my_work_table: ['Requests', '依頼の一覧'],
+  my_work_agent_role: ['Contributing to your requests', 'あなたの依頼に参加しています'],
+  my_work_agent_count_one: ['{n} human request', '依頼 {n} 件'],
+  my_work_agent_count: ['{n} human requests', '依頼 {n} 件'],
+  my_work_agent_view: ['View requests', '依頼を見る'],
+  my_work_no_agents: ['No contributors in this view', 'この表示に作業者はいません'],
+  my_work_no_agents_body: ['Requests without recorded contributor identity remain in Cards and List.', '作業者が記録されていない依頼は、カードと一覧に表示されます。'],
+  my_work_all_agents: ['← All agents', '← すべてのエージェント'],
+  my_work_back: ['← Back to My Work', '← マイワークに戻る'],
+  my_work_back_request: ['← Back to request', '← 依頼に戻る'],
+  my_work_missing: ['This request is outside the loaded history', 'この依頼は、読み込んだ記録の範囲にありません'],
+  my_work_missing_body: ['Return to My Work to see the current requests.', 'マイワークに戻ると、いまの依頼を見られます。'],
+  my_work_stands: ['Where it stands', '現在の状況'],
+  my_work_original: ['Original request', '元の依頼'],
+  my_work_read_original: ['Read full original', '元の依頼の全文を読む'],
+  my_work_streams: ['Work behind this request', 'この依頼の作業'],
+  my_work_no_streams: ['No linked workstreams have been recorded yet.', '結びついた作業はまだ記録されていません。'],
+  my_work_supporting: ['Supporting work', '補助の作業'],
+  my_work_no_detail: ['No detailed update recorded.', '詳しい更新は記録されていません。'],
+  my_work_follow_ups: ['Follow-ups to this request', 'この依頼への追加の指示'],
+  my_work_result: ['Recorded result', '記録された結果'],
+  my_work_cards_heading: ['Recorded cards', '記録されたカード'],
+  my_work_changes: ['Recorded changes', '記録された変更'],
+  my_work_work_update: ['Work update', '作業の更新'],
+  my_work_no_changes: ['No detailed updates have been recorded yet.', '詳しい更新はまだ記録されていません。'],
+  my_work_started: ['Started', '開始'],
+  my_work_elapsed: ['Elapsed', '経過'],
+  my_work_elapsed_title: ['Time since the human request, not active agent runtime', '依頼からの時間です。エージェントが動いていた時間ではありません'],
+  my_work_just_started: ['Just started', '始まったばかり'],
+  my_work_elapsed_m: ['{m}m', '{m} 分'],
+  my_work_elapsed_hm: ['{h}h {m}m', '{h} 時間 {m} 分'],
+  my_work_elapsed_dh: ['{d}d {h}h', '{d} 日 {h} 時間'],
+  my_work_not_recorded: ['Not recorded', '記録なし'],
+  my_work_to_timeline: ['Timeline →', 'タイムライン →'],
+  my_work_updates_ready: ['New work updates are ready.', '新しい作業の更新があります。'],
+  my_work_place_saved: ['Your place is saved.', '表示位置はそのままです。'],
+  my_work_show_updates: ['Show updates', '更新を表示'],
+  my_work_applied: ['New work updates applied.', '新しい作業の更新を表示しました。'],
 };
 
 const stored = recall('oboete-lang', '');
@@ -2074,6 +2187,8 @@ function applyLanguage() {
     $('heading').textContent = t('timeline');
     updateFeedState(feed);
   }
+  // My Work's heading before its first read, which the page opens on.
+  if (view === 'my_work' && mw.rows === null) $('heading').textContent = t('my_work');
 }
 
 function labelRepo(option) {
@@ -5729,8 +5844,598 @@ function drawIn(panel) {
   $('heading').lang = lang;
 }
 
+// --- My Work (parity row X10, docs/my-work.md): the requests and where they stand ----------
+// claude-mem 15.0.1's work view (`plugin/ui/work-view`) on the page: the API gives the requests
+// of all recorded work (`GET /api/my-work?range=all`), and the page scopes, sorts and draws them
+// as claude-mem's page draws its snapshot. A request opens within the page, and its back button
+// returns the focus to what opened it: the address holds the token (decision 55).
+
+// claude-mem's status tabs (`app.js` `labels`): the first six always, the rest with a count.
+const MY_WORK_TABS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked', 'blocked', 'todo', 'unknown', 'closed', 'other'];
+const MY_WORK_ALWAYS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked'];
+// `presentation.js` `attention`; a status it does not name ranks with `unknown`.
+const MY_WORK_ATTENTION = { needs: 0, blocked: 1, ready: 2, working: 3, quiet: 4, todo: 5, unknown: 6, closed: 7, checked: 8 };
+const MY_WORK_LAYOUTS = ['cards', 'list', 'agents'];
+const MY_WORK_NEEDS = ['needs-you', 'needs-input', 'waiting-on-user', 'awaiting-approval', 'needs-approval'];
+const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
+// The answer and the page's place in it. The filters live in the page, as claude-mem's live in
+// its address; the layout is remembered.
+const mw = {
+  rows: null, unlinked: 0, signature: '', fetched: 0, pending: null, slot: null, results: null,
+  layout: MY_WORK_LAYOUTS.includes(recall('oboete-my-work-layout', 'cards')) ? recall('oboete-my-work-layout', 'cards') : 'cards',
+  filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
+  agent: null, request: null, work: null, back: null,
+};
+
+const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
+const myWorkFlat = (text) => String(text ?? '').replace(/\s+/g, ' ').trim();
+
+// claude-mem's `cleanText` cut: at most `max` characters, at a space past two thirds of them.
+function myWorkClip(text, max) {
+  const flat = myWorkFlat(text);
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${cut.slice(0, space > max * 0.65 ? space : max - 1).replace(/[,:;\-\s]+$/, '')}…`;
+}
+
+// An agent as the page names it elsewhere (Claude Code, Codex, Grok), else as recorded.
+function myWorkAgent(name) {
+  const key = `agent_inventory_agent_${name}`;
+  return Object.hasOwn(TEXT, key) ? t(key) : String(name ?? '');
+}
+
+// `presentation.js`: the summary, else the newest recorded update, else the ask, else a line.
+function myWorkActivity(row) {
+  return row.summary || row.updates?.[0]?.text || myWorkClip(row.ask?.text, 300) || t('my_work_no_progress');
+}
+
+// `presentation.js`: the recorded next step, else a line for the status.
+function myWorkNext(row) {
+  if (row.next) return row.next;
+  return t(row.status === 'ready' ? 'my_work_next_ready' : row.status === 'needs' ? 'my_work_next_needs' : 'my_work_next_other');
+}
+
+// `request-views.js` `nextCopy`: the next step where it says more than the summary.
+function myWorkNextLine(row) {
+  const next = myWorkFlat(myWorkNext(row));
+  if (!next || next === myWorkFlat(myWorkActivity(row))) return null;
+  const label = row.status === 'needs' ? 'my_work_status_needs' : row.status === 'ready' ? 'my_work_status_ready' : 'my_work_next_step';
+  return { label, text: next };
+}
+
+const myWorkOpenLabel = (status) => (status === 'ready' ? 'my_work_open_review' : status === 'needs' ? 'my_work_open_handoff' : 'my_work_open_request');
+const myWorkProjects = (row) => [...new Set((row.projects || []).map((p) => String(p).split('/')[0]).filter(Boolean))].join(' · ');
+
+// `view-model.js` `relativeTime`.
+function myWorkAgo(ms, now = Date.now()) {
+  if (!Number.isFinite(ms) || ms <= 0) return t('my_work_no_time');
+  const age = Math.max(0, now - ms);
+  if (age < 60000) return t('my_work_now');
+  if (age < 3600000) return t('my_work_minutes', { n: Math.floor(age / 60000) });
+  if (age < 86400000) return t('my_work_hours', { n: Math.floor(age / 3600000) });
+  if (age < 172800000) return t('my_work_yesterday');
+  return t('my_work_days', { n: Math.floor(age / 86400000) });
+}
+
+function myWorkTime(ms) {
+  const node = el('time', 'my-work-time', myWorkAgo(ms));
+  if (Number.isFinite(ms) && ms > 0) {
+    node.dateTime = new Date(ms).toISOString();
+    node.title = new Date(ms).toLocaleString(lang);
+  }
+  return node;
+}
+
+// `view-model.js` `requestElapsed`, from the original ask.
+function myWorkElapsed(row, now = Date.now()) {
+  if (!Number.isFinite(row.started) || row.started <= 0) return t('my_work_not_recorded');
+  const minutes = Math.max(0, Math.floor((now - row.started) / 60000));
+  if (minutes < 1) return t('my_work_just_started');
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor(minutes / 60) % 24;
+  if (days) return t('my_work_elapsed_dh', { d: days, h: hours });
+  return hours ? t('my_work_elapsed_hm', { h: hours, m: minutes % 60 }) : t('my_work_elapsed_m', { m: minutes });
+}
+
+// `request-views.js` `badge`: `!` for needs, `✓` for ready.
+function myWorkBadge(status) {
+  const key = Object.hasOwn(TEXT, `my_work_status_${status}`) ? `my_work_status_${status}` : 'my_work_status_unknown';
+  const glyph = status === 'needs' ? '!' : ['ready', 'checked'].includes(status) ? '✓' : '';
+  const icon = glyph ? el('span', 'my-work-glyph', glyph) : null;
+  icon?.setAttribute('aria-hidden', 'true');
+  return el('span', `badge my-work-badge my-work-${status}`, icon, word('span', null, key));
+}
+
+// `request-views.js` `contributors`: one name an agent, with how many of its conversations.
+function myWorkContributors(row) {
+  const counts = new Map();
+  for (const s of row.sessions || []) counts.set(s.agent, (counts.get(s.agent) || 0) + 1);
+  if (!counts.size) return word('span', 'my-work-contributor muted', 'my_work_no_contributor');
+  return el('span', 'my-work-contributors', ...[...counts].map(([agent, n]) =>
+    el('span', 'my-work-contributor', myWorkAgent(agent), n > 1 ? t('my_work_contributors_more', { n }) : null)));
+}
+
+// A request's open button, found again after a redraw by its id.
+function myWorkOpener(cls, row, label) {
+  const button = el('button', cls, label);
+  button.type = 'button';
+  button.dataset.id = row.id;
+  button.addEventListener('click', () => myWorkOpen(row.id));
+  return button;
+}
+
+// `request-views.js` `requestCards`: the title opens the request, and the whole card with it.
+function myWorkCard(row) {
+  const next = myWorkNextLine(row);
+  const card = el('article', `my-work-card my-work-status-${row.status}`,
+    el('div', 'my-work-card-meta', myWorkBadge(row.status), myWorkTime(row.updated)),
+    el('h3', 'my-work-title', myWorkOpener('my-work-open', row, row.title)),
+    el('p', 'my-work-summary', myWorkActivity(row)),
+    row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
+    el('div', 'my-work-context', myWorkContributors(row), el('span', 'my-work-project', myWorkProjects(row))),
+    el('div', next ? 'my-work-footer' : 'my-work-footer no-next',
+      next ? el('div', 'my-work-next', word('span', 'my-work-next-label', next.label), el('p', null, next.text)) : null,
+      word('span', 'my-work-open-label', myWorkOpenLabel(row.status))));
+  card.dataset.id = row.id;
+  return card;
+}
+
+function myWorkCell(label, ...children) {
+  const cell = el('td', null, ...children);
+  cell.dataset.label = t(label);
+  return cell;
+}
+
+// `request-views.js` `requestList`.
+function myWorkTable(rows) {
+  const heads = ['my_work_col_status', 'my_work_col_request', 'my_work_col_next', 'my_work_col_updated'].map((key) => word('th', null, key));
+  heads.push(el('th', null, word('span', 'sr-only', 'my_work_open_request')));
+  for (const th of heads) th.scope = 'col';
+  const body = rows.map((row) => {
+    const arrow = myWorkOpener('quiet small my-work-row-open', row, '→');
+    arrow.setAttribute('aria-label', t('my_work_open_label', { title: row.title }));
+    const tr = el('tr', 'my-work-row',
+      myWorkCell('my_work_col_status', myWorkBadge(row.status)),
+      myWorkCell('my_work_col_request', myWorkOpener('my-work-row-title', row, row.title), el('p', 'my-work-project', myWorkProjects(row))),
+      myWorkCell('my_work_col_next', el('p', 'my-work-next-copy', myWorkNextLine(row)?.text || myWorkActivity(row)),
+        row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null),
+      myWorkCell('my_work_col_updated', myWorkTime(row.updated)),
+      el('td', 'my-work-row-arrow', arrow));
+    tr.dataset.id = row.id;
+    return tr;
+  });
+  const table = el('table', 'my-work-table', el('thead', null, el('tr', null, ...heads)), el('tbody', null, ...body));
+  table.setAttribute('aria-label', t('my_work_table'));
+  return el('div', 'table-scroll', table);
+}
+
+// `request-views.js` `agentCards`: one card a conversation (decision 55), in the order of the
+// visible requests; choosing one shows its requests.
+function myWorkAgents(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    for (const session of row.sessions || []) {
+      if (!groups.has(session.id)) groups.set(session.id, { session, requests: [] });
+      groups.get(session.id).requests.push(row);
+    }
+  }
+  if (!groups.size) return myWorkEmpty('my_work_no_agents', 'my_work_no_agents_body');
+  return el('div', 'my-work-agents', ...[...groups.values()].map(({ session, requests }) => {
+    const latest = [...requests].sort((a, b) => b.updated - a.updated)[0];
+    const label = myWorkAgent(session.agent);
+    const avatar = el('span', 'my-work-avatar', label.slice(0, 1).toUpperCase() || '?');
+    avatar.setAttribute('aria-hidden', 'true');
+    const open = el('button', 'my-work-open', label);
+    open.type = 'button';
+    open.dataset.session = session.id;
+    open.addEventListener('click', () => {
+      mw.agent = session.id;
+      myWorkDraw('agents');
+    });
+    const count = requests.length === 1 ? 'my_work_agent_count_one' : 'my_work_agent_count';
+    const card = el('article', 'my-work-card my-work-agent',
+      el('div', 'my-work-agent-top', avatar,
+        el('div', 'my-work-agent-identity', el('h3', 'my-work-title', open), word('p', 'my-work-agent-role', 'my_work_agent_role')),
+        myWorkTime(latest.updated)),
+      myWorkBadge(latest.status),
+      el('p', 'my-work-agent-summary', latest.title),
+      el('div', 'my-work-agent-requests', ...requests.slice(0, 2).map((row) => el('p', null, myWorkActivity(row)))),
+      el('div', 'my-work-footer', word('span', null, count, { n: requests.length }), word('span', 'my-work-open-label', 'my_work_agent_view')));
+    card.dataset.session = session.id;
+    return card;
+  }));
+}
+
+function myWorkEmpty(title, body, timeline = false) {
+  return el('div', 'my-work-empty', word('h3', null, title), word('p', null, body), timeline ? myWorkTimeline() : null);
+}
+
+function myWorkTimeline(key = 'my_work_to_timeline') {
+  const button = word('button', 'quiet small my-work-link', key);
+  button.type = 'button';
+  button.addEventListener('click', () => {
+    setView('timeline');
+    void show();
+  });
+  return button;
+}
+
+const myWorkSearchText = (row) => [row.title, myWorkActivity(row), ...(row.sessions || []).map((s) => myWorkAgent(s.agent)),
+  ...(row.projects || [])].join(' ').toLowerCase();
+
+// `presentation.js` `scopeWork`, then the conversation the agent view chose (`scopedRows`).
+function myWorkScoped(now = Date.now()) {
+  const since = mw.range === 'day' ? now - 86400000 : mw.range === 'week' ? now - 7 * 86400000 : 0;
+  const query = mw.query.trim().toLowerCase();
+  return (mw.rows || []).filter((row) => row.updated >= since
+    && (!mw.project || (row.projects || []).includes(mw.project))
+    && (!query || myWorkSearchText(row).includes(query))
+    && (!mw.agent || (row.sessions || []).some((s) => s.id === mw.agent)));
+}
+
+// `presentation.js` `sortWork`.
+function myWorkSorted(rows) {
+  return [...rows].sort((a, b) => {
+    const title = () => myWorkTitles.compare(a.title, b.title) || String(a.id).localeCompare(String(b.id));
+    if (mw.sort === 'title') return title();
+    const rank = mw.sort === 'attention' ? (MY_WORK_ATTENTION[a.status] ?? 6) - (MY_WORK_ATTENTION[b.status] ?? 6) : 0;
+    const at = Number.isFinite(a.updated) && a.updated > 0 ? a.updated : 0;
+    const bt = Number.isFinite(b.updated) && b.updated > 0 ? b.updated : 0;
+    const time = !at || !bt ? (at ? -1 : bt ? 1 : 0) : mw.sort === 'oldest' ? at - bt : bt - at;
+    return rank || time || title();
+  });
+}
+
+// `app.js` `visibleRows`.
+const myWorkVisible = (scoped) => myWorkSorted(scoped.filter((row) => mw.filter === 'all'
+  || (mw.filter === 'other' ? myWorkCategory(row.status) === 'other' : row.status === mw.filter)));
+
+// `app.js` `render`'s tabs: the counts are of the scoped requests, before the tab's own filter.
+function myWorkTabs(scoped) {
+  const counts = Object.fromEntries(MY_WORK_TABS.map((key) => [key, key === 'all' ? scoped.length : 0]));
+  for (const row of scoped) {
+    counts[MY_WORK_TABS.includes(row.status) ? row.status : 'unknown']++;
+    if (myWorkCategory(row.status) === 'other') counts.other++;
+  }
+  const shown = MY_WORK_TABS.filter((key) => MY_WORK_ALWAYS.includes(key) || key === mw.filter || (key !== 'other' && counts[key]));
+  const nav = el('nav', 'my-work-tabs', ...shown.map((key) => {
+    const button = el('button', 'tab my-work-tab', word('span', null, `my_work_status_${key}`), el('span', 'my-work-count', String(counts[key])));
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(mw.filter === key));
+    button.dataset.myWork = `tab:${key}`;
+    button.addEventListener('click', () => {
+      mw.filter = key;
+      myWorkDraw(`tab:${key}`);
+    });
+    return button;
+  }));
+  nav.setAttribute('aria-label', t('my_work_filter_label'));
+  return nav;
+}
+
+function myWorkSelect(name, label, options, value, set) {
+  const select = el('select', `my-work-${name}`, ...options.map(([v, text]) => {
+    const option = el('option', null, text);
+    option.value = v;
+    option.selected = v === value;
+    return option;
+  }));
+  select.value = value;
+  select.setAttribute('aria-label', t(label));
+  select.dataset.myWork = name;
+  select.addEventListener('change', () => {
+    set(select.value);
+    myWorkDraw(name);
+  });
+  return select;
+}
+
+// The view switch and the toolbar (`index.html`'s `view-switch` and `personal-toolbar`).
+function myWorkControls() {
+  const switches = el('div', 'my-work-switch', ...MY_WORK_LAYOUTS.map((layout) => {
+    const button = word('button', 'quiet', `my_work_${layout}`);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(mw.layout === layout));
+    button.dataset.myWork = `view:${layout}`;
+    button.addEventListener('click', () => {
+      mw.layout = layout;
+      mw.agent = null;
+      remember('oboete-my-work-layout', layout);
+      myWorkDraw(`view:${layout}`);
+    });
+    return button;
+  }));
+  switches.setAttribute('role', 'group');
+  switches.setAttribute('aria-label', t('my_work_view_group'));
+  const search = el('input', 'my-work-search');
+  search.type = 'search';
+  search.autocomplete = 'off';
+  search.value = mw.query;
+  search.placeholder = t('my_work_search_placeholder');
+  search.setAttribute('aria-label', t('my_work_search_label'));
+  search.dataset.myWork = 'search';
+  search.addEventListener('input', () => {
+    mw.query = search.value;
+    myWorkResults();
+  });
+  // Every project of every request, before any filter (`app.js` `render`).
+  const projects = [...new Set((mw.rows || []).flatMap((row) => row.projects || []).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  if (mw.project && !projects.includes(mw.project)) mw.project = '';
+  const toolbar = el('div', 'my-work-toolbar', search,
+    myWorkSelect('project', 'my_work_project_label', [['', t('my_work_all_projects')], ...projects.map((p) => [p, p])], mw.project, (v) => { mw.project = v; }),
+    myWorkSelect('range', 'my_work_range_label', ['day', 'week', 'all'].map((r) => [r, t(`my_work_range_${r}`)]), mw.range, (v) => { mw.range = v; }),
+    myWorkSelect('sort', 'my_work_sort_label', ['attention', 'latest', 'oldest', 'title'].map((s) => [s, t(`my_work_sort_${s}`)]), mw.sort, (v) => { mw.sort = v; }));
+  toolbar.setAttribute('role', 'search');
+  return [switches, toolbar];
+}
+
+// Where new data waits while a person reads (`app.js` `apply`): kept across redraws.
+function myWorkSlot() {
+  mw.slot = el('div', 'my-work-updates');
+  if (mw.pending) myWorkBanner();
+  return mw.slot;
+}
+
+function myWorkBanner() {
+  const apply = word('button', 'small', 'my_work_show_updates');
+  apply.type = 'button';
+  apply.addEventListener('click', () => {
+    if (!mw.pending) return;
+    myWorkAccept(mw.pending);
+    myWorkDraw('current');
+    setStatus(t('my_work_applied'), false, lang);
+  });
+  mw.slot.replaceChildren(el('div', 'my-work-banner',
+    el('span', null, word('strong', null, 'my_work_updates_ready'), ' ', word('span', null, 'my_work_place_saved')), apply));
+}
+
+function myWorkDraw(focus = null) {
+  if (mw.request !== null) {
+    myWorkDrawRequest();
+    myWorkFocus(focus);
+    return;
+  }
+  const [switches, toolbar] = myWorkControls();
+  mw.results = el('div', 'my-work-results');
+  myWorkResults();
+  draw(word('span', null, 'my_work'), [], [
+    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle')),
+    switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
+  ]);
+  setStatus('');
+  myWorkFocus(focus);
+}
+
+// The tabs, the requests and the notes below the toolbar, drawn again alone as a person types in
+// the search field, which stays: an IME's text being composed in it is not cut off.
+function myWorkResults() {
+  const scoped = myWorkScoped();
+  const rows = myWorkVisible(scoped);
+  let trail = null;
+  if (mw.agent) {
+    const session = (mw.rows || []).flatMap((row) => row.sessions || []).find((s) => s.id === mw.agent);
+    const back = word('button', 'quiet small my-work-back', 'my_work_all_agents');
+    back.type = 'button';
+    back.dataset.myWork = 'all-agents';
+    back.addEventListener('click', () => {
+      mw.agent = null;
+      myWorkDraw('view:agents');
+    });
+    trail = el('div', 'my-work-trail', back, el('span', null, session ? myWorkAgent(session.agent) : t('my_work_contributor')));
+  }
+  const body = !rows.length
+    ? (mw.query.trim() ? myWorkEmpty('my_work_no_match', 'my_work_no_match_body') : myWorkEmpty('my_work_empty', 'my_work_empty_body', true))
+    : mw.layout === 'list' ? myWorkTable(rows)
+      : mw.layout === 'agents' && !mw.agent ? myWorkAgents(rows)
+        : el('div', 'my-work-grid', ...rows.map(myWorkCard));
+  const heading = word('h3', 'my-work-heading', mw.filter === 'all' ? 'my_work_all_work' : `my_work_status_${mw.filter}`);
+  heading.tabIndex = -1;
+  const unlinked = mw.unlinked ? el('details', 'my-work-unlinked', word('summary', null, 'my_work_unlinked', { n: mw.unlinked }),
+    el('div', null, word('p', null, 'my_work_unlinked_body'), myWorkTimeline('my_work_unlinked_link'))) : null;
+  mw.results.replaceChildren(...present([myWorkTabs(scoped), myWorkSlot(), trail,
+    el('section', 'my-work-section',
+      el('div', 'sr-only', heading, word('span', null, rows.length === 1 ? 'my_work_count_one' : 'my_work_count', { n: rows.length })),
+      body, unlinked)]));
+}
+
+// A redraw replaces the controls: the one in use takes the focus back (`app.js`'s handlers).
+function myWorkFocus(focus) {
+  if (!focus) return;
+  const panel = $('panel');
+  if (focus === 'heading' || (focus === 'current' && mw.request !== null)) {
+    $('heading').tabIndex = -1;
+    $('heading').focus({ preventScroll: true });
+    return;
+  }
+  const nodes = [...panel.querySelectorAll('input, select, button, h3')];
+  const found = focus === 'current' || focus === 'agents' ? nodes.find((node) => node.className === 'my-work-heading')
+    : nodes.find((node) => node.dataset.myWork === focus);
+  if (!found) return;
+  found.focus({ preventScroll: true });
+}
+
+function myWorkOpen(id) {
+  mw.back = { id, scroll: window.scrollY || 0 };
+  mw.request = id;
+  mw.work = null;
+  myWorkDraw('heading');
+  window.scrollTo?.(0, 0);
+}
+
+// The button that opened what the page closes, by its `data-` key and value.
+function myWorkOpenerOf(key, value) {
+  return [...$('panel').querySelectorAll('button')].find((node) => node.dataset[key] === value);
+}
+
+function myWorkClose() {
+  const back = mw.back;
+  mw.request = null;
+  mw.work = null;
+  mw.back = null;
+  myWorkDraw();
+  const opener = back && myWorkOpenerOf('id', back.id);
+  if (opener) opener.focus({ preventScroll: true });
+  else myWorkFocus('current');
+  window.scrollTo?.(0, back?.scroll || 0);
+}
+
+function myWorkFact(term, ...value) {
+  return el('div', null, word('dt', null, term), el('dd', null, ...value));
+}
+
+// `view-model.js` `statusFor` over a work stream's items, as the page names its statuses.
+function myWorkStreamStatus(items, now = Date.now()) {
+  const states = items.map((w) => {
+    const s = String(w.status || '').trim().toLowerCase().replace(/[_ ]/g, '-');
+    return MY_WORK_NEEDS.includes(s) ? 'needs-you' : s;
+  });
+  if (states.includes('needs-you')) return 'needs';
+  if (states.some((s) => ['blocked', 'failed'].includes(s))) return 'blocked';
+  if (items.length && states.every((s) => ['done', 'completed'].includes(s))) return 'ready';
+  if (items.length && states.every((s) => s === 'dropped')) return 'closed';
+  if (now - Math.max(0, ...items.map((w) => w.updated || 0)) > 6 * 3600000) return 'quiet';
+  if (states.some((s) => ['doing', 'in-progress', 'active', 'running'].includes(s))) return 'working';
+  if (states.some((s) => ['todo', 'planned', 'queued'].includes(s))) return 'todo';
+  return 'unknown';
+}
+
+// The request's work by repository and list, claude-mem's work streams (`listId`, a project's
+// list): its newest change is its summary.
+function myWorkStreams(row) {
+  const lists = new Map();
+  for (const item of row.work || []) {
+    const id = JSON.stringify([item.repo ?? null, item.list]);
+    if (!lists.has(id)) lists.set(id, []);
+    lists.get(id).push(item);
+  }
+  return [...lists].map(([id, items]) => {
+    const newest = [...items].sort((a, b) => b.updated - a.updated);
+    const latest = newest[0];
+    return { id, list: latest.list, items: newest, status: myWorkStreamStatus(items),
+      summary: latest.detail || latest.task || latest.list || null };
+  });
+}
+
+// `request-views.js` `requestPage` and `workstreamPage`, without the rows oboete does not
+// record (decision 55).
+function myWorkDrawRequest() {
+  const row = (mw.rows || []).find((r) => r.id === mw.request);
+  const stream = row && mw.work !== null ? myWorkStreams(row).find((s) => s.id === mw.work) : null;
+  const back = word('button', 'quiet small my-work-back', stream ? 'my_work_back_request' : 'my_work_back');
+  back.type = 'button';
+  back.addEventListener('click', () => {
+    if (!stream) return myWorkClose();
+    mw.work = null;
+    myWorkDraw();
+    const opener = myWorkOpenerOf('stream', stream.id);
+    if (opener) opener.focus({ preventScroll: true });
+    else myWorkFocus('heading');
+  });
+  if (!row) {
+    draw(word('span', null, 'my_work'), [], [back, myWorkSlot(), myWorkEmpty('my_work_missing', 'my_work_missing_body')]);
+    return setStatus('');
+  }
+  if (stream) {
+    const changes = stream.items.map((item) => {
+      const title = item.task || item.list;
+      return el('li', null, el('div', 'meta', localTime(item.updated, lang), word('span', null, 'my_work_work_update')),
+        el('p', null, title), item.detail && item.detail !== title ? el('p', 'my-work-detail', item.detail) : null);
+    });
+    draw(stream.list || t('my_work_supporting'), [], [back, myWorkSlot(),
+      el('div', 'my-work-request-meta', myWorkBadge(stream.status)),
+      el('p', 'my-work-intro-text', stream.summary || t('my_work_no_detail')),
+      el('section', 'my-work-changes', word('h3', null, 'my_work_changes'),
+        changes.length ? el('ul', 'my-work-change-list', ...changes) : word('p', 'text pending', 'my_work_no_changes')),
+    ]);
+    return setStatus('');
+  }
+  const next = myWorkNextLine(row);
+  const elapsed = el('span', null, myWorkElapsed(row));
+  elapsed.title = t('my_work_elapsed_title');
+  const streams = myWorkStreams(row).map((s) => {
+    const open = el('button', 'my-work-open', s.list || t('my_work_supporting'));
+    open.type = 'button';
+    open.dataset.stream = s.id;
+    open.addEventListener('click', () => {
+      mw.work = s.id;
+      myWorkDraw('heading');
+    });
+    return el('article', 'my-work-stream', el('div', 'my-work-stream-text', el('h4', 'my-work-title', open),
+      el('p', null, s.summary || t('my_work_no_detail'))), myWorkBadge(s.status));
+  });
+  // The IDs `get` takes, folded with their count: each opens its full text.
+  const ids = (key, list) => (list?.length ? el('details', 'my-work-recorded', el('summary', null, `${t(key)} (${list.length})`),
+    el('ul', 'my-work-ids', ...list.map((id) => el('li', null, fullText(id, id))))) : null);
+  draw(row.title, [], [back, myWorkSlot(),
+    el('div', 'my-work-request-meta', myWorkBadge(row.status), el('span', 'my-work-project', myWorkProjects(row)), myWorkTime(row.updated)),
+    el('dl', 'my-work-facts', myWorkFact('my_work_contributors', myWorkContributors(row)),
+      myWorkFact('my_work_started', row.started > 0 ? localTime(row.started, lang) : t('my_work_not_recorded')),
+      myWorkFact('my_work_elapsed', elapsed)),
+    el('section', 'my-work-stands', word('h3', null, 'my_work_stands'), el('p', null, myWorkActivity(row)),
+      row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
+      el('p', 'my-work-request-next', el('strong', null, `${t(next?.label || 'my_work_next_step')}:`), ' ', next?.text || myWorkNext(row)),
+      el('details', 'my-work-original', word('summary', null, 'my_work_original'),
+        el('div', null, el('p', 'text', row.ask?.text ?? ''), row.ask?.id ? fullText(row.ask.id, word('span', null, 'my_work_read_original')) : null))),
+    el('section', 'my-work-streams', word('h3', null, 'my_work_streams'),
+      streams.length ? el('div', 'my-work-stream-list', ...streams) : word('p', 'text pending', 'my_work_no_streams')),
+    row.follow_ups?.length ? el('details', 'my-work-original', word('summary', null, 'my_work_follow_ups'),
+      el('div', null, ...row.follow_ups.flatMap((f) => [el('p', 'text', f.text ?? ''), fullText(f.id)]))) : null,
+    ids('my_work_result', row.summaries), ids('my_work_cards_heading', row.cards),
+    el('div', 'my-work-actions', myWorkTimeline()),
+  ]);
+  setStatus('');
+}
+
+function myWorkAccept(answer) {
+  mw.rows = answer.requests;
+  mw.unlinked = answer.unlinked;
+  mw.signature = JSON.stringify([answer.requests, answer.unlinked]);
+  mw.fetched = Date.now();
+  mw.pending = null;
+}
+
+// `app.js` `isReading`: a request open, the page scrolled, or the focus on My Work's controls.
+function myWorkReading() {
+  if (mw.request !== null || (window.scrollY || 0) > 220) return true;
+  const active = document.activeElement;
+  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents']
+    .some((selector) => active?.closest?.(selector));
+}
+
+// A poll's read (`refresh`): unchanged, nothing; changed while a person reads, held behind
+// "Show updates", which never applies itself when the reading ends (`app.js` `apply`). A read a
+// newer drawing overtook (`show`) draws nothing.
+async function myWorkLive() {
+  const mine = generation;
+  const answer = await api('my-work', { range: 'all' });
+  if (mine !== generation || view !== 'my_work') return true;
+  mw.fetched = Date.now();
+  const signature = JSON.stringify([answer.requests, answer.unlinked]);
+  if (signature === mw.signature) return true;
+  if (myWorkReading()) {
+    // The last answer received, as claude-mem's `accept` keeps it: the same answer again stays
+    // held, and one like the shown one replaces it.
+    mw.signature = signature;
+    mw.pending = answer;
+    if (mw.slot) myWorkBanner();
+    return true;
+  }
+  myWorkAccept(answer);
+  myWorkDraw();
+  return true;
+}
+
+async function showMyWork() {
+  const answer = await api('my-work', { range: 'all' });
+  return () => {
+    myWorkAccept(answer);
+    myWorkDraw();
+  };
+}
+
 const LOADERS = new Map([
-  ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
+  ['my_work', showMyWork], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
@@ -5753,7 +6458,7 @@ async function show() {
   }
   setStatus(t('loading'));
   try {
-    const search = q && view !== 'settings';
+    const search = q && !['settings', 'my_work'].includes(view);
     const render = search ? await showSearch(repo, q) : await LOADERS.get(view)(repo);
     if (mine !== generation) return false;
     render();
@@ -5803,6 +6508,8 @@ async function refresh(live, selectedRepo) {
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
   if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
+  // A poll never redraws My Work under a reader (`myWorkLive`).
+  if (live && view === 'my_work' && mw.rows) return myWorkLive();
   return show();
 }
 
@@ -5828,8 +6535,11 @@ async function poll() {
     // Either language's, as the page may have switched since (Codex on #373).
     if (pollFailureNotice?.isConnected || TEXT.unreachable.includes($('status').textContent)) setStatus('');
     const changed = version === null ? drawnWithoutBaseline : v !== version;
-    // Provider calls and tool records do not move v, so Stats also follows each poll.
-    const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())));
+    // Provider calls and tool records do not move v, so Stats also follows each poll, and My Work
+    // reads again each minute: its statuses age, and a write's link to its session comes later
+    // (claude-mem ages its requests each minute).
+    const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())
+      || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;

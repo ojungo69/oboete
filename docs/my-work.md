@@ -78,7 +78,7 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   refuses with 409 a stale one, and a check of a request not reported complete.
 - **Updates**: the page gets a new snapshot when the database changes (server-sent events, polled
   each second on the worker side); while a person reads, scrolls or uses a control, new data waits
-  behind "Show updates", and applied cards keep their order.
+  behind "Show updates", and the page sorts the cards again each time it draws them (`sortWork`).
 - Not part of the parity: TeamBrain (paid team sharing) and the "Connect Claude.ai / ChatGPT" links
   to claude-mem's cloud.
 
@@ -142,7 +142,7 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    recorded request, else the original ask's first sentence, as the title; the newest recorded
    update (a work item's outcome, else its progress, else its name; a card's subtitle, else its
    title), else the original ask, as the summary; the newest recorded next step (a work item's
-   `next_step`), else a line for its status.
+   `next_step`), else, on the page, a line for its status (the answer's `next` is then null).
    There is no stage and no per-stream copy, which claude-mem writes only with a model either.
    Issue #570's measurement before turning summaries on is then zero added calls; that is stated,
    not assumed: the slice's test counts the provider calls a My Work read makes (none).
@@ -168,7 +168,7 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    with the original ask, the follow-ups, the summaries (the result), the linked work's changes and
    the cards, each named by the ID `get` takes, and "Copy handoff" in the page's language
    (decision 55). New data waits behind "Show updates" while a person reads, scrolls or uses a
-   control, and applied cards keep their order. Labels in Japanese and English.
+   control, and the page sorts the cards again as it draws them. Labels in Japanese and English.
 8. **Imported claude-mem history** stays out: its sessions end before the switch (2026-10-15), past
    claude-mem's own default ranges, and claude-mem's My Work shows them where they were written.
 
@@ -364,6 +364,9 @@ them; nothing else in it changes.
 - **`work[].detail`**: each work item's outcome, else its progress, cut to 240 characters as the
   summary is; none when it has neither, a next step alone too. It is the recorded change that
   claude-mem's page of a work stream lists.
+- **`work[].repo`**: each work item's repository as `repos` names it, so that the page keeps two
+  lists of one name in two repositories apart, as claude-mem's work stream is a project's list
+  (`listId`).
 - **`sessions`**: the conversations the request owns (decision 55), each as `agent`, `id` and
   `fingerprint`. They come the newest first, each dated by its own records of the ones the
   request's `updated` counts: a summary, a card, a prompt of a conversation the request owns whole,
@@ -380,4 +383,53 @@ them; nothing else in it changes.
   beside its key (`Work::text`), a name beside its key, a card's text by its reader. Updates that
   the gate masks alike are one text, shown once.
 - **The answer** of a request gains `updates` (each `ts` and `text`), `sessions` (each `agent` and
-  `id`) and each work item's `detail`.
+  `id`) and each work item's `detail` and `repo`.
+- **A conversation known only by its work** (#596): its prompts private, expired or forgotten, or
+  none recorded, it is still the one its writes came from, as claude-mem credits a request to the
+  session of the call that wrote it. The request its work makes names it in `sessions`, dated by
+  its writes, and its agent in `agents`; its item with no `request_id` stays unlinked.
+
+### Slice 2, the page (2026-10-24)
+
+- **The tab**: My Work is the first tab. The page opens on it the first time (`oboete-tab`), then
+  on the tab last used (decision 55). Its search and filters are its own, and the page's global
+  search row is hidden on it. The page and its header widen on it, as claude-mem's view is wide.
+- **The read**: the page reads `GET /api/my-work?range=all` when it opens and filters on its own,
+  as claude-mem's page filters its snapshot. It reads again when the store's version moves, and
+  once a minute, since statuses age and a write's link to its session can come after its op
+  (claude-mem ages its requests each minute).
+- **The views** (claude-mem's `request-views.js`):
+  - Cards: the status, the time, the title, the summary, "Summary updating", the contributors
+    and the projects, the next step where it says more than the summary, and the open label by
+    status.
+  - A list: the status, the request, the next step or outcome, and the last update.
+  - By agent, one card a conversation (decision 55): its agent's name and first letter, its
+    latest request's status and title, two requests' summaries and how many it has. Choosing one
+    shows its requests, with "← All agents".
+  - Each time they are drawn, the requests are sorted as claude-mem sorts them: attention first
+    by default, latest, oldest, or A to Z.
+- **The filters**: search (one substring of the title, the summary, the agents' names and the
+  projects; typing redraws the requests but not the field, so an IME's text being composed in it
+  is not cut off), the project (every project of every request), the time range (24 hours by default,
+  7 days, all) and the status tabs. A tab counts the requests in scope before its own filter;
+  the six that claude-mem always shows are always there, and Blocked, To do, Update recorded and
+  Closed only while they count one.
+- **The request page** (decision 55):
+  - The facts (contributors, started, elapsed); where it stands (the summary, the next step, and
+    the original request with its full text); the work behind it by repository and list, each
+    list's status by claude-mem's `statusFor`, its newest change as its summary, and a page of its
+    recorded changes; the follow-ups; the recorded result and cards, their IDs folded with their
+    count, each opening its full text; and the Timeline.
+  - A back button returns the focus to the card or row that opened the page, and from a list's
+    page to that list's button.
+  - No rows for what oboete does not record (stage, ship estimate, who requested it, after ship,
+    time to completion).
+- **New data while a person reads**: with a request open, the page scrolled past 220 px, or the
+  focus on My Work's controls, cards or list, a new answer waits behind "New work updates are
+  ready" and "Show updates", which never applies itself (claude-mem's `isReading` and
+  `apply`). Otherwise it is drawn at once, and an unchanged answer draws nothing. What is held is
+  the last answer received, as claude-mem's `accept` keeps it: the same answer again stays held
+  when the reading ends, and one like the shown one replaces it. A read that a newer drawing of
+  the page overtook draws nothing.
+- **Not yet**: Copy handoff, the "New update" mark and the flash of a changed card, and the
+  times rewritten between reads come with slice 2's last PR; Checked with slice 3.
