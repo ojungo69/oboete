@@ -2187,8 +2187,8 @@ pub(crate) fn sweep_scratch(root: &Path, now: SystemTime) -> usize {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let holds = name.starts_with(HELD_PREFIX);
-        if (holds || name.starts_with(AGED_PREFIX))
+        let holds = ours(name, HELD_PREFIX);
+        if (holds || ours(name, AGED_PREFIX))
             && std::fs::symlink_metadata(&path).is_ok_and(|m| ended(&path, &m, holds, now))
             && std::fs::remove_dir_all(&path).is_ok()
         {
@@ -2196,6 +2196,24 @@ pub(crate) fn sweep_scratch(root: &Path, now: SystemTime) -> usize {
         }
     }
     removed
+}
+
+/// Whether `name` is `prefix` and the 16 lowercase hex digits `scratch_dir` gives: another
+/// program's directory of a like name is not oboete's to remove (#605).
+fn ours(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|rest| {
+        rest.len() == 16 && rest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// How long a CLI run may take: its timeout, held below the sweep's age when its directory has no
+/// hold, so a sweep that goes by the age never removes it while the run goes on (#605).
+fn run_limit(scratch: &Scratch, timeout_s: u64) -> Duration {
+    let limit = Duration::from_secs(timeout_s);
+    match scratch.1 {
+        Some(_) => limit,
+        None => limit.min(SWEPT_AFTER / 2),
+    }
 }
 
 /// Whether no other user can rename an entry under `root` between a sweep's look and its removal,
@@ -2894,7 +2912,7 @@ fn cli_headless_at(
             cmd.env_remove(key);
         }
     }
-    let (out, ran) = run_cli(cmd, stdin, Duration::from_secs(timeout_s), admission);
+    let (out, ran) = run_cli(cmd, stdin, run_limit(&scratch, timeout_s), admission);
     let stdout = String::from_utf8_lossy(&out);
     // claude's reset holds whatever else fails below, a failed or timed-out run included.
     let rest = if cli == "claude" {
@@ -6980,26 +6998,45 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     fn a_sweep_removes_a_directory_without_a_hold_by_its_age() {
         let root = tempfile::tempdir().unwrap();
         let at = |name: &str| root.path().join(name);
-        std::fs::create_dir(at("oboete-cli-old")).unwrap();
-        std::fs::write(at("oboete-cli-old").join("last.json"), "{}").unwrap();
-        std::fs::write(at("oboete-cli-file"), "").unwrap();
-        std::fs::write(at("oboete-run-file"), "").unwrap();
+        let old = "oboete-cli-00000000000000a1";
+        std::fs::create_dir(at(old)).unwrap();
+        std::fs::write(at(old).join("last.json"), "{}").unwrap();
+        std::fs::write(at("oboete-cli-00000000000000a2"), "").unwrap();
+        std::fs::write(at("oboete-run-00000000000000a3"), "").unwrap();
+        // Another program's of a like name (Node's mkdtemp gives six characters) is not oboete's.
+        for name in [
+            "oboete-cli-a1b2c3",
+            "oboete-cli-00000000000000A1",
+            "oboete-cli-00000000000000a10",
+        ] {
+            std::fs::create_dir(at(name)).unwrap();
+        }
         std::fs::create_dir(at("other-old")).unwrap();
         let named = tempfile::tempdir().unwrap();
         std::fs::write(named.path().join("kept"), "").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(named.path(), at("oboete-run-link")).unwrap();
+        std::os::unix::fs::symlink(named.path(), at("oboete-run-00000000000000a4")).unwrap();
         let now = SystemTime::now();
         assert_eq!(sweep_scratch(root.path(), now), 0);
         let minute = Duration::from_secs(60);
         assert_eq!(sweep_scratch(root.path(), now + SWEPT_AFTER - minute), 0);
-        assert!(at("oboete-cli-old").exists());
+        assert!(at(old).exists());
         assert_eq!(sweep_scratch(root.path(), now + SWEPT_AFTER + minute), 1);
-        assert!(!at("oboete-cli-old").exists());
-        assert!(at("oboete-cli-file").exists() && at("oboete-run-file").exists());
+        assert!(!at(old).exists());
+        assert!(
+            at("oboete-cli-00000000000000a2").exists()
+                && at("oboete-run-00000000000000a3").exists()
+        );
+        for name in [
+            "oboete-cli-a1b2c3",
+            "oboete-cli-00000000000000A1",
+            "oboete-cli-00000000000000a10",
+        ] {
+            assert!(at(name).exists(), "{name}");
+        }
         assert!(at("other-old").exists());
         #[cfg(unix)]
-        assert!(at("oboete-run-link").symlink_metadata().is_ok());
+        assert!(at("oboete-run-00000000000000a4").symlink_metadata().is_ok());
         assert!(named.path().join("kept").exists());
         assert_eq!(sweep_scratch(&at("nothing here"), now + 2 * SWEPT_AFTER), 0);
     }
@@ -7043,7 +7080,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     fn a_sweep_leaves_a_temp_directory_others_can_rename_in() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let old = root.path().join("oboete-cli-old");
+        let old = root.path().join("oboete-cli-00000000000000b1");
         let mode = |m: u32| {
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(m)).unwrap()
         };
@@ -7054,12 +7091,31 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             assert_eq!(sweep_scratch(root.path(), later), removed, "{m:o}");
         }
         mode(0o700);
-        let fifo = root.path().join("oboete-run-fifo");
+        let fifo = root.path().join("oboete-run-00000000000000b2");
         let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: a valid C path and mode.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
         assert!(open_dir(&fifo).is_err());
         assert_eq!(holder(&fifo), None);
+    }
+
+    /// #605: a run whose directory has no hold, which a sweep goes by the age for, is held below that
+    /// age whatever its timeout; a held run keeps its timeout.
+    #[test]
+    fn a_run_without_a_hold_ends_before_the_sweeps_age() {
+        let root = tempfile::tempdir().unwrap();
+        let unheld = Scratch(root.path().join("a"), None);
+        let long = 24 * 60 * 60;
+        assert_eq!(run_limit(&unheld, long), SWEPT_AFTER / 2);
+        assert!(run_limit(&unheld, long) < SWEPT_AFTER);
+        assert_eq!(run_limit(&unheld, 300), Duration::from_secs(300));
+        let dir = root.path().join("b");
+        std::fs::create_dir(&dir).unwrap();
+        let file = std::fs::File::open(&dir).ok();
+        let held = Scratch(dir, file);
+        if held.1.is_some() {
+            assert_eq!(run_limit(&held, long), Duration::from_secs(long));
+        }
     }
 
     /// X11: a run's directory that could take no hold takes the name a sweep goes by the age for,

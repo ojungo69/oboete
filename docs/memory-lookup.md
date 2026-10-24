@@ -3,8 +3,8 @@
 claude-mem 13.35 answers an agent that looks up its own memory, its notes folder or a native
 memory search, with its own search of the same words, beside the native result. Decision 45 puts
 it before the switch. The behaviour of record is claude-mem's
-`src/cli/handlers/memory-search.ts` at v13.39.0 (Apache-2.0; NOTICE); nothing of its code is
-taken. The code is `src/memory_lookup.rs`, run from the prompt hook's `PreToolUse` before the file
+`src/cli/handlers/memory-search.ts` at v13.39.0 (Apache-2.0; NOTICE), and at v15.0.1 for the
+answer since N4; nothing of its code is taken. The code is `src/memory_lookup.rs`, run from the prompt hook's `PreToolUse` before the file
 note (docs/file-note.md).
 
 ## What it does
@@ -24,11 +24,14 @@ note (docs/file-note.md).
 - **Its words**: the query; a grep's or rg's pattern (`-e`/`--regexp` first, none when `-f` names a
   pattern file, an option's value never); a tool's `pattern`; else the file's name, `MEMORY`
   standing for "preferences decisions corrections". At most 500 characters and 1,024 bytes.
-- **The answer**: `mem_search` in auto mode, at most 8 rows, of the checkout's repository
-  (docs/mem-search.md), with the meaning side too when the resident viewer makes the lookup's
+- **The answer**: the index of a search of its words, as claude-mem 15.0's bridge gives (N4): at
+  most 8 rows of the kinds claude-mem calls observations (cards and imported observations) and
+  oboete's claims, the search's own filter, which each leg applies before it takes its depth (a
+  Codex review), by id, title, kind and time, of the checkout's repository
+  (`Search::lookup_index`, docs/mem-search.md), with the meaning side too when the resident viewer makes the lookup's
   query vector within `[inject] per_prompt_wait_ms` (`POST /api/query-vector`, as the prompt asks
   it for its block, G23), else the words side alone: the hook embeds nothing itself and calls no
-  provider (decision 38). Since 2026-10-17 (parity row N5). It comes after claude-mem's sentence (with oboete's name) inside the memory fence,
+  provider (decision 38). Since 2026-10-17 (parity row N5). It comes after claude-mem 15.0's sentences (with oboete's names: go on with timeline around useful ids, then get only for the records chosen) inside the memory fence,
   through the egress gate, the whole within 9,500 UTF-16 units and cut at a line, as the file
   note's room is. It holds no continuation (none would outlive the hook: claude-mem's hook and
   tool share one worker's store) and no muted claim, since it is injected (spec 6.1). When it

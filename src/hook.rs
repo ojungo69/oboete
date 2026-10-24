@@ -4694,10 +4694,10 @@ mod tests {
     }
 
     /// X5 F7: a title cannot close the fence.
-    /// claude-mem 13.35's bridge (docs/memory-lookup.md): a native memory search gets oboete's
-    /// search of it in auto mode, words alone, in the fence after claude-mem's sentence and within
-    /// the note's room, a subagent's too; a call that is no lookup, and any with
-    /// `[inject] memory_lookup = false`, get nothing.
+    /// claude-mem 13.35's bridge (docs/memory-lookup.md): a native memory search gets the index of
+    /// oboete's search of it, as claude-mem 15.0's gives, words alone, in the fence after
+    /// claude-mem's sentences and within the note's room, a subagent's too; a call that is no
+    /// lookup, and any with `[inject] memory_lookup = false`, get nothing.
     #[test]
     fn a_native_memory_lookup_gets_oboetes_search_of_it() {
         let mut p = Prompts::new(false);
@@ -4708,9 +4708,23 @@ mod tests {
         let got = p.hook("PreToolUse", "s1", lookup.clone());
         assert!(
             got.contains(crate::memory_lookup::LOOKUP)
-                && got.contains("Automatic search: index → context → selected details.")
-                && got.contains("Deploys wait for the canary."),
+                && got.contains("oboete Smart search index for the pending memory lookup (native result follows). Continue with timeline around useful IDs, then get only for selected records.")
+                && got.contains(&format!("- [{uid}] Deploys wait for the canary. · observation"))
+                && !got.contains("### ")
+                && !got.contains("Continue with:"),
             "{got}"
+        );
+        // Only the kinds claude-mem calls observations: no session summary, no prompt.
+        let (_, summary) = work(&mut p, 2, "Tabs", "Spaces went.", "Plan the canary deploys");
+        p.prompt("s2", "When do canary deploys wait?");
+        p.s.run();
+        let kinds = p.hook("PreToolUse", "s1", lookup.clone());
+        assert!(
+            kinds.contains(&format!("- [{uid}] "))
+                && !kinds.contains(&format!("[{summary}]"))
+                && !kinds.contains("· summary")
+                && !kinds.contains("· prompt"),
+            "{kinds}"
         );
         assert!(got.encode_utf16().count() <= NOTE_ROOM);
         let mut sub = lookup.clone();
@@ -4729,14 +4743,13 @@ mod tests {
             "{masked}"
         );
         std::fs::remove_file(p.s.home.path().join("config.toml")).unwrap();
-        // A lookup no title answers gets the index, and no continuation, which no store would
-        // keep past the hook.
+        // A lookup no title answers gets the index too, with no continuation, which no store
+        // would keep past the hook.
         // ("anar" is in "canary" for the full-text index, and in no title's words.)
         let unrelated = json!({"tool_name": "memory_search", "tool_input": {"query": "anar"}});
         let index = p.hook("PreToolUse", "s1", unrelated);
         assert!(
-            index.contains("These candidates need your relevance judgment.")
-                && !index.contains("Continue with:"),
+            index.contains(&format!("- [{uid}] ")) && !index.contains("Continue with:"),
             "{index}"
         );
         // A muted claim is never injected, here neither.
