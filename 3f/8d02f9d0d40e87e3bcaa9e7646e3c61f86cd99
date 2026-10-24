@@ -1,0 +1,33 @@
+src/testdata/viewer-readiness/test.mjs
+  s_52c2af97d1549e::t_928f39d109168c 51-52,1098-1280
+src/my_work.rs
+  s_52c2af97d1549e::t_bcb0d2b49da9c6 784-789,3006
+  s_52c2af97d1549e::t_344f941052e7b3 2948,2950,2955,2962,2967,2969-3005,3007-3011
+  s_52c2af97d1549e::t_cfbe4934a43dee 1172-1174,1179-1180,1493-1494,1498,1506,1525-1529,1546,1912,2945-2947,2949,2951-2954,2956-2961,2963-2966,2968
+assets/viewer/app.css
+  s_52c2af97d1549e::t_9e692c28be0534 735-841
+assets/viewer/app.js
+  s_52c2af97d1549e::t_074c4fb9101717 301-307,315-318,2039-2143,2190-2191,5847-6436,6438,6461,6511-6512,6538-6542
+docs/my-work.md
+  s_52c2af97d1549e::t_a10d309b34caf9 81,145,171,367-369,386-435
+assets/viewer/index.html
+  s_52c2af97d1549e::t_1cac85a01f5f3b 20,29
+docs/claude-mem-parity.md
+  s_52c2af97d1549e::t_ee624be9a5bda3 21-22,114,218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3f8d02f9d0d40e87e3bcaa9e7646e3c61f86cd99",
+  "prompts": {},
+  "sessions": {
+    "s_52c2af97d1549e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8b65c44-47d2-4c0d-bed4-d4e61d8ba668",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
