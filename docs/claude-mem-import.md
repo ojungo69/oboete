@@ -20,14 +20,18 @@ rule and nothing more.
 I1. **Where.** Without `--eval-store` the import goes into the home given, the default one
 included. `--eval-store` keeps its meaning, an evaluation home: it still refuses the default home.
 
-I2. **Which databases.** claude-mem's schema from 13.28.0 (migrations to v52) to 13.40.0 (v67).
+I2. **Which databases.** claude-mem's schema from 13.28.0 (migrations to v52) to 15.0.2 (v68).
 The importer reads what it finds by table and column (`PRAGMA table_info`), not by version number:
 another claude-mem draft (#4341) also numbers a migration v61. v65 (13.36.0,
 `refreshUnicodeTitleNormKeys`) only recomputes `observations.title_norm_key`, the key claude-mem
 finds a duplicate title by, which the import does not read; 13.36.0 to 13.39.0 change no other
 table or column. v66 (13.40.0) adds cloud sync columns to `work_state_entries` (`synced_at`, the
 origin device and row, `sync_rev`) and v67 lets the sync ledgers name the work state kind; the
-import reads neither. A database whose `schema_versions` names a version above 67 is refused, with
+import reads neither. 13.41.0 to 15.0.1 add only work state telemetry receipts and, in a database
+of their own, My Work's reviews, neither of which the import reads. v68 (15.0.2) adds
+`observation_files`, an index of each observation's `files_read` and `files_modified` for
+claude-mem's lookup by file; the import reads those lists from the observation itself (I9), not
+from the index. A database whose `schema_versions` names a version above 68 is refused, with
 nothing imported: a newer claude-mem may keep what this import would leave behind. The message
 names both versions.
 
@@ -100,8 +104,8 @@ left to the plain import and not counted.
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,
-   `work_state_entries`) both import; one at v65 or v67 comes in as at v64; one naming v68 is refused
-   with nothing written.
+   `work_state_entries`) both import; one at v65, v67 or v68 comes in as at v64, a path only v68's
+   index holds in no file record; one naming v69 is refused with nothing written.
 2. A table is found by its columns, whatever version row names it.
 3. Notes come in as the last line; a merged project's rows come in under the project they were
    merged into.

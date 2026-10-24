@@ -76,11 +76,12 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
     }
 }
 
-/// The newest claude-mem schema the import reads all of: 13.40.0's (docs/claude-mem-import.md I2).
+/// The newest claude-mem schema the import reads all of: 15.0.2's (docs/claude-mem-import.md I2).
 /// v65 (13.36.0) only recomputes `observations.title_norm_key`; v66 adds cloud sync columns to
-/// `work_state_entries` and v67 lets the sync ledgers name that kind (13.40.0). The import reads
-/// none of them.
-const NEWEST_SCHEMA: i64 = 67;
+/// `work_state_entries` and v67 lets the sync ledgers name that kind (13.40.0); v68 (15.0.2) adds
+/// `observation_files`, an index of each observation's `files_read` and `files_modified`, which
+/// the import reads from the observation itself. The import reads none of them.
+const NEWEST_SCHEMA: i64 = 68;
 
 /// The plain import, as the tests run it.
 #[cfg(test)]
@@ -1710,7 +1711,7 @@ mod tests {
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
     #[test]
-    fn a_database_newer_than_v67_is_refused_with_nothing_written() {
+    fn a_database_newer_than_v68_is_refused_with_nothing_written() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("claude-mem.db");
         claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
@@ -1720,7 +1721,8 @@ mod tests {
                 "INSERT INTO schema_versions VALUES(3, 65, '');
                  INSERT INTO schema_versions VALUES(4, 66, '');
                  INSERT INTO schema_versions VALUES(5, 67, '');
-                 INSERT INTO schema_versions VALUES(6, 68, '');",
+                 INSERT INTO schema_versions VALUES(6, 68, '');
+                 INSERT INTO schema_versions VALUES(7, 69, '');",
             )
             .unwrap();
         let mut raw = crate::raw::open(dir.path()).unwrap();
@@ -1728,21 +1730,23 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(said.contains("v68") && said.contains("v67"), "{said}");
+        assert!(said.contains("v69") && said.contains("v68"), "{said}");
         assert!(docs(&raw).is_empty() && work_ops(&raw).is_empty());
     }
 
-    /// I2: 13.36.0's v65, which only recomputes `observations.title_norm_key`, and 13.40.0's v67,
-    /// which adds the work state's sync columns, come in as v64 does.
+    /// I2: 13.36.0's v65, which only recomputes `observations.title_norm_key`, 13.40.0's v67,
+    /// which adds the work state's sync columns, and 15.0.2's v68, which adds an index of the
+    /// observations' files, come in as v64 does: a path only that index holds comes in nowhere.
     #[test]
-    fn a_v65_or_v67_database_comes_in_as_v64_does() {
+    fn a_v65_v67_or_v68_database_comes_in_as_v64_does() {
         let dir = tempfile::tempdir().unwrap();
-        let (v64, v65, v67) = (
+        let (v64, v65, v67, v68) = (
             dir.path().join("v64.db"),
             dir.path().join("v65.db"),
             dir.path().join("v67.db"),
+            dir.path().join("v68.db"),
         );
-        for db in [&v64, &v65, &v67] {
+        for db in [&v64, &v65, &v67, &v68] {
             claude_mem_v64(db, "2025-12-14T16:09:58.769Z");
         }
         let v65_batch = "ALTER TABLE observations ADD COLUMN title_norm_key TEXT;
@@ -1752,19 +1756,29 @@ mod tests {
             .unwrap()
             .execute_batch(v65_batch)
             .unwrap();
-        let v67_conn = Connection::open(&v67).unwrap();
-        v67_conn.execute_batch(v65_batch).unwrap();
-        v67_conn
+        let v67_batch = "ALTER TABLE work_state_entries ADD COLUMN synced_at INTEGER;
+             ALTER TABLE work_state_entries ADD COLUMN origin_device_id TEXT;
+             ALTER TABLE work_state_entries ADD COLUMN origin_local_id TEXT;
+             ALTER TABLE work_state_entries ADD COLUMN sync_rev TEXT NOT NULL DEFAULT '1';
+             INSERT INTO schema_versions VALUES(4, 66, '2026-10-16T14:58:42.000Z');
+             INSERT INTO schema_versions VALUES(5, 67, '2026-10-16T14:58:42.000Z');";
+        for db in [&v67, &v68] {
+            let c = Connection::open(db).unwrap();
+            c.execute_batch(v65_batch).unwrap();
+            c.execute_batch(v67_batch).unwrap();
+        }
+        Connection::open(&v68)
+            .unwrap()
             .execute_batch(
-                "ALTER TABLE work_state_entries ADD COLUMN synced_at INTEGER;
-                 ALTER TABLE work_state_entries ADD COLUMN origin_device_id TEXT;
-                 ALTER TABLE work_state_entries ADD COLUMN origin_local_id TEXT;
-                 ALTER TABLE work_state_entries ADD COLUMN sync_rev TEXT NOT NULL DEFAULT '1';
-                 INSERT INTO schema_versions VALUES(4, 66, '2026-10-16T14:58:42.000Z');
-                 INSERT INTO schema_versions VALUES(5, 67, '2026-10-16T14:58:42.000Z');",
+                "CREATE TABLE observation_files(path TEXT NOT NULL,
+                   observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+                   PRIMARY KEY (path, observation_id));
+                 CREATE INDEX idx_observation_files_observation
+                   ON observation_files(observation_id);
+                 INSERT INTO observation_files VALUES('src/only-in-the-index.rs', 10);
+                 INSERT INTO schema_versions VALUES(6, 68, '2026-10-23T21:24:16.070Z');",
             )
             .unwrap();
-        drop(v67_conn);
         let import = |src: &Path, home: &Path| {
             std::fs::create_dir(home).unwrap();
             let mut raw = crate::raw::open(home).unwrap();
@@ -1773,22 +1787,29 @@ mod tests {
                 .into_iter()
                 .map(|d| (d.source_id, d.repo, d.body))
                 .collect();
+            let files: Vec<_> = files_ops(&raw)
+                .into_iter()
+                .map(|f| (f.source_id, f.files_read, f.files_modified))
+                .collect();
             (
                 stats.observations,
                 stats.summaries,
                 stats.prompts,
                 stats.work_state,
                 docs,
+                files,
             )
         };
-        let (a, b, c) = (
+        let (a, b, c, d) = (
             dir.path().join("a"),
             dir.path().join("b"),
             dir.path().join("c"),
+            dir.path().join("d"),
         );
         let want = import(&v64, &a);
         assert_eq!(import(&v65, &b), want);
         assert_eq!(import(&v67, &c), want);
+        assert_eq!(import(&v68, &d), want);
     }
 
     /// Test 2: what is read is found by its columns, whatever version the log names: an older
