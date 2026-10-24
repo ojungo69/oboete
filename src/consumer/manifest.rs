@@ -180,6 +180,7 @@ pub fn text(
     // so no count taken before it is a bound (Codex on #370). The fence's own text is outside
     // `cap`, as it always was.
     let cards = crate::cards::recent(&k, raw, repo, CARDS, rules)?;
+    let work = crate::cards::work(home, raw.device(), &cards);
     let sessions = crate::turns::recent(&k, raw, repo, SUMMARIES, rules)?;
     let name = repo_name(repo, rules);
     let fence = manifest::fenced("").encode_utf16().count();
@@ -199,6 +200,7 @@ pub fn text(
                 latest,
                 raw.device(),
                 &name,
+                &work,
                 now,
                 &chrono::Local,
             )
@@ -2924,6 +2926,43 @@ extra_rules = [
         );
         assert!(text.contains(" ● Ours\n"), "{text}");
         assert!(!text.contains("Theirs"), "{text}");
+    }
+
+    /// Parity row 13: session start counts what the curator spent on the windows of the cards it
+    /// shows, from this device's ledger, which it reads and never makes.
+    #[test]
+    fn session_start_counts_what_the_cards_windows_cost() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        store
+            .append_ops(&[cards_op(1, 7, &["Ours", "And ours"])])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        // "Ours" and "[]" -> 2 tokens, "And ours" and "[]" -> 3.
+        let text = shown(home.path(), &store).unwrap();
+        assert!(
+            text.contains("\nStats: 2 obs (5t read) | 0t work\n"),
+            "{text}"
+        );
+        assert!(!home.path().join("providers.db").exists());
+        let db = crate::providers_db::open(home.path()).unwrap();
+        db.execute(
+            "INSERT INTO provider_calls(ts, provider, role, span, outcome, ms, prompt_tokens,
+               completion_tokens) VALUES(0, 'p', 'curator', '1-7', 'ok', 0, 9000, 1000)",
+            [],
+        )
+        .unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert!(
+            text.contains("\nStats: 2 obs (5t read) | 10,000t work | 100% savings\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\nAccess 10k tokens of past work via get(ID) or search(query).\n"),
+            "{text}"
+        );
     }
 
     /// Codex on slice 3: a card's title is gated as its row shows it, on one line, so a rule

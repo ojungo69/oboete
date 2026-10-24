@@ -7,6 +7,7 @@ use crate::redact::Rules;
 use crate::turns::TurnSummary;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::HashMap;
 
 /// One card as a reader gets it: current (K3), over no record removed since (K4), gated (K6).
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +33,8 @@ pub struct Card {
     pub concepts: Vec<String>,
     pub files_read: Vec<String>,
     pub files_modified: Vec<String>,
+    /// The records its window covers on `device`; none for an imported observation.
+    pub window: Option<(i64, i64)>,
 }
 
 /// claude-mem's observation types, in its order (plugin/modes/code.json).
@@ -281,12 +284,14 @@ where
 /// `sessions` (docs/summaries.md S7), newest first as their readers give them, shown the oldest
 /// first by day, at `now` in `tz`, read on device `local`, then `latest`'s fields when it is not
 /// older than the newest card (S8). `name` is the repository's.
+#[allow(clippy::too_many_arguments)]
 pub fn block<Tz: chrono::TimeZone>(
     cards: &[Card],
     sessions: &[TurnSummary],
     latest: Option<&TurnSummary>,
     local: &str,
     name: &str,
+    work: &HashMap<(i64, i64), i64>,
     now: i64,
     tz: &Tz,
 ) -> String
@@ -298,9 +303,41 @@ where
     let legend: Vec<String> = std::iter::once("🎯session".to_owned())
         .chain(ICONS.iter().zip(TYPES).map(|(i, t)| format!("{i}{t}")))
         .collect();
+    // Parity row 13, claude-mem's economics at its default settings (only the percentage on): what
+    // the cards shown cost to read, as its TokenCalculator counts an observation, against what the
+    // curator spent on their windows (`work`), each window once however many cards it made.
+    let read: usize = cards
+        .iter()
+        .map(|c| {
+            let facts = serde_json::to_string(&c.facts).unwrap_or_default();
+            [&c.title, &c.subtitle, &c.narrative, &facts]
+                .iter()
+                .map(|t| t.encode_utf16().count())
+                .sum::<usize>()
+                .div_ceil(4)
+        })
+        .sum();
+    let windows: std::collections::HashSet<(i64, i64)> = cards
+        .iter()
+        .filter(|c| c.device == local)
+        .filter_map(|c| c.window)
+        .collect();
+    let spent: i64 = windows.iter().filter_map(|w| work.get(w)).sum();
+    let saved = spent - i64::try_from(read).unwrap_or(i64::MAX);
+    let mut stats = format!(
+        "Stats: {} obs ({}t read) | {}t work",
+        cards.len(),
+        grouped(read as u64),
+        grouped(spent.unsigned_abs())
+    );
+    if spent > 0 {
+        // JavaScript's Math.round, which rounds a half up.
+        let percent = (saved as f64 / spent as f64 * 100.0 + 0.5).floor() as i64;
+        stats.push_str(&format!(" | {percent}% savings"));
+    }
     let mut out = format!(
         "# [{name}] recent context{header}\n\nLegend: {}\nFormat: ID TIME TYPE TITLE\n\
-         Fetch details: get(ID) | Search: search(query)\n\n",
+         Fetch details: get(ID) | Search: search(query)\n\n{stats}\n\n",
         legend.join(" ")
     );
     // In time order, a summary after the cards of its time (claude-mem's); a window's cards in
@@ -373,7 +410,70 @@ where
             }
         }
     }
+    if spent > 0 && saved > 0 {
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        let thousands = (spent as f64 / 1000.0 + 0.5).floor() as i64;
+        out.push_str(&format!(
+            "Access {thousands}k tokens of past work via get(ID) or search(query).\n"
+        ));
+    }
     out
+}
+
+/// `n` as JavaScript's `toLocaleString()` writes it in claude-mem's lines: `17,868`.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    out
+}
+
+/// What the curator spent on each window of `cards` this device curated (parity row 13), as
+/// claude-mem's `discovery_tokens` are what its observer spent: the prompt and answer tokens of
+/// the window's last call that made its cards, or the estimate of what was sent when a CLI
+/// reports no usage. A window of another device, an imported observation and a ledger that
+/// cannot be read have none: the line is then without them, and a hook never fails for it.
+pub fn work(home: &std::path::Path, device: &str, cards: &[Card]) -> HashMap<(i64, i64), i64> {
+    let spans: Vec<String> = cards
+        .iter()
+        .filter(|c| c.device == device)
+        .filter_map(|c| c.window)
+        .map(|(from, to)| format!("{from}-{to}"))
+        .collect();
+    let read = || -> Result<HashMap<(i64, i64), i64>> {
+        let mut out = HashMap::new();
+        let Some(db) = crate::providers_db::read_only(home)? else {
+            return Ok(out);
+        };
+        // A hook does not wait for the ledger: a busy one leaves the line without work.
+        db.busy_timeout(std::time::Duration::ZERO)?;
+        let mut st = db.prepare(
+            "SELECT span, COALESCE(prompt_tokens, est_tokens, 0) + COALESCE(completion_tokens, 0)
+             FROM provider_calls
+             WHERE role = 'curator' AND outcome = 'ok' AND span IN (SELECT value FROM json_each(?1))
+             ORDER BY id",
+        )?;
+        let rows = st.query_map([serde_json::to_string(&spans)?], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (span, tokens) = row?;
+            if let Some((from, to)) = span.split_once('-')
+                && let (Ok(from), Ok(to)) = (from.parse(), to.parse())
+            {
+                out.insert((from, to), tokens);
+            }
+        }
+        Ok(out)
+    };
+    read().unwrap_or_default()
 }
 
 /// What a reader reads of a card, in `read`'s order.
@@ -446,6 +546,7 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
         concepts: list(12)?,
         files_read: list(13)?,
         files_modified: list(14)?,
+        window: Some((r.get(15)?, r.get(16)?)),
     }))
 }
 
@@ -735,6 +836,7 @@ pub fn imported_by_file(
             concepts: Vec::new(),
             files_read: Vec::new(),
             files_modified: Vec::new(),
+            window: None,
         };
         out.push(Filed {
             card,
@@ -974,6 +1076,7 @@ mod tests {
             concepts: Vec::new(),
             files_read: Vec::new(),
             files_modified: Vec::new(),
+            window: Some((op_seq, op_seq)),
         }
     }
 
@@ -1186,7 +1289,16 @@ mod tests {
     /// another device's card is named with its device.
     #[test]
     fn the_block_is_claude_mems_recent_context_in_local_time() {
-        let block = block(&four(), &[], None, "d", "oboete", at(3, 7, 37, 0), &jst());
+        let block = block(
+            &four(),
+            &[],
+            None,
+            "d",
+            "oboete",
+            &HashMap::new(),
+            at(3, 7, 37, 0),
+            &jst(),
+        );
         assert_eq!(
             block,
             "# [oboete] recent context, 2026-10-03 7:37am GMT+9\n\
@@ -1195,6 +1307,8 @@ mod tests {
              ⚠security_alert ⚷security_note ⊘sensitive\n\
              Format: ID TIME TYPE TITLE\n\
              Fetch details: get(ID) | Search: search(query)\n\
+             \n\
+             Stats: 4 obs (36t read) | 0t work\n\
              \n\
              ### Oct 2, 2026\n\
              e.400.0 9:05a 📝 A summary card\n\
@@ -1212,7 +1326,16 @@ mod tests {
     }
 
     fn block_of(tz: &FixedOffset) -> String {
-        block(&four(), &[], None, "d", "oboete", at(3, 7, 37, 0), tz)
+        block(
+            &four(),
+            &[],
+            None,
+            "d",
+            "oboete",
+            &HashMap::new(),
+            at(3, 7, 37, 0),
+            tz,
+        )
     }
 
     /// A summary of turn op `op_seq` at `ts` that asked `request`, with `fields`.
@@ -1265,6 +1388,7 @@ mod tests {
             Some(&newest),
             "d",
             "oboete",
+            &HashMap::new(),
             at(3, 7, 37, 0),
             &jst(),
         );
@@ -1298,11 +1422,159 @@ mod tests {
             Some(&older),
             "d",
             "oboete",
+            &HashMap::new(),
             at(3, 7, 37, 0),
             &jst(),
         );
         assert!(
             shown.contains("S501 Earlier (Oct 3, 6:00 AM)\n") && !shown.contains("**Learned**")
+        );
+    }
+
+    /// Parity row 13: claude-mem's economics line at its default settings, read as its
+    /// TokenCalculator reads an observation (UTF-16 units of title, subtitle, narrative and the
+    /// facts' JSON, four to a token, rounded up per card), against the curator's spend on the
+    /// windows shown, each window once, another device's never; its footer when that saved some.
+    #[test]
+    fn the_stats_line_counts_each_window_once() {
+        let mut first = card(10, 0, at(3, 6, 0, 0), Some("bugfix"), "Twelve chars");
+        first.window = Some((1, 3));
+        first.facts = vec!["ab".into()];
+        // Eight UTF-16 units, twenty-four bytes.
+        let second = Card {
+            n: 1,
+            title: "設定画面を直した".into(),
+            ..first.clone()
+        };
+        let mut third = card(11, 0, at(3, 6, 1, 0), Some("change"), "x");
+        third.window = Some((4, 4));
+        third.narrative = "y".repeat(10);
+        let other = Card {
+            device: "e".into(),
+            window: Some((6, 6)),
+            ..first.clone()
+        };
+        let work = HashMap::from([((1, 3), 9_400), ((4, 4), 3_000), ((6, 6), 50)]);
+        let shown = block(
+            &[first, second, third, other],
+            &[],
+            None,
+            "d",
+            "oboete",
+            &work,
+            at(3, 7, 37, 0),
+            &jst(),
+        );
+        // 12 + 6 ("[\"ab\"]") = 18 -> 5; 8 + 6 -> 4; 1 + 10 + 2 -> 4; 18 -> 5.
+        assert!(
+            shown.contains(
+                "Fetch details: get(ID) | Search: search(query)\n\n\
+                 Stats: 4 obs (18t read) | 12,400t work | 100% savings\n\n### "
+            ),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with("\n\nAccess 12k tokens of past work via get(ID) or search(query).\n"),
+            "{shown}"
+        );
+        // Nothing spent that this device knows of: claude-mem's line without its percentage, and
+        // no footer.
+        let none = block(
+            &four(),
+            &[],
+            None,
+            "d",
+            "oboete",
+            &HashMap::new(),
+            at(3, 7, 37, 0),
+            &jst(),
+        );
+        assert!(none.contains("\nStats: 4 obs (") && none.contains("t read) | 0t work\n\n"));
+        assert!(
+            !none.contains("savings") && !none.contains("Access "),
+            "{none}"
+        );
+        // Less spent than the cards cost to read: claude-mem's negative percentage, and no footer.
+        let mut cheap = card(10, 0, at(3, 6, 0, 0), Some("bugfix"), "Twelve chars");
+        cheap.window = Some((1, 3));
+        let little = block(
+            &[cheap],
+            &[],
+            None,
+            "d",
+            "oboete",
+            &HashMap::from([((1, 3), 3)]),
+            at(3, 7, 37, 0),
+            &jst(),
+        );
+        // 12 + 2 ("[]") -> 4 tokens read against 3 spent: -33.3%, rounded as Math.round rounds.
+        assert!(
+            little.contains("Stats: 1 obs (4t read) | 3t work | -33% savings\n"),
+            "{little}"
+        );
+        assert!(!little.contains("Access "), "{little}");
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1_000), "1,000");
+        assert_eq!(grouped(193_065), "193,065");
+        assert_eq!(grouped(1_234_567), "1,234,567");
+    }
+
+    /// Parity row 13: a window's spend is its last call that made cards (a recuration's, not the
+    /// first one's, nor a failed call after it), the estimate of what was sent where a CLI
+    /// reported no usage, and only this device's curator calls that made cards count; a missing
+    /// ledger is none, never made.
+    #[test]
+    fn work_is_the_last_curator_call_that_made_a_windows_cards() {
+        let home = tempfile::tempdir().unwrap();
+        let cards = [(1, 3), (4, 4), (5, 5)]
+            .map(|w| Card {
+                window: Some(w),
+                ..card(1, 0, 0, None, "t")
+            })
+            .into_iter()
+            .chain([Card {
+                device: "e".into(),
+                window: Some((6, 6)),
+                ..card(1, 0, 0, None, "t")
+            }])
+            .collect::<Vec<_>>();
+        assert!(work(home.path(), "d", &cards).is_empty());
+        assert!(!home.path().join("providers.db").exists());
+        let db = crate::providers_db::open(home.path()).unwrap();
+        for (role, span, outcome, est, prompt, completion) in [
+            ("curator", "1-3", "ok", 90, Some(100), Some(20)),
+            ("curator", "1-3", "ok", 190, Some(200), Some(30)),
+            ("curator", "4-4", "ok", 70, None, None),
+            ("curator", "4-4", "error", 40, Some(50), None),
+            ("summary", "5-5", "ok", 10, Some(10), Some(1)),
+            ("curator", "6-6", "ok", 10, Some(10), Some(1)),
+        ] {
+            db.execute(
+                "INSERT INTO provider_calls(ts, provider, role, span, outcome, ms, est_tokens,
+                   prompt_tokens, completion_tokens) VALUES(0, 'p', ?1, ?2, ?3, 0, ?4, ?5, ?6)",
+                rusqlite::params![role, span, outcome, est, prompt, completion],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            work(home.path(), "d", &cards),
+            HashMap::from([((1, 3), 230), ((4, 4), 70)])
+        );
+        // A seek on the partial index, not a scan of every call the ledger keeps.
+        let plan: Vec<String> = db
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT span FROM provider_calls
+                 WHERE role = 'curator' AND outcome = 'ok' AND span IN (SELECT value FROM json_each('[]'))",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("provider_calls_span")),
+            "{plan:?}"
         );
     }
 }
