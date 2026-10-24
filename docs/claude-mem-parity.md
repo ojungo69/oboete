@@ -17,9 +17,9 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 25 |
+| equal_or_better | 26 |
 | partial | 28 |
-| missing | 19 |
+| missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
 
@@ -112,7 +112,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | X8 | The feed has a stable newest-first order, and repeated prompts are never merged. | equal_or_better | rare | PaginationHelper.ts:102 / src/view.rs:2110 |
 | X9 | Long prompt cards are not collapsed behind "Show more". The server caps a prompt at 2,000 characters. | partial | rare | viewer-template.html:1152 / src/view.rs:2100 |
 | X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written and shows the recorded wording when no compatible model can write one, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. claude-mem writes the summaries only with OpenRouter as its provider; the owner's writes none, so its cards show the recorded wording. Decision 53: built in the table's order, before removal, with the session summaries its curators already write as the cards' summaries, so it adds no model call (docs/my-work.md). oboete opens on My Work: cards, the list and one card a conversation (decision 55), its filters and status tabs, a request's page with a back button, Copy handoff in the page's language, the marks of a changed request, and a person's check of a result reported complete, kept on this PC by the request's keyed version (rule 6). Differences: the summaries are the curators' (decision 53); the page reads again when the store changes and each minute, where claude-mem's receives events; the review is in the request's page, not a dialog, and a request has no address of its own (decision 55). | equal_or_better | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
-| X11 | claude-mem 15.0 removes the temporary folders a killed curator run left (its Codex app-server's) when its worker starts. oboete removes its `oboete-cli-*` folders when a run ends, and none that a killed oboete left; the forget design plans the same sweep at the worker's start (docs/spec.md, forget, step 7). | missing | rare | CodexAppServerClient.ts:298 / src/provider.rs:2170 |
+| X11 | claude-mem 15.0, at a worker's first Codex run, removes the temporary folders of its Codex app-server that a killed worker left: those whose owner process has ended, and those older than 6 hours that name no owner. oboete's worker, at each start, removes this user's real folders of its CLI runs whose run has ended: one each run holds, open and locked, while it goes on (Unix), once nobody holds it and it is 10 seconds old; one whose hold cannot tell (Windows, a file system without locks, or an older oboete's) after 6 hours unchanged, claude-mem's age for a folder that names no owner. It covers every CLI run (the claude and codex curators, the Codex probes and the v1 preview's copy), not only Codex's, and leaves a held folder whatever its age (docs/spec.md, forget, step 7). | equal_or_better | rare | CodexAppServerClient.ts:298 / src/provider.rs:2173 |
 
 The sections after this one are the first comparison, of 2026-10-03 against claude-mem 13.28.0.
 
@@ -222,7 +222,7 @@ each milestone and new features are added here.
 | # | Difference | Size |
 |---|---|---|
 | N4 | **The three steps as the default memory search.** claude-mem 15.0 teaches search, timeline and get_observations as its default and drops mem_search's modes; its native lookup bridge gives the index alone, and an optional `dumb_search` answers in one shallow call. oboete teaches mem_search in auto and guided mode. Built as claude-mem 15.0 behaves, as decision 45 builds claude-mem 13.35's memory features: the three steps taught as the default in the tools' descriptions, the server's instructions and the session start (N6), the bridge giving the index (N5), and `dumb_search` as claude-mem's, one shallow call that ranks titles by the words asked; mem_search's auto and guided modes stay for an agent or a note that names them, no longer taught. | M |
-| X11 | **Temporary folders of a killed curator run.** claude-mem 15.0 removes them when its worker starts; oboete does not yet (docs/spec.md, forget, step 7). | S |
+| X11 | **Temporary folders of a killed curator run.** claude-mem 15.0 removes those of its Codex app-server whose worker has ended, at a worker's first Codex run. Built: oboete's worker removes those of its CLI runs whose run has ended at each start, by a lock each run holds while it goes on (Unix) or, where that cannot tell, after 6 hours unchanged (docs/spec.md, forget, step 7). | S |
 
 ### After the switch, first
 

@@ -1386,6 +1386,8 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
     if resident {
         viewer.due(home);
     }
+    // X11: what a killed oboete left in the temp directory, at each start.
+    crate::provider::sweep_scratch(&std::env::temp_dir(), std::time::SystemTime::now());
     let phases = Phases {
         embed: Some(&mut embed),
         shortlist: Some(&mut shortlist),

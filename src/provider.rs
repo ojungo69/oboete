@@ -2150,11 +2150,146 @@ fn rate_left(h: &ureq::http::HeaderMap) -> Option<providers_db::RateLeft> {
     (rate != providers_db::RateLeft::default()).then_some(rate)
 }
 
+/// The start of the name of a scratch directory its run holds while it goes on (Unix), by which a
+/// sweep knows one.
+const HELD_PREFIX: &str = "oboete-run-";
+/// The start of the name of one without a hold: an older oboete's, one not on Unix, or one whose run
+/// could take none (X11). A sweep goes by its age alone.
+const AGED_PREFIX: &str = "oboete-cli-";
+
+/// How long a scratch directory nobody holds stands before a sweep removes it: the time between its
+/// making and its hold, with room to spare.
+const HOLD_GRACE: Duration = Duration::from_secs(10);
+
+/// How long a scratch directory whose hold cannot tell stands unchanged before a sweep removes it:
+/// claude-mem's age for a folder that names no owner, far past the longest CLI timeout the settings
+/// take, and past one set higher by hand in config.toml (a Codex review). Its time moves only when
+/// an entry in it is made or removed.
+const SWEPT_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// X11: removes the scratch directories under `root` whose run has ended, as claude-mem 15.0
+/// removes its Codex app-server's whose worker has ended. `Scratch`'s drop removes each when its
+/// run ends, but nothing runs when oboete itself is killed; its hold goes with it. Only a real
+/// directory of this user's goes: a link is never followed, and on Unix one another user owns is
+/// left (elsewhere the temp directory is the user's own). An entry that does not read or does not
+/// go is left to the next sweep. How many it removed.
+pub(crate) fn sweep_scratch(root: &Path, now: SystemTime) -> usize {
+    if !sweepable(root) {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let holds = name.starts_with(HELD_PREFIX);
+        if (holds || name.starts_with(AGED_PREFIX))
+            && std::fs::symlink_metadata(&path).is_ok_and(|m| ended(&path, &m, holds, now))
+            && std::fs::remove_dir_all(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether no other user can rename an entry under `root` between a sweep's look and its removal,
+/// putting something else in its place (a Codex review): on Unix, a directory this user or root
+/// owns, that no one else can write to or that is sticky. Elsewhere the temp directory is the
+/// user's own.
+fn sweepable(root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(m) = std::fs::metadata(root) else {
+            return false;
+        };
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let owner = m.uid() == unsafe { libc::geteuid() } || m.uid() == 0;
+        owner && (m.mode() & 0o022 == 0 || m.mode() & 0o1000 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        true
+    }
+}
+
+/// A directory opened to be locked: never a link or anything but a directory, and never waited on
+/// (a FIFO put in its place would wait for a writer; a Codex review).
+#[cfg(unix)]
+fn open_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Whether the run of a real directory of this user's has ended: for one its run holds (`holds`),
+/// by the hold once it is older than `HOLD_GRACE`; for one without, or where the hold cannot tell,
+/// by standing unchanged longer than `SWEPT_AFTER`.
+fn ended(path: &Path, m: &std::fs::Metadata, holds: bool, now: SystemTime) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if m.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+    }
+    let Some(age) = m.modified().ok().and_then(|t| now.duration_since(t).ok()) else {
+        return false;
+    };
+    if !m.is_dir() {
+        return false;
+    }
+    if !holds {
+        return age > SWEPT_AFTER;
+    }
+    // Not tested before the grace: the test takes the lock for an instant, which a run about to take
+    // its hold would find taken.
+    age > HOLD_GRACE
+        && match holder(path) {
+            Some(held) => !held,
+            None => age > SWEPT_AFTER,
+        }
+}
+
+/// Whether a process holds the directory (its run goes on), none when the hold cannot tell: not on
+/// Unix, or a file system without locks.
+fn holder(path: &Path) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        let file = open_dir(path).ok()?;
+        match file.try_lock() {
+            Ok(()) => Some(false),
+            Err(std::fs::TryLockError::WouldBlock) => Some(true),
+            Err(std::fs::TryLockError::Error(_)) => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// A fresh private directory for one CLI run, removed again when dropped (on every return
 /// path, so failed attempts leave nothing behind). The name is random and the directory must
 /// not exist yet, so nobody else on the machine can plant one under a guessable name (the pid)
-/// and read what the CLI writes there; on Unix it is also created mode 0700.
-pub(crate) struct Scratch(pub(crate) std::path::PathBuf);
+/// and read what the CLI writes there; on Unix it is also created mode 0700, and held, open and
+/// locked, until after its removal: a sweep leaves a directory someone holds, whatever its age
+/// (X11). The CLI does not inherit the lock, as Rust opens files close-on-exec.
+pub(crate) struct Scratch(
+    pub(crate) std::path::PathBuf,
+    #[allow(dead_code)] pub(crate) Option<std::fs::File>,
+);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -2163,21 +2298,52 @@ impl Drop for Scratch {
 }
 
 pub(crate) fn scratch_dir() -> Result<Scratch, CallError> {
+    let fail = |e: std::io::Error| CallError::other(format!("scratch dir: {e}")).unsent();
     let mut raw = [0u8; 8];
     getrandom::fill(&mut raw)
         .map_err(|e| CallError::other(format!("scratch dir: {e}")).unsent())?;
     let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let dir = std::env::temp_dir().join(format!("oboete-cli-{name}"));
+    let prefix = if cfg!(unix) { HELD_PREFIX } else { AGED_PREFIX };
+    let dir = std::env::temp_dir().join(format!("{prefix}{name}"));
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder
-        .create(&dir)
-        .map_err(|e| CallError::other(format!("scratch dir: {e}")).unsent())?;
-    Ok(Scratch(dir))
+    builder.create(&dir).map_err(fail)?;
+    let mut scratch = Scratch(dir, None);
+    if cfg!(unix) {
+        scratch.1 = hold(&scratch.0);
+        if scratch.1.is_none() {
+            aged(&mut scratch, &name).map_err(fail)?;
+        }
+    }
+    Ok(scratch)
+}
+
+/// Gives a run's directory that could take no hold (a file system without locks) the name a sweep
+/// goes by the age for, so a lock a sweep can take later never reads as its run ended.
+fn aged(scratch: &mut Scratch, name: &str) -> std::io::Result<()> {
+    let to = scratch.0.with_file_name(format!("{AGED_PREFIX}{name}"));
+    std::fs::rename(&scratch.0, &to)?;
+    scratch.0 = to;
+    Ok(())
+}
+
+/// The directory open and locked, none where it cannot be: not on Unix, or a file system without
+/// locks.
+fn hold(dir: &Path) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        let file = open_dir(dir).ok()?;
+        file.try_lock().is_ok().then_some(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// The system prompt of the claude and codex curators, in place of each CLI's own (a coding agent's
@@ -6805,6 +6971,113 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             crate::providers_db::state(&conn, "stub").unwrap(),
             crate::providers_db::State::default()
         );
+    }
+
+    /// X11: a sweep removes a directory without a hold (`oboete-cli-*`) unchanged for longer than
+    /// `SWEPT_AFTER`, with what it holds, and nothing else: not a newer one, a file or a link of
+    /// either name (nor what the link names), or another name.
+    #[test]
+    fn a_sweep_removes_a_directory_without_a_hold_by_its_age() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name);
+        std::fs::create_dir(at("oboete-cli-old")).unwrap();
+        std::fs::write(at("oboete-cli-old").join("last.json"), "{}").unwrap();
+        std::fs::write(at("oboete-cli-file"), "").unwrap();
+        std::fs::write(at("oboete-run-file"), "").unwrap();
+        std::fs::create_dir(at("other-old")).unwrap();
+        let named = tempfile::tempdir().unwrap();
+        std::fs::write(named.path().join("kept"), "").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(named.path(), at("oboete-run-link")).unwrap();
+        let now = SystemTime::now();
+        assert_eq!(sweep_scratch(root.path(), now), 0);
+        let minute = Duration::from_secs(60);
+        assert_eq!(sweep_scratch(root.path(), now + SWEPT_AFTER - minute), 0);
+        assert!(at("oboete-cli-old").exists());
+        assert_eq!(sweep_scratch(root.path(), now + SWEPT_AFTER + minute), 1);
+        assert!(!at("oboete-cli-old").exists());
+        assert!(at("oboete-cli-file").exists() && at("oboete-run-file").exists());
+        assert!(at("other-old").exists());
+        #[cfg(unix)]
+        assert!(at("oboete-run-link").symlink_metadata().is_ok());
+        assert!(named.path().join("kept").exists());
+        assert_eq!(sweep_scratch(&at("nothing here"), now + 2 * SWEPT_AFTER), 0);
+    }
+
+    /// X11: a run's directory is held while the run goes on, and a sweep leaves a held one
+    /// whatever its age; once nobody holds it (its oboete was killed), a sweep removes it after
+    /// `HOLD_GRACE`.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_removes_a_runs_directory_once_nobody_holds_it() {
+        let scratch = scratch_dir().unwrap();
+        let name = scratch.0.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("oboete-run-"), "{name}");
+        let other = std::fs::File::open(&scratch.0).unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(scratch);
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("oboete-run-0123456789abcdef");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join("last.json"), "{}").unwrap();
+        let lock = std::fs::File::open(&run).unwrap();
+        lock.try_lock().unwrap();
+        let now = SystemTime::now();
+        assert_eq!(sweep_scratch(root.path(), now + 2 * SWEPT_AFTER), 0);
+        assert!(run.join("last.json").exists());
+        drop(lock);
+        assert_eq!(sweep_scratch(root.path(), now), 0);
+        let second = Duration::from_secs(1);
+        assert_eq!(sweep_scratch(root.path(), now + HOLD_GRACE + second), 1);
+        assert!(!run.exists());
+    }
+
+    /// X11: a sweep leaves a temp directory where another user could put something else in an
+    /// entry's place between its look and its removal: one others can write to that is not sticky.
+    /// A FIFO in a run's directory's place is not waited on.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_leaves_a_temp_directory_others_can_rename_in() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("oboete-cli-old");
+        let mode = |m: u32| {
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let later = SystemTime::now() + 2 * SWEPT_AFTER;
+        for (m, removed) in [(0o777, 0), (0o770, 0), (0o1777, 1)] {
+            std::fs::create_dir_all(&old).unwrap();
+            mode(m);
+            assert_eq!(sweep_scratch(root.path(), later), removed, "{m:o}");
+        }
+        mode(0o700);
+        let fifo = root.path().join("oboete-run-fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid C path and mode.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(open_dir(&fifo).is_err());
+        assert_eq!(holder(&fifo), None);
+    }
+
+    /// X11: a run's directory that could take no hold takes the name a sweep goes by the age for,
+    /// and is still removed when dropped.
+    #[test]
+    fn a_run_without_a_hold_is_named_for_the_age() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("oboete-run-0123456789abcdef");
+        std::fs::create_dir(&dir).unwrap();
+        let mut scratch = Scratch(dir.clone(), None);
+        aged(&mut scratch, "0123456789abcdef").unwrap();
+        let to = root.path().join("oboete-cli-0123456789abcdef");
+        assert_eq!(scratch.0, to);
+        assert!(to.is_dir() && !dir.exists());
+        let now = SystemTime::now();
+        assert_eq!(sweep_scratch(root.path(), now + 2 * HOLD_GRACE), 0);
+        drop(scratch);
+        assert!(!to.exists());
     }
 
     #[test]
