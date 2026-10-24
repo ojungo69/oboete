@@ -278,7 +278,10 @@ fn uninstalled(home: &Path) {
     // at its next look (Codex on #618).
     let state = home.join("state");
     if state.is_dir()
-        && let Err(e) = std::fs::write(state.join(crate::view::LEAVE), "")
+        && let Err(e) = std::fs::write(
+            state.join(crate::view::LEAVE),
+            crate::db::now_ms().to_string(),
+        )
     {
         eprintln!("page: not asked to leave: {e}");
     }
@@ -287,20 +290,31 @@ fn uninstalled(home: &Path) {
         Ok(false) => println!("worker: was not running"),
         Err(e) => eprintln!("worker: {e:#}"),
     }
-    let delete = if cfg!(windows) {
-        format!("Remove-Item -Recurse -Force \"{}\"", home.display())
-    } else {
-        format!("rm -rf {}", shell_quote(&home.to_string_lossy()))
-    };
     println!(
-        "Your memory is kept in {}. To delete it too: {delete}",
-        home.display()
+        "Your memory is kept in {}. To delete it too: {}",
+        home.display(),
+        delete_command(home, cfg!(windows))
     );
     if let Ok(exe) = std::env::current_exe() {
         println!(
             "The program is {}: delete it, or run `cargo uninstall oboete` if cargo installed it.",
             exe.display()
         );
+    }
+}
+
+/// The command that deletes `home`, to copy as it is: in PowerShell single quotes, inside which
+/// neither `$` nor a backtick expands, and as a literal path (CodeRabbit on #618); in a POSIX shell
+/// after `--`.
+fn delete_command(home: &Path, windows: bool) -> String {
+    let path = home.to_string_lossy();
+    if windows {
+        format!(
+            "Remove-Item -Recurse -Force -LiteralPath '{}'",
+            path.replace('\'', "''")
+        )
+    } else {
+        format!("rm -rf -- {}", shell_quote(&path))
     }
 }
 
@@ -3872,6 +3886,25 @@ fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parity row 50 (CodeRabbit on #618): the delete command is copied as it is, so neither
+    /// PowerShell nor a POSIX shell reads anything in the home's path.
+    #[test]
+    fn the_delete_command_quotes_the_home_for_its_shell() {
+        let home = Path::new("/h/it's $x `y` -z");
+        assert_eq!(
+            delete_command(home, true),
+            "Remove-Item -Recurse -Force -LiteralPath '/h/it''s $x `y` -z'"
+        );
+        assert_eq!(
+            delete_command(home, false),
+            "rm -rf -- '/h/it'\\''s $x `y` -z'"
+        );
+        assert_eq!(
+            delete_command(Path::new("/home/u/.oboete"), false),
+            "rm -rf -- /home/u/.oboete"
+        );
+    }
 
     /// docs/unwritten.md U5: a hook whose store does not open waits for it, then for a keep in
     /// progress, and still has time for its file and its marker within the shortest deadline it

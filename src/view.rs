@@ -54,6 +54,9 @@ struct Viewer {
     home: PathBuf,
     /// The held resident lock's identity from listen; foreground viewers have none.
     home_lock: crate::worker::FileId,
+    /// When the resident viewer took that lock, unix ms: a request to leave written before it was
+    /// another viewer's (`LEAVE`). 0 for a foreground viewer.
+    started: i64,
     /// Where `oboete view` was started: its checkout is the page's default scope and its search's
     /// caller (`checkout`). The resident viewer has none, and every repository is its default
     /// scope (docs/resident.md R8).
@@ -680,7 +683,7 @@ enum Leaving {
 
 /// Parity row 50: what `setup all --remove` writes in `state` to ask a resident viewer to leave at
 /// its next look, as a page a tab polls every few seconds is never quiet for a minute (Codex on
-/// #618).
+/// #618): the time it was written, unix ms.
 pub(crate) const LEAVE: &str = "view-leave";
 
 impl Leaving {
@@ -716,8 +719,7 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
-    // A request to leave that a viewer before this one did not take is not this one's.
-    let _ = std::fs::remove_file(state.join(LEAVE));
+    let started = crate::db::now_ms();
     let failed = |why: &str| say(home, why).map(|()| None);
     say(home, "starting")?;
     if !owner_only(home) {
@@ -741,6 +743,7 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         listener,
         viewer: Arc::new(Viewer {
             home_lock,
+            started,
             ..Viewer::new(home, None, port, Token::File)
         }),
     }))
@@ -1027,6 +1030,7 @@ impl Viewer {
         Self {
             home: home.to_path_buf(),
             home_lock: None,
+            started: 0,
             cwd,
             port: AtomicU16::new(port),
             next: Mutex::new(None),
@@ -1092,8 +1096,18 @@ impl Viewer {
         if crate::worker::file_id(std::fs::metadata(state.join("view.lock"))) != lock {
             return Some(Leaving::Gone);
         }
-        if state.join(LEAVE).exists() {
-            return Some(Leaving::Asked);
+        // A request written before this viewer took its lock was another's, or one a viewer did
+        // not take: it is taken away, not followed (CodeRabbit on #618). One with no time in it is
+        // as old.
+        if let Ok(text) = std::fs::read_to_string(state.join(LEAVE)) {
+            if text
+                .trim()
+                .parse::<i64>()
+                .is_ok_and(|at| at >= self.started)
+            {
+                return Some(Leaving::Asked);
+            }
+            let _ = std::fs::remove_file(state.join(LEAVE));
         }
         if crate::config::view(&self.home).is_ok_and(|v| v.port.get() != self.port()) {
             return Some(Leaving::Moved);
@@ -7297,9 +7311,9 @@ curate = false
         assert!(viewer.leaving(id, true).is_some(), "a home replaced");
     }
 
-    /// Parity row 50 (Codex on #618): `setup all --remove` asks a resident viewer to leave, which
-    /// it does at its next look while a page still asks it every few seconds; a request left from
-    /// before a viewer started does not make that one leave.
+    /// Parity row 50 (Codex and CodeRabbit on #618): `setup all --remove` asks a resident viewer to
+    /// leave, which it does at its next look while a page still asks it every few seconds; a request
+    /// written before that viewer started does not make it leave, and is taken away.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_resident_viewer_leaves_when_asked_though_a_page_polls_it() {
@@ -7312,12 +7326,16 @@ curate = false
         )
         .unwrap();
         std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(p.join("state").join(LEAVE), "").unwrap();
+        let leave = p.join("state").join(LEAVE);
         let Resident { lock, viewer, .. } = listen(p).unwrap().unwrap();
         let id = crate::worker::file_id(lock.metadata());
-        assert!(!p.join("state").join(LEAVE).exists());
-        assert_eq!(viewer.leaving(id, false), None);
-        std::fs::write(p.join("state").join(LEAVE), "").unwrap();
+        // Written before it started, or with no time: another's, taken away.
+        for old in [(viewer.started - 1).to_string(), String::new()] {
+            std::fs::write(&leave, old).unwrap();
+            assert_eq!(viewer.leaving(id, false), None);
+            assert!(!leave.exists());
+        }
+        std::fs::write(&leave, viewer.started.to_string()).unwrap();
         assert_eq!(viewer.leaving(id, false), Some(Leaving::Asked));
     }
 

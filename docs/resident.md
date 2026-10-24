@@ -147,9 +147,10 @@ The viewer has a once-a-minute tick of its own. On it, it leaves when config.tom
 not say `resident = true` (and no request arrived since the last tick), when its home is gone
 (`state/view.lock` by identity, as R3), when `[view] port` differs from the port it serves on, for a
 new binary (R9), or when `state/view-leave` asks it to, whatever requests arrived: `setup all
---remove` writes it, since a page a tab polls every few seconds is never quiet for a minute
-(parity row 50, Codex on #618). The viewer that takes it removes it, and a viewer removes one left
-from before it started. It leaves only while no connection is live and no save is running.
+--remove` writes it, with the time it was written, since a page a tab polls every few seconds is
+never quiet for a minute (parity row 50, Codex on #618). A viewer follows only a request written
+after it took its lock, and removes the one it follows; an older one, or one with no time, was
+another viewer's, and it takes that away (CodeRabbit on #618). It leaves only while no connection is live and no save is running.
 
 R5. **Fixed address.** `[view] port` (default 17373, to be checked against what listens on the
 owner's WSL and Windows), 127.0.0.1 only. No scan of other ports: a bookmark needs one address.

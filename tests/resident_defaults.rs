@@ -354,16 +354,17 @@ fn removing_every_agent_stops_the_worker_and_names_what_is_left() {
     assert!(out.contains("worker: stopped"), "{out}");
     assert!(
         out.contains(&format!(
-            "Your memory is kept in {}. To delete it too: rm -rf ",
+            "Your memory is kept in {}. To delete it too: rm -rf -- ",
             h.display()
         )),
         "{out}"
     );
     assert!(out.contains("The program is "), "{out}");
     assert_eq!(resident(), None);
+    let asked = std::fs::read_to_string(h.join("state/view-leave")).unwrap();
     assert!(
-        h.join("state/view-leave").exists(),
-        "the page is asked to leave"
+        asked.trim().parse::<i64>().is_ok(),
+        "the page is asked to leave, with the time: {asked:?}"
     );
     let stopped = Instant::now();
     while worker.0.try_wait().unwrap().is_none() {
