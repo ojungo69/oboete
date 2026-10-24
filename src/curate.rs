@@ -635,8 +635,15 @@ const CLAUDE_MEM_READS: &[&str] = &[
     "memory_context",
 ];
 
-/// oboete's own retrieval tools.
-const OBOETE_READS: &[&str] = &["search", "get", "timeline", "mem_search", "dumb_search"];
+/// oboete's own retrieval tools: `session_start_context` returns stored memory too (Codex on #626).
+const OBOETE_READS: &[&str] = &[
+    "search",
+    "get",
+    "timeline",
+    "mem_search",
+    "dumb_search",
+    "session_start_context",
+];
 
 /// A read of stored memory, as claude-mem's `isRecursiveMemoryTool` finds one (v15.0.1): a bare
 /// `mem_search`, `dumb_search`, `get_summaries`, `claude_mem_search`, `claude_mem_timeline`,
@@ -5129,6 +5136,10 @@ mod tests {
             // oboete's own dumb_search (N4).
             "mcp__oboete__dumb_search",
             "MCP:dumb_search",
+            // oboete's own session_start_context (parity row 32), and claude-mem's.
+            "mcp__oboete__session_start_context",
+            "MCP:session_start_context",
+            "mcp__plugin_claude-mem_mcp-search__session_start_context",
         ] {
             assert!(memory_read(read, &none), "{read}");
         }

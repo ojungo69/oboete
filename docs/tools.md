@@ -277,6 +277,9 @@ agent reloads the context session start gave it.
   again as every reply is, with no fence of its own around theirs. Without a session it records
   nothing: no claim or document counts as shown. A checkout that session start shows nothing for
   (injection off, nothing remembered) is told so.
+- **The call itself**: a read of stored memory, as `search` is (`curate::OBOETE_READS`): capture
+  keeps the call without its output, and the curator sees its name alone, so what it returned is
+  not made a card or a claim again (Codex on #626).
 
 Test: `mcp::tests::session_start_context_shows_what_session_start_injects`.
 
