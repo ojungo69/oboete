@@ -2659,6 +2659,10 @@ pub fn doctor(home: &Path) -> Result<()> {
         println!("  the last worker run failed: {}", why.trim_end());
         unhealthy.push("the worker stopped with an error (see above)");
     }
+    // R14: a worker that left on its own was replaced at the next hook; said, not a failure.
+    if let Some(line) = crate::worker::left_line(home) {
+        println!("  {line}");
+    }
     match (config::worker(home), config::view(home)) {
         (Ok(worker), Ok(view)) if worker.resident => {
             if cfg!(target_os = "linux") {

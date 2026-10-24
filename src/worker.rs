@@ -297,6 +297,8 @@ fn pass_report(
     let mut advanced = false;
     for c in consumers.iter_mut() {
         for device in c.devices(raw)? {
+            // R14: each consumer's batch is progress, in a worker's round as in a rebuild's drain.
+            crate::watchdog::progressed();
             // Immediate: a step reads before it writes, and a deferred transaction whose snapshot
             // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
             // fails its first write with SQLITE_BUSY at once, which stopped the worker.
@@ -1123,6 +1125,8 @@ fn serve(
         if gone(home, holding) {
             return Err(Gone.into());
         }
+        // R14: each round, each batch and each tick of a wait is progress.
+        crate::watchdog::progressed();
         // The next phase round uses the pathname's current store. An end-of-round check
         // cannot cover a replacement that happened after it and before this first pass.
         if crate::backup::restore_requested(home) || replaced(&raw) {
@@ -1244,6 +1248,7 @@ fn serve(
                 if gone(home, holding) {
                     return Err(Gone.into());
                 }
+                crate::watchdog::progressed();
                 if yields && !calling(phases) {
                     match holding.executable.change() {
                         crate::executable::Change::Replaced
@@ -1377,6 +1382,20 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
     let Some(held) = lock(home)? else {
         return Ok(());
     };
+    // R14 (parity row 2): a loop that makes no progress for 15 minutes leaves, so that the next
+    // hook starts a worker anew; a call to a provider may keep it still for its own timeout.
+    let lock_id = file_id(held.0.metadata());
+    // This run's progress at once: a file a run before it wrote is not this one's (Codex on the
+    // branch).
+    write_progress(home, lock_id, 0);
+    let (looked, left) = (home.to_path_buf(), home.to_path_buf());
+    crate::watchdog::watch(
+        crate::watchdog::Watched::here(),
+        crate::watchdog::EVERY,
+        crate::watchdog::STILL,
+        move |still| write_progress(&looked, lock_id, still),
+        move |still| leave(&left, lock_id, still),
+    );
     let mut curation = curation(home);
     let mut embed = crate::embed_phase::Phase::new(home);
     let mut shortlist = crate::shortlist::Builder::new(home);
@@ -1516,6 +1535,12 @@ fn record(home: &Path, last: u64, result: &Result<()>) {
 }
 
 fn note(home: &Path, last: u64, why: &str) {
+    note_with(home, last, why, |guard| guard.lock().is_ok());
+}
+
+/// `note`, with `take` taking its lock: R14's watchdog only tries, as the loop it ends may be stuck
+/// holding it.
+fn note_with(home: &Path, last: u64, why: &str, take: impl FnOnce(&std::fs::File) -> bool) {
     let state = home.join("state");
     let Ok(guard) = std::fs::OpenOptions::new()
         .create(true)
@@ -1525,7 +1550,7 @@ fn note(home: &Path, last: u64, why: &str) {
     else {
         return;
     };
-    if guard.lock().is_err() {
+    if !take(&guard) {
         return;
     }
     if outcome(home).is_some_and(|(g, _)| g > last) {
@@ -1564,6 +1589,171 @@ pub fn last_failure(home: &Path) -> Option<String> {
 /// Whether a process holds the worker lock now. It takes no number: this runs nothing.
 pub fn running(home: &Path) -> bool {
     lock_held(&home.join("state").join("worker.lock"))
+}
+
+/// R14: the outcome of a run whose loop made no progress.
+const NO_PROGRESS: &str = "its loop made no progress for 15 minutes or more, so it left; the next \
+                           worker a hook starts goes on from where it stopped";
+
+/// `state/worker-progress` (R15): this run's process id and the watchdog's looks in a row that
+/// found no progress, replaced whole at each look. Nothing goes into a home that is not this
+/// run's (R3).
+fn write_progress(home: &Path, lock: FileId, still: u64) {
+    let state = home.join("state");
+    if file_id(std::fs::metadata(state.join("worker.lock"))) != lock {
+        return;
+    }
+    let next = state.join("worker-progress.next");
+    if std::fs::write(&next, format!("{}\n{still}\n", std::process::id())).is_ok() {
+        let _ = std::fs::rename(&next, state.join("worker-progress"));
+    }
+}
+
+/// R14: a worker whose loop is stuck notes why and when (`left`), ends its CLI runs and exits.
+/// The lock goes with the process, and the next hook starts a new worker.
+fn leave(home: &Path, lock: FileId, still: u64) {
+    left(home, lock, still);
+    eprintln!("oboete: worker: {NO_PROGRESS}");
+    crate::provider::end_runs();
+    std::process::exit(1);
+}
+
+/// Why a worker left, for doctor, and when, in `state/worker-left`, which the next run's outcome
+/// does not replace; nothing in a home that is not the run's (R3).
+fn left(home: &Path, lock: FileId, still: u64) {
+    let state = home.join("state");
+    if file_id(std::fs::metadata(state.join("worker.lock"))) == lock {
+        if let Some((taken, _)) = outcome(home) {
+            note_with(home, taken, NO_PROGRESS, |guard| guard.try_lock().is_ok());
+        }
+        let next = state.join("worker-left.next");
+        if std::fs::write(&next, format!("{}\n{still}\n", crate::db::now_ms())).is_ok() {
+            let _ = std::fs::rename(&next, state.join("worker-left"));
+        }
+    }
+}
+
+/// The watchdog's looks as minutes, rounded down.
+fn minutes(looks: u64) -> u64 {
+    looks.saturating_mul(crate::watchdog::EVERY.as_secs()) / 60
+}
+
+/// What the running worker's watchdog last wrote: its process id and the looks in a row with no
+/// progress. None when the file is older than two looks: no watchdog writes it (a worker from
+/// before R14, or one gone), and it must not make `status` say more than the lock does.
+fn progress(home: &Path) -> Option<(u32, u64)> {
+    let path = home.join("state").join("worker-progress");
+    let age = std::fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()?;
+    if age > crate::watchdog::EVERY * 2 + Duration::from_secs(10) {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    Some((lines.next()?.parse().ok()?, lines.next()?.parse().ok()?))
+}
+
+/// The line about the last time a worker left on its own (R14), within the last week.
+pub(crate) fn left_line(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("state").join("worker-left")).ok()?;
+    let mut lines = text.lines();
+    let (at, still): (i64, u64) = (lines.next()?.parse().ok()?, lines.next()?.parse().ok()?);
+    (crate::db::now_ms() - at < 7 * 86_400_000).then(|| {
+        format!(
+            "a worker last left on its own at {}, after {} min without progress (it leaves after {} min)",
+            crate::db::utc(at),
+            minutes(still),
+            minutes(crate::watchdog::STILL)
+        )
+    })
+}
+
+/// `oboete worker status` (R15): whether a worker runs and its loop makes progress, the page,
+/// and how runs ended. Whether one runs is the lock's answer; the progress file adds only what the
+/// running worker's watchdog wrote.
+pub fn status(home: &Path) -> Result<()> {
+    for line in status_lines(home) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn status_lines(home: &Path) -> Vec<String> {
+    let mut lines = vec![if running(home) {
+        match progress(home) {
+            Some((pid, 0)) => format!("worker: running (process {pid}), making progress"),
+            Some((pid, still)) => format!(
+                "worker: running (process {pid}), no progress for {} min (it leaves after {} min)",
+                minutes(still),
+                minutes(crate::watchdog::STILL)
+            ),
+            None => "worker: running".to_owned(),
+        }
+    } else {
+        "worker: not running now (the next hook starts it)".to_owned()
+    }];
+    if crate::config::worker(home).is_ok_and(|w| w.resident)
+        && let Ok(view) = crate::config::view(home)
+    {
+        lines.push(crate::view::resident_line(home, view.port.get()));
+    }
+    if let Some(why) = last_failure(home) {
+        lines.push(format!("the last worker run failed: {}", why.trim_end()));
+    }
+    lines.extend(left_line(home));
+    lines
+}
+
+/// `oboete worker stop` (R15): the worker steps aside as for a command (R12), and the next hook
+/// starts one again, as claude-mem's `stop` leaves it to the next hook. The page stays (R1).
+pub fn stop(home: &Path) -> Result<()> {
+    let was = running(home);
+    let held = lock_asking(home).map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#}; a worker whose loop makes no progress leaves by itself within {} min",
+            minutes(crate::watchdog::STILL)
+        )
+    })?;
+    drop(held);
+    println!(
+        "{}",
+        if was {
+            "worker: stopped; the next hook starts it again, and the page stays up"
+        } else {
+            "worker: was not running"
+        }
+    );
+    Ok(())
+}
+
+/// `oboete worker restart` (R15): `stop`, then a worker started as a hook starts one (D6).
+pub fn restart(home: &Path) -> Result<()> {
+    stop(home)?;
+    if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
+        println!("worker: OBOETE_NO_SPAWN is set, so none is started");
+        return Ok(());
+    }
+    if crate::hook::start_worker(home)?.is_none() {
+        println!("worker: a hook started one already");
+        return Ok(());
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while !running(home) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    println!(
+        "{}",
+        if running(home) {
+            "worker: started"
+        } else {
+            "worker: started, but it does not hold the lock yet; `oboete worker status` tells"
+        }
+    );
+    Ok(())
 }
 
 /// Read-only status readers share an existing regular lock; only the exclusive producer
@@ -4656,6 +4846,145 @@ mod tests {
         let k = knowledge::open(&p).unwrap();
         assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
         assert_eq!(seen(&k), vec![1, 2]);
+    }
+
+    /// R14: a worker that leaves notes why for doctor and when for `status`, and nothing in a home
+    /// that is not its own.
+    #[test]
+    fn a_worker_that_leaves_notes_why_and_when_in_its_own_home() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let held = lock(p).unwrap().unwrap();
+        let id = file_id(held.0.metadata());
+        note(p, held.1, STOPPED);
+        left(p, Some((0, 0)), 31);
+        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(STOPPED));
+        assert!(left_line(p).is_none());
+        left(p, id, 31);
+        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(NO_PROGRESS));
+        assert!(
+            left_line(p).is_some_and(|l| l.contains("after 15 min without progress")),
+            "{:?}",
+            left_line(p)
+        );
+        drop(held);
+        assert!(last_failure(p).is_some_and(|why| why == NO_PROGRESS));
+    }
+
+    /// One record a batch, 30 ms each: a backlog that takes many batches.
+    struct Slow;
+    impl Consumer for Slow {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+        fn step(&mut self, raw: &Raw, _k: &Connection, _device: &str, after: i64) -> Result<i64> {
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(raw
+                .after(raw.device(), after, 1)?
+                .last()
+                .map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// R14: a worker marks each round, batch and tick of its waits, so neither a long backlog nor
+    /// a long wait counts as stuck. Its watchdog here looks every 10 ms and allows 80 looks
+    /// (800 ms): 30 batches of 30 ms, then a wait of 2 s whose ticks are 200 ms apart.
+    #[test]
+    fn neither_a_long_backlog_nor_a_wait_is_stuck() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_path_buf();
+        let mut raw = raw::open(&p).unwrap();
+        for i in 0..30 {
+            raw.append(&raw::test_event(&format!("record {i}")))
+                .unwrap();
+        }
+        drop(raw);
+        let (tx, stuck) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let watched = crate::watchdog::Watched::here();
+            crate::watchdog::watch(
+                watched,
+                Duration::from_millis(10),
+                80,
+                |_| {},
+                move |n| {
+                    let _ = tx.send(n);
+                },
+            );
+            run_with(&p, 2_000, vec![Box::new(Slow)], || {})
+        });
+        worker.join().unwrap().unwrap();
+        assert!(
+            stuck.try_recv().is_err(),
+            "a backlog or a wait counted as stuck"
+        );
+    }
+
+    /// R14: the watchdog only tries the note's lock, as the loop it ends may hold it: it says when
+    /// it left, and goes, without the note.
+    #[test]
+    fn a_worker_that_leaves_does_not_wait_for_the_notes_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let held = lock(p).unwrap().unwrap();
+        let id = file_id(held.0.metadata());
+        note(p, held.1, STOPPED);
+        let busy = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p.join("state/worker-note.lock"))
+            .unwrap();
+        busy.lock().unwrap();
+        left(p, id, 31);
+        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(STOPPED));
+        assert!(left_line(p).is_some());
+        drop(busy);
+        drop(held);
+    }
+
+    /// R15: `status` says whether a worker holds the lock, and what its watchdog last wrote only
+    /// while that is fresh.
+    #[test]
+    fn status_reads_the_lock_and_a_fresh_progress_file() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        assert_eq!(
+            status_lines(p),
+            ["worker: not running now (the next hook starts it)"]
+        );
+        let held = lock(p).unwrap().unwrap();
+        let id = file_id(held.0.metadata());
+        assert_eq!(status_lines(p), ["worker: running"]);
+        write_progress(p, id, 0);
+        let pid = std::process::id();
+        assert_eq!(
+            status_lines(p),
+            [format!("worker: running (process {pid}), making progress")]
+        );
+        write_progress(p, id, 31);
+        assert_eq!(
+            status_lines(p),
+            [format!(
+                "worker: running (process {pid}), no progress for 15 min (it leaves after 15 min)"
+            )]
+        );
+        // One a watchdog has not rewritten for two looks says nothing more than the lock.
+        let old = std::time::SystemTime::now() - crate::watchdog::EVERY * 3;
+        std::fs::File::options()
+            .write(true)
+            .open(p.join("state/worker-progress"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(status_lines(p), ["worker: running"]);
+        // Nor in another home's place.
+        write_progress(p, Some((0, 0)), 0);
+        assert_eq!(status_lines(p), ["worker: running"]);
+        drop(held);
     }
 
     // docs/resident.md: a worker that stays (R2, R3, R10, R12).

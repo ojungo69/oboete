@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 28 |
-| partial | 26 |
+| equal_or_better | 29 |
+| partial | 25 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
@@ -35,7 +35,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | Id | Difference | Status | Impact | Evidence (claude-mem / oboete) |
 |---|---|---|---|---|
 | 1 | Both keep a worker up and serve a page at a fixed address. oboete's page needs a token, which the bookmark carries. A fixed idle exit replaces claude-mem's opt-in `IDLE_EXIT_SEC`. | equal_or_better | none | SettingsDefaultsManager.ts:432 / src/view.rs:741 |
-| 2 | oboete has no stop, restart or status command. It does not replace a hung worker that holds the lock. A hung worker stops curation and the page with no notice. claude-mem reclaims a wedged worker using a heartbeat. | partial | rare | worker-service.ts:1533 / docs/resident.md:342 |
+| 2 | `oboete worker status`, `stop` and `restart` exist (docs/resident.md R15). A worker whose loop makes no progress for 15 minutes leaves by itself. While a provider call is out it waits longer, for that call's timeout. It ends its CLI runs as it goes, and the next hook starts a new worker (R14). The page is a process of its own and stays up while the worker is stuck (R1); a viewer that stops answering is not replaced on its own (#612). claude-mem reclaims a wedged worker from its launchers: its heartbeat has to be silent for 2 minutes past a 5-minute boot grace, and two health probes have to fail. oboete's watchdog runs inside the worker, so it trusts no process id. It waits longer because its loop is synchronous. | equal_or_better | rare | port-reclaim.ts:1 / src/watchdog.rs:1 |
 | 3 | claude-mem deletes a card or a session from the page. oboete forgets from the CLI only, and its forget is broader (preview, repo or time range, backups purged). The page has no forget route. | partial | rare | DataRoutes.ts:212 / src/view.rs:1100 |
 | 4 | The settings page does more than claude-mem's single-provider dialog. It covers the provider chain, connection test, write-only keys, the spending cap, embeddings, redaction, exclusions, retention, agents and a first-run guide. A stale save is refused with 409. Nobody has re-checked how easy it is on the real screen since #512 and #536. | equal_or_better | none | ContextSettingsModal.tsx:358 / src/view.rs:1491 |
 | 5 | Meaning search is on, with local bge-m3, over claims, cards, session summaries, imported history and raw records; its queue was down to 16 raw records and no imported document on 2026-10-20 (doctor, 16:52Z). oboete applies no 90-day window to a search by meaning without dates, which claude-mem applies by default (`CLAUDE_MEM_SEARCH_RECENCY_DAYS`, 90 days, 0 for none, the owner's at the default): milestone 1 measured it on the owner's questions, claude-mem's nDCG@10 0.219 with its window and 0.282 without, the window costing most on old prompts, so oboete does better without it; a search names its dates when it wants a window. The model a prompt's query needs is row 31's. | equal_or_better | none | SearchOrchestrator.ts:137 / docs/milestone-1.md:359 |
@@ -228,7 +228,7 @@ each milestone and new features are added here.
 
 | # | Difference | Size |
 |---|---|---|
-| 2 | **Controlling the always-on worker: stop, restart, status, stuck-worker replacement.** claude-mem has commands to stop, restart and check its worker, and a launcher replaces one that is old or fails two health probes. oboete's resident worker (decision 36) is replaced when the binary changes, steps aside for a command that needs its lock, and doctor says whether it runs; stop and restart commands and a watchdog for a hung worker come after the switch. | M |
+| 2 | **Controlling the always-on worker: stop, restart, status, stuck-worker replacement.** claude-mem has commands to stop, restart and check its worker, and a launcher replaces one that is old or fails two health probes. oboete's resident worker (decision 36) is replaced when the binary changes, steps aside for a command that needs its lock, and doctor says whether it runs; stop and restart commands and a watchdog for a hung worker come after the switch. Built: `oboete worker status`, `stop` and `restart`, and the worker's watchdog (docs/resident.md R14 and R15). | M |
 | 16 | **Sessions list, one-session page and category filter in the viewer.** A sessions tab, a page per session and filter chips by kind are in claude-mem's source under development, not in the installed 13.28.0. oboete's page has one timeline per repository. In scope by decision 37. | M |
 | 17 | **Readable 'what this session did' summaries.** claude-mem writes a structured summary of each session (request, what was learned, what was completed, next steps) that can be searched and read in the page. oboete writes a short digest shown only at the next session start; it is not searchable or listed in the page. | M |
 | 21 | **No way to say 'these two are the same project'.** Joining two projects and naming one by hand are in claude-mem's source under development, not in the installed 13.28.0, which names a project by its folder. oboete keys a repository by its origin URL, so a rename on GitHub or a remote added later splits its memory; `oboete repo alias` (appendix B, 30-4) joins them. | M |

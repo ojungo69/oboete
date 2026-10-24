@@ -319,6 +319,41 @@ running" line is a failure. `oboete rebuild` holds a lock of its own (`state/reb
 runs and the stats route reports `rebuilding` from that lock, so a resident worker cannot make the
 page say "rebuilding" for good.
 
+R14. **A worker whose loop makes no progress leaves (parity row 2).** Every `oboete worker` run
+starts a watchdog thread once it holds the lock. The loop marks each round, each consumer's batch
+(in a rebuild's drain too), each 200 ms tick of a wait, and each backup segment it writes. A call to a provider
+marks its start and its end, and while it is out the loop may stay still for the call's own
+timeout and 5 minutes more: a timeout the user set to an hour is waited for. The watchdog looks
+every 30 s and counts the looks in a row that found no new mark, rather than comparing times,
+so a clock that steps (WSL under load, a suspend) moves nothing. It counts from the loop's first
+mark on: a start that restores or migrates a large store is not stillness, as claude-mem gives a
+new worker a boot grace. After more than 30 of them
+(15 minutes), or more than a call out allows, it notes in the worker's outcome that the loop made
+no progress, when it can take the note's lock at once (the loop it ends may hold it), writes the
+time to `state/worker-left`, kills every CLI run out with its process group, and exits. It reads
+the marks and a call's allowance together, under the lock a call's start and end mark under, so
+a call that ends between two reads cannot take its allowance away unseen. Nothing is written into a home that is no longer the run's (R3). The lock goes
+with the process, and the next hook starts a new worker, which goes on from where the last one
+stopped. claude-mem reclaims a wedged worker from its launchers, after a heartbeat that has been
+silent for 2 minutes past a 5-minute boot grace and two failed health probes. oboete's
+watchdog runs inside the worker, so it trusts no process id and kills no process from outside.
+Its 15 minutes are longer because the loop is synchronous: a long step marks only at its end.
+On Windows the CLI runs are not killed (#607 asks for a job object).
+
+R15. **`oboete worker status`, `stop` and `restart` (parity row 2).**
+- `status` says whether a worker holds the lock, and whether its loop is making progress. It
+  also gives the page's line (R13), the last run's failure, and the last time within a week
+  that a worker left on its own (R14). Whether one runs is the lock's answer. The process id and
+  the looks without progress come from `state/worker-progress`, which the worker writes as soon
+  as it holds the lock and the watchdog replaces at each look, so a file that a run before it
+  left is not taken for its own. That file counts only while it is less than two looks old, so it
+  never makes `status` say more than the lock does.
+- `stop` asks the worker to step aside, as a command does (R12). The next hook starts one again,
+  as claude-mem's `stop` leaves it to the next hook, and the page stays up (R1). A worker that
+  does not step aside within 30 s is reported busy. One whose loop is stuck leaves by itself
+  within 15 minutes.
+- `restart` is `stop`, then a worker started as a hook starts one.
+
 ## Owner decision: what the bookmark's token may do
 
 Decision (owner, 2026-10-03): the bookmark does everything the page does, saves
@@ -339,8 +374,13 @@ left as a setting to add before a public release.
 - A local model kept in the worker: when the local embedder is built it is loaded on demand and
   dropped after an idle time, so idle memory stays the worker's own.
 - Windows native and macOS.
-- A stop command, a PID file, a signal handler, restart logic in a yielding command (R12 and R3
-  cover stopping: turn `resident` off, or run the command that needs the lock).
+- A signal handler, and killing a worker by its process id: R14's watchdog ends a stuck worker
+  from inside, and `oboete worker stop` (R15) asks as a command does (R12).
+- A check that the resident viewer still answers. A stuck worker leaves the page up (R1), so
+  claude-mem's reclaim, which restores one process that is both, needs no viewer check here. A
+  probe through the viewer's own port was tried and left out: another local user who fills its
+  32 connections could make it leave, then take its port and the bookmark's token (security
+  review of the branch). A check inside the process is for later (#612).
 - Later, small: the page stops its 3 s polling after the first failed or refused poll and sends the
   token again only on the owner's click; every store opened with `PRAGMA journal_size_limit` (about
   8 MB) if R11 shows a `-wal` file that stays large.

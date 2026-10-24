@@ -1307,6 +1307,9 @@ fn call(
     if let Some(error) = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take()) {
         return Err(error);
     }
+    // R14: the worker's watchdog lets its loop stay still for as long as this call may take.
+    let (Provider::Openai { timeout_s, .. } | Provider::Cli { timeout_s, .. }) = p;
+    let _calling = crate::watchdog::calling(Duration::from_secs(*timeout_s));
     match p {
         Provider::Openai {
             base_url,
@@ -3060,6 +3063,7 @@ fn codex_limits(program: &std::ffi::OsStr, timeout: Duration) -> Option<Value> {
         .envs(curator_env(std::env::vars_os(), cfg!(windows)))
         .env(hook::SKIP_ENV, "1");
     let mut child = own_group(&mut cmd).spawn().ok()?;
+    let _out = run_out(&child);
     let (mut stdin, stdout) = (child.stdin.take()?, child.stdout.take()?);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -3180,6 +3184,49 @@ fn codex_searched(stdout: &str) -> bool {
 /// Most a provider may send (HTTP body or CLI output) before its answer is dropped: a broken or
 /// hijacked provider must not fill memory (the summaries it returns are capped much lower anyway).
 const MAX_RESPONSE_BYTES: u64 = 1 << 20;
+
+/// Parity row 2 (docs/resident.md R14): the process groups of the runs out now, so that a worker
+/// that leaves because its loop is stuck ends them before it goes.
+static RUNS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// A child in a group of its own (`own_group`), counted among the runs out until this is dropped,
+/// after the child is waited for.
+pub(crate) struct RunOut(u32);
+
+pub(crate) fn run_out(child: &std::process::Child) -> RunOut {
+    RUNS.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(child.id());
+    RunOut(child.id())
+}
+
+impl Drop for RunOut {
+    fn drop(&mut self) {
+        RUNS.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// R14: every run out is killed with its process group.
+// shortcut: Windows kills none (a job object would, #607); its worker exits when idle anyway.
+pub(crate) fn end_runs() {
+    #[cfg(unix)]
+    for &pid in RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+    {
+        if let Ok(group) = libc::pid_t::try_from(pid) {
+            // SAFETY: killpg only sends a signal. The group is a run's own, which is not yet
+            // waited for, so its id is not another process group's.
+            unsafe {
+                libc::killpg(group, libc::SIGKILL);
+            }
+        }
+    }
+}
 
 /// `cmd`'s child in a process group of its own, so that `kill_tree` ends its descendants with it.
 pub(crate) fn own_group(cmd: &mut Command) -> &mut Command {
@@ -3343,6 +3390,7 @@ fn run_cli(
             );
         }
     };
+    let _out = run_out(&child);
     // Prompt-file input is handed over by spawn. Stdin admission ends on its last write, and
     // every early return closes the only writer before releasing it.
     let mut input = match CliInput::new(child.stdin.take(), stdin, admission) {
@@ -4834,6 +4882,42 @@ child.wait()
             tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// R14 (parity row 2): a call out keeps the worker's watchdog from calling the loop stuck for
+    /// as long as its timeout allows: an answer that takes a second, against 20 looks of 10 ms.
+    #[test]
+    fn a_call_out_keeps_the_watchdog_waiting() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let answer =
+            json!({"choices": [{"message": {"content": "{\"summary\": \"x\"}"}}]}).to_string();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let _ = conn.read(&mut [0u8; 65_536]);
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = write!(
+                conn,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+        });
+        let watched = crate::watchdog::Watched::here();
+        let (tx, stuck) = std::sync::mpsc::channel();
+        crate::watchdog::watch(
+            watched,
+            Duration::from_millis(10),
+            20,
+            |_| {},
+            move |n| {
+                let _ = tx.send(n);
+            },
+        );
+        // The loop has begun: the watchdog counts from here on.
+        crate::watchdog::progressed();
+        let _ = call(&stub(url), "prompt", &json!({}), None);
+        assert!(stuck.try_recv().is_err(), "stuck while a call was out");
     }
 
     #[test]

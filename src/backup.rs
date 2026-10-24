@@ -835,6 +835,8 @@ fn export_from_report(
             )?;
             wrote.push((path, started.elapsed()));
             last = end;
+            // R14: a first backup of a large store is many segments, each one progress.
+            crate::watchdog::progressed();
         }
     }
     Ok(wrote)

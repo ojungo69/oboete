@@ -111,6 +111,7 @@ fn output(cmd: &mut Command) -> Result<std::process::Output, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
+    let _out = crate::provider::run_out(&child);
     // Each pipe drains on its own thread, up to the cap and then to its end, so the child never
     // blocks on a full pipe.
     let read = |pipe: Option<Box<dyn Read + Send>>| {
@@ -350,6 +351,7 @@ fn probe_exec(exe: &Path, cwd: &Path, canary: &Canary) -> Result<(), String> {
     let mut child = own_group(&mut cmd)
         .spawn()
         .map_err(|e| format!("codex exec: {e}"))?;
+    let _out = crate::provider::run_out(&child);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match child.try_wait() {
