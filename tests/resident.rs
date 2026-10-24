@@ -1588,3 +1588,65 @@ fn a_worker_at_its_start_removes_what_a_killed_run_left() {
     );
     drop(live);
 }
+
+/// R15 (parity row 2): `oboete worker restart`, `status` and `stop` through the binary, in a home
+/// that is not resident: the worker that restart starts would exit when idle, and stop sends it
+/// away at once.
+#[test]
+fn worker_restart_status_and_stop() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let run = |args: &[&str]| -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(p)
+            .args(args)
+            .env_remove("OBOETE_NO_SPAWN")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        run(&["worker", "status"]).lines().next(),
+        Some("worker: not running now (the next hook starts it)")
+    );
+    let restarted = run(&["worker", "restart"]);
+    assert_eq!(
+        restarted.lines().last(),
+        Some("worker: started"),
+        "{restarted}"
+    );
+    // The new worker's own progress at once, not a file a run before it left.
+    until("the new worker's progress", || {
+        run(&["worker", "status"]).starts_with("worker: running (process ")
+    });
+    assert!(run(&["worker", "stop"]).starts_with("worker: stopped"));
+    until("the worker is gone", || {
+        run(&["worker", "status"]).starts_with("worker: not running")
+    });
+}
+
+/// R15: `oboete worker status` says how the worker stands even when the redaction table is broken,
+/// as doctor does, since it sends nothing out.
+#[test]
+fn worker_status_reads_through_a_broken_redaction_table() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[redaction]\nextra_rules = 5\n",
+    )
+    .unwrap();
+    let out = oboete(home.path(), &["worker", "status"], "");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("worker: not running now"));
+}

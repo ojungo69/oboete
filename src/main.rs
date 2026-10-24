@@ -55,13 +55,14 @@ mod transcript;
 mod turns;
 mod unwritten;
 mod view;
+mod watchdog;
 mod work_state;
 mod worker;
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "oboete", version, about = "Memory for coding agents")]
@@ -113,8 +114,12 @@ enum Cmd {
     /// Run Design B's consumers over raw.db (hooks start it; one per home). It exits when idle,
     /// or stays where config.toml says `[worker] resident = true`
     Worker {
+        /// status: whether a worker runs and makes progress; stop: ask it to step aside (the next
+        /// hook starts one again); restart: stop it and start one now
+        #[arg(value_enum)]
+        action: Option<WorkerAction>,
         /// Exit after this long without a new record, whatever config.toml says
-        #[arg(long)]
+        #[arg(long, conflicts_with = "action")]
         idle_ms: Option<u64>,
     },
     /// Rebuild knowledge.db (claims, cards, summaries, indexes, manifests) from raw.db and its op log,
@@ -445,6 +450,14 @@ enum Cmd {
     },
 }
 
+/// `oboete worker <action>` (docs/resident.md R15, parity row 2).
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkerAction {
+    Status,
+    Stop,
+    Restart,
+}
+
 fn main() {
     executable::init();
     let cli = Cli::parse();
@@ -491,7 +504,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     executable::check_home(
         &home,
         match &cmd {
-            Cmd::Worker { .. } => Some(executable::Role::Worker),
+            Cmd::Worker { action: None, .. } => Some(executable::Role::Worker),
             Cmd::View { resident: true, .. } => Some(executable::Role::Viewer),
             _ => None,
         },
@@ -505,9 +518,18 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     // Hooks load them per call inside their fail-open boundary; doctor and setup report a
     // broken `[redaction]` table instead of stopping on it, and inject still prints the
     // recording-failure line such a table causes (OpenCode reads its context there).
+    // `oboete worker status`, `stop` and `restart` send nothing out, and say how a worker stands
+    // even when that table is broken, as doctor does (R15).
     if !matches!(
         &cmd,
-        Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. } | Cmd::Inject { .. }
+        Cmd::Hook { .. }
+            | Cmd::Doctor
+            | Cmd::Setup { .. }
+            | Cmd::Inject { .. }
+            | Cmd::Worker {
+                action: Some(_),
+                ..
+            }
     ) {
         redact::set_home(&home)?;
     }
@@ -519,8 +541,22 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Worker { idle_ms: Some(ms) } => worker::run(&home, ms),
-        Cmd::Worker { idle_ms: None } => worker::run_default(&home),
+        Cmd::Worker {
+            action: Some(WorkerAction::Status),
+            ..
+        } => worker::status(&home),
+        Cmd::Worker {
+            action: Some(WorkerAction::Stop),
+            ..
+        } => worker::stop(&home),
+        Cmd::Worker {
+            action: Some(WorkerAction::Restart),
+            ..
+        } => worker::restart(&home),
+        Cmd::Worker {
+            idle_ms: Some(ms), ..
+        } => worker::run(&home, ms),
+        Cmd::Worker { idle_ms: None, .. } => worker::run_default(&home),
         Cmd::Inject {
             session,
             prompt: true,

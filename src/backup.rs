@@ -835,6 +835,8 @@ fn export_from_report(
             )?;
             wrote.push((path, started.elapsed()));
             last = end;
+            // R14: a first backup of a large store is many segments, each one progress.
+            crate::watchdog::progressed();
         }
     }
     Ok(wrote)
@@ -2014,6 +2016,9 @@ fn restore_locked(
             rebuild.add(line)?;
             receipt.replayed_records += 1;
         }
+        // R14: a restore of a large store, which a worker runs when asked to, is many segments,
+        // each one progress (CodeRabbit on #613).
+        crate::watchdog::progressed();
     }
     // The ops after the records, in op order up to the first segment that is damaged or does not
     // start where the one before it ended. The op log after such a hole is set aside with it: its
@@ -2024,6 +2029,7 @@ fn restore_locked(
             rebuild.add_op(line)?;
             receipt.replayed_ops += 1;
         }
+        crate::watchdog::progressed();
     }
     // Rule 14: what the live raw.db and the logs hold of this home's forgets, before the swap.
     // A copied store may append as a new device while keeping the same home lineage.
@@ -3551,6 +3557,19 @@ pub(crate) mod tests {
         for f in ["raw.db-wal", "raw.db-shm"] {
             let _ = std::fs::remove_file(p.join(f));
         }
+    }
+
+    /// R14: a restore marks each segment it replays, so that a large one, which a worker runs
+    /// when asked to after its loop has begun, is not taken for a stuck loop (CodeRabbit on #613).
+    #[test]
+    fn a_restore_marks_each_segment_it_replays() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 30, 10); // segments 1-10, 11-20, 21-30
+        damage_raw(p);
+        let watched = crate::watchdog::Watched::here();
+        open_raw(p).unwrap();
+        assert_eq!(watched.marks(), 3);
     }
 
     #[test]
