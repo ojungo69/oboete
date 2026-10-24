@@ -6,7 +6,7 @@ use crate::raw::{Raw, Removal};
 use crate::redact::Rules;
 use crate::turns::TurnSummary;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 
 /// One card as a reader gets it: current (K3), over no record removed since (K4), gated (K6).
@@ -291,7 +291,7 @@ pub fn block<Tz: chrono::TimeZone>(
     latest: Option<&TurnSummary>,
     local: &str,
     name: &str,
-    work: &HashMap<(i64, i64), i64>,
+    work: &HashMap<i64, i64>,
     now: i64,
     tz: &Tz,
 ) -> String
@@ -305,7 +305,7 @@ where
         .collect();
     // Parity row 13, claude-mem's economics at its default settings (only the percentage on): what
     // the cards shown cost to read, as its TokenCalculator counts an observation, against what the
-    // curator spent on their windows (`work`), each window once however many cards it made.
+    // curator spent on their windows (`work`, by window op), each once however many cards it made.
     let read: usize = cards
         .iter()
         .map(|c| {
@@ -317,10 +317,10 @@ where
                 .div_ceil(4)
         })
         .sum();
-    let windows: std::collections::HashSet<(i64, i64)> = cards
+    let windows: std::collections::HashSet<i64> = cards
         .iter()
         .filter(|c| c.device == local)
-        .filter_map(|c| c.window)
+        .map(|c| c.op_seq)
         .collect();
     let spent: i64 = windows.iter().filter_map(|w| work.get(w)).sum();
     let saved = spent - i64::try_from(read).unwrap_or(i64::MAX);
@@ -435,19 +435,16 @@ fn grouped(n: u64) -> String {
     out
 }
 
-/// What the curator spent on each window of `cards` this device curated (parity row 13), as
-/// claude-mem's `discovery_tokens` are what its observer spent: the prompt and answer tokens of
-/// the window's last call that made its cards, or the estimate of what was sent when a CLI
-/// reports no usage. A window of another device, an imported observation and a ledger that
+/// What the curator spent on the window of each card of `cards` this device curated, by its
+/// window op (parity row 13), as claude-mem's `discovery_tokens` are what its observer spent: the
+/// prompt and answer tokens of the call that made the op's cards, or the estimate of what was
+/// sent when a CLI reports no usage. That call is the last one before the op was written, by the
+/// provider the op names, over its window's records, that made cards or whose refused answer the
+/// op keeps (`unanchored`): the windows a long record is split into share their records, and a
+/// recuration comes after. A window of another device, an imported observation and a ledger that
 /// cannot be read have none: the line is then without them, and a hook never fails for it.
-pub fn work(home: &std::path::Path, device: &str, cards: &[Card]) -> HashMap<(i64, i64), i64> {
-    let spans: Vec<String> = cards
-        .iter()
-        .filter(|c| c.device == device)
-        .filter_map(|c| c.window)
-        .map(|(from, to)| format!("{from}-{to}"))
-        .collect();
-    let read = || -> Result<HashMap<(i64, i64), i64>> {
+pub fn work(home: &std::path::Path, raw: &Raw, cards: &[Card]) -> HashMap<i64, i64> {
+    let read = || -> Result<HashMap<i64, i64>> {
         let mut out = HashMap::new();
         let Some(db) = crate::providers_db::read_only(home)? else {
             return Ok(out);
@@ -455,20 +452,30 @@ pub fn work(home: &std::path::Path, device: &str, cards: &[Card]) -> HashMap<(i6
         // A hook does not wait for the ledger: a busy one leaves the line without work.
         db.busy_timeout(std::time::Duration::ZERO)?;
         let mut st = db.prepare(
-            "SELECT span, COALESCE(prompt_tokens, est_tokens, 0) + COALESCE(completion_tokens, 0)
+            "SELECT COALESCE(prompt_tokens, est_tokens, 0) + COALESCE(completion_tokens, 0)
              FROM provider_calls
-             WHERE role = 'curator' AND outcome = 'ok' AND span IN (SELECT value FROM json_each(?1))
-             ORDER BY id",
+             WHERE role = 'curator' AND span = ?1 AND ts <= ?2 AND provider = ?3
+               AND outcome IN ('ok', 'unanchored')
+             ORDER BY ts DESC, id DESC LIMIT 1",
         )?;
-        let rows = st.query_map([serde_json::to_string(&spans)?], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (span, tokens) = row?;
-            if let Some((from, to)) = span.split_once('-')
-                && let (Ok(from), Ok(to)) = (from.parse(), to.parse())
-            {
-                out.insert((from, to), tokens);
+        for c in cards.iter().filter(|c| c.device == raw.device()) {
+            let Some((from, to)) = c.window else {
+                continue;
+            };
+            if out.contains_key(&c.op_seq) {
+                continue;
+            }
+            let Some((at, Some(provider))) = raw.op_stamp(raw.device(), c.op_seq)? else {
+                continue;
+            };
+            let tokens = st
+                .query_row(
+                    rusqlite::params![format!("{from}-{to}"), at, provider],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(tokens) = tokens {
+                out.insert(c.op_seq, tokens);
             }
         }
         Ok(out)
@@ -1449,14 +1456,17 @@ mod tests {
         let mut third = card(11, 0, at(3, 6, 1, 0), Some("change"), "x");
         third.window = Some((4, 4));
         third.narrative = "y".repeat(10);
+        // The next window of a record split in two: the same records, its own op and call.
+        let mut split = card(13, 0, at(3, 6, 2, 0), Some("change"), "z");
+        split.window = Some((4, 4));
         let other = Card {
             device: "e".into(),
-            window: Some((6, 6)),
+            op_seq: 12,
             ..first.clone()
         };
-        let work = HashMap::from([((1, 3), 9_400), ((4, 4), 3_000), ((6, 6), 50)]);
+        let work = HashMap::from([(10, 9_400), (11, 3_000), (12, 50), (13, 1_000)]);
         let shown = block(
-            &[first, second, third, other],
+            &[first, second, third, split, other],
             &[],
             None,
             "d",
@@ -1465,16 +1475,16 @@ mod tests {
             at(3, 7, 37, 0),
             &jst(),
         );
-        // 12 + 6 ("[\"ab\"]") = 18 -> 5; 8 + 6 -> 4; 1 + 10 + 2 -> 4; 18 -> 5.
+        // 12 + 6 ("[\"ab\"]") = 18 -> 5; 8 + 6 -> 4; 1 + 10 + 2 -> 4; 1 + 2 -> 1; 18 -> 5.
         assert!(
             shown.contains(
                 "Fetch details: get(ID) | Search: search(query)\n\n\
-                 Stats: 4 obs (18t read) | 12,400t work | 100% savings\n\n### "
+                 Stats: 5 obs (19t read) | 13,400t work | 100% savings\n\n### "
             ),
             "{shown}"
         );
         assert!(
-            shown.ends_with("\n\nAccess 12k tokens of past work via get(ID) or search(query).\n"),
+            shown.ends_with("\n\nAccess 13k tokens of past work via get(ID) or search(query).\n"),
             "{shown}"
         );
         // Nothing spent that this device knows of: claude-mem's line without its percentage, and
@@ -1503,7 +1513,7 @@ mod tests {
             None,
             "d",
             "oboete",
-            &HashMap::from([((1, 3), 3)]),
+            &HashMap::from([(10, 3)]),
             at(3, 7, 37, 0),
             &jst(),
         );
@@ -1520,52 +1530,129 @@ mod tests {
         assert_eq!(grouped(1_234_567), "1,234,567");
     }
 
-    /// Parity row 13: a window's spend is its last call that made cards (a recuration's, not the
-    /// first one's, nor a failed call after it), the estimate of what was sent where a CLI
-    /// reported no usage, and only this device's curator calls that made cards count; a missing
-    /// ledger is none, never made.
+    /// Parity row 13: a window op's spend is the call that made its cards: the last before the op
+    /// was written, by the provider it names, that made cards or whose refused answer it keeps;
+    /// not a later recuration's, another provider's, a failed call's or a summary's. The windows
+    /// a long record is split into, which share their records, each have their own; a CLI that
+    /// reports no usage counts its estimate; another device's card and an op that names no
+    /// provider have none; a missing ledger is none, never made.
     #[test]
-    fn work_is_the_last_curator_call_that_made_a_windows_cards() {
+    fn work_is_the_call_that_made_each_window_ops_cards() {
         let home = tempfile::tempdir().unwrap();
-        let cards = [(1, 3), (4, 4), (5, 5)]
-            .map(|w| Card {
-                window: Some(w),
-                ..card(1, 0, 0, None, "t")
-            })
-            .into_iter()
-            .chain([Card {
-                device: "e".into(),
-                window: Some((6, 6)),
-                ..card(1, 0, 0, None, "t")
-            }])
-            .collect::<Vec<_>>();
-        assert!(work(home.path(), "d", &cards).is_empty());
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let mut window = |from: i64, to: i64, provider: Option<&str>, refused: bool| {
+            let mut op = serde_json::json!({"outcome": "curated", "summary": "s", "from_seq": from,
+                "from_offset": null, "to_seq": to, "to_offset": null, "elided": [],
+                "observations": []});
+            if let Some(p) = provider {
+                op["provider"] = p.into();
+            }
+            if refused {
+                op["refused"] = true.into();
+            }
+            raw.append_ops(&[(crate::raw::OpKind::Window, op)]).unwrap();
+            // Each op a millisecond apart, as a curated window's op follows its call.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let op_seq = raw.max_op_seq().unwrap();
+            let (at, _) = raw.op_stamp(raw.device(), op_seq).unwrap().unwrap();
+            let card = Card {
+                device: raw.device().to_owned(),
+                op_seq,
+                window: Some((from, to)),
+                ..card(op_seq, 0, 0, None, "t")
+            };
+            (card, at)
+        };
+        let (whole, a) = window(1, 3, Some("p"), false);
+        let (first_part, b1) = window(4, 4, Some("p"), false);
+        let (second_part, b2) = window(4, 4, Some("p"), false);
+        let (refused, c) = window(5, 5, Some("q"), true);
+        let (estimated, d) = window(6, 6, Some("p"), false);
+        let (unnamed, _) = window(7, 7, None, false);
+        let other = Card {
+            device: "e".into(),
+            ..whole.clone()
+        };
+        let cards = vec![
+            whole.clone(),
+            Card {
+                n: 1,
+                ..whole.clone()
+            },
+            first_part.clone(),
+            second_part.clone(),
+            refused.clone(),
+            estimated.clone(),
+            unnamed,
+            other,
+        ];
+        assert!(work(home.path(), &raw, &cards).is_empty());
         assert!(!home.path().join("providers.db").exists());
         let db = crate::providers_db::open(home.path()).unwrap();
-        for (role, span, outcome, est, prompt, completion) in [
-            ("curator", "1-3", "ok", 90, Some(100), Some(20)),
-            ("curator", "1-3", "ok", 190, Some(200), Some(30)),
-            ("curator", "4-4", "ok", 70, None, None),
-            ("curator", "4-4", "error", 40, Some(50), None),
-            ("summary", "5-5", "ok", 10, Some(10), Some(1)),
-            ("curator", "6-6", "ok", 10, Some(10), Some(1)),
+        for (ts, provider, role, span, outcome, est, prompt, completion) in [
+            (a - 20, "p", "curator", "1-3", "ok", 90, Some(100), Some(20)),
+            (
+                a - 10,
+                "p",
+                "curator",
+                "1-3",
+                "ok",
+                190,
+                Some(200),
+                Some(30),
+            ),
+            (a - 5, "r", "curator", "1-3", "ok", 700, Some(700), Some(77)),
+            (a - 1, "p", "summary", "1-3", "ok", 10, Some(10), Some(1)),
+            (a - 1, "p", "curator", "1-3", "error", 40, Some(999), None),
+            (
+                b2 + 10,
+                "p",
+                "curator",
+                "1-3",
+                "ok",
+                1,
+                Some(5_000),
+                Some(1),
+            ),
+            (b1 - 1, "p", "curator", "4-4", "ok", 60, Some(60), Some(10)),
+            (b2 - 1, "p", "curator", "4-4", "ok", 80, Some(80), Some(20)),
+            (
+                c - 2,
+                "q",
+                "curator",
+                "5-5",
+                "unanchored",
+                50,
+                Some(50),
+                Some(5),
+            ),
+            (c - 1, "q", "curator", "5-5", "error", 40, Some(40), None),
+            (d - 1, "p", "curator", "6-6", "ok", 70, None, None),
         ] {
             db.execute(
                 "INSERT INTO provider_calls(ts, provider, role, span, outcome, ms, est_tokens,
-                   prompt_tokens, completion_tokens) VALUES(0, 'p', ?1, ?2, ?3, 0, ?4, ?5, ?6)",
-                rusqlite::params![role, span, outcome, est, prompt, completion],
+                   prompt_tokens, completion_tokens) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
+                rusqlite::params![ts, provider, role, span, outcome, est, prompt, completion],
             )
             .unwrap();
         }
         assert_eq!(
-            work(home.path(), "d", &cards),
-            HashMap::from([((1, 3), 230), ((4, 4), 70)])
+            work(home.path(), &raw, &cards),
+            HashMap::from([
+                (whole.op_seq, 230),
+                (first_part.op_seq, 70),
+                (second_part.op_seq, 100),
+                (refused.op_seq, 55),
+                (estimated.op_seq, 70),
+            ])
         );
         // A seek on the partial index, not a scan of every call the ledger keeps.
         let plan: Vec<String> = db
             .prepare(
-                "EXPLAIN QUERY PLAN SELECT span FROM provider_calls
-                 WHERE role = 'curator' AND outcome = 'ok' AND span IN (SELECT value FROM json_each('[]'))",
+                "EXPLAIN QUERY PLAN SELECT ts FROM provider_calls
+                 WHERE role = 'curator' AND span = '1-3' AND ts <= 5 AND provider = 'p'
+                   AND outcome IN ('ok', 'unanchored')
+                 ORDER BY ts DESC, id DESC LIMIT 1",
             )
             .unwrap()
             .query_map([], |r| r.get(3))

@@ -297,10 +297,13 @@ line at its default settings, where only the percentage is switched on: `Stats: 
 cost to read, counted as claude-mem's TokenCalculator counts an observation: the UTF-16 units of
 the title, subtitle, narrative and the facts' JSON, four to a token, rounded up for each card.
 The work is what the curator spent on the windows of those cards, as claude-mem's
-`discovery_tokens` are what its observer spent: the prompt and answer tokens of each window's
-last call that made its cards, from providers.db's ledger, or the estimate of what was sent where
-a CLI reports no usage. A window counts once however many cards it made; claude-mem stores a
-turn's tokens on each observation the turn made, so it counts them again. A card of another
+`discovery_tokens` are what its observer spent: the prompt and answer tokens of the call that
+made each window op's cards, from providers.db's ledger, or the estimate of what was sent where a
+CLI reports no usage. That call is the last one before the op was written, by the provider the op
+names, over the window's records, that made cards or whose refused answer the op keeps (C5): the
+windows a long record is split into share their records, and a recuration comes after (Codex on
+#616). A window op counts once however many cards it made; claude-mem stores a turn's tokens on
+each observation the turn made, so it counts them again. A card of another
 device and an imported observation have no work: the ledger is this device's, and the import
 keeps no token counts. With no work at all the line ends at `0t work`, without a percentage, as
 claude-mem's does. The percentage is rounded as JavaScript's `Math.round` rounds, and the numbers
@@ -309,9 +312,10 @@ ends with claude-mem's footer: `Access <work in thousands>k tokens of past work 
 search(query).` The terminal shows both lines dimmed, as it shows the legend. The hook reads the
 ledger read-only and never makes one, nor waits for it: a ledger it cannot read, or one busy at
 that moment, leaves the line without work.
-The lookup is a seek on a partial index of the calls that made cards (`provider_calls_span`),
-which the worker makes: on this PC's ledger of 80,483 calls it takes under 10 ms for 50 windows,
-where a scan of every call took about as long warm and reads the whole 9 MB file cold.
+Each lookup is a seek on a partial index of the curator's calls by their records and time
+(`provider_calls_span`), which the worker makes, beside a read of the window op's time and provider
+by its key: on this PC's ledger of 80,483 calls, 50 windows take under 10 ms, where a scan of every
+call took about as long warm and reads the whole 9 MB file cold.
 claude-mem's four switches (read tokens, work tokens, the amount saved, the percentage) are not
 built: its default output is what oboete shows.
 

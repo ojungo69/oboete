@@ -180,7 +180,7 @@ pub fn text(
     // so no count taken before it is a bound (Codex on #370). The fence's own text is outside
     // `cap`, as it always was.
     let cards = crate::cards::recent(&k, raw, repo, CARDS, rules)?;
-    let work = crate::cards::work(home, raw.device(), &cards);
+    let work = crate::cards::work(home, raw, &cards);
     let sessions = crate::turns::recent(&k, raw, repo, SUMMARIES, rules)?;
     let name = repo_name(repo, rules);
     let fence = manifest::fenced("").encode_utf16().count();
@@ -2936,16 +2936,14 @@ extra_rules = [
         let cwd = tempfile::tempdir().unwrap();
         session(home.path(), cwd.path());
         let mut store = raw::open(home.path()).unwrap();
-        store
-            .append_ops(&[cards_op(1, 7, &["Ours", "And ours"])])
-            .unwrap();
+        let (kind, mut op) = cards_op(1, 7, &["Ours", "And ours"]);
+        op["provider"] = "p".into();
+        store.append_ops(&[(kind, op)]).unwrap();
         worker::run_once(home.path()).unwrap();
-        // "Ours" and "[]" -> 2 tokens, "And ours" and "[]" -> 3.
+        // "Ours" and "[]" -> 2 tokens, "And ours" and "[]" -> 3. The packet holds uids: no
+        // message prints it (CodeQL).
         let text = shown(home.path(), &store).unwrap();
-        assert!(
-            text.contains("\nStats: 2 obs (5t read) | 0t work\n"),
-            "{text}"
-        );
+        assert!(text.contains("\nStats: 2 obs (5t read) | 0t work\n"));
         assert!(!home.path().join("providers.db").exists());
         let db = crate::providers_db::open(home.path()).unwrap();
         db.execute(
@@ -2955,14 +2953,8 @@ extra_rules = [
         )
         .unwrap();
         let text = shown(home.path(), &store).unwrap();
-        assert!(
-            text.contains("\nStats: 2 obs (5t read) | 10,000t work | 100% savings\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\nAccess 10k tokens of past work via get(ID) or search(query).\n"),
-            "{text}"
-        );
+        assert!(text.contains("\nStats: 2 obs (5t read) | 10,000t work | 100% savings\n"));
+        assert!(text.contains("\nAccess 10k tokens of past work via get(ID) or search(query).\n"));
     }
 
     /// Codex on slice 3: a card's title is gated as its row shows it, on one line, so a rule

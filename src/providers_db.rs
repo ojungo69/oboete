@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS provider_calls(
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 -- What a window's cards cost, read at session start (parity row 13): a seek, not a scan.
-CREATE INDEX IF NOT EXISTS provider_calls_span ON provider_calls(span) WHERE role = 'curator' AND outcome = 'ok';
+CREATE INDEX IF NOT EXISTS provider_calls_span ON provider_calls(span, ts) WHERE role = 'curator';
 -- Whether a curator CLI provably cannot act (docs/milestone-3-plan.md Task 3): one row per CLI
 -- version and probe profile, so a new codex or a changed profile is probed again.
 CREATE TABLE IF NOT EXISTS isolation(

@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 30 |
-| partial | 24 |
+| equal_or_better | 31 |
+| partial | 23 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
