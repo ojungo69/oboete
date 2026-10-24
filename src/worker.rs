@@ -1389,7 +1389,7 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
     // branch).
     write_progress(home, lock_id, 0);
     let (looked, left) = (home.to_path_buf(), home.to_path_buf());
-    crate::watchdog::watch(
+    let _watch = crate::watchdog::watch(
         crate::watchdog::Watched::here(),
         crate::watchdog::EVERY,
         crate::watchdog::STILL,
@@ -1664,10 +1664,9 @@ pub(crate) fn left_line(home: &Path) -> Option<String> {
     let (at, still): (i64, u64) = (lines.next()?.parse().ok()?, lines.next()?.parse().ok()?);
     (crate::db::now_ms() - at < 7 * 86_400_000).then(|| {
         format!(
-            "a worker last left on its own at {}, after {} min without progress (it leaves after {} min)",
+            "a worker last left on its own at {}, after {} min without progress",
             crate::db::utc(at),
-            minutes(still),
-            minutes(crate::watchdog::STILL)
+            minutes(still)
         )
     })
 }
@@ -1686,10 +1685,11 @@ fn status_lines(home: &Path) -> Vec<String> {
     let mut lines = vec![if running(home) {
         match progress(home) {
             Some((pid, 0)) => format!("worker: running (process {pid}), making progress"),
+            // How long a call out may keep it still is the watchdog's: no fixed limit is shown
+            // (CodeRabbit on #613).
             Some((pid, still)) => format!(
-                "worker: running (process {pid}), no progress for {} min (it leaves after {} min)",
-                minutes(still),
-                minutes(crate::watchdog::STILL)
+                "worker: running (process {pid}), no progress for {} min",
+                minutes(still)
             ),
             None => "worker: running".to_owned(),
         }
@@ -4905,7 +4905,7 @@ mod tests {
         let (tx, stuck) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let watched = crate::watchdog::Watched::here();
-            crate::watchdog::watch(
+            let _watch = crate::watchdog::watch(
                 watched,
                 Duration::from_millis(10),
                 80,
@@ -4969,7 +4969,7 @@ mod tests {
         assert_eq!(
             status_lines(p),
             [format!(
-                "worker: running (process {pid}), no progress for 15 min (it leaves after 15 min)"
+                "worker: running (process {pid}), no progress for 15 min"
             )]
         );
         // One a watchdog has not rewritten for two looks says nothing more than the lock.

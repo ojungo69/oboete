@@ -321,13 +321,15 @@ page say "rebuilding" for good.
 
 R14. **A worker whose loop makes no progress leaves (parity row 2).** Every `oboete worker` run
 starts a watchdog thread once it holds the lock. The loop marks each round, each consumer's batch
-(in a rebuild's drain too), each 200 ms tick of a wait, and each backup segment it writes. A call to a provider
+(in a rebuild's drain too), each 200 ms tick of a wait, and each backup segment it writes or, in a
+restore it was asked for, replays. A call to a provider
 marks its start and its end, and while it is out the loop may stay still for the call's own
 timeout and 5 minutes more: a timeout the user set to an hour is waited for. The watchdog looks
 every 30 s and counts the looks in a row that found no new mark, rather than comparing times,
 so a clock that steps (WSL under load, a suspend) moves nothing. It counts from the loop's first
 mark on: a start that restores or migrates a large store is not stillness, as claude-mem gives a
-new worker a boot grace. After more than 30 of them
+new worker a boot grace. The watch ends with the run, however it returns, so a process that goes
+on is not ended by a watch a run before left behind. After more than 30 of them
 (15 minutes), or more than a call out allows, it notes in the worker's outcome that the loop made
 no progress, when it can take the note's lock at once (the loop it ends may hold it), writes the
 time to `state/worker-left`, kills every CLI run out with its process group, and exits. It reads
@@ -341,6 +343,7 @@ Its 15 minutes are longer because the loop is synchronous: a long step marks onl
 On Windows the CLI runs are not killed (#607 asks for a job object).
 
 R15. **`oboete worker status`, `stop` and `restart` (parity row 2).**
+
 - `status` says whether a worker holds the lock, and whether its loop is making progress. It
   also gives the page's line (R13), the last run's failure, and the last time within a week
   that a worker left on its own (R14). Whether one runs is the lock's answer. The process id and

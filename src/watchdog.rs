@@ -6,7 +6,7 @@
 //! claude-mem gives a new worker a boot grace.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -26,6 +26,8 @@ pub(crate) struct Watched {
     marks: AtomicU64,
     /// Calls out now, and the longest stillness the longest of them allows.
     calls: Mutex<(u32, Duration)>,
+    /// The run it watches has returned: its watch ends.
+    ended: AtomicBool,
 }
 
 thread_local! {
@@ -43,6 +45,23 @@ impl Watched {
 
     fn mark(&self) {
         self.marks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn marks(&self) -> u64 {
+        self.marks.load(Ordering::Relaxed)
+    }
+}
+
+/// One run's watch, which ends when this is dropped: with the run, however it returns, so that a
+/// process that goes on (a test binary that runs many workers) is not ended by a watch that a run
+/// before left behind (CodeRabbit on #613).
+#[must_use = "the watch ends when this is dropped"]
+pub(crate) struct Watch(Arc<Watched>);
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::Relaxed);
     }
 }
 
@@ -85,19 +104,24 @@ impl Drop for Calling {
 
 /// On a thread of its own: looks every `every`, and runs `looked` with the looks in a row that
 /// found no new mark, from the loop's first mark on. After more than `still` of them, or more
-/// than a call out allows, `stuck` runs with that number and the watch ends.
+/// than a call out allows, `stuck` runs with that number and the watch ends; it ends too once the
+/// `Watch` it returns is dropped.
 pub(crate) fn watch(
     watched: Arc<Watched>,
     every: Duration,
     still: u64,
     mut looked: impl FnMut(u64) + Send + 'static,
     stuck: impl FnOnce(u64) + Send + 'static,
-) -> std::thread::JoinHandle<()> {
+) -> Watch {
+    let ends = Watch(Arc::clone(&watched));
     std::thread::spawn(move || {
         let mut last = watched.marks.load(Ordering::Relaxed);
         let mut unchanged = 0;
         loop {
             std::thread::sleep(every);
+            if watched.ended.load(Ordering::Relaxed) {
+                return;
+            }
             // Read together under the calls' lock, which a call's start and end mark under: a call
             // that ends between the two reads could otherwise take its allowance away while the
             // mark it made at its end is not seen yet.
@@ -120,7 +144,8 @@ pub(crate) fn watch(
                 return;
             }
         }
-    })
+    });
+    ends
 }
 
 /// How many looks `d` spans, rounded up.
@@ -137,12 +162,11 @@ mod tests {
 
     /// A loop on this thread that has marked once, watched every 10 ms, stuck after `still` looks
     /// without a mark: the number `stuck` got, once it ran.
-    fn watched(still: u64) -> (Arc<Watched>, mpsc::Receiver<u64>) {
-        let watched = Watched::here();
+    fn watched(still: u64) -> (Watch, mpsc::Receiver<u64>) {
         let (tx, rx) = mpsc::channel();
         // The test may be over by then: nobody waits for the number.
-        watch(
-            Arc::clone(&watched),
+        let ends = watch(
+            Watched::here(),
             TICK,
             still,
             |_| {},
@@ -151,7 +175,7 @@ mod tests {
             },
         );
         progressed();
-        (watched, rx)
+        (ends, rx)
     }
 
     /// A worker that has not begun its loop (it restores or migrates a large store first) is not
@@ -160,7 +184,7 @@ mod tests {
     fn a_loop_that_has_not_marked_yet_is_not_stuck() {
         let watched = Watched::here();
         let (tx, stuck) = mpsc::channel();
-        watch(
+        let _watch = watch(
             watched,
             TICK,
             3,
@@ -217,6 +241,17 @@ mod tests {
             }
         });
         assert_eq!(stuck.recv_timeout(Duration::from_secs(5)), Ok(4));
+    }
+
+    /// A run that returns ends its watch: `stuck` never runs, and is dropped with the thread.
+    #[test]
+    fn a_watch_ends_with_its_run() {
+        let (ends, stuck) = watched(3);
+        drop(ends);
+        assert_eq!(
+            stuck.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
     }
 
     #[test]

@@ -4905,7 +4905,7 @@ child.wait()
         });
         let watched = crate::watchdog::Watched::here();
         let (tx, stuck) = std::sync::mpsc::channel();
-        crate::watchdog::watch(
+        let _watch = crate::watchdog::watch(
             watched,
             Duration::from_millis(10),
             20,
