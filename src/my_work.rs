@@ -634,6 +634,17 @@ enum Id {
     Explicit(String),
 }
 
+impl Id {
+    /// As the stores hold it: what a check is filed under (rule 6), and what a masked id's
+    /// fingerprint is of.
+    fn held(&self) -> String {
+        match self {
+            Id::Conversation((agent, session)) => format!("c:{agent}:{session}"),
+            Id::Explicit(e) => format!("r:{e}"),
+        }
+    }
+}
+
 struct Request {
     id: Id,
     original: Original,
@@ -672,8 +683,18 @@ impl Request {
 /// The requests of `range` at `now`, the newest update first, and how many work records no
 /// request takes (claude-mem's "N work records need a linked human request").
 pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
+    Ok(read_held(home, range, now)?.0)
+}
+
+/// `read` of every range, with what each request's check is filed under, in the answer's order:
+/// the review route's (rule 6).
+pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
+    read_held(home, Range::All, now)
+}
+
+fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(json!({"requests": [], "unlinked": 0}));
+        return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
     };
     let rules = Rules::load(home)?;
     let gate = |s: &str| crate::redact::outbound_with(s, &rules);
@@ -907,25 +928,134 @@ pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
     let since = range.since(now);
     let mut answers = Vec::new();
     let mut key = None;
+    let reviews = reviews(home);
     for r in &requests {
         let stores = (&raw, &k, &rules);
         answers.extend(answer(
             r,
-            &convs,
-            &work,
+            (&convs, &work, &reviews),
             stores,
             (home, &mut key),
             (since, now),
         )?);
     }
-    answers.sort_by_key(|v| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
-    Ok(json!({"requests": answers, "unlinked": unlinked}))
+    answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
+    let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    Ok((json!({"requests": answers, "unlinked": unlinked}), held))
 }
 
-/// The home's key of the fingerprints of masked ids (`answer`): 32 random bytes in
-/// `state/my-work.key`, made the first time an id is masked and never in an answer, so that a
-/// fingerprint tells nothing of a guess at the id it stands for (CodeRabbit on #574). Whoever can
-/// read the file can read the stores, which hold the ids themselves.
+/// Rule 6: a check of a request's version, in `state/my-work-reviews.json` under the keyed hash of
+/// the request's stored id. `sessions` are its conversations' `forget::session` hashes, keyed, by
+/// which a forget of one sweeps it. Nothing in the file reads without the home's key.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Review {
+    version: String,
+    at: i64,
+    actor: String,
+    sessions: Vec<String>,
+}
+
+/// What a request's check is filed under, beside its answer.
+pub(crate) struct Held {
+    key: String,
+    sessions: Vec<String>,
+}
+
+const REVIEWS: &str = "my-work-reviews.json";
+
+/// The checks; none when the file is not there or does not read: it is the page's, and no answer
+/// waits on it, as claude-mem's sidecar is optional. A write replaces a file that does not read.
+fn reviews(home: &Path) -> BTreeMap<String, Review> {
+    (std::fs::read(home.join("state").join(REVIEWS)).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// The hold on `state/my-work-reviews.lock`, from the read a check is tested against to its write,
+/// so that two checks, or a check and a forget's sweep, do not come between each other: a check of
+/// an older version does not replace a newer one, nor a stale one bring back what a forget took
+/// (Codex on slice 3).
+pub(crate) struct ReviewsLock(#[allow(dead_code)] std::fs::File);
+
+pub(crate) fn reviews_lock(home: &Path) -> Result<ReviewsLock> {
+    let state = home.join("state");
+    std::fs::create_dir_all(&state)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let lock = options.open(state.join("my-work-reviews.lock"))?;
+    lock.lock()?;
+    Ok(ReviewsLock(lock))
+}
+
+/// The checks as `change` leaves them, written whole when it says they changed, under the hold.
+fn change_reviews(
+    home: &Path,
+    _held: &ReviewsLock,
+    change: impl FnOnce(&mut BTreeMap<String, Review>) -> bool,
+) -> Result<()> {
+    let mut all = reviews(home);
+    if change(&mut all) {
+        let state = home.join("state");
+        crate::backup::write_synced(&state, REVIEWS, &serde_json::to_vec(&all)?)?;
+    }
+    Ok(())
+}
+
+/// Rule 6: a check of `version` filed for `held`, or its Undo, with the checks of the requests no
+/// longer read (`current`) dropped, so that a request a forget took leaves nothing here.
+pub(crate) fn set_review(
+    (home, lock): (&Path, &ReviewsLock),
+    (held, current): (&Held, &[Held]),
+    version: &str,
+    checked: bool,
+    now: i64,
+) -> Result<()> {
+    let read: HashSet<&str> = current.iter().map(|h| h.key.as_str()).collect();
+    change_reviews(home, lock, |all| {
+        all.retain(|key, _| read.contains(key.as_str()));
+        if checked {
+            let review = Review {
+                version: version.to_owned(),
+                at: now,
+                actor: "local-user".to_owned(),
+                sessions: held.sessions.clone(),
+            };
+            all.insert(held.key.clone(), review);
+        } else if all.get(&held.key).is_some_and(|r| r.version == version) {
+            all.remove(&held.key);
+        }
+        true
+    })
+}
+
+/// Rule 6: a forget's sweep at its step 5: the checks of the forgotten `sessions` (each target's
+/// `forget::session` hash) go. A home with no file of checks has none to sweep.
+pub(crate) fn forget_reviews(home: &Path, sessions: &[String]) -> Result<()> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    // Held before the file is looked for: a check whose hold began first writes it before this.
+    let lock = reviews_lock(home)?;
+    if !home.join("state").join(REVIEWS).exists() {
+        return Ok(());
+    }
+    let mut key = None;
+    let gone = (sessions.iter())
+        .map(|s| keyed(s, home, &mut key))
+        .collect::<Result<HashSet<String>>>()?;
+    change_reviews(home, &lock, |all| {
+        let before = all.len();
+        all.retain(|_, r| !r.sessions.iter().any(|s| gone.contains(s)));
+        all.len() != before
+    })
+}
+
+/// The home's key of the fingerprints of masked ids and of the versions checks are of (`answer`):
+/// 32 random bytes in `state/my-work.key`, made the first time a request is read and never in an
+/// answer, so that neither tells anything of a guess at what it stands for (CodeRabbit on #574).
+/// Whoever can read the file can read the stores, which hold the ids themselves.
 fn mask_key(home: &Path) -> Result<Vec<u8>> {
     let path = home.join("state").join("my-work.key");
     let read = || std::fs::read(&path).ok().filter(|key| key.len() == 32);
@@ -965,18 +1095,14 @@ fn shown_id(
     key: &mut Option<Vec<u8>>,
 ) -> Result<(String, Option<String>)> {
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
-    let (shown, held, kind) = match id {
-        Id::Conversation((agent, session)) => (
-            format!("c:{}:{}", gate(agent), gate(session)),
-            format!("c:{agent}:{session}"),
-            "c",
-        ),
+    let (shown, kind) = match id {
+        Id::Conversation((agent, session)) => (format!("c:{}:{}", gate(agent), gate(session)), "c"),
         Id::Explicit(e) => (
             format!("r:{}", crate::work_state::beside("request_id", e, rules)),
-            format!("r:{e}"),
             "r",
         ),
     };
+    let held = id.held();
     // The stored id through the gate as assembled too, since a rule may match it and neither of
     // its parts, which the route's own gate (`view::answered`) would then mask alike in two ids
     // (Codex on #574), or a part's mask may hide what that rule would match: then nothing of it is
@@ -998,27 +1124,35 @@ fn shown_id(
     Ok((format!("{shown}#{print}"), Some(print)))
 }
 
-/// The fingerprint of a stored text the gate masks, keyed by the home's own key, made the first
-/// time one is needed: the same from read to read, and nothing of a guess at the text.
-fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
+/// A stored text hashed with the home's own key, made the first time one is needed: the same from
+/// read to read, and nothing of a guess at the text.
+fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
     let key = match key {
         Some(key) => key,
         None => key.insert(mask_key(home)?),
     };
     let keyed = [key.as_slice(), held.as_bytes()].concat();
-    Ok(crate::forget::hash(&keyed)[..12].to_owned())
+    Ok(crate::forget::hash(&keyed))
+}
+
+/// `keyed`'s first 12 hex digits: the fingerprint of a stored text the gate masks.
+fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
+    Ok(keyed(held, home, key)?[..12].to_owned())
 }
 
 /// One request as the route gives it, every text through the gate; none when its newest update is
 /// before `since`, which then gates nothing.
 fn answer(
     r: &Request,
-    convs: &BTreeMap<Key, Conversation>,
-    work: &[Work],
+    (convs, work, reviews): (
+        &BTreeMap<Key, Conversation>,
+        &[Work],
+        &BTreeMap<String, Review>,
+    ),
     (raw, k, rules): (&Raw, &Connection, &Rules),
     (home, key): (&Path, &mut Option<Vec<u8>>),
     (since, now): (i64, i64),
-) -> Result<Option<Value>> {
+) -> Result<Option<(Value, Held)>> {
     let items: Vec<&Work> = r.work.iter().map(|&i| &work[i]).collect();
     let mut turns: Vec<&Turn> = Vec::new();
     let mut cards: Vec<&Shown> = Vec::new();
@@ -1210,28 +1344,66 @@ fn answer(
     let updates: Vec<Value> = (updates.iter())
         .map(|(ts, text)| json!({"ts": ts, "text": text}))
         .collect();
-    Ok(Some(json!({
-        "id": id,
-        "fingerprint": fingerprint,
-        "title": title,
-        "summary": summary,
-        "next": next,
-        "copy": copy,
-        "updating": updating,
-        "status": status,
-        "updated": updated,
-        "started": original.ts,
-        "agents": agents,
-        "sessions": conversations,
-        "projects": names,
-        "repos": repos,
-        "ask": ask,
-        "follow_ups": follow_ups,
-        "updates": updates,
-        "work": work,
-        "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
-        "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
-    })))
+    // Rule 6: the version a check is of: what was recorded for the request, not what a curator
+    // wrote of it (claude-mem's `contentFingerprint` leaves out its generated copy), keyed so that
+    // it confirms no guess at a value the gate masks, as a masked id's fingerprint (`shown_id`).
+    let said: Vec<&str> = (prompts.iter())
+        .filter(|p| p.text.is_some() && p.ts >= original.ts && original.id.as_ref() != Some(&p.id))
+        .map(|p| p.id.as_str())
+        .collect();
+    let held = r.id.held();
+    let recorded = json!({
+        "id": held,
+        "original": [&original.id, original.from, &original.text],
+        "said": said,
+        "owns": r.owns.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        // With its writes' times, its list's too, as claude-mem's item carries its latest entry: a
+        // status written again is a new version, though its value is not (Codex on slice 3).
+        "work": (items.iter()).map(|w| {
+            let at = |writes: &[WorkWrite]| writes.iter().map(|x| x.ts).collect::<Vec<_>>();
+            json!([w.repo, w.list, w.task, w.fields, w.list_fields, at(&w.writes), at(&w.list_writes)])
+        }).collect::<Vec<_>>(),
+        "cards": cards.iter().map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
+    });
+    let version = keyed(&recorded.to_string(), home, key)?;
+    let filed = keyed(&held, home, key)?;
+    let checked = (reviews.get(&filed))
+        .filter(|review| review.version == version)
+        .map(|review| review.at);
+    let swept_by = (r.owns.iter())
+        .map(|((agent, session), _)| keyed(&crate::forget::session(agent, session), home, key))
+        .collect::<Result<Vec<_>>>()?;
+    let held = Held {
+        key: filed,
+        sessions: swept_by,
+    };
+    Ok(Some((
+        json!({
+            "id": id,
+            "fingerprint": fingerprint,
+            "version": version,
+            "checked": checked,
+            "title": title,
+            "summary": summary,
+            "next": next,
+            "copy": copy,
+            "updating": updating,
+            "status": status,
+            "updated": updated,
+            "started": original.ts,
+            "agents": agents,
+            "sessions": conversations,
+            "projects": names,
+            "repos": repos,
+            "ask": ask,
+            "follow_ups": follow_ups,
+            "updates": updates,
+            "work": work,
+            "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
+            "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
+        }),
+        held,
+    )))
 }
 
 /// claude-mem's `statusFor` over a request's work and its records (an observation's row, here the
@@ -1585,6 +1757,11 @@ mod tests {
         fn read(&self, range: Range, now: i64) -> Value {
             self.s.run();
             super::read(self.s.home.path(), range, now).unwrap()
+        }
+
+        /// The worker run, as `read` runs it, for a test that reads by another function.
+        fn run_read(&self) {
+            self.s.run();
         }
     }
 
@@ -2958,6 +3135,261 @@ mod tests {
         );
     }
 
+    /// Rule 6: a request's version is the home-keyed hash of what was recorded for it: a summary a
+    /// curator writes leaves it, a follow-up and a field of its work move it.
+    #[test]
+    fn a_requests_version_follows_what_was_recorded_not_what_a_curator_wrote() {
+        let mut h = Home::new();
+        let asked = h.said("s1", -60_000, "Fix the parser.");
+        let replied = h.reply("s1", -55_000);
+        let done = json!({"task": "parser", "status": "done", "request_status": "done"});
+        h.wrote("s1", "fix", done);
+        let version = |h: &Home| -> Value {
+            let v = h.read(Range::All, h.t + 10_000);
+            by_id(&v, "c:claude:s1")["version"].clone()
+        };
+        let first = version(&h);
+        assert!(first.as_str().is_some_and(|v| v.len() == 64), "{first}");
+        let unkeyed = crate::forget::hash(b"c:claude:s1");
+        assert_ne!(first, json!(unkeyed));
+        h.turn(
+            "s1",
+            (asked, replied),
+            -50_000,
+            json!({"completed": "Parser fixed."}),
+        );
+        assert_eq!(version(&h), first, "a summary leaves it");
+        h.said("s1", -40_000, "And the docs.");
+        let second = version(&h);
+        assert_ne!(second, first, "a follow-up moves it");
+        h.wrote("s1", "fix", json!({"task": "parser", "outcome": "Merged."}));
+        let third = version(&h);
+        assert_ne!(third, second, "a field of its work moves it");
+        // Keyed: a new key, the same records, another version.
+        std::fs::remove_file(h.s.home.path().join("state").join("my-work.key")).unwrap();
+        assert_ne!(version(&h), third, "keyed by the home's key");
+    }
+
+    /// Rule 6: a check is of one version: shown while it is the request's, unread when a newer one
+    /// is recorded; an Undo of another version leaves it; a write drops the checks of requests no
+    /// longer read; a forget of its session takes it, of another session leaves it. The file holds
+    /// no id, session or text of the store's.
+    #[test]
+    fn a_check_is_of_one_version_and_goes_with_its_session() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let done = json!({"task": "parser", "status": "done", "request_status": "done"});
+        h.wrote("s1", "fix", done);
+        h.said("s2", -50_000, "Fix the docs.");
+        h.run_read();
+        let home = h.s.home.path().to_owned();
+        let now = h.t + 10_000;
+        let reviewing = || super::reviewing(&home, now).unwrap();
+        let at = |v: &Value, id: &str| -> usize {
+            (v["requests"].as_array().unwrap().iter())
+                .position(|r| r["id"] == id)
+                .unwrap()
+        };
+        let (v, held) = reviewing();
+        let (one, two) = (at(&v, "c:claude:s1"), at(&v, "c:claude:s2"));
+        let version = v["requests"][one]["version"].as_str().unwrap().to_owned();
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[one], &held),
+            &version,
+            true,
+            now,
+        )
+        .unwrap();
+        let (v, held) = reviewing();
+        assert_eq!(v["requests"][at(&v, "c:claude:s1")]["checked"], json!(now));
+        assert_eq!(v["requests"][at(&v, "c:claude:s2")]["checked"], Value::Null);
+        let file = std::fs::read_to_string(home.join("state").join(super::REVIEWS)).unwrap();
+        for held_text in ["s1", "claude", "parser", "github"] {
+            assert!(!file.contains(held_text), "{file}");
+        }
+        // An Undo of another version leaves the check.
+        let other = "0".repeat(64);
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[one], &held),
+            &other,
+            false,
+            now,
+        )
+        .unwrap();
+        assert_eq!(reviewing().0["requests"][one]["checked"], json!(now));
+        // A forget of another session leaves it, of its own takes it.
+        let session = |s: &str| crate::forget::session("claude", s);
+        super::forget_reviews(&home, &[session("s2")]).unwrap();
+        assert_eq!(reviewing().0["requests"][one]["checked"], json!(now));
+        super::forget_reviews(&home, &[session("s1")]).unwrap();
+        assert_eq!(reviewing().0["requests"][one]["checked"], Value::Null);
+        // A write drops the checks of requests no longer read.
+        let (v, held) = reviewing();
+        let two_version = v["requests"][two]["version"].as_str().unwrap().to_owned();
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[one], &held),
+            &version,
+            true,
+            now,
+        )
+        .unwrap();
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[two], &held[two..=two]),
+            &two_version,
+            true,
+            now,
+        )
+        .unwrap();
+        let (v, _) = reviewing();
+        assert_eq!(
+            v["requests"][one]["checked"],
+            Value::Null,
+            "dropped as no longer read"
+        );
+        assert_eq!(v["requests"][two]["checked"], json!(now));
+        // A newer version reads unchecked, and its Undo of the old version leaves nothing behind.
+        h.said("s2", -40_000, "And the index.");
+        h.run_read();
+        let (v, held) = reviewing();
+        assert_eq!(v["requests"][at(&v, "c:claude:s2")]["checked"], Value::Null);
+        let two = at(&v, "c:claude:s2");
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[two], &held),
+            &two_version,
+            false,
+            now,
+        )
+        .unwrap();
+        let file = std::fs::read_to_string(home.join("state").join(super::REVIEWS)).unwrap();
+        assert_eq!(file, "{}");
+    }
+
+    /// Codex on slice 3: a request status written again is a new version, though its value is not:
+    /// a check of a result reported complete does not hide the blocked state a later write records.
+    #[test]
+    fn a_status_written_again_is_a_new_version() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let both = json!({"task": "parser", "status": "doing", "request_complete": true,
+            "request_status": "blocked"});
+        h.wrote("s1", "fix", both);
+        h.run_read();
+        let home = h.s.home.path().to_owned();
+        let now = h.t + 10_000;
+        let (v, held) = super::reviewing(&home, now).unwrap();
+        assert_eq!(v["requests"][0]["status"], "ready", "{v}");
+        let version = v["requests"][0]["version"].as_str().unwrap().to_owned();
+        let lock = super::reviews_lock(&home).unwrap();
+        super::set_review((&home, &lock), (&held[0], &held), &version, true, now).unwrap();
+        drop(lock);
+        // A write of its own millisecond.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        h.wrote(
+            "s1",
+            "fix",
+            json!({"task": "parser", "request_status": "blocked"}),
+        );
+        h.run_read();
+        let (v, _) = super::reviewing(&home, now).unwrap();
+        let r = &v["requests"][0];
+        assert_eq!(
+            (r["status"].as_str(), &r["checked"]),
+            (Some("blocked"), &Value::Null),
+            "{v}"
+        );
+    }
+
+    /// Codex on slice 3: a forget's sweep waits for a check's hold, which runs from the read the
+    /// check is tested against to its write, so that a stale check cannot bring back what the sweep
+    /// takes.
+    #[test]
+    fn a_forgets_sweep_waits_for_a_checks_hold() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let done = json!({"task": "parser", "status": "done", "request_status": "done"});
+        h.wrote("s1", "fix", done);
+        h.run_read();
+        let home = h.s.home.path().to_owned();
+        let now = h.t + 10_000;
+        let lock = super::reviews_lock(&home).unwrap();
+        let (v, held) = super::reviewing(&home, now).unwrap();
+        let version = v["requests"][0]["version"].as_str().unwrap().to_owned();
+        let (at, session) = (home.clone(), crate::forget::session("claude", "s1"));
+        let sweep = std::thread::spawn(move || super::forget_reviews(&at, &[session]).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!sweep.is_finished(), "the sweep waits for the hold");
+        super::set_review((&home, &lock), (&held[0], &held), &version, true, now).unwrap();
+        drop(lock);
+        sweep.join().unwrap();
+        let file = std::fs::read_to_string(home.join("state").join(super::REVIEWS)).unwrap();
+        assert_eq!(file, "{}", "taken once the hold was let go");
+    }
+
+    /// Rule 6: a file of checks that does not read is no check, and the next write replaces it.
+    #[test]
+    fn a_file_of_checks_that_does_not_read_is_no_check() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        let done = json!({"task": "parser", "status": "done", "request_status": "done"});
+        h.wrote("s1", "fix", done);
+        h.run_read();
+        let home = h.s.home.path().to_owned();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        std::fs::write(home.join("state").join(super::REVIEWS), b"{not json").unwrap();
+        let now = h.t + 10_000;
+        let (v, held) = super::reviewing(&home, now).unwrap();
+        assert_eq!(v["requests"][0]["checked"], Value::Null);
+        let version = v["requests"][0]["version"].as_str().unwrap().to_owned();
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[0], &held),
+            &version,
+            true,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            super::reviewing(&home, now).unwrap().0["requests"][0]["checked"],
+            json!(now)
+        );
+    }
+
+    /// Rule 6: `oboete forget` of a session takes My Work's check of it when its purge commits.
+    #[test]
+    fn a_forget_of_a_session_takes_its_check() {
+        let mut h = Home::new();
+        let first = h.said("s1", -60_000, "Fix the parser.");
+        let done = json!({"task": "parser", "status": "done", "request_status": "done"});
+        h.wrote("s1", "fix", done);
+        h.run_read();
+        let home = h.s.home.path().to_owned();
+        let now = h.t + 10_000;
+        let (v, held) = super::reviewing(&home, now).unwrap();
+        let version = v["requests"][0]["version"].as_str().unwrap().to_owned();
+        super::set_review(
+            (&home, &super::reviews_lock(&home).unwrap()),
+            (&held[0], &held),
+            &version,
+            true,
+            now,
+        )
+        .unwrap();
+        let device = h.s.raw.device().to_owned();
+        let Home { s, .. } = h;
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let target = crate::forget::session_target(&home, &format!("{device}:{first}")).unwrap();
+        crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
+        crate::forget::purge(&home).unwrap().unwrap();
+        let file = std::fs::read_to_string(home.join("state").join(super::REVIEWS)).unwrap();
+        assert_eq!(file, "{}");
+    }
+
     /// Each work item names its repository as the request's `repos` do, so that the page keeps
     /// two lists of one name in two repositories apart, as claude-mem's work streams are a
     /// project's list (Codex on slice 2's page).
@@ -3149,9 +3581,10 @@ mod tests {
         }
     }
 
-    /// CodeRabbit on #574: the fingerprint of a masked id is keyed by the home's own key, made the
-    /// first time an id is masked, so that it tells nothing of a guess at the id: a hash of the id
-    /// alone is not it, and another home's fingerprint of the same id differs.
+    /// CodeRabbit on #574: the fingerprint of a masked id is keyed by the home's own key, made at
+    /// the first read (rule 6's versions are keyed by it too), so that it tells nothing of a guess
+    /// at the id: a hash of the id alone is not it, and another home's fingerprint of the same id
+    /// differs.
     #[test]
     fn a_masked_ids_fingerprint_is_keyed_by_the_homes_own_key() {
         let homes: Vec<Home> = (0..2)
@@ -3169,7 +3602,9 @@ mod tests {
         let key = |h: &Home| h.s.home.path().join("state").join("my-work.key");
         let read = |h: &Home| ids(&super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap());
         assert_eq!(read(&homes[0]), ["r:sess-7"]);
-        assert!(!key(&homes[0]).exists(), "a key with no id masked");
+        // Made at the first read, though no id is masked: each request's version is keyed by it
+        // (rule 6).
+        assert!(key(&homes[0]).exists(), "a key for the versions");
         let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
         for h in &homes {
             std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();

@@ -431,7 +431,7 @@ them; nothing else in it changes.
   the last answer received, as claude-mem's `accept` keeps it: the same answer again stays held
   when the reading ends, and one like the shown one replaces it. A read that a newer drawing of
   the page overtook draws nothing.
-- **Not yet**: Checked, with slice 3.
+- **Checked**: slice 3, below.
 
 ### Slice 2, the last PR (2026-10-24)
 
@@ -458,3 +458,44 @@ them; nothing else in it changes.
     masked alike stay two streams, the same from read to read; the page groups the streams by it.
     The route takes it out of its gate's walk and puts it back, as it does a request's id. An item
     the gate shows as stored carries none, and no key is made for it.
+
+### Slice 3, Checked (2026-10-24)
+
+- **The version** of a request (rule 6) is its recorded content hashed with the home's own key
+  (`state/my-work.key`, SHA-256, 64 hex digits): its stored id, the original's record id, kind and
+  text, the record ids of its later prompts, the conversations it owns, each linked item's
+  repository, list, task and fields with its list's, the times of the item's and its list's writes
+  (a status written again is a new version though its value is not, as claude-mem's item carries
+  its latest entry), and its cards' ids. The curators' summaries, and a title or
+  next step taken from them, are left out, as claude-mem leaves out its generated copy: a new
+  summary does not undo a check; a new follow-up, a changed item or a new card does. Keyed as a
+  masked id's fingerprint is, so that the version confirms no guess at a value the gate masks. The
+  key is now made at the first read, not the first masked id. The answer gives each request its
+  `version` and `checked` (the time of a check of its current version, else none); the route takes
+  `version` out of its gate's walk and puts it back.
+- **The file**, `state/my-work-reviews.json`, written whole under `state/my-work-reviews.lock`:
+  each check under the keyed hash of its request's stored id, with its version, time, `local-user`
+  and its conversations' `forget::session` hashes, keyed. It holds no id, session or text of the
+  store's. A file that does not read is no check, and the next write replaces it. It is the page's,
+  not memory: not in raw.db, a backup or a sync, and not searched.
+- **The route**, `POST /api/my-work/review` (through `save_gate`): exactly `{request, version,
+  checked}`, the request named by its id as the route shows it. A request not read is 404
+  `not_found`; a version that is not its current one 409 `stale`; a check of a request not
+  reported complete 409 `not_ready`. Undo is `checked: false`, and takes back only a check of that
+  version. Each write drops the checks of requests no longer read, as a request a forget took.
+  `state/my-work-reviews.lock` is held from the read a check is tested against to its write, and by
+  a forget's sweep, so that a check of an older version replaces no newer one and a stale check
+  brings back nothing a sweep took.
+- **Forget**: a forget of a session drops its checks at its purge's step 5, under that hold.
+- **The page**: a checked request is Checked (its badge, the Checked tab's count, last in
+  attention order). A request reported complete opens to a review in its page: claude-mem's
+  dialog's eyebrow, the summary as its outcome, its recorded updates as its evidence (each once,
+  at most 8, as claude-mem takes the work's outcomes and updates), else claude-mem's line for none,
+  the note on what a check is, and "Mark checked". A checked one has "Undo check" and when it was
+  checked. A save reads My Work again in the reads' order, applied though a person reads, and the
+  status line says what happened; a version that changed meanwhile is read again and said so.
+- **Differences**: the review is in the request's page, as the page opens a request within itself
+  (decision 55), not in a dialog.
+- **#600**: an empty first answer is a baseline, so that a request arriving after it flashes and
+  is marked "New update"; a list's button holds its repository's name where a request's work is
+  in two, so that a screen reader tells two lists of one name apart.

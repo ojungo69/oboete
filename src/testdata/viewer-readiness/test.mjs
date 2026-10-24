@@ -1212,7 +1212,8 @@ for(const absent of ['Stage','Ship estimate','Requested by','After ship','Time t
 }
 const streamsOf=()=>panel.querySelectorAll('article').filter(n=>n.className==='my-work-stream');
 const streams=streamsOf();
-assert.deepEqual(streams.map(n=>text(n.querySelector('button'))),['release','docs','docs'],'the work by repository and list');
+assert.deepEqual(streams.map(n=>text(n.querySelector('button')).replace(/\s+/g,' ')),['release alpha','docs alpha','docs beta'],
+  'the work by repository and list, each list\'s button naming its repository (#600)');
 assert.deepEqual(streams.map(n=>text(n.querySelector('.my-work-project'))),['alpha','alpha','beta'],'each list names its repository when the work is in two');
 assert(text(streams[0]).includes('Ready to check')&&text(streams[1]).includes('In progress'),'each list by claude-mem\'s statusFor');
 streams[0].querySelector('button').click();
@@ -1312,6 +1313,7 @@ await run('poll()');
 delete document.visibilityState;
 assert.equal(timeOf(),'5h ago','each poll\'s tick rewrites the times');
 card('t1').querySelector('button').click();
+assert(!text(panel).includes('Mark checked'),'a request not reported complete has no review');
 const elapsedOf=()=>text(panel.querySelector('.my-work-elapsed'));
 assert.equal(elapsedOf(),'5h 0m');
 run(`myWorkTimes(${now}+3600000)`);
@@ -1351,6 +1353,80 @@ const area=panel.querySelector('textarea');
 assert(!area.hidden&&area.selected&&area.value.startsWith('Request: Ask c1'),'without a clipboard the text waits selected');
 assert(text(panel).includes('Clipboard unavailable. Copy the selected handoff text below.'));
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+// Checked (docs/my-work.md rule 6): a checked request is Checked on the page, counted by its tab
+// and ordered last; one reported complete opens to its review, whose "Mark checked" posts the
+// version the page read, then reads My Work again; Undo takes the check back; a version that
+// changed meanwhile is refused, read again and said so.
+const posted=(status,value={})=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const ticks=async()=>{for(let i=0;i<6;i++)await new Promise(r=>setTimeout(r,0));};
+const V='a'.repeat(64);
+set([req('k1',{status:'ready',version:V,checked:now-60000}),req('k2',{status:'ready',version:V})]);
+run('mw.range="all";myWorkDraw()');
+assert.deepEqual(ids(),['k2','k1'],'Checked last in attention order');
+assert(text(card('k1')).includes('Checked')&&text(card('k1')).includes('Open request'),'a checked request is Checked');
+assert(text(card('k2')).includes('Ready to check')&&text(card('k2')).includes('Review result'));
+assert.equal(text(tabs().find(n=>n.dataset.myWork==='tab:checked')),'Checked 1');
+let sent=[],checkedNow=true,refuse=false;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'){sent.push([url,JSON.parse(options.body)]);return Promise.resolve(refuse?posted(409,{code:'stale'}):posted(200));}
+  return Promise.resolve(response({requests:[req('k2',{status:'ready',version:V,...(checkedNow?{checked:now}:{})})],unlinked:0}));
+};
+run(`Object.assign(mw.rows.find(r=>r.id==='k2'),{updates:[{ts:${now},text:'Tests pass.'},{ts:${now-1},text:'Parser fixed.'}]})`);
+card('k2').querySelector('button').click();
+shown=text(panel);
+for(const fragment of ['Recorded result · your review','Recorded evidence','Tests pass.','Parser fixed.','Checking saves a local note','Mark checked']){
+  assert(shown.includes(fragment),`the review shows: ${fragment}`);
+}
+assert(!shown.includes('No separate test evidence was recorded.'),'the recorded updates are its evidence');
+const button=label=>panel.querySelectorAll('button').find(n=>text(n)===label);
+button('Mark checked').click();await ticks();
+assert.deepEqual(sent,[['/api/my-work/review',{request:'k2',version:V,checked:true}]],'the check names the version read');
+assert(button('Undo check')&&!button('Mark checked')&&text(panel).includes('Checked locally'),'the request reads checked');
+assert.equal(document.getElementById('status').textContent,'Checked locally. Your review is saved.');
+checkedNow=false;
+button('Undo check').click();await ticks();
+assert.deepEqual(sent[1],['/api/my-work/review',{request:'k2',version:V,checked:false}],'Undo takes the check back');
+assert(button('Mark checked'),'ready to check again');
+assert.equal(document.getElementById('status').textContent,'Check undone. The result is ready to review.');
+refuse=true;
+button('Mark checked').click();await ticks();
+assert.equal(document.getElementById('status').textContent,'This work changed while you were reading. Review the latest version before checking.');
+refuse=false;
+// The read after a check outruns a poll's that began before it: the poll's older answer changes
+// nothing, and waits behind no "Show updates".
+let releasePoll=null,checkedPoll=0;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST')return Promise.resolve(posted(200));
+  if(!checkedPoll++)return new Promise(r=>{releasePoll=()=>r(response({requests:[req('k2',{status:'ready',version:V,title:'Stale poll'})],unlinked:0}));});
+  return Promise.resolve(response({requests:[req('k2',{status:'ready',version:V,checked:now})],unlinked:0}));
+};
+const slowPoll=run('myWorkLive()');
+button('Mark checked').click();await ticks();
+releasePoll();await slowPoll;
+assert(button('Undo check')&&!text(panel).includes('Stale poll')&&!text(panel).includes('New work updates are ready.'),'an older poll read changes nothing');
+// And a poll's read that began after the read after a check, and came first, is not undone by it:
+// held, as the person reads, and still held when the older read lands.
+let releaseReread=null,polledAfter=null,reads=0;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST')return Promise.resolve(posted(200));
+  if(!reads++)return new Promise(r=>{releaseReread=()=>r(response({requests:[req('k2',{status:'ready',version:V,title:'Older reread'})],unlinked:0}));});
+  return Promise.resolve(response({requests:[req('k2',{status:'ready',version:V,checked:now,title:'Newer poll'})],unlinked:0}));
+};
+button('Undo check').click();await ticks();
+polledAfter=run('myWorkLive()');await polledAfter;
+releaseReread();await ticks();
+assert(text(panel).includes('New work updates are ready.')&&!text(panel).includes('Older reread'),'the newer answer stays held');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+set([req('k3',{status:'ready',version:V,updates:[]})]);
+card('k3').querySelector('button').click();
+assert(text(panel).includes('No separate test evidence was recorded.'),'with no update, the line for none');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+// #600: a request after an empty first answer flashes and is marked new.
+set([]);
+answer={requests:[req('e1')],unlinked:0};
+ctx.fetch=()=>Promise.resolve(response(answer));
+document.activeElement=null;await run('myWorkLive()');
+assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includes('New update'),'an empty first answer is a baseline too');
 // Every My Work label in both languages, each language its own words.
 const labels=Object.entries(run('TEXT')).filter(([key])=>key.startsWith('my_work'));
 assert(labels.length>100,'My Work has its labels');
@@ -1359,5 +1435,5 @@ ctx.ui.setLang('ja');set([req('j1',{status:'needs'})]);
 assert(text(panel).includes('対応が必要')&&text(panel).includes('マイワーク')===false,'the page draws in Japanese');
 assert.equal(text(document.getElementById('heading')),'マイワーク','its heading too');
 ctx.ui.setLang('en');
-console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times and Copy handoff, in both languages');
+console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times, Copy handoff and Checked, in both languages');
 }

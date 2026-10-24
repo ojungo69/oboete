@@ -826,6 +826,14 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-work-change-list p { margin: 4px 0 0; }
 .my-work-detail { color: var(--muted); }
 .my-work-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+/* A list's repository inside its button, and the review of a result reported complete. */
+.my-work-open .my-work-project { display: block; color: var(--muted); font-size: 12.5px; font-weight: 400; }
+.my-work-review { margin: 18px 0; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
+.my-work-review .my-work-eyebrow { margin: 0 0 6px; }
+.my-work-review h3 { margin: 12px 0 4px; font-size: 14px; }
+.my-work-review ul { margin: 0 0 10px; padding-left: 1.2em; color: var(--muted); }
+.my-work-review-note { color: var(--muted); font-size: 13px; }
+.my-work-checked-at { align-self: center; color: var(--muted); font-size: 13px; }
 /* claude-mem's "New update" dot and the note of a copied handoff. */
 .my-work-new { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-weight: 600; white-space: nowrap; }
 .my-work-new::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }

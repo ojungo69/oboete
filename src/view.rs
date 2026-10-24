@@ -1176,6 +1176,7 @@ impl Viewer {
             ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
             ("POST", "/api/claims/mute") => (MAX_BODY, |v, b, _| v.claim_mute(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
+            ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
             ("POST", "/api/setup/preview") => (MAX_BODY, |v, b, _| v.agent_preview(b)),
             ("POST", "/api/setup/start") => (MAX_BODY, |v, b, _| v.agent_start(b)),
@@ -1644,6 +1645,66 @@ impl Viewer {
         ))
     }
 
+    /// docs/my-work.md rule 6: `{request, version, checked}`, a check of the version of a request
+    /// as the page saw it, or its Undo. The request is found by its id as this route shows it; a
+    /// version that is not its current one, or a check of one not reported complete, is refused
+    /// with 409, and the page reads My Work again.
+    fn my_work_review(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Posted {
+            request: String,
+            version: String,
+            checked: bool,
+        }
+        let hex =
+            |v: &str| v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        let posted = match serde_json::from_slice::<Posted>(body) {
+            Ok(p)
+                if !p.request.is_empty()
+                    && p.request.chars().count() <= 2_000
+                    && hex(&p.version) =>
+            {
+                p
+            }
+            _ => return refused(400, "bad_request", ""),
+        };
+        let now = crate::db::now_ms();
+        // Held from the read the check is tested against to its write (`ReviewsLock`).
+        let lock = match crate::my_work::reviews_lock(&self.home) {
+            Ok(lock) => lock,
+            Err(e) => return failed(&e),
+        };
+        let (answer, held) = match crate::my_work::reviewing(&self.home, now) {
+            Ok(read) => read,
+            Err(e) => return failed(&e),
+        };
+        let answer = answered("my-work", answer);
+        let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
+        let Some(i) = requests
+            .iter()
+            .position(|r| r["id"] == posted.request.as_str())
+        else {
+            return refused(404, "not_found", "");
+        };
+        if requests[i]["version"] != posted.version.as_str() {
+            return refused(409, "stale", "");
+        }
+        if posted.checked && requests[i]["status"] != "ready" {
+            return refused(409, "not_ready", "");
+        }
+        match crate::my_work::set_review(
+            (&self.home, &lock),
+            (&held[i], &held),
+            &posted.version,
+            posted.checked,
+            now,
+        ) {
+            Ok(()) => Response::json(&json!({})),
+            Err(e) => failed(&e),
+        }
+    }
+
     /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
     /// Browsers leave port 80 out of Host.
     fn host_ok(&self, host: Option<&str>) -> bool {
@@ -2004,8 +2065,14 @@ fn answered(name: &str, mut answer: Value) -> Value {
     // (#570), known by the answer's own field, as no id's own text can pass for it (Codex and
     // Sourcery on #576). So does the id of each of its conversations (`sessions`), which is the
     // id of that conversation's own request (decision 55), and each work item's `stream`, the
-    // fingerprint of a list the gate masks (CodeRabbit on #597).
-    type Taken = (Option<String>, Vec<Option<String>>, Vec<Option<Value>>);
+    // fingerprint of a list the gate masks (CodeRabbit on #597), and the request's `version`, which
+    // a check names (rule 6).
+    type Taken = (
+        Option<String>,
+        Vec<Option<String>>,
+        Vec<Option<Value>>,
+        Option<Value>,
+    );
     let ids: Vec<Taken> = match answer.get_mut("requests") {
         Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
             .map(|request| {
@@ -2019,7 +2086,8 @@ fn answered(name: &str, mut answer: Value) -> Value {
                         .collect(),
                     _ => Vec::new(),
                 };
-                (request_id(request), sessions, streams)
+                let version = request.as_object_mut().and_then(|r| r.remove("version"));
+                (request_id(request), sessions, streams, version)
             })
             .collect(),
         _ => Vec::new(),
@@ -2033,7 +2101,7 @@ fn answered(name: &str, mut answer: Value) -> Value {
         answer["next"] = next;
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
-        for (request, (id, sessions, streams)) in requests.iter_mut().zip(ids) {
+        for (request, (id, sessions, streams, version)) in requests.iter_mut().zip(ids) {
             if let Some(Value::Array(shown)) = request.get_mut("sessions") {
                 for (session, id) in shown.iter_mut().zip(sessions) {
                     put_id(session, id);
@@ -2045,6 +2113,9 @@ fn answered(name: &str, mut answer: Value) -> Value {
                         item.insert("stream".to_owned(), stream);
                     }
                 }
+            }
+            if let (Value::Object(request), Some(version)) = (&mut *request, version) {
+                request.insert("version".to_owned(), version);
             }
             put_id(request, id);
         }
@@ -4293,6 +4364,121 @@ curate = false
         let hex = |p: &String| p.len() == 12 && p.chars().all(|c| c.is_ascii_hexdigit());
         assert!(read.iter().all(hex), "{first}");
         assert_eq!(prints(&get(&v, "/api/my-work?range=all")), read);
+    }
+
+    /// docs/my-work.md rule 6: `POST /api/my-work/review` passes `save_gate` (the token, this
+    /// viewer's Origin, JSON) and takes `{request, version, checked}` only: an unknown request is
+    /// 404, a version not the current one or a check of a request not reported complete 409; a
+    /// check and its Undo show in the next read. The version leaves the route as it came, though a
+    /// rule matches hex digits, so that a check of what the page read is not stale.
+    #[test]
+    fn the_my_work_review_route_checks_a_version_and_refuses_the_rest() {
+        if !in_child("view::tests::the_my_work_review_route_checks_a_version_and_refuses_the_rest")
+        {
+            return;
+        }
+        let (mut s, v) = feed_fixture();
+        for (id, status) in [("rel", "done"), ("wip", "doing")] {
+            let fields = json!({"task": id, "request_id": id, "request": "Fix the release notes",
+                "status": status, "request_status": status});
+            s.raw
+                .work_state(R, "plan", fields.as_object().unwrap(), None)
+                .unwrap();
+        }
+        s.run();
+        let home = s.home.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'hex', regex = '[0-9a-f]{12}' }]\n",
+        )
+        .unwrap();
+        redact::set_home(home).unwrap();
+        let read = || get(&v, "/api/my-work?range=all");
+        let request = |answer: &Value, id: &str| -> Value {
+            (answer["requests"].as_array().unwrap().iter())
+                .find(|r| r["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let first = read();
+        let (rel, wip) = (request(&first, "r:rel"), request(&first, "r:wip"));
+        let version = rel["version"].as_str().unwrap().to_owned();
+        assert!(
+            version.len() == 64 && version.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{first}"
+        );
+        assert_eq!(
+            (rel["status"].as_str(), wip["status"].as_str()),
+            (Some("ready"), Some("working"))
+        );
+        let post = |body: &[u8], token: &str, origin: &str| -> (u16, Value) {
+            let len = body.len().to_string();
+            let h = [
+                HOST,
+                ("Origin", origin),
+                ("X-Oboete-Token", token),
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            let r = match v.head("POST", "/api/my-work/review", &h) {
+                Head::Body(_, save, given) => v.take(save, body, &given),
+                Head::Answer(r) => r,
+            };
+            (
+                r.status,
+                serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+            )
+        };
+        let ours = "http://127.0.0.1:4321";
+        let body = |request: &str, version: &str, checked: bool| {
+            serde_json::to_vec(&json!({"request": request, "version": version, "checked": checked}))
+                .unwrap()
+        };
+        let check = body("r:rel", &version, true);
+        assert_eq!(post(&check, "wrong", ours).0, 401);
+        assert_eq!(post(&check, "t0k", "http://evil.example").0, 403);
+        let code =
+            |(status, answer): (u16, Value)| (status, answer["code"].as_str().map(str::to_owned));
+        let unknown = json!({"request": "r:rel", "version": version, "checked": true, "more": 1});
+        assert_eq!(
+            code(post(&serde_json::to_vec(&unknown).unwrap(), "t0k", ours)),
+            (400, Some("bad_request".into()))
+        );
+        assert_eq!(
+            code(post(&body("r:rel", "abc", true), "t0k", ours)),
+            (400, Some("bad_request".into()))
+        );
+        assert_eq!(
+            code(post(&body("r:none", &version, true), "t0k", ours)),
+            (404, Some("not_found".into()))
+        );
+        assert_eq!(
+            code(post(&body("r:rel", &"0".repeat(64), true), "t0k", ours)),
+            (409, Some("stale".into()))
+        );
+        let wip_version = wip["version"].as_str().unwrap();
+        assert_eq!(
+            code(post(&body("r:wip", wip_version, true), "t0k", ours)),
+            (409, Some("not_ready".into()))
+        );
+        assert_eq!(request(&read(), "r:rel")["checked"], Value::Null);
+        // The check's read waits for another's hold (Codex on slice 3).
+        let hold = crate::my_work::reviews_lock(home).unwrap();
+        let status = std::thread::scope(|scope| {
+            let posting = scope.spawn(|| post(&check, "t0k", ours).0);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!posting.is_finished(), "the check waits for the hold");
+            drop(hold);
+            posting.join().unwrap()
+        });
+        assert_eq!(status, 200);
+        assert!(
+            request(&read(), "r:rel")["checked"].as_i64().is_some(),
+            "{}",
+            read()
+        );
+        assert_eq!(post(&body("r:rel", &version, false), "t0k", ours).0, 200);
+        assert_eq!(request(&read(), "r:rel")["checked"], Value::Null);
     }
 
     /// A feed over invented records, without the older timeline fixture's claims or imports.
