@@ -74,8 +74,12 @@ the repository; the request as the headline (none when empty); then `Investigate
 card shows them.
 
 P8. **The prompts.** claude-mem's prompt card: a `Prompt` badge, the agent, the repository; the
-text, newlines kept, at most 2,000 characters with `…` past them (the whole text through `get`);
-the footer: the record's key as `get` takes it and the local time.
+text whole, newlines kept; the footer: the record's key as `get` takes it and the local time.
+Since 2026-10-25 (parity row X9), as claude-mem's `PromptCard` (#4757): a prompt of more than 8
+lines or 600 characters (UTF-16 units, JavaScript's `length`) shows 8 lines, with `Show more`
+under them (`もっと見る` in Japanese), which shows it whole and becomes `Show less`
+(`折りたたむ`); the button says which in `aria-expanded`. The feed sends the whole text, which it
+cut at 2,000 characters before.
 
 P9. **States.** `No items to display` when the filter has none; `Loading…` while a page is read;
 `No more items` after the last. A failed read says so and offers to try again (claude-mem only
@@ -127,7 +131,8 @@ built after slice 1, before the switch.
 3. A card hidden by a removal, a summary hidden by a removal or skipped, and a removed prompt are
    not given; a prompt of an imported source is not given.
 4. A rule added after a card, summary or prompt was written masks it in the answer.
-5. A prompt over 2,000 characters is cut with `…`; `get` with its key gives it whole.
+5. A prompt over 2,000 characters comes whole in the feed, and `get` with its key gives it whole
+   too; the page clamps a long one behind `Show more` (P8).
 6. Without the token, with a foreign Host, or with another method, `/api/feed` is refused as every
    route is.
 7. The page (checked in a browser, `assets/viewer/`): the feed with its three kinds, the toggles,

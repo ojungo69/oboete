@@ -1447,3 +1447,24 @@ assert.equal(text(document.getElementById('heading')),'マイワーク','its hea
 ctx.ui.setLang('en');
 console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times, Copy handoff and Checked, in both languages');
 }
+
+// Parity row X9: a long prompt is clamped behind Show more, as claude-mem's PromptCard does; a short one has no button.
+{
+const entry=vm.runInContext('feedEntry',ctx);
+const prompt=text=>entry({kind:'prompt',id:'device:1',ts:0,agent:'claude',repo_name:'r',repo:'r',text});
+const buttons=node=>node.querySelectorAll('button').filter(b=>b.className==='show-more');
+for(const long of ['x'.repeat(601),Array.from({length:9},(_,i)=>`line ${i}`).join('\n')]){
+  const [more]=buttons(prompt(long));
+  assert.ok(more,'a long prompt has a Show more button');
+  assert.equal(more.attrs['aria-expanded'],'false');
+  assert.equal(more.dataset.i18n,'show_more');
+  more.click();
+  assert.equal(more.attrs['aria-expanded'],'true','Show more opens it');
+  assert.equal(more.dataset.i18n,'show_less');
+  more.click();
+  assert.equal(more.attrs['aria-expanded'],'false','Show less closes it');
+}
+for(const short of ['x'.repeat(600),Array.from({length:8},(_,i)=>`line ${i}`).join('\n')]){
+  assert.equal(buttons(prompt(short)).length,0,'a prompt within 8 lines and 600 characters has no button');
+}
+}
