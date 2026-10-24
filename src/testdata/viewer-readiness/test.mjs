@@ -28,6 +28,7 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;document.activeElement=this;}
+  select(){this.selected=true;}
   closest(selector){
     for(let node=this;node;node=node.parentElement){
       if(node.tagName===selector.toUpperCase()||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1)))return node;
@@ -1111,7 +1112,7 @@ const req=(id,over={})=>({id,title:`Request ${id}`,summary:`Summary ${id}`,next:
   repos:['github.com/o/alpha'],ask:{id:'dev:1',ts:now-5*H,text:`Ask ${id}`,from:'prompt'},follow_ups:[],
   updates:[{ts:now-H,text:`Summary ${id}`}],work:[],summaries:[],cards:[],...over});
 const panel=document.getElementById('panel');
-const set=(rows,unlinked=0)=>{run('Object.assign(mw,{filter:"all",query:"",project:"",range:"day",sort:"attention",agent:null,request:null,work:null,back:null,pending:null})');
+const set=(rows,unlinked=0)=>{run('Object.assign(mw,{rows:null,filter:"all",query:"",project:"",range:"day",sort:"attention",agent:null,request:null,work:null,back:null,pending:null});mw.changed.clear();mw.unread.clear()');
   ctx.__rows={requests:rows,unlinked};run('myWorkAccept(globalThis.__rows);myWorkDraw()');};
 const cards=()=>panel.querySelectorAll('article').filter(n=>n.className.startsWith('my-work-card '));
 const ids=()=>cards().map(n=>n.dataset.id);
@@ -1192,7 +1193,7 @@ run('mw.layout="cards"');
 // its status, the follow-ups, the recorded result and cards; back returns the focus to the card.
 const masked='c:[REDACTED]#0123456789ab';
 const alpha='github.com/o/alpha',beta='github.com/o/beta';
-set([req(masked,{status:'ready',next:null,work:[
+set([req(masked,{status:'ready',next:null,projects:['alpha','beta'],repos:[alpha,beta],work:[
   {list:'release',repo:alpha,task:'tag',status:'done',detail:'Tagged.',updated:now-H},
   {list:'release',repo:alpha,task:'notes',status:'done',detail:null,updated:now-2*H},
   {list:'docs',repo:alpha,task:'guide',status:'doing',detail:null,updated:now-H},
@@ -1212,6 +1213,7 @@ for(const absent of ['Stage','Ship estimate','Requested by','After ship','Time t
 const streamsOf=()=>panel.querySelectorAll('article').filter(n=>n.className==='my-work-stream');
 const streams=streamsOf();
 assert.deepEqual(streams.map(n=>text(n.querySelector('button'))),['release','docs','docs'],'the work by repository and list');
+assert.deepEqual(streams.map(n=>text(n.querySelector('.my-work-project'))),['alpha','alpha','beta'],'each list names its repository when the work is in two');
 assert(text(streams[0]).includes('Ready to check')&&text(streams[1]).includes('In progress'),'each list by claude-mem\'s statusFor');
 streams[0].querySelector('button').click();
 shown=text(panel);
@@ -1222,6 +1224,7 @@ assert.equal(document.activeElement,streamsOf()[0].querySelector('button'),'back
 streamsOf()[2].querySelector('button').click();
 shown=text(panel);
 assert(shown.includes('tutorial')&&!shown.includes('guide'),'a list of one name in another repository is a stream of its own');
+assert.equal(text(panel.querySelector('.my-work-request-meta').querySelector('.my-work-project')),'beta','and its page names its repository');
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to request').click();
 assert.equal(document.activeElement,streamsOf()[2].querySelector('button'),'the focus returns to that one, not its namesake');
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
@@ -1268,6 +1271,86 @@ ctx.fetch=()=>new Promise(resolve=>{release=()=>resolve(response({requests:[req(
 const late=run('myWorkLive()');
 run('generation++');release();await late;
 assert(!text(panel).includes('Stale title')&&!text(panel).includes('New work updates are ready.'),'an overtaken read draws nothing');
+// The tab's read and a poll's read in flight together: the newer answer stays, whichever comes
+// last, and the tab's drawing still draws the page (Codex and Greptile on #597).
+set([req('q1')]);
+const releases=[];
+ctx.fetch=()=>new Promise(resolve=>releases.push(title=>resolve(response({requests:[req('q1',{title})],unlinked:0}))));
+document.activeElement=null;
+const load=run('showMyWork()'),polled=run('myWorkLive()');
+releases[1]('Newer poll');await polled;
+releases[0]('Older load');(await load)();
+assert(text(panel).includes('Newer poll')&&!text(panel).includes('Older load'),'an older read never replaces a newer one');
+// The slot of the held update is a polite live region (CodeRabbit on #597).
+assert.equal(panel.querySelector('.my-work-updates').attrs.role,'status','a screen reader says an update is held');
+// A changed request flashes once and keeps "New update" until it is opened, as claude-mem marks
+// a changed card (`apply`, `markRead`); one whose summary alone a model rewrote flashes and is not
+// marked; a request seen unchanged is marked neither way.
+set([req('u1'),req('u2'),req('u3')]);
+answer={requests:[req('u1',{updates:[{ts:now,text:'A new update'}],summary:'A new update'}),req('u2',{summary:'Rewritten'}),req('u3')],unlinked:0};
+ctx.fetch=()=>Promise.resolve(response(answer));
+await run('myWorkLive()');
+const flashed=id=>card(id).className.includes('my-work-updated'),marked=id=>text(card(id)).includes('New update');
+assert.deepEqual(['u1','u2','u3'].map(flashed),[true,true,false],'a changed card flashes');
+assert.deepEqual(['u1','u2','u3'].map(marked),[true,false,false],'one whose record changed is marked new');
+run('myWorkDraw()');
+assert(!card('u1').className.includes('my-work-updated'),'the flash is once');
+assert(text(card('u1')).includes('New update'),'the mark stays until the request is opened');
+card('u1').querySelector('button').click();
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+assert(!text(card('u1')).includes('New update'),'opening the request reads it');
+// Times are rewritten on each poll's tick, as claude-mem rewrites them each second.
+set([req('t1',{updated:now-2*60000})]);
+const timeOf=()=>text(card('t1').querySelector('time'));
+assert.equal(timeOf(),'2m ago');
+run(`myWorkTimes(${now}+3*3600000)`);
+assert.equal(timeOf(),'3h ago','the card\'s time follows the clock');
+card('t1').querySelector('time').dataset.time=String(now-5*3600000);
+document.visibilityState='visible';
+ctx.fetch=url=>Promise.resolve(response(url.startsWith('/api/version')?{v:run('version')}:{requests:[req('t1',{updated:now-2*60000})],unlinked:0}));
+await run('poll()');
+delete document.visibilityState;
+assert.equal(timeOf(),'5h ago','each poll\'s tick rewrites the times');
+card('t1').querySelector('button').click();
+const elapsedOf=()=>text(panel.querySelector('.my-work-elapsed'));
+assert.equal(elapsedOf(),'5h 0m');
+run(`myWorkTimes(${now}+3600000)`);
+assert.equal(elapsedOf(),'6h 0m','and so does the request\'s elapsed time');
+// Lists the gate masks alike stay two by their fingerprints (CodeRabbit on #597).
+set([req('f1',{work:[{list:'[REDACTED]',repo:'[REDACTED]',stream:'aaaaaaaaaaaa',task:'one',status:'doing',detail:null,updated:now-H},
+  {list:'[REDACTED]',repo:'[REDACTED]',stream:'bbbbbbbbbbbb',task:'two',status:'doing',detail:null,updated:now-H}]})]);
+card('f1').querySelector('button').click();
+assert.equal(streamsOf().length,2,'two lists masked alike are two streams');
+assert.equal(streamsOf()[0].querySelectorAll('.my-work-project').length,0,'a repository masked alike is not named apart');
+// Copy handoff, in the page's language (decision 55), as claude-mem's `handoffText`; without a
+// clipboard, the text selected in a field to copy.
+set([req('c1',{updates:[{ts:now,text:'Parser fixed.'},{ts:now-1,text:'Tests added.'}]})]);
+card('c1').querySelector('button').click();
+let copied=null;
+ctx.navigator.clipboard={writeText:value=>{copied=value;return Promise.resolve();}};
+const copy=()=>panel.querySelectorAll('button').find(n=>n.className.includes('my-work-copy'));
+copy().click();await new Promise(r=>setTimeout(r,0));
+assert.equal(copied,['Request: Ask c1','Project: alpha','Recorded state: In progress','Next step: Follow the latest recorded activity.','',
+  'Latest recorded updates:','- Parser fixed.','- Tests added.','','Continue in the original work conversation. This handoff does not assign or send work.'].join('\n'));
+assert(text(panel).includes('Handoff copied. Paste it into the agent or conversation you choose.'),'the copy is confirmed');
+ctx.ui.setLang('ja');run('myWorkDraw()');
+copy().click();await new Promise(r=>setTimeout(r,0));
+assert(copied.startsWith('依頼: Ask c1\nプロジェクト: alpha\n記録された状態: 進行中\n'),`the handoff in Japanese: ${copied}`);
+ctx.ui.setLang('en');run('myWorkDraw()');
+// A state the page names is the handoff's too, where claude-mem says "Recorded update" (a local
+// Codex review of slice 2's last PR).
+for(const [status,said] of [['blocked','Blocked'],['quiet','No recent update'],['todo','To do'],['closed','Closed'],['unknown','Recorded update']]){
+  run(`mw.rows.find(r=>r.id==='c1').status='${status}';myWorkDraw()`);
+  copy().click();await new Promise(r=>setTimeout(r,0));
+  assert.equal(copied.split('\n')[2],`Recorded state: ${said}`,status);
+}
+run("mw.rows.find(r=>r.id==='c1').status='working';myWorkDraw()");
+delete ctx.navigator.clipboard;
+copy().click();await new Promise(r=>setTimeout(r,0));
+const area=panel.querySelector('textarea');
+assert(!area.hidden&&area.selected&&area.value.startsWith('Request: Ask c1'),'without a clipboard the text waits selected');
+assert(text(panel).includes('Clipboard unavailable. Copy the selected handoff text below.'));
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
 // Every My Work label in both languages, each language its own words.
 const labels=Object.entries(run('TEXT')).filter(([key])=>key.startsWith('my_work'));
 assert(labels.length>100,'My Work has its labels');
@@ -1276,5 +1359,5 @@ ctx.ui.setLang('ja');set([req('j1',{status:'needs'})]);
 assert(text(panel).includes('対応が必要')&&text(panel).includes('マイワーク')===false,'the page draws in Japanese');
 assert.equal(text(document.getElementById('heading')),'マイワーク','its heading too');
 ctx.ui.setLang('en');
-console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus and held updates, in both languages');
+console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times and Copy handoff, in both languages');
 }

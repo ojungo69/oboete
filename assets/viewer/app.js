@@ -2141,6 +2141,22 @@ const TEXT = {
   my_work_place_saved: ['Your place is saved.', '表示位置はそのままです。'],
   my_work_show_updates: ['Show updates', '更新を表示'],
   my_work_applied: ['New work updates applied.', '新しい作業の更新を表示しました。'],
+  my_work_new: ['New update', '新しい更新'],
+  my_work_copy_handoff: ['Copy handoff', '引き継ぎをコピー'],
+  my_work_handoff_label: ['Handoff text to copy', 'コピーする引き継ぎの文'],
+  my_work_copied: ['Handoff copied. Paste it into the agent or conversation you choose.', '引き継ぎをコピーしました。渡したいエージェントや会話に貼り付けてください。'],
+  my_work_copied_announce: ['Handoff copied. Nothing was sent.', '引き継ぎをコピーしました。何も送信していません。'],
+  my_work_clipboard: ['Clipboard unavailable. Copy the selected handoff text below.', 'クリップボードを使えません。下で選択した引き継ぎの文をコピーしてください。'],
+  my_work_handoff_request: ['Request: {text}', '依頼: {text}'],
+  my_work_handoff_project: ['Project: {text}', 'プロジェクト: {text}'],
+  my_work_handoff_state: ['Recorded state: {text}', '記録された状態: {text}'],
+  my_work_handoff_next: ['Next step: {text}', '次の一手: {text}'],
+  my_work_handoff_updates: ['Latest recorded updates:', '最新の記録された更新:'],
+  my_work_handoff_no_updates: ['No detailed updates recorded.', '詳しい更新の記録はありません。'],
+  my_work_handoff_end: ['Continue in the original work conversation. This handoff does not assign or send work.', '元の作業の会話で続けてください。この引き継ぎは、作業を割り当てたり送ったりしません。'],
+  my_work_handoff_ready: ['Reported complete', '完了の報告あり'],
+  my_work_handoff_checked: ['Checked locally', 'この PC で確認済み'],
+  my_work_handoff_recorded: ['Recorded update', '記録された更新'],
 };
 
 const stored = recall('oboete-lang', '');
@@ -5865,6 +5881,10 @@ const mw = {
   layout: MY_WORK_LAYOUTS.includes(recall('oboete-my-work-layout', 'cards')) ? recall('oboete-my-work-layout', 'cards') : 'cards',
   filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
   agent: null, request: null, work: null, back: null,
+  // The reads in the order they began, and the latest whose answer the page took.
+  reads: 0, taken: 0,
+  // claude-mem's `changed` (a flash, once) and `unread` (the "New update" mark until opened).
+  changed: new Set(), unread: new Set(),
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -5923,8 +5943,19 @@ function myWorkTime(ms) {
   if (Number.isFinite(ms) && ms > 0) {
     node.dateTime = new Date(ms).toISOString();
     node.title = new Date(ms).toLocaleString(lang);
+    node.dataset.time = String(ms);
   }
   return node;
+}
+
+// claude-mem rewrites its times each second (`app.js` `timer`); here each poll's tick does.
+function myWorkTimes(now = Date.now()) {
+  for (const node of $('panel').querySelectorAll('.my-work-time')) {
+    if (node.dataset.time) node.replaceChildren(myWorkAgo(Number(node.dataset.time), now));
+  }
+  for (const node of $('panel').querySelectorAll('.my-work-elapsed')) {
+    node.replaceChildren(myWorkElapsed({ started: Number(node.dataset.started) }, now));
+  }
 }
 
 // `view-model.js` `requestElapsed`, from the original ask.
@@ -5968,8 +5999,9 @@ function myWorkOpener(cls, row, label) {
 // `request-views.js` `requestCards`: the title opens the request, and the whole card with it.
 function myWorkCard(row) {
   const next = myWorkNextLine(row);
-  const card = el('article', `my-work-card my-work-status-${row.status}`,
-    el('div', 'my-work-card-meta', myWorkBadge(row.status), myWorkTime(row.updated)),
+  const card = el('article', `my-work-card my-work-status-${row.status}${mw.changed.has(row.id) ? ' my-work-updated' : ''}`,
+    el('div', 'my-work-card-meta', myWorkBadge(row.status), myWorkTime(row.updated),
+      mw.unread.has(row.id) ? word('span', 'my-work-new', 'my_work_new') : null),
     el('h3', 'my-work-title', myWorkOpener('my-work-open', row, row.title)),
     el('p', 'my-work-summary', myWorkActivity(row)),
     row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
@@ -6173,6 +6205,8 @@ function myWorkControls() {
 // Where new data waits while a person reads (`app.js` `apply`): kept across redraws.
 function myWorkSlot() {
   mw.slot = el('div', 'my-work-updates');
+  // A polite live region, so that a screen reader says an update is held (CodeRabbit on #597).
+  mw.slot.setAttribute('role', 'status');
   if (mw.pending) myWorkBanner();
   return mw.slot;
 }
@@ -6193,6 +6227,7 @@ function myWorkBanner() {
 function myWorkDraw(focus = null) {
   if (mw.request !== null) {
     myWorkDrawRequest();
+    mw.changed.clear();
     myWorkFocus(focus);
     return;
   }
@@ -6203,6 +6238,7 @@ function myWorkDraw(focus = null) {
     el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle')),
     switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
   ]);
+  mw.changed.clear();
   setStatus('');
   myWorkFocus(focus);
 }
@@ -6256,6 +6292,7 @@ function myWorkFocus(focus) {
 }
 
 function myWorkOpen(id) {
+  mw.unread.delete(id);
   mw.back = { id, scroll: window.scrollY || 0 };
   mw.request = id;
   mw.work = null;
@@ -6305,14 +6342,14 @@ function myWorkStreamStatus(items, now = Date.now()) {
 function myWorkStreams(row) {
   const lists = new Map();
   for (const item of row.work || []) {
-    const id = JSON.stringify([item.repo ?? null, item.list]);
+    const id = item.stream ?? JSON.stringify([item.repo ?? null, item.list]);
     if (!lists.has(id)) lists.set(id, []);
     lists.get(id).push(item);
   }
   return [...lists].map(([id, items]) => {
     const newest = [...items].sort((a, b) => b.updated - a.updated);
     const latest = newest[0];
-    return { id, list: latest.list, items: newest, status: myWorkStreamStatus(items),
+    return { id, list: latest.list, repo: latest.repo, items: newest, status: myWorkStreamStatus(items),
       summary: latest.detail || latest.task || latest.list || null };
   });
 }
@@ -6321,7 +6358,12 @@ function myWorkStreams(row) {
 // record (decision 55).
 function myWorkDrawRequest() {
   const row = (mw.rows || []).find((r) => r.id === mw.request);
-  const stream = row && mw.work !== null ? myWorkStreams(row).find((s) => s.id === mw.work) : null;
+  const all = row ? myWorkStreams(row) : [];
+  const stream = mw.work !== null ? all.find((s) => s.id === mw.work) : null;
+  // A list names its repository, as `projects` does, where the request's work is in two
+  // (Greptile on #597).
+  const several = new Set(all.map((s) => s.repo)).size > 1;
+  const project = (s) => (several ? el('span', 'my-work-project', row.projects?.[row.repos?.indexOf(s.repo)] ?? s.repo ?? '') : null);
   const back = word('button', 'quiet small my-work-back', stream ? 'my_work_back_request' : 'my_work_back');
   back.type = 'button';
   back.addEventListener('click', () => {
@@ -6343,7 +6385,7 @@ function myWorkDrawRequest() {
         el('p', null, title), item.detail && item.detail !== title ? el('p', 'my-work-detail', item.detail) : null);
     });
     draw(stream.list || t('my_work_supporting'), [], [back, myWorkSlot(),
-      el('div', 'my-work-request-meta', myWorkBadge(stream.status)),
+      el('div', 'my-work-request-meta', myWorkBadge(stream.status), project(stream)),
       el('p', 'my-work-intro-text', stream.summary || t('my_work_no_detail')),
       el('section', 'my-work-changes', word('h3', null, 'my_work_changes'),
         changes.length ? el('ul', 'my-work-change-list', ...changes) : word('p', 'text pending', 'my_work_no_changes')),
@@ -6351,9 +6393,10 @@ function myWorkDrawRequest() {
     return setStatus('');
   }
   const next = myWorkNextLine(row);
-  const elapsed = el('span', null, myWorkElapsed(row));
+  const elapsed = el('span', 'my-work-elapsed', myWorkElapsed(row));
   elapsed.title = t('my_work_elapsed_title');
-  const streams = myWorkStreams(row).map((s) => {
+  elapsed.dataset.started = String(row.started);
+  const streams = all.map((s) => {
     const open = el('button', 'my-work-open', s.list || t('my_work_supporting'));
     open.type = 'button';
     open.dataset.stream = s.id;
@@ -6361,7 +6404,7 @@ function myWorkDrawRequest() {
       mw.work = s.id;
       myWorkDraw('heading');
     });
-    return el('article', 'my-work-stream', el('div', 'my-work-stream-text', el('h4', 'my-work-title', open),
+    return el('article', 'my-work-stream', el('div', 'my-work-stream-text', el('h4', 'my-work-title', open), project(s),
       el('p', null, s.summary || t('my_work_no_detail'))), myWorkBadge(s.status));
   });
   // The IDs `get` takes, folded with their count: each opens its full text.
@@ -6382,12 +6425,75 @@ function myWorkDrawRequest() {
     row.follow_ups?.length ? el('details', 'my-work-original', word('summary', null, 'my_work_follow_ups'),
       el('div', null, ...row.follow_ups.flatMap((f) => [el('p', 'text', f.text ?? ''), fullText(f.id)]))) : null,
     ids('my_work_result', row.summaries), ids('my_work_cards_heading', row.cards),
-    el('div', 'my-work-actions', myWorkTimeline()),
+    ...myWorkHandoff(row),
   ]);
   setStatus('');
 }
 
+// `presentation.js` `handoffText`, in the page's language (decision 55); a state the page names
+// is named here too, where claude-mem says "Recorded update" for all but four.
+function myWorkHandoffText(row) {
+  const named = row.status !== 'unknown' && Object.hasOwn(TEXT, `my_work_status_${row.status}`);
+  const state = { ready: 'my_work_handoff_ready', checked: 'my_work_handoff_checked' }[row.status]
+    || (named ? `my_work_status_${row.status}` : 'my_work_handoff_recorded');
+  const updates = (row.updates || []).slice(0, 4).map((u) => `- ${u.text}`);
+  return [
+    t('my_work_handoff_request', { text: row.ask?.text || row.title }),
+    t('my_work_handoff_project', { text: myWorkProjects(row) }),
+    t('my_work_handoff_state', { text: t(state) }),
+    t('my_work_handoff_next', { text: myWorkNext(row) }),
+    '', t('my_work_handoff_updates'),
+    ...(updates.length ? updates : [`- ${t('my_work_handoff_no_updates')}`]),
+    '', t('my_work_handoff_end'),
+  ].join('\n');
+}
+
+// "Copy handoff" (`app.js`): to the clipboard, else selected in a field to copy. Nothing is sent.
+function myWorkHandoff(row) {
+  const copy = word('button', 'small my-work-copy', 'my_work_copy_handoff');
+  copy.type = 'button';
+  const note = el('p', 'my-work-handoff-note');
+  note.setAttribute('role', 'status');
+  const area = el('textarea', 'my-work-handoff-text');
+  area.readOnly = true;
+  area.rows = 9;
+  area.hidden = true;
+  area.setAttribute('aria-label', t('my_work_handoff_label'));
+  copy.addEventListener('click', async () => {
+    const text = myWorkHandoffText(row);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(text);
+      note.replaceChildren(t('my_work_copied'));
+      setStatus(t('my_work_copied_announce'), false, lang);
+    } catch {
+      area.hidden = false;
+      area.value = text;
+      area.focus();
+      area.select();
+      note.replaceChildren(t('my_work_clipboard'));
+    }
+  });
+  return [el('div', 'my-work-actions', copy, myWorkTimeline()), note, area];
+}
+
+// claude-mem's `contentSignature` and `contentFingerprint`: what a card shows, and what was
+// recorded, without the summary a model writes.
+const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work, row.updates, row.cards]);
+const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
+
 function myWorkAccept(answer) {
+  // `app.js` `apply`: a request new or changed since the last answer flashes, and one whose record
+  // changed is marked new until it is opened; the first answer marks none.
+  if (mw.rows?.length) {
+    const shown = new Map(mw.rows.map((row) => [row.id, myWorkSignature(row)]));
+    const content = new Map(mw.rows.map((row) => [row.id, myWorkContent(row)]));
+    for (const row of answer.requests) {
+      if (shown.get(row.id) === myWorkSignature(row)) continue;
+      mw.changed.add(row.id);
+      if (content.get(row.id) !== myWorkContent(row)) mw.unread.add(row.id);
+    }
+  }
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
   mw.signature = JSON.stringify([answer.requests, answer.unlinked]);
@@ -6408,8 +6514,13 @@ function myWorkReading() {
 // newer drawing overtook (`show`) draws nothing.
 async function myWorkLive() {
   const mine = generation;
+  const read = ++mw.reads;
   const answer = await api('my-work', { range: 'all' });
   if (mine !== generation || view !== 'my_work') return true;
+  // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on
+  // #597). No poll's read is older than one taken: polls do not overlap, and the tab's read
+  // begins a new generation.
+  mw.taken = read;
   mw.fetched = Date.now();
   const signature = JSON.stringify([answer.requests, answer.unlinked]);
   if (signature === mw.signature) return true;
@@ -6427,9 +6538,14 @@ async function myWorkLive() {
 }
 
 async function showMyWork() {
+  const read = ++mw.reads;
   const answer = await api('my-work', { range: 'all' });
   return () => {
-    myWorkAccept(answer);
+    // A poll's read that began after this one and came first keeps its answer; the page is drawn.
+    if (read > mw.taken) {
+      mw.taken = read;
+      myWorkAccept(answer);
+    }
     myWorkDraw();
   };
 }
@@ -6528,6 +6644,7 @@ async function poll() {
   if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
+    if (view === 'my_work' && mw.rows) myWorkTimes();
     await pollMaintenance();
     const { v } = await api('version');
     $('live').classList.remove('off');

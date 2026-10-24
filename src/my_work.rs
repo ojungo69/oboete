@@ -994,13 +994,19 @@ fn shown_id(
     if shown == held {
         return Ok((shown, None));
     }
+    let print = keyed_print(&held, home, key)?;
+    Ok((format!("{shown}#{print}"), Some(print)))
+}
+
+/// The fingerprint of a stored text the gate masks, keyed by the home's own key, made the first
+/// time one is needed: the same from read to read, and nothing of a guess at the text.
+fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
     let key = match key {
         Some(key) => key,
         None => key.insert(mask_key(home)?),
     };
     let keyed = [key.as_slice(), held.as_bytes()].concat();
-    let print = crate::forget::hash(&keyed)[..12].to_owned();
-    Ok((format!("{shown}#{print}"), Some(print)))
+    Ok(crate::forget::hash(&keyed)[..12].to_owned())
 }
 
 /// One request as the route gives it, every text through the gate; none when its newest update is
@@ -1171,16 +1177,26 @@ fn answer(
     // closing status too: capture keeps it as sent, and the line that shows it gates it as any
     // (`capture::work_state`; Codex on #574). Its repository as `repos` names it, so that the page
     // keeps lists of one name in two repositories apart, as claude-mem's work streams are a
-    // project's list (`listId`).
-    let work: Vec<Value> = (items.iter().zip(named))
-        .map(|(w, (list, task, detail))| {
-            let status = (w.fields.get("status"))
-                .map(|s| crate::work_state::beside("status", &crate::work_state::text(s), rules));
-            let repo = crate::redact::outbound_with(&w.repo, rules);
-            json!({"list": list, "repo": repo, "task": task, "status": status, "detail": detail,
-                "updated": w.updated})
-        })
-        .collect();
+    // project's list (`listId`); where the gate masks either, a fingerprint of the stored pair
+    // keeps two masked alike apart (`stream`; CodeRabbit on #597).
+    let mut work = Vec::new();
+    for (w, (list, task, detail)) in items.iter().zip(named) {
+        let status = (w.fields.get("status"))
+            .map(|s| crate::work_state::beside("status", &crate::work_state::text(s), rules));
+        let repo = crate::redact::outbound_with(&w.repo, rules);
+        let stream = if repo == w.repo && list == w.list {
+            None
+        } else {
+            let pair = serde_json::to_string(&[&w.repo, &w.list])?;
+            Some(keyed_print(&pair, home, key)?)
+        };
+        let mut item = json!({"list": list, "repo": repo, "task": task, "status": status,
+            "detail": detail, "updated": w.updated});
+        if let Some(stream) = stream {
+            item["stream"] = json!(stream);
+        }
+        work.push(item);
+    }
     let (id, fingerprint) = shown_id(&r.id, rules, home, key)?;
     // Each conversation by the id its own request has or would have, so that the page shows one
     // card a conversation, as claude-mem's agent view does (decision 55).
@@ -2964,6 +2980,38 @@ mod tests {
         let other = ("fix", "github.com/o/other", "there");
         assert_eq!(shown, [other, ("fix", R, "here")], "{r}");
         assert_eq!(r["repos"], json!(["github.com/o/other", R]));
+    }
+
+    /// Two repositories a rule masks alike keep two work streams: an item whose repository or
+    /// list the gate masks carries a fingerprint of the stored pair, keyed by the home's own key,
+    /// the same from read to read and holding nothing of either (CodeRabbit on #597). An item the
+    /// gate shows as stored carries none.
+    #[test]
+    fn work_the_gate_masks_alike_keeps_its_streams_apart() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser in both repositories.");
+        h.wrote("s1", "fix", json!({"task": "here", "status": "doing"}));
+        h.repo = "github.com/o/other";
+        h.wrote("s1", "fix", json!({"task": "there", "status": "doing"}));
+        let streams = |v: &Value| -> Vec<Value> {
+            let work = by_id(v, "c:claude:s1")["work"].as_array().unwrap().clone();
+            work.iter().map(|w| w["stream"].clone()).collect()
+        };
+        let v = h.read(Range::All, h.t + 10_000);
+        assert_eq!(streams(&v), [Value::Null, Value::Null], "{v}");
+        let rule =
+            "[redaction]\nextra_rules = [{ id = \"repo\", regex = 'github\\.com/o/[a-z]+' }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let read = || super::read(h.s.home.path(), Range::All, h.t + 10_000).unwrap();
+        let v = read();
+        let work = by_id(&v, "c:claude:s1")["work"].as_array().unwrap().clone();
+        assert!(work.iter().all(|w| w["repo"] == crate::redact::MASK), "{v}");
+        let prints = streams(&v);
+        let twelve = |p: &Value| p.as_str().is_some_and(|p| p.len() == 12);
+        assert!(prints.iter().all(twelve), "{v}");
+        assert_ne!(prints[0], prints[1]);
+        assert_eq!(streams(&read()), prints, "the same from read to read");
+        assert!(!v.to_string().contains("github.com/o/"), "{v}");
     }
 
     /// #596: a conversation known only by its work (no prompt, summary or card of its own read)

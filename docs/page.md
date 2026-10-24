@@ -18,9 +18,10 @@ like to them.
 
 ## The feed (slice 1)
 
-P1. **Where.** The first tab, `Timeline`, is the feed. The list it replaced (claims, imported
-history and records, with the search box and its filters) stays as it is under a tab of its own,
-`Records`, after it. Context, Stats and Settings follow as now.
+P1. **Where.** `Timeline` is the feed, after My Work, which is the first tab since slice 2 of
+X10 (decision 55, docs/my-work.md). The list it replaced (claims, imported history and records,
+with the search box and its filters) stays as it is under a tab of its own, `Records`, after it.
+Context, Stats and Settings follow as now.
 
 P2. **What.** Three kinds of item, each read through its one reader, so each is shown only as the
 rest of oboete may show it:

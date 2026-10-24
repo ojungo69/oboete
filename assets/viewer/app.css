@@ -826,6 +826,12 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-work-change-list p { margin: 4px 0 0; }
 .my-work-detail { color: var(--muted); }
 .my-work-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+/* claude-mem's "New update" dot and the note of a copied handoff. */
+.my-work-new { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.my-work-new::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.my-work-handoff-note:empty { display: none; }
+.my-work-handoff-note { margin: -8px 0 12px; color: var(--muted); }
+.my-work-handoff-text { width: 100%; font: 12.5px/1.5 var(--mono); }
 @media (max-width: 850px) {
   .my-work-grid, .my-work-agents { grid-template-columns: minmax(0, 1fr); }
 }
@@ -876,9 +882,12 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 @media (prefers-reduced-motion: no-preference) {
   .live:not(.off)::before { animation: live 2.4s ease-in-out infinite; }
   #list:empty ~ #panel .feed-state.loading::before { animation: shimmer 1.4s ease-in-out infinite; }
+  .my-work-card.my-work-updated { animation: my-work-arrived 1.4s ease-out; }
 }
 @keyframes live { 50% { opacity: 0.35; } }
 @keyframes shimmer { 50% { opacity: 0.5; } }
+/* claude-mem's `record-arrived`: a changed card's colour fades back once. */
+@keyframes my-work-arrived { 0%, 30% { background: var(--accent-soft); border-color: var(--accent); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
