@@ -606,6 +606,9 @@ pub fn resident(home: &Path) -> Result<()> {
                     if !matches!(why, Leaving::Gone) {
                         let _ = say(&looking.home, &format!("left: {}", why.text()));
                     }
+                    if matches!(why, Leaving::Asked) {
+                        let _ = std::fs::remove_file(looking.home.join("state").join(LEAVE));
+                    }
                     std::process::exit(0);
                 }
                 continue;
@@ -669,14 +672,22 @@ fn clear(path: &Path) -> std::io::Result<()> {
 enum Leaving {
     /// Its home is another now, or none: nothing is written into it.
     Gone,
+    /// `setup all --remove` asked it to (`LEAVE`), whatever requests came.
+    Asked,
     Moved,
     NotResident,
 }
+
+/// Parity row 50: what `setup all --remove` writes in `state` to ask a resident viewer to leave at
+/// its next look, as a page a tab polls every few seconds is never quiet for a minute (Codex on
+/// #618).
+pub(crate) const LEAVE: &str = "view-leave";
 
 impl Leaving {
     fn text(self) -> &'static str {
         match self {
             Leaving::Gone => "its home is gone",
+            Leaving::Asked => "setup removed every agent",
             Leaving::Moved => "[view] port names another port",
             Leaving::NotResident => "the home is no longer resident",
         }
@@ -705,6 +716,8 @@ fn listen(home: &Path) -> Result<Option<Resident>> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
+    // A request to leave that a viewer before this one did not take is not this one's.
+    let _ = std::fs::remove_file(state.join(LEAVE));
     let failed = |why: &str| say(home, why).map(|()| None);
     say(home, "starting")?;
     if !owner_only(home) {
@@ -1071,13 +1084,16 @@ impl Viewer {
     }
 
     /// R4: why the resident viewer leaves at a look, if it does: its home is gone (its lock file
-    /// is another than `lock`, or none), `[view] port` names another port, or config.toml loads,
-    /// does not say `resident = true`, and no request came since the last look (`quiet`). A file
-    /// that does not load leaves it as it is.
+    /// is another than `lock`, or none), setup asks it to (`LEAVE`), `[view] port` names another
+    /// port, or config.toml loads, does not say `resident = true`, and no request came since the
+    /// last look (`quiet`). A file that does not load leaves it as it is.
     fn leaving(&self, lock: crate::worker::FileId, quiet: bool) -> Option<Leaving> {
         let state = self.home.join("state");
         if crate::worker::file_id(std::fs::metadata(state.join("view.lock"))) != lock {
             return Some(Leaving::Gone);
+        }
+        if state.join(LEAVE).exists() {
+            return Some(Leaving::Asked);
         }
         if crate::config::view(&self.home).is_ok_and(|v| v.port.get() != self.port()) {
             return Some(Leaving::Moved);
@@ -7279,6 +7295,30 @@ curate = false
         std::fs::remove_file(p.join("state/view.lock")).unwrap();
         std::fs::write(p.join("state/view.lock"), "").unwrap();
         assert!(viewer.leaving(id, true).is_some(), "a home replaced");
+    }
+
+    /// Parity row 50 (Codex on #618): `setup all --remove` asks a resident viewer to leave, which
+    /// it does at its next look while a page still asks it every few seconds; a request left from
+    /// before a viewer started does not make that one leave.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_viewer_leaves_when_asked_though_a_page_polls_it() {
+        let port = free_port();
+        let home = resident_home(port);
+        let p = home.path();
+        std::fs::write(
+            p.join("config.toml"),
+            format!("[worker]\nresident = true\n[view]\nport = {port}\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(p.join("state").join(LEAVE), "").unwrap();
+        let Resident { lock, viewer, .. } = listen(p).unwrap().unwrap();
+        let id = crate::worker::file_id(lock.metadata());
+        assert!(!p.join("state").join(LEAVE).exists());
+        assert_eq!(viewer.leaving(id, false), None);
+        std::fs::write(p.join("state").join(LEAVE), "").unwrap();
+        assert_eq!(viewer.leaving(id, false), Some(Leaving::Asked));
     }
 
     /// Resident test 3 (R6): `--new-token` replaces the token file, so the old token fails and

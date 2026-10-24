@@ -274,6 +274,14 @@ fn uninstalled(home: &Path) {
         Ok(false) => {}
         Err(e) => eprintln!("[worker] resident not changed: {e:#}"),
     }
+    // A page a tab polls is never quiet for the minute R4 waits for: the viewer is asked to leave
+    // at its next look (Codex on #618).
+    let state = home.join("state");
+    if state.is_dir()
+        && let Err(e) = std::fs::write(state.join(crate::view::LEAVE), "")
+    {
+        eprintln!("page: not asked to leave: {e}");
+    }
     match crate::worker::step_aside(home) {
         Ok(true) => println!("worker: stopped"),
         Ok(false) => println!("worker: was not running"),

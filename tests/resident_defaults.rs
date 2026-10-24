@@ -361,6 +361,10 @@ fn removing_every_agent_stops_the_worker_and_names_what_is_left() {
     );
     assert!(out.contains("The program is "), "{out}");
     assert_eq!(resident(), None);
+    assert!(
+        h.join("state/view-leave").exists(),
+        "the page is asked to leave"
+    );
     let stopped = Instant::now();
     while worker.0.try_wait().unwrap().is_none() {
         assert!(
