@@ -1,0 +1,35 @@
+src/my_work.rs
+  s_52c2af97d1549e::t_eea40930400782 637-647,686-695,697,931,936,942-1052,1055-1058,1098-1099,1105,1127-1129,1135-1140,1147-1151,1155,1347-1406,1761-1765,3138-3392,3584-3587,3605-3607
+src/forget.rs
+  s_52c2af97d1549e::t_aec0edee424dfc 1369-1370,1385,1389-1391,1471-1473
+assets/viewer/app.css
+  s_52c2af97d1549e::t_cef2f85f1e116a 829-836
+assets/viewer/app.js
+  s_52c2af97d1549e::t_fe11b6aa22f941 2160-2170,5899-5900,6380,6414-6415,6422,6443,6449-6503,6548-6551,6560-6562,6564-6566,6596-6599
+src/view.rs
+  s_52c2af97d1549e::t_cb53df1397f740 1179,1648-1707,2068-2075,2089-2090,2104,2117-2119,4369-4483
+src/backup.rs
+  s_52c2af97d1549e::t_75e43ce38c60cb 944
+docs/claude-mem-parity.md
+  s_52c2af97d1549e::t_d771b78a042e9b 20-21,114,218
+docs/my-work.md
+  s_52c2af97d1549e::t_66d13ab70b5218 434,461-501
+src/testdata/viewer-readiness/test.mjs
+  s_52c2af97d1549e::t_ce9a6d306d90d0 1215-1216,1316,1356-1429,1438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a40c1cae4de376cc76b917cca417725feb595232",
+  "prompts": {},
+  "sessions": {
+    "s_52c2af97d1549e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8b65c44-47d2-4c0d-bed4-d4e61d8ba668",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
