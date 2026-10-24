@@ -1366,6 +1366,8 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
     // whole each time, by every forgotten record's identity.
     let mut jobs = std::collections::HashMap::new();
     let (mut past, mut records_past) = (Vec::new(), Vec::new());
+    // The sessions those record jobs forget, whose checks on the My Work page go at step 5.
+    let mut sessions = Vec::new();
     // Rows a purge rewrote may be in them, a denial's with no job row too (a restore from segments
     // alone, Codex on #469 and #470), which has no step to owe them by.
     let mut records_owed = raw.record_backups_owed()?;
@@ -1380,10 +1382,13 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
                     past.push(request.job);
                 }
             }
-            _ if step >= 3 && !held.contains(&request.job) => {
+            target if step >= 3 && !held.contains(&request.job) => {
                 // Steps 4 and 5 to do (a job 3c-2 took to step 4 had no step 5).
                 records_owed |= step < 5;
                 records_past.push(request.job);
+                if let Target::Session { session, .. } = target {
+                    sessions.push(session);
+                }
             }
             _ => {}
         }
@@ -1463,6 +1468,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         if records_owed {
             raw.owe_record_backups(false)?;
         }
+        // And the checks My Work holds of a forgotten session (docs/my-work.md rule 6), swept
+        // again by a purge that stops before step 5 is recorded.
+        crate::my_work::forget_reviews(home, &sessions)?;
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 5)?;
         }

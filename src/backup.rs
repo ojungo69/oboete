@@ -941,7 +941,7 @@ fn seal_report(
     Ok(path)
 }
 
-fn write_synced(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
+pub(crate) fn write_synced(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
     write_synced_at(dir, name, data, None)
 }
 

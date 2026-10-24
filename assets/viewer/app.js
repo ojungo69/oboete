@@ -2157,6 +2157,17 @@ const TEXT = {
   my_work_handoff_ready: ['Reported complete', '完了の報告あり'],
   my_work_handoff_checked: ['Checked locally', 'この PC で確認済み'],
   my_work_handoff_recorded: ['Recorded update', '記録された更新'],
+  my_work_review_eyebrow: ['Recorded result · your review', '記録された結果・あなたの確認'],
+  my_work_evidence: ['Recorded evidence', '記録された根拠'],
+  my_work_no_evidence: ['No separate test evidence was recorded. Inspect the source before checking this result.', 'テストの根拠は別に記録されていません。この結果を確認済みにする前に、元の記録を見てください。'],
+  my_work_review_note: ['Checking saves a local note that you looked at this version. It does not certify correctness or change the agent’s work. New substantive updates need another check.', '確認済みにすると、この版を見たというメモがこの PC に保存されます。正しさを保証するものではなく、エージェントの作業も変えません。内容のある新しい更新があれば、もう一度確認が必要です。'],
+  my_work_mark_checked: ['Mark checked', '確認済みにする'],
+  my_work_undo_check: ['Undo check', '確認を取り消す'],
+  my_work_checked_at: ['Checked locally {time}', '{time} にこの PC で確認済み'],
+  my_work_checked_saved: ['Checked locally. Your review is saved.', 'この PC で確認済みにしました。確認は保存されています。'],
+  my_work_check_undone: ['Check undone. The result is ready to review.', '確認を取り消しました。結果をもう一度確認できます。'],
+  my_work_review_stale: ['This work changed while you were reading. Review the latest version before checking.', '読んでいる間に作業が変わりました。最新の版を見てから確認してください。'],
+  my_work_review_failed: ['The local review could not be saved. Try again.', '確認を保存できませんでした。もう一度試してください。'],
 };
 
 const stored = recall('oboete-lang', '');
@@ -5885,6 +5896,8 @@ const mw = {
   reads: 0, taken: 0,
   // claude-mem's `changed` (a flash, once) and `unread` (the "New update" mark until opened).
   changed: new Set(), unread: new Set(),
+  // A check or its Undo being saved (`saveReview`'s `busy`).
+  saving: false,
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -6364,6 +6377,7 @@ function myWorkDrawRequest() {
   // (Greptile on #597).
   const several = new Set(all.map((s) => s.repo)).size > 1;
   const project = (s) => (several ? el('span', 'my-work-project', row.projects?.[row.repos?.indexOf(s.repo)] ?? s.repo ?? '') : null);
+  // The list's button holds it too, so that a screen reader tells two of one name apart (#600).
   const back = word('button', 'quiet small my-work-back', stream ? 'my_work_back_request' : 'my_work_back');
   back.type = 'button';
   back.addEventListener('click', () => {
@@ -6397,14 +6411,15 @@ function myWorkDrawRequest() {
   elapsed.title = t('my_work_elapsed_title');
   elapsed.dataset.started = String(row.started);
   const streams = all.map((s) => {
-    const open = el('button', 'my-work-open', s.list || t('my_work_supporting'));
+    const name = project(s);
+    const open = el('button', 'my-work-open', s.list || t('my_work_supporting'), name ? ' ' : null, name);
     open.type = 'button';
     open.dataset.stream = s.id;
     open.addEventListener('click', () => {
       mw.work = s.id;
       myWorkDraw('heading');
     });
-    return el('article', 'my-work-stream', el('div', 'my-work-stream-text', el('h4', 'my-work-title', open), project(s),
+    return el('article', 'my-work-stream', el('div', 'my-work-stream-text', el('h4', 'my-work-title', open),
       el('p', null, s.summary || t('my_work_no_detail'))), myWorkBadge(s.status));
   });
   // The IDs `get` takes, folded with their count: each opens its full text.
@@ -6425,9 +6440,65 @@ function myWorkDrawRequest() {
     row.follow_ups?.length ? el('details', 'my-work-original', word('summary', null, 'my_work_follow_ups'),
       el('div', null, ...row.follow_ups.flatMap((f) => [el('p', 'text', f.text ?? ''), fullText(f.id)]))) : null,
     ids('my_work_result', row.summaries), ids('my_work_cards_heading', row.cards),
+    row.status === 'ready' ? myWorkReviewSection(row) : null,
     ...myWorkHandoff(row),
   ]);
   setStatus('');
+}
+
+// claude-mem's review dialog (`openReview`), in the page: this viewer opens a request within the
+// page, and has no dialog (decision 55). Its evidence is the recorded updates, each once, at most
+// 8, as `presentation.js` takes the work's outcomes and updates.
+function myWorkReviewSection(row) {
+  const evidence = [...new Set((row.updates || []).map((u) => u.text))].slice(0, 8);
+  return el('section', 'my-work-review',
+    word('p', 'my-work-eyebrow', 'my_work_review_eyebrow'),
+    el('p', null, myWorkActivity(row)),
+    word('h3', null, 'my_work_evidence'),
+    el('ul', null, ...(evidence.length ? evidence.map((text) => el('li', null, text)) : [word('li', null, 'my_work_no_evidence')])),
+    word('p', 'my-work-review-note', 'my_work_review_note'),
+    myWorkReviewButton(row, true));
+}
+
+function myWorkReviewButton(row, checked) {
+  const button = word('button', checked ? 'my-work-check' : 'small my-work-undo', checked ? 'my_work_mark_checked' : 'my_work_undo_check');
+  button.type = 'button';
+  button.disabled = mw.saving;
+  button.addEventListener('click', () => myWorkReview(row, checked));
+  return button;
+}
+
+// `app.js` `saveReview`: the check of the version the page read, or its Undo; then My Work read
+// again, in the reads' order. A version that changed meanwhile is refused, and read again.
+async function myWorkReview(row, checked) {
+  if (mw.saving) return;
+  mw.saving = true;
+  for (const button of $('panel').querySelectorAll('.my-work-check, .my-work-undo')) button.disabled = true;
+  let said = 'my_work_review_failed';
+  try {
+    const { res } = await memoryWrite('my-work/review', { request: row.id, version: row.version, checked });
+    if (res.ok || res.status === 409) await myWorkReread();
+    if (res.status === 409) said = 'my_work_review_stale';
+    else if (res.ok) said = checked ? 'my_work_checked_saved' : 'my_work_check_undone';
+  } catch {
+    // The page says it was not saved; nothing changed.
+  } finally {
+    mw.saving = false;
+  }
+  if (view !== 'my_work') return;
+  // Drawn first, as drawing clears the status line.
+  myWorkDraw('current');
+  setStatus(t(said), said === 'my_work_review_failed', lang);
+}
+
+// A read the page asked for itself, applied though a person reads, unless a newer one was taken.
+async function myWorkReread() {
+  const mine = generation;
+  const read = ++mw.reads;
+  const answer = await api('my-work', { range: 'all' });
+  if (mine !== generation || view !== 'my_work' || read < mw.taken) return;
+  mw.taken = read;
+  myWorkAccept(answer);
 }
 
 // `presentation.js` `handoffText`, in the page's language (decision 55); a state the page names
@@ -6474,7 +6545,10 @@ function myWorkHandoff(row) {
       note.replaceChildren(t('my_work_clipboard'));
     }
   });
-  return [el('div', 'my-work-actions', copy, myWorkTimeline()), note, area];
+  const checked = row.status === 'checked'
+    ? [myWorkReviewButton(row, false), word('span', 'my-work-checked-at', 'my_work_checked_at', { time: localTime(row.checked, lang) })]
+    : [];
+  return [el('div', 'my-work-actions', ...checked, copy, myWorkTimeline()), note, area];
 }
 
 // claude-mem's `contentSignature` and `contentFingerprint`: what a card shows, and what was
@@ -6483,9 +6557,13 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 function myWorkAccept(answer) {
+  mw.signature = JSON.stringify([answer.requests, answer.unlinked]);
+  // `presentation.js` `effectiveStatus`: a checked request is Checked on the page.
+  for (const row of answer.requests) if (row.checked) row.status = 'checked';
   // `app.js` `apply`: a request new or changed since the last answer flashes, and one whose record
-  // changed is marked new until it is opened; the first answer marks none.
-  if (mw.rows?.length) {
+  // changed is marked new until it is opened; the first answer marks none, an empty one is a
+  // first answer too (#600).
+  if (mw.rows) {
     const shown = new Map(mw.rows.map((row) => [row.id, myWorkSignature(row)]));
     const content = new Map(mw.rows.map((row) => [row.id, myWorkContent(row)]));
     for (const row of answer.requests) {
@@ -6496,7 +6574,6 @@ function myWorkAccept(answer) {
   }
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
-  mw.signature = JSON.stringify([answer.requests, answer.unlinked]);
   mw.fetched = Date.now();
   mw.pending = null;
 }
@@ -6516,10 +6593,10 @@ async function myWorkLive() {
   const mine = generation;
   const read = ++mw.reads;
   const answer = await api('my-work', { range: 'all' });
-  if (mine !== generation || view !== 'my_work') return true;
-  // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on
-  // #597). No poll's read is older than one taken: polls do not overlap, and the tab's read
-  // begins a new generation.
+  // Nor one older than a read the page took: the read after a check begins while a poll's may be
+  // out (`myWorkReread`).
+  if (mine !== generation || view !== 'my_work' || read < mw.taken) return true;
+  // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on #597).
   mw.taken = read;
   mw.fetched = Date.now();
   const signature = JSON.stringify([answer.requests, answer.unlinked]);
