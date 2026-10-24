@@ -1509,3 +1509,69 @@ fn view_says_when_the_worker_does_not_start() {
     assert_resident_view_result(h, port, &mut view, &stdout, &stderr, start);
     assert!(repos_response(h, port).starts_with("HTTP/1.1 200 OK\r\n"));
 }
+
+/// X11: a worker at its start removes the scratch directories whose run has ended: a run's that
+/// nobody holds (its oboete was killed), and an older oboete's that has stood unchanged for more
+/// than 6 hours. It leaves a run's held, whatever its age, or made a moment ago (its hold comes after
+/// its making), and an older oboete's younger than that.
+#[test]
+fn a_worker_at_its_start_removes_what_a_killed_run_left() {
+    let home = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let at = |name: &str| temp.path().join(name);
+    let names = [
+        "oboete-run-dead",
+        "oboete-run-live",
+        "oboete-run-young",
+        "oboete-cli-old",
+        "oboete-cli-new",
+    ];
+    for name in names {
+        std::fs::create_dir(at(name)).unwrap();
+        std::fs::write(at(name).join("last.json"), "{}").unwrap();
+    }
+    let back = |name: &str, by: Duration| {
+        std::fs::File::open(at(name))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - by)
+            .unwrap();
+    };
+    let day = Duration::from_secs(24 * 60 * 60);
+    back("oboete-run-dead", Duration::from_secs(60));
+    back("oboete-run-live", day);
+    back("oboete-cli-old", day);
+    back("oboete-cli-new", Duration::from_secs(5 * 60 * 60));
+    let live = std::fs::File::open(at("oboete-run-live")).unwrap();
+    live.try_lock().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(home.path())
+        .args(["worker", "--idle-ms", "0"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .env("TMPDIR", temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !at("oboete-run-dead").exists(),
+        "a run nobody holds was left"
+    );
+    assert!(!at("oboete-cli-old").exists(), "an old one was left");
+    assert!(
+        at("oboete-run-live").join("last.json").exists(),
+        "a held one was removed"
+    );
+    assert!(
+        at("oboete-run-young").join("last.json").exists(),
+        "a new run's was removed"
+    );
+    assert!(
+        at("oboete-cli-new").join("last.json").exists(),
+        "a newer one was removed"
+    );
+    drop(live);
+}

@@ -973,7 +973,7 @@ fn copy_first_backup(source: &Path, destination: &Path) -> std::io::Result<()> {
         builder.mode(0o700);
     }
     builder.create(&directory)?;
-    let directory = crate::provider::Scratch(directory);
+    let directory = crate::provider::Scratch(directory, None);
     let temporary = directory.0.join("complete");
     copy_backup_contents(source, &temporary)?;
     // Publish only the completed copy, without replacing an earlier backup or alias.

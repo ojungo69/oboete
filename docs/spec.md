@@ -735,9 +735,9 @@ The four levels below are owner decision 19.
      - If `optimize` is too slow at about 330k documents, it becomes a merge in the idle worker (RD/improvements-synthesis.md:247). The job then records "merge pending", and steps 6-8 go on without waiting for it.
   6. Backup segments holding the scope are rewritten (MUST-M15).
   7. Pending curation windows and queued ops for the target are dropped.
-     - Curator temp directories have random names (src/provider.rs:312-327), so they cannot be tied to a target.
-     - This step therefore removes every `oboete-cli-*` directory under the temp directory that belongs to this user and is older than the longest CLI timeout. The worker does the same when it starts.
-     - Today only `Drop` removes them (src/provider.rs:306-309), which does not run when oboete itself is killed, and no sweep exists in src/.
+     - Curator temp directories have random names (`provider::scratch_dir`), so they cannot be tied to a target.
+     - This step therefore removes every one of this user's under the temp directory whose run has ended. The worker does the same when it starts.
+     - As built (X11): `Scratch`'s drop removes a run's directory when the run ends. On Unix the run holds it (`oboete-run-*`), open and locked, until then, and a killed oboete's hold goes with it; a run that cannot hold its directory (not on Unix, or a file system without locks) names it `oboete-cli-*`, as an older oboete did. The worker at each start removes this user's real directories whose run has ended (`provider::sweep_scratch`): an `oboete-run-*` one nobody holds, once 10 seconds have passed since it last changed (the sweep tests no younger one, as its test takes the lock for an instant), and an `oboete-cli-*` one, or one whose hold the sweep cannot test, once it has stood unchanged for 6 hours, claude-mem's age for a folder that names no owner (a directory's time moves only when an entry in it is made or removed). It sweeps no temp directory where another user could put something else in an entry's place: on Unix, one owned by someone other than this user or root, or one others can write to that is not sticky. This step's own sweep comes with milestone 5's slice 6.
   8. The tombstone op is pushed (section 5, control ops first).
 - **Report**: `forget` prints only what is true when it returns.
   - This device: "done" only after steps 2-7 and any pending merge have finished. While the merge runs, it says "purging (search index merge finishes when idle)".
