@@ -48,6 +48,8 @@ const sourcePath=fs.realpathSync(process.argv[2]||new URL('../../../assets/viewe
 const source=fs.readFileSync(sourcePath,'utf8');
 vm.runInContext(source.replace('await start();',''),ctx,{filename:sourcePath});
 vm.runInContext('globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;}};',ctx);
+// The view the page opens on, before the checks below change it.
+const initialView=vm.runInContext('view',ctx);
 // The simple page uses the saved chain, including unavailable and disabled entries.
 {
 const simple=vm.runInContext('({status:simpleProviderStatus,models:simpleProviderModels,listed:catalogHasProvider,chain:simpleSavedChain,catalog:AI_CATALOG,mode:settingsMode})',ctx);
@@ -1092,4 +1094,187 @@ assert(keyInput(rowOf('groq')),'the first saved entry keeps the key field under 
 assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later entry no key field');
 vm.runInContext("settingsMode='detailed';",ctx);
 console.log('PASS: simple status/models/catalog, remembered view, seven JA/EN blocks, isolated autosaves and masking confirmation');
+}
+// My Work (X10, decision 55): the tab, the three views, the filters, the request page and the
+// new data that waits behind "Show updates" while a person reads.
+{
+const run=code=>vm.runInContext(code,ctx);
+document.querySelector=()=>new Node('main');document.querySelectorAll=()=>[];
+ctx.ui.setLang('en');
+assert.equal(run('VIEWS[0]'),'my_work','My Work is the first tab');
+assert.equal(initialView,'my_work','My Work opens first when nothing is stored');
+run("setView('my_work')");
+assert.equal(document.getElementById('controls').hidden,true,'My Work hides the global search');
+const now=Date.now(),H=3600000;
+const req=(id,over={})=>({id,title:`Request ${id}`,summary:`Summary ${id}`,next:null,copy:'recorded',updating:false,status:'working',
+  updated:now-H,started:now-5*H,agents:['claude'],sessions:[{agent:'claude',id:`c:claude:${id}`}],projects:['alpha'],
+  repos:['github.com/o/alpha'],ask:{id:'dev:1',ts:now-5*H,text:`Ask ${id}`,from:'prompt'},follow_ups:[],
+  updates:[{ts:now-H,text:`Summary ${id}`}],work:[],summaries:[],cards:[],...over});
+const panel=document.getElementById('panel');
+const set=(rows,unlinked=0)=>{run('Object.assign(mw,{filter:"all",query:"",project:"",range:"day",sort:"attention",agent:null,request:null,work:null,back:null,pending:null})');
+  ctx.__rows={requests:rows,unlinked};run('myWorkAccept(globalThis.__rows);myWorkDraw()');};
+const cards=()=>panel.querySelectorAll('article').filter(n=>n.className.startsWith('my-work-card '));
+const ids=()=>cards().map(n=>n.dataset.id);
+// Cards: the badge, the title, the summary, "Summary updating", the projects, the next line only
+// where it says more than the summary (else none), the status's line where none is recorded,
+// and the open label by status.
+set([req('a',{status:'needs',updating:true,next:'Answer the question.'}),req('b',{status:'ready',next:null}),
+  req('c',{next:'Summary c'}),req('d',{summary:null,updates:[],ask:{id:null,ts:now,text:'Ask d',from:'prompt'}})]);
+let shown=text(panel);
+for(const fragment of ['Needs you','Request a','Summary a','Summary updating','alpha','Answer the question.','Read handoff',
+  'Ready to check','Read the reported result and recorded evidence.','Review result','Open request','Ask d']){
+  assert(shown.includes(fragment),`card shows: ${fragment}`);
+}
+const card=id=>cards().find(n=>n.dataset.id===id);
+assert(!text(card('c')).includes('Next step'),'a next step the same as the summary is not repeated');
+assert(text(card('c')).includes('Follow the latest recorded activity.')===false);
+assert(text(card('a')).includes('Claude Code'),'the contributor is named as the page names its agent');
+// Attention first: needs, blocked, ready, working, quiet, todo, unknown, closed; ties newest first.
+set(['closed','unknown','todo','quiet','working','ready','blocked','needs'].map((status,i)=>req(status,{status,updated:now-(i+1)*60000})));
+assert.deepEqual(ids(),['needs','blocked','ready','working','quiet','todo','unknown','closed'],'attention order');
+set([req('x',{updated:now-3*H}),req('y',{updated:now-H}),req('z',{updated:0,title:'A first'})]);
+run('mw.range="all";mw.sort="latest";myWorkDraw()');assert.deepEqual(ids(),['y','x','z'],'latest first, no time last');
+run('mw.sort="oldest";myWorkDraw()');assert.deepEqual(ids(),['x','y','z'],'oldest first, no time last');
+run('mw.sort="title";myWorkDraw()');assert.deepEqual(ids(),['z','x','y'],'A to Z by title');
+// Status tabs: the six always there, Blocked only with one, counts of the scope, a click filters
+// and names the heading.
+set([req('w1'),req('w2'),req('n1',{status:'needs'})]);
+const tabs=()=>panel.querySelectorAll('button').filter(n=>n.dataset.myWork?.startsWith('tab:'));
+assert.deepEqual(tabs().map(n=>n.dataset.myWork),['tab:all','tab:needs','tab:working','tab:quiet','tab:ready','tab:checked']);
+assert.deepEqual(tabs().map(n=>text(n)),['All 3','Needs you 1','In progress 2','No recent update 0','Ready to check 0','Checked 0']);
+set([req('w1'),req('b1',{status:'blocked'})]);
+assert(tabs().some(n=>n.dataset.myWork==='tab:blocked'),'Blocked shows with a count');
+tabs().find(n=>n.dataset.myWork==='tab:blocked').click();
+assert.deepEqual(ids(),['b1'],'a tab filters');
+assert.equal(text(tabs()[0]),'All 2','the counts stay those of the scope, before the tab');
+assert(text(panel.querySelectorAll('h3').find(n=>n.className==='my-work-heading')).includes('Blocked'),'the heading names the tab');
+assert.equal(document.activeElement.dataset.myWork,'tab:blocked','the tab keeps the focus');
+// Search: one substring of title, summary, agent and projects; project and range filters.
+set([req('s1',{title:'Fix the parser',projects:['alpha']}),req('s2',{title:'Docs',summary:'progress',projects:['beta']}),
+  req('s3',{title:'Old',updated:now-25*H}),req('s4',{title:'progress report',projects:['alpha']})]);
+const field=()=>panel.querySelectorAll('input').find(n=>n.dataset.myWork==='search');
+const typed=field();typed.value='parser';for(const cb of typed.listeners.input)cb({target:typed});
+assert.equal(field(),typed,'typing keeps the search field, so an IME\'s text being composed is not cut off');
+assert.deepEqual(ids(),['s1'],'what is typed searches');
+run('mw.query="claude code";myWorkDraw()');assert.deepEqual(ids().sort(),['s1','s2','s4'],'the agent is searched by its shown name');
+run('mw.query="progress alpha";myWorkDraw()');assert.deepEqual(ids(),[],'one substring, not words, though s4 has both');
+assert(text(panel).includes('No matching work'));
+run('mw.query="";mw.project="beta";myWorkDraw()');assert.deepEqual(ids(),['s2'],'project filter');
+run('mw.project="";myWorkDraw()');assert(!ids().includes('s3'),'the past 24 hours hide a request of 25 hours ago');
+run('mw.range="all";myWorkDraw()');assert(ids().includes('s3'),'all recorded work shows it');
+const project=panel.querySelectorAll('select').find(n=>n.dataset.myWork==='project');
+assert.deepEqual(project.options.map(o=>o.value),['','alpha','beta'],'every project, sorted, after All projects');
+// List: five columns, the next step or the summary in the third; open by the title.
+set([req('l1',{next:'Do the next thing'}),req('l2',{next:'Summary l2'}),req('l3')]);
+run('mw.layout="list";myWorkDraw()');
+const table=panel.querySelector('table');
+assert.equal(table.querySelectorAll('th').length,5,'five columns');
+const rowsOf=()=>table.querySelectorAll('tr').filter(n=>n.dataset.id);
+assert(text(rowsOf()[0]).includes('Do the next thing')&&text(rowsOf()[1]).includes('Summary l2'),'the next step, else the summary');
+assert(text(rowsOf()[2]).includes('Follow the latest recorded activity.'),'the status\'s line where none is recorded');
+// Agents: one card a conversation (decision 55), two of one agent apart; choosing one shows its
+// requests with "← All agents".
+set([req('g1',{sessions:[{agent:'claude',id:'c:claude:s1'}],updated:now-60000}),
+  req('g2',{sessions:[{agent:'claude',id:'c:claude:s2'}],updated:now-120000}),
+  req('g3',{sessions:[{agent:'claude',id:'c:claude:s1'}],updated:now-180000,title:'Older one'}),
+  req('g4',{sessions:[]})]);
+run('mw.layout="agents";myWorkDraw()');
+const agents=()=>panel.querySelectorAll('article').filter(n=>n.className.includes('my-work-agent'));
+assert.deepEqual(agents().map(n=>n.dataset.session),['c:claude:s1','c:claude:s2'],'one card a conversation');
+assert(text(agents()[0]).includes('2 human requests')&&text(agents()[0]).includes('Request g1'),'its count and latest title');
+agents()[0].querySelector('button').click();
+assert.deepEqual(ids(),['g1','g3'],'the conversation\'s requests');
+assert(text(panel).includes('← All agents'));
+panel.querySelectorAll('button').find(n=>n.dataset.myWork==='all-agents').click();
+assert.equal(agents().length,2,'back to every conversation');
+run('mw.layout="cards"');
+// The request page: facts, where it stands, the original, the work by repository and list with
+// its status, the follow-ups, the recorded result and cards; back returns the focus to the card.
+const masked='c:[REDACTED]#0123456789ab';
+const alpha='github.com/o/alpha',beta='github.com/o/beta';
+set([req(masked,{status:'ready',next:null,work:[
+  {list:'release',repo:alpha,task:'tag',status:'done',detail:'Tagged.',updated:now-H},
+  {list:'release',repo:alpha,task:'notes',status:'done',detail:null,updated:now-2*H},
+  {list:'docs',repo:alpha,task:'guide',status:'doing',detail:null,updated:now-H},
+  {list:'docs',repo:beta,task:'tutorial',status:'todo',detail:null,updated:now-H}],
+  follow_ups:[{id:'dev:2',ts:now,text:'And the column.'}],summaries:['S1'],cards:['9.0']}),req('other')]);
+const opener=card(masked).querySelector('button');opener.click();
+assert.equal(text(document.getElementById('heading')),`Request ${masked}`,'the request page is titled');
+shown=text(panel);
+for(const fragment of ['← Back to My Work','Contributors','Started','Elapsed','Where it stands','Ready to check:',
+  'Read the reported result and recorded evidence.','Original request','Ask','Work behind this request','release','Tagged.',
+  'docs','guide','Follow-ups to this request','And the column.','Recorded result','S1','Recorded cards','9.0','Timeline →']){
+  assert(shown.includes(fragment),`request page shows: ${fragment}`);
+}
+for(const absent of ['Stage','Ship estimate','Requested by','After ship','Time to completion']){
+  assert(!shown.includes(absent),`no row for what oboete does not record: ${absent}`);
+}
+const streamsOf=()=>panel.querySelectorAll('article').filter(n=>n.className==='my-work-stream');
+const streams=streamsOf();
+assert.deepEqual(streams.map(n=>text(n.querySelector('button'))),['release','docs','docs'],'the work by repository and list');
+assert(text(streams[0]).includes('Ready to check')&&text(streams[1]).includes('In progress'),'each list by claude-mem\'s statusFor');
+streams[0].querySelector('button').click();
+shown=text(panel);
+assert(shown.includes('← Back to request')&&shown.includes('Recorded changes')&&shown.includes('notes'),'the work stream page');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to request').click();
+assert(text(panel).includes('Where it stands'),'back to the request');
+assert.equal(document.activeElement,streamsOf()[0].querySelector('button'),'back returns the focus to the list that opened it');
+streamsOf()[2].querySelector('button').click();
+shown=text(panel);
+assert(shown.includes('tutorial')&&!shown.includes('guide'),'a list of one name in another repository is a stream of its own');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to request').click();
+assert.equal(document.activeElement,streamsOf()[2].querySelector('button'),'the focus returns to that one, not its namesake');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+assert(document.activeElement?.dataset.id===masked,'back returns the focus to the card that opened it, a masked id too');
+// New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
+// updates", and an unchanged answer does nothing.
+set([req('h1')]);
+let answer={requests:[req('h1',{title:'Changed title'})],unlinked:0};
+ctx.fetch=url=>{assert(url.startsWith('/api/my-work?range=all'));return Promise.resolve(response(answer));};
+document.activeElement=panel.querySelectorAll('input').find(n=>n.dataset.myWork==='search');
+await run('myWorkLive()');
+assert(!text(panel).includes('Changed title'),'the cards stay while a person reads');
+assert(text(panel).includes('New work updates are ready.'),'the banner says so');
+panel.querySelectorAll('button').find(n=>text(n)==='Show updates').click();
+assert(text(panel).includes('Changed title')&&!text(panel).includes('New work updates are ready.'),'Show updates applies them');
+document.activeElement=null;
+const before=panel.children;await run('myWorkLive()');
+assert.equal(panel.children,before,'an unchanged answer draws nothing');
+answer={requests:[req('h1',{title:'Changed again'})],unlinked:2};
+await run('myWorkLive()');
+assert(text(panel).includes('Changed again')&&text(panel).includes('2 work records need a linked human request'),'applied when no one reads');
+// What is held is the last answer received, as claude-mem's `accept` keeps it: the same answer
+// again stays held after the reading ends, and one like the shown one replaces it, so that
+// "Show updates" never applies an answer older than the last.
+const reading=()=>{document.activeElement=panel.querySelectorAll('input').find(n=>n.dataset.myWork==='search');};
+set([req('k1')]);
+answer={requests:[req('k1',{title:'Held title'})],unlinked:0};
+reading();await run('myWorkLive()');
+document.activeElement=null;await run('myWorkLive()');
+assert(!text(panel).includes('Held title')&&text(panel).includes('New work updates are ready.'),'the same answer again stays held');
+answer={requests:[req('k1')],unlinked:0};
+reading();await run('myWorkLive()');
+panel.querySelectorAll('button').find(n=>text(n)==='Show updates').click();
+assert(!text(panel).includes('Held title'),'an answer like the shown one replaces the held one');
+answer={requests:[req('k1',{title:'Held title'})],unlinked:0};
+reading();await run('myWorkLive()');
+answer={requests:[req('k1')],unlinked:0};
+document.activeElement=null;await run('myWorkLive()');
+assert(!text(panel).includes('Held title')&&!text(panel).includes('New work updates are ready.'),'and with no one reading, nothing stays held');
+// A poll's read that a newer drawing overtook (`show`) draws nothing.
+set([req('o1')]);
+let release;
+ctx.fetch=()=>new Promise(resolve=>{release=()=>resolve(response({requests:[req('o1',{title:'Stale title'})],unlinked:0}));});
+const late=run('myWorkLive()');
+run('generation++');release();await late;
+assert(!text(panel).includes('Stale title')&&!text(panel).includes('New work updates are ready.'),'an overtaken read draws nothing');
+// Every My Work label in both languages, each language its own words.
+const labels=Object.entries(run('TEXT')).filter(([key])=>key.startsWith('my_work'));
+assert(labels.length>100,'My Work has its labels');
+for(const [key,[en,ja]] of labels)assert(en&&ja&&en!==ja,`${key} has distinct English and Japanese`);
+ctx.ui.setLang('ja');set([req('j1',{status:'needs'})]);
+assert(text(panel).includes('対応が必要')&&text(panel).includes('マイワーク')===false,'the page draws in Japanese');
+assert.equal(text(document.getElementById('heading')),'マイワーク','its heading too');
+ctx.ui.setLang('en');
+console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus and held updates, in both languages');
 }

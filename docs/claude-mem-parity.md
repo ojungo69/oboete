@@ -18,8 +18,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | Status | Rows |
 |---|---|
 | equal_or_better | 24 |
-| partial | 28 |
-| missing | 20 |
+| partial | 29 |
+| missing | 19 |
 | accepted_difference | 7 |
 | total | 79 |
 
@@ -111,7 +111,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | X7 | Raw-text retention by days, after curation, with a page control. Off by default on both sides. | equal_or_better | rare | tool-uses.ts:494 / src/retention.rs:34 |
 | X8 | The feed has a stable newest-first order, and repeated prompts are never merged. | equal_or_better | rare | PaginationHelper.ts:102 / src/view.rs:2110 |
 | X9 | Long prompt cards are not collapsed behind "Show more". The server caps a prompt at 2,000 characters. | partial | rare | viewer-template.html:1152 / src/view.rs:2100 |
-| X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written and shows the recorded wording when no compatible model can write one, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. claude-mem writes the summaries only with OpenRouter as its provider; the owner's writes none, so its cards show the recorded wording. oboete has no such view. Decision 53: built in the table's order, before removal, with the session summaries its curators already write as the cards' summaries, so it adds no model call (docs/my-work.md). | missing | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
+| X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written and shows the recorded wording when no compatible model can write one, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. claude-mem writes the summaries only with OpenRouter as its provider; the owner's writes none, so its cards show the recorded wording. Decision 53: built in the table's order, before removal, with the session summaries its curators already write as the cards' summaries, so it adds no model call (docs/my-work.md). oboete opens on My Work: cards, the list and one card a conversation (decision 55), its filters and status tabs, and a request's page with a back button; Copy handoff and the marks of a changed request come with slice 2's last PR, and the checked mark with slice 3. | partial | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
 | X11 | claude-mem 15.0 removes the temporary folders a killed curator run left (its Codex app-server's) when its worker starts. oboete removes its `oboete-cli-*` folders when a run ends, and none that a killed oboete left; the forget design plans the same sweep at the worker's start (docs/spec.md, forget, step 7). | missing | rare | CodexAppServerClient.ts:298 / src/provider.rs:2170 |
 
 The sections after this one are the first comparison, of 2026-10-03 against claude-mem 13.28.0.
@@ -215,7 +215,7 @@ each milestone and new features are added here.
 
 | # | Difference | Size |
 |---|---|---|
-| X10 | **What was asked, and where it stands.** claude-mem 14.0 opens its viewer on My Work: every request given to the agents as a card with a plain summary a model writes (the recorded wording when none can), who worked on it, its project and its status, attention first, and a mark that a person checked the result. oboete keeps the same requests and the work after them but shows no such view. claude-mem's summaries need OpenRouter as its provider, and the owner's writes none; oboete's cards take the session summaries its curators already write, so My Work adds no model call (docs/my-work.md). | M |
+| X10 | **What was asked, and where it stands.** claude-mem 14.0 opens its viewer on My Work: every request given to the agents as a card with a plain summary a model writes (the recorded wording when none can), who worked on it, its project and its status, attention first, and a mark that a person checked the result. oboete shows its cards, list and agent view and a request's page since slice 2's page (decision 55); Copy handoff, the marks of a changed request and the checked mark are still to come. claude-mem's summaries need OpenRouter as its provider, and the owner's writes none; oboete's cards take the session summaries its curators already write, so My Work adds no model call (docs/my-work.md). | M |
 
 ### Before removal (added 2026-10-23, from claude-mem 15.0)
 
