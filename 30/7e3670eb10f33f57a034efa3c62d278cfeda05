@@ -1,0 +1,33 @@
+assets/viewer/app.css
+  s_52c2af97d1549e::t_85ccac9b223cd5 829-834,885,889-890
+docs/my-work.md
+  s_52c2af97d1549e::t_5218a3451f5eea 434-460
+assets/viewer/app.js
+  s_52c2af97d1549e::t_b0685db7b087d0 2144-2159,5884-5887,5946,5951-5960,6002-6004,6208-6209,6230,6241,6295,6345,6352,6361-6366,6388,6396,6398-6399,6407,6428,6433-6484,6486-6496,6517,6520-6523,6541,6544-6548,6647
+src/testdata/viewer-readiness/test.mjs
+  s_52c2af97d1549e::t_45783a428f9b6e 31,1115,1196,1216,1227,1274-1353,1362
+docs/page.md
+  s_52c2af97d1549e::t_00eaa77ccd71bc 21-24
+docs/claude-mem-parity.md
+  s_52c2af97d1549e::t_e4d3693f817fec 114,218
+src/view.rs
+  s_52c2af97d1549e::t_d61e48ea608785 2006-2009,2016-2022,2036,2042-2048,4262-4297
+src/my_work.rs
+  s_52c2af97d1549e::t_52645b760173fa 997-1003,1009,1180-1199,2985-3016
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "307e3670eb10f33f57a034efa3c62d278cfeda05",
+  "prompts": {},
+  "sessions": {
+    "s_52c2af97d1549e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8b65c44-47d2-4c0d-bed4-d4e61d8ba668",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
