@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 33 |
-| partial | 21 |
+| equal_or_better | 34 |
+| partial | 20 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
@@ -110,7 +110,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | X6 | Memory searches and saved notes are not curated again as new memories, claude-mem 15.0's new search tools included (#587). | equal_or_better | daily | memory-retrieval-tools.ts:20 / src/curate.rs:608 |
 | X7 | Raw-text retention by days, after curation, with a page control. Off by default on both sides. | equal_or_better | rare | tool-uses.ts:494 / src/retention.rs:34 |
 | X8 | The feed has a stable newest-first order, and repeated prompts are never merged. | equal_or_better | rare | PaginationHelper.ts:102 / src/view.rs:2110 |
-| X9 | Long prompt cards are not collapsed behind "Show more". The server caps a prompt at 2,000 characters. | partial | rare | viewer-template.html:1152 / src/view.rs:2100 |
+| X9 | A prompt card of more than 8 lines or 600 characters shows 8 lines behind "Show more" ("もっと見る" in Japanese), as claude-mem's PromptCard, and the feed sends the prompt whole (docs/page.md P8). | equal_or_better | rare | PromptCard.tsx:15 / assets/viewer/app.js:453 |
 | X10 | claude-mem 14.0 opens its viewer on My Work: each request given to the agents as a card with a status (in progress, needs you, no recent update, ready to check, checked), a model-written summary that keeps the last good one while a new one is written and shows the recorded wording when no compatible model can write one, list and agent views, and a drill-down to the work and the original request; a person marks a result checked. claude-mem writes the summaries only with OpenRouter as its provider; the owner's writes none, so its cards show the recorded wording. Decision 53: built in the table's order, before removal, with the session summaries its curators already write as the cards' summaries, so it adds no model call (docs/my-work.md). oboete opens on My Work: cards, the list and one card a conversation (decision 55), its filters and status tabs, a request's page with a back button, Copy handoff in the page's language, the marks of a changed request, and a person's check of a result reported complete, kept on this PC by the request's keyed version (rule 6). Differences: the summaries are the curators' (decision 53); the page reads again when the store changes and each minute, where claude-mem's receives events; the review is in the request's page, not a dialog, and a request has no address of its own (decision 55). | equal_or_better | weekly | WorkViewRoutes.ts:1 / src/view.rs:1 |
 | X11 | claude-mem 15.0, at a worker's first Codex run, removes the temporary folders of its Codex app-server that a killed worker left: those whose owner process has ended, and those older than 6 hours that name no owner. oboete's worker, at each start, removes this user's real folders of its CLI runs whose run has ended: one each run holds, open and locked, while it goes on (Unix), once nobody holds it and it is 10 seconds old; one whose hold cannot tell (Windows, a file system without locks, or an older oboete's) after 6 hours unchanged, claude-mem's age for a folder that names no owner. It covers every CLI run (the claude and codex curators, the Codex probes and the v1 preview's copy), not only Codex's, and leaves a held folder whatever its age (docs/spec.md, forget, step 7). | equal_or_better | rare | CodexAppServerClient.ts:298 / src/provider.rs:2173 |
 

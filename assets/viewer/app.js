@@ -445,6 +445,29 @@ function feedCard(item) {
     facts, narrative, feedFooter(item));
 }
 
+// claude-mem's PromptCard (#4757): a prompt past 8 lines or 600 characters is clamped to 8 lines
+// behind Show more, so one long prompt does not push the timeline off the screen (parity row X9).
+const CLAMP_LINES = 8;
+const CLAMP_MIN_CHARS = 600;
+
+function promptText(text) {
+  const body = el('p', 'text prompt-text', text);
+  if (text.split('\n').length <= CLAMP_LINES && text.length <= CLAMP_MIN_CHARS) return [body];
+  body.classList.add('clamped');
+  const more = word('button', 'show-more', 'show_more');
+  more.type = 'button';
+  more.setAttribute('aria-expanded', 'false');
+  let open = false;
+  more.addEventListener('click', () => {
+    open = !open;
+    body.classList.toggle('clamped', !open);
+    more.dataset.i18n = open ? 'show_less' : 'show_more';
+    more.textContent = t(more.dataset.i18n);
+    more.setAttribute('aria-expanded', String(open));
+  });
+  return [body, more];
+}
+
 function feedEntry(item) {
   let card;
   if (item.kind === 'card') card = feedCard(item);
@@ -456,7 +479,7 @@ function feedEntry(item) {
         word('h4', 'summary-label', field), el('p', 'text', item.fields[field]))),
       feedFooter(item));
   } else card = el('article', 'feed-card prompt-card', feedHeader(item),
-    el('p', 'text prompt-text', item.text), feedFooter(item));
+    ...promptText(item.text), feedFooter(item));
   return el('li', 'feed-entry', card);
 }
 
@@ -919,6 +942,8 @@ const TEXT = {
   feed_card: ['card', 'カード'],
   feed_summary: ['Session summary', 'セッションの要約'],
   feed_prompt: ['Prompt', 'プロンプト'],
+  show_more: ['Show more', 'もっと見る'],
+  show_less: ['Show less', '折りたたむ'],
   untitled: ['Untitled', 'タイトルなし'],
   facts: ['facts', '事実'],
   narrative: ['narrative', '説明'],

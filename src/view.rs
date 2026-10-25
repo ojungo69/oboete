@@ -2326,13 +2326,10 @@ fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -
     }
     for p in prompts {
         let (ts, device, seq) = p.position();
-        let mut text: String = p.text.chars().take(2_000).collect();
-        if p.text.chars().count() > 2_000 {
-            text.push('…');
-        }
+        // Whole, as claude-mem's feed sends it: the page clamps a long one (parity row X9).
         rows.push((2, (ts, device, seq, 0), json!({
             "kind": "prompt", "id": p.key(), "ts": p.ts,
-            "agent": p.agent, "repo_name": name(p.repo.as_deref()), "repo": p.repo, "text": text,
+            "agent": p.agent, "repo_name": name(p.repo.as_deref()), "repo": p.repo, "text": p.text,
         })));
     }
     rows.sort_by(|(ak, a, _), (bk, b, _)| {
@@ -4886,25 +4883,19 @@ curate = false
         assert_ne!(other["next"], cursor);
     }
 
-    /// page.md test 5: the display cap counts Unicode characters after gating, says it cut,
-    /// and leaves the full prompt available through get's record key.
+    /// page.md test 5 (parity row X9): a long prompt comes whole in the feed, as claude-mem's
+    /// does, for the page to clamp, and get's record key gives it whole too.
     #[test]
-    fn feed_cuts_long_prompts_but_get_keeps_the_full_text() {
+    fn feed_sends_a_long_prompt_whole_and_get_keeps_it() {
         let (mut s, v) = feed_fixture();
         let full = format!("{}終", "あ".repeat(2_000));
         let seq = s.said("s", "example.test/team/fern", 1_000, &full);
         let page = get(&v, "/api/feed?all=1");
         let item = &page["items"][0];
-        assert_eq!(item["text"], format!("{}…", "あ".repeat(2_000)));
+        assert_eq!(item["text"], full);
         assert_eq!(item["id"], s.key(seq));
         let doc = get(&v, &format!("/api/doc?id={}", item["id"].as_str().unwrap()));
         assert!(doc["text"].as_str().unwrap().contains(&full));
-        let exact = "い".repeat(2_000);
-        s.said("s", "example.test/team/fern", 2_000, &exact);
-        assert_eq!(
-            get(&v, "/api/feed?all=1&limit=1")["items"][0]["text"],
-            exact
-        );
     }
 
     /// page.md test 6: the new endpoint passes through the same guards, before any store read.

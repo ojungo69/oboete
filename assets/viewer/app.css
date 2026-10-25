@@ -657,6 +657,25 @@ input.invalid, select.invalid, textarea.invalid { border-color: var(--red); back
 /* A prompt is the owner's own words: quieter than a curated card. */
 .prompt-card { background: var(--bg); box-shadow: none; }
 .prompt-text { margin-top: 12px; padding-left: 12px; border-left: 3px solid var(--line-strong); }
+/* claude-mem's clamp for a long prompt (#4757): 8 lines behind Show more. */
+.prompt-text.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  line-clamp: 8;
+  overflow: hidden;
+}
+.show-more {
+  display: block;
+  margin: 6px 0 0 15px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.show-more:hover { text-decoration: underline; }
 .summary-card { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; }
 .summary-card > :not(.summary-section) { grid-column: 1 / -1; }
 .summary-section { margin: 14px 0 0; min-width: 0; }
