@@ -554,19 +554,27 @@ pub(crate) fn window_at(
     // work. A memory tool's call says nothing, so a window of such calls waits too.
     let mut ends = false;
     if steps && !full {
-        let mut open = std::collections::HashMap::new();
-        for (i, p) in pieces.iter().enumerate() {
-            match p.step {
-                Step::Starts => {
-                    open.entry(p.key.as_str()).or_insert(i);
+        // The open starts are found again in what the cut keeps, until none is left in it: a
+        // start whose work lies past the cut is open there too (Codex on #637).
+        let mut cut = pieces.len();
+        loop {
+            let mut open = std::collections::HashMap::new();
+            for (i, p) in pieces[..cut].iter().enumerate() {
+                match p.step {
+                    Step::Starts => {
+                        open.entry(p.key.as_str()).or_insert(i);
+                    }
+                    Step::Ends => {
+                        open.remove(p.key.as_str());
+                    }
+                    Step::Passes => {}
                 }
-                Step::Ends => {
-                    open.remove(p.key.as_str());
-                }
-                Step::Passes => {}
             }
+            let Some(first) = open.into_values().min() else {
+                break;
+            };
+            cut = first;
         }
-        let cut = open.into_values().min().unwrap_or(pieces.len());
         if pieces[..cut].iter().any(|p| p.step == Step::Ends) {
             pieces.truncate(cut);
             ends = true;
@@ -6993,6 +7001,59 @@ mod tests {
         let phase =
             run_phase(&mut raw, &kn(), &db, &rules, &curating(3), "", &mut curator).unwrap();
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
+    }
+
+    /// Codex on #637 (#640): a session's prompt whose work lies past another session's start is
+    /// open where the window stops too: `A:prompt, A:tool, A:reply, A:prompt, B:prompt, A:tool`
+    /// sends A's first turn alone, and A's next prompt waits with its work and B's prompt for B's.
+    #[test]
+    fn a_start_whose_work_lies_past_the_cut_waits_with_it() {
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let mut curator =
+            |_: &str, prompt: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+                sent.borrow_mut().push(prompt.to_owned());
+                Ok(answered("groq"))
+            };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let ts = crate::db::now_ms() - 60_000;
+        let at = |e: Event| Event { ts, ..e };
+        let other = |e: Event| Event {
+            session: "other".into(),
+            ..at(e)
+        };
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut step = |raw: &mut Raw, events: Vec<Event>| {
+            for e in events {
+                raw.append(&e).unwrap();
+            }
+            run_phase(raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
+        };
+        let reply = |text: &str| event("reply", json!({"assistant": text}));
+        let records = vec![
+            at(prompt("Build the parser.")),
+            at(tool("parsed")),
+            at(reply("Built the parser.")),
+            at(prompt("Now the lexer.")),
+            other(prompt("Fix the docs.")),
+            at(tool("lexed")),
+        ];
+        assert_eq!(step(&mut raw, records), Phase::Covered);
+        let last = || sent.borrow().last().cloned().unwrap();
+        assert!(
+            last().contains("parsed") && last().contains("Built the parser."),
+            "{}",
+            last()
+        );
+        for text in ["Now the lexer.", "Fix the docs.", "lexed"] {
+            assert!(!last().contains(text), "{text}: {}", last());
+        }
+        assert!(matches!(step(&mut raw, vec![]), Phase::Waiting { .. }));
+        assert_eq!(sent.borrow().len(), 1);
+        assert_eq!(step(&mut raw, vec![other(tool("fixed"))]), Phase::Covered);
+        for text in ["Now the lexer.", "Fix the docs.", "lexed", "fixed"] {
+            assert!(last().contains(text), "{text}");
+        }
     }
 
     /// Decision 56: while the owner is at work, a window goes as soon as its work is done so far, a
