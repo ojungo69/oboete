@@ -4022,9 +4022,14 @@ fn anchored_in(k: &Connection, w: &Window) -> Result<Vec<(String, crate::claims:
 /// attempt counts toward D11's three: only when no provider waits on time or a budget, and at
 /// least one was tried (or can never take it). One that waits only on the owner does not count,
 /// nor does a chain with no entry at all (an owner hold too: the owner configures one). A window
-/// whose answers only failed to anchor is tried again at once: another answer may anchor, and
-/// waiting holds every later window of a chain with one entry (#330).
+/// with an answer refused only for its anchors is tried again at once and the attempt counts,
+/// whatever the others wait for: another answer may anchor, waiting holds every later window
+/// (#330), and an uncounted wait asked the same entries again at each reset, so C5's last resort
+/// never came while another entry waited on its budget (2026-10-26).
 pub(crate) fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
+    if failed.iter().any(|f| f.skip == Skip::Refused) {
+        return ("time", now, true);
+    }
     let timed = |budget: bool| {
         failed
             .iter()
@@ -4047,7 +4052,6 @@ pub(crate) fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
         {
             ("time", now + RETRY_MS, true)
         }
-        (None, None) if failed.iter().any(|f| f.skip == Skip::Refused) => ("time", now, true),
         (None, None) => ("owner", now + OWNER_RETRY_MS, false),
     }
 }
@@ -7474,6 +7478,46 @@ mod tests {
             (&json!("skipped"), &json!("curated"))
         );
         assert_eq!(step.get(), 4);
+    }
+
+    /// A window whose answers were refused only for their anchors counts its attempts, and is
+    /// tried again at once, while another entry waits on its budget or a rest: waiting asked the
+    /// same entries again at each reset and held every window after it, never counted, so C5's
+    /// last resort never came (2026-10-26).
+    #[test]
+    fn an_unanchored_window_counts_its_attempts_while_another_entry_waits() {
+        let later = crate::db::now_ms() + 3_600_000;
+        for other in [Skip::Budget(later), Skip::Wait(later)] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&prompt(&"a".repeat(40))).unwrap();
+            let step = Cell::new(0);
+            let mut chain = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+                step.set(step.get() + 1);
+                Err(went_past(&[
+                    ("anthropic", "unanchored", Skip::Refused),
+                    ("groq", "budget", other.clone()),
+                ]))
+            };
+            let (rules, summary) = (Rules::default(), curating(30));
+            for attempts in 1..3 {
+                let before = crate::db::now_ms();
+                run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
+                let p = providers_db::pending_of(&db, raw.device())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    (p.hold.as_str(), p.attempts),
+                    ("time", attempts),
+                    "{other:?}"
+                );
+                assert!((before..=crate::db::now_ms()).contains(&p.next_attempt_at));
+            }
+            let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
+            assert_eq!(phase, Phase::Covered, "{other:?}");
+            assert_eq!(windows(&raw)[0]["outcome"], json!("skipped"), "{other:?}");
+            assert_eq!(step.get(), 3, "{other:?}");
+        }
     }
 
     /// docs/cards.md C5 (G08, #368): a window whose third attempt has answers refused only for
