@@ -327,6 +327,8 @@ pub enum OpKind {
     /// A card or a session summary removed from the page, or brought back (parity row 3,
     /// decision 57): a `hide::HideOp`, no text.
     Hide,
+    /// What one of My Work's jobs wrote (docs/my-work-model.md S1): a `my_work_ops::MyWorkOp`.
+    MyWork,
 }
 
 impl OpKind {
@@ -343,6 +345,7 @@ impl OpKind {
             OpKind::WorkState => "work_state",
             OpKind::Forget => "forget",
             OpKind::Hide => "hide",
+            OpKind::MyWork => "my_work",
         }
     }
     pub(crate) fn from_name(name: &str) -> Option<Self> {
@@ -358,6 +361,7 @@ impl OpKind {
             Self::WorkState,
             Self::Forget,
             Self::Hide,
+            Self::MyWork,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -1659,11 +1663,12 @@ impl std::error::Error for Restoring {}
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
 /// writes anything an older binary would mishandle, in any store or a backup segment. The newest
 /// this binary reads.
-pub(crate) const FORMAT: i64 = 4;
+pub(crate) const FORMAT: i64 = 5;
 
 /// What an open stamps, below `FORMAT` while a home holds nothing only a newer binary reads: 3
-/// comes with the first expiry batch (docs/retention.md) and 4 with the first hide op
-/// (docs/card-hide.md), so a home that has neither still opens in the binaries before them.
+/// comes with the first expiry batch (docs/retention.md), 4 with the first hide op
+/// (docs/card-hide.md) and 5 with the first My Work op (docs/my-work-model.md S3), so a home that
+/// has none of them still opens in the binaries before them.
 pub(crate) const OPEN_FORMAT: i64 = 2;
 
 /// The format of a home with an expired record, or an expiry batch begun (docs/retention.md).
@@ -1672,6 +1677,18 @@ pub(crate) const EXPIRED_FORMAT: i64 = 3;
 /// The format of a home with a hide op (docs/card-hide.md): a binary before it stops at an op type
 /// it does not know.
 pub(crate) const HIDDEN_FORMAT: i64 = 4;
+
+/// The format of a home with a My Work op (docs/my-work-model.md S3), for the same reason.
+pub(crate) const MY_WORK_FORMAT: i64 = 5;
+
+/// The format an op of `kind` raises a home to when it is written or brought back.
+fn format_for(kind: OpKind) -> i64 {
+    match kind {
+        OpKind::Hide => HIDDEN_FORMAT,
+        OpKind::MyWork => MY_WORK_FORMAT,
+        _ => OPEN_FORMAT,
+    }
+}
 
 /// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
 /// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
@@ -6992,9 +7009,7 @@ impl Rebuild {
                 v["batch"].as_i64().context("batch")?
             ],
         )?;
-        if kind == OpKind::Hide {
-            raise_format(&self.conn, HIDDEN_FORMAT)?;
-        }
+        raise_format(&self.conn, format_for(kind))?;
         Ok(())
     }
 
@@ -8452,12 +8467,16 @@ pub(crate) type OpText = (String, i64, String, String);
 /// A window's `reason` is one only when oboete set the window aside (`curate::set_aside`, which
 /// `oboete recurate` reads): a provider's failure is free text, masked (Codex on #487).
 const OP_NAMES: &[&str] = &[
+    // A My Work op's subject (its repository, request, week or day) and the entry that wrote it
+    // (docs/my-work-model.md S6).
+    "about",
     "agent",
     "candidates",
     "carried",
     "copied",
     "device",
     "dropped",
+    "entry",
     // A folder never recorded, by its path as an event's `cwd` label holds it (slice 4a, #489).
     "folder",
     "forgotten",
@@ -8738,8 +8757,13 @@ fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Resul
         )?;
         seqs.push(op_seq);
     }
-    if bodies.iter().any(|(kind, _)| *kind == OpKind::Hide.name()) {
-        raise_format(tx, HIDDEN_FORMAT)?;
+    let needs = bodies
+        .iter()
+        .filter_map(|(kind, _)| OpKind::from_name(kind))
+        .map(format_for)
+        .max();
+    if let Some(format) = needs {
+        raise_format(tx, format)?;
     }
     Ok(seqs)
 }
@@ -9952,6 +9976,31 @@ mod tests {
         );
         let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// docs/my-work-model.md S6: a My Work op's labels (its job, subject and entry) are names no
+    /// rule masks; the fields it kept are text, masked as any op's.
+    #[test]
+    fn a_my_work_ops_labels_are_names_and_its_fields_text() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let body = serde_json::json!({"job": "group", "about": "github.com/o/acme-482915",
+            "entry": "acme-482915", "ts": 1, "read": {"spans": [[1, 2]], "ops": []},
+            "removed": [], "fields": {"title": "Ship acme-482915"}, "skipped": false});
+        let now = masked_op_text(OpKind::MyWork, &body.to_string(), &rules).unwrap();
+        let now: serde_json::Value = serde_json::from_str(&now).unwrap();
+        for label in ["job", "about", "entry"] {
+            assert_eq!(now[label], body[label], "{label}");
+        }
+        assert_eq!(
+            now["fields"]["title"],
+            serde_json::json!("Ship ***********")
+        );
     }
 
     /// A hide op holds no text a rule masks: its target is oboete's word, so a rule that finds

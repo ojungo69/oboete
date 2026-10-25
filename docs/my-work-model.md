@@ -867,6 +867,28 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   The table and the index are ones an older binary ignores: no format change.
 - **Not yet**: the job runner (the due check, the round's order of A3, A5's gate, the wait at the
   bound), with the op kind (slice 2b) and the first job (slice 3).
+
+### Slice 2b-1: the op and its consumer (2026-10-26)
+
+- **The op kind `my_work`** (`raw::OpKind::MyWork`), its body `my_work_ops::MyWorkOp` (S2): the
+  job (one of `my_work_ops::JOBS`), `about` (what it is about: a repository, a request, a week, a
+  day or a suggestion), the entry that wrote it, its time, `read` (this device's record spans and
+  the op seqs it was shown), `removed`, and the fields kept or `skipped`. `my_work_ops::fitted`
+  keeps an op within the op cap: whole, else without its removals, else as a skip of its labels,
+  else not at all; a job that drops quotes first does so before it.
+- **The format** (S3): `raw::FORMAT` is 5; the first `my_work` op raises the home to 5 in the
+  transaction that appends it, and a rebuild that brings one back stamps it too
+  (docs/store-format.md).
+- **Masking** (S6): `about` and `entry` join the op names no redaction rule masks (`job` was one);
+  the fields are text, masked as any op's.
+- **The consumer** (S4, `consumer::my_work`) keeps every op in knowledge.db's `my_work`, and
+  `my_work_ops::newest` reads the newest of a job and subject, by time, then device and op seq,
+  whichever device wrote it, so a rewind of one device leaves the other devices' as they were. The
+  design's "older marked replaced" is that read: no mark is kept to undo. An op of a job this
+  binary does not know is passed over. `oboete rebuild` makes the same rows with no provider call.
+- **Not yet**: the forget's rule (S5) and the exclusion's (S6, which applies when a reader shows
+  or sends an op), with the job runner; nothing writes a `my_work` op until the first job.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's
