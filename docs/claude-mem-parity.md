@@ -17,8 +17,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 32 |
-| partial | 22 |
+| equal_or_better | 33 |
+| partial | 21 |
 | missing | 18 |
 | accepted_difference | 7 |
 | total | 79 |
@@ -65,7 +65,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 29 | An image-only prompt is dropped instead of stored as a placeholder. A prompt delivered twice is stored twice. Prompts are not numbered. No native prompt id is kept. | partial | rare | SessionRoutes.ts:868 / src/capture.rs:366 |
 | 30 | No ranking by re-confirmation. claude-mem's version is off by default and off for the owner. | missing | none | rank.ts:1 / src/cards.rs:432 |
 | 31 | Per-prompt hints are on and rank better than claude-mem's. Until 2026-10-21 they reached no prompt: from 2026-10-13 to 2026-10-20 none of the 779 additional contexts of Claude Code's prompt hooks on this PC was oboete's block, where 31 were claude-mem's. On a copy of the store read cold, as WSL's page cache can be after a pause (inferred, not measured on the owner's prompts), the resident viewer's answer took 3.7 to 3.9 s against the hook's 1 s wait, 2.85 s of it decision 52's sessions query. Since 2026-10-21 that query looks for a document's newest row once a session (69 ms cold instead of 3.0 s), the wait is 2 s by default, and on a copy of the store, cold, the prompt hook took 1.3 s with five lines in its block. From then (#571, installed 2026-10-20 19:59 UTC) to 2026-10-24, of the owner's 66 prompts to Claude Code on this PC, 4 got claude-mem's block and 1 got oboete's, and none got both; which helps more is unmeasured. Each card shows its whole narrative, as claude-mem's block does, within 2,500 characters (docs/prompt-context.md). What is left: the resident viewer drops the model after 30 quiet minutes, and a prompt that comes then gets the words side only while the model loads (about 2 s); decision 44(c) covers only the "nothing passes, inject nothing" part. | partial | weekly | SearchRoutes.ts:569 / src/search/b.rs:671 |
-| 32 | No `session_start_context` tool. `timeline` with no arguments partly stands in for it. | partial | rare | mcp-server.ts:437 / src/mcp.rs:1687 |
+| 32 | `session_start_context` returns the text session start injects for the agent's checkout, or another checkout's by its directory, as claude-mem's returns its SessionStart context. claude-mem also takes a project name or a chain of them, a platform filter, `full` and `colors`; oboete's session start is one checkout's. | equal_or_better | rare | mcp-server.ts:437 / src/mcp.rs:476 |
 | 33 | No capture for Kimi, Oh My Pi, Windsurf, Copilot, Goose, Roo, Warp, T3 Code, DeepSeek Harness, Qoder or Hermes Agent (15.0), or ODS (15.0.2). The owner's DB has 36 Oh My Pi sessions, the last on 2026-09-16. | missing | rare | ide-detection.ts:51 / src/setup.rs:20 |
 | 34 | Cursor, OpenCode, Antigravity and Pi are wired and unit-tested but never checked live. The OpenCode plugin is V2-only. Pi has no mem_search. | partial | rare | CursorHooksInstaller.ts:264 / src/setup.rs:85 |
 | 35 | No local HTTP ingest or query API and no bot adapter (#344, #345). Decision 33 defers them. | missing | none | SessionRoutes.ts:572 / docs/spec-client-runtime.md:98 |
@@ -267,7 +267,7 @@ each milestone and new features are added here.
 | 27 | **Setting for a worker run by an outside process manager.** claude-mem has a setting that tells hooks never to start the background process, for people who run it under a container or service manager. oboete has only an undocumented environment variable for this. | S |
 | 29 | **Small recording differences: image-only prompts, duplicate prompts, prompt numbers, subagent type.** claude-mem records an image-only prompt as a placeholder, drops a prompt delivered twice within 10 seconds, numbers prompts within a session and stores the subagent's type. oboete skips image-only prompts, stores a double delivery twice, has no prompt number and stores only the subagent's id. | S |
 | 30 | **Ranking by how often a memory was confirmed again.** claude-mem can keep the days on which a memory was confirmed again and rank by them, when a setting is turned on. oboete has no such history; it brings older items in by word match with current work. | M |
-| 32 | **Reloading the context from the agent.** claude-mem lets the agent fetch the start-of-session context for any project. oboete's agent has no tool for it. Saving a note on purpose is built (N3). | M |
+| 32 | **Reloading the context from the agent.** claude-mem lets the agent fetch the start-of-session context for any project. oboete's agent has no tool for it. Saving a note on purpose is built (N3). Built: `session_start_context` returns what session start injects for the agent's checkout or another checkout's directory (docs/tools.md, slice 5). | M |
 | 33 | **Agents oboete does not support at all (OpenClaw, Kimi, Windsurf, Oh My Pi, Copilot CLI, Goose, Roo, Warp).** claude-mem installs into these tools. oboete supports seven coding agents and none of these, so their sessions would not be recorded and would get no memory. | L |
 | 36 | **Connecting a new tool by writing a transcript watch config.** claude-mem lets the user describe a new tool's transcript format in a config file, with examples and commands to create, check and run it. In oboete a new format has to be built into the program. | L |
 | 38 | **Copying memory between machines over SSH without a cloud account.** claude-mem's repository has a script that pushes, pulls and compares memory between two machines over SSH. oboete has nothing like it; its planned sync always goes through the owner's Cloudflare hub. | M |

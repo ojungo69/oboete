@@ -262,6 +262,27 @@ Tests: `mcp::tests::a_saved_note_is_found_by_search_and_get_and_kept_once`,
 `capture::tests::a_memory_read_is_stored_without_its_output` (a saved note's call too);
 `hook::tests::a_failed_memory_read_is_no_failure_of_the_work` (a failed save too).
 
+## Slice 5: session_start_context
+
+claude-mem's `session_start_context` (`src/servers/mcp-server.ts` at v15.0.2, parity row 32): the
+agent reloads the context session start gave it.
+
+- **Arguments**: `project`, a checkout's directory; left out, the checkout the server runs in.
+  Anything else is the caller's error. claude-mem takes a project name, or a chain of them, and a
+  platform filter, `full` and `colors`; oboete's session start is one checkout's (its branch
+  included), and the repository's cards are every agent's (docs/cards.md S4).
+- **The answer**: the text a hook injects at session start for that checkout, as `oboete inject`
+  prints it (`hook::inject_text`): the stop line, the decisions and open items, the work state,
+  the memory-use block and the recent memory list, each block in its fence, through the gate
+  again as every reply is, with no fence of its own around theirs. Without a session it records
+  nothing: no claim or document counts as shown. A checkout that session start shows nothing for
+  (injection off, nothing remembered) is told so.
+- **The call itself**: a read of stored memory, as `search` is (`curate::OBOETE_READS`): capture
+  keeps the call without its output, and the curator sees its name alone, so what it returned is
+  not made a card or a claim again (Codex on #626).
+
+Test: `mcp::tests::session_start_context_shows_what_session_start_injects`.
+
 ## Differences from claude-mem, and why
 
 | claude-mem | oboete | Why |
