@@ -6197,8 +6197,9 @@ const mw = {
   changed: new Set(), unread: new Set(),
   // A check or its Undo being saved (`saveReview`'s `busy`).
   saving: false,
-  // The open request's work product, by its id and version, once read (slice 4).
-  products: null,
+  // The open request's work product, by its id and version, once read (slice 4), and the number
+  // of its latest read: an earlier read's late answer is not kept (CodeRabbit on #650).
+  products: null, productsAsk: 0,
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -6767,7 +6768,9 @@ function myWorkProducts(row) {
   if (mw.products?.key === key) {
     fill(mw.products.list);
   } else {
+    const ask = ++mw.productsAsk;
     api('my-work/product', { request: row.id }).then((answer) => {
+      if (ask !== mw.productsAsk) return;
       mw.products = { key, list: answer.products || [] };
       if (mw.request === row.id) fill(mw.products.list);
     }).catch(() => {});

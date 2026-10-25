@@ -531,9 +531,12 @@ newest first, at most 60; a commit links to GitHub once a recorded push sent its
   opens (new records, expired ones and new rules change it without changing the request's version:
   Codex on #650) and again when its version changes while it stays open, each entry with its kind,
   its title, a link when
-  it has one, its path when it is a file, and its time. Each is gated as the page's text is; a
-  link is http or https with no user name or password, and one the gate changes is shown as its
-  title alone. Nothing is shown while it reads, nor when there is nothing.
+  it has one, its path when it is a file, and its time. Each is gated as the page's text is, and
+  what a work item attaches is read from its value as work state's own lines show it beside its
+  key, since a rule may match a value only there (CodeRabbit on #650): a value the gate hides
+  whole, or whose address it hides, makes no entry. A link is http or https with no user name or
+  password, and one the gate changes is shown as its title alone. Nothing is shown while it reads,
+  nor when there is nothing.
 - **Differences**: a file is shown by its name and path, not served (claude-mem's viewer serves
   it through the record that names it); oboete's page serves no local file. A request's
   conversations are read whole, or the prompts it owns of one (#570), as its summaries and cards

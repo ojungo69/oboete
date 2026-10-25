@@ -4527,11 +4527,6 @@ curate = false
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #570 (Sourcery and Codex on #575): a masked My Work id's fingerprint is its selector, as a
-    /// claim's uid is, so a rule that matches its 12 hex digits leaves it: two ids the gate masks
-    /// alike stay two through the route, the same from read to read. Codex and Sourcery on #576:
-    /// an id's own text that looks like one is no fingerprint, and a rule that masks the key `id`
-    /// does not take the id's fingerprint away.
     /// Slice 4 (docs/my-work.md): a request's work product, by the id the page has, with the
     /// token; a request it does not know, none named, or no token, refused.
     #[test]
@@ -4558,6 +4553,11 @@ curate = false
         assert_eq!(status("/api/my-work/product", &[HOST, TOKEN]), 400);
     }
 
+    /// #570 (Sourcery and Codex on #575): a masked My Work id's fingerprint is its selector, as a
+    /// claim's uid is, so a rule that matches its 12 hex digits leaves it: two ids the gate masks
+    /// alike stay two through the route, the same from read to read. Codex and Sourcery on #576:
+    /// an id's own text that looks like one is no fingerprint, and a rule that masks the key `id`
+    /// does not take the id's fingerprint away.
     #[test]
     fn a_my_work_ids_fingerprint_leaves_the_route_as_it_came() {
         if !in_child("view::tests::a_my_work_ids_fingerprint_leaves_the_route_as_it_came") {

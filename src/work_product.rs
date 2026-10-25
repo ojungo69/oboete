@@ -483,7 +483,7 @@ fn set_branch(branches: &mut Vec<Branch>, branch: Branch) {
     }
 }
 
-fn pushes_from(command: &str, response: &Value, out: &str) -> Vec<Branch> {
+fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<Branch> {
     static PUSH: LazyLock<Regex> = LazyLock::new(|| git_pattern(r"push\b"));
     static REMOTE: LazyLock<Regex> = LazyLock::new(|| js_regex(r"^To (\S+)$").unwrap());
     static REF: LazyLock<Regex> = LazyLock::new(|| {
@@ -526,7 +526,9 @@ fn pushes_from(command: &str, response: &Value, out: &str) -> Vec<Branch> {
         }
     }
     let branch = recorded.or_else(|| target.as_ref().map(|target| target.branch.as_str()));
+    // A failed call pushed only the refs its output names (CodeRabbit on #650).
     if pushes.is_empty()
+        && !failed
         && !js_lines(out).any(|line| REJECTED.is_match(line))
         && let Some(branch) = branch.filter(|branch| !branch.is_empty())
     {
@@ -604,7 +606,7 @@ pub(crate) fn from_command(
     source: Option<Source>,
     failed: bool,
 ) -> Vec<Product> {
-    let pushes = pushes_from(command, response, out);
+    let pushes = pushes_from(command, response, out, failed);
     // A failed call made only what its output confirms: the branches its command names may never
     // have been made (Codex on #650).
     let created = if failed {
@@ -814,7 +816,7 @@ pub(crate) fn from_files(
         .collect()
 }
 
-fn is_work_product_field(field: &str) -> bool {
+pub(crate) fn is_work_product_field(field: &str) -> bool {
     WORK_PRODUCT_FIELDS.contains(&field) || field.ends_with("_url")
 }
 
@@ -2118,6 +2120,22 @@ mod tests {
         );
         let titles: Vec<&str> = products.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(titles, ["abc1234 Fix the parser"]);
+        let push = |out, failed| {
+            from_command(
+                "git push origin feat/x",
+                &Value::Null,
+                out,
+                None,
+                None,
+                failed,
+            )
+        };
+        assert_eq!((push("", false).len(), push("", true).len()), (1, 0));
+        let named = push(" * [new branch]      feat/x -> feat/x", true);
+        assert_eq!(
+            named.iter().map(|p| p.title.as_str()).collect::<Vec<_>>(),
+            ["feat/x"]
+        );
         let answer: Value = json!({"url": "https://example.com/artifacts/abc"})
             .to_string()
             .into();

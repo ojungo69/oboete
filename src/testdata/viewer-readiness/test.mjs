@@ -1269,6 +1269,20 @@ await new Promise(resolve=>setImmediate(resolve));
 assert.equal(asked.length,3,'another request is read');
 assert(box().hidden,'nothing read, no section');
 back();
+// An earlier opening's answer that arrives after a later one's is not kept (CodeRabbit on #650).
+const held=[];
+ctx.fetch=url=>{asked.push(url);const list=products;return new Promise(resolve=>held.push(()=>resolve(response({products:list}))));};
+set([req('p3',{version:'v1'})]);
+products=[{kind:'commit',title:'Earlier answer',url:null,path:null,at:null}];
+card('p3').querySelector('button').click();
+back();
+products=[{kind:'commit',title:'Later answer',url:null,path:null,at:null}];
+card('p3').querySelector('button').click();
+held[1]();await new Promise(resolve=>setImmediate(resolve));
+held[0]();await new Promise(resolve=>setImmediate(resolve));
+run('myWorkDraw()');
+assert(text(box()).includes('Later answer')&&!text(box()).includes('Earlier answer'),'the later answer stays');
+back();
 }
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
 // updates", and an unchanged answer does nothing.

@@ -1031,7 +1031,30 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
         }
     }
     for (fields, at) in &held.sources.fields {
-        lists.push(crate::work_product::from_fields(fields, Some(*at), None));
+        // What a work item attaches, as work state's own lines show it beside its key, since a
+        // rule may match a value only there; a link the gate changes is its title alone
+        // (CodeRabbit on #650).
+        let mut changed = Vec::new();
+        let shown = (fields.iter())
+            .filter(|(k, _)| crate::work_product::is_work_product_field(k))
+            .map(|(k, v)| {
+                let text = crate::work_state::text(v);
+                let gated = crate::work_state::beside(k, &text, &rules);
+                if gated == text {
+                    (k.clone(), v.clone())
+                } else {
+                    changed.push(k.clone());
+                    (k.clone(), Value::String(gated))
+                }
+            })
+            .collect();
+        let mut list = crate::work_product::from_fields(&shown, Some(*at), None);
+        for p in &mut list {
+            if p.field.as_ref().is_some_and(|f| changed.contains(f)) {
+                p.url = None;
+            }
+        }
+        lists.push(list);
     }
     for (files, at) in &held.sources.files {
         lists.push(crate::work_product::from_files(files, Some(*at), None));
@@ -2060,7 +2083,9 @@ mod tests {
             "s1",
             "report",
             json!({"task": "report", "status": "doing",
-            "docs_url": "https://intranet.example/report"}),
+            "docs_url": "https://intranet.example/report",
+            "spec_url": "https://wiki.example/spec",
+            "notes_url": "https://wiki.example/private/page"}),
         );
         let r = h.reply("s1", -50_000);
         h.s.cards(
@@ -2071,10 +2096,14 @@ mod tests {
             false,
         );
         h.run_read();
-        // A rule added after the worker's run: the read gates with it before a rescan does.
+        // Rules added after the worker's run: the read gates with them before a rescan does. Two
+        // match a value only beside its key, as work state's lines show it (CodeRabbit on #650):
+        // one hides it whole, one a part of it.
         std::fs::write(
             h.s.home.path().join("config.toml"),
-            "[redaction]\nextra_rules = [{ id = 'intranet', regex = 'intranet' }]\n",
+            "[redaction]\nextra_rules = [{ id = 'intranet', regex = 'intranet' }, \
+             { id = 'keyed', regex = 'spec_url = \"https' }, \
+             { id = 'part', regex = 'notes_url = \"https://wiki\\.example/(private)' }]\n",
         )
         .unwrap();
         let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
@@ -2083,12 +2112,23 @@ mod tests {
             .position(|id| id == "c:claude:s1")
             .unwrap();
         let products = super::products(h.s.home.path(), &held[i]).unwrap();
-        let link = products
+        // A work item's link the gate hides any of, beside its key, is its title alone when an
+        // address is left (notes_url), and nothing when none is (docs_url's host, spec_url whole).
+        let shown = serde_json::to_string(&products).unwrap();
+        assert!(
+            !shown.contains("intranet") && !shown.contains("/spec") && !shown.contains("private"),
+            "{products:?}"
+        );
+        assert!(
+            !products.iter().any(|p| p["kind"] == "documentation"),
+            "{products:?}"
+        );
+        let wiki: Vec<&Value> = products
             .iter()
-            .find(|p| p["kind"] == "documentation")
-            .unwrap();
-        assert!(link["url"].is_null(), "{products:?}");
-        assert!(!link.to_string().contains("intranet"), "{products:?}");
+            .filter(|p| p["title"] == "wiki.example")
+            .collect();
+        assert_eq!(wiki.len(), 1, "{products:?}");
+        assert!(wiki[0]["url"].is_null(), "{products:?}");
         let files: Vec<&Value> = products.iter().filter(|p| p["path"].is_string()).collect();
         assert_eq!(files.len(), 1, "{products:?}");
         assert_eq!(
