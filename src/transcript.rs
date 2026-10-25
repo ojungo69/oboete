@@ -199,11 +199,21 @@ impl Emitter {
         result
     }
 
-    fn prompt(&mut self, ts: &str, text: &str) -> Result<()> {
+    /// A prompt at `ts`; `line`, a Claude Code transcript's, says where it came from (O2): its
+    /// `entrypoint`, and an `origin` other than a person's typing (a task's notification).
+    fn prompt(&mut self, ts: &str, text: &str, line: Option<&Value>) -> Result<()> {
         self.stop(ts)?;
         let mut payload = json!({"prompt": text});
         if let Some(sent) = self.agent_sent {
             payload[crate::capture::AGENT_SENT] = json!(sent);
+        }
+        if let Some(v) = line {
+            if v["origin"]["kind"].as_str().is_some_and(|k| k != "human") {
+                payload[crate::capture::AGENT_SENT] = json!(true);
+            }
+            if let Some(e) = crate::typed::entrypoint(&v["entrypoint"]) {
+                payload[crate::capture::ENTRYPOINT] = json!(e);
+            }
         }
         self.emit("UserPromptSubmit", ts, payload)
     }
@@ -399,11 +409,11 @@ fn claude_record(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<(
                 let hooked =
                     t.starts_with("<command-message>") || t.starts_with("<command-name>/goal<");
                 return match command_text(t).filter(|_| hooked) {
-                    Some(command) => e.prompt(&ts, &command),
+                    Some(command) => e.prompt(&ts, &command, Some(v)),
                     None => Ok(()),
                 };
             }
-            e.prompt(&ts, &text)
+            e.prompt(&ts, &text, Some(v))
         }
         // A prompt typed while a turn runs reaches the prompt hook when it is queued (claude-mem
         // has them). Harness traffic is queued too; it is read where it is delivered.
@@ -424,7 +434,11 @@ fn claude_record(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<(
             }
             // The turn that runs goes on: its Stop comes where it ends, not here.
             e.queued.push(t.to_string());
-            e.emit("UserPromptSubmit", &ts, json!({"prompt": text}))
+            let mut payload = json!({"prompt": text});
+            if let Some(entry) = crate::typed::entrypoint(&v["entrypoint"]) {
+                payload[crate::capture::ENTRYPOINT] = json!(entry);
+            }
+            e.emit("UserPromptSubmit", &ts, payload)
         }
         // Where the Stop hook ran (a turn with stop hooks), or the turn's end.
         Some("system")
@@ -529,7 +543,7 @@ fn codex_line(e: &mut Emitter, v: &Value) -> Result<()> {
                         .iter()
                         .any(|c| text.trim_start().starts_with(c)) =>
                 {
-                    e.prompt(&ts, &text)
+                    e.prompt(&ts, &text, None)
                 }
                 Some("assistant") => {
                     e.said(text);
