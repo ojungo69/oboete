@@ -1207,6 +1207,7 @@ impl Viewer {
             ("POST", "/api/claims/mute") => (MAX_BODY, |v, b, _| v.claim_mute(b)),
             ("POST", "/api/forget/preview") => (MAX_BODY, |v, b, _| v.forget_preview(b)),
             ("POST", "/api/forget/start") => (MAX_BODY, |v, b, _| v.forget_start(b)),
+            ("POST", "/api/hide") => (MAX_BODY, |v, b, _| v.hide(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
@@ -1682,6 +1683,11 @@ impl Viewer {
         ))
     }
 
+    /// Parity row 3: a card or a summary removed from the page, or brought back.
+    fn hide(&self, body: &[u8]) -> Response {
+        saved(crate::settings::hide::save(&self.home, &self.saving, body))
+    }
+
     fn preference(&self, body: &[u8]) -> Response {
         saved(crate::settings::claims::pref_add(
             &self.home,
@@ -1921,6 +1927,14 @@ impl Viewer {
                 Response::json(&self.embedding.status(&self.home))
             } else {
                 Response::text(400, "status carries no query")
+            };
+        }
+        // Parity row 3: the cards and summaries removed from the page, to bring back.
+        if name == "hidden" {
+            return if query.is_empty() {
+                saved(crate::settings::hide::list(&self.home))
+            } else {
+                Response::text(400, "the list carries no query")
             };
         }
         self.api(name, &q).unwrap_or_else(|e| failed(&e))
@@ -2459,23 +2473,26 @@ fn sessions(
     listed.truncate(limit);
     // Each kind as the feed counts it: current cards of the session's own windows (K2), and its
     // summaries that are no skip.
+    // Parity row 3: a removed card or summary counts no more than the feed shows it.
     let counts = |table: &str, sql: &str| -> Result<HashMap<(String, String), i64>> {
         if !crate::consumer::manifest::exists(&k, "table", table)? {
             return Ok(HashMap::new());
         }
-        let mut st = k.prepare(sql)?;
+        let sql = sql.replace("{shown}", &crate::hide::shown(&k, table, "")?);
+        let mut st = k.prepare(&sql)?;
         let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     };
     let cards = counts(
         "cards",
         "SELECT agent, session, COUNT(*) FROM cards
-         WHERE replaced_by IS NULL AND agent IS NOT NULL AND session IS NOT NULL
+         WHERE replaced_by IS NULL AND agent IS NOT NULL AND session IS NOT NULL {shown}
          GROUP BY agent, session",
     )?;
     let turns = counts(
         "turns",
-        "SELECT agent, session, COUNT(*) FROM turns WHERE skipped = 0 GROUP BY agent, session",
+        "SELECT agent, session, COUNT(*) FROM turns WHERE skipped = 0 {shown}
+         GROUP BY agent, session",
     )?;
     let gate = |s: &str| redact::outbound_with(s, &rules);
     let mut out = Vec::new();
@@ -5709,6 +5726,7 @@ curate = false
             "/api/privacy/capture",
             "/api/claims/correct",
             "/api/claims/mute",
+            "/api/hide",
             "/api/preferences",
             "/api/forget/preview",
             "/api/forget/start",
@@ -5891,6 +5909,73 @@ curate = false
         let uid = preference["uid"].as_str().unwrap();
         assert_eq!(uid.len(), 64);
         assert_eq!(get(&v, &format!("/api/claim?id={uid}"))["uid"], uid);
+    }
+
+    /// Parity row 3 (docs/card-hide.md): a card removed through `/api/hide` leaves the feed and
+    /// its details, `/api/hidden` lists it, and bringing it back shows it again.
+    #[test]
+    fn the_page_removes_a_card_and_brings_it_back() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Ship the parser.");
+        let ids = s.cards(
+            seq,
+            seq,
+            json!([{"type": "feature", "title": "Azimuth parser"}]),
+            false,
+        );
+        s.run();
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let id = &ids[0];
+        let in_feed = |v: &Viewer| {
+            (get(v, "/api/feed?all=1")["items"]
+                .as_array()
+                .unwrap()
+                .iter())
+            .any(|item| item["id"] == json!(id))
+        };
+        assert!(in_feed(&v));
+        assert!(
+            get(&v, &format!("/api/doc?id={id}"))["text"]
+                .as_str()
+                .unwrap()
+                .contains("Azimuth parser")
+        );
+        let post = |hidden: bool| {
+            let body =
+                serde_json::to_vec(&json!({"item": {"kind": "card", "id": id}, "hidden": hidden}))
+                    .unwrap();
+            let len = body.len().to_string();
+            json_of(&request(
+                &v,
+                "POST",
+                "/api/hide",
+                &[
+                    HOST,
+                    TOKEN,
+                    ("Origin", "http://127.0.0.1:4321"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", &len),
+                ],
+                &body,
+            ))
+        };
+        assert_eq!(post(true), json!({"state": "applied", "hidden": true}));
+        assert!(!in_feed(&v));
+        assert_eq!(
+            v.route("GET", &format!("/api/doc?id={id}"), &[HOST, TOKEN])
+                .status,
+            404
+        );
+        let hidden = get(&v, "/api/hidden");
+        assert_eq!(hidden["items"][0]["id"], json!(id));
+        assert_eq!(hidden["items"][0]["title"], "Azimuth parser");
+        assert_eq!(
+            v.route("GET", "/api/hidden?x=1", &[HOST, TOKEN]).status,
+            400
+        );
+        assert_eq!(post(false), json!({"state": "applied", "hidden": false}));
+        assert!(in_feed(&v));
+        assert_eq!(get(&v, "/api/hidden"), json!({"items": []}));
     }
 
     #[test]

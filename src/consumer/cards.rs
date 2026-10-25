@@ -5,7 +5,7 @@ use crate::cards::schema;
 use crate::raw::{OpKind, Raw};
 use crate::worker::Consumer;
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct Cards;
 
@@ -27,7 +27,15 @@ impl Consumer for Cards {
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
         };
-        for op in ops.iter().filter(|o| o.kind == OpKind::Window) {
+        for op in &ops {
+            // Parity row 3: a card removed from the page, or brought back.
+            if let Some(h) = crate::hide::keep(k, op, crate::hide::CARD)? {
+                hide_mark(k, &h.device, h.op_seq, h.n.unwrap_or(-1), h.hidden)?;
+                continue;
+            }
+            if op.kind != OpKind::Window {
+                continue;
+            }
             let Some(span) = crate::curate::op_span(&op.body) else {
                 continue;
             };
@@ -62,12 +70,15 @@ impl Consumer for Cards {
             let (goals, removed) = (list(&op.body["goals"]), list(&op.body["removed"]));
             for (n, c) in cards.iter().enumerate() {
                 let text = |field: &str| c[field].as_str().unwrap_or("");
+                let hidden =
+                    crate::hide::hidden(k, crate::hide::CARD, device, op.op_seq, n as i64)?;
                 k.execute(
                     "INSERT INTO cards(device, op_seq, n, from_seq, from_offset, to_seq,
                        to_offset, goals, removed, ts, agent, session, repo, type, title,
-                       subtitle, narrative, facts, concepts, files_read, files_modified, subagent)
+                       subtitle, narrative, facts, concepts, files_read, files_modified, subagent,
+                       hidden)
                      VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                       ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                       ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                     params![
                         device,
                         op.op_seq,
@@ -90,7 +101,8 @@ impl Consumer for Cards {
                         list(&c["concepts"]),
                         list(&c["files_read"]),
                         list(&c["files_modified"]),
-                        i64::from(subagent)
+                        i64::from(subagent),
+                        hidden
                     ],
                 )?;
                 crate::consumer::fts::cards(k, Some(k.last_insert_rowid()))?;
@@ -132,8 +144,33 @@ impl Consumer for Cards {
         for key in lost {
             crate::embed_phase::touched(None, k, "o", &key)?;
         }
+        for (device, op_seq, n, hidden) in crate::hide::rewind(k, device, to, crate::hide::CARD)? {
+            hide_mark(k, &device, op_seq, n, hidden)?;
+        }
         Ok(())
     }
+}
+
+/// Parity row 3: card `n` of `device`'s window op `op_seq` marked removed or not, its full-text
+/// row and its vector following the mark.
+fn hide_mark(k: &Connection, device: &str, op_seq: i64, n: i64, hidden: bool) -> Result<()> {
+    k.execute(
+        "UPDATE cards SET hidden = ?4 WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+        params![device, op_seq, n, hidden],
+    )?;
+    let rowid: Option<i64> = k
+        .query_row(
+            "SELECT rowid FROM cards WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+            params![device, op_seq, n],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(rowid) = rowid {
+        k.execute("DELETE FROM cards_fts WHERE rowid = ?1", [rowid])?;
+        // Indexed again only while it is current and shown.
+        crate::consumer::fts::cards(k, Some(rowid))?;
+    }
+    crate::embed_phase::touched(None, k, "o", &format!("{device}.{op_seq}.{n}"))
 }
 
 /// The vector keys (`<device>.<op seq>.<n>`) of `device`'s cards where `clause` holds for `?2`.

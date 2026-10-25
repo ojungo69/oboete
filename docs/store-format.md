@@ -38,6 +38,10 @@ switches to.
   whose retention never ran still opens in the binary before it; the first expiry batch raises
   the home to 3 in the transaction that commits it, and a restore that brings back an expired
   record, or a raw.db copy rewritten with one, is stamped 3 too. A stamp is never lowered.
+- **4, a hide op** (docs/card-hide.md): a binary before it stops at an op type it does not know.
+  The first `hide` op raises the home to 4 in the transaction that appends it (`insert_ops`), and
+  a rebuild that brings one back from the backup's ops is stamped 4 too; a rebuild's expired
+  record raises it to 3 only when it is below. A home with no hide op still opens at 2 or 3.
 
 ## The refusal
 

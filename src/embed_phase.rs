@@ -915,16 +915,21 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
         "SELECT count(*) FROM active a WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
            WHERE v.embedder = ?1 AND v.kind = 'c' AND v.key = a.uid)",
     );
-    let cards = count(
-        "SELECT count(*) FROM cards c WHERE c.replaced_by IS NULL AND NOT EXISTS (
+    // Parity row 3: a removed card or summary waits for no vector. A doctor can read a store the
+    // worker has not given the column yet.
+    let shown = |table: &str| crate::hide::shown(k, table, "x.").unwrap_or_default();
+    let cards = count(&format!(
+        "SELECT count(*) FROM cards x WHERE x.replaced_by IS NULL {} AND NOT EXISTS (
            SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.kind = 'o'
-             AND v.key = c.device || '.' || c.op_seq || '.' || c.n)",
-    );
-    let summaries = count(
-        "SELECT count(*) FROM turns t WHERE t.skipped = 0 AND NOT EXISTS (
+             AND v.key = x.device || '.' || x.op_seq || '.' || x.n)",
+        shown("cards")
+    ));
+    let summaries = count(&format!(
+        "SELECT count(*) FROM turns x WHERE x.skipped = 0 {} AND NOT EXISTS (
            SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.kind = 's'
-             AND v.key = 'S' || t.device || '.' || t.op_seq)",
-    );
+             AND v.key = 'S' || x.device || '.' || x.op_seq)",
+        shown("turns")
+    ));
     let imports = count(
         "SELECT count(*) FROM imported i
          WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
@@ -1622,7 +1627,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             .collect::<rusqlite::Result<_>>()?,
         "o" => k
             .prepare_cached(&format!(
-                "SELECT {}, {CARD_DOC} FROM cards c WHERE replaced_by IS NULL
+                "SELECT {}, {CARD_DOC} FROM cards c WHERE replaced_by IS NULL AND hidden = 0
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                      AND v.kind = 'o' AND v.key = c.device || '.' || c.op_seq || '.' || c.n)
                  ORDER BY ts DESC LIMIT ?2",
@@ -1632,7 +1637,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             .collect::<rusqlite::Result<_>>()?,
         "s" => k
             .prepare_cached(&format!(
-                "SELECT {SUMMARY_DOC} FROM turns t WHERE skipped = 0
+                "SELECT {SUMMARY_DOC} FROM turns t WHERE skipped = 0 AND hidden = 0
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                      AND v.kind = 's' AND v.key = 'S' || t.device || '.' || t.op_seq)
                  ORDER BY ts DESC LIMIT ?2"
@@ -2200,7 +2205,8 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
             k.query_row(
                 &format!(
                     "SELECT {}, {CARD_DOC} FROM cards
-                     WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL",
+                     WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL
+                       AND hidden = 0",
                     crate::consumer::fts::CARD_COLUMNS
                 ),
                 params![device, op_seq, n],
@@ -2215,7 +2221,7 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
             k.query_row(
                 &format!(
                     "SELECT {SUMMARY_DOC} FROM turns
-                     WHERE device = ?1 AND op_seq = ?2 AND skipped = 0"
+                     WHERE device = ?1 AND op_seq = ?2 AND skipped = 0 AND hidden = 0"
                 ),
                 params![device, op_seq],
                 summary_read,

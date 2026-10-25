@@ -324,6 +324,9 @@ pub enum OpKind {
     WorkState,
     /// A claim's or an imported document's uid forgotten (milestone 5 D5): `{uid, job}`, no text.
     Forget,
+    /// A card or a session summary removed from the page, or brought back (parity row 3,
+    /// decision 57): a `hide::HideOp`, no text.
+    Hide,
 }
 
 impl OpKind {
@@ -339,6 +342,7 @@ impl OpKind {
             OpKind::Turn => "turn",
             OpKind::WorkState => "work_state",
             OpKind::Forget => "forget",
+            OpKind::Hide => "hide",
         }
     }
     pub(crate) fn from_name(name: &str) -> Option<Self> {
@@ -353,6 +357,7 @@ impl OpKind {
             Self::Turn,
             Self::WorkState,
             Self::Forget,
+            Self::Hide,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -1654,15 +1659,19 @@ impl std::error::Error for Restoring {}
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
 /// writes anything an older binary would mishandle, in any store or a backup segment. The newest
 /// this binary reads.
-pub(crate) const FORMAT: i64 = 3;
+pub(crate) const FORMAT: i64 = 4;
 
 /// What an open stamps, below `FORMAT` while a home holds nothing only a newer binary reads: 3
-/// comes with the first expiry batch (docs/retention.md), so a home whose retention never ran
-/// still opens in the binary before it.
+/// comes with the first expiry batch (docs/retention.md) and 4 with the first hide op
+/// (docs/card-hide.md), so a home that has neither still opens in the binaries before them.
 pub(crate) const OPEN_FORMAT: i64 = 2;
 
 /// The format of a home with an expired record, or an expiry batch begun (docs/retention.md).
 pub(crate) const EXPIRED_FORMAT: i64 = 3;
+
+/// The format of a home with a hide op (docs/card-hide.md): a binary before it stops at an op type
+/// it does not know.
+pub(crate) const HIDDEN_FORMAT: i64 = 4;
 
 /// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
 /// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
@@ -1708,6 +1717,14 @@ fn format_of(conn: &Connection) -> Result<i64> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     anyhow::ensure!(found <= FORMAT, NewerFormat { found });
     Ok(found)
+}
+
+/// raw.db's stamp raised to `to` in the caller's transaction: a stamp is never lowered.
+fn raise_format(conn: &Connection, to: i64) -> Result<()> {
+    if format_of(conn)? < to {
+        conn.execute_batch(&format!("PRAGMA user_version = {to}"))?;
+    }
+    Ok(())
 }
 
 /// Restore-lock waits: opens wait at most 2 s within their initialization budget (hooks 2 s,
@@ -6826,8 +6843,7 @@ impl Rebuild {
                     ],
                 )?;
                 self.ledger(device, seq, &v)?;
-                self.conn
-                    .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
+                raise_format(&self.conn, EXPIRED_FORMAT)?;
             }
             Some("removed") => {
                 // Restore only a complete explicitly carried triple. A legacy or malformed
@@ -6956,6 +6972,9 @@ impl Rebuild {
                 v["batch"].as_i64().context("batch")?
             ],
         )?;
+        if kind == OpKind::Hide {
+            raise_format(&self.conn, HIDDEN_FORMAT)?;
+        }
         Ok(())
     }
 
@@ -8697,6 +8716,9 @@ fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Resul
             params![device, op_seq, kind, ts, body, batch],
         )?;
         seqs.push(op_seq);
+    }
+    if bodies.iter().any(|(kind, _)| *kind == OpKind::Hide.name()) {
+        raise_format(tx, HIDDEN_FORMAT)?;
     }
     Ok(seqs)
 }

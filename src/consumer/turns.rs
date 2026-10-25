@@ -5,7 +5,7 @@ use crate::raw::{OpKind, Raw};
 use crate::turns::{TurnOp, schema};
 use crate::worker::Consumer;
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct Turns;
 
@@ -27,7 +27,15 @@ impl Consumer for Turns {
         let Some(last) = ops.last().map(|o| o.op_seq) else {
             return Ok(after);
         };
-        for op in ops.iter().filter(|o| o.kind == OpKind::Turn) {
+        for op in &ops {
+            // Parity row 3: a summary removed from the page, or brought back.
+            if let Some(h) = crate::hide::keep(k, op, crate::hide::SUMMARY)? {
+                hide_mark(k, &h.device, h.op_seq, h.hidden)?;
+                continue;
+            }
+            if op.kind != OpKind::Turn {
+                continue;
+            }
             // A synced op may come from any device: one that does not read as a turn is none.
             let Ok(t) = serde_json::from_value::<TurnOp>(op.body.clone()) else {
                 continue;
@@ -37,10 +45,12 @@ impl Consumer for Turns {
                    (SELECT rowid FROM turns WHERE device = ?1 AND op_seq = ?2)",
                 params![device, op.op_seq],
             )?;
+            // A row written again keeps the mark its hide ops give it.
+            let hidden = crate::hide::hidden(k, crate::hide::SUMMARY, device, op.op_seq, -1)?;
             k.execute(
                 "INSERT OR REPLACE INTO turns(device, op_seq, ts, agent, session, repo, from_seq,
-                   through, read, goals, removed, fields, skipped, excluded)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                   through, read, goals, removed, fields, skipped, excluded, hidden)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     device,
                     op.op_seq,
@@ -55,7 +65,8 @@ impl Consumer for Turns {
                     serde_json::to_string(&t.removed)?,
                     serde_json::to_string(&t.fields)?,
                     t.skipped,
-                    t.excluded
+                    t.excluded,
+                    hidden
                 ],
             )?;
             crate::consumer::fts::turns(k, Some(k.last_insert_rowid()))?;
@@ -87,6 +98,32 @@ impl Consumer for Turns {
         for key in lost {
             crate::embed_phase::touched(None, k, "s", &key)?;
         }
+        for (device, op_seq, _, hidden) in crate::hide::rewind(k, device, to, crate::hide::SUMMARY)?
+        {
+            hide_mark(k, &device, op_seq, hidden)?;
+        }
         Ok(())
     }
+}
+
+/// Parity row 3: the summary of `device`'s turn op `op_seq` marked removed or not, its full-text
+/// row and its vector following the mark. Its row stays: what was asked is not asked again.
+fn hide_mark(k: &Connection, device: &str, op_seq: i64, hidden: bool) -> Result<()> {
+    k.execute(
+        "UPDATE turns SET hidden = ?3 WHERE device = ?1 AND op_seq = ?2",
+        params![device, op_seq, hidden],
+    )?;
+    let rowid: Option<i64> = k
+        .query_row(
+            "SELECT rowid FROM turns WHERE device = ?1 AND op_seq = ?2",
+            params![device, op_seq],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(rowid) = rowid {
+        k.execute("DELETE FROM turns_fts WHERE rowid = ?1", [rowid])?;
+        // Indexed again only while it is shown.
+        crate::consumer::fts::turns(k, Some(rowid))?;
+    }
+    crate::embed_phase::touched(None, k, "s", &format!("S{device}.{op_seq}"))
 }

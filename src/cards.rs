@@ -117,6 +117,13 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS cards_repo ON cards(repo, ts);",
     )?;
+    // Parity row 3: 1 for a card removed from the page (`hide`), left out by every reader. Before
+    // the full-text backfill below, which leaves such a card out.
+    crate::claims::migrate(
+        k,
+        "SELECT count(*) = 0 FROM pragma_table_info('cards') WHERE name = 'hidden'",
+        "ALTER TABLE cards ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
+    )?;
     if !crate::consumer::manifest::exists(k, "table", "cards_fts")? {
         // A store whose cards consumer has already passed its ops needs a backfill. Creating
         // the index and filling it commit together, also when a search opens it first.
@@ -169,7 +176,8 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
         "SELECT count(*) = 0 FROM pragma_table_info('cards') WHERE name = 'subagent'",
         "ALTER TABLE cards ADD COLUMN subagent INTEGER;
          CREATE INDEX IF NOT EXISTS cards_unmarked ON cards(ts) WHERE subagent IS NULL;",
-    )
+    )?;
+    crate::hide::schema(k)
 }
 
 /// A path as `card_files` keeps it and is searched by: `/` for `\\`.
@@ -577,8 +585,9 @@ pub fn recent(
         |r| r.get(0),
     )?;
     let main = if marked { "AND subagent IS NOT 1" } else { "" };
+    let shown = crate::hide::shown(k, "cards", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE repo = ?1 AND replaced_by IS NULL {main}
+        "SELECT {COLUMNS} FROM cards WHERE repo = ?1 AND replaced_by IS NULL {main} {shown}
          ORDER BY ts DESC, device DESC, op_seq DESC, n"
     ))?;
     let mut rows = st.query([repo])?;
@@ -607,8 +616,9 @@ pub fn page(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok((Vec::new(), false));
     }
+    let shown = crate::hide::shown(k, "cards", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
            AND (?1 IS NULL OR repo = ?1)
            AND (?6 IS NULL OR (agent = ?6 AND session = ?7))
            AND (?2 IS NULL OR (ts, device, op_seq, n) < (?2, ?3, ?4, ?5))
@@ -655,9 +665,10 @@ pub fn around(
     } else {
         "ts > ?2 ORDER BY ts, device, op_seq, n"
     };
+    let shown = crate::hide::shown(k, "cards", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL AND (?1 IS NULL OR repo = ?1)
-           AND {side}"
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
+           AND (?1 IS NULL OR repo = ?1) AND {side}"
     ))?;
     let mut rows = st.query(rusqlite::params![repo, at])?;
     let mut out = Vec::new();
@@ -689,10 +700,11 @@ pub fn of_turn(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(out);
     }
+    let shown = crate::hide::shown(k, "cards", "")?;
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS} FROM cards
          WHERE device = ?1 AND agent = ?2 AND session = ?3 AND from_seq <= ?5 AND to_seq >= ?4
-           AND replaced_by IS NULL
+           AND replaced_by IS NULL {shown}
          ORDER BY ts DESC, op_seq DESC, n"
     ))?;
     let mut rows = st.query(rusqlite::params![device, agent, session, from, through])?;
@@ -883,11 +895,12 @@ pub fn by_file(
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let shown = crate::hide::shown(k, "cards", "")?;
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS}, (SELECT MAX(f.modified) FROM card_files f
              WHERE f.device = cards.device AND f.op_seq = cards.op_seq AND f.n = cards.n
                AND f.name = ?2 AND f.path IN ({marks}))
-         FROM cards WHERE repo = ?1 AND replaced_by IS NULL
+         FROM cards WHERE repo = ?1 AND replaced_by IS NULL {shown}
            AND (device, op_seq, n) IN (SELECT device, op_seq, n FROM card_files
              WHERE name = ?2 AND path IN ({marks}))
          ORDER BY ts DESC, device DESC, op_seq DESC, n"
@@ -989,6 +1002,29 @@ where
     Some(out.join("\n"))
 }
 
+/// Parity row 3: the current cards removed from the page, the newest first, at most `limit`, as
+/// Settings lists them to bring back; read as every reader reads a card.
+pub(crate) fn removed(k: &Connection, raw: &Raw, limit: usize, rules: &Rules) -> Result<Vec<Card>> {
+    if !crate::consumer::manifest::exists(k, "table", "cards")? {
+        return Ok(Vec::new());
+    }
+    if crate::hide::shown(k, "cards", "")?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL AND hidden = 1
+         ORDER BY ts DESC, device DESC, op_seq DESC, n"
+    ))?;
+    let mut rows = st.query([])?;
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        out.extend(read(r, raw, rules)?);
+    }
+    Ok(out)
+}
+
 /// A card's ID as `get` takes it, `<device>.<op seq>.<n>` or `<op seq>.<n>` of `local`, in parts:
 /// the device, the op seq and the place.
 pub(crate) fn id_parts<'a>(id: &'a str, local: &'a str) -> Option<(&'a str, i64, i64)> {
@@ -1010,9 +1046,10 @@ pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(None);
     }
+    let shown = crate::hide::shown(k, "cards", "")?;
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS} FROM cards
-         WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL"
+         WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL {shown}"
     ))?;
     let mut rows = st.query(rusqlite::params![device, op_seq, n])?;
     match rows.next()? {
