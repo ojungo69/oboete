@@ -174,6 +174,32 @@ mod tests {
         crate::search::b::query(home, &q).unwrap().hits.len()
     }
 
+    /// Whether `table`'s full-text index has an entry for its row `id` names (`<op_seq>.<n>` or
+    /// `S<op_seq>`).
+    fn indexed(home: &Path, id: &str) -> bool {
+        let k = crate::knowledge::open(home).unwrap();
+        let (sql, op_seq, n) = match id.strip_prefix('S') {
+            Some(seq) => (
+                "SELECT count(*) FROM turns_fts WHERE rowid IN
+                   (SELECT rowid FROM turns WHERE op_seq = ?1 AND ?2 = 0)",
+                seq.parse::<i64>().unwrap(),
+                0,
+            ),
+            None => {
+                let (seq, n) = id.split_once('.').unwrap();
+                (
+                    "SELECT count(*) FROM cards_fts WHERE rowid IN
+                       (SELECT rowid FROM cards WHERE op_seq = ?1 AND n = ?2)",
+                    seq.parse::<i64>().unwrap(),
+                    n.parse::<i64>().unwrap(),
+                )
+            }
+        };
+        k.query_row(sql, params![op_seq, n], |r| r.get::<_, i64>(0))
+            .unwrap()
+            > 0
+    }
+
     fn card_titles(home: &Path) -> Vec<String> {
         let raw = crate::raw::open(home).unwrap();
         let k = crate::knowledge::open(home).unwrap();
@@ -237,6 +263,7 @@ mod tests {
         );
         assert_eq!(card_titles(home), ["Bravo lexer"]);
         assert_eq!(seen(home), gone);
+        assert!(!indexed(home, &ids[0]), "its full-text entry goes");
         let listed = list(home).unwrap();
         assert_eq!(
             (&listed["items"][0]["kind"], &listed["items"][0]["id"]),
@@ -251,6 +278,7 @@ mod tests {
         hide(home, "card", &ids[0], false).unwrap();
         assert_eq!(card_titles(home), ["Azimuth parser", "Bravo lexer"]);
         assert_eq!(seen(home), shown);
+        assert!(indexed(home, &ids[0]));
         assert_eq!(list(home).unwrap(), json!({"items": []}));
         crate::worker::rebuild(home).unwrap();
         assert_eq!(seen(home), shown, "a rebuild takes the newest op's mark");
@@ -343,6 +371,7 @@ mod tests {
         assert_eq!(shown(), (1, true, 1, 1, true));
         hide(home, "summary", &id, true).unwrap();
         assert_eq!((shown(), rows()), ((0, false, 0, 0, false), 1));
+        assert!(!indexed(home, &id), "its full-text entry goes");
         assert_eq!(list(home).unwrap()["items"][0]["id"], json!(id));
         crate::worker::rebuild(home).unwrap();
         assert_eq!(
@@ -352,6 +381,64 @@ mod tests {
         );
         hide(home, "summary", &id, false).unwrap();
         assert_eq!(shown(), (1, true, 1, 1, true));
+        assert!(indexed(home, &id));
+    }
+
+    /// A hide op read before the card or the summary it names (another device's, read first)
+    /// still removes it, with the newest op's mark.
+    #[test]
+    fn a_hide_op_read_before_what_it_names_still_marks_it() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Ship the parser.");
+        let device = s.raw.device().to_owned();
+        let first = s.raw.max_op_seq().unwrap() + 1;
+        let (card, summary) = (first + 4, first + 5);
+        let mark = |target: &str, op_seq: i64, n: Option<i64>, hidden: bool| {
+            let op = HideOp {
+                target: target.into(),
+                device: device.clone(),
+                op_seq,
+                n,
+                hidden,
+            };
+            (crate::raw::OpKind::Hide, serde_json::to_value(op).unwrap())
+        };
+        // Each named twice, the newest removing it.
+        s.raw
+            .append_ops(&[
+                mark(CARD, card, Some(0), false),
+                mark(CARD, card, Some(0), true),
+                mark(SUMMARY, summary, None, false),
+                mark(SUMMARY, summary, None, true),
+            ])
+            .unwrap();
+        let ids = s.cards(
+            seq,
+            seq,
+            json!([{"type": "feature", "title": "Azimuth parser"}]),
+            false,
+        );
+        let id = s.turn(
+            json!({"agent": "claude", "session": "s1", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Zulu request"}, "skipped": false}),
+        );
+        assert_eq!(
+            (ids[0].clone(), id.clone()),
+            (format!("{card}.0"), format!("S{summary}"))
+        );
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let rules = crate::redact::Rules::default();
+        assert!(card_titles(home).is_empty());
+        assert!(
+            crate::turns::recent(&k, &s.raw, R, 10, &rules)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!indexed(home, &ids[0]) && !indexed(home, &id));
+        assert_eq!(list(home).unwrap()["items"].as_array().unwrap().len(), 2);
     }
 
     /// A rewind past a hide op shows what it removed again: the op is gone from the log.
