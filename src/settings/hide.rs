@@ -252,6 +252,8 @@ mod tests {
         assert_eq!(card_titles(home), ["Azimuth parser", "Bravo lexer"]);
         assert_eq!(seen(home), shown);
         assert_eq!(list(home).unwrap(), json!({"items": []}));
+        crate::worker::rebuild(home).unwrap();
+        assert_eq!(seen(home), shown, "a rebuild takes the newest op's mark");
     }
 
     /// A removed card loses its vector and waits for none; brought back, it waits for one again.
