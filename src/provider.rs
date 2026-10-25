@@ -511,15 +511,18 @@ fn probe_attempt(
         return Ok(report("blocked", code, None, None, None));
     }
     let est = probe_estimate(&p);
-    let reservation = match budget::reserve_with_history(
-        db,
-        (&p, history),
-        "probe",
-        "connection-test",
-        est,
-        paid_cap,
-        &[],
-    )? {
+    let reserve = || {
+        budget::reserve_with_history(
+            db,
+            (&p, history),
+            "probe",
+            "connection-test",
+            est,
+            paid_cap,
+            &[],
+        )
+    };
+    let mut reservation = match reserve()? {
         Ok(reservation) => reservation,
         Err(refusal) => {
             let (code, retry_at) = probe_refusal(&p, refusal);
@@ -535,30 +538,66 @@ fn probe_attempt(
         Err(error) => Err(error),
         Ok(()) => {
             let switch = switched(&p);
-            let mut answer = None;
-            // A model that refused the reasoning switch is asked again without it, through the
-            // gate again, as the chain asks it.
-            for _ in 0..2 {
-                let admission = match gate() {
-                    Ok(admission) => admission,
-                    Err(error) => {
-                        reservation.cancel(db)?;
-                        return Err(error);
-                    }
-                };
-                let sent = probe_send(
-                    &p,
-                    admission,
-                    #[cfg(test)]
-                    cli_executable,
-                );
-                let again = switch && matches!(&sent, Err(e) if refused_switch(&p, e));
-                answer = Some(sent);
-                if !again {
-                    break;
+            let admission = match gate() {
+                Ok(admission) => admission,
+                Err(error) => {
+                    reservation.cancel(db)?;
+                    return Err(error);
                 }
+            };
+            let sent = probe_send(
+                &p,
+                admission,
+                #[cfg(test)]
+                cli_executable,
+            );
+            match sent {
+                // A model that refused the reasoning switch is asked again without it, as the
+                // chain asks it (Codex on #643): the refused attempt settled, then the budget and
+                // the gate again.
+                Err(e) if switch && refused_switch(&p, &e) => {
+                    let usd = reservation.cost(&p, e.usage, e.sent && e.status.is_none());
+                    let detail = format!("http {}: probe refused", e.status.unwrap_or(400));
+                    reservation.settle(
+                        db,
+                        &providers_db::Call {
+                            provider: p.name(),
+                            role: "probe",
+                            span: "connection-test",
+                            outcome: "error",
+                            ms: started.elapsed().as_millis() as i64,
+                            detail: Some(&detail),
+                            bytes_out: PROBE_PROMPT.len(),
+                            est_tokens: Some(est),
+                            usage: e.usage,
+                            usd,
+                        },
+                        e.rate,
+                        |state| state,
+                    )?;
+                    reservation = match reserve()? {
+                        Ok(reservation) => reservation,
+                        Err(refusal) => {
+                            let (code, retry_at) = probe_refusal(&p, refusal);
+                            return Ok(report("blocked", code, None, None, retry_at));
+                        }
+                    };
+                    let admission = match gate() {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            reservation.cancel(db)?;
+                            return Err(error);
+                        }
+                    };
+                    probe_send(
+                        &p,
+                        admission,
+                        #[cfg(test)]
+                        cli_executable,
+                    )
+                }
+                sent => sent,
             }
-            answer.expect("sent at least once")
         }
     };
     match result {
@@ -5218,6 +5257,28 @@ child.wait()
                 .get("reasoning")
                 .is_none()
         );
+        // Each request settles (Codex on #643): the refused one, then the answered one.
+        assert_eq!(outcomes(&conn)[3..], ["error", "ok"]);
+        // A probe at its entry's last request of the day is not sent again.
+        let (url, requests) = serve_each(vec![("400 Bad Request", refused())], "");
+        OPENROUTER_AT.set(Some(url.clone()));
+        let mut last = stub(url);
+        if let Provider::Openai {
+            model,
+            name,
+            daily_budget,
+            ..
+        } = &mut last
+        {
+            *model = "switch-refused-last".into();
+            *name = "last".into();
+            *daily_budget = Some(1);
+        }
+        let result = probe(&conn, &last, 5.0, &|| Ok(None)).unwrap();
+        assert_eq!(result["status"], "blocked", "{result}");
+        assert!(requests.recv().is_ok());
+        assert!(requests.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(providers_db::calls_in_a_day(&conn, "last").unwrap().0, 1);
 
         let other =
             json!({"error": {"message": "Invalid schema for response_format", "code": 400}})
