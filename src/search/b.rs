@@ -1811,7 +1811,11 @@ fn claims_leg(
         });
     }
     // The leg keeps `depth`, in any order: the page is cut at the end, its units whole, and pages
-    // of one limit split them only as `page_units` fills them (#645).
+    // of one limit split them only as `page_units` fills them (#645). A unit no page of the limit
+    // holds takes no place first: `page_units` never shows it, and its places are a claim's that
+    // fits (Codex on #648).
+    let page = q.limit - q.offset;
+    units.retain(|unit| unit.len() <= page);
     let (units, _) = claims::place(units, depth);
     // A done linker can be pulled into a delivered unit from the lowered list. It takes
     // one place there, and must not be appended a second time below the other legs.
@@ -3998,6 +4002,32 @@ mod tests {
                 assert_eq!(seen, whole, "{order:?}, limit {limit}");
             }
         }
+    }
+
+    /// #645 (Codex on #648): on a page of one, fifty delivered units, each too big for it, take
+    /// none of the claims leg's places, so the standalone claim after them still shows.
+    #[test]
+    fn units_too_big_for_the_page_leave_room_for_a_claim_that_fits() {
+        let mut s = Store::new();
+        for i in 0..50 {
+            let text = format!("Indent widgets {i}.");
+            let source = s.said("work", R, 1_000 + i, &text);
+            let earlier = s.claim(source, &text, ("preference", "decided", "user"), &[]);
+            s.decided(R, 5_000 + i, &format!("Use spaces, rule {i}."), &[&earlier]);
+        }
+        let lone = s.decided(
+            R,
+            9_000,
+            "Indent widgets in the parser module the way the formatter's settings already say.",
+            &[],
+        );
+        s.run();
+        let found = s.query(&Query {
+            raw: RawArm::Off,
+            limit: 1,
+            ..q("indent widgets")
+        });
+        assert_eq!(keys(&found), [lone.as_str()]);
     }
 
     /// Q7: a stored multiline title still makes exactly one searchable index line.
