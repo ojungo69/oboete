@@ -312,10 +312,18 @@ row 6), and its search pages on with `offset`; oboete's now do the same.
   resort, naming the ids it left out, never happens here. A document within its share is shown as
   the CLI's `get` shows it.
 - **`search`'s `offset`** passes over that many hits before the first shown, up to 900: a page
-  reads every leg as deep as `offset` plus `limit`.
+  reads every leg as deep as `offset` plus `limit`, the bit index's pool too when that is past
+  its 400 candidates. Pages are filled `limit` hits at a time, as the pages before showed them,
+  so a claim and the newer one that replaced it (D2) are never split, and pages of one limit
+  show each unit once (#645).
+- **`session_start_context`** stops at 32 KiB too, after its last whole block, so the note is
+  outside every fence; a first block over the cap alone is cut inside and closed (#645).
 
 Tests: `mcp::tests::replies_are_capped_and_get_divides_its_share_among_the_ids`,
-`mcp::tests::search_pages_on_with_an_offset`.
+`mcp::tests::search_pages_on_with_an_offset`,
+`mcp::tests::session_start_reply_ends_after_a_whole_block`,
+`search::b::tests::pages_of_one_limit_keep_delivered_units_whole`,
+`search::b::tests::a_deep_page_reaches_past_the_knn_candidates`.
 
 ## Differences from claude-mem, and why
 

@@ -66,7 +66,8 @@ pub struct SearchArgs {
     /// Maximum number of hits (default 10, at most 100).
     #[serde(default)]
     limit: Option<usize>,
-    /// Hits to pass over before the first shown, to page on (default 0, at most 900).
+    /// Hits to pass over before the first shown, to page on with the same limit (default 0, at
+    /// most 900). A claim and the newer one that replaced it are never split across pages.
     #[serde(default)]
     offset: Option<usize>,
 }
@@ -214,6 +215,31 @@ fn cut(text: &str, max: usize, note: &str) -> String {
     format!("{}{note}", &text[..end])
 }
 
+/// session_start_context's reply: gated and fenced as a hook injects it, its blocks each in their
+/// fence, through the gate again, as every reply is, with no fence of its own around theirs; then
+/// at most `MAX_REPLY_BYTES` (#645), ending after the last whole block that fits, so the note is
+/// outside every fence. A first block over the cap alone is cut inside and closed. Recorded text
+/// holds no closing tag (`manifest::quote`), so each one ends a block.
+fn start_reply(shown: &str) -> String {
+    const CLOSE: &str = "</oboete-memory>\n";
+    let text = crate::redact::outbound(shown);
+    if text.len() <= MAX_REPLY_BYTES {
+        return text;
+    }
+    let mut room = MAX_REPLY_BYTES - SHORTENED.len();
+    while !text.is_char_boundary(room) {
+        room -= 1;
+    }
+    match text[..room].rfind(CLOSE) {
+        Some(i) => format!("{}{SHORTENED}", &text[..i + CLOSE.len()]),
+        None if text[..room].contains("<oboete-memory>") => {
+            let head = cut(&text, room - CLOSE.len() - 1, "");
+            format!("{head}\n{CLOSE}{SHORTENED}")
+        }
+        None => cut(&text, MAX_REPLY_BYTES, SHORTENED),
+    }
+}
+
 /// `get`'s documents in the order asked, each through the egress gate and then cut to an equal
 /// share of `MAX_DETAIL_BYTES`, as claude-mem divides get_observations': a long first document
 /// never pushes a later one out. With at most 20 ids a share is over 12 KiB, so every id shows.
@@ -333,14 +359,15 @@ impl Oboete {
                 Err(e) => return failed(format!("{e:#}")),
             },
             raw: search::RawArm::Below,
-            limit: a.limit.unwrap_or(10).min(MAX_LIMIT) + offset,
+            limit: a.limit.unwrap_or(10).min(MAX_LIMIT),
+            offset,
             skip_session: None,
             no_starts: false,
             names: Vec::new(),
         };
         let answer = search::query(&self.home, &q).map_err(internal)?;
         let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
-        let out: String = (answer.hits.iter().skip(offset))
+        let out: String = (answer.hits.iter())
             .map(|h| search::line(h, q.all, &rules))
             .collect();
         let mut result = text(if out.is_empty() {
@@ -568,10 +595,8 @@ impl Oboete {
                 "session start shows nothing for this checkout: injection is off, or nothing is remembered here yet".into(),
             );
         }
-        // Gated and fenced as a hook injects it, its blocks each in their fence: through the gate
-        // again, as every reply is, with no fence of its own around theirs.
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            crate::redact::outbound(&shown),
+            start_reply(&shown),
         )]))
     }
 
@@ -1502,6 +1527,36 @@ mod tests {
         let shown = details(vec![("d".into(), Some(document))], &Default::default());
         assert!(!shown.contains("ghp_"), "{}", &shown[shown.len() - 200..]);
         assert!(shown.ends_with(&format!("{DETAIL_SHORTENED}\n")));
+    }
+
+    /// #645 (CodeRabbit on #644): session_start_context's reply stops at `MAX_REPLY_BYTES` after
+    /// its last whole block, gated before the cut; a first block over the cap alone is closed.
+    #[test]
+    fn session_start_reply_ends_after_a_whole_block() {
+        let block = |body: &str| crate::manifest::fence("what", body);
+        let many: String = (0..40).map(|_| block(&"x".repeat(1_000))).collect();
+        let shown = start_reply(&many);
+        assert!(shown.len() <= MAX_REPLY_BYTES, "{}", shown.len());
+        assert!(shown.ends_with(&format!("</oboete-memory>\n{SHORTENED}")));
+        let (opened, closed) = (
+            shown.matches("<oboete-memory>").count(),
+            shown.matches("</oboete-memory>").count(),
+        );
+        assert_eq!(opened, closed);
+        assert!(opened < 40);
+        // Each block shown is whole: the cut is at a block's end.
+        assert_eq!(shown.matches(&"x".repeat(1_000)).count(), opened);
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: secret scanners
+        // One block over the cap, the key across the place it is cut.
+        let cut_at = MAX_REPLY_BYTES - SHORTENED.len() - "</oboete-memory>\n".len() - 1;
+        let at = cut_at - "<oboete-memory>\nwhat\n\n".len() - 10;
+        let one = block(&format!("{}{key}{}", "x".repeat(at), "y".repeat(1_000)));
+        let shown = start_reply(&one);
+        assert!(shown.len() <= MAX_REPLY_BYTES, "{}", shown.len());
+        assert!(!shown.contains("ghp_"), "{}", &shown[shown.len() - 200..]);
+        assert!(shown.ends_with(&format!("\n</oboete-memory>\n{SHORTENED}")));
+        let short = block("A short note.");
+        assert_eq!(start_reply(&short), crate::redact::outbound(&short));
     }
 
     /// Parity row 6: search pages on with `offset`, as claude-mem's does, up to `MAX_OFFSET`.

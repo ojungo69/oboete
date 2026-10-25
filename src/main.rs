@@ -612,6 +612,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                     other => anyhow::bail!("--raw {other}: use below, off or only"),
                 },
                 limit: limit.min(100),
+                offset: 0,
                 skip_session: None,
                 no_starts: false,
                 names: Vec::new(),
