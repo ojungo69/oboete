@@ -3555,7 +3555,7 @@ mod tests {
         const TEST: &str = "hook::tests::a_claude_prompt_keeps_the_entry_point_its_hook_was_given";
         const CHILD: &str = "OBOETE_ENTRYPOINT_TEST_CHILD";
         if std::env::var(CHILD).as_deref() != Ok(TEST) {
-            for value in [Some("cli"), Some("sdk-cli"), None] {
+            for value in [Some("cli"), Some("sdk-cli"), Some("remote_trigger"), None] {
                 let mut child = std::process::Command::new(std::env::current_exe().unwrap());
                 child
                     .args(["--exact", TEST, "--nocapture"])

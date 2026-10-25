@@ -200,7 +200,8 @@ impl Emitter {
     }
 
     /// A prompt at `ts`; `line`, a Claude Code transcript's, says where it came from (O2): its
-    /// `entrypoint`, and an `origin` other than a person's typing (a task's notification).
+    /// `entrypoint`, and an `origin` or a `turnOrigin` other than a person's typing (a task's
+    /// notification, a scheduled turn, the Agent SDK's).
     fn prompt(&mut self, ts: &str, text: &str, line: Option<&Value>) -> Result<()> {
         self.stop(ts)?;
         let mut payload = json!({"prompt": text});
@@ -208,7 +209,8 @@ impl Emitter {
             payload[crate::capture::AGENT_SENT] = json!(sent);
         }
         if let Some(v) = line {
-            if v["origin"]["kind"].as_str().is_some_and(|k| k != "human") {
+            let not_typed = |origin: &Value| origin.as_str().is_some_and(|k| k != "human");
+            if not_typed(&v["origin"]["kind"]) || not_typed(&v["turnOrigin"]) {
                 payload[crate::capture::AGENT_SENT] = json!(true);
             }
             if let Some(e) = crate::typed::entrypoint(&v["entrypoint"]) {
@@ -2814,6 +2816,76 @@ mod tests {
             prompts,
             [json!({"prompt": "Review the diff.", "agent_sent": true})]
         );
+    }
+
+    /// O2 (docs/my-work-model.md): an imported Claude Code line keeps its entry point, and one
+    /// whose `origin` or `turnOrigin` is not a person's typing (a task's notification, a scheduled
+    /// turn) is marked another program's; only the person's terminal prompts are typed.
+    #[test]
+    fn an_imported_claude_line_is_typed_only_when_its_origin_is_human() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("claude/projects");
+        let project = root.join("-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = "66666666-6666-4666-8666-666666666666";
+        let line = |second: u32, text: &str, entrypoint: &str, origin: Value| {
+            let mut v = json!({"type": "user", "cwd": "/work/app", "sessionId": session,
+                "timestamp": format!("2026-09-02T00:00:{second:02}.000Z"),
+                "entrypoint": entrypoint,
+                "message": {"role": "user", "content": text}});
+            (v.as_object_mut().unwrap()).extend(origin.as_object().unwrap().clone());
+            format!("{v}\n")
+        };
+        let text = [
+            line(
+                1,
+                "Fix the parser.",
+                "cli",
+                json!({"origin": {"kind": "human"}}),
+            ),
+            line(
+                2,
+                "Summarize the run.",
+                "cli",
+                json!({"origin": {"kind": "agent"}}),
+            ),
+            line(3, "Check the build.", "sdk-cli", json!({})),
+            line(
+                4,
+                "Run the nightly check.",
+                "cli",
+                json!({"turnOrigin": "scheduled"}),
+            ),
+            line(
+                5,
+                "Ship it.",
+                "cli",
+                json!({"turnOrigin": "human", "promptSource": "typed"}),
+            ),
+        ]
+        .concat();
+        std::fs::write(project.join(format!("{session}.jsonl")), text).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        import(&home, &[("claude", root.as_path())], true, &mut Vec::new()).unwrap();
+        let prompts: Vec<Value> = (records(&home).into_iter())
+            .filter(|e| e.kind == "prompt")
+            .map(|e| serde_json::from_str(&e.body).unwrap())
+            .collect();
+        assert_eq!(
+            prompts,
+            [
+                json!({"prompt": "Fix the parser.", "entrypoint": "cli"}),
+                json!({"prompt": "Summarize the run.", "agent_sent": true, "entrypoint": "cli"}),
+                json!({"prompt": "Check the build.", "entrypoint": "sdk-cli"}),
+                json!({"prompt": "Run the nightly check.", "agent_sent": true, "entrypoint": "cli"}),
+                json!({"prompt": "Ship it.", "entrypoint": "cli"}),
+            ]
+        );
+        let typed: Vec<bool> = (prompts.iter())
+            .map(|b| crate::typed::typed("prompt", "claude", "transcript", b))
+            .collect();
+        assert_eq!(typed, [true, false, false, false, true]);
     }
 
     #[test]
