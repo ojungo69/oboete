@@ -277,7 +277,13 @@ pub fn phase(
     // that found none after the same one starts where it stopped (Codex on #637): a stretch with
     // no reply is read once, not once for every window of it.
     let asked_last = last_asked(k, &device)?;
-    let mut after = read_through(&device, asked_last, ck).unwrap_or(asked_last);
+    // The store file's mark as well as the device's: a raw.db a restore put in place under this
+    // process keeps the device, and the records it brought back are read (#646). A handle bound to
+    // no file keeps no mark.
+    let mark = raw.file_identity().map(|file| format!("{device}\n{file}"));
+    let mut after = (mark.as_deref())
+        .and_then(|mark| read_through(mark, asked_last, ck))
+        .unwrap_or(asked_last);
     // The turns kept back on the way, written a page at a time: the scan goes past them, so none
     // is read again at the next run (Codex on #371).
     let mut parked = Vec::new();
@@ -288,7 +294,9 @@ pub fn phase(
             SCANNED.with(|s| s.borrow_mut().push((after, ck)));
             replies.extend(raw.replies_between(after, ck, PAGE)?);
             let Some(end) = replies.back().map(|r| r.seq) else {
-                read_to(&device, asked_last, ck);
+                if let Some(mark) = &mark {
+                    read_to(mark, asked_last, ck);
+                }
                 break;
             };
             after = end;
@@ -377,9 +385,9 @@ pub fn phase(
     Ok(Phase::Idle)
 }
 
-/// How far this process's looks for turn ends read with none left to ask for, for each device: the
-/// last turn end asked for then, and the record the look read through. Lost with the process: the
-/// next one reads that stretch once.
+/// How far this process's looks for turn ends read with none left to ask for, for each device and
+/// raw.db file: the last turn end asked for then, and the record the look read through. Lost with
+/// the process: the next one reads that stretch once.
 static NO_TURN_END: std::sync::Mutex<Vec<(String, i64, i64)>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
@@ -389,18 +397,18 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Where a look for turn ends after `asked_last` starts on `device`, when one of this process read
-/// that far with none to ask for, no further than the checkpoint.
-fn read_through(device: &str, asked_last: i64, checkpoint: i64) -> Option<i64> {
+/// Where a look for turn ends after `asked_last` starts on a device's store (`mark`), when one of
+/// this process read that far with none to ask for, no further than the checkpoint.
+fn read_through(mark: &str, asked_last: i64, checkpoint: i64) -> Option<i64> {
     let marks = NO_TURN_END.lock().ok()?;
-    let (_, asked, through) = marks.iter().find(|(d, ..)| d == device)?;
+    let (_, asked, through) = marks.iter().find(|(m, ..)| m == mark)?;
     (*asked == asked_last && *through <= checkpoint).then_some(*through)
 }
 
-fn read_to(device: &str, asked_last: i64, through: i64) {
+fn read_to(mark: &str, asked_last: i64, through: i64) {
     if let Ok(mut marks) = NO_TURN_END.lock() {
-        marks.retain(|(d, ..)| d != device);
-        marks.push((device.to_owned(), asked_last, through));
+        marks.retain(|(m, ..)| m != mark);
+        marks.push((mark.to_owned(), asked_last, through));
     }
 }
 
@@ -1276,6 +1284,31 @@ mod tests {
         drop(raw);
         crate::worker::run_once(home.path()).unwrap();
         assert_eq!(look(home.path()), [(3, 5)]);
+        // #646: a restore puts another raw.db in place with the same device and records; this
+        // process reads that stretch again rather than trust the old file's mark.
+        let raw = crate::raw::open(home.path()).unwrap();
+        let (device, lines) = (
+            raw.device().to_owned(),
+            raw.export_lines(0, usize::MAX).unwrap(),
+        );
+        let ops = raw.export_op_lines(0, usize::MAX).unwrap();
+        drop(raw);
+        let rebuilt = home.path().join("raw.db.rebuilt");
+        let mut rebuild = crate::raw::Rebuild::new(&rebuilt, &device).unwrap();
+        for (_, line) in &lines {
+            rebuild.add(line).unwrap();
+        }
+        for (_, line) in &ops {
+            rebuild.add_op(line).unwrap();
+        }
+        rebuild.finish().unwrap();
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.path().join(file));
+        }
+        std::fs::rename(&rebuilt, home.path().join("raw.db")).unwrap();
+        assert_eq!(crate::raw::open(home.path()).unwrap().device(), device);
+        assert_eq!(look(home.path()), [(0, 5)]);
+        assert_eq!(look(home.path()), [(5, 5)]);
         // A mark holds for its device, the same last turn end asked, and no further than the
         // checkpoint.
         read_to("elsewhere", 10, 20);

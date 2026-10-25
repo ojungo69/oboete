@@ -1785,6 +1785,12 @@ impl Raw {
         Ok(admission)
     }
 
+    /// The raw.db file this handle opened (its volume and file number), when it was bound at open:
+    /// a restore puts another file in place with the same device.
+    pub fn file_identity(&self) -> Option<&str> {
+        self.file_identity.as_deref()
+    }
+
     fn current(&self) -> Result<()> {
         let current = crate::db::store_file(&self.home.join("raw.db"));
         if current.is_empty() || self.file_identity.as_deref() != Some(current.as_str()) {
