@@ -303,7 +303,7 @@ fn insert(doc: &mut DocumentMut, at: usize, new: Table) -> Result<(), Refusal> {
             // Parsed tables retain their old document positions. Keep the edited provider
             // block in logical array order, with each entry's children immediately after it.
             fn in_array_order(table: &mut Table) {
-                table.set_position(isize::MAX);
+                table.set_position(Some(isize::MAX));
                 for (_, item) in table.iter_mut() {
                     match item {
                         Item::Table(child) => in_array_order(child),

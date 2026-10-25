@@ -1425,7 +1425,7 @@ fn write_extra_rules(
         }
         if reordered {
             for table in next.iter_mut() {
-                table.set_position(isize::MAX);
+                table.set_position(Some(isize::MAX));
             }
         }
         doc["redaction"]["extra_rules"] = toml_edit::Item::ArrayOfTables(next);
