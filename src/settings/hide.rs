@@ -625,7 +625,8 @@ mod tests {
     }
 
     /// A hide op raises the home to the format that reads it, in the transaction that writes it,
-    /// and a rebuild from the backup's lines stamps it too: a binary before it stops at the op.
+    /// and a rebuild from the backup's lines stamps it too, the outstanding expiry batch a restore
+    /// finishes on it included: a binary before it stops at the op.
     #[test]
     fn a_hide_raises_the_home_to_the_format_that_reads_it() {
         let mut s = Store::new();
@@ -660,6 +661,9 @@ mod tests {
         for (_, line) in &ops {
             rebuild.add_op(line).unwrap();
         }
+        rebuild
+            .expire(&[(device.clone(), seq, 1_000)], 2_000)
+            .unwrap();
         rebuild.finish().unwrap();
         assert_eq!(stamp(&rebuilt), crate::raw::HIDDEN_FORMAT);
     }

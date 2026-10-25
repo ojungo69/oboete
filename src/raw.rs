@@ -4891,9 +4891,7 @@ impl Raw {
                 )
                 .unwrap();
         }
-        self.conn
-            .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))
-            .unwrap();
+        raise_format(&self.conn, EXPIRED_FORMAT).unwrap();
     }
 
     /// docs/retention.md: whether one of `device`'s records `from` to `to` expired.
@@ -7416,8 +7414,8 @@ pub(crate) fn apply_expiry_owed(
         owe.execute(params![device, seq, ts])?;
         expire.execute(params![device, seq, ts, at])?;
     }
-    conn.execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
-    Ok(())
+    // Raised, never lowered: the ops replayed before it can hold a hide op (Codex on #658).
+    raise_format(conn, EXPIRED_FORMAT)
 }
 
 /// The copies of raw.db set aside in `home` (2c, decision 5), the live store never among them, and
