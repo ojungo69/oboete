@@ -56,6 +56,7 @@ mod turns;
 mod unwritten;
 mod view;
 mod watchdog;
+mod work_product;
 mod work_state;
 mod worker;
 

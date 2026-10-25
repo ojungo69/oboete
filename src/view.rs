@@ -1997,6 +1997,20 @@ impl Viewer {
                 Some(range) => crate::my_work::read(&self.home, range, crate::db::now_ms())?,
                 None => return Ok(bad("range")),
             },
+            // Slice 4 (docs/my-work.md): what one request produced, read when its page opens, by
+            // the id the page has, as a check names it (`my_work_review`).
+            "my-work/product" => {
+                let Some(request) = arg("request").filter(|r| r.chars().count() <= 2_000) else {
+                    return Ok(bad("request"));
+                };
+                let (answer, held) = crate::my_work::reviewing(&self.home, crate::db::now_ms())?;
+                let answer = answered("my-work", answer);
+                let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
+                let Some(i) = requests.iter().position(|r| r["id"] == request) else {
+                    return Ok(Response::text(404, "no such request"));
+                };
+                json!({"products": crate::my_work::products(&self.home, &held[i])?})
+            }
             "timeline" => {
                 let (all, limit, before) = match (flag(q, "all"), limit(q, 50), page(q)) {
                     (Ok(all), Ok(limit), Ok(before)) => (all, limit, before),
@@ -4511,6 +4525,32 @@ curate = false
         let year = v.route("GET", "/api/my-work?range=year", &[HOST, TOKEN]);
         assert_eq!(year.status, 400);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Slice 4 (docs/my-work.md): a request's work product, by the id the page has, with the
+    /// token; a request it does not know, none named, or no token, refused.
+    #[test]
+    fn the_my_work_product_route_answers_for_a_request_it_knows() {
+        let (mut s, v) = feed_fixture();
+        let fields = json!({"task": "rel", "request_id": "rel", "request": "Ship the notes",
+            "status": "doing", "work_product": "https://example.com/notes"});
+        s.raw
+            .work_state(R, "plan", fields.as_object().unwrap(), None)
+            .unwrap();
+        s.run();
+        let answer = get(&v, "/api/my-work/product?request=r%3Arel");
+        assert_eq!(
+            answer["products"][0]["url"], "https://example.com/notes",
+            "{answer}"
+        );
+        let status =
+            |target: &str, headers: &[(&str, &str)]| v.route("GET", target, headers).status;
+        assert_eq!(status("/api/my-work/product?request=r%3Arel", &[HOST]), 401);
+        assert_eq!(
+            status("/api/my-work/product?request=r%3Anone", &[HOST, TOKEN]),
+            404
+        );
+        assert_eq!(status("/api/my-work/product", &[HOST, TOKEN]), 400);
     }
 
     /// #570 (Sourcery and Codex on #575): a masked My Work id's fingerprint is its selector, as a

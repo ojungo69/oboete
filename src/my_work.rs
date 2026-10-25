@@ -956,10 +956,122 @@ struct Review {
     sessions: Vec<String>,
 }
 
-/// What a request's check is filed under, beside its answer.
+/// What a request's check is filed under, beside its answer, and what its work product is read
+/// from (slice 4).
 pub(crate) struct Held {
     key: String,
     sessions: Vec<String>,
+    sources: Sources,
+}
+
+/// A request's conversations, each with the prompt spans it owns (none: all of it), its work
+/// items' fields with the time of their last write, and its cards' modified files with the time
+/// of their window.
+#[derive(Default)]
+pub(crate) struct Sources {
+    convs: Vec<(Key, Option<Vec<Span>>)>,
+    fields: Vec<(Map<String, Value>, i64)>,
+    files: Vec<(Vec<String>, i64)>,
+}
+
+/// claude-mem's `mergeProducts` limit: the newest this many entries of a request's work product.
+const PRODUCTS: usize = 60;
+
+/// Slice 4 (parity row X16): what a request produced, as claude-mem 15.1's request drawer shows it:
+/// the commits, branches and pull requests its conversations' recorded commands made, the links
+/// its publishing tools returned, the files of kinds a person opens that its cards name as
+/// modified, and what its work items attach. The calls are read live from raw.db, so a forgotten
+/// or expired one is none; each entry is gated as the page's text is, and a link the gate changes
+/// is shown as its title alone. No provider is called.
+pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(Vec::new());
+    };
+    let rules = Rules::load(home)?;
+    let mut lists = Vec::new();
+    // The consumer makes its table; before its first step there is nothing to read.
+    if crate::consumer::manifest::exists(&k, "table", "product_calls")? {
+        let mut calls = k.prepare(
+            "SELECT device, seq FROM product_calls WHERE agent = ?1 AND session = ?2
+             ORDER BY device, seq",
+        )?;
+        for ((agent, session), owned) in &held.sources.convs {
+            let rows = (calls
+                .query_map(params![agent, session], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+            for (device, seq) in rows {
+                let ours = |spans: &Vec<Span>| spans.iter().any(|s| holds(s, &device, (seq, seq)));
+                if owned.as_ref().is_some_and(|spans| !ours(spans)) {
+                    continue;
+                }
+                let Some(Item::Event(e)) = (raw.after(&device, seq - 1, 1)?.pop())
+                    .filter(|r| r.seq == seq)
+                    .map(|r| r.item)
+                else {
+                    continue;
+                };
+                let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
+                    continue;
+                };
+                let source = crate::work_product::Source {
+                    kind: "record".into(),
+                    id: format!("{device}:{seq}"),
+                    index: None,
+                };
+                let tool = body["tool"].as_str().unwrap_or("");
+                lists.push(crate::work_product::from_tool_use(
+                    tool,
+                    &body["input"],
+                    &body["output"],
+                    Some(e.ts),
+                    Some(source),
+                    body["failed"] == true,
+                ));
+            }
+        }
+    }
+    for (fields, at) in &held.sources.fields {
+        // What a work item attaches, as work state's own lines show it beside its key, since a
+        // rule may match a value only there; a link the gate changes is its title alone
+        // (CodeRabbit on #650).
+        let mut changed = Vec::new();
+        let shown = (fields.iter())
+            .filter(|(k, _)| crate::work_product::is_work_product_field(k))
+            .map(|(k, v)| {
+                let text = crate::work_state::text(v);
+                let gated = crate::work_state::beside(k, &text, &rules);
+                if gated == text {
+                    (k.clone(), v.clone())
+                } else {
+                    changed.push(k.clone());
+                    (k.clone(), Value::String(gated))
+                }
+            })
+            .collect();
+        let mut list = crate::work_product::from_fields(&shown, Some(*at), None);
+        for p in &mut list {
+            if p.field.as_ref().is_some_and(|f| changed.contains(f)) {
+                p.url = None;
+            }
+        }
+        lists.push(list);
+    }
+    for (files, at) in &held.sources.files {
+        lists.push(crate::work_product::from_files(files, Some(*at), None));
+    }
+    let gate = |s: &str| crate::redact::outbound_with(s, &rules);
+    Ok((crate::work_product::merge(lists, PRODUCTS).into_iter())
+        .map(|p| {
+            let url = p.url.filter(|url| gate(url) == *url);
+            json!({
+                "kind": gate(&p.kind),
+                "title": gate(&p.title),
+                "url": url,
+                "path": p.path.as_deref().map(gate),
+                "at": p.at,
+            })
+        })
+        .collect())
 }
 
 const REVIEWS: &str = "my-work-reviews.json";
@@ -1374,9 +1486,35 @@ fn answer(
     let swept_by = (r.owns.iter())
         .map(|((agent, session), _)| keyed(&crate::forget::session(agent, session), home, key))
         .collect::<Result<Vec<_>>>()?;
+    let sources = Sources {
+        convs: (r.owns.iter())
+            .map(|(key, own)| {
+                let owned = match own {
+                    Owns::All => None,
+                    Owns::Prompts(spans) => Some(spans.iter().cloned().collect()),
+                };
+                (key.clone(), owned)
+            })
+            .collect(),
+        // A list's own fields attach to it too, as claude-mem reads each entry's fields.
+        fields: (items.iter())
+            .flat_map(|w| {
+                [
+                    (w.fields.clone(), w.updated),
+                    (w.list_fields.clone(), w.updated),
+                ]
+            })
+            .filter(|(fields, _)| !fields.is_empty())
+            .collect(),
+        files: (cards.iter())
+            .map(|c| (c.c.files_modified.clone(), c.c.ts))
+            .filter(|(files, _)| !files.is_empty())
+            .collect(),
+    };
     let held = Held {
         key: filed,
         sessions: swept_by,
+        sources,
     };
     Ok(Some((
         json!({
@@ -1766,6 +1904,13 @@ mod tests {
         }
     }
 
+    /// A `Bash` call in `session` at `at` that ran `command` and printed `out`: its seq.
+    fn bash(h: &mut Home, session: &str, at: i64, command: &str, out: &str) -> i64 {
+        let body = json!({"tool": "Bash", "input": json!({"command": command}).to_string(),
+            "output": out, "failed": false});
+        h.s.event("tool", session, (R, "main"), h.t + at, body)
+    }
+
     fn by_id<'a>(v: &'a Value, id: &str) -> &'a Value {
         v["requests"]
             .as_array()
@@ -1819,6 +1964,176 @@ mod tests {
         assert_eq!(
             by_id(&v, "c:claude:s2")["ask"]["text"],
             "パーサのエラーを直して"
+        );
+    }
+
+    /// Slice 4 (parity row X16): a request's work product, as claude-mem 15.1 reads it: the commit
+    /// its conversation made and pushed to GitHub, linked to it; a command that only names git
+    /// makes nothing; what a work item attaches shows; a record that expired is no call, and its
+    /// commit goes with it. Another conversation's commit is not this request's.
+    #[test]
+    fn a_requests_work_product_is_read_live_from_its_records() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship the parser fix.");
+        let out = "[main abc1234] Fix the parser\n 1 file changed\nTo https://github.com/o/r.git\n   0000000..abc1234  main -> main";
+        let commit = bash(
+            &mut h,
+            "s1",
+            -59_000,
+            "git commit -m 'Fix the parser' && git push origin main",
+            out,
+        );
+        bash(&mut h, "s1", -58_000, "grep -rn 'git commit' docs", "");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "Ship", "status": "doing",
+            "work_product": "https://example.com/notes"}),
+        );
+        h.said("s2", -50_000, "Rename the lexer.");
+        bash(
+            &mut h,
+            "s2",
+            -49_000,
+            "git commit -m 'Rename the lexer'",
+            "[main def5678] Rename the lexer",
+        );
+        h.run_read();
+        let shown = |h: &Home| {
+            let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+            let i = ids(&answer)
+                .iter()
+                .position(|id| id == "c:claude:s1")
+                .unwrap();
+            super::products(h.s.home.path(), &held[i]).unwrap()
+        };
+        let products = shown(&h);
+        let titles: Vec<&str> = products
+            .iter()
+            .map(|p| p["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            titles,
+            ["example.com", "abc1234 Fix the parser", "main"],
+            "{products:?}"
+        );
+        assert_eq!(products[1]["url"], "https://github.com/o/r/commit/abc1234");
+        assert_eq!(products[0]["url"], "https://example.com/notes");
+        h.s.raw.expire_for_test(&[commit]);
+        let products = shown(&h);
+        let titles: Vec<&str> = products
+            .iter()
+            .map(|p| p["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles, ["example.com"], "{products:?}");
+    }
+
+    /// Slice 4: of a conversation two requests share, each has the work product of the prompts it
+    /// owns.
+    #[test]
+    fn a_shared_conversations_work_product_follows_its_prompts() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship the release.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "A",
+            "request": "Write the release notes", "status": "doing"}),
+        );
+        bash(
+            &mut h,
+            "s1",
+            -55_000,
+            "git commit -m 'Write the notes'",
+            "[main aaa1111] Write the notes",
+        );
+        h.said("s1", -40_000, "Now tag it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "B",
+            "request": "Tag the release", "status": "doing"}),
+        );
+        bash(
+            &mut h,
+            "s1",
+            -35_000,
+            "git checkout -b release-1",
+            "Switched to a new branch 'release-1'",
+        );
+        h.run_read();
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let titles = |id: &str| -> Vec<String> {
+            let i = ids(&answer).iter().position(|x| x == id).unwrap();
+            (super::products(h.s.home.path(), &held[i]).unwrap().iter())
+                .map(|p| p["title"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(titles("r:A"), ["aaa1111 Write the notes"]);
+        assert_eq!(titles("r:B"), ["release-1"]);
+    }
+
+    /// Slice 4: the rules as they are now gate what is shown, and a link they change shows as its
+    /// title alone; a file a card names as modified shows by its name and path.
+    #[test]
+    fn work_product_is_gated_as_shown_and_names_files() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Write the report.");
+        h.wrote(
+            "s1",
+            "report",
+            json!({"task": "report", "status": "doing",
+            "docs_url": "https://intranet.example/report",
+            "spec_url": "https://wiki.example/spec",
+            "notes_url": "https://wiki.example/private/page"}),
+        );
+        let r = h.reply("s1", -50_000);
+        h.s.cards(
+            p,
+            r,
+            json!([{"type": "feature", "title": "Report", "narrative": "Wrote it.",
+            "files_modified": ["/home/u/report.pdf", "/home/u/src/main.rs"]}]),
+            false,
+        );
+        h.run_read();
+        // Rules added after the worker's run: the read gates with them before a rescan does. Two
+        // match a value only beside its key, as work state's lines show it (CodeRabbit on #650):
+        // one hides it whole, one a part of it.
+        std::fs::write(
+            h.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'intranet', regex = 'intranet' }, \
+             { id = 'keyed', regex = 'spec_url = \"https' }, \
+             { id = 'part', regex = 'notes_url = \"https://wiki\\.example/(private)' }]\n",
+        )
+        .unwrap();
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = ids(&answer)
+            .iter()
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let products = super::products(h.s.home.path(), &held[i]).unwrap();
+        // A work item's link the gate hides any of, beside its key, is its title alone when an
+        // address is left (notes_url), and nothing when none is (docs_url's host, spec_url whole).
+        let shown = serde_json::to_string(&products).unwrap();
+        assert!(
+            !shown.contains("intranet") && !shown.contains("/spec") && !shown.contains("private"),
+            "{products:?}"
+        );
+        assert!(
+            !products.iter().any(|p| p["kind"] == "documentation"),
+            "{products:?}"
+        );
+        let wiki: Vec<&Value> = products
+            .iter()
+            .filter(|p| p["title"] == "wiki.example")
+            .collect();
+        assert_eq!(wiki.len(), 1, "{products:?}");
+        assert!(wiki[0]["url"].is_null(), "{products:?}");
+        let files: Vec<&Value> = products.iter().filter(|p| p["path"].is_string()).collect();
+        assert_eq!(files.len(), 1, "{products:?}");
+        assert_eq!(
+            (files[0]["title"].as_str(), files[0]["path"].as_str()),
+            (Some("report.pdf"), Some("/home/u/report.pdf"))
         );
     }
 

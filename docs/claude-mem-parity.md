@@ -18,8 +18,8 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | Status | Rows |
 |---|---|
 | equal_or_better | 37 |
-| partial | 19 |
-| missing | 24 |
+| partial | 20 |
+| missing | 23 |
 | accepted_difference | 6 |
 | total | 86 |
 
@@ -117,7 +117,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | X13 | My Rules: the preferences claude-mem 15.1's build story learns from the owner's corrections (row X14), and rules the owner writes. The owner approves, edits, turns off, rejects or replaces each. The approved ones are written to `~/.claude-mem/MY-RULES.md`, and a button adds `@~/.claude-mem/MY-RULES.md` once to `~/.claude/CLAUDE.md`, so every Claude Code session loads them. oboete has no rules page and writes no rules file. | missing | rare | my-rules.mjs:1 / src/manifest.rs:74 |
 | X14 | Progress on each request. A model reviews each request from memory and keeps its state, a percent and dated readings (up to 20); the card shows a progress bar, a finish date when the last two readings move forward, the goal it serves, and a build story (what shipped, stalled and was redone, up to 12,000 characters). claude-mem 15.1's worker writes them itself: every 10 minutes it checks whether anything is due and runs one job on the first logged-in agent among Claude Code, Codex and Gemini (Claude Sonnet for goals, reviews and the story, Haiku for grouping and goal links), on by default (`CLAUDE_MEM_WORK_VIEW_AUTO_REFRESH`), with no daily cap and no time limit; with an Anthropic key in `~/.claude-mem/.env` the Claude runs are billed to that key. oboete's My Work makes no model call (decision 53). | missing | weekly | request-groups.mjs:345 / src/my_work.rs:1413 |
 | X15 | One card for a request across conversations: a model decides, once for each new conversation, whether it starts a request, continues an open one in the same project or is left out; a card spans /clear, worktrees and agents, and the model's title replaces the first sentence. oboete shows one card a conversation (decision 55). | missing | weekly | request-groups.mjs:201 / docs/spec.md:82 |
-| X16 | A request's work product: links an agent attaches to a work-state item (`work_product`), and the commits, pushes and branches read from the git commands it recorded, a commit linked to GitHub once a recorded push sent it there. No model call. oboete records those commands and shows none of this. | missing | weekly | work-product.mjs:83 / src/capture.rs:506 |
+| X16 | A request's work product: links an agent attaches to a work-state item (`work_product`), and the commits, pushes and branches read from the git commands it recorded, a commit linked to GitHub once a recorded push sent it there. No model call. Since 2026-10-25 oboete shows the same in a request's page, read from its records live when the page opens, with claude-mem's parsing (docs/my-work.md slice 4). Difference: a file is shown by its name and path, not served, as oboete's page serves no local file. | partial | weekly | work-product.mjs:83 / src/my_work.rs:986 |
 | X17 | Finished subagents: claude-mem 15.1 adds a Claude Code SubagentStop hook, and its page's agent view shows each subagent as working, without a recent step, or finished. oboete installs no SubagentStop hook. | missing | rare | hooks.json:147 / src/setup.rs:27 |
 | X18 | An agent with no adapter of its own (claude-mem's example is Devin CLI) falls back to claude-mem's raw adapter, which since 15.1 takes the last answer from the Stop payload, so the session gets a summary. oboete records only the agents it sets up. | missing | rare | adapters/raw.ts:20 / src/hook.rs:129 |
 
@@ -238,7 +238,7 @@ each milestone and new features are added here.
 | X13 | **The owner's rules.** claude-mem 15.1's My Rules turns learned preferences and the owner's own rules into a file Claude Code loads. | M |
 | X14 | **Where each request stands.** claude-mem 15.1 reviews each request from memory (a percent, readings, a finish date, the goal it serves) and writes a build story, in the background with Sonnet and Haiku. oboete would write them with its curator chain, the cost shown before it is built. | L |
 | X15 | **One card for a request across conversations.** claude-mem 15.1 joins the conversations of one request with a model's judgement; oboete shows one card a conversation (decision 55). | M |
-| X16 | **What a request produced.** Links an agent attaches and the commits, pushes and branches read from recorded git commands. No model call. | S |
+| X16 | **What a request produced.** Links an agent attaches and the commits, pushes and branches read from recorded git commands. No model call. Built (docs/my-work.md slice 4), files shown by path, not served. | S |
 | X17 | **Finished subagents.** A SubagentStop hook and the agent view's finished state. | S |
 | X18 | **Agents without an adapter.** claude-mem's raw adapter gives any other host a session summary. | M |
 

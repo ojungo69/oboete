@@ -2404,6 +2404,19 @@ const TEXT = {
   my_work_original: ['Original request', '元の依頼'],
   my_work_read_original: ['Read full original', '元の依頼の全文を読む'],
   my_work_streams: ['Work behind this request', 'この依頼の作業'],
+  my_work_products: ['Work product', '成果物'],
+  my_work_kind_commit: ['Commit', 'コミット'],
+  my_work_kind_branch: ['Branch', 'ブランチ'],
+  my_work_kind_pull_request: ['Pull request', 'プルリクエスト'],
+  my_work_kind_artifact: ['Artifact', 'アーティファクト'],
+  my_work_kind_page: ['Page', 'ページ'],
+  my_work_kind_document: ['Document', '文書'],
+  my_work_kind_deployment: ['Deployment', '公開先'],
+  my_work_kind_deck: ['Slides', 'スライド'],
+  my_work_kind_image: ['Image', '画像'],
+  my_work_kind_video: ['Video', '動画'],
+  my_work_kind_spreadsheet: ['Spreadsheet', '表'],
+  my_work_kind_link: ['Link', 'リンク'],
   my_work_no_streams: ['No linked workstreams have been recorded yet.', '結びついた作業はまだ記録されていません。'],
   my_work_supporting: ['Supporting work', '補助の作業'],
   my_work_no_detail: ['No detailed update recorded.', '詳しい更新は記録されていません。'],
@@ -6184,6 +6197,9 @@ const mw = {
   changed: new Set(), unread: new Set(),
   // A check or its Undo being saved (`saveReview`'s `busy`).
   saving: false,
+  // The open request's work product, by its id and version, once read (slice 4), and the number
+  // of its latest read: an earlier read's late answer is not kept (CodeRabbit on #650).
+  products: null, productsAsk: 0,
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -6591,6 +6607,9 @@ function myWorkFocus(focus) {
 }
 
 function myWorkOpen(id) {
+  // Its work product is read again: new records, expired ones and new rules change it without
+  // changing the request's version (Codex on #650).
+  mw.products = null;
   mw.unread.delete(id);
   mw.back = { id, scroll: window.scrollY || 0 };
   mw.request = id;
@@ -6723,6 +6742,7 @@ function myWorkDrawRequest() {
         el('div', null, el('p', 'text', row.ask?.text ?? ''), row.ask?.id ? fullText(row.ask.id, word('span', null, 'my_work_read_original')) : null))),
     el('section', 'my-work-streams', word('h3', null, 'my_work_streams'),
       streams.length ? el('div', 'my-work-stream-list', ...streams) : word('p', 'text pending', 'my_work_no_streams')),
+    myWorkProducts(row),
     row.follow_ups?.length ? el('details', 'my-work-original', word('summary', null, 'my_work_follow_ups'),
       el('div', null, ...row.follow_ups.flatMap((f) => [el('p', 'text', f.text ?? ''), fullText(f.id)]))) : null,
     ids('my_work_result', row.summaries), ids('my_work_cards_heading', row.cards),
@@ -6730,6 +6750,47 @@ function myWorkDrawRequest() {
     ...myWorkHandoff(row),
   ]);
   setStatus('');
+}
+
+// Slice 4 (docs/my-work.md): what the request produced, as claude-mem 15.1's drawer shows it,
+// read once its page opens and again when the request changes. Nothing shows while it reads, nor
+// when there is nothing, as no empty field is shown.
+function myWorkProducts(row) {
+  const box = el('section', 'my-work-products');
+  box.hidden = true;
+  const fill = (list) => {
+    if (!list.length) return;
+    box.replaceChildren(word('h3', null, 'my_work_products'),
+      el('ul', 'my-work-product-list', ...list.map(myWorkProduct)));
+    box.hidden = false;
+  };
+  const key = `${row.id}\n${row.version}`;
+  if (mw.products?.key === key) {
+    fill(mw.products.list);
+  } else {
+    const ask = ++mw.productsAsk;
+    api('my-work/product', { request: row.id }).then((answer) => {
+      if (ask !== mw.productsAsk) return;
+      mw.products = { key, list: answer.products || [] };
+      if (mw.request === row.id) fill(mw.products.list);
+    }).catch(() => {});
+  }
+  return box;
+}
+
+function myWorkProduct(p) {
+  const label = `my_work_kind_${String(p.kind).replace(/-/g, '_')}`;
+  const kind = Object.hasOwn(TEXT, label) ? word('span', 'my-work-product-kind', label) : el('span', 'my-work-product-kind', p.kind);
+  let title = el('span', null, p.title);
+  // The answer holds only http and https links; the page checks again before it makes one.
+  if (/^https?:\/\//i.test(p.url || '')) {
+    title = el('a', null, p.title);
+    title.href = p.url;
+    title.target = '_blank';
+    title.rel = 'noopener noreferrer';
+  }
+  return el('li', null, kind, ' ', title, p.path ? el('code', 'my-work-product-path', p.path) : null,
+    p.at ? el('span', 'meta', localTime(p.at, lang)) : null);
 }
 
 // claude-mem's review dialog (`openReview`), in the page: this viewer opens a request within the

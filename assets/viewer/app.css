@@ -866,6 +866,11 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-work-recorded { margin: 10px 0; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
 .my-work-recorded summary { cursor: pointer; font-weight: 600; }
 .my-work-ids { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 10px 0 0; }
+.my-work-product-list { display: grid; gap: 6px; list-style: none; padding: 0; margin: 10px 0 0; }
+.my-work-product-list li { min-width: 0; overflow-wrap: anywhere; }
+.my-work-product-kind { display: inline-block; padding: 0 6px; font-size: 0.8em; border: 1px solid var(--line); border-radius: var(--radius-s, 4px); }
+.my-work-product-path { display: block; margin-top: 2px; font-size: 0.85em; }
+.my-work-product-list .meta { margin-left: 6px; }
 .my-work-ids li { min-width: 0; }
 .my-work-ids li:has(> section) { flex-basis: 100%; }
 .my-work-ids button { min-height: 28px; padding: 2px 8px; background: var(--surface); color: var(--text); border-color: var(--line); font: 12.5px/1.4 var(--mono); }

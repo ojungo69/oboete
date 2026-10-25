@@ -1230,6 +1230,60 @@ panel.querySelectorAll('button').find(n=>text(n)==='← Back to request').click(
 assert.equal(document.activeElement,streamsOf()[2].querySelector('button'),'the focus returns to that one, not its namesake');
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
 assert(document.activeElement?.dataset.id===masked,'back returns the focus to the card that opened it, a masked id too');
+// Slice 4: a request's work product, read each time its page opens and once a version while it stays open; a link only for
+// http and https, opening apart from the page; a path shown as text; an empty answer, no section.
+{
+const asked=[];let products=[];
+ctx.fetch=url=>{asked.push(url);return Promise.resolve(response({products}));};
+const box=()=>panel.querySelector('.my-work-products');
+const back=()=>panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+products=[{kind:'commit',title:'abc1234 Fix the parser',url:'https://github.com/o/r/commit/abc1234',path:null,at:now-H},
+  {kind:'document',title:'notes.pdf',url:null,path:'/work/notes.pdf',at:null},
+  {kind:'link',title:'Not a link',url:'javascript:alert(1)',path:null,at:null}];
+set([req('p1',{version:'v1'})]);
+card('p1').querySelector('button').click();
+assert(box().hidden,'the section waits for its answer');
+await new Promise(resolve=>setImmediate(resolve));
+assert.deepEqual(asked,['/api/my-work/product?request=p1'],'the page asks for its request');
+const shownProducts=text(box());
+assert(!box().hidden&&shownProducts.includes('Work product'),'the section shows what was read');
+const links=box().querySelectorAll('a');
+assert.equal(links.length,1,'only an http or https address is a link');
+assert.equal(links[0].href,'https://github.com/o/r/commit/abc1234');
+assert.equal(links[0].target,'_blank');assert.equal(links[0].rel,'noopener noreferrer');
+for(const fragment of ['Commit','Document','notes.pdf','/work/notes.pdf','Not a link']){
+  assert(shownProducts.includes(fragment),`the work product shows: ${fragment}`);
+}
+run('myWorkDraw()');
+assert(asked.length===1&&!box().hidden,'a redraw of the open page shows what was read, not read again');
+back();
+card('p1').querySelector('button').click();
+assert(box().hidden,'opened again, the page reads again: records and rules change it, not the version (Codex on #650)');
+await new Promise(resolve=>setImmediate(resolve));
+assert(asked.length===2&&!box().hidden,'and shows the new answer');
+back();
+products=[];
+set([req('p2')]);
+card('p2').querySelector('button').click();
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(asked.length,3,'another request is read');
+assert(box().hidden,'nothing read, no section');
+back();
+// An earlier opening's answer that arrives after a later one's is not kept (CodeRabbit on #650).
+const held=[];
+ctx.fetch=url=>{asked.push(url);const list=products;return new Promise(resolve=>held.push(()=>resolve(response({products:list}))));};
+set([req('p3',{version:'v1'})]);
+products=[{kind:'commit',title:'Earlier answer',url:null,path:null,at:null}];
+card('p3').querySelector('button').click();
+back();
+products=[{kind:'commit',title:'Later answer',url:null,path:null,at:null}];
+card('p3').querySelector('button').click();
+held[1]();await new Promise(resolve=>setImmediate(resolve));
+held[0]();await new Promise(resolve=>setImmediate(resolve));
+run('myWorkDraw()');
+assert(text(box()).includes('Later answer')&&!text(box()).includes('Earlier answer'),'the later answer stays');
+back();
+}
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
 // updates", and an unchanged answer does nothing.
 set([req('h1')]);
@@ -1445,7 +1499,7 @@ ctx.ui.setLang('ja');set([req('j1',{status:'needs'})]);
 assert(text(panel).includes('対応が必要')&&text(panel).includes('マイワーク')===false,'the page draws in Japanese');
 assert.equal(text(document.getElementById('heading')),'マイワーク','its heading too');
 ctx.ui.setLang('en');
-console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times, Copy handoff and Checked, in both languages');
+console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times, the work product, Copy handoff and Checked, in both languages');
 }
 
 // Parity row X9: a long prompt is clamped behind Show more, as claude-mem's PromptCard does; a short one has no button.
