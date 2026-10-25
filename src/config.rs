@@ -1139,14 +1139,22 @@ pub struct Worker {
 /// Whether a Messages entry's `extra` asks for a prompt cache of its own anywhere: at the top of
 /// the request, or on a block of its `system`, `tools` or `messages`, for any lifetime.
 fn own_cache(extra: &serde_json::Map<String, serde_json::Value>) -> bool {
-    fn asks(v: &serde_json::Value) -> bool {
+    cache_markers(extra) > 0
+}
+
+/// The cache breakpoints a Messages entry's `extra` takes: the request's own at the top (automatic
+/// caching), and one for each block it marks with `cache_control`.
+pub(crate) fn cache_markers(extra: &serde_json::Map<String, serde_json::Value>) -> usize {
+    fn marked(v: &serde_json::Value) -> usize {
         match v {
-            serde_json::Value::Object(o) => o.contains_key("cache_control") || o.values().any(asks),
-            serde_json::Value::Array(a) => a.iter().any(asks),
-            _ => false,
+            serde_json::Value::Object(o) => {
+                usize::from(o.contains_key("cache_control")) + o.values().map(marked).sum::<usize>()
+            }
+            serde_json::Value::Array(a) => a.iter().map(marked).sum(),
+            _ => 0,
         }
     }
-    extra.contains_key("cache_control") || extra.values().any(asks)
+    usize::from(extra.contains_key("cache_control")) + extra.values().map(marked).sum::<usize>()
 }
 
 /// `home`'s `[worker]`, by its own parse as `inject`'s. An error is not "off": a worker that

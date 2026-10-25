@@ -1731,11 +1731,12 @@ fn anthropic_request(
 /// that names its fence, are the same bytes for every call of its kind (`curate::FENCE_SENTENCE`,
 /// G09): they go in a block of their own that writes the prompt cache, for five minutes or as the
 /// entry's own `cache_control` asks (a longer cache must come first), so a call within that time
-/// reads them at a tenth of the input price. Any other prompt goes whole.
+/// reads them at a tenth of the input price. Any other prompt goes whole, as does one whose entry's
+/// `extra` already takes every breakpoint a request may have (Codex on #636).
 fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>) -> Value {
     let Some(n) = prompt
         .find(crate::curate::FENCE_SENTENCE)
-        .filter(|&n| n > 0)
+        .filter(|&n| n > 0 && crate::config::cache_markers(extra) < ANTHROPIC_BREAKPOINTS)
     else {
         return Value::String(prompt.to_owned());
     };
@@ -1748,6 +1749,9 @@ fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>) -> Va
         {"type": "text", "text": &prompt[n..]},
     ])
 }
+
+/// The cache breakpoints a Messages request may have, automatic caching's among them.
+const ANTHROPIC_BREAKPOINTS: usize = 4;
 
 /// Keywords the Messages API refuses in a schema with a 400: numeric and string bounds, and array
 /// bounds other than a `minItems` of 0 or 1.
@@ -7816,6 +7820,21 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(content["content"][0]["cache_control"]["ttl"], "1h");
         let plain = anthropic_request("m", PROBE_PROMPT, &schema, &none);
         assert_eq!(plain["messages"][0]["content"], PROBE_PROMPT);
+        // A request has at most four breakpoints, automatic caching's among them (Codex on #636):
+        // an entry whose own take all four leaves the prompt whole, and one with three gets ours.
+        let marked = json!({"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}});
+        let three = json!({"system": [marked, marked, marked]});
+        let mut four = three.clone();
+        four["cache_control"] = json!({"type": "ephemeral"});
+        let five = json!({"system": [marked, marked, marked, marked, marked]});
+        for (extra, split) in [(&three, true), (&four, false), (&five, false)] {
+            let body = anthropic_request("m", &fenced, &schema, extra.as_object().unwrap());
+            let content = &body["messages"][0]["content"];
+            assert_eq!(content.is_array(), split, "{extra}");
+            if !split {
+                assert_eq!(content, &json!(fenced), "{extra}");
+            }
+        }
     }
 
     /// What a call's input is billed as: on a Messages entry a token read from its prompt cache
