@@ -232,6 +232,37 @@ fn a_legacy_copied_home_refuses_a_new_native_records_forget_before_registration(
     assert!(ok(run(home, &["get", &fresh], "")).contains("legacy-home-still-records-642"));
 }
 
+/// Parity row 3 (Codex on #655): `forget --continue --wait`, which a forget from the page starts
+/// while another purge runs, waits for that purge's lock and then goes on.
+#[test]
+fn a_continue_that_waits_goes_on_after_the_purge_that_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let running = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("purge.lock"))
+        .unwrap();
+    running.lock().unwrap();
+    let mut child = command(home.path(), &["forget", "--continue", "--wait"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "it waits while the purge runs"
+    );
+    drop(running);
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn record(home: &Path, body: &str) -> String {
     let projects = home.join("claude/projects/synthetic");
     std::fs::create_dir_all(&projects).unwrap();

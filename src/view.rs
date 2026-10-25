@@ -1205,6 +1205,8 @@ impl Viewer {
             ("POST", "/api/privacy/capture") => (MAX_BODY, |v, b, _| v.capture(b)),
             ("POST", "/api/claims/correct") => (MAX_BODY, |v, b, _| v.claim_correct(b)),
             ("POST", "/api/claims/mute") => (MAX_BODY, |v, b, _| v.claim_mute(b)),
+            ("POST", "/api/forget/preview") => (MAX_BODY, |v, b, _| v.forget_preview(b)),
+            ("POST", "/api/forget/start") => (MAX_BODY, |v, b, _| v.forget_start(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
@@ -1661,6 +1663,19 @@ impl Viewer {
 
     fn claim_mute(&self, body: &[u8]) -> Response {
         saved(crate::settings::claims::mute(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
+    /// Parity row 3: what forgetting an item the page shows takes, and the key its start brings.
+    fn forget_preview(&self, body: &[u8]) -> Response {
+        saved(crate::settings::forget::preview(&self.home, body))
+    }
+
+    fn forget_start(&self, body: &[u8]) -> Response {
+        saved(crate::settings::forget::start(
             &self.home,
             &self.saving,
             body,
@@ -2401,7 +2416,7 @@ type SessionPosition = (i64, String, i64);
 
 /// docs/page.md S2 and S4: what names a session in the page's requests, 16 hex digits of a hash
 /// of its agent and session: no label of it, and the same whichever of its prompts a forget took.
-fn session_key(agent: &str, session: &str) -> String {
+pub(crate) fn session_key(agent: &str, session: &str) -> String {
     let digest = Sha256::digest(format!("{agent}\0{session}"));
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -5695,6 +5710,8 @@ curate = false
             "/api/claims/correct",
             "/api/claims/mute",
             "/api/preferences",
+            "/api/forget/preview",
+            "/api/forget/start",
         ] {
             save_guards(&v, path, MAX_BODY, b"{}");
             for method in ["PUT", "PATCH", "OPTIONS", "DELETE"] {
@@ -5706,6 +5723,61 @@ curate = false
             );
         }
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    /// Parity row 3: the page forgets a session through its two routes, the start with the
+    /// preview's key, and the page's reads show it gone at once; another session stays.
+    #[test]
+    fn the_page_forgets_a_session_and_its_reads_show_it_gone() {
+        let mut s = search::b::fixture::Store::new();
+        // The second session goes: a key that named the first would not be the one asked for.
+        s.said("s1", "r", 1_000, "Keep this one.");
+        s.said("s2", "r", 2_000, "Forget this conversation.");
+        s.run();
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let post = |path: &str, body: Value| -> (u16, Value) {
+            let body = serde_json::to_vec(&body).unwrap();
+            let len = body.len().to_string();
+            let h = [
+                HOST,
+                TOKEN,
+                ("Origin", "http://127.0.0.1:4321"),
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            let r = request(&v, "POST", path, &h, &body);
+            (r.status, json_of(&r))
+        };
+        let titled = |title: &str| {
+            let listed = get(&v, "/api/sessions?all=1");
+            (listed["sessions"].as_array().unwrap().iter())
+                .find(|s| s["title"] == title)
+                .map(|s| s["key"].as_str().unwrap().to_owned())
+        };
+        let key = titled("Forget this conversation.").unwrap();
+        let item = json!({"kind": "session", "id": key});
+        let (status, shown) = post("/api/forget/preview", json!({ "item": item }));
+        assert_eq!(
+            (status, shown["records"].as_u64()),
+            (200, Some(1)),
+            "{shown}"
+        );
+        let (status, started) = post(
+            "/api/forget/start",
+            json!({"item": item, "preview_key": shown["preview_key"], "confirmed": true}),
+        );
+        assert_eq!(
+            (status, &started["started"]),
+            (200, &json!(true)),
+            "{started}"
+        );
+        assert_eq!(titled("Forget this conversation."), None);
+        assert!(titled("Keep this one.").is_some());
+        let feed = get(&v, "/api/feed?all=1").to_string();
+        assert!(
+            !feed.contains("Forget this conversation.") && feed.contains("Keep this one."),
+            "{feed}"
+        );
     }
 
     /// Egress is process-wide: a test that exercises its real configuration runs alone in a child

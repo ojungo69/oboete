@@ -312,6 +312,20 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 .lead { color: var(--muted); margin: 0 0 16px; max-width: 72ch; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.actions:has(.forget-control) { align-items: flex-start; }
+.forget-preview {
+  max-width: 36rem;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--red);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}
+.forget-preview p { margin: 0 0 8px; }
+.forget-preview button.danger { color: var(--red); border-color: var(--red); }
+.forget-preview button.danger:hover:not(:disabled) { background: var(--red-bg); }
 .relation { font-size: 13px; color: var(--muted); margin: 8px 0; }
 .relation button, .claim-links button { overflow-wrap: anywhere; text-align: left; max-width: 100%; }
 
