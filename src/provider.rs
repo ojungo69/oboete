@@ -511,15 +511,18 @@ fn probe_attempt(
         return Ok(report("blocked", code, None, None, None));
     }
     let est = probe_estimate(&p);
-    let reservation = match budget::reserve_with_history(
-        db,
-        (&p, history),
-        "probe",
-        "connection-test",
-        est,
-        paid_cap,
-        &[],
-    )? {
+    let reserve = || {
+        budget::reserve_with_history(
+            db,
+            (&p, history),
+            "probe",
+            "connection-test",
+            est,
+            paid_cap,
+            &[],
+        )
+    };
+    let mut reservation = match reserve()? {
         Ok(reservation) => reservation,
         Err(refusal) => {
             let (code, retry_at) = probe_refusal(&p, refusal);
@@ -534,6 +537,7 @@ fn probe_attempt(
     let result = match ready {
         Err(error) => Err(error),
         Ok(()) => {
+            let switch = switched(&p);
             let admission = match gate() {
                 Ok(admission) => admission,
                 Err(error) => {
@@ -541,12 +545,59 @@ fn probe_attempt(
                     return Err(error);
                 }
             };
-            probe_send(
+            let sent = probe_send(
                 &p,
                 admission,
                 #[cfg(test)]
                 cli_executable,
-            )
+            );
+            match sent {
+                // A model that refused the reasoning switch is asked again without it, as the
+                // chain asks it (Codex on #643): the refused attempt settled, then the budget and
+                // the gate again.
+                Err(e) if switch && refused_switch(&p, &e) => {
+                    let usd = reservation.cost(&p, e.usage, e.sent && e.status.is_none());
+                    let detail = format!("http {}: probe refused", e.status.unwrap_or(400));
+                    reservation.settle(
+                        db,
+                        &providers_db::Call {
+                            provider: p.name(),
+                            role: "probe",
+                            span: "connection-test",
+                            outcome: "error",
+                            ms: started.elapsed().as_millis() as i64,
+                            detail: Some(&detail),
+                            bytes_out: PROBE_PROMPT.len(),
+                            est_tokens: Some(est),
+                            usage: e.usage,
+                            usd,
+                        },
+                        e.rate,
+                        |state| state,
+                    )?;
+                    reservation = match reserve()? {
+                        Ok(reservation) => reservation,
+                        Err(refusal) => {
+                            let (code, retry_at) = probe_refusal(&p, refusal);
+                            return Ok(report("blocked", code, None, None, retry_at));
+                        }
+                    };
+                    let admission = match gate() {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            reservation.cancel(db)?;
+                            return Err(error);
+                        }
+                    };
+                    probe_send(
+                        &p,
+                        admission,
+                        #[cfg(test)]
+                        cli_executable,
+                    )
+                }
+                sent => sent,
+            }
         }
     };
     match result {
@@ -951,6 +1002,7 @@ impl<'a> Chain<'a> {
                 None
             };
             let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
+            let switch = switched(p);
             let mut result = if forced {
                 drop(admission);
                 Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)"))
@@ -958,25 +1010,35 @@ impl<'a> Chain<'a> {
                 ready.and_then(|()| call(p, prompt, schema, admission))
             };
             let sent = report_sent(reservation.id(), forced, &result, observer);
-            // The retry is a second request: only when the daily budget has room for it.
-            if let Err(e) = &result
-                && e.status == Some(429)
-                && p.retry_429()
+            // A second request goes through the budget and the egress gate again, so nothing
+            // forgotten since the first goes out (Codex on #643): after a 429 that names a short
+            // wait, or for a model that refused the reasoning switch, which it then goes without.
+            let again = match &result {
+                Err(e) if e.status == Some(429) && p.retry_429() => {
+                    (e.retry_after_s.filter(|&wait| wait <= MAX_WAIT_S)).map(|wait| {
+                        let detail = format!("429, retry in {wait:.0}s");
+                        ("wait", detail, Some(wait), e.rate)
+                    })
+                }
+                Err(e) if switch && refused_switch(p, e) => {
+                    Some(("error", e.message.clone(), None, e.rate))
+                }
+                _ => None,
+            };
+            // Only when the daily budget has room for it.
+            if let Some((outcome, detail, wait, rate)) = again
                 && used < budget::daily(conn, p)?
-                && let Some(wait) = e.retry_after_s
-                && wait <= MAX_WAIT_S
             {
-                let detail = format!("429, retry in {wait:.0}s");
                 let ms = started.elapsed().as_millis() as i64;
-                let until = db::now_ms() + (wait * 1_000.0).ceil() as i64;
-                // A 429 is an answer with an HTTP error status: not billed.
+                let until = wait.map(|wait| db::now_ms() + (wait * 1_000.0).ceil() as i64);
+                // An answer with an HTTP error status: not billed.
                 reservation.settle_report(
                     conn,
                     &providers_db::Call {
                         provider: &name,
                         role,
                         span,
-                        outcome: "wait",
+                        outcome,
                         ms,
                         detail: Some(&detail),
                         bytes_out: prompt.len(),
@@ -984,15 +1046,17 @@ impl<'a> Chain<'a> {
                         usage: Usage::default(),
                         usd: None,
                     },
-                    e.rate,
+                    rate,
                     |state| providers_db::State {
-                        down_until: state.down_until.max(until),
+                        down_until: until.map_or(state.down_until, |u| state.down_until.max(u)),
                         ..state
                     },
                     sent,
                     observer,
                 )?;
-                std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
+                if let Some(wait) = wait {
+                    std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
+                }
                 reservation = match budget::reserve(
                     conn,
                     p,
@@ -1542,9 +1606,104 @@ fn openai_compat(
     )
 }
 
-/// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy.
+/// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy; a call
+/// to OpenRouter asks for no reasoning (`reasoning_switch`). A model that refuses the switch is
+/// asked again without it by the caller (`refused_switch`), through the egress gate again.
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
 fn http_call(
+    api: Api,
+    base_url: &str,
+    key_file: Option<&Path>,
+    model: &str,
+    timeout_s: u64,
+    extra: &serde_json::Map<String, Value>,
+    headers: &std::collections::BTreeMap<String, String>,
+    prompt: &str,
+    schema: &Value,
+    admission: Option<crate::dispatch::Guard>,
+    redirects: u32,
+) -> Result<Answer, CallError> {
+    let mut off;
+    let extra = if reasoning_switch(api, base_url, model, extra) {
+        off = extra.clone();
+        off.insert("reasoning".into(), json!({"enabled": false}));
+        &off
+    } else {
+        extra
+    };
+    http_send(
+        api, base_url, key_file, model, timeout_s, extra, headers, prompt, schema, admission,
+        redirects,
+    )
+}
+
+/// Whether `p`'s next call sends the reasoning switch.
+fn switched(p: &Provider) -> bool {
+    matches!(p, Provider::Openai { api, base_url, model, extra, .. }
+        if reasoning_switch(*api, base_url, model, extra))
+}
+
+/// Whether `e` is `p`'s model refusing the reasoning switch: it gets none from then on.
+fn refused_switch(p: &Provider, e: &CallError) -> bool {
+    let Provider::Openai { model, .. } = p else {
+        return false;
+    };
+    if !e.message.ends_with(REASONING_REFUSED) {
+        return false;
+    }
+    if let Ok(mut refused) = NO_REASONING_SWITCH.lock()
+        && !refused.iter().any(|m| m == model)
+    {
+        refused.push(model.clone());
+    }
+    true
+}
+
+/// Models whose OpenRouter endpoint refused the reasoning switch in this process: they reason
+/// whatever a request asks, and are called without it.
+static NO_REASONING_SWITCH: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// What a refusal of the reasoning switch adds to a call's error message.
+const REASONING_REFUSED: &str = " (reasoning refused)";
+
+/// claude-mem 15.0.2: a call to OpenRouter asks for no reasoning, unless its entry sets reasoning
+/// itself or its model refused the switch. A reasoning-by-default model otherwise thinks for
+/// seconds to a minute before a curator's answer (8 to 36 s against 2 s, OpenRouter's free
+/// dots-3-note-preview, 2026-10-25), and can spend its whole output on it and answer nothing.
+fn reasoning_switch(
+    api: Api,
+    base_url: &str,
+    model: &str,
+    extra: &serde_json::Map<String, Value>,
+) -> bool {
+    api == Api::Openai
+        && reaches_openrouter(base_url)
+        && !["reasoning", "reasoning_effort", "include_reasoning"]
+            .iter()
+            .any(|k| extra.contains_key(*k))
+        && NO_REASONING_SWITCH
+            .lock()
+            .is_ok_and(|refused| !refused.iter().any(|m| m == model))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A loopback URL a test calls as OpenRouter's.
+    static OPENROUTER_AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn reaches_openrouter(base_url: &str) -> bool {
+    #[cfg(test)]
+    if OPENROUTER_AT.with(|at| at.borrow().as_deref() == Some(base_url)) {
+        return true;
+    }
+    config::openrouter(base_url)
+}
+
+/// `http_call`'s request, as it is given.
+#[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
+fn http_send(
     api: Api,
     base_url: &str,
     key_file: Option<&Path>,
@@ -1630,6 +1789,9 @@ fn http_call(
         if moderation(&text) {
             message.push_str(" (moderation)");
         }
+        if matches!(status, 400 | 422) && names_reasoning(&text) {
+            message.push_str(REASONING_REFUSED);
+        }
         // Spent credits are not luck: the entry rests as a spent month's budget does.
         let spent =
             api == Api::Anthropic && (status == 402 || status == 400 && credits_spent(&text));
@@ -1657,13 +1819,25 @@ fn http_call(
         return anthropic_answer(&v, rate);
     }
     let usage = usage_openai(&v);
-    let content = v["choices"][0]["message"]["content"]
+    let choice = &v["choices"][0];
+    // claude-mem 15.0.2 (#2995): a model that spends its whole output on reasoning answers
+    // nothing, cut at its length limit, and fails as such.
+    if choice["message"]["content"]
         .as_str()
-        .ok_or_else(|| {
-            CallError::other("invalid output: no choices[0].message.content")
-                .with_usage(usage)
-                .rated(rate)
-        })?;
+        .is_none_or(|c| c.trim().is_empty())
+        && choice["finish_reason"].as_str() == Some("length")
+    {
+        return Err(CallError::other(
+            "invalid output: the answer reached its length limit before any text",
+        )
+        .with_usage(usage)
+        .rated(rate));
+    }
+    let content = choice["message"]["content"].as_str().ok_or_else(|| {
+        CallError::other("invalid output: no choices[0].message.content")
+            .with_usage(usage)
+            .rated(rate)
+    })?;
     Ok(Answer {
         value: answer_value(content),
         usage,
@@ -1987,6 +2161,18 @@ fn moderation(body: &str) -> bool {
         }
         Err(_) => hit(body),
     }
+}
+
+/// Whether an error refuses the reasoning switch ("Reasoning is mandatory for this endpoint and
+/// cannot be disabled.", OpenRouter, 2026-10-25). Only the error's own message is read, as
+/// `moderation` reads it.
+fn names_reasoning(body: &str) -> bool {
+    error_body(body).is_some_and(|v| {
+        let e = v.get("error").unwrap_or(&v);
+        e["message"]
+            .as_str()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("reasoning"))
+    })
 }
 
 /// Whether an Anthropic 400 says the account's credits are spent ("Your credit balance is too low
@@ -4873,41 +5059,269 @@ child.wait()
         body: Vec<u8>,
         extra_headers: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
+        serve_each(vec![(status, body)], extra_headers)
+    }
+
+    /// `serve` for one request after another, each answered in turn.
+    fn serve_each(
+        answers: Vec<(&'static str, Vec<u8>)>,
+        extra_headers: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            let mut req = Vec::new();
-            let mut buf = [0u8; 4096];
-            // Read the headers and the JSON body (its length is in Content-Length).
-            while let Ok(n) = conn.read(&mut buf) {
-                req.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&req).to_lowercase();
-                if let Some(end) = text.find("\r\n\r\n") {
-                    let len = text
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if req.len() >= end + 4 + len {
+            for (status, body) in answers {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read the headers and the JSON body (its length is in Content-Length).
+                while let Ok(n) = conn.read(&mut buf) {
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req).to_lowercase();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if req.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                    if n == 0 {
                         break;
                     }
                 }
-                if n == 0 {
-                    break;
-                }
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                conn.write_all(head.as_bytes()).ok();
+                conn.write_all(&body).ok();
+                tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
             }
-            let head = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            conn.write_all(head.as_bytes()).ok();
-            conn.write_all(&body).ok();
-            tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// The JSON body of a request a test server received.
+    fn request_body(request: &str) -> Value {
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    /// One OpenAI-compatible call with `extra`, to `url` as OpenRouter's when `openrouter`.
+    fn send_to(
+        url: &str,
+        model: &str,
+        extra: Value,
+        openrouter: bool,
+    ) -> Result<Answer, CallError> {
+        OPENROUTER_AT.set(openrouter.then(|| url.to_owned()));
+        http_call(
+            Api::Openai,
+            url,
+            None,
+            model,
+            10,
+            extra.as_object().unwrap(),
+            &Default::default(),
+            "p",
+            &json!({}),
+            None,
+            0,
+        )
+    }
+
+    /// claude-mem 15.0.2: a call to OpenRouter asks for no reasoning, unless its entry sets
+    /// reasoning itself; a call elsewhere gets no such field.
+    #[test]
+    fn an_openrouter_call_asks_for_no_reasoning_unless_its_entry_sets_it() {
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"},
+            "finish_reason": "stop"}]})
+        .to_string()
+        .into_bytes();
+        let cases = [
+            (json!({}), true, Some(json!({"enabled": false}))),
+            (
+                json!({"reasoning": {"effort": "low"}}),
+                true,
+                Some(json!({"effort": "low"})),
+            ),
+            (json!({"reasoning_effort": "low"}), true, None),
+            (json!({"include_reasoning": true}), true, None),
+            (json!({}), false, None),
+        ];
+        for (extra, openrouter, reasoning) in cases {
+            let (url, request) = serve_once(answer.clone(), "");
+            let a = send_to(&url, "switch-asked", extra.clone(), openrouter).unwrap();
+            assert_eq!(a.value, json!({"summary": "s"}));
+            let body = request_body(&request.recv().unwrap());
+            assert_eq!(
+                body.get("reasoning"),
+                reasoning.as_ref(),
+                "{extra} {openrouter}"
+            );
+        }
+    }
+
+    /// A model that cannot stop reasoning refuses the switch with a 400, unbilled: the chain asks
+    /// again without it, after the budget and the egress gate again, as a 429's retry does (Codex
+    /// on #643), and the model gets no switch from then on; the settings probe does the same.
+    /// Another 400 is no refusal and is not sent again.
+    #[test]
+    fn a_model_that_refuses_the_reasoning_switch_is_asked_again_without_it() {
+        let refused = || {
+            json!({"error": {"message":
+                "Reasoning is mandatory for this endpoint and cannot be disabled.", "code": 400}})
+            .to_string()
+            .into_bytes()
+        };
+        let answer = |content: &str| {
+            json!({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+                .to_string()
+                .into_bytes()
+        };
+        let (url, requests) = serve_each(
+            vec![
+                ("400 Bad Request", refused()),
+                ("200 OK", answer("{\"summary\": \"s\"}")),
+                ("200 OK", answer("{\"summary\": \"s\"}")),
+            ],
+            "",
+        );
+        OPENROUTER_AT.set(Some(url.clone()));
+        let mut p = stub(url);
+        if let Provider::Openai { model, .. } = &mut p {
+            *model = "switch-refused".into();
+        }
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let first = std::cell::RefCell::new(None);
+        let gates = std::cell::Cell::new(0);
+        let gate = || {
+            gates.set(gates.get() + 1);
+            // The second request's gate comes after the first went out.
+            if gates.get() == 2 {
+                let sent = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+                *first.borrow_mut() = Some(request_body(&sent));
+            }
+            Ok(None)
+        };
+        let run = |p: &Provider| {
+            Chain::new(std::slice::from_ref(p), &conn).gate(&gate).run(
+                "curator",
+                "s",
+                "synthetic",
+                &json!({}),
+            )
+        };
+        assert_eq!(run(&p).unwrap().output, json!({"summary": "s"}));
+        assert_eq!(gates.get(), 2);
+        assert_eq!(outcomes(&conn), ["error", "ok"]);
+        let first = first.borrow_mut().take().unwrap();
+        assert_eq!(first["reasoning"], json!({"enabled": false}));
+        let second = request_body(&requests.recv().unwrap());
+        assert!(second.get("reasoning").is_none(), "{second}");
+        run(&p).unwrap();
+        let third = request_body(&requests.recv().unwrap());
+        assert!(third.get("reasoning").is_none(), "{third}");
+
+        let (url, requests) = serve_each(
+            vec![
+                ("400 Bad Request", refused()),
+                ("200 OK", answer("{\"ok\":true}")),
+            ],
+            "",
+        );
+        OPENROUTER_AT.set(Some(url.clone()));
+        let mut probed = stub(url);
+        if let Provider::Openai { model, .. } = &mut probed {
+            *model = "switch-refused-probe".into();
+        }
+        let probes = std::cell::Cell::new(0);
+        let gate = || {
+            probes.set(probes.get() + 1);
+            Ok(None)
+        };
+        let result = probe(&conn, &probed, 5.0, &gate).unwrap();
+        assert_eq!(result["code"], "ok", "{result}");
+        assert_eq!(probes.get(), 2);
+        assert_eq!(
+            request_body(&requests.recv().unwrap())["reasoning"],
+            json!({"enabled": false})
+        );
+        assert!(
+            request_body(&requests.recv().unwrap())
+                .get("reasoning")
+                .is_none()
+        );
+        // Each request settles (Codex on #643): the refused one, then the answered one.
+        assert_eq!(outcomes(&conn)[3..], ["error", "ok"]);
+        // A probe at its entry's last request of the day is not sent again.
+        let (url, requests) = serve_each(vec![("400 Bad Request", refused())], "");
+        OPENROUTER_AT.set(Some(url.clone()));
+        let mut last = stub(url);
+        if let Provider::Openai {
+            model,
+            name,
+            daily_budget,
+            ..
+        } = &mut last
+        {
+            *model = "switch-refused-last".into();
+            *name = "last".into();
+            *daily_budget = Some(1);
+        }
+        let result = probe(&conn, &last, 5.0, &|| Ok(None)).unwrap();
+        assert_eq!(result["status"], "blocked", "{result}");
+        assert!(requests.recv().is_ok());
+        assert!(requests.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(providers_db::calls_in_a_day(&conn, "last").unwrap().0, 1);
+
+        let other =
+            json!({"error": {"message": "Invalid schema for response_format", "code": 400}})
+                .to_string()
+                .into_bytes();
+        let (url, requests) = serve_each(vec![("400 Bad Request", other)], "");
+        OPENROUTER_AT.set(Some(url.clone()));
+        let mut plain = stub(url);
+        if let Provider::Openai { model, .. } = &mut plain {
+            *model = "switch-other-400".into();
+        }
+        let failed = Chain::new(&[plain], &conn)
+            .run("curator", "s", "synthetic", &json!({}))
+            .unwrap_err();
+        assert!(
+            !failed.to_string().contains("reasoning refused"),
+            "{failed}"
+        );
+        assert_eq!(
+            request_body(&requests.recv().unwrap())["reasoning"],
+            json!({"enabled": false})
+        );
+        assert!(requests.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    /// An answer cut at its length limit before any text, its output spent on reasoning, fails as
+    /// such with its usage; an empty answer that stopped on its own is read as before.
+    #[test]
+    fn an_answer_cut_at_its_length_limit_before_any_text_says_so() {
+        for content in [json!(""), json!(null), json!("  ")] {
+            let answer = json!({"choices": [{"message": {"content": content},
+                "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 4000}});
+            let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+            let e = send_to(&url, "cut", json!({}), false).unwrap_err();
+            assert!(e.invalid(), "{}", e.message);
+            assert!(e.message.contains("length limit"), "{}", e.message);
+            assert_eq!(e.usage.completion, Some(4000));
+        }
+        let stopped = json!({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]});
+        let (url, _) = serve_once(stopped.to_string().into_bytes(), "");
+        let a = send_to(&url, "cut", json!({}), false).unwrap();
+        assert_eq!(a.value, json!(""));
     }
 
     /// R14 (parity row 2): a call out keeps the worker's watchdog from calling the loop stuck for
