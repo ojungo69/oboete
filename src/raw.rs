@@ -10182,7 +10182,7 @@ mod tests {
             panic!("appended");
         };
         let held = [(device.clone(), seq)];
-        let past = std::collections::HashMap::from([(device, seq)]);
+        let past = std::collections::HashMap::from([(device.clone(), seq)]);
         assert_eq!(
             raw.append_note(&kept, (&held, &past), "/w/open", &settings, open_place)
                 .unwrap(),
@@ -10197,6 +10197,14 @@ mod tests {
         };
         assert_eq!(
             raw.append_note(&again, (&[], &none), "/w/open", &settings, open_place)
+                .unwrap(),
+            Noted::Kept
+        );
+        // #632: the first save indexed after the checkpoints were read and before the index rows
+        // were: no row holds it, and the checkpoint read is from before it.
+        let earlier = std::collections::HashMap::from([(device.clone(), seq - 1)]);
+        assert_eq!(
+            raw.append_note(&again, (&[], &earlier), "/w/open", &settings, open_place)
                 .unwrap(),
             Noted::Kept
         );

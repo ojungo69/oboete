@@ -618,18 +618,19 @@ impl Oboete {
         let read = (key.as_str(), Some(folder.as_str()));
         let k = crate::knowledge::open(&self.home).map_err(internal)?;
         crate::consumer::imported::schema(&k).map_err(internal)?;
-        // The ops the index says hold this uid, and how far it read each device's ops; the op log
-        // decides, in the note's transaction (`Raw::append_note`).
+        // How far the index read each device's ops, then the ops it says hold this uid; the op log
+        // decides, in the note's transaction (`Raw::append_note`). In this order an op the worker
+        // indexes between the two reads is in `held` or past the checkpoint read (#632).
+        let indexed: std::collections::HashMap<String, i64> = k
+            .prepare("SELECT device, seq FROM op_checkpoints WHERE consumer = 'imported'")
+            .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .map_err(|e| internal(e.into()))?;
         let held: Vec<(String, i64)> = k
             .prepare("SELECT op_device, op_seq FROM imported WHERE uid = ?1")
             .and_then(|mut st| {
                 st.query_map([&doc.uid], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect()
             })
-            .map_err(|e| internal(e.into()))?;
-        let indexed: std::collections::HashMap<String, i64> = k
-            .prepare("SELECT device, seq FROM op_checkpoints WHERE consumer = 'imported'")
-            .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
             .map_err(|e| internal(e.into()))?;
         let saved = format!(
             "Saved memory {}: {}. Repository: {repo}.",
