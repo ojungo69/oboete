@@ -249,6 +249,10 @@ pub type PromptPosition = (i64, String, i64);
 /// text is there to read: neither a forget's nor expired (`Raw::prompt_labels`).
 pub(crate) type PromptLabel = (String, i64, (String, String), bool);
 
+/// Whether a batch would repeat what the op log holds, asked in the batch's own transaction
+/// (`Raw::append_note`).
+type Repeats<'a> = &'a dyn Fn(&Connection) -> Result<bool>;
+
 /// One of this store's own work state writes (`Raw::native_work_writes`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkWrite {
@@ -5516,7 +5520,7 @@ impl Raw {
     /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
     /// it yields commit together, and with them the curation checkpoint (D2).
     pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
-        self.append_ops_from(ops, None, None, None)
+        self.append_ops_from(ops, None, None, None, None)
     }
 
     /// `append_ops` for claude-mem's work state lists, imported under `settings`: a list is also
@@ -5528,23 +5532,31 @@ impl Raw {
         ops: &[(OpKind, serde_json::Value)],
         settings: &crate::capture::Settings,
     ) -> Result<Vec<i64>> {
-        self.append_ops_from(ops, None, Some(settings), None)
+        self.append_ops_from(ops, None, Some(settings), None, None)
     }
 
-    /// `append_ops` for ops written from `cwd`, the label of the writer's working directory. A
-    /// work state op of a repository never recorded, or written from a folder never recorded, is
-    /// refused here (`NeverRecorded`), after every exclusion committed before this write (slice
-    /// 4a, Codex on #489).
+    /// `append_ops` for ops written from `cwd`, the label of the writer's working directory, and
+    /// with `kept`, what a batch would repeat (`append_note`). A work state op of a repository
+    /// never recorded, or written from a folder never recorded, is refused here (`NeverRecorded`),
+    /// after every exclusion committed before this write (slice 4a, Codex on #489).
     fn append_ops_from(
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
         cwd: Option<&str>,
         settings: Option<&crate::capture::Settings>,
         read: Option<(&str, Option<&str>)>,
+        kept: Option<Repeats<'_>>,
     ) -> Result<Vec<i64>> {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
+        // What the batch would repeat, asked in its own transaction (`append_note`): nothing is
+        // written, and no seq returned.
+        if let Some(kept) = kept
+            && kept(&tx)?
+        {
+            return Ok(Vec::new());
+        }
         // An agent's own writes: its work state, and the notes it saves (`append_note`).
         let fenced = |kind: OpKind, body: &serde_json::Value| {
             kind == OpKind::WorkState || kind == OpKind::Import && body["source"] == NOTE_SOURCE
@@ -5760,7 +5772,7 @@ impl Raw {
         )?;
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
-        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd, None, None)?[0])
+        Ok(self.append_ops_from(&[(OpKind::WorkState, op)], cwd, None, None, None)?[0])
     }
 
     /// `work_state` for a writer that holds its capture settings and its repository and folder as
@@ -5784,21 +5796,24 @@ impl Raw {
         let clock = seen.map_or(i64::MIN, |c| c + 1).max(crate::db::now_ms());
         let op = serde_json::json!({"repo": repo, "list": list, "fields": fields, "clock": clock});
         let ops = [(OpKind::WorkState, op)];
-        Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?[0])
+        Ok(self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read), None)?[0])
     }
 
     /// `save_memory` (claude-mem 13.35): an agent's note, `doc` of source `NOTE_SOURCE`, as this
     /// device's next op, under the fence a work state write takes (`work_state_under`): refused in
     /// its transaction (`NeverRecorded`) where the writer's place or the note's repository is
-    /// never recorded. Nothing is appended when forget names the note (D5), nor when one of the
-    /// ops knowledge.db says hold its uid (`held`, `(device, op_seq)`) is still in the op log (the
-    /// same uid, so the same repository, title and text): the op log, not the index, says it is
-    /// kept, so a restore that lost the op and has not rewound the index yet keeps no note away
-    /// (Codex on #525).
+    /// never recorded. Nothing is appended when forget names the note (D5), nor when the op log
+    /// holds its uid (the same uid, so the same repository and title and text, or the same
+    /// `sourceFingerprint`), asked in the note's transaction: at one of the ops knowledge.db says
+    /// hold it (`held`, `(device, op_seq)`), or past the op each device's index has read
+    /// (`indexed`, the imported consumer's checkpoints), so a save repeated before the worker
+    /// indexed the first appends nothing either (Codex on #629). The op log, not the index, says
+    /// it is kept, so a restore that lost the op and has not rewound the index yet keeps no note
+    /// away (Codex on #525).
     pub fn append_note(
         &mut self,
         doc: &ImportDoc,
-        held: &[(String, i64)],
+        (held, indexed): (&[(String, i64)], &std::collections::HashMap<String, i64>),
         cwd: &str,
         settings: &crate::capture::Settings,
         read: (&str, Option<&str>),
@@ -5808,19 +5823,38 @@ impl Raw {
         if forgotten_uid(&self.conn, &doc.uid)? || denied(&self.conn, Some(&origin), &text)? {
             return Ok(Noted::Forgotten);
         }
-        let mut in_log = self.conn.prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq = ?2 AND type = 'import'
-                             AND json_extract(body, '$.uid') = ?3)",
-        )?;
-        for (device, seq) in held {
-            if in_log.query_row(params![device, seq, doc.uid], |r| r.get::<_, bool>(0))? {
-                return Ok(Noted::Kept);
-            }
+        let mut devices = self.op_devices()?;
+        if !devices.contains(&self.device) {
+            devices.push(self.device.clone());
         }
-        drop(in_log);
+        let kept = |tx: &Connection| -> Result<bool> {
+            let mut at = tx.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq = ?2
+                                 AND type = 'import' AND json_extract(body, '$.uid') = ?3)",
+            )?;
+            for (device, seq) in held {
+                if at.query_row(params![device, seq, doc.uid], |r| r.get::<_, bool>(0))? {
+                    return Ok(true);
+                }
+            }
+            let mut after = tx.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2
+                                 AND type = 'import' AND json_extract(body, '$.uid') = ?3)",
+            )?;
+            for device in &devices {
+                let since = indexed.get(device).copied().unwrap_or(0);
+                if after.query_row(params![device, since, doc.uid], |r| r.get::<_, bool>(0))? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
         let ops = [(OpKind::Import, serde_json::to_value(doc)?)];
-        let seqs = self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read))?;
-        Ok(Noted::Appended(seqs[0]))
+        let seqs =
+            self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read), Some(&kept))?;
+        Ok(seqs
+            .first()
+            .map_or(Noted::Kept, |&seq| Noted::Appended(seq)))
     }
 
     /// `work_state_in` on this store.
@@ -10113,9 +10147,10 @@ mod tests {
         raw.exclude_capture(("folder", "/w/private"), false)
             .unwrap();
         let open_place = ("github.com/o/open", Some("/w/open"));
+        let none = std::collections::HashMap::new();
         let refused = raw.append_note(
             &note("github.com/o/secret", "a"),
-            &[],
+            (&[], &none),
             "/w/open",
             &settings,
             open_place,
@@ -10124,7 +10159,7 @@ mod tests {
         let below = ("github.com/o/open", Some("/w/private/sub"));
         let refused = raw.append_note(
             &note("github.com/o/open", "b"),
-            &[],
+            (&[], &none),
             "/w/private/sub",
             &settings,
             below,
@@ -10141,21 +10176,47 @@ mod tests {
         // An entry the op log no longer holds (a restore lost it) keeps nothing away.
         let stale = [(device.clone(), 9_999)];
         let Noted::Appended(seq) = raw
-            .append_note(&kept, &stale, "/w/open", &settings, open_place)
+            .append_note(&kept, (&stale, &none), "/w/open", &settings, open_place)
             .unwrap()
         else {
             panic!("appended");
         };
-        let held = [(device, seq)];
+        let held = [(device.clone(), seq)];
+        let past = std::collections::HashMap::from([(device.clone(), seq)]);
         assert_eq!(
-            raw.append_note(&kept, &held, "/w/open", &settings, open_place)
+            raw.append_note(&kept, (&held, &past), "/w/open", &settings, open_place)
                 .unwrap(),
             Noted::Kept
         );
+        // Codex on #629: the same uid again before the index read the first, its text another
+        // (a repeated `sourceFingerprint`), appends nothing; past what the index read, the log
+        // alone is asked.
+        let again = ImportDoc {
+            body: "Another text.".into(),
+            ..kept.clone()
+        };
+        assert_eq!(
+            raw.append_note(&again, (&[], &none), "/w/open", &settings, open_place)
+                .unwrap(),
+            Noted::Kept
+        );
+        // #632: the first save indexed after the checkpoints were read and before the index rows
+        // were: no row holds it, and the checkpoint read is from before it.
+        let earlier = std::collections::HashMap::from([(device.clone(), seq - 1)]);
+        assert_eq!(
+            raw.append_note(&again, (&[], &earlier), "/w/open", &settings, open_place)
+                .unwrap(),
+            Noted::Kept
+        );
+        assert!(matches!(
+            raw.append_note(&again, (&[], &past), "/w/open", &settings, open_place)
+                .unwrap(),
+            Noted::Appended(_)
+        ));
         let forget = serde_json::json!({"uid": kept.uid});
         raw.append_ops(&[(OpKind::Forget, forget)]).unwrap();
         assert_eq!(
-            raw.append_note(&kept, &[], "/w/open", &settings, open_place)
+            raw.append_note(&kept, (&[], &none), "/w/open", &settings, open_place)
                 .unwrap(),
             Noted::Forgotten
         );

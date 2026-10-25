@@ -1468,3 +1468,18 @@ for(const short of ['x'.repeat(600),Array.from({length:8},(_,i)=>`line ${i}`).jo
   assert.equal(buttons(prompt(short)).length,0,'a prompt within 8 lines and 600 characters has no button');
 }
 }
+
+// Parity row N3: a note an agent saved is a Feed card labelled Note, as claude-mem's feed shows a manual memory.
+{
+const entry=vm.runInContext('feedEntry',ctx);
+const note=()=>text(entry({kind:'note',id:'oboete-note:0123456789abcdef',ts:0,agent:null,repo_name:'r',repo:'r',
+  title:'Release tagging',subtitle:'',narrative:'Releases are tagged from main.',facts:[],concepts:[],files_read:[],files_modified:[]}));
+const shown=note();
+for(const part of ['Note','Release tagging','Saved by an agent','narrative','Releases are tagged from main.','oboete-note:0123456789abcdef'])
+  assert.ok(shown.includes(part),`a note's card shows ${part}: ${shown}`);
+ctx.ui.setLang('ja');
+const ja=note();
+assert.ok(ja.includes('メモ')&&ja.includes('エージェントが保存したメモ'),ja);
+ctx.ui.setLang('en');
+console.log('PASS: a saved note is a Feed card labelled Note, in both languages');
+}

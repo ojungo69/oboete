@@ -406,9 +406,16 @@ function feedFooter(item) {
   return el('footer', 'feed-card-footer', el('code', null, item.id), time);
 }
 
+// A note an agent saved has no subtitle of its own: it says whose it is, as claude-mem's manual
+// memory says "Manual memory" (row N3).
+function feedSubtitle(item) {
+  if (item.subtitle) return el('p', 'text feed-subtitle', item.subtitle);
+  return item.kind === 'note' ? word('p', 'text feed-subtitle', 'feed_note_subtitle') : null;
+}
+
 function feedCard(item) {
   const title = item.title ? el('h3', 'feed-title', item.title) : word('h3', 'feed-title', 'untitled');
-  const subtitle = item.subtitle ? el('p', 'text feed-subtitle', item.subtitle) : null;
+  const subtitle = feedSubtitle(item);
   const hasFacts = item.facts.length || item.concepts.length || item.files_read.length || item.files_modified.length;
   const facts = hasFacts ? el('section', 'feed-facts',
     item.facts.length ? el('ul', 'facts-list', ...item.facts.map((fact) => el('li', 'text', fact))) : null,
@@ -470,7 +477,8 @@ function promptText(text) {
 
 function feedEntry(item) {
   let card;
-  if (item.kind === 'card') card = feedCard(item);
+  // A note an agent saved is shown as claude-mem shows a manual memory: an observation (row N3).
+  if (item.kind === 'card' || item.kind === 'note') card = feedCard(item);
   else if (item.kind === 'summary') {
     const sections = ['investigated', 'learned', 'completed', 'next_steps', 'notes'];
     card = el('article', 'feed-card summary-card', feedHeader(item),
@@ -944,6 +952,8 @@ const TEXT = {
   feed_prompt: ['Prompt', 'プロンプト'],
   show_more: ['Show more', 'もっと見る'],
   show_less: ['Show less', '折りたたむ'],
+  feed_note: ['Note', 'メモ'],
+  feed_note_subtitle: ['Saved by an agent', 'エージェントが保存したメモ'],
   untitled: ['Untitled', 'タイトルなし'],
   facts: ['facts', '事実'],
   narrative: ['narrative', '説明'],

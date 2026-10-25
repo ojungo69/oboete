@@ -116,6 +116,11 @@ pub struct SaveMemoryArgs {
     /// active checkout.
     #[serde(default)]
     project: Option<String>,
+    /// claude-mem's free-form metadata. Its `sourceFingerprint` is read as claude-mem reads it;
+    /// the rest is not: claude-mem's server sends the checkout's project, so its `project` decides
+    /// nothing there.
+    #[serde(default)]
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -549,7 +554,21 @@ impl Oboete {
             "" => untitled(&body),
             t => t.to_owned(),
         };
-        let id = crate::curate::sha256_hex(&format!("{repo}\0{title}\0{body}"))[..16].to_owned();
+        // Parity row N3: claude-mem's `sourceFingerprint` (its memory-file bridge's replay key) is
+        // one note in a repository: a save that repeats it answers the first, as claude-mem's does.
+        // Its hash starts with a NUL, which no repository key starts with, so it is never a content
+        // id's (Codex on #629).
+        let fingerprint = (a.metadata.as_ref())
+            .and_then(|m| m.get("sourceFingerprint"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|f| !f.is_empty());
+        let id = match fingerprint {
+            Some(source) => {
+                crate::curate::sha256_hex(&format!("\0sourceFingerprint\0{repo}\0{source}"))
+            }
+            None => crate::curate::sha256_hex(&format!("{repo}\0{title}\0{body}")),
+        }[..16]
+            .to_owned();
         let doc = crate::raw::ImportDoc {
             uid: format!("{}:{id}", crate::raw::NOTE_SOURCE),
             source: crate::raw::NOTE_SOURCE.into(),
@@ -599,7 +618,13 @@ impl Oboete {
         let read = (key.as_str(), Some(folder.as_str()));
         let k = crate::knowledge::open(&self.home).map_err(internal)?;
         crate::consumer::imported::schema(&k).map_err(internal)?;
-        // The ops the index says hold this uid; the op log decides (`Raw::append_note`).
+        // How far the index read each device's ops, then the ops it says hold this uid; the op log
+        // decides, in the note's transaction (`Raw::append_note`). In this order an op the worker
+        // indexes between the two reads is in `held` or past the checkpoint read (#632).
+        let indexed: std::collections::HashMap<String, i64> = k
+            .prepare("SELECT device, seq FROM op_checkpoints WHERE consumer = 'imported'")
+            .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .map_err(|e| internal(e.into()))?;
         let held: Vec<(String, i64)> = k
             .prepare("SELECT op_device, op_seq FROM imported WHERE uid = ?1")
             .and_then(|mut st| {
@@ -612,7 +637,7 @@ impl Oboete {
             doc.uid,
             one_line(&doc.title)
         );
-        let seq = match raw.append_note(&doc, &held, &cwd, &settings, read) {
+        let seq = match raw.append_note(&doc, (&held, &indexed), &cwd, &settings, read) {
             Err(e) if e.is::<crate::raw::NeverRecorded>() => {
                 return failed(format!(
                     "nothing is recorded in {repo} or in this folder now: the note was not kept"
@@ -625,7 +650,13 @@ impl Oboete {
                     doc.uid
                 ));
             }
-            Ok(crate::raw::Noted::Kept) => return text(saved),
+            // Not `saved`: a repeated fingerprint's title need not be the one kept.
+            Ok(crate::raw::Noted::Kept) => {
+                return text(format!(
+                    "Memory already saved as {}. Repository: {repo}.",
+                    doc.uid
+                ));
+            }
             Ok(crate::raw::Noted::Appended(seq)) => seq,
         };
         let device = raw.device().to_owned();
@@ -2634,6 +2665,7 @@ mod tests {
                 text: text.into(),
                 title: title.map(String::from),
                 project: project.map(String::from),
+                metadata: None,
             }))
             .unwrap()
     }
@@ -2762,9 +2794,96 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, 1);
-        // claude-mem's `metadata` is not read, and a call that sends it is not refused.
+        // claude-mem's other `metadata` is not read, and a call that sends it is not refused.
         let args = json!({"text": "x", "metadata": {"source": "web"}});
         assert!(serde_json::from_value::<SaveMemoryArgs>(args).is_ok());
+    }
+
+    /// Parity row N3: claude-mem's `metadata.sourceFingerprint` is one note in a repository, the
+    /// first kept and answered again, however the text changes; its `metadata.project` files
+    /// nothing, as claude-mem's server sends the checkout's project.
+    #[test]
+    fn a_note_reads_claude_mems_metadata() {
+        let (s, server, _) = seeded("Parser errors go to stderr.");
+        let other = s.home.path().join("other");
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        std::fs::write(
+            other.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:o/other.git\n",
+        )
+        .unwrap();
+        let to = |project: Option<&str>, text: &str, metadata: serde_json::Value| {
+            body(
+                server
+                    .save_memory(Parameters(SaveMemoryArgs {
+                        text: text.into(),
+                        title: Some(text.into()),
+                        project: project.map(String::from),
+                        metadata: metadata.as_object().cloned(),
+                    }))
+                    .unwrap(),
+            )
+        };
+        let with = |text: &str, metadata| to(None, text, metadata);
+        let uid = |reply: &str| {
+            (reply.split_whitespace())
+                .find(|w| w.starts_with("oboete-note:"))
+                .map(|w| w.trim_end_matches([':', '.']).to_owned())
+                .unwrap()
+        };
+        let path = other.to_string_lossy().into_owned();
+        let own = with("Own checkout.", json!({"project": path}));
+        assert!(own.contains("Repository: github.com/o/r."), "{own}");
+        let first = with("Version one.", json!({"sourceFingerprint": "a"}));
+        let again = with("Version two.", json!({"sourceFingerprint": "a"}));
+        assert_eq!(uid(&first), uid(&again), "{first} / {again}");
+        assert!(
+            again.contains("Memory already saved as oboete-note:"),
+            "{again}"
+        );
+        let got = body(
+            server
+                .get(Parameters(GetArgs {
+                    id: Some(uid(&first)),
+                    ..Default::default()
+                }))
+                .unwrap(),
+        );
+        assert!(
+            got.contains("Version one.") && !got.contains("Version two."),
+            "{got}"
+        );
+        // Another fingerprint is another note, and so is the same one in another repository; an
+        // empty one is none, as claude-mem's.
+        let b = with("Version one.", json!({"sourceFingerprint": "b"}));
+        let elsewhere = to(
+            Some(&path),
+            "Version one.",
+            json!({"sourceFingerprint": "a"}),
+        );
+        assert!(
+            elsewhere.contains("Repository: github.com/o/other."),
+            "{elsewhere}"
+        );
+        let none = with("Version one.", json!({"sourceFingerprint": ""}));
+        let unnamed = with("Version three.", json!({"sourceFingerprint": ""}));
+        let uids: std::collections::HashSet<_> = [&first, &b, &elsewhere, &none, &unnamed]
+            .map(|r| uid(r))
+            .into();
+        assert_eq!(
+            uids.len(),
+            5,
+            "{first} / {b} / {elsewhere} / {none} / {unnamed}"
+        );
+        // Codex on #629: a fingerprint's id is never an ordinary note's, here one titled `source`
+        // whose text is the fingerprint.
+        let plain = body(save(&server, "notes/c.md", Some("source"), None));
+        let named = with("From c.", json!({"sourceFingerprint": "notes/c.md"}));
+        assert!(
+            !named.contains("already saved") && uid(&plain) != uid(&named),
+            "{plain} / {named}"
+        );
+        assert_eq!(notes(&s), 8);
     }
 
     /// A note goes to the repository `project` names, a directory or a repository oboete knows;

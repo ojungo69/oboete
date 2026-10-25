@@ -3417,6 +3417,24 @@ pub(crate) mod fixture {
             uid
         }
 
+        /// A note an agent saved (`save_memory`) to `repo` at `ts`: its uid.
+        pub fn note(&mut self, id: &str, repo: &str, ts: i64, title: &str, body: &str) -> String {
+            let doc = ImportDoc {
+                uid: format!("{}:{id}", crate::raw::NOTE_SOURCE),
+                source: crate::raw::NOTE_SOURCE.into(),
+                source_id: id.into(),
+                kind: "note".into(),
+                repo: repo.into(),
+                session: crate::raw::NOTE_SESSION.into(),
+                ts,
+                title: title.into(),
+                body: body.into(),
+            };
+            let uid = doc.uid.clone();
+            self.raw.append_imports(vec![doc]).unwrap();
+            uid
+        }
+
         /// An imported observation `id` of `kind` in `session`, filed under claude-mem project
         /// `project`, with a files op naming `read` and `modified` (docs/file-note.md F10): its uid.
         #[allow(clippy::too_many_arguments)]
