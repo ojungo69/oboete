@@ -691,6 +691,14 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS turns_repo ON turns(repo, ts);
          CREATE INDEX IF NOT EXISTS turns_through ON turns(device, through);",
     )?;
+    // Parity row 3: 1 for a summary removed from the page (`hide`), left out by every reader; its
+    // row stays, as what was asked is not asked again.
+    crate::claims::migrate(
+        k,
+        "SELECT count(*) = 0 FROM pragma_table_info('turns') WHERE name = 'hidden'",
+        "ALTER TABLE turns ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    crate::hide::schema(k)?;
     // knowledge.db's `user_version` 1: `turns_fts` holds the summaries' notes (#403). An index
     // built before them is built again, once: checked again under a write lock taken first, as
     // `claims::migrate` does, and waited for through the stores' initialization window, so a
@@ -743,8 +751,9 @@ pub fn recent(
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
         return Ok(Vec::new());
     }
+    let shown = crate::hide::shown(k, "turns", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM turns WHERE repo = ?1 AND skipped = 0
+        "SELECT {COLUMNS} FROM turns WHERE repo = ?1 AND skipped = 0 {shown}
          ORDER BY ts DESC, device DESC, op_seq DESC"
     ))?;
     let mut rows = st.query([repo])?;
@@ -772,8 +781,9 @@ pub fn page(
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
         return Ok((Vec::new(), false));
     }
+    let shown = crate::hide::shown(k, "turns", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM turns WHERE skipped = 0
+        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 {shown}
            AND (?1 IS NULL OR repo = ?1)
            AND (?5 IS NULL OR (agent = ?5 AND session = ?6))
            AND (?2 IS NULL OR (ts, device, op_seq) < (?2, ?3, ?4))
@@ -818,10 +828,40 @@ pub fn around(
     } else {
         "ts > ?2 ORDER BY ts, device, op_seq"
     };
+    let shown = crate::hide::shown(k, "turns", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 AND (?1 IS NULL OR repo = ?1) AND {side}"
+        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 {shown} AND (?1 IS NULL OR repo = ?1)
+           AND {side}"
     ))?;
     let mut rows = st.query(params![repo, at])?;
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
+        out.extend(read_row(r, raw, rules)?);
+    }
+    Ok(out)
+}
+
+/// Parity row 3: the summaries removed from the page, the newest first, at most `limit`, as
+/// Settings lists them to bring back; read as every reader reads a summary.
+pub(crate) fn removed(
+    k: &Connection,
+    raw: &Raw,
+    limit: usize,
+    rules: &Rules,
+) -> Result<Vec<TurnSummary>> {
+    if !crate::consumer::manifest::exists(k, "table", "turns")? {
+        return Ok(Vec::new());
+    }
+    if crate::hide::shown(k, "turns", "")?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut st = k.prepare(&format!(
+        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 AND hidden = 1
+         ORDER BY ts DESC, device DESC, op_seq DESC"
+    ))?;
+    let mut rows = st.query([])?;
     let mut out = Vec::new();
     while out.len() < limit
         && let Some(r) = rows.next()?
@@ -847,8 +887,9 @@ pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
         return Ok(None);
     }
+    let shown = crate::hide::shown(k, "turns", "")?;
     let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM turns WHERE device = ?1 AND op_seq = ?2 AND skipped = 0"
+        "SELECT {COLUMNS} FROM turns WHERE device = ?1 AND op_seq = ?2 AND skipped = 0 {shown}"
     ))?;
     let mut rows = st.query(params![device, op_seq])?;
     match rows.next()? {

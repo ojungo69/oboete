@@ -24,6 +24,7 @@ mod executable;
 mod failure;
 mod forget;
 mod gates;
+mod hide;
 mod hook;
 mod hookstate;
 mod import;

@@ -51,6 +51,8 @@ vm.runInContext(source.replace('await start();',''),ctx,{filename:sourcePath});
 vm.runInContext('globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;}};',ctx);
 // The view the page opens on, before the checks below change it.
 const initialView=vm.runInContext('view',ctx);
+// A whole settings answer, set by the W4 checks below for the later ones that open Settings.
+let validSettings=null;
 // The simple page uses the saved chain, including unavailable and disabled entries.
 {
 const simple=vm.runInContext('({status:simpleProviderStatus,models:simpleProviderModels,listed:catalogHasProvider,chain:simpleSavedChain,catalog:AI_CATALOG,mode:settingsMode})',ctx);
@@ -812,6 +814,7 @@ const settings=(extra={})=>({version:'v1',first_run:false,resident_supported:tru
     idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],
     daily_requests:[1,100000],retention_days:[1,36500]},
   view_runtime:{port:17373,mode:'foreground'},embedding:embedding(),...extra});
+validSettings=settings;
 const posted=[];let answers=[];let settingsGets=0;let settingsAnswer=null;let runStatus=null;
 ctx.fetch=(url,options)=>{
   if(options?.method==='POST'){posted.push({url,body:JSON.parse(options.body)});return Promise.resolve(answers.shift());}
@@ -905,7 +908,20 @@ assert.equal(w4.formOf(settings({embedding:undefined})).embedding,null,'an older
     const parts=panel.querySelector('.settings').children;
     assert(parts.length>3&&parts.every(part=>part!==null&&part!==undefined),`simple view, ${label}: no absent part`);
   }
+  // Parity row 3: what was removed from the page is listed here only while there is some.
+  const removedBlock=()=>panel.querySelectorAll('.simple-block').find(node=>node.dataset.simpleBlock==='hidden');
+  const removed={items:[{kind:'card',id:'12.0',title:'Azimuth parser',repo_name:'fern',ts:30}]};
+  f=w4.formOf({...settings(ready),hidden:removed});ctx.ui.setForm(f);ctx.ui.drawSettings();
+  assert(removedBlock()&&text(removedBlock()).includes('Azimuth parser'),'the simple page lists what was removed');
+  f=w4.formOf({...settings(ready),hidden:{items:[]}});ctx.ui.setForm(f);ctx.ui.drawSettings();
+  assert(!removedBlock(),'and shows no block while nothing is');
   vm.runInContext("settingsMode='detailed';",ctx);
+  f=w4.formOf({...settings(),hidden:removed});ctx.ui.setForm(f);ctx.ui.drawSettings();
+  assert(text(panel.querySelector('.hidden-settings')).includes('Azimuth parser'),'the detailed page lists it under maintenance');
+  assert.deepEqual(w4.formOf(settings()).hidden,removed,
+    "a save's answer, which has no list, keeps the one read (CodeRabbit on #658)");
+  assert.equal(w4.formOf({...settings(),hidden:null}).hidden,null,'a list Settings could not read says so');
+  ctx.ui.setForm(null);
 }
 f=w4.formOf(settings({embedding:embedding({workers_ai:{...embedding().workers_ai,account_id:'ACCT',daily_requests:500000,monthly_usd:0}})}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
@@ -2068,4 +2084,133 @@ assert.equal(document.getElementById('status').textContent,'Forgotten. The store
 ctx.ui.setForm(null);run('setView("timeline")');
 assert(requests.filter(r=>r.options.method).every(r=>r.options.method==='POST'),'every write is a POST');
 console.log('PASS: Forget: prompt/note/session/claim, preview counts, Cancel/Escape focus, confirmed POST, server reread, stale/refusals, one at a time and JA/EN');
+}
+
+// Parity row 3 (docs/card-hide.md): a card or a summary is removed from the page, Undo brings it
+// back, a refusal is named, and Settings lists what was removed to bring it back.
+{
+const run=code=>vm.runInContext(code,ctx);
+const settle=async()=>{for(let i=0;i<3;i++)await new Promise(resolve=>setImmediate(resolve));};
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const json=(value,status=200)=>({ok:status===200,status,headers:{get:()=> 'application/json'},json:async()=>structuredClone(value)});
+const card={kind:'card',id:'12.0',ts:30,agent:'claude',repo_name:'fern',repo:'example.test/team/fern',type:'feature',
+  title:'Azimuth parser',subtitle:'',narrative:'',facts:[],concepts:[],files_read:[],files_modified:[]};
+const summary={kind:'summary',id:'S13',ts:40,agent:'claude',repo_name:'fern',repo:'example.test/team/fern',
+  fields:{request:'Fix the parser.'}};
+const requests=[];
+// holdFeed: a feed read waits for the check to answer it; noisy: a reread writes the status line,
+// as a view's own reread may.
+let items=[summary,card],hidden={items:[]},holdFeed=false,noisy=false;
+ctx.fetch=(url,options={})=>{
+  const request={url,options,body:options.body?JSON.parse(options.body):null};requests.push(request);
+  if(options.method==='POST'||holdFeed&&url.startsWith('/api/feed?'))
+    return new Promise((resolve,reject)=>Object.assign(request,{resolve,reject}));
+  if(url.startsWith('/api/feed?')){if(noisy)run("setStatus('Reading the feed.')");return Promise.resolve(json({items,next:null}));}
+  if(url.startsWith('/api/repos?'))return Promise.resolve(json({current:'',repos:[]}));
+  if(url.startsWith('/api/hidden?'))return Promise.resolve(hidden?json(hidden):json({code:'hide_unavailable'},503));
+  if(url.startsWith('/api/settings?'))return Promise.resolve(json(validSettings()));
+  if(url.startsWith('/api/privacy?'))return Promise.resolve(json({available:false,repositories:[],rescan:{state:'unavailable'}}));
+  if(url.startsWith('/api/setup?')||url.startsWith('/api/embedding?'))return new Promise(()=>{});
+  throw new Error(`unexpected read: ${url}`);
+};
+ctx.ui.setLang('en');run('reposLoaded=true;setView("timeline")');
+await run('show()');
+const list=document.getElementById('list');
+const status=document.getElementById('status');
+// As a browser's: setting the text clears what was appended after it.
+Object.defineProperty(status,'textContent',{configurable:true,get(){return this.shown??'';},set(value){this.shown=value;this.children=[];}});
+const removeOf=id=>list.querySelectorAll('footer').find(f=>text(f).includes(id))
+  ?.querySelectorAll('button').find(b=>b.dataset.i18n==='hide_button');
+assert(removeOf('12.0')&&removeOf('S13'),'a card and a summary each have Remove from the page');
+assert(!list.querySelectorAll('button').some(b=>b.dataset.i18n==='forget_button'),'neither has Forget');
+removeOf('12.0').click();
+let post=requests.at(-1);
+assert.equal(post.url,'/api/hide');
+assert.deepEqual(post.body,{item:{kind:'card',id:'12.0'},hidden:true});
+items=[summary];noisy=true;
+post.resolve(json({state:'applied',hidden:true}));await settle();
+noisy=false;
+assert(!list.querySelectorAll('footer').some(f=>text(f).includes('12.0')),'the page reads again without the card');
+assert.equal(status.textContent,'Removed from the page. Undo it here, or later under Settings, Removed from the page.');
+let undo=status.children.filter(b=>b?.dataset?.i18n==='hide_undo').at(-1);
+assert(undo,'the result offers Undo');
+run("setStatus('')");
+assert.equal(status.textContent,'Removed from the page. Undo it here, or later under Settings, Removed from the page.',
+  'a redraw keeps the result');
+assert(status.children.filter(b=>b?.dataset?.i18n==='hide_undo').at(-1)===undo,'and its Undo');
+undo.click();
+post=requests.at(-1);
+assert.deepEqual(post.body,{item:{kind:'card',id:'12.0'},hidden:false});
+items=[summary,card];noisy=true;
+post.resolve(json({state:'applied',hidden:false}));await settle();
+noisy=false;
+assert(removeOf('12.0'),'Undo brings the card back');
+assert.equal(status.textContent,'Brought back to the page.','through a reread that writes the status line');
+// Undo pressed before the removal's reread answered: the removal's late result does not cover it.
+removeOf('12.0').click();
+holdFeed=true;items=[summary];
+requests.at(-1).resolve(json({state:'applied',hidden:true}));await settle();
+const removalRead=requests.at(-1);
+assert(removalRead.url.startsWith('/api/feed?'),'the removal reads the feed again');
+status.children.find(b=>b?.dataset?.i18n==='hide_undo').click();
+requests.at(-1).resolve(json({state:'applied',hidden:false}));await settle();
+const undoRead=requests.at(-1);
+assert(undoRead.url.startsWith('/api/feed?')&&undoRead!==removalRead);
+holdFeed=false;items=[summary,card];
+undoRead.resolve(json({items,next:null}));await settle();
+removalRead.resolve(json({items,next:null}));await settle();
+assert.equal(status.textContent,'Brought back to the page.','Undo\'s result stays');
+// An Undo refused while the removal's reread waits: the removal's late result does not hide why.
+removeOf('12.0').click();
+holdFeed=true;items=[summary];
+requests.at(-1).resolve(json({state:'applied',hidden:true}));await settle();
+const lateRead=requests.at(-1);
+status.children.find(b=>b?.dataset?.i18n==='hide_undo').click();
+requests.at(-1).resolve(json({code:'hide_unavailable'},503));await settle();
+assert.equal(status.textContent,'The memory is busy. Try again in a moment.');
+holdFeed=false;
+lateRead.resolve(json({items,next:null}));await settle();
+assert.equal(status.textContent,'The memory is busy. Try again in a moment.','the refusal stays');
+items=[summary,card];await run('show()');
+// A refusal is named; a summary is removed by its own kind; Japanese.
+ctx.ui.setLang('ja');await run('show()');
+removeOf('S13').click();
+post=requests.at(-1);
+assert.deepEqual(post.body,{item:{kind:'summary',id:'S13'},hidden:true});
+post.resolve(json({code:'hide_not_found',field:'item'},404));await settle();
+assert.equal(status.textContent,'すでにありません。ページを読み込み直してください。');
+removeOf('S13').click();
+requests.at(-1).resolve(json({state:'pending',hidden:true,code:'hide_pending'}));await settle();
+assert.equal(status.textContent,'受け付けました。記憶の更新が追いつくと、ページに反映されます。');
+// Settings lists what was removed, and brings it back.
+ctx.ui.setLang('en');
+hidden={items:[{kind:'summary',id:'S13',title:'Fix the parser.',repo_name:'fern',ts:40}]};
+ctx.ui.setView('settings');
+const render=await ctx.ui.showSettings();render();
+assert.deepEqual(ctx.ui.getForm().hidden,hidden,'opening Settings reads what was removed');
+ctx.ui.setForm(null);run('setView("timeline")');
+const f={hidden:{items:[{kind:'card',id:'12.0',title:'Azimuth parser',repo_name:'fern',ts:30}]}};
+const section=run('hiddenSection')(f);
+assert.equal(text(section.querySelector('h3')),'Removed from the page');
+assert(text(section).includes('Azimuth parser')&&text(section).includes('card')&&text(section).includes('fern'));
+assert.equal(run('hiddenSection')({hidden:{items:[]}}).querySelectorAll('p').at(-1).dataset.i18n,'hidden_none');
+assert.equal(run('hiddenSection')({hidden:null}).querySelectorAll('p').at(-1).dataset.i18n,'hidden_unavailable');
+assert.equal(run('hiddenSection')(f,true).dataset.simpleBlock,'hidden','the simple page shows it as one of its blocks');
+ctx.ui.setView('settings');ctx.ui.setForm(f);
+// The whole page is drawn by other checks: here, only that the list is drawn again.
+const drawSettings=run('drawSettings');let drawn=0;ctx.drawSettings=()=>{drawn++;};
+const restore=section.querySelectorAll('button').find(b=>b.dataset.i18n==='hidden_restore');
+hidden={items:[]};
+restore.click();
+post=requests.at(-1);
+assert.deepEqual(post.body,{item:{kind:'card',id:'12.0'},hidden:false});
+post.resolve(json({state:'applied',hidden:false}));await settle();
+assert(requests.some(r=>r.url.startsWith('/api/hidden?')),'the list is read again');
+assert.deepEqual(f.hidden,{items:[]});
+assert.equal(drawn,1,'Settings is drawn again with the list read');
+assert.equal(status.textContent,'Brought back to the page.');
+ctx.drawSettings=drawSettings;ctx.ui.setForm(null);run('setView("timeline")');
+delete status.textContent;status.children=[];
+assert(requests.filter(r=>r.options.method).every(r=>r.options.method==='POST'),'every write is a POST');
+console.log('PASS: Remove from the page: card and summary, Undo through redraws, refusals named, JA/EN, Settings list and Bring back');
 }

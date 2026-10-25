@@ -885,9 +885,17 @@ mod tests {
         );
         assert!(shown.contains("Parser errors go to stderr."), "{shown}");
         let dir = s.home.path().join("r");
+        // The backlog's age is counted in minutes from now, which can turn between the two reads.
+        let minutes = regex::Regex::new(r"/ \d+ min not yet curated").unwrap();
+        let aged = |text: &str| {
+            minutes
+                .replace_all(text.trim_end(), "/ N min not yet curated")
+                .into_owned()
+        };
+        assert!(minutes.is_match(&shown), "{shown}");
         assert_eq!(
-            shown.trim_end(),
-            crate::hook::inject_text(s.home.path(), &dir, None).trim_end()
+            aged(&shown),
+            aged(&crate::hook::inject_text(s.home.path(), &dir, None))
         );
         let elsewhere = tempfile::tempdir().unwrap();
         let other = body(

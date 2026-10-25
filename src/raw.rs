@@ -324,6 +324,9 @@ pub enum OpKind {
     WorkState,
     /// A claim's or an imported document's uid forgotten (milestone 5 D5): `{uid, job}`, no text.
     Forget,
+    /// A card or a session summary removed from the page, or brought back (parity row 3,
+    /// decision 57): a `hide::HideOp`, no text.
+    Hide,
 }
 
 impl OpKind {
@@ -339,6 +342,7 @@ impl OpKind {
             OpKind::Turn => "turn",
             OpKind::WorkState => "work_state",
             OpKind::Forget => "forget",
+            OpKind::Hide => "hide",
         }
     }
     pub(crate) fn from_name(name: &str) -> Option<Self> {
@@ -353,6 +357,7 @@ impl OpKind {
             Self::Turn,
             Self::WorkState,
             Self::Forget,
+            Self::Hide,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -1654,15 +1659,19 @@ impl std::error::Error for Restoring {}
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
 /// writes anything an older binary would mishandle, in any store or a backup segment. The newest
 /// this binary reads.
-pub(crate) const FORMAT: i64 = 3;
+pub(crate) const FORMAT: i64 = 4;
 
 /// What an open stamps, below `FORMAT` while a home holds nothing only a newer binary reads: 3
-/// comes with the first expiry batch (docs/retention.md), so a home whose retention never ran
-/// still opens in the binary before it.
+/// comes with the first expiry batch (docs/retention.md) and 4 with the first hide op
+/// (docs/card-hide.md), so a home that has neither still opens in the binaries before them.
 pub(crate) const OPEN_FORMAT: i64 = 2;
 
 /// The format of a home with an expired record, or an expiry batch begun (docs/retention.md).
 pub(crate) const EXPIRED_FORMAT: i64 = 3;
+
+/// The format of a home with a hide op (docs/card-hide.md): a binary before it stops at an op type
+/// it does not know.
+pub(crate) const HIDDEN_FORMAT: i64 = 4;
 
 /// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
 /// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
@@ -1708,6 +1717,14 @@ fn format_of(conn: &Connection) -> Result<i64> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     anyhow::ensure!(found <= FORMAT, NewerFormat { found });
     Ok(found)
+}
+
+/// raw.db's stamp raised to `to` in the caller's transaction: a stamp is never lowered.
+fn raise_format(conn: &Connection, to: i64) -> Result<()> {
+    if format_of(conn)? < to {
+        conn.execute_batch(&format!("PRAGMA user_version = {to}"))?;
+    }
+    Ok(())
 }
 
 /// Restore-lock waits: opens wait at most 2 s within their initialization budget (hooks 2 s,
@@ -4874,9 +4891,7 @@ impl Raw {
                 )
                 .unwrap();
         }
-        self.conn
-            .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))
-            .unwrap();
+        raise_format(&self.conn, EXPIRED_FORMAT).unwrap();
     }
 
     /// docs/retention.md: whether one of `device`'s records `from` to `to` expired.
@@ -6047,6 +6062,28 @@ impl Raw {
         Ok(found)
     }
 
+    /// Every op of `kind` on every device: its time, device, op seq and body (a body that does not
+    /// read is left out). For kinds with few ops, as `hide`'s.
+    pub(crate) fn every_op_of(
+        &self,
+        kind: OpKind,
+    ) -> Result<Vec<(i64, String, i64, serde_json::Value)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT ts, device, op_seq, body FROM ops WHERE type = ?1")?;
+        let rows = st.query_map([kind.name()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts, device, op_seq, body) = row?;
+            if let Ok(body) = serde_json::from_str(&body) {
+                out.push((ts, device, op_seq, body));
+            }
+        }
+        Ok(out)
+    }
+
     /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
     /// that the worker has not applied yet (`claims::Pending`).
     pub fn ops_of(
@@ -6826,8 +6863,7 @@ impl Rebuild {
                     ],
                 )?;
                 self.ledger(device, seq, &v)?;
-                self.conn
-                    .execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
+                raise_format(&self.conn, EXPIRED_FORMAT)?;
             }
             Some("removed") => {
                 // Restore only a complete explicitly carried triple. A legacy or malformed
@@ -6956,6 +6992,9 @@ impl Rebuild {
                 v["batch"].as_i64().context("batch")?
             ],
         )?;
+        if kind == OpKind::Hide {
+            raise_format(&self.conn, HIDDEN_FORMAT)?;
+        }
         Ok(())
     }
 
@@ -7375,8 +7414,8 @@ pub(crate) fn apply_expiry_owed(
         owe.execute(params![device, seq, ts])?;
         expire.execute(params![device, seq, ts, at])?;
     }
-    conn.execute_batch(&format!("PRAGMA user_version = {EXPIRED_FORMAT}"))?;
-    Ok(())
+    // Raised, never lowered: the ops replayed before it can hold a hide op (Codex on #658).
+    raise_format(conn, EXPIRED_FORMAT)
 }
 
 /// The copies of raw.db set aside in `home` (2c, decision 5), the live store never among them, and
@@ -8450,8 +8489,9 @@ const OP_NAMES: &[&str] = &[
 
 /// Slice 3e-4 (#478): an op's `body` of `kind` with each string `rules` find something in masked,
 /// one `*` for each character a finding touches, but the values of `OP_NAMES`; none when they find
-/// nothing or the body does not parse. A forget's op (a uid and a job) and a migration's (a
-/// checkpoint and hashes) hold no text. Unlike a record's masks, which keep its bytes for the
+/// nothing or the body does not parse. A forget's op (a uid and a job), a migration's (a
+/// checkpoint and hashes) and a hide's (what it names, by oboete's word and ids) hold no text:
+/// a rule for `card` would make a hide op name nothing (Codex on #658). Unlike a record's masks, which keep its bytes for the
 /// ledger's offsets, these never lengthen a text: a correction or a claim stays under its
 /// character cap (Codex on #487).
 pub(crate) fn masked_op_text(
@@ -8493,7 +8533,7 @@ pub(crate) fn masked_op_text(
             _ => false,
         }
     }
-    if matches!(kind, OpKind::Forget | OpKind::Migration) {
+    if matches!(kind, OpKind::Forget | OpKind::Migration | OpKind::Hide) {
         return None;
     }
     let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -8697,6 +8737,9 @@ fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Resul
             params![device, op_seq, kind, ts, body, batch],
         )?;
         seqs.push(op_seq);
+    }
+    if bodies.iter().any(|(kind, _)| *kind == OpKind::Hide.name()) {
+        raise_format(tx, HIDDEN_FORMAT)?;
     }
     Ok(seqs)
 }
@@ -9909,6 +9952,29 @@ mod tests {
         );
         let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// A hide op holds no text a rule masks: its target is oboete's word, so a rule that finds
+    /// `card` or `summary` leaves it naming what it removed (Codex on #658).
+    #[test]
+    fn a_hide_op_holds_no_text_a_rule_masks() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'card|summary' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        for target in ["card", "summary"] {
+            let body = serde_json::json!({
+                "target": target, "device": "d", "op_seq": 3, "n": 0, "hidden": true,
+            });
+            assert_eq!(
+                masked_op_text(OpKind::Hide, &body.to_string(), &rules),
+                None
+            );
+            assert!(masked_op_text(OpKind::Window, &body.to_string(), &rules).is_some());
+        }
     }
 
     /// Slice 3e-4 (Codex on #487): a window's `reason` is kept only when oboete set the window

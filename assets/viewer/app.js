@@ -17,10 +17,12 @@ function el(tag, cls, ...children) {
 // that many ms, through the redraws that clear it: a forget's result outlives the live view's next
 // redraw, which the forget itself brings (parity row 3).
 let statusHeld = null;
-function setStatus(text, isError = false, textLang = null, hold = 0) {
-  if (!text && statusHeld && Date.now() < statusHeld.until) ({ text, isError, textLang } = statusHeld);
-  else statusHeld = text && hold ? { text, isError, textLang, until: Date.now() + hold } : null;
+// `action`, a button after the text (a removal's Undo), is held with it.
+function setStatus(text, isError = false, textLang = null, hold = 0, action = null) {
+  if (!text && statusHeld && Date.now() < statusHeld.until) ({ text, isError, textLang, action } = statusHeld);
+  else statusHeld = text && hold ? { text, isError, textLang, action, until: Date.now() + hold } : null;
   $('status').textContent = text;
+  if (text && action) $('status').append(' ', action);
   $('status').classList.toggle('error', isError);
   if (textLang) $('status').lang = textLang;
   else $('status').removeAttribute('lang');
@@ -411,7 +413,8 @@ function feedFooter(item) {
   const time = localTime(item.ts, lang);
   time.dataset.feedTimestamp = String(item.ts);
   return el('footer', 'feed-card-footer', el('code', null, item.id), time,
-    ['prompt', 'note'].includes(item.kind) ? forgetControl(item.kind, item.id) : null);
+    ['prompt', 'note'].includes(item.kind) ? forgetControl(item.kind, item.id)
+      : ['card', 'summary'].includes(item.kind) ? hideControl(item.kind, item.id) : null);
 }
 
 // A note an agent saved has no subtitle of its own: it says whose it is, as claude-mem's manual
@@ -1518,6 +1521,21 @@ const TEXT = {
   forget_preview_failed: ['What it would forget could not be read.', '忘れる内容を読めませんでした。'],
   forget_failed: ['It was not forgotten.', '忘れられませんでした。'],
   forget_confirmation: ['It was not forgotten.', '忘れられませんでした。'],
+  hide_button: ['Remove from the page', 'ページから外す'],
+  hide_done: ['Removed from the page. Undo it here, or later under Settings, Removed from the page.', 'ページから外しました。ここで元に戻すか、あとで設定の「ページから外したもの」から戻せます。'],
+  hide_undo: ['Undo', '元に戻す'],
+  hide_restored: ['Brought back to the page.', 'ページに戻しました。'],
+  hide_pending: ['Recorded. The page shows it once the memory has caught up.', '受け付けました。記憶の更新が追いつくと、ページに反映されます。'],
+  hide_item: ['This cannot be removed from here.', 'これはここからは外せません。'],
+  hide_not_found: ['It is no longer there. Reload the page.', 'すでにありません。ページを読み込み直してください。'],
+  hide_unavailable: ['The memory is busy. Try again in a moment.', '記憶が使用中です。少し待ってからもう一度お試しください。'],
+  hidden_h: ['Removed from the page', 'ページから外したもの'],
+  simple_hidden_h: ['Removed from the page', 'ページから外したもの'],
+  simple_hidden_desc: ['Cards and summaries removed from the page, left out of session start, search and what agents are given until brought back.', 'ページから外したカードと要約です。戻すまで、会話の開始時・検索・エージェントに渡す内容にも出ません。'],
+  hidden_desc: ['Cards and summaries removed from the page. Until brought back, they are left out of the page, session start, search and what agents are given. To erase one, forget its conversation or the prompt it came from.', 'ページから外したカードと要約です。戻すまで、ページ・会話の開始時・検索・エージェントに渡す内容に出ません。完全に消すには、その会話か、もとになったプロンプトを忘れてください。'],
+  hidden_none: ['Nothing is removed.', '外したものはありません。'],
+  hidden_restore: ['Bring back', '戻す'],
+  hidden_unavailable: ['What was removed could not be read.', '外したものを読み込めませんでした。'],
   forget_key: ['It was not forgotten.', '忘れられませんでした。'],
   preference_h: ['A preference for every repository', 'すべてのリポジトリに共通する希望'],
   preference_desc: ['Save an owner preference for agents in every repository. It creates a new global claim; it does not rewrite existing claims. This operation makes no model request.', 'すべてのリポジトリでエージェントに伝える本人の希望を保存します。新しい共通の記憶を作り、既存の記憶は書き換えません。この操作ではモデルを呼び出しません。'],
@@ -3094,6 +3112,8 @@ function formOf(s) {
     retention: { days: s.retention?.days ?? null, edit: text(s.retention?.days), forever: (s.retention?.days ?? null) === null },
     redaction: { enabled: s.redaction?.enabled !== false, rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
     privacy: s.privacy || privacyUnavailable(),
+    // Opening Settings reads the list; a save's or another operation's answer keeps what was read.
+    hidden: 'hidden' in s ? s.hidden : form?.hidden ?? null,
     preference: preferenceDraft,
     maintenance: maintenanceDraft,
     chain: s.chain.map((e) => ({
@@ -3847,8 +3867,10 @@ async function runDoctor() {
 
 async function showSettings() {
   void refreshAgentInventory();
-  const [s, privacy] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable)]);
+  const [s, privacy, hidden] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable),
+    api('hidden').catch(() => null)]);
   s.privacy = privacy;
+  s.hidden = hidden;
   return () => {
     recoveryDraft.preview=null;
     recoveryDraft.confirmed=false;
@@ -4425,6 +4447,84 @@ function forgetControl(kind, id) {
     } finally { if (!preview) action.close(current()); }
   });
   return control;
+}
+
+// Parity row 3 (docs/card-hide.md): a card or a summary removed from the page alone, and brought
+// back. How long its result, with Undo, stays through the redraws the store's change brings.
+const HIDE_HOLD = 15000;
+
+async function hideWrite(kind, id, hidden) {
+  try {
+    const { res, answer } = await memoryWrite('hide', { item: { kind, id }, hidden });
+    if (res.ok) return answer;
+    // Held as a result is, so the reread a removal starts does not clear why its Undo failed.
+    setStatus(memoryFailure(res, answer), true, lang, HIDE_HOLD);
+  } catch {
+    setStatus(t('memory_result_unknown'), true, lang, HIDE_HOLD);
+  }
+  return null;
+}
+
+function hideControl(kind, id) {
+  const button = word('button', 'quiet small', 'hide_button');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    const answer = await hideWrite(kind, id, true);
+    button.disabled = false;
+    if (!answer) return;
+    const undo = word('button', 'quiet small', 'hide_undo');
+    undo.type = 'button';
+    undo.addEventListener('click', async () => {
+      if (undo.disabled) return;
+      undo.disabled = true;
+      const back = await hideWrite(kind, id, false);
+      if (!back) return;
+      const restored = t(back.state === 'pending' ? 'hide_pending' : 'hide_restored');
+      setStatus(restored, false, lang, HIDE_HOLD);
+      // A reread sets the status line itself.
+      if ((await refresh()) !== false) setStatus(restored, false, lang, HIDE_HOLD);
+    });
+    const done = t(answer.state === 'pending' ? 'hide_pending' : 'hide_done');
+    setStatus(done, false, lang, HIDE_HOLD, undo);
+    // Unless Undo was pressed meanwhile, which says its own result.
+    if ((await refresh()) !== false && !undo.disabled) setStatus(done, false, lang, HIDE_HOLD, undo);
+  });
+  return button;
+}
+
+async function refreshHidden(f) {
+  const listed = await api('hidden').catch(() => null);
+  if (!currentSettings(f)) return false;
+  f.hidden = listed;
+  drawSettings();
+  return listed !== null;
+}
+
+function hiddenSection(f, simple = false) {
+  const listed = f.hidden;
+  const rows = (listed?.items || []).map((item) => {
+    const back = word('button', 'quiet small', 'hidden_restore');
+    back.type = 'button';
+    back.addEventListener('click', async () => {
+      if (back.disabled) return;
+      back.disabled = true;
+      const answer = await hideWrite(item.kind, item.id, false);
+      if (!currentSettings(f)) return;
+      if (!answer) { back.disabled = false; return; }
+      const receipt = t(answer.state === 'pending' ? 'hide_pending' : 'hide_restored');
+      await refreshHidden(f);
+      if (currentSettings(f)) setStatus(receipt, false, lang);
+    });
+    const time = localTime(item.ts, lang);
+    return el('li', null, el('p', 'text', item.title || item.id),
+      el('p', 'desc', word('span', null, `feed_${item.kind}`), item.repo_name ? ` · ${item.repo_name} · ` : ' · ', time), back);
+  });
+  let listing = word('p', 'desc', 'hidden_unavailable');
+  if (listed) listing = rows.length ? el('ul', null, ...rows) : word('p', 'desc', 'hidden_none');
+  if (simple) return simpleBlock('hidden', listing);
+  return el('section', 'hidden-settings', word('h3', null, 'hidden_h'), word('p', 'desc', 'hidden_desc'), listing);
 }
 
 async function refreshPrivacy(f) {
@@ -6103,7 +6203,9 @@ function drawSimpleSettings(panel, f) {
     simpleBlock('inject', ...inject), captureSection(f, true),
     simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
       el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
-    simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents()))]));
+    simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents())),
+    // Only while something is removed, to bring it back from here too.
+    f.hidden?.items?.length ? hiddenSection(f, true) : null]));
 }
 
 function drawSettings() {
@@ -6292,7 +6394,7 @@ function drawSettings() {
   if(recovered)panel.append(recovered);
   panel.append(...present([el('p', 'lead', t('lead')), formEl,
     settingsGroup('agents', false, preferenceSection(f), agentInventorySection(), agentSetupSection()),
-    settingsGroup('maintenance', false, viewSection(f), doctorSection(), maintenanceSection(f))]));
+    settingsGroup('maintenance', false, viewSection(f), hiddenSection(f), doctorSection(), maintenanceSection(f))]));
   drawIn(panel);
 }
 

@@ -915,16 +915,21 @@ pub(crate) fn doctor_facts_in(k: &Connection, embedder: &str) -> DoctorFacts {
         "SELECT count(*) FROM active a WHERE NOT EXISTS (SELECT 1 FROM vector_keys v
            WHERE v.embedder = ?1 AND v.kind = 'c' AND v.key = a.uid)",
     );
-    let cards = count(
-        "SELECT count(*) FROM cards c WHERE c.replaced_by IS NULL AND NOT EXISTS (
+    // Parity row 3: a removed card or summary waits for no vector. A doctor can read a store the
+    // worker has not given the column yet.
+    let shown = |table: &str| crate::hide::shown(k, table, "x.").unwrap_or_default();
+    let cards = count(&format!(
+        "SELECT count(*) FROM cards x WHERE x.replaced_by IS NULL {} AND NOT EXISTS (
            SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.kind = 'o'
-             AND v.key = c.device || '.' || c.op_seq || '.' || c.n)",
-    );
-    let summaries = count(
-        "SELECT count(*) FROM turns t WHERE t.skipped = 0 AND NOT EXISTS (
+             AND v.key = x.device || '.' || x.op_seq || '.' || x.n)",
+        shown("cards")
+    ));
+    let summaries = count(&format!(
+        "SELECT count(*) FROM turns x WHERE x.skipped = 0 {} AND NOT EXISTS (
            SELECT 1 FROM vector_keys v WHERE v.embedder = ?1 AND v.kind = 's'
-             AND v.key = 'S' || t.device || '.' || t.op_seq)",
-    );
+             AND v.key = 'S' || x.device || '.' || x.op_seq)",
+        shown("turns")
+    ));
     let imports = count(
         "SELECT count(*) FROM imported i
          WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
@@ -1622,7 +1627,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             .collect::<rusqlite::Result<_>>()?,
         "o" => k
             .prepare_cached(&format!(
-                "SELECT {}, {CARD_DOC} FROM cards c WHERE replaced_by IS NULL
+                "SELECT {}, {CARD_DOC} FROM cards c WHERE replaced_by IS NULL AND hidden = 0
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                      AND v.kind = 'o' AND v.key = c.device || '.' || c.op_seq || '.' || c.n)
                  ORDER BY ts DESC LIMIT ?2",
@@ -1632,7 +1637,7 @@ fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Ve
             .collect::<rusqlite::Result<_>>()?,
         "s" => k
             .prepare_cached(&format!(
-                "SELECT {SUMMARY_DOC} FROM turns t WHERE skipped = 0
+                "SELECT {SUMMARY_DOC} FROM turns t WHERE skipped = 0 AND hidden = 0
                    AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
                      AND v.kind = 's' AND v.key = 'S' || t.device || '.' || t.op_seq)
                  ORDER BY ts DESC LIMIT ?2"
@@ -2200,7 +2205,8 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
             k.query_row(
                 &format!(
                     "SELECT {}, {CARD_DOC} FROM cards
-                     WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL",
+                     WHERE device = ?1 AND op_seq = ?2 AND n = ?3 AND replaced_by IS NULL
+                       AND hidden = 0",
                     crate::consumer::fts::CARD_COLUMNS
                 ),
                 params![device, op_seq, n],
@@ -2215,7 +2221,7 @@ fn current(raw: Option<&Raw>, k: &Connection, kind: &str, key: &str) -> Result<O
             k.query_row(
                 &format!(
                     "SELECT {SUMMARY_DOC} FROM turns
-                     WHERE device = ?1 AND op_seq = ?2 AND skipped = 0"
+                     WHERE device = ?1 AND op_seq = ?2 AND skipped = 0 AND hidden = 0"
                 ),
                 params![device, op_seq],
                 summary_read,
@@ -2908,6 +2914,57 @@ mod tests {
         ] {
             assert_eq!(skipped(&s, &key).as_deref(), Some("empty"), "{key}");
         }
+    }
+
+    /// Parity row 3 (docs/card-hide.md): a card and a summary removed from the page lose their
+    /// vectors and are sent to no embedder while removed; brought back, they are embedded again.
+    #[test]
+    fn a_card_and_a_summary_removed_from_the_page_lose_their_vectors_until_brought_back() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let seq = s.said("s", R, 1_000, "Ship the parser.");
+        let card = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Azimuth"}]),
+            false,
+        )[0]
+        .clone();
+        let summary = s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R,
+            "ts": 2_000, "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Fix the parser."}, "skipped": false}),
+        );
+        s.run();
+        embed_all(&s);
+        let device = s.raw.device().to_owned();
+        let both = vec![
+            format!("{device}.{card}"),
+            format!("S{device}.{}", &summary[1..]),
+        ];
+        let kept = |s: &Store| -> Vec<String> {
+            (keys(s).into_iter())
+                .filter(|(kind, _, why)| ["o", "s"].contains(&kind.as_str()) && why.is_none())
+                .map(|(_, key, _)| key)
+                .collect()
+        };
+        assert_eq!(kept(&s), both);
+        let hide = |kind: &str, id: &str, hidden: bool| {
+            let body = serde_json::json!({"item": {"kind": kind, "id": id}, "hidden": hidden});
+            let body = serde_json::to_vec(&body).unwrap();
+            crate::settings::hide::save(s.home.path(), &std::sync::Mutex::new(()), &body).unwrap();
+        };
+        hide("card", &card, true);
+        hide("summary", &summary, true);
+        assert!(kept(&s).is_empty(), "their vectors go");
+        let sent = stub.requests();
+        embed_all(&s);
+        assert_eq!(stub.requests(), sent, "nothing removed is sent");
+        hide("card", &card, false);
+        hide("summary", &summary, false);
+        embed_all(&s);
+        assert_eq!(kept(&s), both, "brought back, they are embedded again");
     }
 
     /// Tools slice 3 (V1, K6; Codex): each value of a card or a summary is gated alone, as its

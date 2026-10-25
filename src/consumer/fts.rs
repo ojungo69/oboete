@@ -222,7 +222,7 @@ pub(crate) fn turn_text(fields: &str) -> Joined {
 pub(crate) fn cards(k: &Connection, rowid: Option<i64>) -> Result<()> {
     let mut st = k.prepare(&format!(
         "SELECT rowid, {CARD_COLUMNS} FROM cards
-         WHERE replaced_by IS NULL AND (?1 IS NULL OR rowid = ?1)"
+         WHERE replaced_by IS NULL AND hidden = 0 AND (?1 IS NULL OR rowid = ?1)"
     ))?;
     let rows = st.query_map([rowid], |r| {
         Ok((r.get::<_, i64>(0)?, card_text(r, 1)?.text))
@@ -240,7 +240,8 @@ pub(crate) fn cards(k: &Connection, rowid: Option<i64>) -> Result<()> {
 /// Q4: every displayed summary field, `notes` among them since #403, never a skipped turn.
 pub(crate) fn turns(k: &Connection, rowid: Option<i64>) -> Result<()> {
     let mut st = k.prepare(
-        "SELECT rowid, fields FROM turns WHERE skipped = 0 AND (?1 IS NULL OR rowid = ?1)",
+        "SELECT rowid, fields FROM turns
+         WHERE skipped = 0 AND hidden = 0 AND (?1 IS NULL OR rowid = ?1)",
     )?;
     let rows = st.query_map([rowid], |r| {
         Ok((r.get::<_, i64>(0)?, turn_text(&r.get::<_, String>(1)?).text))
