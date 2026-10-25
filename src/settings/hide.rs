@@ -113,7 +113,8 @@ pub(crate) fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
 }
 
 /// The cards and summaries removed from the page, the newest first, each with its kind, its ID,
-/// its first line and its time, gated as every reader gates them.
+/// its first line, its repository's name and its time, gated as every reader gates them; the
+/// viewer's answer gate passes over it too, as the feed's.
 pub(crate) fn list(home: &Path) -> Result<Value, Refusal> {
     let unavailable = |e: anyhow::Error| {
         eprintln!("oboete: the removed cards could not be read: {e:#}");
@@ -126,19 +127,23 @@ pub(crate) fn list(home: &Path) -> Result<Value, Refusal> {
         .map_err(unavailable)?
         .rules;
     let local = raw.device().to_owned();
+    // As the feed names a repository.
+    let repo_name = |repo: &Option<String>| {
+        crate::consumer::manifest::repo_name(repo.as_deref().unwrap_or(""), &rules)
+    };
     let mut items = Vec::new();
     for c in crate::cards::removed(&k, &raw, LISTED, &rules).map_err(unavailable)? {
         items.push((
             c.ts,
             json!({"kind": "card", "id": c.id(&local), "title": c.row_title,
-            "repo": c.repo, "ts": c.ts}),
+            "repo_name": repo_name(&c.repo), "ts": c.ts}),
         ));
     }
     for s in crate::turns::removed(&k, &raw, LISTED, &rules).map_err(unavailable)? {
         items.push((
             s.ts,
             json!({"kind": "summary", "id": s.id(&local), "title": s.row,
-            "repo": s.repo, "ts": s.ts}),
+            "repo_name": repo_name(&s.repo), "ts": s.ts}),
         ));
     }
     items.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));

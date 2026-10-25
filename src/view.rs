@@ -1929,14 +1929,6 @@ impl Viewer {
                 Response::text(400, "status carries no query")
             };
         }
-        // Parity row 3: the cards and summaries removed from the page, to bring back.
-        if name == "hidden" {
-            return if query.is_empty() {
-                saved(crate::settings::hide::list(&self.home))
-            } else {
-                Response::text(400, "the list carries no query")
-            };
-        }
         self.api(name, &q).unwrap_or_else(|e| failed(&e))
     }
 
@@ -1980,6 +1972,12 @@ impl Viewer {
                     "why": why,
                 })
             }
+            // Parity row 3: the cards and summaries removed from the page, to bring back.
+            "hidden" if q.is_empty() => match crate::settings::hide::list(&self.home) {
+                Ok(listed) => listed,
+                Err(refused) => return Ok(saved(Err(refused))),
+            },
+            "hidden" => return Ok(bad("query")),
             "doc" => match search::b::get(&self.home, id)? {
                 Some(text) => json!({ "id": id, "text": text }),
                 None => return Ok(Response::text(404, "no such document")),
