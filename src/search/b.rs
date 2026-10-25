@@ -78,6 +78,9 @@ pub struct Query {
     pub order: Order,
     pub raw: RawArm,
     pub limit: usize,
+    /// MCP search's `offset` (#645): hits to page past, counted as pages of `limit` count them, a
+    /// delivered unit never split; every leg reaches `limit + offset` deep.
+    pub offset: usize,
     /// Evaluation only (Task 6, spec 8.2 M1): every leg leaves this session's documents out in
     /// SQL before its limit, its vector side too, as the question's own conversation holds the
     /// answer written after it; a document with no session stays. Claims are not filtered: an
@@ -573,7 +576,7 @@ pub fn prompt_near(
         if filter.1.is_empty() {
             continue;
         }
-        for (key, cosine) in near.knn_scored(&k, family, filter, (None, None), None)? {
+        for (key, cosine) in near.knn_scored(&k, family, filter, (None, None), None, 0)? {
             if cosine < crate::shortlist::MEANING {
                 break;
             }
@@ -739,6 +742,13 @@ pub(crate) fn curated_words(
 }
 
 fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
+    // Every leg reaches the page's last hit; the page is cut from them at the end (#645).
+    let page = (q.offset, q.limit);
+    let reach = Query {
+        limit: q.limit + q.offset,
+        ..q.clone()
+    };
+    let q = &reach;
     if !crate::raw::exists(home) {
         return Ok(Answer {
             hits: Vec::new(),
@@ -911,7 +921,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             Order::DateDesc => hits.sort_by_key(|h| std::cmp::Reverse(h.when)),
             Order::DateAsc => hits.sort_by_key(|h| h.when),
         }
-        hits = limit_units(hits, q.limit);
+        hits = page_units(hits, page);
         Ok(Answer { hits, vector })
     })
 }
@@ -928,7 +938,10 @@ fn raw_kinds(q: &Query) -> Option<(String, Vec<Value>)> {
 
 /// Apply the limit after ordering while keeping D2's claim units whole. Date order still
 /// uses each hit's own time; a unit that cannot fit is left out as `claims::place` leaves it.
-fn limit_units(hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
+/// With an offset (#645), units are filled a page's `limit` at a time, as the pages before showed
+/// them, and the page is the fill after `offset` hits' worth of fills: pages of one limit split
+/// the units between them and never a unit.
+fn page_units(hits: Vec<Hit>, (offset, limit): (usize, usize)) -> Vec<Hit> {
     let parents: HashMap<String, String> = hits
         .iter()
         .filter_map(|h| match &h.class {
@@ -937,7 +950,7 @@ fn limit_units(hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
         })
         .collect();
     if parents.is_empty() {
-        return hits.into_iter().take(limit).collect();
+        return hits.into_iter().skip(offset).take(limit).collect();
     }
     let root = |h: &Hit| {
         let mut key = h.key.clone();
@@ -946,20 +959,37 @@ fn limit_units(hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
         }
         key
     };
-    let mut sizes = HashMap::new();
-    for h in &hits {
-        *sizes.entry(root(h)).or_insert(0usize) += 1;
-    }
-    let mut seen = HashSet::new();
-    let mut kept = HashSet::new();
-    let mut left = limit;
+    // The units in the order their first hit comes, with their sizes.
+    let mut units: Vec<(String, usize)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
     for h in &hits {
         let key = root(h);
-        if seen.insert(key.clone()) && sizes[&key] <= left {
-            left -= sizes[&key];
-            kept.insert(key);
+        match at.get(&key) {
+            Some(&i) => units[i].1 += 1,
+            None => {
+                at.insert(key.clone(), units.len());
+                units.push((key, 1));
+            }
         }
     }
+    let mut placed = HashSet::new();
+    let mut fill = |mut left: usize| {
+        let mut kept = HashSet::new();
+        for (key, size) in &units {
+            if !placed.contains(key) && *size <= left {
+                left -= size;
+                kept.insert(key.clone());
+            }
+        }
+        placed.extend(kept.iter().cloned());
+        kept
+    };
+    let mut skip = if limit == 0 { 0 } else { offset };
+    while skip > 0 {
+        fill(skip.min(limit));
+        skip -= skip.min(limit);
+    }
+    let kept = fill(limit);
     hits.into_iter()
         .filter(|h| kept.contains(&root(h)))
         .collect()
@@ -1391,7 +1421,7 @@ impl Near {
         };
         let starts_out = q.no_starts && family == "r";
         let candidates = if q.types.is_some() || starts_out {
-            CANDIDATES as usize
+            (CANDIDATES as usize).max(depth)
         } else {
             depth
         };
@@ -1481,7 +1511,7 @@ impl Near {
         skip: Option<&str>,
         depth: usize,
     ) -> Result<Vec<String>> {
-        let mut scored = self.knn_scored(k, kind, ("repo", repos), span, skip)?;
+        let mut scored = self.knn_scored(k, kind, ("repo", repos), span, skip, depth)?;
         scored.truncate(depth);
         Ok(scored.into_iter().map(|(key, _)| key).collect())
     }
@@ -1496,6 +1526,7 @@ impl Near {
         (column, values): (&str, &[String]),
         span: (Option<i64>, Option<i64>),
         skip: Option<&str>,
+        depth: usize,
     ) -> Result<Vec<(String, f32)>> {
         let mut clauses = vec![
             "embedding MATCH vec_bit(?)".to_owned(),
@@ -1510,7 +1541,7 @@ impl Near {
         ];
         let mut args = vec![
             Value::Blob(crate::embed::bits(&self.vector)),
-            Value::Integer(CANDIDATES),
+            Value::Integer(CANDIDATES.max(depth as i64)),
             Value::Text(self.embedder.clone()),
         ];
         if kind != "i" {
@@ -1771,11 +1802,6 @@ fn claims_leg(
     }
     // A unit brings the claim that ended its earlier decision whatever that claim's time: an
     // earlier decision is never shown without it (D2), which `since` and `until` do not lift.
-    let slots = if q.types.is_some() || q.order != Order::Relevance {
-        depth
-    } else {
-        q.limit
-    };
     let mut units = claims::units(k, &shown, hidden)?;
     if let Some(filter) = &q.types {
         // A unit with an excluded mate cannot show its earlier claim on its own (D2).
@@ -1784,7 +1810,9 @@ fn claims_leg(
                 .all(|c| filter.accepts(&Class::Current, &c.kind))
         });
     }
-    let (units, _) = claims::place(units, slots);
+    // The leg keeps `depth`, in any order: the page is cut at the end, its units whole, and pages
+    // of one limit split them only as `page_units` fills them (#645).
+    let (units, _) = claims::place(units, depth);
     // A done linker can be pulled into a delivered unit from the lowered list. It takes
     // one place there, and must not be appended a second time below the other legs.
     let placed: HashSet<&str> = units.iter().flatten().map(|c| c.uid.as_str()).collect();
@@ -2295,7 +2323,12 @@ fn curated_leg(
     if let Some(near) = near {
         // The whole candidate pool, nearest first: a row its reader hides takes no place, so the
         // depth counts only the rows shown (Q3), as the full-text list's does.
-        let pool = near.query_knn(k, q, if summaries { "s" } else { "o" }, CANDIDATES as usize)?;
+        let pool = near.query_knn(
+            k,
+            q,
+            if summaries { "s" } else { "o" },
+            (CANDIDATES as usize).max(depth),
+        )?;
         let mut nearest = Vec::new();
         for id in pool {
             if nearest.len() == depth {
@@ -3911,6 +3944,59 @@ mod tests {
                 s.query(&one).hits.is_empty(),
                 "D2: the whole pair takes two places"
             );
+        }
+    }
+
+    /// #645: `offset` pages by whole units. At every offset, with limits 1 to 3, in each order, no
+    /// page holds the preference without the decision that replaced it or the decision without
+    /// it; pages of one limit show each unit that fits a page exactly once, none over the limit.
+    #[test]
+    fn pages_of_one_limit_keep_delivered_units_whole() {
+        let mut s = Store::new();
+        let text = "Indent widgets with tabs.";
+        let source = s.said("work", R, 1_000, text);
+        let earlier = s.claim(source, text, ("preference", "decided", "user"), &[]);
+        let later = s.decided(
+            R,
+            2_000,
+            "Indent widgets with spaces, never tabs.",
+            &[&earlier],
+        );
+        let others: Vec<String> = (0..3)
+            .map(|i| {
+                let said = format!("Indent widgets in module {i} alike.");
+                s.decided(R, 3_000 + i, &said, &[])
+            })
+            .collect();
+        s.run();
+        let total = 2 + others.len();
+        for order in [Order::Relevance, Order::DateDesc, Order::DateAsc] {
+            for limit in 1..=3 {
+                let page = |offset: usize| -> Vec<String> {
+                    let asked = Query {
+                        raw: RawArm::Off,
+                        order,
+                        limit,
+                        offset,
+                        ..q("indent widgets")
+                    };
+                    s.query(&asked).hits.into_iter().map(|h| h.key).collect()
+                };
+                for offset in 0..=total {
+                    let shown = page(offset);
+                    let at = format!("{order:?}, limit {limit}, offset {offset}: {shown:?}");
+                    assert_eq!(shown.contains(&earlier), shown.contains(&later), "{at}");
+                    assert!(shown.len() <= limit, "{at}");
+                }
+                let mut seen: Vec<String> = (0..=total).step_by(limit).flat_map(page).collect();
+                let mut whole = others.clone();
+                if limit >= 2 {
+                    whole.extend([earlier.clone(), later.clone()]);
+                }
+                seen.sort();
+                whole.sort();
+                assert_eq!(seen, whole, "{order:?}, limit {limit}");
+            }
         }
     }
 
@@ -6018,6 +6104,57 @@ mod tests {
         let near = prompt_near(s.home.path(), (a, &[]), text, &Default::default()).unwrap();
         let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
         assert_eq!(keys, ["claude-mem:test:own"]);
+    }
+
+    /// #645 (CodeRabbit on #644): a page past the bit index's `CANDIDATES` still gets the documents
+    /// only the meaning side finds, imported documents and cards alike, with a type filter too:
+    /// each leg's pool reaches the page's depth.
+    #[test]
+    fn a_deep_page_reaches_past_the_knn_candidates() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let text = "Payments retry on a gateway timeout.";
+        let n = CANDIDATES + 10;
+        let docs: Vec<_> = (0..n)
+            .map(|i| crate::raw::ImportDoc {
+                uid: format!("claude-mem:test:x{i}"),
+                source: "claude-mem:test".into(),
+                source_id: format!("x{i}"),
+                kind: "decision".into(),
+                repo: crate::import::repo("payments"),
+                session: "cm".into(),
+                ts: 1_000 + i,
+                title: String::new(),
+                body: text.into(),
+            })
+            .collect();
+        s.raw.append_imports(docs).unwrap();
+        for i in 0..n {
+            let seq = s.said("work", R, 2_000 + i, "Work on it.");
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "decision", "title": text}]),
+                false,
+            );
+        }
+        s.run();
+        embedded_by(&s, &stub);
+        let near = crate::embed::stub::vector(crate::embed::EMBEDDER, text);
+        for types in [None, Some("decision".parse().unwrap())] {
+            // Words no document holds, so the full-text side finds none; past both legs' 400.
+            let deep = Query {
+                text: "zqxvy wqkp".into(),
+                all: true,
+                types,
+                raw: RawArm::Off,
+                limit: 5,
+                offset: 2 * n as usize - 8,
+                ..Default::default()
+            };
+            let found = query_with(s.home.path(), &deep, Some(&near)).unwrap();
+            assert_eq!(found.hits.len(), 5, "{:?}", keys(&found));
+        }
     }
 
     /// #506: past `SESSION_FILTER` sessions the bit index is asked by the projects their documents
