@@ -273,16 +273,22 @@ pub fn phase(
         }
     }
     // Then every turn end after the last one asked for, kept back or given up, however many
-    // records follow it (Codex on C2), a page at a time (Codex on #371).
-    let mut after = last_asked(k, &device)?;
+    // records follow it (Codex on C2), a page at a time (Codex on #371). A look of this process
+    // that found none after the same one starts where it stopped (Codex on #637): a stretch with
+    // no reply is read once, not once for every window of it.
+    let asked_last = last_asked(k, &device)?;
+    let mut after = read_through(&device, asked_last, ck).unwrap_or(asked_last);
     // The turns kept back on the way, written a page at a time: the scan goes past them, so none
     // is read again at the next run (Codex on #371).
     let mut parked = Vec::new();
     loop {
         if replies.is_empty() {
             park(raw, &mut parked)?;
+            #[cfg(test)]
+            SCANNED.with(|s| s.borrow_mut().push((after, ck)));
             replies.extend(raw.replies_between(after, ck, PAGE)?);
             let Some(end) = replies.back().map(|r| r.seq) else {
+                read_to(&device, asked_last, ck);
                 break;
             };
             after = end;
@@ -369,6 +375,33 @@ pub fn phase(
     }
     park(raw, &mut parked)?;
     Ok(Phase::Idle)
+}
+
+/// How far this process's looks for turn ends read with none left to ask for, for each device: the
+/// last turn end asked for then, and the record the look read through. Lost with the process: the
+/// next one reads that stretch once.
+static NO_TURN_END: std::sync::Mutex<Vec<(String, i64, i64)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+thread_local! {
+    /// The spans this thread's looks for turn ends read, from and through.
+    static SCANNED: std::cell::RefCell<Vec<(i64, i64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Where a look for turn ends after `asked_last` starts on `device`, when one of this process read
+/// that far with none to ask for, no further than the checkpoint.
+fn read_through(device: &str, asked_last: i64, checkpoint: i64) -> Option<i64> {
+    let marks = NO_TURN_END.lock().ok()?;
+    let (_, asked, through) = marks.iter().find(|(d, ..)| d == device)?;
+    (*asked == asked_last && *through <= checkpoint).then_some(*through)
+}
+
+fn read_to(device: &str, asked_last: i64, through: i64) {
+    if let Ok(mut marks) = NO_TURN_END.lock() {
+        marks.retain(|(d, ..)| d != device);
+        marks.push((device.to_owned(), asked_last, through));
+    }
 }
 
 /// The op of a turn the exclusion list keeps back (D13): its labels alone, read from no record's
@@ -1188,6 +1221,64 @@ mod tests {
         assert_eq!(once(), Phase::Covered);
         assert_eq!(*asked.borrow(), ["summary", "window"]);
         assert_eq!(once(), Phase::Idle);
+    }
+
+    /// Codex on #637 (#640): a stretch with no turn end is read once by this process: the next look
+    /// starts where the last stopped, and reads only what came after.
+    #[test]
+    fn a_stretch_with_no_turn_end_is_read_once() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build."),
+                said("s1", "tool", "one"),
+                said("s1", "tool", "two"),
+            ],
+            &[window(1, 3, "Stepping.", &[])],
+        );
+        let look = |home: &Path| {
+            let mut raw = crate::raw::open(home).unwrap();
+            let k = crate::knowledge::open(home).unwrap();
+            let db = crate::providers_db::open(home).unwrap();
+            let summary = Summary {
+                curate: true,
+                ..Summary::default()
+            };
+            let mut never = |_: &str,
+                             _: &str,
+                             _: &crate::provider::AnswerCheck,
+                             _: &crate::provider::Gate|
+             -> Result<ChainResult> { panic!("no turn ended") };
+            SCANNED.take();
+            let phase = phase(
+                &mut raw,
+                &k,
+                &db,
+                &Rules::default(),
+                &summary,
+                "",
+                &mut never,
+            );
+            assert_eq!(phase.unwrap(), Phase::Idle);
+            SCANNED.take()
+        };
+        assert_eq!(look(home.path()), [(0, 3)]);
+        assert_eq!(look(home.path()), [(3, 3)]);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        for text in ["three", "four"] {
+            raw.append(&said("s1", "tool", text)).unwrap();
+        }
+        raw.append_ops(&[window(4, 5, "Stepping on.", &[])])
+            .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(look(home.path()), [(3, 5)]);
+        // A mark holds for its device, the same last turn end asked, and no further than the
+        // checkpoint.
+        read_to("elsewhere", 10, 20);
+        assert_eq!(read_through("elsewhere", 10, 30), Some(20));
+        assert_eq!(read_through("elsewhere", 5, 30), None);
+        assert_eq!(read_through("elsewhere", 10, 15), None);
+        assert_eq!(read_through("nowhere", 10, 30), None);
     }
 
     /// Decision 56 (T1): a summary its providers hold keeps the run's wait when no window is due,
