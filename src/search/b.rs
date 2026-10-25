@@ -26,10 +26,11 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 /// A reader's local model goes after this long without a search (D14), and one whose load
 /// failed is tried again after as long.
 const READER_IDLE: Duration = Duration::from_secs(10 * 60);
-/// The model the hooks keep warm (`warm`) goes after this long without a search or a hook record:
-/// of the 16 prompts of the week to 2026-10-17, 13 came within it of the hooks' last record, 10
-/// within `READER_IDLE` (parity row 31).
-const WARM_IDLE: Duration = Duration::from_secs(30 * 60);
+/// The model the hooks keep warm (`warm`) goes after this long without a search or a hook record
+/// (parity row 31): 4 hours since decision 56, so a prompt after a long pause finds it loaded too;
+/// at 30 minutes, 13 of the 16 prompts of the week to 2026-10-17 came within it of the hooks' last
+/// record, 10 within `READER_IDLE`.
+const WARM_IDLE: Duration = Duration::from_secs(4 * 60 * 60);
 /// Whether this process keeps its model warm (`keep_warm`): only the resident viewer does, so an
 /// MCP server or a CLI command keeps its own model no longer than `READER_IDLE`.
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -7452,9 +7453,11 @@ mod tests {
         let now = 100 * 60 * 60 * 1_000;
         let min = 60 * 1_000;
         assert!(warms(None, (5, now - min), now));
-        assert!(!warms(None, (5, now - 31 * min), now));
+        // Decision 56: within four hours, and not after them.
+        assert!(warms(None, (5, now - 239 * min), now));
+        assert!(!warms(None, (5, now - 241 * min), now));
         assert!(!warms(Some(5), (5, now), now));
-        assert!(warms(Some(5), (6, now - 31 * min), now));
+        assert!(warms(Some(5), (6, now - 241 * min), now));
     }
 
     /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and
