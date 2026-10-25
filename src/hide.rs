@@ -27,9 +27,11 @@ pub(crate) const SUMMARY: &str = "summary";
 
 pub(crate) fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
-        "-- Each hide op kept: a rewind marks the cards and summaries again from those left.
+        "-- Each hide op kept, with its time: the newest one's mark is a card's or a summary's,
+         -- whatever order the devices' ops are read in, and a rewind marks them again from those
+         -- left.
          CREATE TABLE IF NOT EXISTS hides(
-           op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+           op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, ts INTEGER NOT NULL,
            target TEXT NOT NULL, device TEXT NOT NULL, target_seq INTEGER NOT NULL,
            n INTEGER NOT NULL DEFAULT -1, hidden INTEGER NOT NULL,
            PRIMARY KEY (op_device, op_seq)
@@ -53,11 +55,13 @@ pub(crate) fn keep(k: &Connection, op: &Op, target: &str) -> Result<Option<HideO
     }
     schema(k)?;
     k.execute(
-        "INSERT OR REPLACE INTO hides(op_device, op_seq, target, device, target_seq, n, hidden)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR REPLACE INTO hides(op_device, op_seq, ts, target, device, target_seq, n,
+           hidden)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             op.device,
             op.op_seq,
+            op.ts,
             h.target,
             h.device,
             h.op_seq,
@@ -98,7 +102,8 @@ pub(crate) fn rewind(
     Ok(marks)
 }
 
-/// The mark the newest kept hide op of `target` gives (`device`, `op_seq`, `n`): false with none.
+/// The mark the newest kept hide op of `target` gives (`device`, `op_seq`, `n`), by time and
+/// then by device and op seq, as `newest` orders them: false with none.
 pub(crate) fn hidden(
     k: &Connection,
     target: &str,
@@ -108,12 +113,32 @@ pub(crate) fn hidden(
 ) -> Result<bool> {
     Ok(k.query_row(
         "SELECT hidden FROM hides WHERE target = ?1 AND device = ?2 AND target_seq = ?3
-               AND n = ?4 ORDER BY op_seq DESC LIMIT 1",
+               AND n = ?4 ORDER BY ts DESC, op_device DESC, op_seq DESC LIMIT 1",
         params![target, device, op_seq, n],
         |r| r.get::<_, bool>(0),
     )
     .optional()?
     .unwrap_or(false))
+}
+
+/// The mark the newest hide op of `target` in raw.db gives (`device`, `op_seq`, `n`), applied or
+/// not, or none with none: what a removal on the page compares with, so an Undo pressed before
+/// the worker applied the removal is recorded.
+pub(crate) fn newest(
+    raw: &crate::raw::Raw,
+    target: &str,
+    (device, op_seq, n): (&str, i64, Option<i64>),
+) -> Result<Option<bool>> {
+    Ok(raw
+        .every_op_of(OpKind::Hide)?
+        .into_iter()
+        .filter_map(|(ts, op_device, seq, body)| {
+            let h = serde_json::from_value::<HideOp>(body).ok()?;
+            (h.target == target && h.device == device && h.op_seq == op_seq && h.n == n)
+                .then_some(((ts, op_device, seq), h.hidden))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, hidden)| hidden))
 }
 
 /// `AND <alias>hidden = 0` for a reader of `table` (`cards` or `turns`), or nothing while the

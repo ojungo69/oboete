@@ -30,7 +30,10 @@ impl Consumer for Cards {
         for op in &ops {
             // Parity row 3: a card removed from the page, or brought back.
             if let Some(h) = crate::hide::keep(k, op, crate::hide::CARD)? {
-                hide_mark(k, &h.device, h.op_seq, h.n.unwrap_or(-1), h.hidden)?;
+                // The newest op's mark, not the one read last: devices are read in turn.
+                let n = h.n.unwrap_or(-1);
+                let mark = crate::hide::hidden(k, crate::hide::CARD, &h.device, h.op_seq, n)?;
+                hide_mark(k, &h.device, h.op_seq, n, mark)?;
                 continue;
             }
             if op.kind != OpKind::Window {

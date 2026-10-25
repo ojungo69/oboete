@@ -30,7 +30,9 @@ impl Consumer for Turns {
         for op in &ops {
             // Parity row 3: a summary removed from the page, or brought back.
             if let Some(h) = crate::hide::keep(k, op, crate::hide::SUMMARY)? {
-                hide_mark(k, &h.device, h.op_seq, h.hidden)?;
+                // The newest op's mark, not the one read last: devices are read in turn.
+                let mark = crate::hide::hidden(k, crate::hide::SUMMARY, &h.device, h.op_seq, -1)?;
+                hide_mark(k, &h.device, h.op_seq, mark)?;
                 continue;
             }
             if op.kind != OpKind::Turn {

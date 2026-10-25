@@ -6064,6 +6064,28 @@ impl Raw {
         Ok(found)
     }
 
+    /// Every op of `kind` on every device: its time, device, op seq and body (a body that does not
+    /// read is left out). For kinds with few ops, as `hide`'s.
+    pub(crate) fn every_op_of(
+        &self,
+        kind: OpKind,
+    ) -> Result<Vec<(i64, String, i64, serde_json::Value)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT ts, device, op_seq, body FROM ops WHERE type = ?1")?;
+        let rows = st.query_map([kind.name()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts, device, op_seq, body) = row?;
+            if let Ok(body) = serde_json::from_str(&body) {
+                out.push((ts, device, op_seq, body));
+            }
+        }
+        Ok(out)
+    }
+
     /// The bodies of `device`'s ops of `kind` after `op_seq`, in op_seq order: what a reader checks
     /// that the worker has not applied yet (`claims::Pending`).
     pub fn ops_of(

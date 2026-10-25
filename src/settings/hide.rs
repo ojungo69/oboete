@@ -84,11 +84,17 @@ pub(crate) fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
             .map_err(|e| unavailable(e.into()))?;
         (device.to_owned(), op_seq, None, now)
     };
-    let Some(now) = now else {
+    let Some(shown) = now else {
         return Err(refused(404, "hide_not_found", "item"));
     };
+    // The newest op's mark, applied or not: an Undo pressed while the removal waits for the
+    // worker is recorded, not taken for the state it already is (Codex on #658).
+    let now = crate::hide::newest(&raw, target, (&device, op_seq, n))
+        .map_err(unavailable)?
+        .unwrap_or(shown);
     if now == posted.hidden {
-        return Ok(json!({"state": "applied", "hidden": now}));
+        let state = if shown == now { "applied" } else { "pending" };
+        return Ok(json!({"state": state, "hidden": now}));
     }
     let op = HideOp {
         target: target.to_owned(),
@@ -486,6 +492,136 @@ mod tests {
         drop(k);
         assert_eq!(card_titles(home), ["Azimuth parser"]);
         assert_eq!(summaries(), 1);
+    }
+
+    /// An Undo pressed while the removal waits for the worker is recorded and wins once both are
+    /// applied; a request for the state the newest waiting op gives writes nothing and says it is
+    /// pending (Codex on #658).
+    #[test]
+    fn an_undo_before_the_removal_is_applied_is_recorded() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Ship the parser.");
+        let ids = s.cards(
+            seq,
+            seq,
+            json!([{"type": "feature", "title": "Azimuth parser"}]),
+            false,
+        );
+        s.run();
+        let home = s.home.path().to_owned();
+        let card: i64 = ids[0].split_once('.').unwrap().0.parse().unwrap();
+        let device = s.raw.device().to_owned();
+        let mut waiting = |hidden: bool| {
+            let op = HideOp {
+                target: CARD.into(),
+                device: device.clone(),
+                op_seq: card,
+                n: Some(0),
+                hidden,
+            };
+            let body = serde_json::to_value(&op).unwrap();
+            s.raw
+                .append_ops(&[(crate::raw::OpKind::Hide, body)])
+                .unwrap();
+        };
+        let ops = || crate::raw::open(&home).unwrap().max_op_seq().unwrap();
+        // A removal and its bringing back, both waiting for the worker: the newest says shown.
+        waiting(true);
+        waiting(false);
+        assert_eq!(card_titles(&home), ["Azimuth parser"], "not applied yet");
+        let before = ops();
+        assert_eq!(
+            hide(&home, "card", &ids[0], false).unwrap(),
+            json!({"state": "applied", "hidden": false})
+        );
+        assert_eq!(ops(), before, "the newest waiting op already says it");
+        // A removal waiting: the same removal again writes nothing; an Undo is recorded.
+        waiting(true);
+        let before = ops();
+        assert_eq!(
+            hide(&home, "card", &ids[0], true).unwrap(),
+            json!({"state": "pending", "hidden": true})
+        );
+        assert_eq!(ops(), before);
+        hide(&home, "card", &ids[0], false).unwrap();
+        assert_eq!(ops(), before + 1, "the Undo is recorded");
+        s.run();
+        assert_eq!(card_titles(&home), ["Azimuth parser"]);
+    }
+
+    /// The newest op's mark wins whatever order the devices' ops are read in: a removal and a later
+    /// bringing back from two other devices, in either order of their ids, for a card and a
+    /// summary, through a rebuild too (Codex on #658).
+    #[test]
+    fn the_newest_mark_wins_across_devices() {
+        for (older, newer) in [("aaaa", "zzzz"), ("zzzz", "aaaa")] {
+            let mut s = Store::new();
+            let seq = s.said("s1", R, 1_000, "Ship the parser.");
+            let ids = s.cards(
+                seq,
+                seq,
+                json!([{"type": "feature", "title": "Azimuth parser"}]),
+                false,
+            );
+            let summary = s.turn(json!({"agent": "claude", "session": "s1", "repo": R,
+                "ts": 2_000, "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+                "fields": {"request": "Zulu request"}, "skipped": false}));
+            let card: i64 = ids[0].split_once('.').unwrap().0.parse().unwrap();
+            let turn: i64 = summary[1..].parse().unwrap();
+            let device = s.raw.device().to_owned();
+            // The older op has the higher op seq: only the time orders them.
+            let put = |(op_device, op_seq): (&str, i64),
+                       ts: i64,
+                       (target, seq, n): (&str, i64, Option<i64>),
+                       hidden: bool| {
+                let op = HideOp {
+                    target: target.into(),
+                    device: device.clone(),
+                    op_seq: seq,
+                    n,
+                    hidden,
+                };
+                rusqlite::Connection::open(s.home.path().join("raw.db"))
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO ops(device, op_seq, type, ts, body, batch)
+                         VALUES(?1, ?2, 'hide', ?3, ?4, ?2)",
+                        params![op_device, op_seq, ts, serde_json::to_string(&op).unwrap()],
+                    )
+                    .unwrap();
+            };
+            for (i, named) in [(CARD, card, Some(0)), (SUMMARY, turn, None)]
+                .into_iter()
+                .enumerate()
+            {
+                let i = i as i64;
+                put((older, 10 + i), 1_000, named, true);
+                put((newer, 1 + i), 2_000, named, false);
+            }
+            s.run();
+            let Store {
+                home: dir,
+                raw: held,
+            } = s;
+            drop(held);
+            let summaries = |home: &Path| {
+                let raw = crate::raw::open(home).unwrap();
+                let k = crate::knowledge::open(home).unwrap();
+                let rules = crate::redact::Rules::default();
+                crate::turns::recent(&k, &raw, R, 10, &rules).unwrap().len()
+            };
+            for pass in ["read", "rebuilt"] {
+                if pass == "rebuilt" {
+                    crate::worker::rebuild(dir.path()).unwrap();
+                }
+                assert_eq!(
+                    card_titles(dir.path()),
+                    ["Azimuth parser"],
+                    "{pass}, {older} {newer}"
+                );
+                assert_eq!(summaries(dir.path()), 1, "{pass}, {older} {newer}");
+            }
+        }
     }
 
     /// A hide op raises the home to the format that reads it, in the transaction that writes it,
