@@ -23,7 +23,7 @@ sha2 = "0.10"
 sqlite-vec = "0.1.9"
 toml = "1.1.6"
 tokio = { version = "1", features = ["rt", "io-std"] }
-toml_edit = "0.23"
+toml_edit = "0.25"
 ureq = { version = "3.4.2", features = ["json"] }
 zstd = "0.14"
 unicode-normalization = "0.1.25"

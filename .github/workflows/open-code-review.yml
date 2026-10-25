@@ -112,7 +112,7 @@ jobs:
         id: primary
         if: steps.pr.outputs.review == 'true'
         continue-on-error: true
-        uses: alibaba/open-code-review@486022daaf14f7142275eddb9b3cacc3cc5dadfa # 2026-09-24
+        uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
           ocr_version: '1.12.9'
           llm_url: ${{ secrets.OCR_LLM_URL }}
@@ -146,7 +146,7 @@ jobs:
           env.OCR_EXIT_CODE != '' && env.OCR_EXIT_CODE != '0' &&
           vars.OCR_LLM_FALLBACK_MODEL != '' &&
           vars.OCR_LLM_FALLBACK_MODEL != vars.OCR_LLM_MODEL
-        uses: alibaba/open-code-review@486022daaf14f7142275eddb9b3cacc3cc5dadfa # 2026-09-24
+        uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
           ocr_version: '1.12.9'
           llm_url: ${{ secrets.OCR_LLM_FALLBACK_URL }}
