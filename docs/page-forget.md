@@ -39,10 +39,13 @@ row alone; its records stay.
   start refuses one, and the same start twice registers once. `forget::start` checks the token
   once more under raw's lock. The records are hidden at once; the purge, which the CLI runs
   before it returns, starts in the background (`forget --continue`, `forget::continue_now`), so
-  the claims and windows made from them go a few minutes later. The answer says when a purge
-  already runs (`cleaning: false`): that one read its jobs when it began, so this one's starts at
-  the worker's next look after it; and when a request log could not be written (`logged:
-  false`), which the CLI says too.
+  the claims and windows made from them go a few minutes later. A purge reads its jobs when it
+  begins, so while one runs (another forget's, or the CLI's) the purge this start makes waits for
+  it to end (`forget --continue --wait`) and needs no worker to look again (Codex on #655); the
+  worker's own look starts none beside a running purge and looks again in ten minutes. The
+  answer says whether the purge was started (`cleaning`; when it could not be, the worker's next
+  look starts it) and whether it waits for one that runs (`after`), and when a request log could
+  not be written (`logged: false`), which the CLI says too.
 - **The page** has Forget on a feed entry of a prompt or a note, on the session page, and on a
   claim's details: the preview's counts in sentences (the copies and the written claims when
   there are any, the claims that come back), what stays outside (the agent's own transcript
@@ -74,6 +77,8 @@ row alone; its records stay.
 - `settings::forget::tests::a_claims_preview_counts_the_claims_that_come_back`
 - `settings::forget::tests::a_session_asked_of_a_home_with_no_store_makes_none`
 - `settings::forget::tests::a_start_says_when_its_purge_waits_and_when_its_log_was_not_written`
+- `forget::tests::a_purge_started_while_one_runs_waits_for_it`
+- `forget_cli::a_continue_that_waits_goes_on_after_the_purge_that_runs`
 - `settings::forget::tests::what_only_its_session_can_take_is_refused_by_name`
 - `forget::tests::a_selection_whose_copies_pass_the_cap_is_refused_at_its_preview` (by name)
 - `view::tests::the_page_forgets_a_session_and_its_reads_show_it_gone`

@@ -1792,23 +1792,25 @@ assert(escaped,'Escape closes the confirmation');
 assert.equal(list.querySelector('.forget-preview'),null);
 assert.equal(requests.length,beforeEscape,'Escape sends nothing');
 assert.equal(document.activeElement,button,'Escape restores focus');
-for(const [language,done,waiting,notLogged] of [
+for(const [language,done,waiting,later,notLogged] of [
   ['en','Forgotten. The stores are cleaned in the background.',
     'Forgotten. Its cleaning starts after the one already running.',
+    'Forgotten. Its cleaning could not be started now: the worker starts it at its next look, or run oboete forget --continue.',
     'The request could not be written to every log: raw.db holds it, but a restore from the backups alone would bring the text back.'],
   ['ja','忘れました。保存先の掃除は裏で続きます。',
     '忘れました。保存先の掃除は、いま動いている掃除が終わってから始まります。',
+    '忘れました。保存先の掃除は今は始められませんでした。ワーカーが次に見回ったときに始めます(すぐ始めるには oboete forget --continue を実行してください)。',
     '忘れる依頼をすべての控えには書けませんでした。raw.db には残っていますが、バックアップだけから戻すと、忘れた内容が戻ります。'],
 ]){
   ctx.ui.setLang(language);
-  for(const cleaning of [true,false])for(const logged of [true,false]){
+  for(const [cleaning,after,said] of [[true,false,done],[true,true,waiting],[false,false,later]])for(const logged of [true,false]){
     button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
     button.click();requests.at(-1).resolve(json(preview));await settle();
     list.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
-    requests.at(-1).resolve(json({...started,cleaning,logged}));await settle();
+    requests.at(-1).resolve(json({...started,cleaning,after,logged}));await settle();
     assert.equal(document.getElementById('status').textContent,
-      (cleaning?done:waiting)+(logged?'':` ${notLogged}`),
-      `${language}: cleaning/logged are reported together in the status line`);
+      said+(logged?'':` ${notLogged}`),
+      `${language}: when the cleaning starts and whether it was logged are said together in the status line`);
   }
 }
 ctx.ui.setLang('en');

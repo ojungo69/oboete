@@ -1509,6 +1509,7 @@ const TEXT = {
   forget_cancel: ['Cancel', 'やめる'],
   forget_done: ['Forgotten. The stores are cleaned in the background.', '忘れました。保存先の掃除は裏で続きます。'],
   forget_done_waiting: ['Forgotten. Its cleaning starts after the one already running.', '忘れました。保存先の掃除は、いま動いている掃除が終わってから始まります。'],
+  forget_done_later: ['Forgotten. Its cleaning could not be started now: the worker starts it at its next look, or run oboete forget --continue.', '忘れました。保存先の掃除は今は始められませんでした。ワーカーが次に見回ったときに始めます(すぐ始めるには oboete forget --continue を実行してください)。'],
   forget_not_logged: ['The request could not be written to every log: raw.db holds it, but a restore from the backups alone would bring the text back.', '忘れる依頼をすべての控えには書けませんでした。raw.db には残っていますが、バックアップだけから戻すと、忘れた内容が戻ります。'],
   forget_stale: ['It changed since the preview. Press Forget again to see it.', '確認のあとで内容が変わりました。もう一度「忘れる」を押して確かめてください。'],
   forget_item: ['This cannot be forgotten from here.', 'これはここからは忘れられません。'],
@@ -4379,7 +4380,8 @@ function forgetControl(kind, id) {
           if (current()) setStatus(t('memory_result_unknown'), true, lang);
         } finally { action.close(!receipt && current()); }
         if (receipt) {
-          const done = t(receipt.cleaning ? 'forget_done' : 'forget_done_waiting')
+          // The cleaning started now, after one that runs, or at the worker's next look.
+          const done = t(!receipt.cleaning ? 'forget_done_later' : receipt.after ? 'forget_done_waiting' : 'forget_done')
             + (receipt.logged ? '' : ` ${t('forget_not_logged')}`);
           // Back normally reuses its list; forgotten records need a fresh read.
           ses.items = [];

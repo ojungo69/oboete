@@ -165,6 +165,10 @@ enum Cmd {
         /// Purge what forgotten uids' requests left unpurged (the worker runs it when one waits)
         #[arg(long = "continue", conflicts_with_all = ["record", "span", "uid", "session", "repo", "since", "status", "yes"])]
         resume: bool,
+        /// With --continue: first wait for a purge another process runs (a forget from the page
+        /// while one runs starts it so)
+        #[arg(long, hide = true, requires = "resume")]
+        wait: bool,
     },
     /// Curate again what was curated before: the spans queued since (a quote a new rule masked
     /// or a forget removed), the windows every provider skipped, the imported records of a
@@ -844,18 +848,24 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             yes,
             status,
             resume,
-        } => forget::run(
-            &home,
-            record.as_deref(),
-            span.as_deref(),
-            uid.as_deref(),
-            session.as_deref(),
-            repo.as_deref(),
-            since.as_deref().zip(until.as_deref()),
-            yes,
-            status,
-            resume,
-        ),
+            wait,
+        } => {
+            if wait {
+                forget::wait_for_purge(&home)?;
+            }
+            forget::run(
+                &home,
+                record.as_deref(),
+                span.as_deref(),
+                uid.as_deref(),
+                session.as_deref(),
+                repo.as_deref(),
+                since.as_deref().zip(until.as_deref()),
+                yes,
+                status,
+                resume,
+            )
+        }
         Cmd::Claims => {
             let settings = capture::Settings::load(&home)?;
             let cwd = std::env::current_dir()?;

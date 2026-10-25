@@ -130,9 +130,10 @@ pub(crate) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
 
 /// The forget the owner confirmed, registered only while the item's preview is the one shown:
 /// a preview that changed since is stale (409), as the CLI's start refuses one. The records are
-/// hidden at once; the purge goes on in the background. `cleaning` is false when a purge already
-/// runs, after which this forget's purge starts; `logged` is false when a request log was not
-/// written, which the CLI says too.
+/// hidden at once; the purge goes on in the background: `cleaning` when it was started, `after`
+/// when it waits for a purge that runs (one reads its jobs when it begins); with no `cleaning` the
+/// worker's next look starts it. `logged` is false when a request log was not written, which the
+/// CLI says too.
 pub(crate) fn start(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
     let posted: Start =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
@@ -182,11 +183,11 @@ pub(crate) fn start(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Valu
         eprintln!("oboete: a forget from the page is registered, not logged: {problem}");
     }
     // The CLI purges at once: so does this, in the background (`forget --continue`).
-    let cleaning = forget::continue_now(home);
-    Ok(
-        json!({"started": true, "records": p.count(), "logged": report.problems.is_empty(),
-        "cleaning": cleaning}),
-    )
+    let cleaning = forget::continue_now(home, true);
+    Ok(json!({
+        "started": true, "records": p.count(), "logged": report.problems.is_empty(),
+        "cleaning": cleaning.is_some(), "after": cleaning == Some(true),
+    }))
 }
 
 #[cfg(test)]
@@ -266,7 +267,8 @@ mod tests {
         let started = confirm(home, "prompt", &id, &key, true).unwrap();
         assert_eq!(
             started,
-            json!({"started": true, "records": 1, "logged": true, "cleaning": true})
+            json!({"started": true, "records": 1, "logged": true, "cleaning": true,
+                "after": false})
         );
         let at = |seq: i64| {
             let raw = crate::raw::open(home).unwrap();
@@ -355,8 +357,8 @@ mod tests {
         assert!(!crate::raw::exists(home.path()));
     }
 
-    /// A start while a purge runs says its purge waits for that one, and a start whose request
-    /// log could not be written says so, as the CLI does; both are registered.
+    /// A start while a purge runs starts its purge after that one and says so, and a start whose
+    /// request log could not be written says so, as the CLI does; both are registered.
     #[test]
     fn a_start_says_when_its_purge_waits_and_when_its_log_was_not_written() {
         let mut s = Store::new();
@@ -388,16 +390,16 @@ mod tests {
         let continued = forget::CONTINUED.get();
         let started = go(&first);
         assert_eq!(
-            (&started["cleaning"], &started["logged"]),
-            (&json!(false), &json!(true))
+            (&started["cleaning"], &started["after"], &started["logged"]),
+            (&json!(true), &json!(true), &json!(true))
         );
-        assert_eq!(forget::CONTINUED.get(), continued);
+        assert_eq!(forget::CONTINUED.get(), continued + 1);
         drop(running);
         std::fs::write(home.join("config.toml"), "[backup]\ndir = 42\n").unwrap();
         let started = go(&second);
         assert_eq!(
-            (&started["cleaning"], &started["logged"]),
-            (&json!(true), &json!(false))
+            (&started["cleaning"], &started["after"], &started["logged"]),
+            (&json!(true), &json!(false), &json!(false))
         );
         let raw = crate::raw::open(home).unwrap();
         let shown = |seq: i64| {
