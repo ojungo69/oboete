@@ -192,8 +192,8 @@ mod tests {
     fn a_card_removed_from_the_page_leaves_its_readers_and_comes_back() {
         let mut s = Store::new();
         let seq = s.said("s1", R, 1_000, "Ship the parser.");
-        let cards = json!([{"type": "feature", "title": "Azimuth parser"},
-            {"type": "feature", "title": "Bravo lexer"}]);
+        let cards = json!([{"type": "feature", "title": "Azimuth parser",
+            "files_read": ["src/a.rs"]}, {"type": "feature", "title": "Bravo lexer"}]);
         let ids = s.cards(seq, seq, cards, false);
         s.run();
         let Store {
@@ -202,38 +202,100 @@ mod tests {
         } = s;
         drop(held);
         let home = dir.path();
-        assert_eq!(card_titles(home), ["Azimuth parser", "Bravo lexer"]);
-        assert!(found(home, "Azimuth") > 0);
-        assert_eq!(
-            hide(home, "card", &ids[0], true).unwrap(),
-            json!({"state": "applied", "hidden": true})
-        );
-        let gone = |home: &Path| {
+        // What each reader shows: get, the feed's page, the timeline, the note on src/a.rs, the
+        // cards a turn's summary is shown, and the words search.
+        let seen = |home: &Path| {
             let raw = crate::raw::open(home).unwrap();
             let k = crate::knowledge::open(home).unwrap();
             let rules = crate::redact::Rules::default();
             let got = crate::cards::get(&k, &raw, &ids[0], &rules).unwrap();
             let (page, _) =
                 crate::cards::page(&k, &raw, (Some(R), None), None, 10, &rules).unwrap();
-            got.is_none() && page.len() == 1 && found(home, "Azimuth") == 0
+            let around =
+                crate::cards::around(&k, &raw, Some(R), i64::MAX, true, 10, &rules).unwrap();
+            let filed = crate::cards::by_file(&k, &raw, R, &["src/a.rs"], 40, &rules).unwrap();
+            let device = raw.device().to_owned();
+            let turn =
+                (crate::cards::of_turn(&k, &raw, &device, ("claude", "s1"), (1, 1), 10, &rules))
+                    .unwrap();
+            let found = found(home, "Azimuth") > 0;
+            (
+                got.is_some(),
+                page.len(),
+                around.len(),
+                filed.len(),
+                turn.len(),
+                found,
+            )
         };
+        let (shown, gone) = ((true, 2, 2, 1, 2, true), (false, 1, 1, 0, 1, false));
+        assert_eq!(card_titles(home), ["Azimuth parser", "Bravo lexer"]);
+        assert_eq!(seen(home), shown);
+        assert_eq!(
+            hide(home, "card", &ids[0], true).unwrap(),
+            json!({"state": "applied", "hidden": true})
+        );
         assert_eq!(card_titles(home), ["Bravo lexer"]);
-        assert!(gone(home));
+        assert_eq!(seen(home), gone);
         let listed = list(home).unwrap();
         assert_eq!(
             (&listed["items"][0]["kind"], &listed["items"][0]["id"]),
             (&json!("card"), &json!(ids[0]))
         );
         crate::worker::rebuild(home).unwrap();
-        assert!(gone(home), "a rebuild keeps it removed");
+        assert_eq!(seen(home), gone, "a rebuild keeps it removed");
         let ops = || crate::raw::open(home).unwrap().max_op_seq().unwrap();
         let before = ops();
         hide(home, "card", &ids[0], true).unwrap();
         assert_eq!(ops(), before, "the same state again writes nothing");
         hide(home, "card", &ids[0], false).unwrap();
         assert_eq!(card_titles(home), ["Azimuth parser", "Bravo lexer"]);
-        assert!(found(home, "Azimuth") > 0);
+        assert_eq!(seen(home), shown);
         assert_eq!(list(home).unwrap(), json!({"items": []}));
+    }
+
+    /// A removed card loses its vector and waits for none; brought back, it waits for one again.
+    #[test]
+    fn a_removed_card_loses_its_vector_and_waits_for_none() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Ship the parser.");
+        let ids = s.cards(
+            seq,
+            seq,
+            json!([{"type": "feature", "title": "Azimuth parser"}]),
+            false,
+        );
+        s.run();
+        let home = s.home.path();
+        let key = format!("{}.{}", s.raw.device(), ids[0]);
+        let k = crate::knowledge::open(home).unwrap();
+        k.execute(
+            "INSERT INTO vector_keys(id, embedder, kind, key, src_sha) VALUES (1, 'test', 'o', ?1, 'x')",
+            [&key],
+        )
+        .unwrap();
+        k.execute(
+            "INSERT INTO vec_index(rowid, embedder, kind, repo, ts, session, embedding)
+             VALUES (1, 'test', 'o', ?1, 1000, 's1', vec_bit(?2))",
+            params![R, crate::embed::bits(&vec![0.5_f32; crate::embed::DIM])],
+        )
+        .unwrap();
+        let waits = || {
+            *crate::embed_phase::doctor_facts_in(&k, "test")
+                .cards
+                .as_ref()
+                .unwrap()
+        };
+        let rows = |table: &str| -> i64 {
+            k.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(waits(), 0);
+        hide(home, "card", &ids[0], true).unwrap();
+        assert_eq!((rows("vector_keys"), rows("vec_index")), (0, 0));
+        assert_eq!(waits(), 0, "a removed card waits for no vector");
+        hide(home, "card", &ids[0], false).unwrap();
+        assert_eq!(waits(), 1, "brought back, it waits for one");
     }
 
     /// A summary removed from the page leaves its readers, its row stays (what was asked is not
@@ -254,11 +316,16 @@ mod tests {
             let k = crate::knowledge::open(home).unwrap();
             let recent = crate::turns::recent(&k, &s.raw, R, 10, &rules).unwrap();
             let got = crate::turns::get(&k, &s.raw, &id, &rules).unwrap();
-            (recent.len(), got.is_some(), found(home, "Zulu") > 0)
+            let (page, _) =
+                crate::turns::page(&k, &s.raw, (Some(R), None), None, 10, &rules).unwrap();
+            let around =
+                crate::turns::around(&k, &s.raw, Some(R), i64::MAX, true, 10, &rules).unwrap();
+            let found = found(home, "Zulu") > 0;
+            (recent.len(), got.is_some(), page.len(), around.len(), found)
         };
-        assert_eq!(shown(), (1, true, true));
+        assert_eq!(shown(), (1, true, 1, 1, true));
         hide(home, "summary", &id, true).unwrap();
-        assert_eq!(shown(), (0, false, false));
+        assert_eq!(shown(), (0, false, 0, 0, false));
         let k = crate::knowledge::open(home).unwrap();
         let rows: i64 = k
             .query_row(
@@ -270,7 +337,7 @@ mod tests {
         assert_eq!(rows, 1);
         assert_eq!(list(home).unwrap()["items"][0]["id"], json!(id));
         hide(home, "summary", &id, false).unwrap();
-        assert_eq!(shown(), (1, true, true));
+        assert_eq!(shown(), (1, true, 1, 1, true));
     }
 
     /// A rewind past a hide op shows what it removed again: the op is gone from the log.

@@ -5933,7 +5933,10 @@ curate = false
                 .iter())
             .any(|item| item["id"] == json!(id))
         };
+        // The session's items: its prompt and its card.
+        let items = |v: &Viewer| get(v, "/api/sessions?all=1")["sessions"][0]["items"].clone();
         assert!(in_feed(&v));
+        assert_eq!(items(&v), 2);
         assert!(
             get(&v, &format!("/api/doc?id={id}"))["text"]
                 .as_str()
@@ -5961,6 +5964,7 @@ curate = false
         };
         assert_eq!(post(true), json!({"state": "applied", "hidden": true}));
         assert!(!in_feed(&v));
+        assert_eq!(items(&v), 1);
         assert_eq!(
             v.route("GET", &format!("/api/doc?id={id}"), &[HOST, TOKEN])
                 .status,
@@ -5975,6 +5979,7 @@ curate = false
         );
         assert_eq!(post(false), json!({"state": "applied", "hidden": false}));
         assert!(in_feed(&v));
+        assert_eq!(items(&v), 2);
         assert_eq!(get(&v, "/api/hidden"), json!({"items": []}));
     }
 
