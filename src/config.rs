@@ -11,10 +11,9 @@ pub struct Config {
     pub providers: Vec<Provider>,
     #[serde(default)]
     pub summary: Summary,
-    /// `[my_work]`: My Work's jobs on the curator chain, off until the owner turns them on. The
-    /// first job reads it (docs/my-work-model.md, slice 3).
+    /// `[my_work]`: My Work's jobs on the curator chain, off until the owner turns them on
+    /// (docs/my-work-model.md A6, A7).
     #[serde(default)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub my_work: MyWork,
     #[serde(default)]
     pub embedding: Embedding,

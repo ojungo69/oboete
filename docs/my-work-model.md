@@ -902,6 +902,31 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **Not yet**: the exclusion's rule (S6), which applies when a reader shows or sends an op, with
   the job runner; nothing writes a `my_work` op until the first job.
 
+### Slice 3a: the job runner (2026-10-26)
+
+- **`my_work_run::Runner`**, made by the worker for each curation round from `[my_work]` and the
+  chain, runs the jobs `my_work_run::jobs()` names: none yet; the first, grouping, comes next. A
+  job (`my_work_run::Job`) says which of its subjects are due and since when (a read, no call),
+  and what it sends for one (`Ask`: the prompt, the schema, what it shows, the check, and what an
+  answer keeps). The runner does the rest.
+- **The order** (A3): `turns::round` asks for the oldest turn summary due; then, when it sent
+  none, a job due an hour or more; then a window; then, when no window was sent, any job due, the
+  one due the longest first. A round sends one My Work call at most, whatever it answered.
+- **The switch and the bound** (A1, A6, A7): nothing runs while `[my_work] curate` is off, and the
+  worker reaches a round only while `[summary] curate` is on. At `calls_a_day` calls of the role in
+  the rolling day (`providers_db::my_work_calls_in_a_day`, which now gives the oldest call's time
+  too), every job waits until the oldest leaves it, without keeping the worker up.
+- **The gate** (A5): before each send and each retry the job takes the dispatch lock and checks
+  the exclusion list, the forget fence and the rules' version, as a turn summary does; a change
+  sends nothing and keeps nothing, and the next pass reads again. The answer is appended under the
+  forget fence the job read with, and a job waits while knowledge.db lags a forget.
+- **Waiting and giving up** (A8): a job every entry fails waits in `my_work_pending` by its span,
+  for the hold `curate::hold` gives it (a refused answer is tried again at once and counted), and
+  after `ATTEMPTS` counted attempts is kept as a skip op of what it read. A request that changed
+  (its digest, with the chain's) is asked whatever an older one waits for.
+- **Not yet**: the first job, grouping (C1 to C5), and with it S6's exclusion of ops at read time;
+  the settings page's row with its estimate (A6, slice 2c).
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

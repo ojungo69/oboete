@@ -1505,6 +1505,25 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 .gate(gate)
                 .run("summary", span, prompt, &crate::turns::answer_schema())
         };
+        // And as My Work's role (docs/my-work-model.md A1), each job with its own schema, while
+        // `[my_work] curate` asks for it too.
+        let call = |span: &str,
+                    prompt: &str,
+                    schema: &serde_json::Value,
+                    check: &crate::provider::AnswerCheck,
+                    gate: &crate::provider::Gate| {
+            crate::provider::Chain::new(&cfg.providers, db)
+                .paid_cap(cfg.paid_usd_per_month)
+                .check(check)
+                .gate(gate)
+                .run(crate::my_work::ROLE, span, prompt, schema)
+        };
+        let mut runner = crate::my_work_run::Runner::new(
+            (cfg.my_work.curate, cfg.my_work.calls_a_day),
+            crate::my_work_run::jobs(),
+            Box::new(call),
+            (&rules, &cfg.summary, &chain),
+        );
         crate::turns::round(
             raw,
             k,
@@ -1514,6 +1533,7 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             &chain,
             &mut summarizer,
             &mut curator,
+            &mut |raw, k, db, overdue| runner.pass(raw, k, db, overdue),
         )
     })
 }
@@ -6284,6 +6304,7 @@ mod tests {
                 "",
                 &mut fake_summarizer,
                 &mut fake_curator,
+                &mut |_, _, _, _| Ok(Phase::Idle),
             )
         };
         let held = lock(home)?.expect("no other worker");

@@ -507,7 +507,7 @@ fn asked(k: &Connection, device: &str, through: i64) -> Result<bool> {
 }
 
 /// A hold as a phase: only a wait on time, and within D10's stay-up, keeps the worker up.
-fn held(hold: &str, until: i64, now: i64) -> Phase {
+pub(crate) fn held(hold: &str, until: i64, now: i64) -> Phase {
     Phase::Waiting {
         until,
         up: hold == "time" && until - now <= crate::curate::STAY_UP_MS,
@@ -515,9 +515,11 @@ fn held(hold: &str, until: i64, now: i64) -> Phase {
 }
 
 /// A run of the curation pass (decision 56, T1): the oldest summary due first (`phase`); then, when
-/// it sent none, one window (`curate::run_phase`). Windows go a step at a time while the work goes
+/// it sent none, a My Work job due an hour or more; then one window (`curate::run_phase`); then
+/// any My Work job due (docs/my-work-model.md A3). Windows go a step at a time while the work goes
 /// on, and would otherwise hold summaries back for as long as it lasts; a turn's own windows were
-/// curated, and their cards read, in an earlier run.
+/// curated, and their cards read, in an earlier run. The jobs go in the owner's pauses, and still
+/// within an hour while windows go on.
 #[allow(clippy::too_many_arguments)]
 pub fn round(
     raw: &mut Raw,
@@ -528,17 +530,26 @@ pub fn round(
     chain: &str,
     summarizer: &mut Curator,
     curator: &mut Curator,
+    my_work: &mut crate::my_work_run::Pass,
 ) -> Result<Phase> {
     let turns = phase(raw, k, db, rules, summary, chain, summarizer)?;
     if turns == Phase::Covered {
         return Ok(turns);
     }
+    let overdue = my_work(raw, k, db, true)?;
+    if overdue == Phase::Covered {
+        return Ok(overdue);
+    }
     let windows = crate::curate::run_phase(raw, k, db, rules, summary, chain, curator)?;
-    Ok(sooner(windows, turns))
+    if windows == Phase::Covered {
+        return Ok(windows);
+    }
+    let due = my_work(raw, k, db, false)?;
+    Ok(sooner(sooner(windows, turns), sooner(overdue, due)))
 }
 
 /// What the worker does next of two phases: covered work first, then the sooner wait.
-fn sooner(a: Phase, b: Phase) -> Phase {
+pub(crate) fn sooner(a: Phase, b: Phase) -> Phase {
     match (a, b) {
         (Phase::Covered, _) | (_, Phase::Covered) => Phase::Covered,
         (Phase::Idle, p) | (p, Phase::Idle) => p,
@@ -1209,6 +1220,90 @@ mod tests {
         assert_eq!(shown[0].fields["request"], "Build the parser");
     }
 
+    /// docs/my-work-model.md A3: after a summary due, a My Work job due an hour or more goes
+    /// before a window, and any other job only when no window was sent.
+    #[test]
+    fn a_round_asks_for_a_my_work_job_due_an_hour_before_a_window_and_any_other_after() {
+        // Records no window covers and no turn end: a window is due, no summary.
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "tool", "one"),
+                said("s1", "tool", "two"),
+            ],
+            &[],
+        );
+        let asked = RefCell::new(Vec::new());
+        // My Work's pass answers `covered` for the passes it covers: `true` the overdue one.
+        let round_with = |covered: &[bool]| {
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            let k = crate::knowledge::open(home.path()).unwrap();
+            let db = crate::providers_db::open(home.path()).unwrap();
+            let summary = Summary {
+                curate: true,
+                ..Summary::default()
+            };
+            let mut never = |_: &str,
+                             _: &str,
+                             _: &crate::provider::AnswerCheck,
+                             _: &crate::provider::Gate|
+             -> Result<ChainResult> { panic!("no summary is due") };
+            let mut curator = |_: &str,
+                               _: &str,
+                               _: &crate::provider::AnswerCheck,
+                               _: &crate::provider::Gate|
+             -> Result<ChainResult> {
+                asked.borrow_mut().push("window".to_owned());
+                Ok(ChainResult {
+                    provider: "fake".into(),
+                    output: json!({"claims": [], "summary": "Stepped."}),
+                    tier: 1,
+                })
+            };
+            let mut my_work = |_: &mut Raw, _: &Connection, _: &Connection, overdue: bool| {
+                asked
+                    .borrow_mut()
+                    .push(format!("my work, overdue {overdue}"));
+                Ok(if covered.contains(&overdue) {
+                    Phase::Covered
+                } else {
+                    Phase::Idle
+                })
+            };
+            let rules = Rules::default();
+            let (s, c) = (&mut never, &mut curator);
+            let phase = round(&mut raw, &k, &db, &rules, &summary, "", s, c, &mut my_work);
+            drop((raw, k, db));
+            crate::worker::run_once(home.path()).unwrap();
+            (phase.unwrap(), asked.take())
+        };
+        let overdue = round_with(&[true]);
+        assert_eq!(
+            overdue,
+            (Phase::Covered, vec!["my work, overdue true".to_owned()])
+        );
+        let window = round_with(&[false]);
+        assert_eq!(
+            window,
+            (
+                Phase::Covered,
+                vec!["my work, overdue true".to_owned(), "window".to_owned()]
+            )
+        );
+        // The window is curated: the job not due an hour goes now.
+        let after = round_with(&[false]);
+        assert_eq!(
+            after,
+            (
+                Phase::Covered,
+                vec![
+                    "my work, overdue true".to_owned(),
+                    "my work, overdue false".to_owned()
+                ]
+            )
+        );
+    }
+
     /// Decision 56 (T1): a run asks for the oldest summary due first, and for a window only when
     /// it sent none, so windows that go a step at a time while the work goes on hold no summary
     /// back.
@@ -1250,7 +1345,8 @@ mod tests {
             let mut curator = answer("window", json!({"claims": [], "summary": "Stepped."}));
             let rules = Rules::default();
             let (s, c) = (&mut summarizer, &mut curator);
-            let phase = round(&mut raw, &k, &db, &rules, &summary, "", s, c).unwrap();
+            let mut idle = |_: &mut Raw, _: &Connection, _: &Connection, _: bool| Ok(Phase::Idle);
+            let phase = round(&mut raw, &k, &db, &rules, &summary, "", s, c, &mut idle).unwrap();
             drop((raw, k, db));
             crate::worker::run_once(home.path()).unwrap();
             phase
@@ -1382,7 +1478,11 @@ mod tests {
          -> Result<ChainResult> { panic!("no window is due") };
         let (rules, summary) = (Rules::default(), Summary::default());
         let (s, c) = (&mut failing, &mut curator);
-        let phase = round(&mut raw, &k, &db, &rules, &summary, "chain", s, c).unwrap();
+        let mut idle = |_: &mut Raw, _: &Connection, _: &Connection, _: bool| Ok(Phase::Idle);
+        let phase = round(
+            &mut raw, &k, &db, &rules, &summary, "chain", s, c, &mut idle,
+        )
+        .unwrap();
         assert_eq!(phase, Phase::Waiting { until, up: true });
     }
 
