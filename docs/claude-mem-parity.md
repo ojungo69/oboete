@@ -17,9 +17,9 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 36 |
+| equal_or_better | 37 |
 | partial | 19 |
-| missing | 18 |
+| missing | 17 |
 | accepted_difference | 6 |
 | total | 79 |
 
@@ -49,7 +49,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 13 | Money spent is shown. The session start gives claude-mem's "Stats:" line (cards, tokens read, work, % savings) and its footer, at its default settings; a window's curator spend is counted once, where claude-mem counts a turn's tokens again for each observation the turn made. | equal_or_better | rare | AgentFormatter.ts:46 / src/cards.rs:288 |
 | 14 | Since 2026-10-17 oboete also excludes by a folder name or claude-mem pattern (`*`, `**`, `?`, a leading `~`), read as claude-mem reads one (since #587 a whole `**/` part also stands for no folder, as in claude-mem 15.0), and a name with no `/` also covers the folders inside one so named; a pattern that does not start at a root also names the end of a path (`secret/**` names `/work/secret` and the folders in it), where claude-mem tries it against the whole path and the last part alone, so such a pattern with a `/` names no folder there; `oboete import claude-mem` brings claude-mem's patterns over once (docs/settings-privacy.md, docs/claude-mem-import.md I8). | equal_or_better | none | project-filter.ts:68 / src/capture.rs:203 |
 | 15 | Private prompts behave the same. oboete strips claude-mem 15.0's six block names (`private`, `claude-mem-context`, `system-reminder`, `persisted-output`, `system_instruction`, `system-instruction`) and two of its own (`ide_opened_file`, `hook_context`) from a prompt and from every tool field before anything is stored or sent, a block only with its closing tag. One edge differs, on the private side: an unclosed `<private>` in a typed prompt hides the rest, where claude-mem keeps it all. | equal_or_better | rare | tag-stripping.ts:5 / src/hook.rs:32 |
-| 16 | The page has no sessions list, no per-session page and no category chips. Feed items carry no session id. | missing | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2078 |
+| 16 | The page has a Sessions tab, as claude-mem's: the sessions hooks recorded, the newest first by their first prompt, each with its title, agent, repository, start and number of items, and a session's page of its cards, summaries and prompts as the feed shows them, with a chip per kind and its count (docs/page.md, slice 2). A session's title is its first prompt where claude-mem's is a custom title, else the project. claude-mem's session menu deletes a session; oboete forgets from the CLI (row 3). | equal_or_better | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2332 |
 | 17 | Summaries have the same six fields and can be searched. A summary is asked in the run after its turn's last window, the reply's, which goes as soon as the reply is recorded (decision 56, docs/summaries.md T1); a turn that ends with no reply still waits the idle time. claude-mem writes it at Stop. Since 2026-10-17 a Stop whose message is empty (Claude Code's when a session ends in a tool call) takes the transcript's last assistant text, as claude-mem does. | equal_or_better | rare | summarize.ts:103 / src/curate.rs:1471 |
 | 18 | oboete has no tool, Bash-pattern or agent-type skip settings. The only switch is the coarse `OBOETE_SKIP` (it also skips reads), and it is not documented for users. The owner uses only claude-mem's default skip list, which covers about 0.5% of tool rows. | partial | rare | SettingsDefaultsManager.ts:433 / src/hook.rs:22 |
 | 19 | Counts are fixed at claude-mem's defaults (50 cards, 10 summaries). oboete has no type, concept, field or full-count settings, and no switch to turn work state off. A Context page preview exists. | partial | none | ContextConfigLoader.ts:52 / src/consumer/manifest.rs:56 |

@@ -119,13 +119,85 @@ does); the page writes text with text nodes, never as HTML. Nothing is written t
 | English only | Japanese and English | owner decision (#94) |
 | Icons beside the summary's sections | none | its icon files are not taken; the labels say the same |
 | The first visit's help shown again by `?` | the same | — |
+| A session's title: its custom title, else the project | its first prompt, else the repository | oboete records no custom title; the first prompt says what the session was for |
+| Sessions paged by offset, 200 at a time | by the last one's place, 50 at a time | as the feed (P3): none skipped or repeated when a session begins between pages |
+| A session's menu deletes it | none | forgetting is the CLI's (parity row 3) |
 
 ## Sessions (slice 2)
 
-claude-mem's `Sessions` tab: one row per session (its first request or the repository, the
-agent, the number of items, the start time), the newest first, and a session's page: its items as
-the feed shows them, with a filter by kind (`Prompt`, `Summary`, then the card types). Designed and
-built after slice 1, before the switch.
+Parity row 16: claude-mem's `Sessions` tab (`SessionList.tsx`, `SessionCard.tsx`,
+`SessionDetailPage.tsx`, `CategoryFilter.tsx` and `/api/sessions` at v15.0.2): one card per
+session, the newest first, and a session's page of its items, filtered by kind.
+
+S1. **Where.** A `Sessions` tab (`会話`) after `Timeline`. The header's repository select applies
+to it as to the feed.
+
+S2. **The list.** `GET /api/sessions?repo=<key>|all=1&limit=<n>&before=<cursor>` answers
+`{sessions, next}`: one entry per agent and session with a prompt hooks recorded (a live source,
+as the feed's prompts are) that no removal took whole, as claude-mem's session begins at its first
+prompt. Each has its key (16 hex digits of a hash of its agent and session, which names it in the
+requests below, the same whichever of its prompts a forget takes), its agent, its session id, its
+repository (key and display name, as the feed names it), its title, its start and its number of
+items. Its title, start and repository are its first such prompt's: the title on one line, at
+most 100 characters with `…` past them, gated as the feed gates it, and the repository's display
+name when the prompt has no text (claude-mem's title is a custom title, else the project). Newest
+first by start, ties by the first prompt's device and seq; `limit` 50 by default and at most 100
+(claude-mem's 200 and 1,000, by offset). `next` is the last entry's place, so no session is listed
+twice or skipped when one starts between pages. The number of items counts the session's current
+cards (whose window is that session's alone, docs/cards.md K2, and none a recuration replaced),
+its summaries that are no skip, and its prompts that no removal took whole; a card or summary a
+removal hides (K4, T7) is counted until the worker passes it.
+
+S3. **A session's card.** The title; the session id, its first 8 characters with the whole id as
+the tooltip; `N items` (`N 件`); the repository's display name, the agent and the local start
+time. The card is a button: a click or Enter opens the session's page.
+
+S4. **A session's page.** `← Back to sessions` (`← 会話の一覧へ`) returns to the list as it was,
+the opened card focused again; then the title, the agent and the session id; the kind filter (S5);
+then the session's items as the feed shows them (P2 to P9), newest first, read by
+`GET /api/feed?session=<key>` with the feed's paging, live updates and states, and no repository
+filter. A key of no listed session has no items. A
+session's items are its cards (K2), its summaries and its prompts. A note an agent saved belongs
+to no session, nor does a card of a window of several sessions: neither is among them.
+
+S5. **The kind filter.** One chip per kind among the items read so far, in claude-mem's order:
+Prompt, Summary, then the card types (discovery, decision, bugfix, feature, refactor, change,
+security_alert, security_note; other for a type outside them), each with its count. A chip turns
+its kind on or off; with none on, every item shows. Beside them, `N of M` items shown (`M 件中 N
+件`), with `+` while more pages remain.
+
+S6. **Live.** A version change reads the list's first page again, which takes the place of the
+sessions it covers: those begun since on top, one changed since (a removal took its first prompt)
+in its new place, and one no longer listed (a removal took all its prompts) gone; the pages read
+after it stay as read. A first page that does not reach the sessions shown (more than a page begun
+since) starts the list again, More reading on from it. On a session's page, the session's new items
+go on top as the feed's do (P5).
+
+S7. **Safety.** As P12: the token, Host and method checks, each reader's gate and `gated` over the
+answer, text nodes only, nothing written. The session id and the agent are gated as a card's
+labels are (K6). A session's key in a request is compared, never used as a path.
+
+S8. **Not built.** claude-mem's session menu deletes a session and everything captured in it;
+oboete forgets from the CLI (row 3).
+
+## Tests of slice 2
+
+1. `/api/sessions` lists each agent and session with a live prompt, newest first by its first
+   prompt, with its key, title, items and repository; a session of imported records only is not
+   listed, and a skip or a card of a window of several sessions is no item; `next` reads the
+   rest, none twice and none skipped when a session starts between pages.
+2. The repository filter keeps that repository's sessions; `all=1` gives every repository's.
+3. A rule added after a prompt was written masks the title; a first prompt a removal took whole
+   is no title, no start and no item, the next one giving them and the session keeping its key; a
+   session whose prompts a removal took whole is not listed.
+4. `/api/feed?session=<key>` gives that session's cards, summaries and prompts and no other
+   session's, paged as the feed is; a key of no listed session has no items, and one that is no
+   key is refused.
+5. The page (the viewer's Node harness): the tab lists the sessions; opening one shows its items,
+   the chips with their counts, and a chip filters them; Back returns to the list with the opened
+   card focused; in both languages.
+6. Without the token, with a foreign Host or another method, `/api/sessions` is refused as every
+   route is.
 
 ## Tests of slice 1 (through `view::Viewer::route`)
 

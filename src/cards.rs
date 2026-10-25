@@ -591,13 +591,15 @@ pub fn recent(
     Ok(out)
 }
 
-/// A repository's (or all repositories') cards after `before`, newest first. The one reader
-/// still skips K4-hidden rows without using a slot. The boolean says another visible row
-/// exists: at most one extra is inspected for exhaustion, never returned or used as a cursor.
+/// A repository's (or all repositories') cards after `before`, newest first, or one agent's
+/// session's (`session`, `(agent, session)`, docs/page.md S4: a card whose window is that
+/// session's alone, K2). The one reader still skips K4-hidden rows without using a slot. The
+/// boolean says another visible row exists: at most one extra is inspected for exhaustion, never
+/// returned or used as a cursor.
 pub fn page(
     k: &Connection,
     raw: &Raw,
-    repo: Option<&str>,
+    (repo, session): (Option<&str>, Option<(&str, &str)>),
     before: Option<&Position>,
     limit: usize,
     rules: &Rules,
@@ -608,6 +610,7 @@ pub fn page(
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL
            AND (?1 IS NULL OR repo = ?1)
+           AND (?6 IS NULL OR (agent = ?6 AND session = ?7))
            AND (?2 IS NULL OR (ts, device, op_seq, n) < (?2, ?3, ?4, ?5))
          ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
     ))?;
@@ -616,7 +619,9 @@ pub fn page(
         before.map(|p| p.0),
         before.map(|p| p.1.as_str()),
         before.map(|p| p.2),
-        before.map(|p| p.3)
+        before.map(|p| p.3),
+        session.map(|s| s.0),
+        session.map(|s| s.1)
     ])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {

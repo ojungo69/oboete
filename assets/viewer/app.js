@@ -298,7 +298,7 @@ function timelineEntry(item, all) {
 // --- Views ----------------------------------------------------------------------------------
 
 const LIMIT = 100;
-const VIEWS = ['my_work', 'timeline', 'records', 'context', 'stats', 'settings'];
+const VIEWS = ['my_work', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
 // My Work opens first once (decision 55), whatever view was stored before it existed; from then
 // on the page opens on the view last used.
 const firstMyWork = recall('oboete-tab', '') !== 'my_work';
@@ -316,7 +316,9 @@ function setView(name) {
   // My Work has its own search and filters, and its tab opens on the requests, not on one.
   $('controls').hidden = name === 'settings' || name === 'my_work';
   if (name === 'my_work') Object.assign(mw, { request: null, work: null, back: null });
-  for (const control of document.querySelectorAll('.record-controls')) control.hidden = name === 'timeline';
+  // The tab opens on the list, not on a session (docs/page.md S1).
+  if (name === 'sessions') Object.assign(ses, { open: null, back: null });
+  for (const control of document.querySelectorAll('.record-controls')) control.hidden = name === 'timeline' || name === 'sessions';
   for (const b of document.querySelectorAll('#tabs .tab')) {
     b.classList.toggle('active', b.dataset.view === name);
     b.setAttribute('aria-current', b.dataset.view === name ? 'page' : 'false');
@@ -492,7 +494,8 @@ function feedEntry(item) {
 }
 
 function activeFeed(state) {
-  return Boolean(state) && feed === state && state.generation === generation && view === 'timeline';
+  return Boolean(state) && feed === state && state.generation === generation
+    && view === (state.session ? 'sessions' : 'timeline');
 }
 
 function updateFeedState(state) {
@@ -527,7 +530,8 @@ async function readFeed(state, mode) {
   updateFeedState(state);
   state.request = (async () => {
     try {
-      const params = { ...scope(state.repo), limit: FEED_LIMIT };
+      // A session's page reads that session's items alone (docs/page.md S4).
+      const params = state.session ? { session: state.session, limit: FEED_LIMIT } : { ...scope(state.repo), limit: FEED_LIMIT };
       if (mode === 'more') params.before = state.next;
       const page = await api('feed', params);
       if (!activeFeed(state)) return false;
@@ -546,20 +550,23 @@ async function readFeed(state, mode) {
           continue;
         }
         if (unseen.has(key)) continue;
-        entries.push(feedEntry(item));
+        const entry = feedEntry(item);
+        entry.dataset.category = feedCategory(item);
+        entries.push(entry);
         unseen.add(key);
       }
       if (mode === 'live' && !joined) {
         entries.length = 0;
         unseen.clear();
       }
-      if (mode === 'live') $('list').prepend(...entries);
+      if (mode === 'live') state.list.prepend(...entries);
       else {
-        $('list').append(...entries);
+        state.list.append(...entries);
         state.next = page.next;
         state.loaded = true;
       }
       for (const key of unseen) state.keys.add(key);
+      state.drawn?.();
       setStatus('');
       return true;
     } catch (error) {
@@ -583,19 +590,243 @@ async function showFeed(repo, mine) {
   retry.type = 'button';
   const sentinel = el('div', 'feed-sentinel');
   sentinel.setAttribute('aria-hidden', 'true');
-  const state = { generation: mine, repo, keys: new Set(), next: null, loaded: false, loading: false,
+  const state = { generation: mine, repo, list: $('list'), keys: new Set(), next: null, loaded: false, loading: false,
     error: null, request: null, retryMode: 'initial', notice, more, retry, sentinel, observer: null };
   feed = state;
   more.addEventListener('click', () => void readFeed(state, 'more'));
   retry.addEventListener('click', () => void readFeed(state, state.retryMode));
   draw(t('timeline'), [], [el('div', 'feed-pagination', notice, more, retry, sentinel)]);
   setStatus('');
-  if (typeof IntersectionObserver !== 'undefined') {
-    state.observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting) && !state.loading && !state.error) void readFeed(state, 'more');
-    }, { threshold: 0.1 });
-    state.observer.observe(sentinel);
+  observeEnd(state, () => void readFeed(state, 'more'));
+  return readFeed(state, 'initial');
+}
+
+// New pages load when the end of a list comes into view, and by its More button (P9).
+function observeEnd(state, more) {
+  if (typeof IntersectionObserver === 'undefined') return;
+  state.observer = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting) && !state.loading && !state.error) more();
+  }, { threshold: 0.1 });
+  state.observer.observe(state.sentinel);
+}
+
+// --- Sessions: claude-mem's Sessions tab (docs/page.md slice 2) ----------------------------
+
+// claude-mem's `CATEGORY_ORDER`: the kinds a session's page filters by.
+const CATEGORIES = ['prompt', 'summary', 'discovery', 'decision', 'bugfix', 'feature', 'refactor', 'change',
+  'security_alert', 'security_note', 'other'];
+const CARD_TYPES = CATEGORIES.slice(2, -1);
+// The list as read (`items`, `next`, of `repo`), the session open, the card it was opened from
+// and the kinds its page shows.
+const ses = { items: [], next: null, repo: null, open: null, back: null, kinds: new Set(), stale: false };
+let sessionsList = null;
+
+function feedCategory(item) {
+  if (item.kind !== 'card') return item.kind;
+  return CARD_TYPES.includes(item.type) ? item.type : 'other';
+}
+
+function sessionCard(s) {
+  const id = el('code', 'session-id', s.session.slice(0, 8));
+  id.title = s.session;
+  const button = el('button', 'session-card',
+    el('span', 'session-title', s.title || s.repo_name || s.repo || ''),
+    el('span', 'session-meta', id,
+      word('span', 'session-count', s.items === 1 ? 'session_item' : 'session_items', { n: s.items }),
+      s.repo_name ? el('span', 'feed-repo', s.repo_name) : null,
+      el('span', 'badge feed-agent', s.agent), localTime(s.started, lang)));
+  button.type = 'button';
+  button.dataset.session = s.key;
+  button.addEventListener('click', () => sessionOpen(s));
+  return el('li', 'session-entry', button);
+}
+
+function activeSessions(state) {
+  return Boolean(state) && sessionsList === state && state.generation === generation && view === 'sessions' && !ses.open;
+}
+
+function updateSessionsState(state) {
+  if (!activeSessions(state)) return;
+  state.notice.textContent = state.loading ? t('feed_loading')
+    : state.error ? t('feed_error', { reason: failureMessage(state.error) })
+      : !ses.items.length ? t('sessions_empty') : '';
+  state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
+  state.more.hidden = ses.next === null;
+  state.more.disabled = state.loading;
+  state.retry.hidden = !state.error || state.loading;
+  state.sentinel.hidden = !ses.items.length || ses.next === null || state.loading || Boolean(state.error);
+}
+
+// The cards again, the one in focus keeping it.
+function drawSessions(state) {
+  const focused = document.activeElement?.dataset?.session;
+  state.list.replaceChildren(...ses.items.map(sessionCard));
+  const again = focused && [...state.list.querySelectorAll('button')].find((b) => b.dataset.session === focused);
+  if (again) again.focus({ preventScroll: true });
+}
+
+async function readSessions(state, mode) {
+  if (!activeSessions(state) || state.loading) return false;
+  if (mode === 'live' && !ses.items.length) mode = 'initial';
+  if (mode === 'more' && ses.next === null) return false;
+  state.loading = true;
+  state.error = null;
+  state.retryMode = mode;
+  updateSessionsState(state);
+  try {
+    const params = { ...scope(state.repo), limit: FEED_LIMIT };
+    if (mode === 'more') params.before = ses.next;
+    const page = await api('sessions', params);
+    if (!activeSessions(state)) return false;
+    if (mode === 'initial') {
+      ses.items = page.sessions;
+      ses.next = page.next;
+    } else if (mode === 'more') {
+      const known = new Set(ses.items.map((s) => s.key));
+      ses.items.push(...page.sessions.filter((s) => !known.has(s.key)));
+      ses.next = page.next;
+    } else {
+      // Live (S6): the first page as it is now takes the place of the sessions it covers: those
+      // begun since on top, a changed one in its new place, one no longer listed gone. The pages
+      // read after it stay; a first page that does not reach the list shown starts it again.
+      const live = page.sessions;
+      const keys = new Set(live.map((s) => s.key));
+      const last = live[live.length - 1];
+      if (page.next === null) {
+        ses.items = live;
+        ses.next = null;
+      } else if (ses.items.some((s) => keys.has(s.key))) {
+        ses.items = [...live, ...ses.items.filter((s) => !keys.has(s.key) && s.started <= last.started)];
+      } else {
+        ses.items = live;
+        ses.next = page.next;
+      }
+    }
+    drawSessions(state);
+    setStatus('');
+    return true;
+  } catch (error) {
+    if (activeSessions(state)) state.error = error;
+    return false;
+  } finally {
+    state.loading = false;
+    updateSessionsState(state);
   }
+}
+
+async function showSessions(repo, mine) {
+  if (ses.open) return showSessionPage(mine);
+  const notice = el('p', 'feed-state');
+  notice.setAttribute('role', 'status');
+  notice.setAttribute('aria-live', 'polite');
+  const more = word('button', 'quiet more', 'more');
+  more.type = 'button';
+  const retry = word('button', 'quiet', 'retry');
+  retry.type = 'button';
+  const sentinel = el('div', 'feed-sentinel');
+  sentinel.setAttribute('aria-hidden', 'true');
+  const state = { generation: mine, repo, list: $('list'), loading: false, error: null, retryMode: 'initial',
+    notice, more, retry, sentinel, observer: null };
+  sessionsList = state;
+  more.addEventListener('click', () => void readSessions(state, 'more'));
+  retry.addEventListener('click', () => void readSessions(state, state.retryMode));
+  draw(t('sessions'), [], [el('div', 'feed-pagination', notice, more, retry, sentinel)]);
+  setStatus('');
+  observeEnd(state, () => void readSessions(state, 'more'));
+  // Back from a session: the list as it was read, not read again (S4), unless the store changed
+  // while the session's page was open (S6).
+  if (ses.back && ses.repo === repo && ses.items.length) {
+    drawSessions(state);
+    updateSessionsState(state);
+    if (ses.stale) {
+      ses.stale = false;
+      void readSessions(state, 'live');
+    }
+    return true;
+  }
+  Object.assign(ses, { repo, items: [], next: null, stale: false });
+  return readSessions(state, 'initial');
+}
+
+function sessionOpen(s) {
+  ses.back = { key: s.key, scroll: window.scrollY || 0 };
+  ses.open = s;
+  ses.kinds = new Set();
+  void show();
+  window.scrollTo?.(0, 0);
+}
+
+async function sessionClose() {
+  const back = ses.back;
+  ses.open = null;
+  await show();
+  ses.back = null;
+  const opener = back && [...$('list').querySelectorAll('button')].find((b) => b.dataset.session === back.key);
+  if (opener) opener.focus({ preventScroll: true });
+  window.scrollTo?.(0, back?.scroll || 0);
+}
+
+// The kinds among the items read, each a chip with its count, and how many are shown (S5).
+function drawKinds(state, chips, count) {
+  const focused = document.activeElement?.dataset?.kind;
+  const entries = [...state.list.children];
+  const counts = new Map();
+  for (const entry of entries) counts.set(entry.dataset.category, (counts.get(entry.dataset.category) || 0) + 1);
+  chips.replaceChildren(...CATEGORIES.filter((kind) => counts.has(kind)).map((kind) => {
+    const chip = el('button', 'quiet small session-chip', word('span', null, `category_${kind}`), ` (${counts.get(kind)})`);
+    chip.type = 'button';
+    chip.dataset.kind = kind;
+    chip.setAttribute('aria-pressed', String(ses.kinds.has(kind)));
+    chip.addEventListener('click', () => {
+      if (ses.kinds.has(kind)) ses.kinds.delete(kind);
+      else ses.kinds.add(kind);
+      drawKinds(state, chips, count);
+    });
+    return chip;
+  }));
+  // The chip in focus keeps it, as a session's card does (`drawSessions`).
+  const again = focused && [...chips.querySelectorAll('button')].find((b) => b.dataset.kind === focused);
+  if (again) again.focus({ preventScroll: true });
+  let shown = 0;
+  for (const entry of entries) {
+    entry.hidden = ses.kinds.size > 0 && !ses.kinds.has(entry.dataset.category);
+    if (!entry.hidden) shown += 1;
+  }
+  count.replaceChildren(word('span', null, state.next === null ? 'session_shown' : 'session_shown_more',
+    { n: shown, m: entries.length }));
+}
+
+async function showSessionPage(mine) {
+  const s = ses.open;
+  const back = word('button', 'quiet small session-back', 'back_to_sessions');
+  back.type = 'button';
+  back.addEventListener('click', () => void sessionClose());
+  const id = el('p', 'session-detail-id', el('span', 'badge feed-agent', s.agent), el('code', null, s.session));
+  const chips = el('div', 'session-chips');
+  chips.setAttribute('role', 'group');
+  chips.setAttribute('aria-label', t('session_filter'));
+  const count = el('span', 'session-chips-count');
+  const list = el('ol', 'entries feed');
+  const notice = el('p', 'feed-state');
+  notice.setAttribute('role', 'status');
+  notice.setAttribute('aria-live', 'polite');
+  const more = word('button', 'quiet more', 'more');
+  more.type = 'button';
+  const retry = word('button', 'quiet', 'retry');
+  retry.type = 'button';
+  const sentinel = el('div', 'feed-sentinel');
+  sentinel.setAttribute('aria-hidden', 'true');
+  const state = { generation: mine, repo: $('repo').value, session: s.key, list, keys: new Set(), next: null,
+    loaded: false, loading: false, error: null, request: null, retryMode: 'initial', notice, more, retry, sentinel,
+    observer: null };
+  state.drawn = () => drawKinds(state, chips, count);
+  feed = state;
+  more.addEventListener('click', () => void readFeed(state, 'more'));
+  retry.addEventListener('click', () => void readFeed(state, state.retryMode));
+  draw(s.title || s.repo_name || s.session, [], [back, id, el('div', 'session-filter', chips, count), list,
+    el('div', 'feed-pagination', notice, more, retry, sentinel)]);
+  setStatus('');
+  observeEnd(state, () => void readFeed(state, 'more'));
   return readFeed(state, 'initial');
 }
 
@@ -762,6 +993,25 @@ const TEXT = {
   simple_agent_partial: ['Check the connection', '接続の確認が必要です'],
   simple_agent_connect: ['Connection settings for {name}', '{name} の接続設定'],
   timeline: ['Timeline', 'タイムライン'],
+  sessions: ['Sessions', '会話'],
+  back_to_sessions: ['← Back to sessions', '← 会話の一覧へ'],
+  session_item: ['1 item', '1 件'],
+  session_items: ['{n} items', '{n} 件'],
+  sessions_empty: ['No sessions to display', '表示する会話はありません'],
+  session_filter: ['Filter by kind', '種類で絞り込む'],
+  session_shown: ['{n} of {m}', '{m} 件中 {n} 件'],
+  session_shown_more: ['{n} of {m}+', '{m}+ 件中 {n} 件'],
+  category_prompt: ['Prompt', 'プロンプト'],
+  category_summary: ['Summary', '要約'],
+  category_discovery: ['Discovery', '発見'],
+  category_decision: ['Decision', '決定'],
+  category_bugfix: ['Bugfix', '不具合の修正'],
+  category_feature: ['Feature', '機能'],
+  category_refactor: ['Refactor', '構造の整理'],
+  category_change: ['Change', '変更'],
+  category_security_alert: ['Security Alert', '安全性についての警告'],
+  category_security_note: ['Security Note', '安全性についての補足'],
+  category_other: ['Other', 'その他'],
   records: ['Records', '記録'],
   context: ['Context', 'コンテキスト'],
   stats: ['Stats', '統計'],
@@ -6683,12 +6933,14 @@ async function show() {
   const mine = ++generation;
   feed?.observer?.disconnect();
   feed = null;
+  sessionsList?.observer?.disconnect();
+  sessionsList = null;
   // The settings tab needs no repository: it names the config.toml mistake that fails their list (#325).
   if (!reposLoaded && view !== 'settings') return refresh();
   const repo = $('repo').value;
   const q = $('q').value.trim();
-  if (view === 'timeline') {
-    const shown = await showFeed(repo, mine);
+  if (view === 'timeline' || view === 'sessions') {
+    const shown = await (view === 'timeline' ? showFeed(repo, mine) : showSessions(repo, mine));
     if (shown && version === null) drawnWithoutBaseline = true;
     return shown;
   }
@@ -6743,7 +6995,9 @@ async function refresh(live, selectedRepo) {
   // Preserve unsaved settings, including when a poll began before the Settings tab opened. The
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
+  if (live && activeFeed(feed) && feed.session) ses.stale = true;
   if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
+  if (live && activeSessions(sessionsList) && sessionsList.repo === $('repo').value) return readSessions(sessionsList, 'live');
   // A poll never redraws My Work under a reader (`myWorkLive`).
   if (live && view === 'my_work' && mw.rows) return myWorkLive();
   return show();

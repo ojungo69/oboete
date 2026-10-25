@@ -1483,3 +1483,121 @@ assert.ok(ja.includes('メモ')&&ja.includes('エージェントが保存した�
 ctx.ui.setLang('en');
 console.log('PASS: a saved note is a Feed card labelled Note, in both languages');
 }
+
+// Parity row 16 (docs/page.md slice 2): the Sessions tab lists the sessions; a session's page shows
+// its items, a chip per kind with its count, filters by them, and Back returns to the list with the
+// opened card focused; in both languages.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const response=value=>({ok:true,status:200,json:async()=>value});
+const settle=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,0));};
+const asked=[];
+const sessions=[
+  {key:'a1b2c3d4e5f60718',agent:'codex',session:'0b5e7c2d-later',repo:'example.test/team/moss',repo_name:'moss',title:'Fix the build.',started:2000,items:1},
+  {key:'0f1e2d3c4b5a6978',agent:'claude',session:'7f3a91c4-earlier',repo:'example.test/team/fern',repo_name:'fern',title:null,started:1000,items:3}];
+const items=[
+  {kind:'card',id:'5.0',ts:30,type:'feature',agent:'claude',repo_name:'fern',repo:'example.test/team/fern',title:'Parser built',subtitle:'',narrative:'Built.',facts:[],concepts:[],files_read:[],files_modified:[]},
+  {kind:'summary',id:'S6',ts:20,agent:'claude',repo_name:'fern',repo:'example.test/team/fern',fields:{request:'Build the parser.'}},
+  {kind:'prompt',id:'dev:1',ts:10,agent:'claude',repo_name:'fern',repo:'example.test/team/fern',text:'Build the parser.'},
+  {kind:'card',id:'4.0',ts:5,type:'curiosity',agent:'claude',repo_name:'fern',repo:'example.test/team/fern',title:'Odd one',subtitle:'',narrative:'Odd.',facts:[],concepts:[],files_read:[],files_modified:[]}];
+ctx.fetch=url=>{
+  asked.push(url);
+  if(url.startsWith('/api/sessions?'))return Promise.resolve(response({sessions,next:null}));
+  if(url.startsWith('/api/feed?'))return Promise.resolve(response({items,next:null}));
+  if(url.startsWith('/api/repos?'))return Promise.resolve(response({current:'',repos:[]}));
+  return Promise.resolve(response({}));
+};
+run('reposLoaded=true;setView("sessions")');
+await run('show()');
+const list=document.getElementById('list');
+const cards=()=>list.querySelectorAll('button').filter(b=>b.className==='session-card');
+assert.deepEqual(cards().map(b=>b.dataset.session),['a1b2c3d4e5f60718','0f1e2d3c4b5a6978'],'the sessions, newest first');
+assert(text(cards()[0]).includes('Fix the build.')&&text(cards()[0]).includes('1 item')&&text(cards()[0]).includes('0b5e7c2d'),text(cards()[0]));
+assert(text(cards()[1]).includes('fern')&&text(cards()[1]).includes('3 items'),'a session with no prompt left is titled by its repository');
+assert.equal(text(document.getElementById('heading')),'Sessions');
+cards()[1].click();
+await settle();
+assert(asked.some(u=>u.startsWith('/api/feed?')&&u.includes('session=0f1e2d3c4b5a6978')),'the page reads that session\'s items');
+const panel=document.getElementById('panel');
+const shown=text(panel);
+for(const part of ['← Back to sessions','claude','7f3a91c4-earlier','Prompt (1)','Summary (1)','Feature (1)','Other (1)','4 of 4','Parser built'])
+  assert(shown.includes(part),`the session's page shows ${part}: ${shown}`);
+const entries=()=>panel.querySelectorAll('li').filter(n=>n.className==='feed-entry');
+const chip=kind=>panel.querySelectorAll('button').find(b=>b.dataset.kind===kind);
+chip('summary').focus();chip('summary').click();
+assert.deepEqual(entries().map(n=>n.hidden),[true,false,true,true],'a chip shows its kind alone');
+assert(document.activeElement?.dataset?.kind==='summary'&&panel.contains(document.activeElement),'the chip keeps the focus');
+assert.equal(chip('summary').attrs['aria-pressed'],'true');
+assert(text(panel).includes('1 of 4'),text(panel));
+chip('prompt').click();
+assert.deepEqual(entries().map(n=>n.hidden),[true,false,false,true],'two chips, two kinds');
+chip('summary').click();chip('prompt').click();
+assert.deepEqual(entries().map(n=>n.hidden),[false,false,false,false],'no chip on, every item');
+panel.querySelectorAll('button').find(b=>b.className.includes('session-back')).click();
+await settle();
+assert.deepEqual(cards().map(b=>b.dataset.session),['a1b2c3d4e5f60718','0f1e2d3c4b5a6978'],'back to the list');
+assert.equal(document.activeElement?.dataset?.session,'0f1e2d3c4b5a6978','the opened card has the focus again');
+assert.equal(asked.filter(u=>u.startsWith('/api/sessions?')).length,1,'the list is not read again on the way back');
+// A live read keeps the focused card's focus; a change seen while a session's page was open reads
+// the list again on the way back (S6).
+cards()[0].focus();
+await run('refresh(true)');
+assert.equal(asked.filter(u=>u.startsWith('/api/sessions?')).length,2,'a live read of the list');
+assert(document.activeElement?.dataset?.session==='a1b2c3d4e5f60718'&&list.contains(document.activeElement),'the focused card keeps the focus');
+cards()[1].click();
+await settle();
+await run('refresh(true)');
+panel.querySelectorAll('button').find(b=>b.className.includes('session-back')).click();
+await settle();
+assert.equal(asked.filter(u=>u.startsWith('/api/sessions?')).length,3,'the list is read again after a change');
+ctx.ui.setLang('ja');
+run('setView("sessions")');
+await run('show()');
+assert(text(document.getElementById('heading')).includes('会話')&&text(cards()[1]).includes('3 件'),'the list in Japanese');
+cards()[1].click();
+await settle();
+assert(text(panel).includes('← 会話の一覧へ')&&text(panel).includes('プロンプト (1)')&&text(panel).includes('4 件中 4 件'),text(panel));
+ctx.ui.setLang('en');
+run('setView("timeline")');
+console.log('PASS: Sessions: the list, a session\'s page, its kind chips, Back with the focus, in both languages');
+}
+
+// Parity row 16, S6 (Codex and CodeRabbit on #635): a live read's first page takes the place of
+// the sessions it covers: one no longer listed goes, a changed one moves to its place, and a first
+// page that does not reach the list shown starts it again, More reading on from its cursor.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const response=value=>({ok:true,status:200,json:async()=>value});
+const session=(key,started)=>({key,agent:'claude',session:`s-${key}`,repo:'example.test/team/fern',repo_name:'fern',title:`Title ${key}`,started,items:1});
+let reply={sessions:[],next:null};
+ctx.fetch=url=>{
+  if(url.startsWith('/api/sessions?'))return Promise.resolve(response(reply));
+  if(url.startsWith('/api/repos?'))return Promise.resolve(response({current:'',repos:[]}));
+  return Promise.resolve(response({}));
+};
+const shown=()=>document.getElementById('list').querySelectorAll('button').filter(b=>b.className==='session-card').map(b=>b.dataset.session);
+reply={sessions:[session('aaaaaaaaaaaaaaaa',3000),session('bbbbbbbbbbbbbbbb',2000),session('cccccccccccccccc',1000)],next:null};
+run('reposLoaded=true;setView("sessions")');
+await run('show()');
+assert.deepEqual(shown(),['aaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb','cccccccccccccccc']);
+// b's first prompt removed: it starts later and moves up; c's prompts all removed: it goes.
+reply={sessions:[session('bbbbbbbbbbbbbbbb',3500),session('aaaaaaaaaaaaaaaa',3000)],next:null};
+await run('refresh(true)');
+assert.deepEqual(shown(),['bbbbbbbbbbbbbbbb','aaaaaaaaaaaaaaaa'],'a changed session moves, a removed one goes');
+assert(!text(document.getElementById('list')).includes('Title cccccccccccccccc'),'the removed session\'s title is gone');
+// More than a page begun since: the first page does not reach the list, which starts again.
+const fresh=Array.from({length:3},(_,i)=>session(`d${String(i).padStart(15,'0')}`,9000-i));
+reply={sessions:fresh,next:'[8998,"dev",1]'};
+await run('refresh(true)');
+assert.deepEqual(shown(),fresh.map(s=>s.key),'the list starts again from the first page');
+assert.equal(run('ses.next'),'[8998,"dev",1]','More reads on from the first page\'s cursor');
+// A first page that reaches the list keeps the pages read after it.
+reply={sessions:[session('eeeeeeeeeeeeeeee',9500),...fresh.slice(0,2)],next:'[8999,"dev",2]'};
+await run('refresh(true)');
+assert.deepEqual(shown(),['eeeeeeeeeeeeeeee',...fresh.map(s=>s.key)],'joined: the pages read stay');
+assert.equal(run('ses.next'),'[8998,"dev",1]','and so does their cursor');
+run('setView("timeline")');
+console.log('PASS: Sessions live: removed sessions go, changed ones move, a list that does not join starts again');
+}
