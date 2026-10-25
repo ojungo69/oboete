@@ -691,7 +691,31 @@ pub fn save_key(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, R
     }
     let written = crate::keyfile::write(file, &posted.key, home)
         .map_err(|r| refused(r.status(), r.code(), field))?;
+    let readers: Vec<&str> = (cfg.providers.iter())
+        .filter(|p| matches!(p, Provider::Openai { key_file: Some(f), .. } if f == file))
+        .map(|p| p.name())
+        .collect();
+    key_saved(home, &readers);
     Ok(json!({"entry": posted.entry, "key": "ok", "durable": written.durable}))
+}
+
+/// Parity row 11: a saved key ends the rests of the entries that read it, and what waits on time
+/// or on the owner is tried at the worker's next pass (`providers_db::key_saved`). The key is
+/// saved whatever happens here: an error is said on stderr, and their rests run out by themselves.
+pub(crate) fn key_saved(home: &Path, entries: &[&str]) {
+    if entries.is_empty() || !home.join("providers.db").exists() {
+        return;
+    }
+    let ended = (|| -> anyhow::Result<()> {
+        let mut db = crate::providers_db::open(home)?;
+        let tx = db.transaction()?;
+        crate::providers_db::key_saved(&tx, entries)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(e) = ended {
+        eprintln!("oboete: a saved key's rest not ended: {e:#}");
+    }
 }
 
 /// Changes one physical or virtual provider entry against the version the page read.
@@ -2667,10 +2691,26 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let file = keys.path().join("LOCAL_KEY.md");
         std::fs::write(&file, "Local\nold-key-123\n").unwrap();
-        let text = api_entries(&[("local", &file), ("twin", &file), ("twin", &file)]);
+        let solo = keys.path().join("SOLO_KEY.md");
+        std::fs::write(&solo, "Solo\nsolo-key-123\n").unwrap();
+        let text = api_entries(&[
+            ("local", &file),
+            ("twin", &file),
+            ("twin", &file),
+            ("solo", &solo),
+        ]);
         let home = home_with(Some(&text));
         let version = show(home.path())["version"].clone();
         let canary = format!("{}-{}", "canary", "7d1e0b52");
+        // Parity row 11: the entries that read the file rest no longer; others do.
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let rest = crate::providers_db::State {
+            down_until: 5_000_000_000_000,
+            ..Default::default()
+        };
+        for p in ["local", "twin", "solo", "other"] {
+            crate::providers_db::set_state(&db, p, rest).unwrap();
+        }
         let saved = save_key(
             home.path(),
             &Mutex::new(()),
@@ -2680,6 +2720,9 @@ mod tests {
             saved,
             Ok(json!({"entry": "local", "key": "ok", "durable": true}))
         );
+        let rests =
+            ["local", "twin", "solo", "other"].map(|p| crate::providers_db::state(&db, p).unwrap());
+        assert_eq!(rests, [Default::default(), Default::default(), rest, rest]);
         assert_eq!(crate::config::read_key(&file).unwrap(), canary);
         let shown = show(home.path());
         assert!(!shown.to_string().contains(&canary), "{shown}");

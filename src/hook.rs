@@ -379,12 +379,24 @@ fn run_io(
         let failure = failed
             .filter(|_| injecting || reads_start)
             .map(|f| crate::failure::line(f, kept_count(home)));
+        // The line for the person at the terminal, which Claude Code shows from `systemMessage`:
+        // one more read of config.toml, once a session. Only at an injection point (a resumed
+        // session gets none), not beside a recording failure, which has its own line, and not in
+        // a replay, whose output is the measured packet. Settings that do not load say nothing.
+        let terminal = (injecting
+            && (agent, event) == ("claude", "SessionStart")
+            && failure.is_none()
+            && std::env::var_os(crate::capture::REPLAY_ENV).is_none())
+        .then(|| config::inject_with_language(home).ok())
+        .flatten()
+        .filter(|(inject, _)| inject.session_start_note);
         // docs/work-state.md L7: the work state's rule beside the failure line, outside every
         // fence, and its open lines in a fence of their own before the manifest's.
         let work = manifest.as_ref().and_then(|m| m.work.as_ref());
         let line = [
             failure.clone(),
-            stopped.as_ref().map(crate::curate::Stopped::line),
+            // Parity row 11: an agent no terminal note reaches tells the person of the stop.
+            stopped.as_ref().map(|s| s.line(terminal.is_none())),
             work.map(|w| w.rule.clone()),
             memory_use(manifest.as_ref()),
         ]
@@ -403,17 +415,6 @@ fn run_io(
         if let Some(p) = &prompted {
             blocks.extend(p.blocks.iter().map(|(what, text)| (*what, text.as_str())));
         }
-        // The line for the person at the terminal, which Claude Code shows from `systemMessage`:
-        // one more read of config.toml, once a session. Only at an injection point (a resumed
-        // session gets none), not beside a recording failure, which has its own line, and not in
-        // a replay, whose output is the measured packet. Settings that do not load say nothing.
-        let terminal = (injecting
-            && (agent, event) == ("claude", "SessionStart")
-            && failure.is_none()
-            && std::env::var_os(crate::capture::REPLAY_ENV).is_none())
-        .then(|| config::inject_with_language(home).ok())
-        .flatten()
-        .filter(|(inject, _)| inject.session_start_note);
         let listed =
             terminal.is_some_and(|(inject, _)| inject.session_start_list && inject.session_start);
         let note = terminal.map(|(inject, japanese)| {
@@ -2724,7 +2725,7 @@ pub fn joined(home: &Path, raw: Option<&crate::raw::Raw>, start: Option<&Start>)
     });
     let parts: Vec<String> = [
         crate::failure::since(home).map(|f| crate::failure::line(f, kept_count(home))),
-        stopped.as_ref().map(crate::curate::Stopped::line),
+        stopped.as_ref().map(|s| s.line(true)),
         work.map(|w| w.rule.clone()),
         memory_use(start),
         work.and_then(|w| w.open.as_deref())
@@ -7610,11 +7611,23 @@ mod tests {
             "{context}"
         );
         assert!(!out.contains("stopped until the owner acts"), "{out}");
+        // Parity row 11: the terminal note told the person, so the agent is not asked to; Codex
+        // shows no terminal note, so its agent is.
+        let relay = "oboete: tell the user about this at the start of your first reply.";
+        assert!(!context.contains(relay), "{context}");
+        let codex = hook(
+            home,
+            "codex",
+            "SessionStart",
+            &json!({"session_id": "stopped-codex", "cwd": p.c, "source": "startup"}),
+        );
+        assert!(codex.contains(relay), "{codex}");
         // OpenCode reads `oboete inject`, not the hook's output.
         let packet = inject_text(home, Path::new(&p.c), Some("stopped-inject"));
         assert!(
             packet.starts_with("oboete: curation has waited for you since ")
-                && packet.contains("Parser errors go to stderr."),
+                && packet.contains("Parser errors go to stderr.")
+                && packet.contains(relay),
             "{packet}"
         );
         // A manifest that cannot be read still leaves the line (Codex on #438).

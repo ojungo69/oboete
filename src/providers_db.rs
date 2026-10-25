@@ -265,6 +265,36 @@ pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
     Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
 }
 
+/// The vetted detail of `provider`'s latest call (parity row 11): while it rests, the call that
+/// set the rest, since a skip while it rests writes no row.
+pub fn last_detail(conn: &Connection, provider: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT detail FROM provider_calls WHERE provider = ?1 ORDER BY ts DESC, id DESC LIMIT 1",
+            [provider],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Parity row 11: a key saved for `providers` ends their rests, and the windows and turns that wait
+/// on time or on the owner are tried at the worker's next pass: a refused key's rest doubles up
+/// to a day, and the owner who saved a new one should not wait for it. A wait on a budget stays:
+/// a key lifts no cap.
+pub fn key_saved(conn: &Connection, providers: &[&str]) -> Result<()> {
+    for provider in providers {
+        conn.execute("DELETE FROM provider_state WHERE provider = ?1", [provider])?;
+    }
+    for table in ["pending", "turn_pending"] {
+        conn.execute(
+            &format!("UPDATE {table} SET next_attempt_at = 0 WHERE hold IN ('time', 'owner')"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct State {
     pub down_until: i64,
@@ -1165,6 +1195,71 @@ mod tests {
         resume(&conn, "claude").unwrap();
         let got = turn_pending_of(&conn, "a", 7).unwrap();
         assert_eq!(got.unwrap().next_attempt_at, 0);
+    }
+
+    /// Parity row 11: a saved key ends the rests of the entries named, and wakes what waits on
+    /// time or on the owner, windows and turns alike; a wait on a budget stays.
+    #[test]
+    fn a_saved_key_ends_its_entries_rests_and_wakes_waits_on_time_or_the_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        let later = 5_000_000_000_000;
+        let rest = State {
+            down_until: later,
+            backoff: 3,
+            ..Default::default()
+        };
+        for p in ["groq", "groq-20b", "nim"] {
+            set_state(&conn, p, rest).unwrap();
+        }
+        let row = |device: &str, hold: &str| Pending {
+            device: device.into(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 2,
+            to_offset: None,
+            reason: "r".into(),
+            hold: hold.into(),
+            attempts: 0,
+            next_attempt_at: later,
+            since: 1,
+            prompt: "p".into(),
+        };
+        for (device, hold) in [("a", "time"), ("b", "owner"), ("c", "budget")] {
+            set_pending(&conn, &row(device, hold)).unwrap();
+        }
+        let turn = |seq: i64, hold: &str| TurnPending {
+            device: "a".into(),
+            seq,
+            agent: "claude".into(),
+            session: "s".into(),
+            prompt: "p".into(),
+            reason: "r".into(),
+            hold: hold.into(),
+            attempts: 0,
+            next_attempt_at: later,
+        };
+        set_turn_pending(&conn, &turn(7, "time")).unwrap();
+        set_turn_pending(&conn, &turn(8, "budget")).unwrap();
+        key_saved(&conn, &["groq", "groq-20b"]).unwrap();
+        assert_eq!(state(&conn, "groq").unwrap(), State::default());
+        assert_eq!(state(&conn, "groq-20b").unwrap(), State::default());
+        assert_eq!(state(&conn, "nim").unwrap(), rest);
+        let due: Vec<(String, i64)> = (pending(&conn).unwrap().into_iter())
+            .map(|p| (p.hold, p.next_attempt_at))
+            .collect();
+        let held = |hold: &str, at: i64| (hold.to_owned(), at);
+        assert_eq!(
+            due,
+            [held("time", 0), held("owner", 0), held("budget", later)]
+        );
+        let turn_at = |seq| {
+            turn_pending_of(&conn, "a", seq)
+                .unwrap()
+                .unwrap()
+                .next_attempt_at
+        };
+        assert_eq!((turn_at(7), turn_at(8)), (0, later));
     }
 
     #[test]

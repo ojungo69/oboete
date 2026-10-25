@@ -2668,9 +2668,10 @@ pub fn doctor(home: &Path) -> Result<()> {
                 if skipped > 0 {
                     let s = crate::curate::Stopped {
                         waits: None,
+                        causes: Vec::new(),
                         skipped,
                     };
-                    println!("  {}", s.line());
+                    println!("  {}", s.line(false));
                 }
                 // Milestone 5 D5 item 7: a forget whose rebuild left its uid in knowledge.db.
                 let (lines, stopped) = crate::forget::doctor_lines(home)?;
@@ -2820,7 +2821,12 @@ pub fn doctor(home: &Path) -> Result<()> {
                             "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
                         );
                     } else {
-                        println!("  {p}: resting until {}", crate::db::utc(until));
+                        // Parity row 11: why, when only the owner can end the rest.
+                        let cause = crate::providers_db::last_detail(&db, &p)?
+                            .as_deref()
+                            .and_then(crate::provider::Cause::of)
+                            .map_or(String::new(), |c| format!("; {}", c.said()));
+                        println!("  {p}: resting until {}{cause}", crate::db::utc(until));
                     }
                 }
                 for line in crate::isolation::doctor(&db)? {

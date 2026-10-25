@@ -252,15 +252,99 @@ impl CallError {
     /// fails the same way until the owner replaces it. Never a bare 401: OpenCode Go answers 401
     /// for credits and monthly limits too.
     fn key_rejected(&self) -> bool {
-        matches!(self.status, Some(401 | 403))
-            && [
-                "invalid_api_key",
-                "authentication_error",
-                "permission_error",
-                "PERMISSION_DENIED",
-            ]
-            .iter()
-            .any(|code| self.message.contains(&format!(": {code}")))
+        refused_key(self.status, &self.message)
+    }
+}
+
+/// Whether a failed call's status and vetted message say the provider rejected the key by name.
+fn refused_key(status: Option<u16>, message: &str) -> bool {
+    matches!(status, Some(401 | 403))
+        && [
+            "invalid_api_key",
+            "authentication_error",
+            "permission_error",
+            "PERMISSION_DENIED",
+        ]
+        .iter()
+        .any(|code| message.contains(&format!(": {code}")))
+}
+
+/// Why an entry rests when only the owner can end it (parity row 11), read from the vetted detail
+/// its last call left in providers.db (`http 401: invalid_api_key`), never from the provider's
+/// words (issue #91).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// It refused the key by name.
+    Key,
+    /// Its credits or paid quota are spent.
+    Credits,
+    /// Its model is not found.
+    Model,
+}
+
+impl Cause {
+    /// The cause a failed call's vetted detail names, if it is one the owner must act on.
+    pub(crate) fn of(detail: &str) -> Option<Self> {
+        let status = (detail.strip_prefix("http "))
+            .and_then(|s| s.get(..3))
+            .and_then(|s| s.parse().ok());
+        let named = |codes: &[&str]| codes.iter().any(|c| detail.contains(&format!(": {c}")));
+        if refused_key(status, detail) {
+            Some(Self::Key)
+        } else if status == Some(402)
+            || detail.contains(" (credits spent)")
+            || named(&["insufficient_quota", "billing_error"])
+        {
+            Some(Self::Credits)
+        } else if named(&["model_not_found"])
+            || (status == Some(404) && named(&["not_found_error"]))
+        {
+            Some(Self::Model)
+        } else {
+            None
+        }
+    }
+
+    /// What happened and what the owner does, as a session's start and doctor say it.
+    pub(crate) fn said(self) -> &'static str {
+        match self {
+            Self::Key => {
+                "its key was refused: put a new key on the settings page (`oboete view --open`); \
+                 the next pass uses a saved key"
+            }
+            Self::Credits => {
+                "its credits are spent: add credits with the provider, or turn it off on the \
+                 settings page (`oboete view --open`)"
+            }
+            Self::Model => {
+                "its model is not found: choose another model on the settings page \
+                 (`oboete view --open`)"
+            }
+        }
+    }
+
+    /// The same for the person at the terminal (`hook::session_start_note`).
+    pub(crate) fn note(self, name: &str, japanese: bool) -> String {
+        match (japanese, self) {
+            (true, Self::Key) => format!(
+                "{name} の鍵が拒否されました。設定画面で新しい鍵を保存すれば、次の要約で使われます。"
+            ),
+            (true, Self::Credits) => format!(
+                "{name} のクレジットが尽きています。提供元でクレジットを追加するか、設定画面でオフにしてください。"
+            ),
+            (true, Self::Model) => {
+                format!("{name} のモデルが見つかりません。設定画面で別のモデルを選んでください。")
+            }
+            (false, Self::Key) => format!(
+                "{name} refused its key: save a new key on the settings page and the next pass uses it."
+            ),
+            (false, Self::Credits) => format!(
+                "{name} has spent its credits: add credits with the provider, or turn it off on the settings page."
+            ),
+            (false, Self::Model) => {
+                format!("{name} cannot find its model: choose another model on the settings page.")
+            }
+        }
     }
 }
 
@@ -8337,5 +8421,45 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let e = call(&p, "p", &json!({"type": "object"}), None).unwrap_err();
         assert_eq!((e.status, e.message.as_str()), (Some(302), "http 302"));
         assert!(matches!(target.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
+    /// Parity row 11: the causes only the owner ends, from a failed call's vetted detail. An
+    /// outage, a limit, a moderation refusal or a bare 401 (OpenCode Go's credits and limits) is
+    /// none, and a refused key is what `key_rejected` says.
+    #[test]
+    fn a_rests_cause_is_read_from_the_vetted_detail() {
+        for (detail, cause) in [
+            ("http 401: invalid_api_key", Some(Cause::Key)),
+            ("http 401: authentication_error", Some(Cause::Key)),
+            ("http 403: PERMISSION_DENIED", Some(Cause::Key)),
+            ("http 401", None),
+            ("http 403: 403 (moderation)", None),
+            ("http 402", Some(Cause::Credits)),
+            ("http 400: billing_error", Some(Cause::Credits)),
+            (
+                "http 400: invalid_request_error (credits spent)",
+                Some(Cause::Credits),
+            ),
+            ("http 429: insufficient_quota", Some(Cause::Credits)),
+            ("http 404: model_not_found", Some(Cause::Model)),
+            ("http 404: not_found_error", Some(Cause::Model)),
+            ("http 400: model_not_found", Some(Cause::Model)),
+            ("http 400: not_found_error", None),
+            ("http 404", None),
+            ("http 429: rate_limit_exceeded, retry in 60s", None),
+            ("http 503: service_unavailable", None),
+            ("cooling down after an earlier failure", None),
+        ] {
+            assert_eq!(Cause::of(detail), cause, "{detail}");
+            let status = detail[5..8]
+                .parse()
+                .ok()
+                .filter(|_| detail.starts_with("http "));
+            assert_eq!(
+                refused_key(status, detail),
+                cause == Some(Cause::Key),
+                "{detail}"
+            );
+        }
     }
 }
