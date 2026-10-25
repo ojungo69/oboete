@@ -547,11 +547,17 @@ is due again. The backups are rewritten by the same rule. An op that lists no `r
 taken by this rule, as `Judge::turn` passes over a turn op without `from`; so every job but
 `rule` must list it.
 
-S6. **Exclusion, rescans, retention.** A request or goal quote of an excluded session or
-repository is hidden while it is excluded; a story chapter that read one is hidden until
-rewritten, and its week is due. A new redaction rule masks `my_work` op text, as it masks every
-op's; its labels (job, ids, spans) are kept from masking, as a turn op's are (`OP_NAMES`).
-Retention leaves the ops' text, as it leaves summaries'.
+S6. **Exclusion, rescans, retention.** While an exclusion stands, every `my_work` op that read a
+record of the excluded session or repository is hidden, and so is every op built on one, followed
+through the same `read` lists as S5: a goal's title and product, a review's summary or a story
+chapter written from the excluded prompts is shown nowhere and sent to no job, not only their
+quotes. Each such job is due again at once for what the exclusion still allows, reading only
+that; for the goals that is a first run (M2). A request of an excluded session or repository is
+hidden too, and not reviewed. Taking the exclusion back shows the ops again, unless a newer op of
+the same key replaced them meanwhile.
+A new redaction rule masks `my_work` op text, as it masks every op's; its labels (job, ids, spans)
+are kept from masking, as a turn op's are (`OP_NAMES`). Retention leaves the ops' text, as it
+leaves summaries'.
 
 S7. **Devices.** `my_work` ops are this device's, written from what it holds; they do not travel
 until sync decides how goals from two devices meet. (Claude; overrulable.)
@@ -766,7 +772,8 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `lengths_are_counted_in_characters` (M4)
 - `the_label_uses_the_local_date` (V2)
 - `goals_are_not_in_session_start_search_or_what_agents_are_given` (M6)
-- `a_quote_of_an_excluded_session_is_hidden_while_it_is_excluded` (S6)
+- `goals_that_read_an_excluded_repository_are_hidden_and_sent_nowhere_until_rewritten` (S6)
+- `an_op_built_on_a_hidden_op_is_hidden_and_the_exclusion_taken_back_shows_both` (S6)
 
 ### Slice 6
 
