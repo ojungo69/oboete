@@ -962,11 +962,15 @@ impl ModelRule {
 
 /// An OpenRouter `:free` model, by the URL as written in any case (#238).
 fn openrouter_free(base_url: &str, model: &str) -> bool {
+    openrouter(base_url) && is_free(model)
+}
+
+/// Whether an entry's calls go to OpenRouter's API, by the URL as written in any case.
+pub(crate) fn openrouter(base_url: &str) -> bool {
     base_url
         .trim()
         .trim_end_matches('/')
         .eq_ignore_ascii_case(OPENROUTER)
-        && is_free(model)
 }
 
 fn is_free(model: &str) -> bool {

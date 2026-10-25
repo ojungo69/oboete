@@ -1542,9 +1542,93 @@ fn openai_compat(
     )
 }
 
-/// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy.
+/// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy. A call
+/// to OpenRouter asks for no reasoning (`reasoning_switch`); a model that refuses the switch is
+/// asked again without it, once, and gets none from then on.
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
 fn http_call(
+    api: Api,
+    base_url: &str,
+    key_file: Option<&Path>,
+    model: &str,
+    timeout_s: u64,
+    extra: &serde_json::Map<String, Value>,
+    headers: &std::collections::BTreeMap<String, String>,
+    prompt: &str,
+    schema: &Value,
+    admission: Option<crate::dispatch::Guard>,
+    redirects: u32,
+) -> Result<Answer, CallError> {
+    let send = |extra: &serde_json::Map<String, Value>, admission| {
+        http_send(
+            api, base_url, key_file, model, timeout_s, extra, headers, prompt, schema, admission,
+            redirects,
+        )
+    };
+    if !reasoning_switch(api, base_url, model, extra) {
+        return send(extra, admission);
+    }
+    let mut off = extra.clone();
+    off.insert("reasoning".into(), json!({"enabled": false}));
+    let again = admission.clone();
+    match send(&off, admission) {
+        Err(e) if e.message.ends_with(REASONING_REFUSED) => {
+            if let Ok(mut refused) = NO_REASONING_SWITCH.lock()
+                && !refused.iter().any(|m| m == model)
+            {
+                refused.push(model.to_owned());
+            }
+            send(extra, again)
+        }
+        answer => answer,
+    }
+}
+
+/// Models whose OpenRouter endpoint refused the reasoning switch in this process: they reason
+/// whatever a request asks, and are called without it.
+static NO_REASONING_SWITCH: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// What a refusal of the reasoning switch adds to a call's error message.
+const REASONING_REFUSED: &str = " (reasoning refused)";
+
+/// claude-mem 15.0.2: a call to OpenRouter asks for no reasoning, unless its entry sets reasoning
+/// itself or its model refused the switch. A reasoning-by-default model otherwise thinks for
+/// seconds to a minute before a curator's answer (8 to 36 s against 2 s, OpenRouter's free
+/// dots-3-note-preview, 2026-10-25), and can spend its whole output on it and answer nothing.
+fn reasoning_switch(
+    api: Api,
+    base_url: &str,
+    model: &str,
+    extra: &serde_json::Map<String, Value>,
+) -> bool {
+    api == Api::Openai
+        && reaches_openrouter(base_url)
+        && !["reasoning", "reasoning_effort", "include_reasoning"]
+            .iter()
+            .any(|k| extra.contains_key(*k))
+        && NO_REASONING_SWITCH
+            .lock()
+            .is_ok_and(|refused| !refused.iter().any(|m| m == model))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A loopback URL a test calls as OpenRouter's.
+    static OPENROUTER_AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn reaches_openrouter(base_url: &str) -> bool {
+    #[cfg(test)]
+    if OPENROUTER_AT.with(|at| at.borrow().as_deref() == Some(base_url)) {
+        return true;
+    }
+    config::openrouter(base_url)
+}
+
+/// `http_call`'s request, as it is given.
+#[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
+fn http_send(
     api: Api,
     base_url: &str,
     key_file: Option<&Path>,
@@ -1630,6 +1714,9 @@ fn http_call(
         if moderation(&text) {
             message.push_str(" (moderation)");
         }
+        if matches!(status, 400 | 422) && names_reasoning(&text) {
+            message.push_str(REASONING_REFUSED);
+        }
         // Spent credits are not luck: the entry rests as a spent month's budget does.
         let spent =
             api == Api::Anthropic && (status == 402 || status == 400 && credits_spent(&text));
@@ -1657,13 +1744,25 @@ fn http_call(
         return anthropic_answer(&v, rate);
     }
     let usage = usage_openai(&v);
-    let content = v["choices"][0]["message"]["content"]
+    let choice = &v["choices"][0];
+    // claude-mem 15.0.2 (#2995): a model that spends its whole output on reasoning answers
+    // nothing, cut at its length limit, and fails as such.
+    if choice["message"]["content"]
         .as_str()
-        .ok_or_else(|| {
-            CallError::other("invalid output: no choices[0].message.content")
-                .with_usage(usage)
-                .rated(rate)
-        })?;
+        .is_none_or(|c| c.trim().is_empty())
+        && choice["finish_reason"].as_str() == Some("length")
+    {
+        return Err(CallError::other(
+            "invalid output: the answer reached its length limit before any text",
+        )
+        .with_usage(usage)
+        .rated(rate));
+    }
+    let content = choice["message"]["content"].as_str().ok_or_else(|| {
+        CallError::other("invalid output: no choices[0].message.content")
+            .with_usage(usage)
+            .rated(rate)
+    })?;
     Ok(Answer {
         value: answer_value(content),
         usage,
@@ -1987,6 +2086,18 @@ fn moderation(body: &str) -> bool {
         }
         Err(_) => hit(body),
     }
+}
+
+/// Whether an error refuses the reasoning switch ("Reasoning is mandatory for this endpoint and
+/// cannot be disabled.", OpenRouter, 2026-10-25). Only the error's own message is read, as
+/// `moderation` reads it.
+fn names_reasoning(body: &str) -> bool {
+    error_body(body).is_some_and(|v| {
+        let e = v.get("error").unwrap_or(&v);
+        e["message"]
+            .as_str()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("reasoning"))
+    })
 }
 
 /// Whether an Anthropic 400 says the account's credits are spent ("Your credit balance is too low
@@ -4873,41 +4984,176 @@ child.wait()
         body: Vec<u8>,
         extra_headers: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
+        serve_each(vec![(status, body)], extra_headers)
+    }
+
+    /// `serve` for one request after another, each answered in turn.
+    fn serve_each(
+        answers: Vec<(&'static str, Vec<u8>)>,
+        extra_headers: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            let mut req = Vec::new();
-            let mut buf = [0u8; 4096];
-            // Read the headers and the JSON body (its length is in Content-Length).
-            while let Ok(n) = conn.read(&mut buf) {
-                req.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&req).to_lowercase();
-                if let Some(end) = text.find("\r\n\r\n") {
-                    let len = text
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if req.len() >= end + 4 + len {
+            for (status, body) in answers {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read the headers and the JSON body (its length is in Content-Length).
+                while let Ok(n) = conn.read(&mut buf) {
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req).to_lowercase();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if req.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                    if n == 0 {
                         break;
                     }
                 }
-                if n == 0 {
-                    break;
-                }
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                conn.write_all(head.as_bytes()).ok();
+                conn.write_all(&body).ok();
+                tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
             }
-            let head = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            conn.write_all(head.as_bytes()).ok();
-            conn.write_all(&body).ok();
-            tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// The JSON body of a request a test server received.
+    fn request_body(request: &str) -> Value {
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    /// One OpenAI-compatible call with `extra`, to `url` as OpenRouter's when `openrouter`.
+    fn send_to(
+        url: &str,
+        model: &str,
+        extra: Value,
+        openrouter: bool,
+    ) -> Result<Answer, CallError> {
+        OPENROUTER_AT.set(openrouter.then(|| url.to_owned()));
+        http_call(
+            Api::Openai,
+            url,
+            None,
+            model,
+            10,
+            extra.as_object().unwrap(),
+            &Default::default(),
+            "p",
+            &json!({}),
+            None,
+            0,
+        )
+    }
+
+    /// claude-mem 15.0.2: a call to OpenRouter asks for no reasoning, unless its entry sets
+    /// reasoning itself; a call elsewhere gets no such field.
+    #[test]
+    fn an_openrouter_call_asks_for_no_reasoning_unless_its_entry_sets_it() {
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"},
+            "finish_reason": "stop"}]})
+        .to_string()
+        .into_bytes();
+        let cases = [
+            (json!({}), true, Some(json!({"enabled": false}))),
+            (
+                json!({"reasoning": {"effort": "low"}}),
+                true,
+                Some(json!({"effort": "low"})),
+            ),
+            (json!({"reasoning_effort": "low"}), true, None),
+            (json!({"include_reasoning": true}), true, None),
+            (json!({}), false, None),
+        ];
+        for (extra, openrouter, reasoning) in cases {
+            let (url, request) = serve_once(answer.clone(), "");
+            let a = send_to(&url, "switch-asked", extra.clone(), openrouter).unwrap();
+            assert_eq!(a.value, json!({"summary": "s"}));
+            let body = request_body(&request.recv().unwrap());
+            assert_eq!(
+                body.get("reasoning"),
+                reasoning.as_ref(),
+                "{extra} {openrouter}"
+            );
+        }
+    }
+
+    /// A model that cannot stop reasoning refuses the switch with a 400, unbilled: the call is
+    /// sent again without it, and the model gets none from then on. Another 400 is no refusal.
+    #[test]
+    fn a_model_that_refuses_the_reasoning_switch_is_asked_again_without_it() {
+        let refused = json!({"error": {"message":
+            "Reasoning is mandatory for this endpoint and cannot be disabled.", "code": 400}})
+        .to_string()
+        .into_bytes();
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"},
+            "finish_reason": "stop"}]})
+        .to_string()
+        .into_bytes();
+        let (url, requests) = serve_each(
+            vec![
+                ("400 Bad Request", refused),
+                ("200 OK", answer.clone()),
+                ("200 OK", answer),
+            ],
+            "",
+        );
+        let a = send_to(&url, "switch-refused", json!({}), true).unwrap();
+        assert_eq!(a.value, json!({"summary": "s"}));
+        let first = request_body(&requests.recv().unwrap());
+        let second = request_body(&requests.recv().unwrap());
+        assert_eq!(first["reasoning"], json!({"enabled": false}));
+        assert!(second.get("reasoning").is_none(), "{second}");
+        send_to(&url, "switch-refused", json!({}), true).unwrap();
+        let third = request_body(&requests.recv().unwrap());
+        assert!(third.get("reasoning").is_none(), "{third}");
+
+        let other =
+            json!({"error": {"message": "Invalid schema for response_format", "code": 400}})
+                .to_string()
+                .into_bytes();
+        let (url, requests) = serve_each(vec![("400 Bad Request", other)], "");
+        let e = send_to(&url, "switch-other-400", json!({}), true).unwrap_err();
+        assert_eq!(e.status, Some(400));
+        assert!(!e.message.contains("reasoning"), "{}", e.message);
+        assert_eq!(
+            request_body(&requests.recv().unwrap())["reasoning"],
+            json!({"enabled": false})
+        );
+        assert!(requests.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    /// An answer cut at its length limit before any text, its output spent on reasoning, fails as
+    /// such with its usage; an empty answer that stopped on its own is read as before.
+    #[test]
+    fn an_answer_cut_at_its_length_limit_before_any_text_says_so() {
+        for content in [json!(""), json!(null), json!("  ")] {
+            let answer = json!({"choices": [{"message": {"content": content},
+                "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 4000}});
+            let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+            let e = send_to(&url, "cut", json!({}), false).unwrap_err();
+            assert!(e.invalid(), "{}", e.message);
+            assert!(e.message.contains("length limit"), "{}", e.message);
+            assert_eq!(e.usage.completion, Some(4000));
+        }
+        let stopped = json!({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]});
+        let (url, _) = serve_once(stopped.to_string().into_bytes(), "");
+        let a = send_to(&url, "cut", json!({}), false).unwrap();
+        assert_eq!(a.value, json!(""));
     }
 
     /// R14 (parity row 2): a call out keeps the worker's watchdog from calling the loop stuck for
