@@ -17,6 +17,10 @@ use crate::raw::{Item, Raw, WorkWrite};
 use crate::redact::Rules;
 use crate::turns::TurnSummary;
 
+/// The curator chain's role for My Work's jobs (docs/my-work-model.md A1), in the ledger and for a
+/// CLI entry's system prompt.
+pub(crate) const ROLE: &str = "my_work";
+
 /// What is read, at most, as claude-mem's agent view reads it (`readAgentRecords`,
 /// `buildAgentView`): the newest 240 work items, 300 observations (cards here), 100 summaries,
 /// of what no exclusion takes (`link`, `newest`).

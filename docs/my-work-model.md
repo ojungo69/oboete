@@ -846,6 +846,26 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **Not read yet**: no reader takes the marks; slices 3 to 5 do (grouping, reviews, goals). Until
   then only `typed::entrypoint` runs outside the tests, where a prompt is captured.
 
+### Slice 2a: the providers' side of the job frame (2026-10-26)
+
+- **`[my_work]`** in config.toml (`config::MyWork`): `curate`, false unless set, and `calls_a_day`,
+  100 unless set. No job reads them yet; the settings page's row, with its estimate first (A6),
+  comes with slice 2c, after the marks.
+- **The role `my_work`** (`my_work::ROLE`). A CLI entry is told it turns a developer's recorded
+  requests, session summaries and work state into the JSON My Work asks for
+  (`provider::MY_WORK_SYSTEM`, A10); the rest is `CURATOR_SYSTEM`'s: no tools, the JSON alone, the
+  records' text data.
+- **A refused answer** (A9): an answer a My Work check refuses rests no entry and counts toward no
+  breaker, as an answer that did not anchor leaves it (`Chain::run_report`).
+- **The daily count** (A7): `providers_db::my_work_calls_in_a_day`, the role's requests of every
+  entry in a rolling 24 hours, counted as an entry's daily budget is; a partial index on the role
+  keeps it a seek.
+- **Waiting** (A8): providers.db's `my_work_pending`, by the job's ledger span, holds the request's
+  digest, the reason, the hold, the attempts and the next attempt. `oboete resume` wakes a job held
+  for the owner, and a saved key one held for time or the owner, as they wake windows and turns.
+  The table and the index are ones an older binary ignores: no format change.
+- **Not yet**: the job runner (the due check, the round's order of A3, A5's gate, the wait at the
+  bound), with the op kind (slice 2b) and the first job (slice 3).
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

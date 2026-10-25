@@ -11,6 +11,11 @@ pub struct Config {
     pub providers: Vec<Provider>,
     #[serde(default)]
     pub summary: Summary,
+    /// `[my_work]`: My Work's jobs on the curator chain, off until the owner turns them on. The
+    /// first job reads it (docs/my-work-model.md, slice 3).
+    #[serde(default)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub my_work: MyWork,
     #[serde(default)]
     pub embedding: Embedding,
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
@@ -184,6 +189,32 @@ impl Default for Summary {
 
 fn default_window_tokens() -> u32 {
     crate::curate::WINDOW_TOKENS
+}
+
+/// `[my_work]` (docs/my-work-model.md, decision 57): whether the worker writes My Work's groups,
+/// reviews, story, goals and rule suggestions with the curator chain, and in how many calls a day
+/// at most.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MyWork {
+    /// Off until a person turns it on on the settings page, its estimate shown first (A6).
+    #[serde(default)]
+    pub curate: bool,
+    /// Calls of role `my_work` in any 24 hours, at most (A7).
+    #[serde(default = "default_my_work_calls")]
+    pub calls_a_day: u32,
+}
+
+impl Default for MyWork {
+    fn default() -> Self {
+        Self {
+            curate: false,
+            calls_a_day: default_my_work_calls(),
+        }
+    }
+}
+
+fn default_my_work_calls() -> u32 {
+    100
 }
 fn default_idle_minutes() -> u32 {
     10
@@ -746,6 +777,7 @@ pub fn load(home: &Path) -> Result<Config> {
         return Ok(Config {
             providers: default_providers(),
             summary: Summary::default(),
+            my_work: MyWork::default(),
             embedding: Embedding::default(),
             gemini: None,
             paid_usd_per_month: default_paid_usd_per_month(),
@@ -1648,6 +1680,20 @@ model = "haiku"
         )
         .unwrap();
         assert!(load(dir).is_err());
+    }
+
+    /// `[my_work]` (docs/my-work-model.md A6, A7): off and 100 calls a day unless set.
+    #[test]
+    fn my_work_is_off_with_100_calls_a_day_unless_set() {
+        let none = tempfile::tempdir().unwrap();
+        let defaults = MyWork {
+            curate: false,
+            calls_a_day: 100,
+        };
+        assert_eq!(load(none.path()).unwrap().my_work, defaults);
+        assert_eq!(load_text("[summary]\ncurate = true\n").my_work, defaults);
+        let set = load_text("[my_work]\ncurate = true\ncalls_a_day = 40\n").my_work;
+        assert_eq!((set.curate, set.calls_a_day), (true, 40));
     }
 
     fn load_text(text: &str) -> Config {
