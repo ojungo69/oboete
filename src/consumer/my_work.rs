@@ -39,8 +39,8 @@ impl Consumer for MyWork {
             }
             k.execute(
                 "INSERT OR REPLACE INTO my_work(device, op_seq, ts, job, about, entry, read,
-                   removed, fields, skipped)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                   removed, fields, skipped, forgotten)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     device,
                     op.op_seq,
@@ -51,7 +51,8 @@ impl Consumer for MyWork {
                     serde_json::to_string(&w.read)?,
                     serde_json::to_string(&w.removed)?,
                     serde_json::to_string(&w.fields)?,
-                    w.skipped
+                    w.skipped,
+                    w.forgotten
                 ],
             )?;
         }

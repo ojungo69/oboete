@@ -3438,6 +3438,30 @@ impl Raw {
             }
         }
         drop(rows);
+        // docs/my-work-model.md S5: then the My Work ops, in op order, each by what it read: a
+        // forgotten record, or an op whose text a forget took before or takes now, a My Work op
+        // judged before it among them, so an update built on a taken op is taken too.
+        let mut taken = taken_ops(&self.forgotten_op_bodies()?);
+        taken.extend(
+            (found.windows.iter().chain(&found.turns))
+                .map(|(device, op_seq, job)| ((device.clone(), *op_seq), job.clone())),
+        );
+        let mut st = self.conn.prepare(
+            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'my_work' ORDER BY device, op_seq",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
+            else {
+                continue;
+            };
+            if let Some(job) = judge.my_work(&device, ts, &body, &taken) {
+                taken.insert((device.clone(), op_seq), job.clone());
+                found.my_work.push((device, op_seq, job));
+            }
+        }
+        drop(rows);
         Ok((found, judge))
     }
 
@@ -3847,6 +3871,9 @@ impl Raw {
             .chain(ops.turns.iter().map(|(device, op_seq, job)| {
                 (device.as_str(), *op_seq, job.as_str(), OpKind::Turn)
             }))
+            .chain(ops.my_work.iter().map(|(device, op_seq, job)| {
+                (device.as_str(), *op_seq, job.as_str(), OpKind::MyWork)
+            }))
             .collect();
         let mut rewritten = 0;
         for batch in all.chunks(RECORD_PURGE_BATCH) {
@@ -3879,6 +3906,7 @@ impl Raw {
                             }
                             body
                         }
+                        OpKind::MyWork => forgotten_my_work_body(&body, job),
                         _ => forgotten_turn_body(&body, job),
                     };
                     rewritten += tx.execute(
@@ -3909,7 +3937,7 @@ impl Raw {
         Ok(self
             .conn
             .prepare(
-                "SELECT device, op_seq, body FROM ops WHERE type IN ('window', 'turn')
+                "SELECT device, op_seq, body FROM ops WHERE type IN ('window', 'turn', 'my_work')
                    AND json_extract(body, '$.forgotten') IS NOT NULL",
             )?
             .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
@@ -7641,7 +7669,7 @@ fn rewrite_copy(
             // not hold judged by its own (Codex and CodeRabbit on #472).
             // A body that does not parse may hold a card's or a summary's text: it fails the copy,
             // as a claim's does (Codex on #472).
-            let now = if matches!(kind, OpKind::Window | OpKind::Turn) {
+            let now = if matches!(kind, OpKind::Window | OpKind::Turn | OpKind::MyWork) {
                 let body =
                     serde_json::from_str(&text).context("an op whose body does not parse")?;
                 judge.purged(kind, (&key.0, key.1), ts, batch, &body)
@@ -7824,6 +7852,9 @@ fn shown_then(removed: &[serde_json::Value], ts: i64, r: &(i64, String, Option<i
 pub(crate) struct RecordOps {
     pub(crate) windows: Vec<(String, i64, String)>,
     pub(crate) turns: Vec<(String, i64, String)>,
+    /// docs/my-work-model.md S5: the My Work ops that read a forgotten record, or an op whose text
+    /// a forget took, in op order.
+    pub(crate) my_work: Vec<(String, i64, String)>,
     /// Slice 3d-4 (rule c): the claim ops of the batch of each window op of `windows` a record job
     /// takes, and of each window op a record job's purge rewrote before 3d-4 whose claims still
     /// hold text, by the window op's device and op seq; and when this read them, which `copied`
@@ -8035,6 +8066,36 @@ impl Judge {
             })
     }
 
+    /// docs/my-work-model.md S5 for a My Work op of `device` written at `ts` that holds its text:
+    /// the job of the first forgotten record it was shown in its `read` spans, else of the first
+    /// op it read whose text a forget took (`taken`, by device and op seq). One that lists no
+    /// `read` is never taken by this rule, as a turn op without `from` is not.
+    fn my_work(
+        &self,
+        device: &str,
+        ts: i64,
+        body: &serde_json::Value,
+        taken: &std::collections::HashMap<(String, i64), String>,
+    ) -> Option<String> {
+        if body.get("forgotten").is_some() {
+            return None;
+        }
+        let removed = items(&body["removed"]);
+        let shown = |r: &&(i64, String, Option<i64>)| shown_then(removed, ts, r);
+        items(&body["read"]["spans"])
+            .iter()
+            .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
+            .flat_map(|(a, b)| self.forgotten.between(device, a, b))
+            .find(shown)
+            .map(|r| r.1.clone())
+            .or_else(|| {
+                items(&body["read"]["ops"])
+                    .iter()
+                    .filter_map(serde_json::Value::as_i64)
+                    .find_map(|seq| taken.get(&(device.to_owned(), seq)).cloned())
+            })
+    }
+
     /// The body an op of `kind` at `at` (device, op seq), written at `ts` in `batch`, is to hold
     /// once a purge takes its text: a window or turn op's as raw.db holds it rewritten, else by the
     /// rules; a claim op's that quotes a forgotten record, the job of the first such record's
@@ -8057,6 +8118,15 @@ impl Judge {
                     _ => forgotten_turn_body(body, &self.turn(at.0, ts, body)?),
                 };
                 Some(body.to_string())
+            }
+            // docs/my-work-model.md S5: as raw.db holds it rewritten, else by what it read, the
+            // ops raw.db holds rewritten among them.
+            OpKind::MyWork => {
+                if let Some(now) = self.rewritten.get(&(at.0.to_owned(), at.1)) {
+                    return Some(now.clone());
+                }
+                let job = self.my_work(at.0, ts, body, &taken_ops(&self.rewritten))?;
+                Some(forgotten_my_work_body(body, &job).to_string())
             }
             OpKind::Claim => {
                 if self
@@ -8249,6 +8319,29 @@ pub(crate) fn forgotten_turn_body(body: &serde_json::Value, job: &str) -> serde_
         o.insert("forgotten".to_owned(), job.into());
     }
     b
+}
+
+/// docs/my-work-model.md S5: My Work op `body` without its text: its job, subject and what it read
+/// kept, its fields gone and a skip, with the forget's job, so the job is due again.
+pub(crate) fn forgotten_my_work_body(body: &serde_json::Value, job: &str) -> serde_json::Value {
+    let mut b = body.clone();
+    if let Some(o) = b.as_object_mut() {
+        o.insert("fields".to_owned(), serde_json::json!({}));
+        o.insert("skipped".to_owned(), true.into());
+        o.insert("forgotten".to_owned(), job.into());
+    }
+    b
+}
+
+/// The job that took each op of `rewritten`, by device and op seq.
+fn taken_ops(rewritten: &ForgottenOps) -> std::collections::HashMap<(String, i64), String> {
+    rewritten
+        .iter()
+        .filter_map(|(at, body)| {
+            let body: serde_json::Value = serde_json::from_str(body).ok()?;
+            Some((at.clone(), body["forgotten"].as_str()?.to_owned()))
+        })
+        .collect()
 }
 
 /// Slice 3e-1: a row's stored body (`enc` as stored) with each of `ranges` masked (`masked`), stored

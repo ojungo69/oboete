@@ -1033,6 +1033,7 @@ fn record_jobs_with_text(raw: &crate::raw::Raw) -> Result<HashSet<String>> {
         ops.windows
             .into_iter()
             .chain(ops.turns)
+            .chain(ops.my_work)
             .map(|(_, _, job)| job),
     );
     // Slice 3d-4: and a window's claims that hold text, of a window rewritten before too.
@@ -3575,6 +3576,115 @@ mod tests {
                 (seq, serde_json::from_str(&body).unwrap())
             })
             .collect()
+    }
+
+    /// docs/my-work-model.md S5: a forget takes a My Work op that was shown a forgotten record,
+    /// and one built on an op it took, in op order: its job, subject and what it read stay, its
+    /// fields go, marked with the forget's job, in raw.db, knowledge.db and the backup's ops. One
+    /// that read neither keeps its text.
+    #[test]
+    fn a_forget_takes_the_my_work_ops_that_read_what_it_took() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Parsers stay in {WINDOW_CANARY} mode."),
+        );
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let op = |about: &str, spans: &[(i64, i64)], ops: &[i64], text: &str| {
+            let body = json!({"job": "review", "about": about, "entry": "anthropic", "ts": 5_000,
+                "read": {"spans": spans, "ops": ops}, "removed": [],
+                "fields": {"summary": text}, "skipped": false});
+            (crate::raw::OpKind::MyWork, body)
+        };
+        let read = op("R1", &[(r1, r1)], &[], &format!("Read: {WINDOW_CANARY}."));
+        let first = s.raw.append_ops(&[read]).unwrap()[0];
+        let card = window_op(r1, r1, &format!("Its card: {WINDOW_CANARY}."), json!({}));
+        let window = s.raw.append_ops(&[card]).unwrap()[0];
+        let built = op(
+            "R2",
+            &[(r2, r2)],
+            &[first],
+            &format!("On it: {WINDOW_CANARY}."),
+        );
+        let carded = op(
+            "R4",
+            &[(r2, r2)],
+            &[window],
+            &format!("Its card: {WINDOW_CANARY}."),
+        );
+        let kept = op("R3", &[(r2, r2)], &[], "Kept: it read the kept record.");
+        let rest = s.raw.append_ops(&[built, carded, kept]).unwrap();
+        let home = s.home.path().to_owned();
+        s.run();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        let before = op_bodies(&home);
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        let shown = preview(&home, target).unwrap();
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let purged = purge(&home).unwrap().unwrap();
+        // The window op, and three My Work ops: the one shown the record, the one built on it,
+        // the one that read the window.
+        assert_eq!((purged.records, purged.ops), (1, 4));
+        let job = crate::raw::open(&home).unwrap().forget_jobs().unwrap()[0]
+            .0
+            .job
+            .clone();
+        let after = op_bodies(&home);
+        for seq in [first, rest[0], rest[1]] {
+            let gone = crate::raw::forgotten_my_work_body(&before[&seq], &job);
+            assert_eq!(after[&seq], gone, "{seq}");
+        }
+        assert_eq!(after[&rest[2]], before[&rest[2]]);
+        assert_eq!(backup_hits(&home, WINDOW_CANARY), Vec::<String>::new());
+        assert!(!holds_text(&copy, WINDOW_CANARY));
+        assert_eq!(
+            store_hits(&home, WINDOW_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+        let k = crate::knowledge::open(&home).unwrap();
+        let review = crate::my_work_ops::newest(&k, "review", "R1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (review.op.skipped, review.op.forgotten.as_deref()),
+            (true, Some(job.as_str()))
+        );
+        assert!(review.op.fields.is_empty());
+        let r3 = crate::my_work_ops::newest(&k, "review", "R3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            r3.op.fields["summary"],
+            json!("Kept: it read the kept record.")
+        );
+        // A restore from older ops gives a My Work op its text back: purged again.
+        assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute(
+                "UPDATE ops SET body = ?1 WHERE op_seq = ?2",
+                rusqlite::params![before[&first].to_string(), first],
+            )
+            .unwrap();
+        assert!(status(&home).unwrap().iter().any(|j| j.local == PENDING));
+        assert_eq!(purge(&home).unwrap().unwrap().ops, 1);
+        assert_eq!(
+            store_hits(&home, WINDOW_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
     }
 
     /// Slice 3d-2: the window ops that showed a curator a forgotten record (in their span or their

@@ -868,7 +868,7 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **Not yet**: the job runner (the due check, the round's order of A3, A5's gate, the wait at the
   bound), with the op kind (slice 2b) and the first job (slice 3).
 
-### Slice 2b-1: the op and its consumer (2026-10-26)
+### Slice 2b: the op, its consumer and its forget (2026-10-26)
 
 - **The op kind `my_work`** (`raw::OpKind::MyWork`), its body `my_work_ops::MyWorkOp` (S2): the
   job (one of `my_work_ops::JOBS`), `about` (what it is about: a repository, a request, a week, a
@@ -886,8 +886,17 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   whichever device wrote it, so a rewind of one device leaves the other devices' as they were. The
   design's "older marked replaced" is that read: no mark is kept to undo. An op of a job this
   binary does not know is passed over. `oboete rebuild` makes the same rows with no provider call.
-- **Not yet**: the forget's rule (S5) and the exclusion's (S6, which applies when a reader shows
-  or sends an op), with the job runner; nothing writes a `my_work` op until the first job.
+- **The forget** (S5): `Raw::record_ops` judges the `my_work` ops after the windows and turns, in
+  op order, each by what it read: a forgotten record it was shown in its spans, or an op in its
+  `read` whose text a forget took before or takes in the same pass (a window, a turn, or a My Work
+  op judged before it, so an update built on a taken op is taken too). A taken op keeps its job,
+  subject, entry, time and what it read; its fields go, it is a skip, and it holds the forget's
+  job (`forgotten_my_work_body`), which the consumer keeps (`MyWorkOp::forgotten`), so the job is
+  due again. The backup's ops segments and the copies of raw.db are judged by the same rule
+  (`Judge::purged`), and a restore that gives an op its text back makes the purge go on again.
+  The forget's preview does not count My Work ops yet.
+- **Not yet**: the exclusion's rule (S6), which applies when a reader shows or sends an op, with
+  the job runner; nothing writes a `my_work` op until the first job.
 
 ## Not built
 

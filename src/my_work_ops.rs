@@ -50,6 +50,9 @@ pub(crate) struct MyWorkOp {
     pub fields: BTreeMap<String, Value>,
     #[serde(default)]
     pub skipped: bool,
+    /// The job of the forget that took its text (S5): its job is due again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forgotten: Option<String>,
 }
 
 /// `op` as it can be kept within an op's cap (`raw::MAX_OP_BYTES`): whole, else without its
@@ -89,6 +92,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            removed TEXT NOT NULL,
            fields TEXT NOT NULL,
            skipped INTEGER NOT NULL,
+           forgotten TEXT,
            PRIMARY KEY(device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS my_work_about ON my_work(job, about, ts);",
@@ -112,7 +116,7 @@ pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Ke
     schema(k)?;
     let row = k
         .query_row(
-            "SELECT device, op_seq, ts, entry, read, removed, fields, skipped FROM my_work
+            "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten FROM my_work
              WHERE job = ?1 AND about = ?2 ORDER BY ts DESC, device DESC, op_seq DESC LIMIT 1",
             params![job, about],
             |r| {
@@ -125,11 +129,12 @@ pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Ke
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, bool>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             },
         )
         .optional()?;
-    let Some((device, op_seq, ts, entry, read, removed, fields, skipped)) = row else {
+    let Some((device, op_seq, ts, entry, read, removed, fields, skipped, forgotten)) = row else {
         return Ok(None);
     };
     Ok(Some(Kept {
@@ -144,6 +149,7 @@ pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Ke
             removed: serde_json::from_str(&removed)?,
             fields: serde_json::from_str(&fields)?,
             skipped,
+            forgotten,
         },
     }))
 }
@@ -169,6 +175,7 @@ mod tests {
             removed: vec![],
             fields: serde_json::from_value(fields).unwrap(),
             skipped: false,
+            forgotten: None,
         }
     }
 
