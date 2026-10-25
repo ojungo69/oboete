@@ -3,8 +3,8 @@ Copyright 2026 ojungo69
 
 Licensed under the Apache License, Version 2.0.
 
-This product includes text adapted from Claude-Mem (https://github.com/thedotmack/claude-mem),
-licensed under the Apache License, Version 2.0:
+This product includes text and code adapted from Claude-Mem
+(https://github.com/thedotmack/claude-mem), licensed under the Apache License, Version 2.0:
 
     Claude-Mem
     Copyright 2026 Alex Newman
@@ -17,7 +17,14 @@ and on what to record and what to skip. It is cut down and reworded in the curat
 (src/curate.rs, `prompt`) and named in src/cards.rs (`TYPES`, `CONCEPTS`). From the same file,
 the request for a session summary and the guidance on its six fields (request, investigated,
 learned, completed, next_steps, notes), reworded in the summary prompt (src/turns.rs, `prompt`).
-No code of Claude-Mem is included.
+
+From src/services/work-view/work-product.mjs at v15.1.0, with its tests
+(tests/worker/work-view/work-product.test.mjs and work-product-git.test.mjs): the reading of what
+a request produced (the commits, pushes, branches and pull requests of recorded git and gh
+commands, the links publishing tools return, the files of kinds a person opens, the links attached
+to work-state items) and their merge, ported to Rust and changed in src/work_product.rs: which
+recorded calls are read is oboete's, and no file is served. No other code of Claude-Mem is
+included.
 
 This product includes a model graph derived from BGE-M3 (https://huggingface.co/BAAI/bge-m3),
 licensed under the MIT License:

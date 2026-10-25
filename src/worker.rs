@@ -257,6 +257,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         // The rescan first: the tombstones it appends are in raw before the others read a record.
         Box::new(crate::consumer::rescan::Rescan::new(home)),
         Box::new(crate::consumer::fts::Fts),
+        // Where the tool calls that may have made something are, for My Work (docs/my-work.md).
+        Box::new(crate::consumer::products::Products),
         // The op log's claims (milestone 3 D4), in op_seqs of every device that has ops.
         Box::new(crate::consumer::claims::Claims),
         // Claims whose quote a later tombstone masked or removed.

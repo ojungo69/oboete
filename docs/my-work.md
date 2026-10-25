@@ -179,6 +179,7 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 2. **The page**: the tab, the three views, the filters, the drill-down, Copy handoff and the
    reading-safe updates.
 3. **Checked**: the file, the route, Undo, the stale version, and the forget path.
+4. **Work product** (parity row X16, from claude-mem 15.1): what a request produced, in its page.
 
 ## Tests (acceptance, from #570 and the rules above)
 
@@ -503,3 +504,43 @@ them; nothing else in it changes.
   language, in its label and in the label's variables, so that a switch of language keeps it; a
   save the server took is said as kept, and as shown at the page's next read, when the read after
   it fails, where it was said as not saved.
+
+### Slice 4, work product (2026-10-25)
+
+claude-mem 15.1 shows what a request produced in its drawer (`src/services/work-view/work-product.mjs`
+at v15.1.0): the commits, pushes and branches its recorded `git` commands made, a pull request
+`gh pr create` opened, the link a publishing tool returned (Artifact, Notion, Claude Docs, a
+ChatGPT page, a site deploy), the files of kinds a person opens (images, video, PDF, Word, slides,
+sheets, HTML) its observations name as modified, and what an agent attached to a work-state item
+(`work_product`, `deliverable`, a `*_url` field). One entry a commit, branch, link or file, the
+newest first, at most 60; a commit links to GitHub once a recorded push sent its branch there.
+
+- **The parsing** is claude-mem's, ported (`src/work_product.rs`): the same patterns over a
+  recorded `Bash` call's command and output, a publishing tool's input and answer, a card's
+  `files_modified` and a work item's fields, the same merge.
+- **Where the calls are**: a tool record's text is in no index (#317), so the `products` consumer
+  keeps where each live call that may have made something is (`product_calls`: device, seq, time,
+  agent, session), picked as claude-mem picks the calls it reads, and nothing it said. My Work
+  reads those records from raw.db when a request's page opens: a forgotten or expired record is
+  no call, and what it made goes with it.
+- **The route**, `GET /api/my-work/product?request=<id>`, with the token, as every route: the
+  request named by its id as `GET /api/my-work` shows it; one not read is 404, none named 400.
+  The list of requests does not carry it, since the page reads every request each minute.
+- **What it shows**: a "Work product" section of the request's page, read when the page opens
+  and again when the request's version changes, each entry with its kind, its title, a link when
+  it has one, its path when it is a file, and its time. Each is gated as the page's text is; a
+  link is http or https with no user name or password, and one the gate changes is shown as its
+  title alone. Nothing is shown while it reads, nor when there is nothing.
+- **Differences**: a file is shown by its name and path, not served (claude-mem's viewer serves
+  it through the record that names it); oboete's page serves no local file. A request's
+  conversations are read whole, or the prompts it owns of one (#570), as its summaries and cards
+  are.
+- No provider is called.
+
+Tests: `consumer::products::tests::product_calls_are_the_live_calls_that_may_make_something`,
+`my_work::tests::a_requests_work_product_is_read_live_from_its_records`,
+`my_work::tests::a_shared_conversations_work_product_follows_its_prompts`,
+`my_work::tests::work_product_is_gated_as_shown_and_names_files`,
+`view::tests::the_my_work_product_route_answers_for_a_request_it_knows`, the viewer harness's
+work product check (read once a version, a link only for http and https, no section when empty),
+and the parser's 39 in `work_product::tests`, from claude-mem's two test files.
