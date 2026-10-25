@@ -81,17 +81,15 @@ impl Reservation {
         self.id
     }
 
-    /// Actual reported usage, with the admission-time bounds for any missing part. A token written
-    /// to the provider's cache counts twice, the most Anthropic bills a cache write (twice the
-    /// input price, for an hour's cache), and one read from it once, so what is counted is never
+    /// Actual reported usage, with the admission-time bounds for any missing part. The tokens the
+    /// provider's cache wrote and read are priced as `Provider::billed_input` prices them, never
     /// less than the bill; an input never reported is priced as admission priced it
     /// (`Provider::input_weight`; Codex on #409).
     pub(crate) fn cost(&self, p: &Provider, usage: Usage, billed: bool) -> Option<f64> {
-        let written = usage.written.unwrap_or(0);
         (billed && p.limits().is_paid()).then(|| {
             p.limits().usd(
                 usage.prompt.map_or(self.input * p.input_weight(), |n| {
-                    n.saturating_add(written) as f64
+                    p.billed_input(n, usage.cached, usage.written)
                 }),
                 usage.completion.map_or(self.output, |n| n as f64),
             )
@@ -1711,10 +1709,42 @@ mod tests {
         }
     }
 
-    /// Codex on #409: a Messages entry that writes its prompt cache prices each input token at
-    /// twice its input price, the most a cache write is billed, wherever its usage is not known:
-    /// admission, the reservation, a call whose usage never comes back, recuration's estimate. Its
-    /// tokens count once: a prompt that fits its ceiling is not refused for its price.
+    /// A Messages entry's call is counted as billed: of its reported prompt, the tokens its cache
+    /// read at a tenth of the input price and those it wrote at 1.25 times.
+    #[test]
+    fn a_messages_calls_cache_is_counted_as_billed() {
+        let limits = Limits {
+            max_output_tokens: 100,
+            usd_per_mtok_in: 1.0,
+            usd_per_mtok_out: 1.0,
+            ..Default::default()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let mut p = entry("p", limits);
+        if let Provider::Openai { api, .. } = &mut p {
+            *api = crate::config::Api::Anthropic;
+        }
+        let reservation = reserve(&db, &p, "curator", "s", 10_000, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let usage = Usage {
+            prompt: Some(10_000),
+            completion: Some(100),
+            cached: Some(4_000),
+            written: Some(1_000),
+            ..Default::default()
+        };
+        // 5,000 fresh, 1,000 written at 1.25, 4,000 read at 0.1, and 100 out: USD 0.00675.
+        let usd = reservation.cost(&p, usage, true).unwrap();
+        assert!((usd - 0.00675).abs() < 1e-12, "{usd}");
+    }
+
+    /// Codex on #409: a Messages entry prices each input token at what a cache write may bill,
+    /// 1.25 times its input price for a fenced prompt's instructions and twice with a cache of its
+    /// own (`cache_control`), wherever its usage is not known: admission, the reservation, a call
+    /// whose usage never comes back, recuration's estimate. Its tokens count once: a prompt that
+    /// fits its ceiling is not refused for its price.
     #[test]
     fn a_cache_writing_entry_prices_its_input_twice_and_counts_its_tokens_once() {
         let limits = Limits {
@@ -1724,7 +1754,9 @@ mod tests {
             usd_per_mtok_out: 1.0,
             ..Default::default()
         };
-        for (cache, usd) in [(false, 0.0601), (true, 0.1201)] {
+        // A Messages entry's input at 1.25 times its price, the write of a fenced prompt's
+        // instructions to its cache; twice with a cache of its own.
+        for (cache, usd) in [(false, 0.0751), (true, 0.1201)] {
             let home = tempfile::tempdir().unwrap();
             let db = open(home.path()).unwrap();
             let mut p = entry("p", limits.clone());
@@ -1738,7 +1770,7 @@ mod tests {
                 }
             }
             // 60,000 input tokens and 100 output tokens at USD 1 per million each: within USD 0.10
-            // a month once, not twice.
+            // a month at 1.25 times, not twice.
             let refused = admit_with_history(&db, (&p, &p), 60_000.0, 0.1, &[]).unwrap();
             assert_eq!(refused.is_some(), cache);
             let reservation = reserve(&db, &p, "probe", "s", 60_000, 5.0, &[])

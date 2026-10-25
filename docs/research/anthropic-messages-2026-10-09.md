@@ -56,16 +56,27 @@ The default entry is Haiku 5.5, the cheaper Haiku with structured outputs. It is
 first row, with `max_request_tokens = 100000`, so no prompt reaches the second; a curation window
 is about 6,000 tokens. Its prices put it inside `paid_usd_per_month` with every other paid entry.
 
-A prompt cache (`cache_control` in an entry's `extra`) is billed at 1.25 times the input price for
-a token written to a 5-minute cache, 2 times for a 1-hour cache, and 0.1 times for a token read
-from it (0.05 or 0.025 times on some models; the same page, "Prompt caching"). The usage reports
-the written tokens (`cache_creation_input_tokens`) and the read ones apart, so oboete counts a
-written token at twice the entry's input price and a read one at once: what it counts toward
-`paid_usd_per_month` is never less than the bill. Such an entry also prices each input token at
-twice the input price wherever its usage is not known yet (admission, the reservation, the
-recuration estimate), so a call whose usage never comes back (a timeout, an unreadable answer) is
-counted the same way. Only the price is doubled: its tokens count once against the request ceiling,
-the rate limits and the daily tokens.
+A prompt cache is billed at 1.25 times the input price for a token written to a 5-minute cache,
+2 times for a 1-hour cache, and 0.1 times for a token read from it (0.05 or 0.025 times on some
+models; the same page, "Prompt caching"); Haiku 5.5 caches a prefix of 512 tokens or more. Since
+2026-10-25 a Messages request puts a fenced prompt's instructions, all before the sentence that
+names its fence (`curate::FENCE_SENTENCE`), in a block of their own marked for a 5-minute cache:
+the curator's and the summary's instructions are the same bytes for every call (G09, about 4,300
+tokens for the curator), so a call within five minutes of the last reads them at a tenth of the
+input price. Curation goes a step at a time while the owner works (decision 56), calls a median of
+34 s apart on a replay, so most calls read them. A cache an entry's own `extra` asks for
+(`cache_control`, of the whole request) still applies, and the instructions' block takes its
+lifetime, as a longer cache must come first.
+
+The usage reports the written tokens (`cache_creation_input_tokens`) and the read ones apart.
+oboete counts a written token at 1.25 times the entry's input price, and at 2 times when the entry's
+`extra` asks for a cache of its own anywhere (at the top or on a block of its `system`, `tools` or
+`messages`), whose lifetimes the usage does not tell apart; a read one at 0.1 times. What it counts
+toward `paid_usd_per_month` is never less than the bill on Claude's models. A Messages entry also
+prices each input token at 1.25 times its input price (2 times with a cache of its own) wherever
+its usage is not known yet (admission, the reservation, the recuration estimate), so a call whose usage
+never comes back (a timeout, an unreadable answer) is counted at least as billed. Only the price is
+raised: its tokens count once against the request ceiling, the rate limits and the daily tokens.
 
 The Haiku 5.5 migration guide (https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide):
 

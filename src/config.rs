@@ -328,19 +328,48 @@ impl Provider {
             Self::Openai { enabled, .. } | Self::Cli { enabled, .. } => *enabled,
         }
     }
-    /// The most one input token may be billed, in input prices: twice for a Messages entry that
-    /// writes its prompt cache (`cache_control` in its `extra`), which Anthropic bills at up to
-    /// twice the input price, else once. Only prices: a paid call's input is priced at this where
-    /// its usage is not known (admission, the reservation, a call whose usage never comes back,
-    /// recuration's estimate), and its tokens count once against every token limit (Codex on #409).
+    /// The most one input token may be billed, in input prices. A Messages entry writes its prompt
+    /// cache: a fenced prompt's instructions (`provider::anthropic_request`) at 1.25 times the input
+    /// price, for five minutes' cache, and at up to twice when its `extra` asks for a cache of its
+    /// own anywhere (`own_cache`); any other entry once. Only prices: a paid call's input is priced
+    /// at this where its usage is not known (admission, the reservation, a call whose usage never
+    /// comes back, recuration's estimate), and its tokens count once against every token limit
+    /// (Codex on #409).
     pub fn input_weight(&self) -> f64 {
         match self {
             Provider::Openai {
                 api: Api::Anthropic,
                 extra,
                 ..
-            } if extra.contains_key("cache_control") => 2.0,
+            } if own_cache(extra) => 2.0,
+            Provider::Openai {
+                api: Api::Anthropic,
+                ..
+            } => 1.25,
             _ => 1.0,
+        }
+    }
+
+    /// What a call's input is billed as, in input tokens at the input price, from its reported
+    /// `prompt` (every input token, those its cache wrote and read too), never less than the bill.
+    /// A Messages entry bills a token read from its prompt cache at a tenth of the input price or
+    /// less (Claude's models), and one written at 1.25 times for oboete's own five-minute marker;
+    /// at twice when its `extra` asks for a cache of its own anywhere (`own_cache`), whose lifetime
+    /// the usage does not tell apart (Codex on #636). Elsewhere a written token counts twice and a
+    /// read one once.
+    pub fn billed_input(&self, prompt: i64, cached: Option<i64>, written: Option<i64>) -> f64 {
+        let (cached, written) = (cached.unwrap_or(0).max(0), written.unwrap_or(0).max(0));
+        match self {
+            Provider::Openai {
+                api: Api::Anthropic,
+                extra,
+                ..
+            } => {
+                let write = if own_cache(extra) { 2.0 } else { 1.25 };
+                let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
+                fresh as f64 + written as f64 * write + cached as f64 * 0.1
+            }
+            _ => prompt.saturating_add(written) as f64,
         }
     }
     /// The output tokens a request reserves on top of its prompt: `max_tokens` or
@@ -1105,6 +1134,27 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
 #[serde(default, deny_unknown_fields)]
 pub struct Worker {
     pub resident: bool,
+}
+
+/// Whether a Messages entry's `extra` asks for a prompt cache of its own anywhere: at the top of
+/// the request, or on a block of its `system`, `tools` or `messages`, for any lifetime.
+fn own_cache(extra: &serde_json::Map<String, serde_json::Value>) -> bool {
+    cache_markers(extra) > 0
+}
+
+/// The cache breakpoints a Messages entry's `extra` takes: the request's own at the top (automatic
+/// caching), and one for each block it marks with `cache_control`.
+pub(crate) fn cache_markers(extra: &serde_json::Map<String, serde_json::Value>) -> usize {
+    fn marked(v: &serde_json::Value) -> usize {
+        match v {
+            serde_json::Value::Object(o) => {
+                usize::from(o.contains_key("cache_control")) + o.values().map(marked).sum::<usize>()
+            }
+            serde_json::Value::Array(a) => a.iter().map(marked).sum(),
+            _ => 0,
+        }
+    }
+    usize::from(extra.contains_key("cache_control")) + extra.values().map(marked).sum::<usize>()
 }
 
 /// `home`'s `[worker]`, by its own parse as `inject`'s. An error is not "off": a worker that

@@ -4865,6 +4865,11 @@ fn carried(
     Ok((out, uids, offered, goals))
 }
 
+/// Where a fenced prompt's instructions end: the sentence that names its fence, the last before the
+/// record. All before it is the same bytes for every call of its kind (G09), which a Messages
+/// entry marks for its prompt cache (`provider::anthropic_request`).
+pub(crate) const FENCE_SENTENCE: &str = "The fence lines are `";
+
 /// The curator's prompt: what to extract and how, then everything taken from the record (the
 /// window's lines, the candidates, what the sessions carry) between two fence lines it cannot
 /// contain, as data: file and tool content is quotation, never instruction (spec 3.3). The fence
@@ -4940,7 +4945,7 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          not that it was looked at (\"Analyzed the login code\").\n\
          Write every body, the summary and each card in {language}; a type and a concept stay \
          as written above.\n\
-         The fence lines are `{fence}`.\n\n\
+         {FENCE_SENTENCE}{fence}`.\n\n\
          {fence}\n{text}\n## Already known: kept claims these lines may replace or reverse (uid: \
          body)\n{candidates}\n## Already known: carried from earlier in each session\n{carried}\n\
          {fence}"
@@ -10775,6 +10780,9 @@ curate = false
             "the prompts part at byte {same}: {}",
             &a[..same]
         );
+        // What a Messages entry caches is that shared part.
+        let cached = a.find(FENCE_SENTENCE).unwrap();
+        assert!(language < cached && cached <= same, "{cached} {same}");
     }
 
     /// The window op lists every draft the gates dropped or lowered, with its id: fifty ids of
