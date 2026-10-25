@@ -556,12 +556,16 @@ impl Oboete {
         };
         // Parity row N3: claude-mem's `sourceFingerprint` (its memory-file bridge's replay key) is
         // one note in a repository: a save that repeats it answers the first, as claude-mem's does.
+        // Its hash starts with a NUL, which no repository key starts with, so it is never a content
+        // id's (Codex on #629).
         let fingerprint = (a.metadata.as_ref())
             .and_then(|m| m.get("sourceFingerprint"))
             .and_then(serde_json::Value::as_str)
             .filter(|f| !f.is_empty());
         let id = match fingerprint {
-            Some(source) => crate::curate::sha256_hex(&format!("{repo}\0source\0{source}")),
+            Some(source) => {
+                crate::curate::sha256_hex(&format!("\0sourceFingerprint\0{repo}\0{source}"))
+            }
             None => crate::curate::sha256_hex(&format!("{repo}\0{title}\0{body}")),
         }[..16]
             .to_owned();
@@ -614,7 +618,8 @@ impl Oboete {
         let read = (key.as_str(), Some(folder.as_str()));
         let k = crate::knowledge::open(&self.home).map_err(internal)?;
         crate::consumer::imported::schema(&k).map_err(internal)?;
-        // The ops the index says hold this uid; the op log decides (`Raw::append_note`).
+        // The ops the index says hold this uid, and how far it read each device's ops; the op log
+        // decides, in the note's transaction (`Raw::append_note`).
         let held: Vec<(String, i64)> = k
             .prepare("SELECT op_device, op_seq FROM imported WHERE uid = ?1")
             .and_then(|mut st| {
@@ -622,12 +627,16 @@ impl Oboete {
                     .collect()
             })
             .map_err(|e| internal(e.into()))?;
+        let indexed: std::collections::HashMap<String, i64> = k
+            .prepare("SELECT device, seq FROM op_checkpoints WHERE consumer = 'imported'")
+            .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .map_err(|e| internal(e.into()))?;
         let saved = format!(
             "Saved memory {}: {}. Repository: {repo}.",
             doc.uid,
             one_line(&doc.title)
         );
-        let seq = match raw.append_note(&doc, &held, &cwd, &settings, read) {
+        let seq = match raw.append_note(&doc, (&held, &indexed), &cwd, &settings, read) {
             Err(e) if e.is::<crate::raw::NeverRecorded>() => {
                 return failed(format!(
                     "nothing is recorded in {repo} or in this folder now: the note was not kept"
@@ -2865,7 +2874,15 @@ mod tests {
             5,
             "{first} / {b} / {elsewhere} / {none} / {unnamed}"
         );
-        assert_eq!(notes(&s), 6);
+        // Codex on #629: a fingerprint's id is never an ordinary note's, here one titled `source`
+        // whose text is the fingerprint.
+        let plain = body(save(&server, "notes/c.md", Some("source"), None));
+        let named = with("From c.", json!({"sourceFingerprint": "notes/c.md"}));
+        assert!(
+            !named.contains("already saved") && uid(&plain) != uid(&named),
+            "{plain} / {named}"
+        );
+        assert_eq!(notes(&s), 8);
     }
 
     /// A note goes to the repository `project` names, a directory or a repository oboete knows;

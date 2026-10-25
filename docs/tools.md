@@ -240,13 +240,14 @@ correction or handoff on purpose; search finds it, and the session start never s
   note's repository, also in the write's transaction, as a work state write is (slice 4a); a
   note forget names.
 - **The same note again**: its uid is `oboete-note:` and 16 hex digits of a hash of its
-  repository, title and text, so a repeat answers the same uid and appends nothing once the
-  first is indexed and its op is still in the op log (claude-mem's exact-repeat hash is its
-  session, title and text). The op log decides, not the index: after a restore lost the op and
-  before the worker rewound the index, the note is appended again. A `metadata.sourceFingerprint`
-  (the replay key of claude-mem's memory-file bridge) takes the title and text's place in that
-  hash: a save that repeats it in the repository answers the first note, whatever its text, as
-  claude-mem's does.
+  repository, title and text, so a repeat answers the same uid and appends nothing while the
+  first one's op is in the op log, asked in the note's write, also before the worker has indexed
+  it (claude-mem's exact-repeat hash is its session, title and text). The op log decides, not the
+  index: after a restore lost the op and before the worker rewound the index, the note is
+  appended again. A `metadata.sourceFingerprint` (the replay key of claude-mem's memory-file
+  bridge) takes the title and text's place in that hash, in a form no title and text give: a save
+  that repeats it in the repository answers the first note, whatever its text, as claude-mem's
+  does.
 - **The answer**: `Saved memory <uid>: <title>. Repository: <repository>.`, once the worker has
   indexed it (at most 10 seconds, as `oboete pref add` waits), else the same with "The worker
   indexes it when it next runs". claude-mem answers `Saved memory #<id>: <title>. Project:
