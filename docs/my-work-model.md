@@ -813,9 +813,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   (`claude -p`), `sdk-ts` and `sdk-py` (the Agent SDK), `mcp`, `remote_trigger` and
   `claude-code-github-action`. A value is kept when it is 1 to 32 lowercase letters, digits, `-`
   and `_`, the form Claude Code's own take; any other is dropped.
-- **The transcript import** keeps a line's `entrypoint` on its prompt, a queued prompt's too, and
-  marks a line whose `origin.kind` or `turnOrigin` is not `human` as another program's. A line with
-  neither is not marked: on this PC the 2026-10 lines with neither are a compaction's summary, a
+- **The transcript import** keeps a line's `entrypoint` on its prompt, and marks a line whose
+  `origin.kind` or `turnOrigin` is not `human` as another program's. A queued prompt's enqueue
+  line names neither: it takes the entry point the session's lines last named, and the marks of
+  the line that delivers it. The marks are no part of a line's identity, so a transcript imported
+  before them keeps its checkpoint and its records. A line with neither is not marked: on this PC the 2026-10 lines with neither are a compaction's summary, a
   local command or its output, a shell command typed after `!`, an interruption and another
   session's message, which the import leaves out or records as an envelope; an older Claude Code
   wrote neither. Meta and subagent lines were left out before.

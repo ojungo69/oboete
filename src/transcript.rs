@@ -104,8 +104,11 @@ struct Emitter {
     native_session_known: bool,
     /// Whether another agent sent a Codex rollout's prompts, from its own `session_meta` (#273).
     agent_sent: Option<bool>,
-    /// Prompts the prompt hook got when they were queued, not yet delivered as user records.
-    queued: Vec<String>,
+    /// Prompts the prompt hook got when they were queued, not yet delivered as user records, each
+    /// with where its line is in `lines`.
+    queued: Vec<(String, usize)>,
+    /// The entry point the session's lines last named (O2): a queued prompt's line names none.
+    entrypoint: Option<String>,
     stats: Stats,
     pending: Vec<Pending>,
     /// The current turn's last assistant text, sent as `Stop` when the turn ends, and the
@@ -209,13 +212,7 @@ impl Emitter {
             payload[crate::capture::AGENT_SENT] = json!(sent);
         }
         if let Some(v) = line {
-            let not_typed = |origin: &Value| origin.as_str().is_some_and(|k| k != "human");
-            if not_typed(&v["origin"]["kind"]) || not_typed(&v["turnOrigin"]) {
-                payload[crate::capture::AGENT_SENT] = json!(true);
-            }
-            if let Some(e) = crate::typed::entrypoint(&v["entrypoint"]) {
-                payload[crate::capture::ENTRYPOINT] = json!(e);
-            }
+            mark(&mut payload, v, None);
         }
         self.emit("UserPromptSubmit", ts, payload)
     }
@@ -326,6 +323,19 @@ fn command_text(s: &str) -> Option<String> {
     })
 }
 
+/// O2: what a Claude Code line says of the prompt in `payload`: an `origin` or a `turnOrigin`
+/// other than a person's typing (a task's notification, a scheduled turn, the Agent SDK's) makes it
+/// another program's, and its `entrypoint`, or else `session`'s, is where it was sent from.
+fn mark(payload: &mut Value, v: &Value, session: Option<&str>) {
+    let not_typed = |origin: &Value| origin.as_str().is_some_and(|k| k != "human");
+    if not_typed(&v["origin"]["kind"]) || not_typed(&v["turnOrigin"]) {
+        payload[crate::capture::AGENT_SENT] = json!(true);
+    }
+    if let Some(e) = crate::typed::entrypoint(&v["entrypoint"]).or(session) {
+        payload[crate::capture::ENTRYPOINT] = json!(e);
+    }
+}
+
 fn claude_line(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<()> {
     // Older Claude Code wrote subagent turns inline, marked isSidechain; newer writes them to
     // <session>/subagents/, read with their file's agent id.
@@ -348,6 +358,9 @@ fn claude_line(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<()>
             e.meta_seen = true;
         }
         e.cwd = cwd.or(e.cwd.take());
+        if let Some(entry) = crate::typed::entrypoint(&v["entrypoint"]) {
+            e.entrypoint = Some(entry.to_owned());
+        }
         return claude_record(e, v, None);
     }
     let session = e.cwd.clone();
@@ -399,8 +412,11 @@ fn claude_record(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<(
             }
             // The delivery of a prompt already sent when it was queued.
             // Measured on the dev set: it comes after the turn ended (mid-turn ones are attachments).
-            if let Some(i) = e.queued.iter().position(|q| q == text.trim()) {
-                e.queued.remove(i);
+            if let Some(i) = e.queued.iter().position(|(q, _)| q == text.trim()) {
+                // Its delivery says who sent it: the marks go on the prompt sent when it was
+                // queued (Codex on #659).
+                let (_, at) = e.queued.remove(i);
+                mark(&mut e.lines[at].1.payload, v, None);
                 return e.stop(&ts);
             }
             // A skill command (message tag first) and /goal reach the prompt hook as typed; other
@@ -435,12 +451,11 @@ fn claude_record(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<(
                 return Ok(());
             }
             // The turn that runs goes on: its Stop comes where it ends, not here.
-            e.queued.push(t.to_string());
             let mut payload = json!({"prompt": text});
-            if let Some(entry) = crate::typed::entrypoint(&v["entrypoint"]) {
-                payload[crate::capture::ENTRYPOINT] = json!(entry);
-            }
-            e.emit("UserPromptSubmit", &ts, payload)
+            mark(&mut payload, v, e.entrypoint.as_deref());
+            e.emit("UserPromptSubmit", &ts, payload)?;
+            e.queued.push((t.to_string(), e.lines.len() - 1));
+            Ok(())
         }
         // Where the Stop hook ran (a turn with stop hooks), or the turn's end.
         Some("system")
@@ -694,6 +709,7 @@ fn parse(path: &Path, agent: &str, subagents: &[PathBuf]) -> Result<(Vec<Line>, 
         native_session_known: false,
         agent_sent: None,
         queued: Vec::new(),
+        entrypoint: None,
         stats: Stats::default(),
         pending: Vec::new(),
         last_text: None,
@@ -1308,10 +1324,17 @@ fn import_files(
 }
 
 fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
-    // A copied transcript keeps its event contents; its file path is not its identity.
+    // A copied transcript keeps its event contents; its file path is not its identity. Nor are the
+    // marks read from a Claude Code line (O2): a transcript imported before they were read keeps
+    // its checkpoint and its records' identities (Codex on #659). A Codex rollout's mark (#273)
+    // was always part of them.
     let mut payload = line.payload.clone();
     if let Some(fields) = payload.as_object_mut() {
         fields.remove("transcript_path");
+        fields.remove(crate::capture::ENTRYPOINT);
+        if line.agent == "claude" {
+            fields.remove(crate::capture::AGENT_SENT);
+        }
     }
     prefix.update(serde_json::to_vec(&(
         line.agent,
@@ -2836,6 +2859,11 @@ mod tests {
             (v.as_object_mut().unwrap()).extend(origin.as_object().unwrap().clone());
             format!("{v}\n")
         };
+        let queued = |second: u32, text: &str| {
+            let v = json!({"type": "queue-operation", "operation": "enqueue", "sessionId": session,
+                "timestamp": format!("2026-09-02T00:00:{second:02}.000Z"), "content": text});
+            format!("{v}\n")
+        };
         let text = [
             line(
                 1,
@@ -2862,6 +2890,23 @@ mod tests {
                 "cli",
                 json!({"turnOrigin": "human", "promptSource": "typed"}),
             ),
+            // Queued while a turn runs: the enqueue line names neither, its delivery both.
+            queued(6, "Also run the tests."),
+            line(
+                7,
+                "Also run the tests.",
+                "cli",
+                json!({"turnOrigin": "human"}),
+            ),
+            queued(8, "Check the nightly run."),
+            line(
+                9,
+                "Check the nightly run.",
+                "cli",
+                json!({"turnOrigin": "scheduled"}),
+            ),
+            // Never delivered: the session's entry point is all it has.
+            queued(10, "Then deploy."),
         ]
         .concat();
         std::fs::write(project.join(format!("{session}.jsonl")), text).unwrap();
@@ -2880,12 +2925,48 @@ mod tests {
                 json!({"prompt": "Check the build.", "entrypoint": "sdk-cli"}),
                 json!({"prompt": "Run the nightly check.", "agent_sent": true, "entrypoint": "cli"}),
                 json!({"prompt": "Ship it.", "entrypoint": "cli"}),
+                json!({"prompt": "Also run the tests.", "entrypoint": "cli"}),
+                json!({"prompt": "Check the nightly run.", "agent_sent": true, "entrypoint": "cli"}),
+                json!({"prompt": "Then deploy.", "entrypoint": "cli"}),
             ]
         );
         let typed: Vec<bool> = (prompts.iter())
             .map(|b| crate::typed::typed("prompt", "claude", "transcript", b))
             .collect();
-        assert_eq!(typed, [true, false, false, false, true]);
+        assert_eq!(typed, [true, false, false, false, true, true, false, true]);
+    }
+
+    /// Codex on #659: a Claude Code line's marks (O2) are not part of its identity, so a transcript
+    /// imported before they were read still matches its checkpoint and its records; a Codex
+    /// rollout's mark (#273) still is part of it.
+    #[test]
+    fn a_claude_lines_marks_leave_its_identity_as_it_was() {
+        let line = |agent: &'static str, payload: Value| Line {
+            seq: 1,
+            agent,
+            event: "UserPromptSubmit".into(),
+            session: "s".into(),
+            ts: "2026-09-02T00:00:01.000Z".into(),
+            payload,
+            synthetic: false,
+            native_session_known: true,
+        };
+        let hash = |l: &Line| {
+            let mut h = Sha256::new();
+            hash_line(&mut h, l).unwrap();
+            format!("{:x}", h.finalize())
+        };
+        let before = json!({"prompt": "Fix it.", "session_id": "s", "cwd": "/w"});
+        let mut marked = before.clone();
+        marked[crate::capture::ENTRYPOINT] = json!("cli");
+        marked[crate::capture::AGENT_SENT] = json!(true);
+        assert_eq!(
+            hash(&line("claude", marked)),
+            hash(&line("claude", before.clone()))
+        );
+        let mut codex = before.clone();
+        codex[crate::capture::AGENT_SENT] = json!(true);
+        assert_ne!(hash(&line("codex", codex)), hash(&line("codex", before)));
     }
 
     #[test]
