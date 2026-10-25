@@ -40,6 +40,13 @@ the records it was made from stay, and nothing brings it back.
   consumer has applied the op (`claims::applied`), or says it is pending (`hide_pending`).
 - **`GET /api/hidden`** lists what is removed, the newest first, each with its kind, id, title,
   repository and time, through the same gate as the feed, for the page's Settings to bring back.
+- **The page**: "Remove from the page" on a feed entry of a card or a summary, on the timeline and
+  on a session's page, beside the prompts' and notes' Forget. It asks nothing first, as it is
+  undone in one step: the page reads the view again, and the status line says it was removed, with
+  Undo, for 15 seconds through the live view's redraws; a refusal is held as long, so a reread
+  does not clear why an Undo failed. Settings lists what is removed, with
+  "Bring back": the detailed page under "Diagnostics and maintenance", and the simple page while
+  something is removed. In Japanese and English.
 - **The format**: a binary before this one stops at an op type it does not know, so the first hide
   op raises the home to format 4 (`raw::HIDDEN_FORMAT`) in the transaction that writes it, and a
   rebuild that brings one back stamps it too (docs/store-format.md). A home with no hide op still
@@ -62,13 +69,31 @@ both, and erasing them is oboete's forget.
 ## Tests
 
 - `settings::hide::tests::a_card_removed_from_the_page_leaves_its_readers_and_comes_back`
-  (session start, the feed's pages, `get`, search; listed; kept through a rebuild of knowledge.db;
-  the same state twice writes one op)
-- `settings::hide::tests::a_summary_removed_from_the_page_keeps_its_row_and_comes_back`
-- `settings::hide::tests::a_rewind_past_its_hide_op_shows_the_card_again`
+  (session start, the feed's pages, the timeline, `get`, the note on a file, the cards a turn's
+  summary is shown, the words search, the full-text entry; listed; kept through a rebuild of
+  knowledge.db, which takes the newest op's mark; the same state twice writes one op)
+- `settings::hide::tests::a_summary_removed_from_the_page_keeps_its_row_and_comes_back` (the same
+  readers, its row kept, through a rebuild)
+- `settings::hide::tests::a_hide_op_read_before_what_it_names_still_marks_it` (another device's op
+  read first, the newest of two marks)
+- `settings::hide::tests::a_rewind_past_its_hide_op_shows_the_card_and_the_summary_again`
+- `settings::hide::tests::a_removed_card_loses_its_vector_and_waits_for_none` (doctor's count)
+- `embed_phase::tests::a_card_and_a_summary_removed_from_the_page_lose_their_vectors_until_brought_back`
+  (with the stub embedder: nothing removed is sent; brought back, embedded again)
 - `settings::hide::tests::a_hide_raises_the_home_to_the_format_that_reads_it` (the append and a
   rebuild from the backup's lines)
 - `settings::hide::tests::what_is_no_card_or_summary_is_refused`
 - `view::tests::the_page_removes_a_card_and_brings_it_back` (through `/api/hide` and
-  `/api/hidden`)
+  `/api/hidden`; the session's count)
 - `view::tests::w3_privacy_and_claim_writes_pass_every_guard_before_store_work` (the route added)
+- the viewer harness: Remove on a card and a summary, Undo through a redraw and a reread that
+  writes the status line, Undo pressed before the removal's reread answered (its result, or why it
+  was refused, stays), a refusal named, the pending answer, Japanese and English, Settings reading
+  the list when it opens, both views' list, and Bring back
+
+Mutation checks: each of the server's 33 checks (every reader's condition, the consumers' marks,
+full-text entries and vectors, the rebuild's and the rewind's marks, the embedding phase's
+filters, the same-state answer, the no-store guard, the format stamps) fails a test when removed
+(33/33), and each of the page's 21 (Remove and its request, the result and its Undo held through
+redraws and rereads, a refusal named and held, the Settings list in both views, its read, Bring
+back) fails the viewer harness (21/21).
