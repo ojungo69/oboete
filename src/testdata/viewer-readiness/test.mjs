@@ -1562,3 +1562,42 @@ ctx.ui.setLang('en');
 run('setView("timeline")');
 console.log('PASS: Sessions: the list, a session\'s page, its kind chips, Back with the focus, in both languages');
 }
+
+// Parity row 16, S6 (Codex and CodeRabbit on #635): a live read's first page takes the place of
+// the sessions it covers: one no longer listed goes, a changed one moves to its place, and a first
+// page that does not reach the list shown starts it again, More reading on from its cursor.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const response=value=>({ok:true,status:200,json:async()=>value});
+const session=(key,started)=>({key,agent:'claude',session:`s-${key}`,repo:'example.test/team/fern',repo_name:'fern',title:`Title ${key}`,started,items:1});
+let reply={sessions:[],next:null};
+ctx.fetch=url=>{
+  if(url.startsWith('/api/sessions?'))return Promise.resolve(response(reply));
+  if(url.startsWith('/api/repos?'))return Promise.resolve(response({current:'',repos:[]}));
+  return Promise.resolve(response({}));
+};
+const shown=()=>document.getElementById('list').querySelectorAll('button').filter(b=>b.className==='session-card').map(b=>b.dataset.session);
+reply={sessions:[session('aaaaaaaaaaaaaaaa',3000),session('bbbbbbbbbbbbbbbb',2000),session('cccccccccccccccc',1000)],next:null};
+run('reposLoaded=true;setView("sessions")');
+await run('show()');
+assert.deepEqual(shown(),['aaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb','cccccccccccccccc']);
+// b's first prompt removed: it starts later and moves up; c's prompts all removed: it goes.
+reply={sessions:[session('bbbbbbbbbbbbbbbb',3500),session('aaaaaaaaaaaaaaaa',3000)],next:null};
+await run('refresh(true)');
+assert.deepEqual(shown(),['bbbbbbbbbbbbbbbb','aaaaaaaaaaaaaaaa'],'a changed session moves, a removed one goes');
+assert(!text(document.getElementById('list')).includes('Title cccccccccccccccc'),'the removed session\'s title is gone');
+// More than a page begun since: the first page does not reach the list, which starts again.
+const fresh=Array.from({length:3},(_,i)=>session(`d${String(i).padStart(15,'0')}`,9000-i));
+reply={sessions:fresh,next:'[8998,"dev",1]'};
+await run('refresh(true)');
+assert.deepEqual(shown(),fresh.map(s=>s.key),'the list starts again from the first page');
+assert.equal(run('ses.next'),'[8998,"dev",1]','More reads on from the first page\'s cursor');
+// A first page that reaches the list keeps the pages read after it.
+reply={sessions:[session('eeeeeeeeeeeeeeee',9500),...fresh.slice(0,2)],next:'[8999,"dev",2]'};
+await run('refresh(true)');
+assert.deepEqual(shown(),['eeeeeeeeeeeeeeee',...fresh.map(s=>s.key)],'joined: the pages read stay');
+assert.equal(run('ses.next'),'[8998,"dev",1]','and so does their cursor');
+run('setView("timeline")');
+console.log('PASS: Sessions live: removed sessions go, changed ones move, a list that does not join starts again');
+}

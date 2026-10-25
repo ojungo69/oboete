@@ -2142,11 +2142,27 @@ fn answered(name: &str, mut answer: Value) -> Value {
             .collect(),
         _ => Vec::new(),
     };
+    // A session's key, a hash that names it in the page's requests (docs/page.md S2), leaves the
+    // gate's walk and comes back as a cursor does, so no rule of the user's masks a selector
+    // (CodeRabbit on #635).
+    let keys: Vec<Option<Value>> = match answer.get_mut("sessions") {
+        Some(Value::Array(sessions)) if name == "sessions" => (sessions.iter_mut())
+            .map(|s| s.as_object_mut().and_then(|s| s.remove("key")))
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc") {
         gated_with_ids(answer, true)
     } else {
         gated(answer)
     };
+    if let Some(Value::Array(sessions)) = answer.get_mut("sessions") {
+        for (session, key) in sessions.iter_mut().zip(keys) {
+            if let (Value::Object(session), Some(key)) = (session, key) {
+                session.insert("key".to_owned(), key);
+            }
+        }
+    }
     if let Some(next) = next {
         answer["next"] = next;
     }
@@ -5278,12 +5294,25 @@ curate = false
                 })
                 .unwrap();
         }
+        // A rule of the user's that matches a key's hex leaves the key whole (CodeRabbit on #635).
         std::fs::write(s.home.path().join("config.toml"),
-            "[redaction]\nextra_rules = [{id = \"invented\", regex = 'invented-([A-Z]+)$', secret_group = 1}]\n").unwrap();
+            "[redaction]\nextra_rules = [{id = \"invented\", regex = 'invented-([A-Z]+)$', secret_group = 1}, \
+             { id = 'hex', regex = '[0-9a-f]{12}' }]\n").unwrap();
         let page = get(&v, "/api/sessions?all=1");
         let listed = page["sessions"].as_array().unwrap();
         let named: Vec<_> = listed.iter().map(|e| e["session"].clone()).collect();
         assert_eq!(named, [json!("b"), json!("a")], "{page}");
+        let key = listed[1]["key"].as_str().unwrap();
+        assert!(
+            key.len() == 16 && key.chars().all(|c| c.is_ascii_hexdigit()),
+            "{key}"
+        );
+        let opened = get(&v, &format!("/api/feed?session={key}"));
+        assert_eq!(
+            opened["items"].as_array().map(Vec::len),
+            Some(1),
+            "{opened}"
+        );
         assert_eq!(listed[0]["title"], "invented-[REDACTED]");
         assert!(!page.to_string().contains("MOSS"));
         assert_eq!(

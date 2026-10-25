@@ -686,10 +686,21 @@ async function readSessions(state, mode) {
       ses.items.push(...page.sessions.filter((s) => !known.has(s.key)));
       ses.next = page.next;
     } else {
-      // Live: the sessions begun since on top, the shown ones as they are now (S6).
-      const now = new Map(page.sessions.map((s) => [s.key, s]));
-      const known = new Set(ses.items.map((s) => s.key));
-      ses.items = [...page.sessions.filter((s) => !known.has(s.key)), ...ses.items.map((s) => now.get(s.key) ?? s)];
+      // Live (S6): the first page as it is now takes the place of the sessions it covers: those
+      // begun since on top, a changed one in its new place, one no longer listed gone. The pages
+      // read after it stay; a first page that does not reach the list shown starts it again.
+      const live = page.sessions;
+      const keys = new Set(live.map((s) => s.key));
+      const last = live[live.length - 1];
+      if (page.next === null) {
+        ses.items = live;
+        ses.next = null;
+      } else if (ses.items.some((s) => keys.has(s.key))) {
+        ses.items = [...live, ...ses.items.filter((s) => !keys.has(s.key) && s.started <= last.started)];
+      } else {
+        ses.items = live;
+        ses.next = page.next;
+      }
     }
     drawSessions(state);
     setStatus('');

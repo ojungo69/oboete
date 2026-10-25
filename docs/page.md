@@ -166,8 +166,12 @@ security_alert, security_note; other for a type outside them), each with its cou
 its kind on or off; with none on, every item shows. Beside them, `N of M` items shown (`M 件中 N
 件`), with `+` while more pages remain.
 
-S6. **Live.** A version change reads the list's first page again, or on a session's page puts the
-session's new items on top as the feed does (P5).
+S6. **Live.** A version change reads the list's first page again, which takes the place of the
+sessions it covers: those begun since on top, one changed since (a removal took its first prompt)
+in its new place, and one no longer listed (a removal took all its prompts) gone; the pages read
+after it stay as read. A first page that does not reach the sessions shown (more than a page begun
+since) starts the list again, More reading on from it. On a session's page, the session's new items
+go on top as the feed's do (P5).
 
 S7. **Safety.** As P12: the token, Host and method checks, each reader's gate and `gated` over the
 answer, text nodes only, nothing written. The session id and the agent are gated as a card's
