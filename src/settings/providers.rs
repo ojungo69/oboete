@@ -644,6 +644,7 @@ pub(super) fn save_key_at(
     if !matches!(entry, Provider::Openai { .. }) {
         return Err(refused(422, "no_key_file", "providers.key"));
     }
+    let name = entry.name().to_owned();
     let new_key = crate::keyfile::managed(&posted.key, home, owner, data)
         .map_err(|r| refused(r.status(), r.code(), "providers.key"))?;
     let filename = new_key
@@ -657,6 +658,7 @@ pub(super) fn save_key_at(
     }
     table.insert("key_file", Item::Value(reference));
     let mut answer = commit(home, &posted.version, doc)?;
+    super::key_saved(home, &[&name]);
     answer["key_saved"] = json!({"durable": new_key.durable});
     new_key.retain();
     Ok(answer)
@@ -1186,6 +1188,32 @@ mod tests {
                 .contains("# placement note")
         );
         assert!(!home.path().join("providers.db").exists());
+    }
+
+    /// Parity row 11: a key saved on the providers page ends its entry's rest, and no other's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_saved_on_the_providers_page_ends_its_entrys_rest() {
+        let owner = tempfile::tempdir().unwrap();
+        let home = home(
+            "[[providers]]\nkind = \"openai\"\nname = \"a\"\n\
+             base_url = \"https://example.invalid/v1\"\nmodel = \"synthetic\"\n",
+        );
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let rest = crate::providers_db::State {
+            down_until: 5_000_000_000_000,
+            ..Default::default()
+        };
+        for p in ["a", "b"] {
+            crate::providers_db::set_state(&db, p, rest).unwrap();
+        }
+        let shown = show(home.path());
+        let body = serde_json::to_vec(&json!({"version": shown["version"],
+            "selector": shown["providers"][0]["selector"], "key": "NewSyntheticKey111"}))
+        .unwrap();
+        save_key_at(home.path(), &Mutex::new(()), &body, owner.path(), None).unwrap();
+        let rests = ["a", "b"].map(|p| crate::providers_db::state(&db, p).unwrap());
+        assert_eq!(rests, [Default::default(), rest]);
     }
 
     #[cfg(target_os = "linux")]

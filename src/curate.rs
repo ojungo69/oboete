@@ -7,7 +7,7 @@
 //! op and its claims in one transaction, or keeps a pending row that says what it waits for.
 
 use crate::config::Summary;
-use crate::provider::{AnswerCheck, ChainFailed, ChainResult, Fallback, Gate, Skip};
+use crate::provider::{AnswerCheck, Cause, ChainFailed, ChainResult, Fallback, Gate, Skip};
 use crate::providers_db::{self, Pending};
 use crate::raw::{Event, Item, OpKind, Raw};
 use crate::redact::Rules;
@@ -3253,22 +3253,30 @@ fn parking_counts(
 
 /// How long a window every provider failed waits on their resets before a session's start says
 /// curation stopped (G22). claude-mem says so after three failures in a row; here three counted
-/// attempts skip a window, so a window that waits this long waits on rate limits.
+/// attempts skip a window, so a window that waits this long waits on rate limits. One that waits
+/// while an entry rests on a cause only the owner ends (a refused key, spent credits, a missing
+/// model) is said at once, as claude-mem says a refused key at once (parity row 11).
 const STOPPED_MS: i64 = 30 * 60 * 1000;
 
 /// Curation stopped, as a session's start says it (parity row 11, G22): the window every provider
-/// failed, while it waits for the owner or a budget, or on resets once it has waited
-/// `STOPPED_MS`; and the spans of windows every provider skipped that no recuration covered.
+/// failed, while it waits for the owner or a budget, or on resets once it has waited `STOPPED_MS`
+/// or while an entry rests on a cause only the owner ends; those entries with their causes; and
+/// the spans of windows every provider skipped that no recuration covered.
 #[derive(Debug, PartialEq)]
 pub struct Stopped {
     pub waits: Option<Pending>,
+    pub causes: Causes,
     pub skipped: usize,
 }
+
+/// Entries of the chain that rest on a cause only the owner ends, each with its cause.
+pub type Causes = Vec<(String, Cause)>;
 
 /// `Stopped` for `raw`'s device at `now`, None while curation is off or none stopped. providers.db
 /// is read, never created.
 pub fn stopped(home: &std::path::Path, raw: &Raw, now: i64) -> Result<Option<Stopped>> {
-    if !crate::config::load(home)?.summary.curate {
+    let config = crate::config::load(home)?;
+    if !config.summary.curate {
         return Ok(None);
     }
     let device = raw.device();
@@ -3276,28 +3284,56 @@ pub fn stopped(home: &std::path::Path, raw: &Raw, now: i64) -> Result<Option<Sto
     let next = offset.map_or((seq + 1, 0), |o| (seq, o));
     // providers.db that cannot be read hides the wait only: the skipped spans are raw's (Codex on
     // #438).
-    let waits = (|| -> Result<Option<Pending>> {
-        match providers_db::read_only(home)? {
-            Some(db) => providers_db::pending_of(&db, device),
-            None => Ok(None),
-        }
+    let read = (|| -> Result<Option<(Pending, Causes)>> {
+        let Some(db) = providers_db::read_only(home)? else {
+            return Ok(None);
+        };
+        // Only the window that waits now: a device's records are one sequence, so it starts where
+        // the checkpoint ends. One before or after it (a restore moved the checkpoint) waits for
+        // nothing, and the next pass replaces it (CodeRabbit on #438).
+        let Some(p) = providers_db::pending_of(&db, device)?
+            .filter(|p| (p.from_seq, p.from_offset.unwrap_or(0)) == next)
+        else {
+            return Ok(None);
+        };
+        Ok(Some((p, owner_causes(&db, &config.providers)?)))
     })()
     .unwrap_or_else(|e| {
         eprintln!("oboete: curation's wait not read: {e:#}");
         None
     })
-    // Only the window that waits now: a device's records are one sequence, so it starts where
-    // the checkpoint ends. One before or after it (a restore moved the checkpoint) waits for
-    // nothing, and the next pass replaces it (CodeRabbit on #438).
-    .filter(|p| (p.from_seq, p.from_offset.unwrap_or(0)) == next)
     // One due now is tried at the next pass, which this session's start begins (Codex on #438).
-    .filter(|p| match p.hold.as_str() {
+    .filter(|(p, causes)| match p.hold.as_str() {
         "owner" => true,
         "budget" => p.next_attempt_at > now,
-        _ => p.next_attempt_at > now && now - p.since >= STOPPED_MS,
+        _ => p.next_attempt_at > now && (now - p.since >= STOPPED_MS || !causes.is_empty()),
     });
+    let (waits, causes) = read.map_or((None, Vec::new()), |(p, causes)| (Some(p), causes));
     let skipped = failed_spans(raw)?;
-    Ok((waits.is_some() || skipped > 0).then_some(Stopped { waits, skipped }))
+    Ok((waits.is_some() || skipped > 0).then_some(Stopped {
+        waits,
+        causes,
+        skipped,
+    }))
+}
+
+/// The enabled entries of `chain` that rest on a cause only the owner ends, in chain order and
+/// each once, with the cause their last call's vetted detail names.
+fn owner_causes(db: &Connection, chain: &[crate::config::Provider]) -> Result<Causes> {
+    let resting: std::collections::HashSet<String> = (providers_db::stopped(db)?.into_iter())
+        .map(|(p, _)| p)
+        .collect();
+    let mut causes = Causes::new();
+    for name in chain.iter().filter(|p| p.enabled()).map(|p| p.name()) {
+        if !resting.contains(name) || causes.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        let detail = providers_db::last_detail(db, name)?;
+        if let Some(cause) = detail.as_deref().and_then(Cause::of) {
+            causes.push((name.to_owned(), cause));
+        }
+    }
+    Ok(causes)
 }
 
 /// How many spans of this device's windows every provider skipped are left for `oboete recurate
@@ -3311,9 +3347,11 @@ pub fn failed_spans(raw: &Raw) -> Result<usize> {
 }
 
 impl Stopped {
-    /// The agent's line, beside the recording-failure line: what stopped and the command that
-    /// says why or curates what was skipped. Never a provider's words.
-    pub fn line(&self) -> String {
+    /// The agent's line, beside the recording-failure line: what stopped, each entry only the
+    /// owner can bring back with what to do, and the command that says why or curates what was
+    /// skipped. Never a provider's words. With `relay`, where no terminal note tells the person,
+    /// the agent is asked to, as claude-mem asks (parity row 11).
+    pub fn line(&self, relay: bool) -> String {
         let mut lines = Vec::new();
         if let Some(p) = &self.waits {
             let since = crate::db::utc(p.since);
@@ -3333,6 +3371,9 @@ impl Stopped {
                      itself. `oboete doctor` says why."
                 ),
             });
+            for (name, cause) in &self.causes {
+                lines.push(format!("oboete: {name}: {}.", cause.said()));
+            }
         }
         if self.skipped > 0 {
             lines.push(format!(
@@ -3340,6 +3381,9 @@ impl Stopped {
                  `oboete recurate --skipped` lists them, and with --yes curates them again.",
                 self.skipped
             ));
+        }
+        if relay && self.waits.is_some() {
+            lines.push("oboete: tell the user about this at the start of your first reply.".into());
         }
         lines.join("\n")
     }
@@ -3351,7 +3395,12 @@ impl Stopped {
         if let Some(p) = &self.waits {
             let since = duration(now - p.since, japanese);
             let next = duration(p.next_attempt_at - now, japanese);
+            // A wait on time is not the providers' silence when an entry only the owner can
+            // bring back rests: the line names it below.
+            let owners = !self.causes.is_empty() && !matches!(p.hold.as_str(), "owner" | "budget");
             parts.push(match (japanese, p.hold.as_str()) {
+                (true, _) if owners => format!("要約が {since}前から止まっています。"),
+                (false, _) if owners => format!("curation has stopped for {since}."),
                 (true, "owner") => format!(
                     "要約が {since}前から止まっています。要約役があなたの操作を待っています。理由と直し方: oboete doctor"
                 ),
@@ -3371,6 +3420,9 @@ impl Stopped {
                     "curation has stopped for {since}: the providers do not answer (tried again in {next}). Why: oboete doctor"
                 ),
             });
+            for (name, cause) in &self.causes {
+                parts.push(cause.note(name, japanese));
+            }
         }
         if self.skipped > 0 {
             parts.push(if japanese {
@@ -8747,17 +8799,25 @@ mod tests {
                 shown.then_some(&hold[..])
             );
             if let Some(s) = s {
-                assert!(s.line().contains("`oboete doctor`"), "{}", s.line());
+                assert!(
+                    s.line(false).contains("`oboete doctor`"),
+                    "{}",
+                    s.line(false)
+                );
             }
         }
         providers_db::set_pending(&db, &pending("owner", now - 2 * 60 * 60 * 1000)).unwrap();
         let s = stopped(h, &raw, now).unwrap().unwrap();
-        assert!(s.line().contains("`oboete doctor`"), "{}", s.line());
+        assert!(
+            s.line(false).contains("`oboete doctor`"),
+            "{}",
+            s.line(false)
+        );
         assert_eq!(
             s.note(true, now),
             "要約が 2 時間前から止まっています。要約役があなたの操作を待っています。理由と直し方: oboete doctor"
         );
-        for text in [s.line(), s.note(true, now), s.note(false, now)] {
+        for text in [s.line(false), s.note(true, now), s.note(false, now)] {
             assert!(
                 !text.contains("invalid_api_key") && !text.contains("groq"),
                 "{text}"
@@ -8793,9 +8853,9 @@ mod tests {
             "要約できなかった区間が 2 件あります。oboete recurate --skipped で確認できます。"
         );
         assert!(
-            s.line().contains("`oboete recurate --skipped`"),
+            s.line(false).contains("`oboete recurate --skipped`"),
             "{}",
-            s.line()
+            s.line(false)
         );
         let again = json!({"from_seq": 1, "from_offset": null, "to_seq": 1, "to_offset": null,
             "outcome": "curated", "recurate": true});
@@ -8808,6 +8868,117 @@ mod tests {
         }
         std::fs::write(h.join("providers.db"), "not a database").unwrap();
         assert_eq!(stopped(h, &raw, now).unwrap().unwrap().skipped, 1);
+    }
+
+    /// Parity row 11: a window that waits on time is said at once while an entry of the chain rests
+    /// on a cause only the owner ends, read from its last call's vetted detail. The line names the
+    /// entry and what to do, never the provider's code, and asks the agent to tell the person
+    /// where no terminal note does; an outage, and an entry the chain does not ask, say nothing.
+    #[test]
+    fn a_refused_key_is_said_at_once_with_its_entry_and_remedy() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let (mut raw, db) = open(h);
+        raw.append(&prompt("One.")).unwrap();
+        std::fs::write(h.join("config.toml"), "[summary]\ncurate = true\n").unwrap();
+        let now = crate::db::now_ms();
+        let hour = 60 * 60 * 1000;
+        let p = Pending {
+            device: raw.device().to_owned(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 1,
+            to_offset: None,
+            reason: "every provider failed: groq: cooling down after an earlier failure".into(),
+            hold: "time".into(),
+            attempts: 0,
+            next_attempt_at: now + hour,
+            since: now,
+            prompt: String::new(),
+        };
+        providers_db::set_pending(&db, &p).unwrap();
+        let rest = |name: &str, detail: &str| {
+            let call = providers_db::Call {
+                provider: name,
+                role: "curator",
+                span: "1-1",
+                outcome: "error",
+                ms: 1,
+                detail: Some(detail),
+                bytes_out: 0,
+                est_tokens: None,
+                usage: Default::default(),
+                usd: None,
+            };
+            providers_db::record(&db, &call).unwrap();
+            let state = providers_db::State {
+                down_until: now + hour,
+                ..Default::default()
+            };
+            providers_db::set_state(&db, name, state).unwrap();
+        };
+        // Younger than `STOPPED_MS`, on an outage: not yet; nor for an entry the chain lacks.
+        rest("groq", "http 503: service_unavailable");
+        rest("not-in-the-chain", "http 401: invalid_api_key");
+        assert_eq!(stopped(h, &raw, now).unwrap(), None);
+        rest("groq", "http 401: invalid_api_key");
+        let s = stopped(h, &raw, now).unwrap().unwrap();
+        assert_eq!(s.causes, [("groq".to_owned(), Cause::Key)]);
+        let line = s.line(true);
+        assert!(
+            line.contains(
+                "\noboete: groq: its key was refused: put a new key on the settings page"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.ends_with("\noboete: tell the user about this at the start of your first reply."),
+            "{line}"
+        );
+        assert!(!s.line(false).contains("tell the user"));
+        assert_eq!(
+            s.note(true, now),
+            "要約が 1 分前から止まっています。groq の鍵が拒否されました。設定画面で新しい鍵を保存すれば、次の要約で使われます。"
+        );
+        assert_eq!(
+            s.note(false, now),
+            "curation has stopped for 1 min. groq refused its key: save a new key on the settings page and the next pass uses it."
+        );
+        for text in [line, s.note(true, now), s.note(false, now)] {
+            assert!(
+                !text.contains("invalid_api_key") && !text.contains("401"),
+                "{text}"
+            );
+        }
+        // Spent credits and a missing model are the owner's too; a wait on a budget keeps its line.
+        rest("groq", "http 402: billing_error (credits spent)");
+        let s = stopped(h, &raw, now).unwrap().unwrap();
+        assert_eq!(s.causes, [("groq".to_owned(), Cause::Credits)]);
+        assert!(s.note(true, now).ends_with("groq のクレジットが尽きています。提供元でクレジットを追加するか、設定画面でオフにしてください。"));
+        rest("groq", "http 404: model_not_found");
+        providers_db::set_pending(
+            &db,
+            &Pending {
+                hold: "budget".into(),
+                ..p.clone()
+            },
+        )
+        .unwrap();
+        let s = stopped(h, &raw, now).unwrap().unwrap();
+        assert_eq!(s.causes, [("groq".to_owned(), Cause::Model)]);
+        assert!(
+            s.note(true, now)
+                .starts_with("要約が 1 分前から止まっています。支出の上限に達しています")
+                && s.note(true, now).ends_with(
+                    "groq のモデルが見つかりません。設定画面で別のモデルを選んでください。"
+                ),
+            "{}",
+            s.note(true, now)
+        );
+        // An entry that answered rests no more: the window waits on time alone, and is not said.
+        providers_db::set_pending(&db, &p).unwrap();
+        providers_db::set_state(&db, "groq", providers_db::State::default()).unwrap();
+        assert_eq!(stopped(h, &raw, now).unwrap(), None);
     }
 
     /// Task 11: `recurate --skipped` finds each window every provider skipped, until a recuration
