@@ -8489,8 +8489,9 @@ const OP_NAMES: &[&str] = &[
 
 /// Slice 3e-4 (#478): an op's `body` of `kind` with each string `rules` find something in masked,
 /// one `*` for each character a finding touches, but the values of `OP_NAMES`; none when they find
-/// nothing or the body does not parse. A forget's op (a uid and a job) and a migration's (a
-/// checkpoint and hashes) hold no text. Unlike a record's masks, which keep its bytes for the
+/// nothing or the body does not parse. A forget's op (a uid and a job), a migration's (a
+/// checkpoint and hashes) and a hide's (what it names, by oboete's word and ids) hold no text:
+/// a rule for `card` would make a hide op name nothing (Codex on #658). Unlike a record's masks, which keep its bytes for the
 /// ledger's offsets, these never lengthen a text: a correction or a claim stays under its
 /// character cap (Codex on #487).
 pub(crate) fn masked_op_text(
@@ -8532,7 +8533,7 @@ pub(crate) fn masked_op_text(
             _ => false,
         }
     }
-    if matches!(kind, OpKind::Forget | OpKind::Migration) {
+    if matches!(kind, OpKind::Forget | OpKind::Migration | OpKind::Hide) {
         return None;
     }
     let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -9951,6 +9952,29 @@ mod tests {
         );
         let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// A hide op holds no text a rule masks: its target is oboete's word, so a rule that finds
+    /// `card` or `summary` leaves it naming what it removed (Codex on #658).
+    #[test]
+    fn a_hide_op_holds_no_text_a_rule_masks() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'card|summary' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        for target in ["card", "summary"] {
+            let body = serde_json::json!({
+                "target": target, "device": "d", "op_seq": 3, "n": 0, "hidden": true,
+            });
+            assert_eq!(
+                masked_op_text(OpKind::Hide, &body.to_string(), &rules),
+                None
+            );
+            assert!(masked_op_text(OpKind::Window, &body.to_string(), &rules).is_some());
+        }
     }
 
     /// Slice 3e-4 (Codex on #487): a window's `reason` is kept only when oboete set the window

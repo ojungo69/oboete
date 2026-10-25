@@ -18,7 +18,8 @@ the records it was made from stay, and nothing brings it back.
   hidden}`, the target `card` (a window op's card, `n` its place there) or `summary` (a turn op's
   summary), `hidden` false to bring it back (`hide::HideOp`). It is an op like a correction, so
   the backup keeps it, a restore and a rebuild bring it back, and a rewind of the op log takes it
-  away.
+  away. Holding no text, it is left as written when the redaction rules change and the op text
+  is masked again, so a rule that finds `card` does not make it name nothing.
 - **The consumers** keep each hide op in knowledge.db's `hides` (who wrote it, what it names, its
   mark) and mark the card or the summary: `cards.hidden`, `turns.hidden`, the newest op's mark.
   A mark takes the row's full-text entry out (`cards_fts`, `turns_fts`) and drops its vector
