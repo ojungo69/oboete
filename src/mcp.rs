@@ -66,6 +66,9 @@ pub struct SearchArgs {
     /// Maximum number of hits (default 10, at most 100).
     #[serde(default)]
     limit: Option<usize>,
+    /// Hits to pass over before the first shown, to page on (default 0, at most 900).
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -159,23 +162,81 @@ pub struct WorkStateReadArgs {
 
 /// A model can ask for any `limit`; the store is not dumped into one reply.
 const MAX_LIMIT: usize = 100;
+/// How far `search` pages on: a deeper page reads every leg that deep.
+const MAX_OFFSET: usize = 900;
+/// A reply's text, at most, as claude-mem caps a tool's (parity row 6): one answer never fills an
+/// agent's context.
+const MAX_REPLY_BYTES: usize = 32 * 1024;
+/// `get`'s, at most, as claude-mem's get_observations: the ids were chosen, so each is shown, its
+/// detail cut to its share.
+const MAX_DETAIL_BYTES: usize = 256 * 1024;
+/// What a reply cut to its cap ends with, as claude-mem's.
+const SHORTENED: &str = "\n[Response shortened; request fewer selected records for more detail.]";
+/// What a document `get` cut to its share ends with, as claude-mem's.
+const DETAIL_SHORTENED: &str = "\n[Detail shortened to fit the memory budget.]";
 
 /// Every answer passes the egress gate, then its fence (spec 6.5): it goes into the agent's
 /// context, and so to its model's provider, the user's rules as they are now apply (spec 6.4),
-/// and what it holds is data, never instructions.
+/// and what it holds is data, never instructions. At most `MAX_REPLY_BYTES`.
 fn text(s: String) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(
-        search::fenced(&crate::redact::outbound(&s)),
-    )]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(replied(
+        &s,
+        MAX_REPLY_BYTES,
+    ))]))
 }
 
 /// A failure the model can act on (a wrong argument, an unknown id) is a tool result with
 /// `isError`, not a protocol error, so the client hands it back to the model: gated and fenced
 /// as every reply is, since it can echo the caller's argument (Codex on #306).
 fn failed(s: String) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::error(vec![ContentBlock::text(
-        search::fenced(&crate::redact::outbound(&s)),
-    )]))
+    Ok(CallToolResult::error(vec![ContentBlock::text(replied(
+        &s,
+        MAX_REPLY_BYTES,
+    ))]))
+}
+
+/// `s` through the egress gate, then cut to `max` bytes, then fenced: a cut before the gate could
+/// leave part of a secret its rule no longer matches.
+fn replied(s: &str, max: usize) -> String {
+    search::fenced(&cut(&crate::redact::outbound(s), max, SHORTENED))
+}
+
+/// `text` within `max` bytes: as it is when it fits, else its start, to a character's end, and
+/// `note`.
+fn cut(text: &str, max: usize, note: &str) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max.saturating_sub(note.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{note}", &text[..end])
+}
+
+/// `get`'s documents in the order asked, each through the egress gate and then cut to an equal
+/// share of `MAX_DETAIL_BYTES`, as claude-mem divides get_observations': a long first document
+/// never pushes a later one out. With at most 20 ids a share is over 12 KiB, so every id shows.
+fn details(parts: Vec<(String, Option<String>)>, rules: &crate::redact::Rules) -> String {
+    let heads: usize = (parts.iter())
+        .map(|(id, _)| format!("## {id}\n\n").len() + DETAIL_SHORTENED.len())
+        .sum();
+    let share = MAX_DETAIL_BYTES.saturating_sub(heads) / parts.len().max(1);
+    let mut out = String::new();
+    for (id, text) in parts {
+        out.push_str(&format!("## {id}\n"));
+        match text {
+            // As the CLI's `get` shows it: the whole reply passes the gate in `replied`.
+            Some(text) if text.len() <= share => out.push_str(&text),
+            Some(text) => {
+                let gated = crate::redact::outbound_with(&text, rules);
+                out.push_str(&cut(&gated, share, DETAIL_SHORTENED));
+            }
+            None => out.push_str(&format!("no document {id} (ids come from search)\n")),
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// A note's title when it is given none, as claude-mem makes one: its first 60 characters, and
@@ -251,6 +312,10 @@ impl Oboete {
             (Ok(since), Ok(until)) => (since, until),
             (Err(e), _) | (_, Err(e)) => return failed(format!("{e:#}")),
         };
+        let offset = a.offset.unwrap_or(0);
+        if offset > MAX_OFFSET {
+            return failed(format!("offset is at most {MAX_OFFSET}"));
+        }
         let q = search::Query {
             text: a.query,
             caller: Some(repo::key(&self.cwd)),
@@ -268,16 +333,14 @@ impl Oboete {
                 Err(e) => return failed(format!("{e:#}")),
             },
             raw: search::RawArm::Below,
-            limit: a.limit.unwrap_or(10).min(MAX_LIMIT),
+            limit: a.limit.unwrap_or(10).min(MAX_LIMIT) + offset,
             skip_session: None,
             no_starts: false,
             names: Vec::new(),
         };
         let answer = search::query(&self.home, &q).map_err(internal)?;
         let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
-        let out: String = answer
-            .hits
-            .iter()
+        let out: String = (answer.hits.iter().skip(offset))
             .map(|h| search::line(h, q.all, &rules))
             .collect();
         let mut result = text(if out.is_empty() {
@@ -301,11 +364,19 @@ impl Oboete {
     fn get(&self, Parameters(a): Parameters<GetArgs>) -> Result<CallToolResult, ErrorData> {
         match (a.id, a.ids) {
             (Some(id), None) => match search::get(&self.home, &id).map_err(internal)? {
-                Some(t) => text(t),
+                Some(t) => Ok(CallToolResult::success(vec![ContentBlock::text(replied(
+                    &t,
+                    MAX_DETAIL_BYTES,
+                ))])),
                 None => failed(format!("no document {id} (ids come from search)")),
             },
             (None, Some(ids)) if (1..=20).contains(&ids.len()) => {
-                text(search::get_many(&self.home, &ids).map_err(internal)?)
+                let parts = search::get_each(&self.home, &ids).map_err(internal)?;
+                let rules = crate::redact::Rules::load(&self.home).map_err(internal)?;
+                Ok(CallToolResult::success(vec![ContentBlock::text(replied(
+                    &details(parts, &rules),
+                    MAX_DETAIL_BYTES,
+                ))]))
             }
             _ => failed("provide exactly one of id or ids (1 to 20 ids)".into()),
         }
@@ -843,6 +914,7 @@ mod tests {
             kind: None,
             order_by: None,
             limit: None,
+            offset: None,
         }
     }
 
@@ -1350,6 +1422,123 @@ mod tests {
         for word in ["relevance", "date_desc", "date_asc"] {
             assert!(bad.contains(word), "{bad}");
         }
+    }
+
+    /// Parity row 6: claude-mem caps a tool's reply at 32 KiB, and get_observations' at 256 KiB
+    /// divided among the ids asked, so a long first document never pushes a later one out. The cut
+    /// ends on a character, after the egress gate, and says so.
+    #[test]
+    fn replies_are_capped_and_get_divides_its_share_among_the_ids() {
+        let ascii = "a".repeat(40 * 1024);
+        let short = cut(&ascii, MAX_REPLY_BYTES, SHORTENED);
+        assert!(short.len() <= MAX_REPLY_BYTES && short.ends_with(SHORTENED));
+        let wide = "日".repeat(20_000);
+        let short = cut(&wide, 1_001, SHORTENED);
+        assert!(
+            short.len() <= 1_001 && short.ends_with(SHORTENED),
+            "{}",
+            short.len()
+        );
+        assert_eq!(cut("small", 1_000, SHORTENED), "small");
+        let (mut s, server, _) = seeded("Keep the widget small.");
+        let device = s.raw.device().to_owned();
+        let ids: Vec<String> = (0..3)
+            .map(|i| {
+                let text = format!("REC{i} {}", "word ".repeat(60_000));
+                let seq = s.said("work", "github.com/o/r", 1_700_000_003_000 + i, &text);
+                format!("{device}:{seq}")
+            })
+            .collect();
+        s.run();
+        let get = |value: serde_json::Value| {
+            body(
+                server
+                    .get(Parameters(
+                        serde_json::from_value::<GetArgs>(value).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+        };
+        let got = get(json!({"ids": ids}));
+        for (i, id) in ids.iter().enumerate() {
+            assert!(got.contains(&format!("## {id}\n")), "{id}");
+            assert!(got.contains(&format!("REC{i} ")), "{i}");
+        }
+        assert_eq!(got.matches(DETAIL_SHORTENED).count(), 3);
+        assert!(!got.contains(SHORTENED));
+        assert!(got.len() <= MAX_DETAIL_BYTES + 1_024, "{}", got.len());
+        let one = get(json!({"id": ids[0]}));
+        assert!(one.contains(SHORTENED) && one.len() > MAX_REPLY_BYTES);
+        assert!(one.len() <= MAX_DETAIL_BYTES + 1_024, "{}", one.len());
+        // Any other reply stops at its own cap: the newest of a long timeline.
+        let timeline = body(
+            server
+                .timeline(Parameters(
+                    serde_json::from_value::<TimelineArgs>(json!({"all": true})).unwrap(),
+                ))
+                .unwrap(),
+        );
+        assert!(
+            timeline.len() <= MAX_REPLY_BYTES + 1_024,
+            "{}",
+            timeline.len()
+        );
+    }
+
+    /// Parity row 6: every reply and every failure stops at its cap; a document is gated before
+    /// its cut, so a secret the cut splits is masked whole, never half shown.
+    #[test]
+    fn a_reply_is_gated_before_it_is_cut() {
+        for reply in [text("a".repeat(40_000)), failed("b".repeat(40_000))] {
+            let shown = body(reply.unwrap());
+            assert!(shown.contains(SHORTENED) && shown.len() <= MAX_REPLY_BYTES + 1_024);
+        }
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: secret scanners
+        let heads = "## d\n\n".len() + DETAIL_SHORTENED.len();
+        let share = MAX_DETAIL_BYTES - heads;
+        // The cut ends `DETAIL_SHORTENED` before the share: the key straddles it.
+        let at = share - DETAIL_SHORTENED.len() - 10;
+        let document = format!("{}{key}{}", "x".repeat(at), "y".repeat(1_000));
+        let shown = details(vec![("d".into(), Some(document))], &Default::default());
+        assert!(!shown.contains("ghp_"), "{}", &shown[shown.len() - 200..]);
+        assert!(shown.ends_with(&format!("{DETAIL_SHORTENED}\n")));
+    }
+
+    /// Parity row 6: search pages on with `offset`, as claude-mem's does, up to `MAX_OFFSET`.
+    #[test]
+    fn search_pages_on_with_an_offset() {
+        let (mut s, server, _) = seeded("Keep the invented widget small.");
+        for i in 0..4 {
+            s.said(
+                "work",
+                "github.com/o/r",
+                1_700_000_004_000 + i,
+                &format!("zebrafish note {i}"),
+            );
+        }
+        s.run();
+        let search = |offset: Option<usize>| {
+            let mut args = json!({"query": "zebrafish", "limit": 2, "orderBy": "date_asc"});
+            if let Some(n) = offset {
+                args["offset"] = json!(n);
+            }
+            server
+                .search(Parameters(
+                    serde_json::from_value::<SearchArgs>(args).unwrap(),
+                ))
+                .unwrap()
+        };
+        let first = body(search(None));
+        let second = body(search(Some(2)));
+        for (page, notes) in [(&first, [0, 1]), (&second, [2, 3])] {
+            for n in 0..4 {
+                let shown = page.contains(&format!("zebrafish note {n}"));
+                assert_eq!(shown, notes.contains(&n), "note {n}: {page}");
+            }
+        }
+        let deep = search(Some(MAX_OFFSET + 1));
+        assert_eq!(deep.is_error, Some(true));
+        assert!(body(deep).contains("offset is at most"));
     }
 
     /// Q8: batches preserve requested positions (including missing and repeated IDs),

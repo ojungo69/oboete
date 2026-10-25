@@ -296,6 +296,27 @@ agent reloads the context session start gave it.
 
 Test: `mcp::tests::session_start_context_shows_what_session_start_injects`.
 
+## Slice 6: reply caps and paging
+
+claude-mem's MCP replies have a size cap (`src/servers/mcp-text-format.ts` at v15.0.2, parity
+row 6), and its search pages on with `offset`; oboete's now do the same.
+
+- **Every reply** stops at 32 KiB (`mcp::MAX_REPLY_BYTES`): the text goes through the egress gate
+  first, so a cut never leaves part of a secret its rule no longer matches, then it is cut to a
+  character's end and ends with claude-mem's `[Response shortened; request fewer selected records
+  for more detail.]`, then it is fenced. A failure the model can act on is capped the same way.
+- **`get`** stops at 256 KiB, as claude-mem's get_observations: the ids were chosen, so each is
+  shown. For several ids the budget is divided equally among them, so a long first document never
+  pushes a later one out: each over its share is gated, then cut, and ends with `[Detail shortened
+  to fit the memory budget.]`. With at most 20 ids a share is over 12 KiB, so claude-mem's last
+  resort, naming the ids it left out, never happens here. A document within its share is shown as
+  the CLI's `get` shows it.
+- **`search`'s `offset`** passes over that many hits before the first shown, up to 900: a page
+  reads every leg as deep as `offset` plus `limit`.
+
+Tests: `mcp::tests::replies_are_capped_and_get_divides_its_share_among_the_ids`,
+`mcp::tests::search_pages_on_with_an_offset`.
+
 ## Differences from claude-mem, and why
 
 | claude-mem | oboete | Why |
@@ -303,7 +324,7 @@ Test: `mcp::tests::session_start_context_shows_what_session_start_injects`.
 | `get_observations(ids)` | `get(ids)` | one `get` for every kind of id oboete has (claims, cards, summaries, imported documents, records) |
 | Search output: tables grouped by day and file, in date or first-appearance order | one ranked line per hit | relevance order is what oboete's search was measured on (docs/milestone-1.md); `orderBy` gives the dates |
 | Observations, sessions and prompts fetched separately, then shown together | claims first, then cards, summaries and imported documents fused by rank, then records | the owner's decisions come first (oboete's merit); one ranked list instead of three |
-| `offset` paging | none (`limit` up to 100) | claude-mem's semantic path ignores it (claude-mem-parity.md row 6) |
+| `offset` paging | `offset` up to 900, `limit` up to 100 | a page reads every leg that deep (slice 6) |
 | `get_tool_uses` (raw tool input and output) | `get` of a record's key | a record is the raw event, gated |
 | Advertised default limit 20, actual 50 / 50 / 20 per kind | default 10, at most 100 | as now |
 | Code-structure tools, corpora | none | left out by decision 37 |

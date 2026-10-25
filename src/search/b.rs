@@ -2579,6 +2579,20 @@ fn get_in(home: &Path, raw: &Raw, k: &Connection, id: &str) -> Result<Option<Str
 /// Q8: full text in the requested order, with a missing/hidden ID reported in its place.
 /// The callers gate and fence the whole reply just as they do a single item's text.
 pub fn get_many(home: &Path, ids: &[String]) -> Result<String> {
+    let mut out = String::new();
+    for (id, text) in get_each(home, ids)? {
+        out.push_str(&format!("## {id}\n"));
+        match text {
+            Some(text) => out.push_str(&text),
+            None => out.push_str(&format!("no document {id} (ids come from search)\n")),
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// `get_many`'s documents, each id in order with its text, or none where no document has it.
+pub fn get_each(home: &Path, ids: &[String]) -> Result<Vec<(String, Option<String>)>> {
     anyhow::ensure!(
         (1..=20).contains(&ids.len()),
         "ids must contain 1 to 20 ids"
@@ -2589,20 +2603,15 @@ pub fn get_many(home: &Path, ids: &[String]) -> Result<String> {
         .as_ref()
         .map(|_| crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT))
         .transpose()?;
-    let mut out = String::new();
-    for id in ids {
-        out.push_str(&format!("## {id}\n"));
-        let text = match &stores {
-            Some((raw, k)) => get_in(home, raw, k, id)?,
-            None => None,
-        };
-        match text {
-            Some(text) => out.push_str(&text),
-            None => out.push_str(&format!("no document {id} (ids come from search)\n")),
-        }
-        out.push('\n');
-    }
-    Ok(out)
+    ids.iter()
+        .map(|id| {
+            let text = match &stores {
+                Some((raw, k)) => get_in(home, raw, k, id)?,
+                None => None,
+            };
+            Ok((id.clone(), text))
+        })
+        .collect()
 }
 
 /// A card in full, as its reader gave it (gated, K6): its ID, time, type and repository, then
