@@ -123,7 +123,7 @@ struct Said {
 /// The first `max` characters of `text` as a request shows them: the gate reads `OVERLAP` more,
 /// and a key block the cut leaves open goes, as `hook::clip` keeps a field. The gate reads no more
 /// of a long prompt (a delegated review's runs to 20,000 characters).
-fn shown(text: &str, max: usize, rules: &Rules) -> String {
+pub(crate) fn shown(text: &str, max: usize, rules: &Rules) -> String {
     let window: String = text.chars().take(max + OVERLAP).collect();
     let mut gated = crate::redact::outbound_with(&window, rules);
     if window.len() < text.len()
@@ -160,6 +160,9 @@ fn holds(s: &Span, device: &str, (from, to): (i64, i64)) -> bool {
 #[derive(Default)]
 struct Conversation {
     repos: BTreeSet<String>,
+    /// The repository of its first prompt that names one, as stored: the key linked worktrees
+    /// share, which grouping keeps a request within (docs/my-work-model.md C2).
+    repo: Option<String>,
     /// The oldest first.
     prompts: Vec<Said>,
     /// Where each of its live prompts is, a forgotten or expired one too, whose text is not read:
@@ -696,12 +699,17 @@ pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
     read_held(home, Range::All, now)
 }
 
-fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> {
-    let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
-    };
-    let rules = Rules::load(home)?;
-    let gate = |s: &str| crate::redact::outbound_with(s, &rules);
+/// What My Work reads of the stores before it makes requests: each conversation with its
+/// prompts, summaries and cards, the work and who wrote it, and the request ids each
+/// conversation's work names. The page's read and grouping's (docs/my-work-model.md C1) share it.
+struct Gathered {
+    convs: BTreeMap<Key, Conversation>,
+    work: Vec<Work>,
+    named: HashMap<Key, BTreeSet<String>>,
+}
+
+fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
     // An excluded repository's sessions take no part, nor its work (the design's 1).
     let excluded_repos = raw.exclusions_now()?;
     let excluded: HashSet<Key> = (raw.sessions_in(&excluded_repos)?.iter())
@@ -714,8 +722,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let summaries = newest(
         SUMMARIES,
         |before| {
-            let (page, more) =
-                crate::turns::page(&k, &raw, (None, None), before, SUMMARIES, &rules)?;
+            let (page, more) = crate::turns::page(k, raw, (None, None), before, SUMMARIES, rules)?;
             let rows = (page.into_iter())
                 .map(|s| {
                     let (span, key) = k.query_row(
@@ -740,7 +747,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let cards = newest(
         CARDS,
         |before| {
-            let (page, more) = crate::cards::page(&k, &raw, (None, None), before, CARDS, &rules)?;
+            let (page, more) = crate::cards::page(k, raw, (None, None), before, CARDS, rules)?;
             let rows = (page.into_iter())
                 .map(|c| {
                     let (span, agent, session): ((i64, i64), Option<String>, Option<String>) = k
@@ -767,7 +774,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let writes = (raw.native_work_writes()?.into_iter())
         .filter(|w| !excluded_repos.contains(&w.repo))
         .collect();
-    let work = link(&raw, &k, fold(writes), &excluded)?;
+    let work = link(raw, k, fold(writes), &excluded)?;
     // Every prompt of the sessions read (`PROMPTS`): the work's, the summaries', the cards', and
     // those of the newest live prompts whose text is there, each prompt kept only as `at`
     // returns it: what a forget took or an expiry left without text takes no part (Codex on #574).
@@ -805,6 +812,9 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     for (key, repo, p) in said {
         let c = convs.entry(key).or_default();
         c.repos.extend(repo.as_deref().map(gate));
+        if c.repo.is_none() {
+            c.repo = repo;
+        }
         c.prompts.push(p);
     }
     // A conversation known only by its work (its prompts private, expired or forgotten, or none
@@ -840,6 +850,15 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
             named.entry(key.clone()).or_default().insert(id);
         }
     }
+    Ok(Gathered { convs, work, named })
+}
+
+fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> {
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
+    };
+    let rules = Rules::load(home)?;
+    let Gathered { convs, work, named } = gather(&raw, &k, &rules)?;
     let mut requests: Vec<Request> = Vec::new();
     let mut at: HashMap<Id, usize> = HashMap::new();
     let mut unlinked = 0;
@@ -947,6 +966,95 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
     Ok((json!({"requests": answers, "unlinked": unlinked}), held))
+}
+
+/// A conversation as grouping reads it (docs/my-work-model.md C1, C2).
+pub(crate) struct Seen {
+    /// Its agent and session, as the stores hold them.
+    pub key: (String, String),
+    /// The repository of its first prompt that names one, as stored.
+    pub repo: Option<String>,
+    /// Its opening ask, when it is a prompt (claude-mem's `originalFor`): the record's device and
+    /// seq, its time, and its text before any gate.
+    pub ask: Option<(String, i64, i64, String)>,
+    /// Its prompts that ask, the oldest first, as `ask` gives one.
+    pub asks: Vec<(String, i64, i64, String)>,
+    /// Its newest prompt, summary, card or work write, unix ms.
+    pub last: i64,
+    /// The request ids its work names.
+    pub named: BTreeSet<String>,
+    /// The work-state lists it wrote to, by repository and name, from every write a call of its
+    /// sent (C3).
+    pub lists: BTreeSet<(String, String)>,
+}
+
+/// Every conversation My Work reads (`gather`), as grouping reads it.
+pub(crate) fn seen(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Vec<Seen>> {
+    let Gathered { convs, work, named } = gather(raw, k, rules)?;
+    let mut lists = writers(raw, k, &work)?;
+    let mut out = Vec::new();
+    for (key, c) in convs {
+        let said = |p: &Said| {
+            let text = p.text.clone()?;
+            asks(&text).then(|| (p.device.clone(), p.seq, p.ts, text))
+        };
+        let asks: Vec<_> = c.prompts.iter().filter_map(said).collect();
+        let ask = (c.original(raw.device()))
+            .filter(|o| o.from == "prompt")
+            .and_then(|o| {
+                asks.iter()
+                    .find(|a| o.id == Some(format!("{}:{}", a.0, a.1)))
+            })
+            .cloned();
+        let wrote = (work.iter())
+            .filter(|w| w.by.as_ref().is_some_and(|(by, ..)| *by == key))
+            .map(|w| w.updated);
+        let last = (c.prompts.iter().map(|p| p.ts))
+            .chain(c.turns.iter().map(|t| t.s.ts))
+            .chain(c.cards.iter().map(|card| card.c.ts))
+            .chain(wrote)
+            .max()
+            .unwrap_or(0);
+        out.push(Seen {
+            named: named.get(&key).cloned().unwrap_or_default(),
+            lists: lists.remove(&key).unwrap_or_default(),
+            key,
+            repo: c.repo,
+            ask,
+            asks,
+            last,
+        });
+    }
+    Ok(out)
+}
+
+/// The lists each conversation wrote to, by repository and name: every write of every item, by
+/// the calls that sent it (`senders`), where `link` reads an item's newest write alone. None
+/// before the worker has made `raw_docs_tools`.
+fn writers(
+    raw: &Raw,
+    k: &Connection,
+    work: &[Work],
+) -> Result<HashMap<Key, BTreeSet<(String, String)>>> {
+    let mut out: HashMap<Key, BTreeSet<(String, String)>> = HashMap::new();
+    if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
+        return Ok(out);
+    }
+    let mut near = k.prepare_cached(
+        "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
+         WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
+    )?;
+    let mut read = HashMap::new();
+    for w in work {
+        for write in w.writes.iter().chain(&w.list_writes) {
+            for (key, ..) in senders(raw, &mut near, &mut read, write)? {
+                out.entry(key)
+                    .or_default()
+                    .insert((w.repo.clone(), w.list.clone()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Rule 6: a check of a request's version, in `state/my-work-reviews.json` under the keyed hash of

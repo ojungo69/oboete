@@ -29,8 +29,6 @@ pub type Caller<'a> =
 pub type Pass<'a> = dyn FnMut(&mut Raw, &Connection, &Connection, bool) -> Result<Phase> + 'a;
 
 /// What a job reads, all of it read-only.
-// shortcut: no job reads every store until grouping (slice 3a-2), which drops this allow.
-#[allow(dead_code)]
 pub(crate) struct Stores<'a> {
     pub raw: &'a Raw,
     pub k: &'a Connection,
@@ -41,7 +39,6 @@ pub(crate) struct Stores<'a> {
 }
 
 /// A job's subject that is due, and since when, unix ms (A3): a time to come is when it will be.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Due {
     pub about: String,
     pub since: i64,
@@ -51,7 +48,6 @@ pub(crate) struct Due {
 pub(crate) type Keep = dyn Fn(&Value) -> BTreeMap<String, Value>;
 
 /// What a job sends for one subject, and how it takes the answer.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Ask {
     /// Its fixed instructions, then the data between fence lines (A10), every piece of recorded
     /// text gated alone before it is cut (A5).
@@ -89,9 +85,9 @@ impl std::fmt::Display for BoundReached {
 
 impl std::error::Error for BoundReached {}
 
-/// The jobs this binary runs, for one round: none until the first, grouping (slice 3a-2).
+/// The jobs this binary runs, for one round.
 pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
-    Vec::new()
+    vec![Box::new(crate::my_work_group::Grouping::default())]
 }
 
 /// One round's runner: the switches and bound as the worker read them, the jobs, and the chain.
