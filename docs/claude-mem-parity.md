@@ -238,10 +238,10 @@ each milestone and new features are added here.
 
 | # | Difference | Size |
 |---|---|---|
-| X12 | **The owner's goals.** claude-mem 15.1's My Goals keeps the month's priorities and open and repeated asks from the prompts the owner typed, with quotes, month by month. A model writes them: decision 57 builds them with the curator chain. | M |
-| X13 | **The owner's rules.** claude-mem 15.1's My Rules turns learned preferences and the owner's own rules into a file Claude Code loads. Decision 57 builds it with the curator chain. | M |
-| X14 | **Where each request stands.** claude-mem 15.1 reviews each request from memory (a percent, readings, a finish date, the goal it serves) and writes a build story, in the background with Sonnet and Haiku. Decision 57: oboete writes them with its curator chain. | L |
-| X15 | **One card for a request across conversations.** claude-mem 15.1 joins the conversations of one request with a model's judgement; oboete shows one card a conversation (decision 55). Decision 57 builds it with the curator chain. | M |
+| X12 | **The owner's goals.** claude-mem 15.1's My Goals keeps the month's priorities and open and repeated asks from the prompts the owner typed, with quotes, month by month. A model writes them: decision 57 builds them with the curator chain. Planned in [my-work-model.md](my-work-model.md). | M |
+| X13 | **The owner's rules.** claude-mem 15.1's My Rules turns learned preferences and the owner's own rules into a file Claude Code loads. Decision 57 builds it with the curator chain. Planned in [my-work-model.md](my-work-model.md). | M |
+| X14 | **Where each request stands.** claude-mem 15.1 reviews each request from memory (a percent, readings, a finish date, the goal it serves) and writes a build story, in the background with Sonnet and Haiku. Decision 57: oboete writes them with its curator chain. Planned in [my-work-model.md](my-work-model.md). | L |
+| X15 | **One card for a request across conversations.** claude-mem 15.1 joins the conversations of one request with a model's judgement; oboete shows one card a conversation (decision 55). Decision 57 builds it with the curator chain. Planned in [my-work-model.md](my-work-model.md). | M |
 | X16 | **What a request produced.** Links an agent attaches and the commits, pushes and branches read from recorded git commands. No model call. Built (docs/my-work.md slice 4), files shown by path, not served. | S |
 | X17 | **Finished subagents.** A SubagentStop hook and the agent view's finished state. | S |
 | X18 | **Agents without an adapter.** claude-mem's raw adapter gives any other host a session summary. | M |
@@ -252,7 +252,7 @@ each milestone and new features are added here.
 |---|---|---|
 | X19 | **A setup page after install.** claude-mem 15.2's installer hands setup to a browser page that scans the agents' history, shows what Cloud found and the person's token use, and ends on a first search. oboete's setup prints the page's address; its first run is the welcome dialog and the settings page's guide. | L |
 | X20 | **Recent prompts from the agents' own history.** claude-mem 15.2's setup stores the prompts a person typed in the last 30 days in Claude Code, Codex, Gemini CLI, Antigravity CLI and OpenCode that its hooks missed. oboete's transcript import reads Claude Code and Codex only, when asked. | M |
-| X21 | **Which prompts are the owner's own.** claude-mem 15.2 drops prompts an agent wrote by their text and opening as well as by where they came from, before its goals and grouping read them. oboete marks only Codex prompts another program sent, and decision 57's goals, rules and grouping will read the owner's prompts. | M |
+| X21 | **Which prompts are the owner's own.** claude-mem 15.2 drops prompts an agent wrote by their text and opening as well as by where they came from, before its goals and grouping read them. oboete marks only Codex prompts another program sent, and decision 57's goals, rules and grouping will read the owner's prompts. Planned in [my-work-model.md](my-work-model.md). | M |
 
 ### Before the switch (added 2026-10-25, decision 56)
 
