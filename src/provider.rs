@@ -1710,7 +1710,7 @@ fn anthropic_request(
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": anthropic_content(prompt, extra)}],
         "output_config": {"format": {"type": "json_schema", "schema": anthropic_schema(schema)}}
     });
     for (k, v) in extra {
@@ -1725,6 +1725,28 @@ fn anthropic_request(
         body[k] = v.clone();
     }
     body
+}
+
+/// A prompt as a Messages request's content. A fenced prompt's instructions, all before the sentence
+/// that names its fence, are the same bytes for every call of its kind (`curate::FENCE_SENTENCE`,
+/// G09): they go in a block of their own that writes the prompt cache, for five minutes or as the
+/// entry's own `cache_control` asks (a longer cache must come first), so a call within that time
+/// reads them at a tenth of the input price. Any other prompt goes whole.
+fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>) -> Value {
+    let Some(n) = prompt
+        .find(crate::curate::FENCE_SENTENCE)
+        .filter(|&n| n > 0)
+    else {
+        return Value::String(prompt.to_owned());
+    };
+    let cache = match extra.get("cache_control") {
+        Some(own) if own.is_object() => own.clone(),
+        _ => json!({"type": "ephemeral"}),
+    };
+    json!([
+        {"type": "text", "text": &prompt[..n], "cache_control": cache},
+        {"type": "text", "text": &prompt[n..]},
+    ])
 }
 
 /// Keywords the Messages API refuses in a schema with a 400: numeric and string bounds, and array
@@ -7732,10 +7754,11 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             extra.insert("metadata".into(), json!({"user_id": "private-canary"}));
             extra.insert("cache_control".into(), json!({"type": "ephemeral"}));
         }
-        // The test writes no prompt cache, so it is priced at its input price once, as its
-        // preview shows (`settings::providers::preview`).
+        // The test sends none of the entry's `cache_control` and writes no cache: its preview prices
+        // its input once (`settings::providers::preview`), and its reservation allows for the cache
+        // write of a fenced prompt (`Provider::input_weight`), which it never makes.
         assert_eq!(p.input_weight(), 2.0);
-        assert_eq!(probe_provider(&p).unwrap().input_weight(), 1.0);
+        assert_eq!(probe_provider(&p).unwrap().input_weight(), 1.25);
         let result = probe(&conn, &p, 5.0, &|| Ok(None)).unwrap();
         assert_eq!(
             (result["status"].as_str(), result["http_status"].as_u64()),
@@ -7769,6 +7792,61 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             headers.insert("X-Api-Key".into(), "private-header-canary".into());
         }
         assert_eq!(probe_provider(&p).unwrap_err(), "unsafe_headers");
+    }
+
+    /// A fenced prompt's instructions, the same bytes for every window or turn (G09), go in a block
+    /// of their own that writes the prompt cache, for five minutes or as the entry's own
+    /// `cache_control` asks, the record after them in a block of its own; any other prompt goes
+    /// whole, uncached.
+    #[test]
+    fn a_fenced_prompts_instructions_write_the_prompt_cache() {
+        let fenced =
+            crate::curate::prompt("English", "## claude session s\nL1 [user] Hi.\n", "", "");
+        let schema = json!({"type": "object"});
+        let none = serde_json::Map::new();
+        let content = &anthropic_request("m", &fenced, &schema, &none)["messages"][0]["content"];
+        let at = fenced.find(crate::curate::FENCE_SENTENCE).unwrap();
+        assert_eq!(content[0]["text"], fenced[..at]);
+        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(content[1]["text"], fenced[at..]);
+        assert!(content[1].get("cache_control").is_none(), "{content}");
+        let hour = json!({"cache_control": {"type": "ephemeral", "ttl": "1h"}});
+        let content =
+            &anthropic_request("m", &fenced, &schema, hour.as_object().unwrap())["messages"][0];
+        assert_eq!(content["content"][0]["cache_control"]["ttl"], "1h");
+        let plain = anthropic_request("m", PROBE_PROMPT, &schema, &none);
+        assert_eq!(plain["messages"][0]["content"], PROBE_PROMPT);
+    }
+
+    /// What a call's input is billed as: on a Messages entry a token read from its prompt cache
+    /// at a tenth of the input price, one written at 1.25 times, or twice for an hour's cache;
+    /// elsewhere a written token twice and a read one once. A reported prompt counts every input
+    /// token, those its cache wrote and read too.
+    #[test]
+    fn a_calls_cache_reads_and_writes_are_priced_as_billed() {
+        let url = "http://127.0.0.1:9/v1".to_owned();
+        let mut messages = stub(url.clone());
+        if let Provider::Openai { api, .. } = &mut messages {
+            *api = Api::Anthropic;
+        }
+        assert_eq!(messages.billed_input(10_000, Some(4_000), None), 6_400.0);
+        assert_eq!(messages.billed_input(10_000, None, Some(4_000)), 11_000.0);
+        assert_eq!(messages.billed_input(10_000, None, None), 10_000.0);
+        assert_eq!(messages.input_weight(), 1.25);
+        if let Provider::Openai { extra, .. } = &mut messages {
+            extra.insert(
+                "cache_control".into(),
+                json!({"type": "ephemeral", "ttl": "1h"}),
+            );
+        }
+        assert_eq!(messages.billed_input(10_000, None, Some(4_000)), 14_000.0);
+        assert_eq!(messages.input_weight(), 2.0);
+        let other = stub(url);
+        assert_eq!(
+            other.billed_input(10_000, Some(4_000), Some(1_000)),
+            11_000.0
+        );
+        assert_eq!(other.input_weight(), 1.0);
     }
 
     /// Haiku 5.5's thinking is adaptive and its depth is `output_config.effort`: an entry's own

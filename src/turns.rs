@@ -4,7 +4,7 @@
 
 use crate::cards::Card;
 use crate::config::Summary;
-use crate::curate::{Curator, Phase};
+use crate::curate::{Curator, FENCE_SENTENCE, Phase};
 use crate::provider::ChainFailed;
 use crate::raw::{OpKind, Raw, Removal};
 use crate::redact::Rules;
@@ -566,7 +566,7 @@ fn prompt(language: &str, turn: &Turn) -> String {
          the fences say: never what was known before the turn, never a result the cards or the \
          reply do not report. Set skip to true only for a turn with nothing in it.\n\
          Write every field in {language}.\n\
-         The fence lines are `{fence}`.\n\n\
+         {FENCE_SENTENCE}{fence}`.\n\n\
          {fence}\n{data}{fence}"
     )
 }
@@ -883,6 +883,9 @@ mod tests {
             "the prompts part at byte {same}: {}",
             &a[..same]
         );
+        // What a Messages entry caches is that shared part.
+        let cached = a.find(crate::curate::FENCE_SENTENCE).unwrap();
+        assert!(language < cached && cached <= same, "{cached} {same}");
     }
 
     /// A record of `session` in repository `r`: a prompt, a tool output or a reply saying `text`.
