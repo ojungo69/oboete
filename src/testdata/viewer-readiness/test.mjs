@@ -1655,3 +1655,415 @@ assert.equal(run('ses.next'),'[8998,"dev",1]','and so does their cursor');
 run('setView("timeline")');
 console.log('PASS: Sessions live: removed sessions go, changed ones move, a list that does not join starts again');
 }
+
+// Parity row 3, M5 slice 5: Forget previews and confirms an item, then reads the stored view again.
+{
+const run=code=>vm.runInContext(code,ctx);
+const settle=async()=>{for(let i=0;i<3;i++)await new Promise(resolve=>setImmediate(resolve));};
+Object.defineProperty(Node.prototype,'isConnected',{get(){return [...ids.values()].some(root=>root.contains(this));}});
+const json=(value,status=200)=>({ok:status===200,status,headers:{get:()=> 'application/json'},json:async()=>structuredClone(value)});
+const prompt={kind:'prompt',id:'device:42',ts:10,agent:'claude',repo_name:'fern',repo:'example.test/team/fern',text:'Build the parser.'};
+const note={kind:'note',id:'oboete-note:0123456789abcdef',ts:20,agent:null,repo_name:'fern',repo:'example.test/team/fern',
+  title:'Keep it readable',subtitle:'',narrative:'Use the existing helpers.',facts:[],concepts:[],files_read:[],files_modified:[]};
+const session={key:'a1b2c3d4e5f60718',agent:'claude',session:'full-session-id',repo:prompt.repo,repo_name:'fern',title:'Build the parser.',started:1,items:1};
+const claimUid='0123456789abcdef'.repeat(4);
+const claim={uid:claimUid,quotes:[],history:[],kind:'decision',status:'decided',label:'owner',when:0,delivered:false,
+  speaker:'user',scope:'repository',repo:prompt.repo,text:'Keep it readable.',later:null,supersedes:[],ended_by:[],muted:false};
+const preview={preview_key:'a'.repeat(64),records:7,copies:2,claims:3,cards:4,summaries:0,written:1,again:0};
+const started={started:true,records:7,logged:true,cleaning:true};
+const previewLines=block=>block.querySelectorAll('p').map(text);
+const limits={
+  en:'What was already given to an agent or sent to a curator is not taken back, and a conversation that starts during the cleaning may get only part of its memory.',
+  ja:'すでにエージェントに渡した内容や要約役に送った内容は取り消せません。掃除の間に始まった会話には、記憶の一部しか渡らないことがあります。',
+};
+const requests=[];
+let holdFeed=false,items=[prompt],sessions=[session],sessionNext=null,olderSessions=[];
+ctx.fetch=(url,options={})=>{
+  const request={url,options,body:options.body?JSON.parse(options.body):null};requests.push(request);
+  if(options.method==='POST'||url.startsWith('/api/timeline?')||holdFeed&&url.startsWith('/api/feed?'))
+    return new Promise((resolve,reject)=>Object.assign(request,{resolve,reject}));
+  if(url.startsWith('/api/feed?'))return Promise.resolve(json({items,next:null}));
+  if(url.startsWith('/api/sessions?')){
+    const older=new URL(url,'https://oboete.test').searchParams.has('before');
+    return Promise.resolve(json({sessions:older?olderSessions:sessions,next:older?null:sessionNext}));
+  }
+  if(url.startsWith('/api/claim?'))return Promise.resolve(json(claim));
+  if(url.startsWith('/api/repos?'))return Promise.resolve(json({current:'',repos:[]}));
+  throw new Error(`unexpected read: ${url}`);
+};
+ctx.ui.setLang('en');run('reposLoaded=true;setView("timeline")');
+await run('show()');
+const list=document.getElementById('list');
+let button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+assert(button,'a prompt has a Forget button');
+button.focus();button.click();
+assert(button.disabled,'Forget is disabled while the preview is read');
+const request=requests.at(-1);
+assert.equal(request.url,'/api/forget/preview');
+assert.equal(request.options.method,'POST');
+assert.equal(request.options.headers['X-Oboete-Token'],'0123456789abcdef0123456789abcdef');
+assert.deepEqual(request.body,{item:{kind:'prompt',id:'device:42'}});
+request.resolve(json(preview));await settle();
+const block=list.querySelector('.forget-preview');
+assert(block,'the preview is an in-page confirmation');
+assert(text(block).includes('This forgets the prompt, and the 3 memories, 4 cards and 0 summaries made from it.'),text(block));
+assert(text(block).includes('This cannot be undone.'),text(block));
+const cancel=block.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_cancel');
+assert.equal(document.activeElement,cancel,'Cancel receives focus');
+const beforeCancel=requests.length;
+cancel.click();
+assert.equal(requests.length,beforeCancel,'Cancel sends nothing');
+assert.equal(list.querySelector('.forget-preview'),null);
+assert.equal(document.activeElement,button,'Cancel restores the opener focus');
+assert(!button.disabled,'Cancel enables the opener');
+for(const [language,lines] of [
+  ['en',[
+    'This forgets the prompt, and the 3 memories, 4 cards and 0 summaries made from it.',
+    'It also forgets 2 records of the same conversation from another source, which may hold a copy of it.',
+    'The 1 memories written with those cards lose their text until they are curated again.',
+    "The agent's own transcript files keep their copy: delete it there too if it must go.",
+    limits.en,'This cannot be undone.',
+  ]],
+  ['ja',[
+    'このプロンプトと、そこから作った記憶 3 件・カード 4 件・要約 0 件を忘れます。',
+    '同じ会話を別の記録元から取り込んだ記録 2 件も、写しを含むことがあるため一緒に忘れます。',
+    'それらのカードと一緒に作られた記憶 1 件は、作り直されるまで文章が消えます。',
+    'エージェント自身の会話ファイルには写しが残ります。必要ならそちらも消してください。',
+    limits.ja,'この操作は取り消せません。',
+  ]],
+]){
+  ctx.ui.setLang(language);
+  for(const copies of [2,0]){
+    button.click();requests.at(-1).resolve(json({...preview,copies,written:copies?1:0}));await settle();
+    const shown=list.querySelector('.forget-preview');
+    assert.deepEqual(previewLines(shown),copies?lines:[lines[0],...lines.slice(3)],
+      `${language}: prompt disclosures have counts and order, and omit zero copies/written`);
+    shown.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_cancel').click();
+  }
+}
+ctx.ui.setLang('en');
+button.click();requests.at(-1).resolve(json(preview));await settle();
+let confirmation=list.querySelector('.forget-preview');
+let confirm=confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm');
+confirm.click();
+let start=requests.at(-1);
+assert.equal(start.url,'/api/forget/start');
+assert.deepEqual(start.body,{item:{kind:'prompt',id:'device:42'},preview_key:'a'.repeat(64),confirmed:true});
+assert(confirmation.querySelectorAll('button').every(b=>b.disabled),'both choices disable during start');
+const duringStart=requests.length;
+confirm.click();confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_cancel').click();
+assert.equal(requests.length,duringStart,'a pending start cannot be repeated or cancelled');
+assert(list.contains(confirmation),'Cancel while start is pending leaves the same confirmation block in the page');
+assert(list.contains(button),'the prompt stays while start is pending');
+holdFeed=true;start.resolve(json(started));await settle();
+const reread=requests.at(-1);
+assert(reread.url.startsWith('/api/feed?')&&!reread.options.method,'success reads the feed again');
+// The next server read alone determines what remains on the page.
+reread.resolve(json({items:[prompt],next:null}));holdFeed=false;await settle();
+assert.equal(document.getElementById('status').textContent,'Forgotten. The stores are cleaned in the background.');
+// The store's change brings the live view's redraw, which clears the line: the result stays.
+run('setStatus("")');
+assert.equal(document.getElementById('status').textContent,'Forgotten. The stores are cleaned in the background.',
+  'a redraw right after a forget keeps its result in the status line');
+run('setStatus("Another message")');
+assert.equal(document.getElementById('status').textContent,'Another message','another message replaces it');
+run('setStatus("")');
+assert.equal(document.getElementById('status').textContent,'','and the next redraw clears that one');
+assert(text(list).includes('Build the parser.'),'an item still returned by the server stays visible');
+assert.equal(list.querySelector('.forget-preview'),null);
+button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+button.click();requests.at(-1).resolve(json({...preview,preview_key:'b'.repeat(64)}));await settle();
+confirmation=list.querySelector('.forget-preview');
+confirm=confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm');
+confirm.click();start=requests.at(-1);
+assert.equal(start.body.preview_key,'b'.repeat(64),'a new preview supplies the next key');
+const beforeStale=requests.length;
+start.resolve(json({code:'forget_stale',field:'preview_key'},409));await settle();
+assert.equal(document.getElementById('status').textContent,'It changed since the preview. Press Forget again to see it.');
+assert.equal(requests.length,beforeStale,'stale does not preview, retry or reload on its own');
+assert.equal(list.querySelector('.forget-preview'),null);
+assert.equal(document.activeElement,button,'a refused start restores focus');
+button.click();requests.at(-1).resolve(json(preview));await settle();
+confirmation=list.querySelector('.forget-preview');
+const beforeEscape=requests.length;
+let escaped=false;
+for(const cb of confirmation.listeners.keydown||[])cb({key:'Escape',preventDefault(){escaped=true;}});
+assert(escaped,'Escape closes the confirmation');
+assert.equal(list.querySelector('.forget-preview'),null);
+assert.equal(requests.length,beforeEscape,'Escape sends nothing');
+assert.equal(document.activeElement,button,'Escape restores focus');
+for(const [language,done,waiting,notLogged] of [
+  ['en','Forgotten. The stores are cleaned in the background.',
+    'Forgotten. Its cleaning starts after the one already running.',
+    'The request could not be written to every log: raw.db holds it, but a restore from the backups alone would bring the text back.'],
+  ['ja','忘れました。保存先の掃除は裏で続きます。',
+    '忘れました。保存先の掃除は、いま動いている掃除が終わってから始まります。',
+    '忘れる依頼をすべての控えには書けませんでした。raw.db には残っていますが、バックアップだけから戻すと、忘れた内容が戻ります。'],
+]){
+  ctx.ui.setLang(language);
+  for(const cleaning of [true,false])for(const logged of [true,false]){
+    button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+    button.click();requests.at(-1).resolve(json(preview));await settle();
+    list.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+    requests.at(-1).resolve(json({...started,cleaning,logged}));await settle();
+    assert.equal(document.getElementById('status').textContent,
+      (cleaning?done:waiting)+(logged?'':` ${notLogged}`),
+      `${language}: cleaning/logged are reported together in the status line`);
+  }
+}
+ctx.ui.setLang('en');
+
+items=[note,{...note,kind:'card',id:'7.0'},
+  {kind:'summary',id:'S8',ts:5,agent:'claude',repo_name:'fern',repo:prompt.repo,fields:{request:'Build the parser.'}}];
+ctx.ui.setLang('ja');await run('show()');
+const entries=list.querySelectorAll('li').filter(n=>n.className==='feed-entry');
+const noteButton=entries[0].querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+assert(noteButton,'a note has a Forget button');
+assert.equal(text(noteButton),'忘れる');
+for(const entry of entries.slice(1))assert(!entry.querySelectorAll('button').some(b=>b.dataset.i18n==='forget_button'),
+  'cards and summaries have no Forget button');
+noteButton.click();
+assert.deepEqual(requests.at(-1).body,{item:{kind:'note',id:'oboete-note:0123456789abcdef'}});
+requests.at(-1).resolve(json(preview));await settle();
+confirmation=list.querySelector('.forget-preview');
+assert.deepEqual(previewLines(confirmation),[
+  'このメモを忘れます。',
+  'これを保存した会話の、エージェント自身の会話ファイルには写しが残ります。',
+  limits.ja,'この操作は取り消せません。',
+]);
+const jaCancel=confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_cancel');
+assert.equal(text(jaCancel),'やめる');jaCancel.click();
+assert.equal(document.activeElement,noteButton);
+ctx.ui.setLang('en');
+
+run('setView("sessions")');await run('show()');
+list.querySelectorAll('button').find(b=>b.dataset.session===session.key).click();await settle();
+const panel=document.getElementById('panel');
+const sessionButton=panel.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_session_button');
+assert(sessionButton,'the session header has Forget this session');
+assert.equal(text(sessionButton),'Forget this session');
+sessionButton.click();
+assert.deepEqual(requests.at(-1).body,{item:{kind:'session',id:'a1b2c3d4e5f60718'}},'session Forget uses the key, not the displayed session id');
+requests.at(-1).resolve(json({...preview,written:3}));await settle();
+confirmation=panel.querySelector('.forget-preview');
+assert.deepEqual(previewLines(confirmation),[
+  'This forgets the session: 7 records, and the 3 memories, 4 cards and 0 summaries made from them.',
+  'The 3 memories written with those cards lose their text until they are curated again.',
+  "The agent's own transcript files keep their copy: delete it there too if it must go.",
+  limits.en,'This cannot be undone.',
+]);
+confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+start=requests.at(-1);
+assert.deepEqual(start.body,{item:{kind:'session',id:session.key},preview_key:'a'.repeat(64),confirmed:true});
+const beforeSessionDone=requests.length;
+sessions=[];start.resolve(json(started));await settle();
+assert.equal(run('ses.open'),null,'forgetting a session goes back to the list');
+assert(requests.slice(beforeSessionDone).some(r=>r.url.startsWith('/api/sessions?')),'the sessions list is read again, bypassing the Back cache');
+assert(!list.querySelectorAll('button').some(b=>b.dataset.session===session.key),'the server no longer lists the forgotten session');
+assert.equal(document.getElementById('status').textContent,'Forgotten. The stores are cleaned in the background.');
+
+for(const [fresh,paged] of [
+  [null,false],
+  [{...session,title:'Continue with the parser.'},false],
+  [{...session,title:'Continue with the parser.'},true],
+]){
+  sessions=[session];items=[prompt];run('setView("sessions")');await run('show()');
+  list.querySelectorAll('button').find(b=>b.dataset.session===session.key).click();await settle();
+  assert.equal(text(document.getElementById('heading')),'Build the parser.');
+  panel.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button').click();
+  requests.at(-1).resolve(json(preview));await settle();
+  panel.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+  start=requests.at(-1);const beforePromptDone=requests.length;
+  sessions=paged?[{...session,key:'cccccccccccccccc',started:2}]:fresh?[fresh]:[];
+  sessionNext=paged?'older':null;olderSessions=paged?[fresh]:[];
+  items=[];start.resolve(json(started));await settle();
+  assert(requests.slice(beforePromptDone).some(r=>r.url.startsWith('/api/sessions?')),
+    'forgetting a prompt in an open session reads the sessions again');
+  if(fresh){
+    assert.equal(run('ses.open?.key'),session.key,'a session still returned by the server stays open');
+    assert.equal(text(document.getElementById('heading')),'Continue with the parser.','the heading comes from the fresh session entry');
+    if(paged)assert(requests.slice(beforePromptDone).some(r=>r.url.includes('before=older')),
+      'a session on a later page is found before deciding it is gone');
+  }else{
+    assert.equal(run('ses.open'),null,'forgetting the last prompt returns to the sessions list');
+    assert.equal(text(document.getElementById('heading')),'Sessions');
+    assert(!list.querySelectorAll('button').some(b=>b.dataset.session===session.key));
+  }
+  assert.equal(document.getElementById('status').textContent,'Forgotten. The stores are cleaned in the background.');
+  sessionNext=null;olderSessions=[];
+}
+
+ctx.__forgetClaim=claimUid;
+const claimPanel=await run('claimPanel(globalThis.__forgetClaim)');panel.replaceChildren(claimPanel);
+const claimButton=claimPanel.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+assert(claimButton,'a claim has Forget beside its owner actions');
+for(const again of [2,0]){
+  claimButton.click();
+  assert.deepEqual(requests.at(-1).body,{item:{kind:'claim',id:claimUid}},'a claim uses its full uid');
+  requests.at(-1).resolve(json({...preview,again}));await settle();
+  confirmation=claimPanel.querySelector('.forget-preview');
+  assert.deepEqual(previewLines(confirmation),[
+    'This forgets the memory.',
+    ...(again?['It replaced 2 older memories; they become current again unless another memory replaces them.']:[]),
+    'The records it was made from stay, and search still finds them: forget the prompt or the conversation when the text itself must go.',
+    limits.en,'This cannot be undone.',
+  ]);
+  confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_cancel').click();
+}
+assert.equal(document.activeElement,claimButton);
+run('setView("timeline")');items=[prompt,note];await run('show()');
+const forgetButtons=list.querySelectorAll('button').filter(b=>b.dataset.i18n==='forget_button');
+button=forgetButtons[0];
+button.click();
+let beforeOther=requests.length;
+forgetButtons[1].click();button.click();
+assert.equal(requests.length,beforeOther,'a preview in flight blocks other Forget requests');
+requests.at(-1).resolve(json(preview));await settle();
+forgetButtons[1].click();
+assert.equal(list.querySelector('.forget-preview'),null,'opening another preview closes the previous one');
+assert(!button.disabled,'the previous opener is usable again');
+assert.equal(requests.at(-1).body.item.kind,'note');
+requests.at(-1).resolve(json(preview));await settle();
+assert.equal(list.querySelectorAll('.forget-preview').length,1,'only one confirmation is open');
+confirmation=list.querySelector('.forget-preview');
+confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+start=requests.at(-1);beforeOther=requests.length;
+button.click();
+assert.equal(requests.length,beforeOther,'a start in flight blocks another item');
+for(const cb of confirmation.listeners.keydown||[])cb({key:'Escape',preventDefault(){throw new Error('busy Escape must not close');}});
+assert.equal(list.querySelector('.forget-preview'),confirmation,'a start cannot be dismissed by Escape');
+start.reject(new Error('connection lost'));await settle();
+assert.equal(document.getElementById('status').textContent,
+  'The connection ended before the result was confirmed. The operation may already be recorded. Check the stored state before repeating it.');
+assert.equal(requests.length,beforeOther,'a lost result is not retried');
+assert.equal(list.querySelector('.forget-preview'),null);
+button.click();const failedPreview=requests.at(-1);
+forgetButtons[1].focus();
+failedPreview.reject(new Error('network failure'));await settle();
+assert.equal(document.getElementById('status').textContent,'The viewer could not be reached. Please try again.');
+assert(!button.disabled,'a rejected preview enables Forget again');
+assert.equal(document.activeElement,button,'a rejected preview restores focus to Forget');
+assert.equal(requests.at(-1),failedPreview,'a rejected preview is not retried');
+assert.equal(list.querySelector('.forget-preview'),null,'a rejected preview opens no confirmation');
+const narrative=list.querySelector('.feed-narrative');
+list.querySelectorAll('button').find(b=>b.dataset.i18n==='narrative').click();
+assert(!narrative.hidden,'an unrelated note is open before the refusals');
+for(const [code,status,message] of [
+  ['forget_item',400,'This cannot be forgotten from here.'],
+  ['forget_preview_failed',422,'What it would forget could not be read.'],
+  ['forget_too_large',422,'This takes too many records to forget from here: forget its whole conversation instead.'],
+  ['forget_other_device',422,'This prompt was recorded by another device: forget its whole conversation instead.'],
+]){
+  button.click();const count=requests.length;
+  requests.at(-1).resolve(json({code,field:'item'},status));await settle();
+  assert.equal(document.getElementById('status').textContent,message);
+  assert.equal(requests.length,count,'a preview refusal sends nothing more');
+  assert.equal(list.querySelector('.forget-preview'),null);
+  assert(list.contains(button)&&!button.disabled,'a preview refusal leaves the item usable');
+  assert(list.contains(narrative)&&!narrative.hidden,'a preview refusal leaves the unrelated open note alone');
+}
+for(const [code,status,message] of [
+  ['forget_item',422,'This cannot be forgotten from here.'],
+  ['forget_confirmation',422,'It was not forgotten.'],
+  ['forget_key',422,'It was not forgotten.'],
+  ['forget_failed',500,'It was not forgotten.'],
+  ['forget_too_large',422,'This takes too many records to forget from here: forget its whole conversation instead.'],
+  ['forget_other_device',422,'This prompt was recorded by another device: forget its whole conversation instead.'],
+]){
+  button.click();requests.at(-1).resolve(json(preview));await settle();
+  confirmation=list.querySelector('.forget-preview');
+  confirmation.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+  const count=requests.length;
+  requests.at(-1).resolve(json({code,field:'item'},status));await settle();
+  assert.equal(document.getElementById('status').textContent,message);
+  assert.equal(requests.length,count,'a start refusal does not reload or retry');
+  assert.equal(list.querySelector('.forget-preview'),null);
+  assert(list.contains(button)&&!button.disabled,'a start refusal leaves the item usable');
+  assert(list.contains(narrative)&&!narrative.hidden,'a start refusal leaves the unrelated open note alone');
+}
+for(const answer of [json(preview),json({code:'forget_too_large'},422)]){
+  button.click();const late=requests.at(-1);
+  await run('show()');
+  run('setStatus("Current page status")');
+  late.resolve(answer);await settle();
+  assert.equal(list.querySelector('.forget-preview'),null,'a preview for a replaced view is discarded');
+  assert.equal(document.getElementById('status').textContent,'Current page status','a late preview refusal leaves the current status unchanged');
+  button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+}
+for(const [stage,outcome] of [
+  ['preview','success'],['preview','refusal'],['preview','network'],['start','refusal'],['start','network'],
+]){
+  button.click();
+  if(stage==='start'){
+    requests.at(-1).resolve(json(preview));await settle();
+    list.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+  }
+  const pending=requests.at(-1);
+  assert.equal(pending.url,`/api/forget/${stage}`);
+  document.getElementById('q').value='';
+  run('setView("records")');const loading=run('show()');
+  const recordsRead=requests.at(-1);
+  assert(recordsRead.url.startsWith('/api/timeline?'));
+  assert(button.isConnected,'the old control remains attached while the next page loads');
+  run('setStatus("Current page status")');document.getElementById('status').focus();
+  if(outcome==='network')pending.reject(new Error('late failure'));
+  else pending.resolve(outcome==='success'?json(preview):json({code:'forget_too_large'},422));
+  await settle();
+  assert.equal(document.getElementById('status').textContent,'Current page status',`${stage}/${outcome}: a late answer leaves the new status alone`);
+  assert.equal(document.activeElement,document.getElementById('status'),`${stage}/${outcome}: a late answer does not steal focus`);
+  assert.equal(list.querySelector('.forget-preview'),null,'a late answer leaves no confirmation in the old page');
+  recordsRead.resolve(json({items:[],next:null}));await loading;
+  run('setView("timeline")');await run('show()');
+  button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+}
+button=list.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_button');
+button.click();requests.at(-1).resolve(json(preview));await settle();
+list.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+start=requests.at(-1);
+await run('show()');
+const beforeLateStart=requests.length;
+start.resolve(json(started));await settle();
+assert(requests.slice(beforeLateStart).some(r=>r.url.startsWith('/api/feed?')),
+  'a successful start after Refresh still reads the current feed again');
+assert.equal(document.getElementById('status').textContent,'Forgotten. The stores are cleaned in the background.');
+const newer={...session,key:'bbbbbbbbbbbbbbbb',title:'A newer session',started:2};
+sessions=[newer];sessionNext='older';olderSessions=[session];
+run('setView("sessions")');await run('show()');
+panel.querySelectorAll('button').find(b=>b.dataset.i18n==='more').click();await settle();
+list.querySelectorAll('button').find(b=>b.dataset.session===session.key).click();await settle();
+panel.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_session_button').click();
+requests.at(-1).resolve(json(preview));await settle();
+panel.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+start=requests.at(-1);
+panel.querySelectorAll('button').find(b=>b.className.includes('session-back')).click();await settle();
+list.querySelectorAll('button').find(b=>b.dataset.session===newer.key).click();await settle();
+olderSessions=[];start.resolve(json(started));await settle();
+assert.equal(run('ses.open.key'),newer.key,'a late success keeps a different session open');
+const beforeBack=requests.length;
+panel.querySelectorAll('button').find(b=>b.className.includes('session-back')).click();await settle();
+assert(requests.slice(beforeBack).some(r=>r.url.startsWith('/api/sessions?')),'Back rereads after a background forget');
+assert(!list.querySelectorAll('button').some(b=>b.dataset.session===session.key),
+  'a forgotten session on an older page does not survive in the Back cache');
+sessionNext=null;
+sessions=[session];run('setView("sessions")');await run('show()');
+list.querySelectorAll('button').find(b=>b.dataset.session===session.key).click();await settle();
+panel.querySelectorAll('button').find(b=>b.dataset.i18n==='forget_session_button').click();
+requests.at(-1).resolve(json(preview));await settle();
+panel.querySelector('.forget-preview').querySelectorAll('button').find(b=>b.dataset.i18n==='forget_confirm').click();
+start=requests.at(-1);
+ctx.ui.setView('settings');
+const draft={unsaved:'keep this draft'};ctx.ui.setForm(draft);
+const fields=new Node();fields.className='settings';
+const input=new Node('input');input.value='not saved';fields.append(input);panel.replaceChildren(fields);
+const beforeSettings=requests.length;
+start.resolve(json(started));await settle();
+assert.equal(run('view'),'settings','a late session result does not take the person back from another tab');
+assert(requests.slice(beforeSettings).some(r=>r.url.startsWith('/api/repos?')),'a late success uses the current view refresh path');
+assert.equal(ctx.ui.getForm(),draft,'the refresh preserves unsaved settings');
+assert.equal(input.value,'not saved');
+assert(panel.contains(input),'the current settings fields stay on the page');
+assert.equal(document.getElementById('status').textContent,'Forgotten. The stores are cleaned in the background.');
+ctx.ui.setForm(null);run('setView("timeline")');
+assert(requests.filter(r=>r.options.method).every(r=>r.options.method==='POST'),'every write is a POST');
+console.log('PASS: Forget: prompt/note/session/claim, preview counts, Cancel/Escape focus, confirmed POST, server reread, stale/refusals, one at a time and JA/EN');
+}

@@ -16,6 +16,7 @@ use crate::config::{self, ChainOverlay, Provider, ToolOutput};
 
 pub(crate) mod claims;
 pub(crate) mod embedding;
+pub(crate) mod forget;
 pub(crate) mod maintenance;
 pub(crate) mod privacy;
 mod providers;

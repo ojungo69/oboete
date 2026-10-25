@@ -13,8 +13,13 @@ function el(tag, cls, ...children) {
   return e;
 }
 
-// `textLang` marks the language of a translated status line (#274).
-function setStatus(text, isError = false, textLang = null) {
+// `textLang` marks the language of a translated status line (#274). `hold` keeps the line, for
+// that many ms, through the redraws that clear it: a forget's result outlives the live view's next
+// redraw, which the forget itself brings (parity row 3).
+let statusHeld = null;
+function setStatus(text, isError = false, textLang = null, hold = 0) {
+  if (!text && statusHeld && Date.now() < statusHeld.until) ({ text, isError, textLang } = statusHeld);
+  else statusHeld = text && hold ? { text, isError, textLang, until: Date.now() + hold } : null;
   $('status').textContent = text;
   $('status').classList.toggle('error', isError);
   if (textLang) $('status').lang = textLang;
@@ -225,7 +230,7 @@ function claimOwnerControls(c, panel) {
   const mute = el('button', 'quiet small', t(c.muted ? 'claim_unmute' : 'claim_mute'));
   mute.type = 'button';
   const result = el('p', 'desc');
-  const fields = el('div', null, correction, mute);
+  const fields = el('div', null, correction, el('div', 'actions', mute, forgetControl('claim', c.uid)));
   const reload = el('button', 'quiet small', t('claim_refresh'));
   reload.type = 'button';
   reload.addEventListener('click', async () => {
@@ -405,7 +410,8 @@ function feedHeader(item) {
 function feedFooter(item) {
   const time = localTime(item.ts, lang);
   time.dataset.feedTimestamp = String(item.ts);
-  return el('footer', 'feed-card-footer', el('code', null, item.id), time);
+  return el('footer', 'feed-card-footer', el('code', null, item.id), time,
+    ['prompt', 'note'].includes(item.kind) ? forgetControl(item.kind, item.id) : null);
 }
 
 // A note an agent saved has no subtitle of its own: it says whose it is, as claude-mem's manual
@@ -823,7 +829,8 @@ async function showSessionPage(mine) {
   feed = state;
   more.addEventListener('click', () => void readFeed(state, 'more'));
   retry.addEventListener('click', () => void readFeed(state, state.retryMode));
-  draw(s.title || s.repo_name || s.session, [], [back, id, el('div', 'session-filter', chips, count), list,
+  draw(s.title || s.repo_name || s.session, [], [el('div', 'actions', back, forgetControl('session', s.key)), id,
+    el('div', 'session-filter', chips, count), list,
     el('div', 'feed-pagination', notice, more, retry, sentinel)]);
   setStatus('');
   observeEnd(state, () => void readFeed(state, 'more'));
@@ -1484,6 +1491,33 @@ const TEXT = {
   rescan_progress: ['Checkpoint: {processed}; current raw sequence: {total}', '検査位置: {processed}、元の記録の末尾: {total}'],
   memory_action_failed: ['The operation was refused ({status}).', '操作を受け付けられませんでした({status})。'],
   memory_result_unknown: ['The connection ended before the result was confirmed. The operation may already be recorded. Check the stored state before repeating it.', '結果を確認する前に接続が終了しました。操作がすでに記録されている可能性があります。繰り返す前に保存済みの状態を確認してください。'],
+  forget_button: ['Forget', '忘れる'],
+  forget_session_button: ['Forget this session', 'この会話を忘れる'],
+  forget_preview_session: ['This forgets the session: {records} records, and the {claims} memories, {cards} cards and {summaries} summaries made from them.', 'この会話の記録 {records} 件と、そこから作った記憶 {claims} 件・カード {cards} 件・要約 {summaries} 件を忘れます。'],
+  forget_preview_prompt: ['This forgets the prompt, and the {claims} memories, {cards} cards and {summaries} summaries made from it.', 'このプロンプトと、そこから作った記憶 {claims} 件・カード {cards} 件・要約 {summaries} 件を忘れます。'],
+  forget_preview_claim: ['This forgets the memory.', 'この記憶を忘れます。'],
+  forget_preview_note: ['This forgets the note.', 'このメモを忘れます。'],
+  forget_preview_copies: ['It also forgets {copies} records of the same conversation from another source, which may hold a copy of it.', '同じ会話を別の記録元から取り込んだ記録 {copies} 件も、写しを含むことがあるため一緒に忘れます。'],
+  forget_preview_written: ['The {written} memories written with those cards lose their text until they are curated again.', 'それらのカードと一緒に作られた記憶 {written} 件は、作り直されるまで文章が消えます。'],
+  forget_preview_again: ['It replaced {again} older memories; they become current again unless another memory replaces them.', 'この記憶が置き換えていた古い記憶 {again} 件は、ほかに置き換えるものがなければ、再び有効になります。'],
+  forget_claim_records: ['The records it was made from stay, and search still finds them: forget the prompt or the conversation when the text itself must go.', 'もとになった記録は残り、検索でも見つかります。文章そのものを消すには、そのプロンプトか会話を忘れてください。'],
+  forget_note_outside: ["The agent's own transcript of the conversation that saved it keeps a copy.", 'これを保存した会話の、エージェント自身の会話ファイルには写しが残ります。'],
+  forget_outside: ["The agent's own transcript files keep their copy: delete it there too if it must go.", 'エージェント自身の会話ファイルには写しが残ります。必要ならそちらも消してください。'],
+  forget_limits: ['What was already given to an agent or sent to a curator is not taken back, and a conversation that starts during the cleaning may get only part of its memory.', 'すでにエージェントに渡した内容や要約役に送った内容は取り消せません。掃除の間に始まった会話には、記憶の一部しか渡らないことがあります。'],
+  forget_irreversible: ['This cannot be undone.', 'この操作は取り消せません。'],
+  forget_confirm: ['Forget', '忘れる'],
+  forget_cancel: ['Cancel', 'やめる'],
+  forget_done: ['Forgotten. The stores are cleaned in the background.', '忘れました。保存先の掃除は裏で続きます。'],
+  forget_done_waiting: ['Forgotten. Its cleaning starts after the one already running.', '忘れました。保存先の掃除は、いま動いている掃除が終わってから始まります。'],
+  forget_not_logged: ['The request could not be written to every log: raw.db holds it, but a restore from the backups alone would bring the text back.', '忘れる依頼をすべての控えには書けませんでした。raw.db には残っていますが、バックアップだけから戻すと、忘れた内容が戻ります。'],
+  forget_stale: ['It changed since the preview. Press Forget again to see it.', '確認のあとで内容が変わりました。もう一度「忘れる」を押して確かめてください。'],
+  forget_item: ['This cannot be forgotten from here.', 'これはここからは忘れられません。'],
+  forget_too_large: ['This takes too many records to forget from here: forget its whole conversation instead.', '一度に忘れる記録が多すぎます。会話ごと忘れてください。'],
+  forget_other_device: ['This prompt was recorded by another device: forget its whole conversation instead.', 'このプロンプトは別の端末で記録されたものです。会話ごと忘れてください。'],
+  forget_preview_failed: ['What it would forget could not be read.', '忘れる内容を読めませんでした。'],
+  forget_failed: ['It was not forgotten.', '忘れられませんでした。'],
+  forget_confirmation: ['It was not forgotten.', '忘れられませんでした。'],
+  forget_key: ['It was not forgotten.', '忘れられませんでした。'],
   preference_h: ['A preference for every repository', 'すべてのリポジトリに共通する希望'],
   preference_desc: ['Save an owner preference for agents in every repository. It creates a new global claim; it does not rewrite existing claims. This operation makes no model request.', 'すべてのリポジトリでエージェントに伝える本人の希望を保存します。新しい共通の記憶を作り、既存の記憶は書き換えません。この操作ではモデルを呼び出しません。'],
   preference_text: ['Preference (up to 1,000 characters)', '希望すること(1,000文字まで)'],
@@ -4281,6 +4315,114 @@ async function memoryWrite(path, body) {
 function memoryFailure(res, answer) {
   const code = answer.code || PROVIDER_HTTP_ERRORS[res.status];
   return code && Object.hasOwn(TEXT, code) ? t(code) : t('memory_action_failed', { status: res.status });
+}
+
+let forgetAction = null;
+let forgetPreviewId = 0;
+// How long a forget's result stays through the redraws the store's change brings.
+const FORGET_HOLD = 15000;
+
+function forgetControl(kind, id) {
+  const button = word('button', 'quiet small', kind === 'session' ? 'forget_session_button' : 'forget_button');
+  button.type = 'button';
+  button.setAttribute('aria-expanded', 'false');
+  const control = el('div', 'forget-control', button);
+  button.addEventListener('click', async () => {
+    if (button.disabled || forgetAction?.busy) return;
+    forgetAction?.close(false);
+    const mine = generation;
+    const from = view;
+    const current = () => mine === generation && view === from && control.isConnected;
+    let preview = null;
+    const action = { busy: true, close: (focus = true) => {
+      preview?.remove();
+      button.disabled = false;
+      button.setAttribute('aria-expanded', 'false');
+      button.removeAttribute('aria-controls');
+      if (forgetAction === action) forgetAction = null;
+      if (focus && button.isConnected) button.focus();
+    } };
+    forgetAction = action;
+    button.disabled = true;
+    try {
+      const { res, answer } = await memoryWrite('forget/preview', { item: { kind, id } });
+      if (!current()) return;
+      if (!res.ok) { setStatus(memoryFailure(res, answer), true, lang); return; }
+      const confirm = word('button', 'quiet small danger', 'forget_confirm');
+      const cancel = word('button', 'quiet small', 'forget_cancel');
+      confirm.type = cancel.type = 'button';
+      const description = el('div', null, word('p', null, `forget_preview_${kind}`, answer));
+      if (kind === 'prompt' && answer.copies > 0) description.append(word('p', null, 'forget_preview_copies', answer));
+      if (['prompt', 'session'].includes(kind) && answer.written > 0) description.append(word('p', null, 'forget_preview_written', answer));
+      if (kind === 'claim' && answer.again > 0) description.append(word('p', null, 'forget_preview_again', answer));
+      if (kind === 'claim') description.append(word('p', null, 'forget_claim_records'));
+      if (kind === 'note') description.append(word('p', null, 'forget_note_outside'));
+      if (['prompt', 'session'].includes(kind)) description.append(word('p', null, 'forget_outside'));
+      description.append(word('p', null, 'forget_limits'));
+      const warning = word('p', null, 'forget_irreversible');
+      description.id = `forget-description-${++forgetPreviewId}`;
+      warning.id = `${description.id}-warning`;
+      for (const choice of [confirm, cancel]) choice.setAttribute('aria-describedby', `${description.id} ${warning.id}`);
+      preview = el('section', 'forget-preview', description, warning, el('div', 'actions', confirm, cancel));
+      preview.id = `${description.id}-block`;
+      confirm.addEventListener('click', async () => {
+        if (action.busy || forgetAction !== action) return;
+        action.busy = true;
+        confirm.disabled = cancel.disabled = true;
+        let receipt = null;
+        try {
+          const { res, answer: result } = await memoryWrite('forget/start',
+            { item: { kind, id }, preview_key: answer.preview_key, confirmed: true });
+          if (!res.ok) { if (current()) setStatus(memoryFailure(res, result), true, lang); return; }
+          receipt = result;
+        } catch {
+          if (current()) setStatus(t('memory_result_unknown'), true, lang);
+        } finally { action.close(!receipt && current()); }
+        if (receipt) {
+          const done = t(receipt.cleaning ? 'forget_done' : 'forget_done_waiting')
+            + (receipt.logged ? '' : ` ${t('forget_not_logged')}`);
+          // Back normally reuses its list; forgotten records need a fresh read.
+          ses.items = [];
+          setStatus(done, false, lang, FORGET_HOLD);
+          let reread;
+          if (kind === 'session' && view === 'sessions' && ses.open?.key === id) {
+            reread = sessionClose();
+          } else if (kind === 'prompt' && view === 'sessions' && ses.open) {
+            const key = ses.open.key;
+            const back = ses.back;
+            ses.open = null;
+            if ((await refresh()) === false || ses.back !== back || !activeSessions(sessionsList)) return;
+            const state = sessionsList;
+            let entry = ses.items.find((s) => s.key === key);
+            while (!entry && ses.next !== null) {
+              if (!(await readSessions(state, 'more')) || !activeSessions(state) || ses.back !== back) return;
+              entry = ses.items.find((s) => s.key === key);
+            }
+            if (entry) {
+              ses.open = entry;
+              reread = show();
+            } else {
+              ses.back = null;
+              reread = true;
+            }
+          } else reread = refresh();
+          if ((await reread) !== false) setStatus(done, false, lang, FORGET_HOLD);
+        }
+      });
+      cancel.addEventListener('click', () => { if (!action.busy) action.close(); });
+      preview.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && !action.busy) { event.preventDefault(); action.close(); }
+      });
+      control.append(preview);
+      button.setAttribute('aria-expanded', 'true');
+      button.setAttribute('aria-controls', preview.id);
+      action.busy = false;
+      cancel.focus();
+    } catch {
+      if (current()) setStatus(t('network_failed'), true, lang);
+    } finally { if (!preview) action.close(current()); }
+  });
+  return control;
 }
 
 async function refreshPrivacy(f) {

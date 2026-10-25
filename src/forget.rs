@@ -17,6 +17,35 @@ use std::path::{Path, PathBuf};
 
 /// One request's records; a larger selection is several requests (rule 9).
 pub const MAX_RECORDS: usize = 500;
+
+/// A selection past [`MAX_RECORDS`], its copies counted: the page names it, since only its
+/// session's forget can take it (parity row 3).
+#[derive(Debug)]
+pub(crate) struct TooLarge;
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "split this selection into spans of at most {MAX_RECORDS} records, their copies counted"
+        )
+    }
+}
+
+impl std::error::Error for TooLarge {}
+
+/// A record of another device's: a record's forget takes only this device's, its session's any
+/// device's, which the page names (parity row 3).
+#[derive(Debug)]
+pub(crate) struct OtherDevice;
+
+impl std::fmt::Display for OtherDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this forget slice accepts only this device's raw records")
+    }
+}
+
+impl std::error::Error for OtherDevice {}
 /// One log line's bytes at most (rule 9).
 const MAX_LINE: usize = 256 << 10;
 /// What a log's name is, in the home and in the backup directory (rule 3).
@@ -318,10 +347,9 @@ impl Preview {
             !self.records.is_empty(),
             "no raw records matched; nothing was registered"
         );
-        anyhow::ensure!(
-            self.records.len() + self.copies.len() <= MAX_RECORDS,
-            "split this selection into spans of at most {MAX_RECORDS} records, their copies counted"
-        );
+        if self.records.len() + self.copies.len() > MAX_RECORDS {
+            return Err(TooLarge.into());
+        }
         for r in &self.records {
             anyhow::ensure!(
                 r.device == device && (from..=to).contains(&r.seq),
@@ -1583,15 +1611,24 @@ pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
             eprintln!("oboete: forget jobs not read: {e:#}");
             false
         });
-    // A purge that runs goes on with them itself.
+    if waiting {
+        continue_now(home);
+    }
+}
+
+/// `oboete forget --continue` started now, unless a purge runs: from `continue_due`, and from the
+/// page's forget, which registers without the CLI's purge and does not wait for the worker's next
+/// look (parity row 3). False when a purge runs: it read its jobs when it began, so what waits
+/// goes at the worker's next look after it.
+pub(crate) fn continue_now(home: &Path) -> bool {
     let free = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(home.join("state").join("purge.lock"))
         .is_ok_and(|f| f.try_lock().is_ok());
-    if !waiting || !free {
-        return;
+    if !free {
+        return false;
     }
     #[cfg(test)]
     CONTINUED.set(CONTINUED.get() + 1);
@@ -1600,6 +1637,7 @@ pub(crate) fn continue_due(home: &Path, raw: &crate::raw::Raw) {
     if let Some(mut child) = crate::hook::spawn_detached(home, &["forget", "--continue"]) {
         std::thread::spawn(move || child.wait());
     }
+    true
 }
 
 /// What a reconcile found: lines skipped, copies it could not read or write. Never a refusal.
@@ -8280,7 +8318,7 @@ mod tests {
         copies(&mut raw, MAX_RECORDS - 1..MAX_RECORDS);
         let err = raw.forget_preview(record(&raw, l)).unwrap_err();
         assert!(
-            format!("{err:#}").contains("their copies counted"),
+            format!("{err:#}").contains("their copies counted") && err.is::<TooLarge>(),
             "{err:#}"
         );
     }

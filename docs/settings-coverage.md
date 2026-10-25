@@ -58,7 +58,7 @@ left with "—" there.
 | Backup location | 2.6 | page, preserving old files and logs | `[backup] dir` | the next backup | all | `settings.rs` `backup_choices_preserve_old_requests_and_move_no_existing_data` | W3 |
 | Correct, mute, unmute a claim | 3.4, 6.1 | claim details; recorded/pending/applied receipt | `oboete correct`, `mute`, shared recorded backend | application is confirmed, or explicitly pending | all | `settings/claims.rs` `w3_correct_applies_the_gated_owner_body_and_status`, `w3_mute_and_unmute_preserve_search_and_change_injection_eligibility` | W3 |
 | A preference for every repository | 4.4 | page with explicit global confirmation; partial recording distinguished | `oboete pref`, shared recorded backend | apply after consumer confirmation; delivery at the next eligible session start | all | `settings/claims.rs` `w3_explicit_global_preference_is_applied_without_inference` | W3 |
-| Forget, with its preview | 6.2 | — | M5 | at once, after the preview's confirmation | all | — | M5 slice 5 |
+| Forget a session, a prompt, a claim or a note, with its preview | 6.2, parity 3 | the session page, a feed entry of a prompt or a note, claim details; the preview's counts, then a confirmation | `oboete forget`'s preview and start (`settings/forget.rs`), the purge as `forget --continue` | the records at once, after the preview's confirmation; the purge in the background | all | `settings/forget.rs` tests, `view.rs` `the_page_forgets_a_session_and_its_reads_show_it_gone`, the viewer harness | M5 slice 5 (docs/page-forget.md) |
 
 ### Search and embeddings
 

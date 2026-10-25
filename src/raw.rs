@@ -1828,10 +1828,9 @@ impl Raw {
         let (device, from, to) = target.bounds()?;
         let device = device.to_owned();
         let device = device.as_str();
-        anyhow::ensure!(
-            device == self.device,
-            "this forget slice accepts only this device's raw records"
-        );
+        if device != self.device {
+            return Err(crate::forget::OtherDevice.into());
+        }
         anyhow::ensure!(
             self.home_id_proven()?,
             "this store has no verified home identity: forget was not registered"
@@ -1866,11 +1865,9 @@ impl Raw {
         let copies = self.copies(&picked)?;
         // The cap `Preview::validate` holds a request to, said before the selection is shown
         // (Codex on #460).
-        anyhow::ensure!(
-            picked.len() + copies.len() <= crate::forget::MAX_RECORDS,
-            "split this selection into spans of at most {} records, their copies counted",
-            crate::forget::MAX_RECORDS
-        );
+        if picked.len() + copies.len() > crate::forget::MAX_RECORDS {
+            return Err(crate::forget::TooLarge.into());
+        }
         self.check_named(device, &picked, &copies)?;
         let mut sources = Vec::<String>::new();
         for n in picked.iter().chain(&copies) {
