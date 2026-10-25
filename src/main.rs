@@ -54,6 +54,9 @@ mod setup;
 mod shortlist;
 mod transcript;
 mod turns;
+// docs/my-work-model.md slice 1: My Work's grouping, goals and rules (slices 3 to 5) read it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod typed;
 mod unwritten;
 mod view;
 mod watchdog;

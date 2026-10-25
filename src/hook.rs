@@ -117,10 +117,12 @@ fn run_io(
         } else {
             serde_json::from_str(raw)?
         };
-        // The agent mark is oboete's own, from a rollout or the transcript parser (#273): a live
-        // hook's payload is the agent's, so any it carries is dropped.
+        // The agent mark and the entry point are oboete's own, from a rollout, the environment or
+        // the transcript parser (#273, O2): a live hook's payload is the agent's, so any it
+        // carries is dropped.
         if let Some(fields) = payload.as_object_mut() {
             fields.remove(crate::capture::AGENT_SENT);
+            fields.remove(crate::capture::ENTRYPOINT);
         }
         let Some(resolved) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
             return Ok(());
@@ -2961,6 +2963,15 @@ fn adapt(
     if agent == "codex" && event == "PostToolUse" && codex_call_failed(payload) {
         return Ok(vec![("PostToolUseFailure".into(), p)]);
     }
+    // O2: Claude Code gives its children the session's entry point (`cli` in a terminal, `sdk-cli`
+    // for `claude -p`); a transcript import reads it from the line.
+    if agent == "claude"
+        && event == "UserPromptSubmit"
+        && p.get(crate::capture::ENTRYPOINT).is_none()
+        && let Ok(e) = std::env::var("CLAUDE_CODE_ENTRYPOINT")
+    {
+        p[crate::capture::ENTRYPOINT] = json!(e);
+    }
     // A transcript import says who sent the prompt; a live hook reads the rollout (#273).
     if agent == "codex"
         && event == "UserPromptSubmit"
@@ -3533,6 +3544,53 @@ mod tests {
         )
         .unwrap();
         String::from_utf8(output).unwrap().trim().to_owned()
+    }
+
+    /// O2 (docs/my-work-model.md): a Claude Code prompt keeps the entry point its hook was given
+    /// (`CLAUDE_CODE_ENTRYPOINT`, which Claude Code gives its children: `cli` in a terminal,
+    /// `sdk-cli` for `claude -p`), and one the payload claims is dropped; Codex's prompt keeps
+    /// none. The variable is the process's, so each value runs in a child process.
+    #[test]
+    fn a_claude_prompt_keeps_the_entry_point_its_hook_was_given() {
+        const TEST: &str = "hook::tests::a_claude_prompt_keeps_the_entry_point_its_hook_was_given";
+        const CHILD: &str = "OBOETE_ENTRYPOINT_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok(TEST) {
+            for value in [Some("cli"), Some("sdk-cli"), Some("remote_trigger"), None] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, TEST);
+                match value {
+                    Some(v) => child.env("CLAUDE_CODE_ENTRYPOINT", v),
+                    None => child.env_remove("CLAUDE_CODE_ENTRYPOINT"),
+                };
+                let out = child.output().unwrap();
+                assert!(
+                    out.status.success()
+                        && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+                    "{value:?}: {}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let given = std::env::var("CLAUDE_CODE_ENTRYPOINT").ok();
+        for agent in ["claude", "codex"] {
+            let payload = json!({"session_id": "s1", "cwd": home.path(), "prompt": "Fix the parser.",
+                crate::capture::ENTRYPOINT: "claude-desktop"});
+            hook(home.path(), agent, "UserPromptSubmit", &payload);
+            let events = recorded(home.path(), agent, "s1");
+            let prompt = events.iter().find(|e| e.kind == "prompt").unwrap();
+            let body: Value = serde_json::from_str(&prompt.body).unwrap();
+            let expected = given.as_deref().filter(|_| agent == "claude");
+            assert_eq!(
+                body.get("entrypoint").and_then(Value::as_str),
+                expected,
+                "{agent}"
+            );
+        }
     }
 
     fn recorded(home: &Path, agent: &str, session: &str) -> Vec<crate::raw::Event> {

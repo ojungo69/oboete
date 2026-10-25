@@ -89,6 +89,10 @@ pub struct Captured {
 /// a Codex rollout, or by the transcript parser, and never by an agent.
 pub(crate) const AGENT_SENT: &str = "oboete_agent_sent";
 
+/// The hook payload's Claude Code entry point (docs/my-work-model.md O2): set by the hook adapter
+/// from `CLAUDE_CODE_ENTRYPOINT`, or by the transcript parser from the line, and never by an agent.
+pub(crate) const ENTRYPOINT: &str = "oboete_entrypoint";
+
 /// The events one hook call of a ported agent records: none for events that carry nothing, nor
 /// in a checkout whose `.oboete.toml` stops recording (slice 4a, `checkout_records`).
 pub fn events(
@@ -491,6 +495,10 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             let sent = |mut body: Value| {
                 if payload[AGENT_SENT] == true {
                     body["agent_sent"] = json!(true);
+                }
+                // Where a Claude Code prompt was typed, or sent from (O2): what My Work's goals read.
+                if let Some(e) = crate::typed::entrypoint(&payload[ENTRYPOINT]) {
+                    body["entrypoint"] = json!(e);
                 }
                 body
             };

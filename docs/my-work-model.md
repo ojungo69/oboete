@@ -318,7 +318,9 @@ person's. The Claude Code hook stores the session's entry point in the prompt's 
 hook stores `agent_sent`: `CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets in the environment of
 its tools (`cli` in a terminal session on this PC). A prompt counts when it is `cli` or
 `claude-desktop`, as in claude-mem, or the VS Code extension's value, which the probe names. A
-transcript import reads each line's `entrypoint` and `origin.kind` (`human`), as claude-mem does.
+transcript import reads each line's `entrypoint`, and marks a line whose `origin.kind` or
+`turnOrigin` is not `human` (a task's notification, a scheduled turn, the Agent SDK's) as another
+program's; claude-mem counts a line only when its `origin.kind` is `human`.
 Whether hooks get the variable, and what `claude -p` and the SDK set it to, is slice 1's first
 probe. If hooks do not get it, the hook takes the newest transcript line that carries
 `entrypoint`, from one bounded read of the file's end, as `rollout_agent_sent` reads a Codex
@@ -341,8 +343,9 @@ opening ask that is not typed `[agent prompt]`, as curation labels such a line.
 O5. **What is still missing.** Grok, agy, OpenCode, Pi and Cursor carry no mark: their prompts
 count unless a text test flags them. A delegated `grok --prompt-file` run is caught only when its
 prompt was written in a recorded tool input first. A Claude Code prompt recorded before slice 1
-has no entry point and counts unless a text test flags it; 31 days after slice 1 the goals window
-holds none. My Work's original ask still reads an agent-sent prompt as an ask, as claude-mem's
+has no entry point: it counts, unless a text test flags it, when a hook recorded it, and not when
+only the transcript import found it, as an Agent SDK session runs no hooks (measured in As built);
+31 days after slice 1 the goals window holds none. My Work's original ask still reads an agent-sent prompt as an ask, as claude-mem's
 cards do (row X21). (Claude; overrulable.)
 
 ### C. One request across conversations (row X15)
@@ -709,6 +712,7 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `a_prompt_that_opens_in_lowercase_or_is_short_is_not_fingerprinted` (O3)
 - `a_role_assignment_opening_over_400_characters_is_an_agents` (O3)
 - `agent_text_after_the_prompt_or_from_10_days_before_does_not_flag_it` (O3)
+- `a_prompt_written_into_a_tool_call_is_found_across_its_lines` (O3)
 - `an_envelope_a_private_prompt_and_an_omitted_one_are_not_typed` (O1)
 - `a_grok_prompt_counts_unless_a_text_test_flags_it` (O5)
 
@@ -795,6 +799,52 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `edit_turn_off_and_undo_survive_a_rebuild` (R3, S4)
 - `undo_works_after_a_reload` (R3)
 - `a_forget_of_a_suggestions_source_leaves_the_approved_rule` (R5)
+
+## As built
+
+### Slice 1: the marks (2026-10-26)
+
+- **The entry point** (O2): the Claude Code hook stores `CLAUDE_CODE_ENTRYPOINT` in a prompt's
+  body as `entrypoint`, after dropping any `entrypoint` the payload carries, so only the hook's
+  environment says it. The probe: Claude Code sets the variable for every process it starts (its
+  tools' and its MCP servers' environments hold `cli` in a terminal session on this PC), so the
+  hook reads no transcript. Claude Code 2.1.310 names 27 entry points: `cli`, `claude-desktop` and
+  `claude-vscode` count (`typed::TYPED_ENTRYPOINTS`); the others never do, among them `sdk-cli`
+  (`claude -p`), `sdk-ts` and `sdk-py` (the Agent SDK), `mcp`, `remote_trigger` and
+  `claude-code-github-action`. A value is kept when it is 1 to 32 lowercase letters, digits, `-`
+  and `_`, the form Claude Code's own take; any other is dropped.
+- **The transcript import** keeps a line's `entrypoint` on its prompt, and marks a line whose
+  `origin.kind` or `turnOrigin` is not `human` as another program's. A queued prompt's enqueue
+  line names neither: it takes the entry point the session's lines last named, and the marks of
+  the line that delivers it. The marks are no part of a line's identity, so a transcript imported
+  before them keeps its checkpoint and its records. A line with neither is not marked: on this PC the 2026-10 lines with neither are a compaction's summary, a
+  local command or its output, a shell command typed after `!`, an interruption and another
+  session's message, which the import leaves out or records as an envelope; an older Claude Code
+  wrote neither. Meta and subagent lines were left out before.
+- **What counts** (`typed::typed`): a record of kind `prompt` with its text, no `agent_sent`, and
+  for Claude Code an entry point that counts. A Claude Code prompt with no entry point counts only
+  when a hook wrote it (O5): on a copy of this PC's store, 1,584 of the last 31 days' 1,896 Claude
+  Code prompts are single-prompt Agent SDK sessions (`sdk-py`) that only the transcript import
+  recorded, as the SDK ran no hooks there.
+- **The text tests** (`typed::AgentText`, O3): claude-mem's rolling hash over every position of
+  agent text, each hit compared in full, normalized by NFKC, lower case and the letters and digits
+  of every script. `typed::agent_text` reads a reply's text, and a tool's input with JSON's escapes
+  of line breaks and tabs undone, as claude-mem undoes a line break's, so a prompt written into a
+  command or a file is found across its lines.
+- **Measured** on a copy of this PC's store (`typed::tests::measure_the_marks_on_a_copy_of_a_store`,
+  a release build, 2026-10-26), the last 31 days' prompts:
+
+  | Agent | All | Counted out by the marks | Typed by the marks | Checkable | Opening in agent text | Role assignment | Typed after the tests |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | Claude Code | 1,896 | 1,584 | 312 | 27 | 10 | 0 | 302 |
+  | Codex | 647 | 141 | 506 | 345 | 185 | 23 | 319 |
+  | Grok | 34 | 0 | 34 | 12 | 9 | 2 | 25 |
+
+  The 40 days of agent text before them, 287,417 replies and tool inputs of 182.7 million
+  characters, streamed in 15.4 s, 5.1 s of it in the tests; reading the 31 days' prompts took
+  10.8 s, both by one pass over every record. The peak resident size was 94 MB.
+- **Not read yet**: no reader takes the marks; slices 3 to 5 do (grouping, reviews, goals). Until
+  then only `typed::entrypoint` runs outside the tests, where a prompt is captured.
 
 ## Not built
 
