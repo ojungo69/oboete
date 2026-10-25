@@ -3737,6 +3737,7 @@ impl Raw {
         }
         let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
+        judge.taken = taken_ops(&judge.rewritten);
         if masks {
             judge.now = self
                 .preferences_now()?
@@ -7939,6 +7940,10 @@ fn items(v: &serde_json::Value) -> &[serde_json::Value] {
 #[derive(Debug, Default)]
 pub(crate) struct Judge {
     rewritten: ForgottenOps,
+    /// docs/my-work-model.md S5: the ops a forget takes, with its job, that a My Work op may have
+    /// read: raw.db's rewritten ones, and once `widen` has read them, those only the backup's ops
+    /// segments and the copies of raw.db hold (Codex on #664).
+    taken: std::collections::HashMap<(String, i64), String>,
     forgotten: Forgotten,
     spans: Spans,
     /// Slice 3d-4: each claim taken for repeating what a window showed its curator of a forgotten
@@ -8125,7 +8130,7 @@ impl Judge {
                 if let Some(now) = self.rewritten.get(&(at.0.to_owned(), at.1)) {
                     return Some(now.clone());
                 }
-                let job = self.my_work(at.0, ts, body, &taken_ops(&self.rewritten))?;
+                let job = self.my_work(at.0, ts, body, &self.taken)?;
                 Some(forgotten_my_work_body(body, &job).to_string())
             }
             OpKind::Claim => {
@@ -8219,6 +8224,39 @@ impl Judge {
                 ops.sort_by_key(|o| o.0);
             }
         }
+        // docs/my-work-model.md S5: what a forget takes of the ops only they hold, so that a My
+        // Work op built on one is taken with it there as in raw.db (Codex on #664): the windows
+        // and turns by their rules, those rewritten before by their job, then the My Work ops in
+        // op order, each seeing those judged before it.
+        let mut taken = std::mem::take(&mut self.taken);
+        let mut work = Vec::new();
+        let mut each =
+            |kind: OpKind, at: (&str, i64), ts: i64, _: Option<i64>, body: &serde_json::Value| {
+                let before = body["forgotten"].as_str().map(str::to_owned);
+                let job = match kind {
+                    OpKind::Window => before.or_else(|| self.window(at.0, ts, body)),
+                    OpKind::Turn => before.or_else(|| self.turn(at.0, ts, body)),
+                    OpKind::MyWork => {
+                        work.push(((at.0.to_owned(), at.1), ts, body.clone()));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(job) = job {
+                    taken.entry((at.0.to_owned(), at.1)).or_insert(job);
+                }
+            };
+        crate::backup::each_op(home, &mut each)?;
+        each_copy_op(home, &mut each)?;
+        work.sort_by(|a, b| a.0.cmp(&b.0));
+        work.dedup_by(|a, b| a.0 == b.0);
+        for (at, ts, body) in work {
+            let before = body["forgotten"].as_str().map(str::to_owned);
+            if let Some(job) = before.or_else(|| self.my_work(&at.0, ts, &body, &taken)) {
+                taken.entry(at).or_insert(job);
+            }
+        }
+        self.taken = taken;
         Ok(())
     }
 

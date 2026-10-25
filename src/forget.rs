@@ -3687,6 +3687,81 @@ mod tests {
         );
     }
 
+    /// Codex on #664: My Work ops only the backup's ops segments and a copy of raw.db hold lose
+    /// their text there when they read a record a forget takes, or an op it takes, in op order;
+    /// so does one built on an op a purge rewrote there before.
+    #[test]
+    fn a_forget_takes_the_my_work_ops_only_the_backups_hold_and_those_built_on_them() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Parsers stay in {WINDOW_CANARY} mode."),
+        );
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let op = |spans: serde_json::Value, ops: serde_json::Value, text: &str| {
+            let body = json!({"job": "review", "about": "R1", "entry": "anthropic", "ts": 5_000,
+                "read": {"spans": spans, "ops": ops}, "removed": [],
+                "fields": {"summary": text}, "skipped": false});
+            (crate::raw::OpKind::MyWork, body)
+        };
+        let read = op(
+            json!([[r1, r1]]),
+            json!([]),
+            &format!("Read: {WINDOW_CANARY}."),
+        );
+        let shown = s.raw.append_ops(&[read]).unwrap()[0];
+        let built = op(
+            json!([[r2, r2]]),
+            json!([shown]),
+            &format!("On it: {WINDOW_CANARY}."),
+        );
+        s.raw.append_ops(&[built]).unwrap();
+        // One a purge rewrote before, for another forget, and one built on it.
+        let gone = json!({"job": "review", "about": "R2", "entry": "anthropic", "ts": 5_000,
+            "read": {"spans": [], "ops": []}, "removed": [], "fields": {}, "skipped": true,
+            "forgotten": "earlier"});
+        let earlier = s
+            .raw
+            .append_ops(&[(crate::raw::OpKind::MyWork, gone)])
+            .unwrap()[0];
+        let on = op(
+            json!([[r2, r2]]),
+            json!([earlier]),
+            &format!("Then: {WINDOW_CANARY}."),
+        );
+        s.raw.append_ops(&[on]).unwrap();
+        let home = s.home.path().to_owned();
+        crate::backup::export(&home).unwrap();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        // raw.db no longer holds them, as after a restore of an older store.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops WHERE type = 'my_work'", [])
+            .unwrap();
+        assert!(!backup_hits(&home, WINDOW_CANARY).is_empty());
+        let in_copy =
+            |copy: &Path| (copy_ops(copy).iter()).any(|(_, _, body)| body.contains(WINDOW_CANARY));
+        assert!(in_copy(&copy));
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        let shown = preview(&home, target).unwrap();
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert_eq!(backup_hits(&home, WINDOW_CANARY), Vec::<String>::new());
+        assert!(!in_copy(&copy));
+    }
+
     /// Slice 3d-2: the window ops that showed a curator a forgotten record (in their span or their
     /// goals) or a claim made from one (among their candidates, or the claims carried in), and the
     /// turn ops that rest on such a record or read a card of such a window, keep their structure
