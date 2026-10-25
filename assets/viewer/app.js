@@ -3112,7 +3112,8 @@ function formOf(s) {
     retention: { days: s.retention?.days ?? null, edit: text(s.retention?.days), forever: (s.retention?.days ?? null) === null },
     redaction: { enabled: s.redaction?.enabled !== false, rules: (s.redaction?.extra_rules || []).map(redactionEdit), hashes: (s.redaction?.allowlist || []).join('\n') },
     privacy: s.privacy || privacyUnavailable(),
-    hidden: s.hidden ?? null,
+    // Opening Settings reads the list; a save's or another operation's answer keeps what was read.
+    hidden: 'hidden' in s ? s.hidden : form?.hidden ?? null,
     preference: preferenceDraft,
     maintenance: maintenanceDraft,
     chain: s.chain.map((e) => ({

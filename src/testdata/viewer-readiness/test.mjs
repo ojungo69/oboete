@@ -918,6 +918,10 @@ assert.equal(w4.formOf(settings({embedding:undefined})).embedding,null,'an older
   vm.runInContext("settingsMode='detailed';",ctx);
   f=w4.formOf({...settings(),hidden:removed});ctx.ui.setForm(f);ctx.ui.drawSettings();
   assert(text(panel.querySelector('.hidden-settings')).includes('Azimuth parser'),'the detailed page lists it under maintenance');
+  assert.deepEqual(w4.formOf(settings()).hidden,removed,
+    "a save's answer, which has no list, keeps the one read (CodeRabbit on #658)");
+  assert.equal(w4.formOf({...settings(),hidden:null}).hidden,null,'a list Settings could not read says so');
+  ctx.ui.setForm(null);
 }
 f=w4.formOf(settings({embedding:embedding({workers_ai:{...embedding().workers_ai,account_id:'ACCT',daily_requests:500000,monthly_usd:0}})}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
