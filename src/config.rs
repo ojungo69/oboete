@@ -165,6 +165,7 @@ impl Summary {
         crate::curate::Cut {
             tokens: self.window_tokens,
             shrink: self.shrink,
+            steps: false,
         }
     }
 }

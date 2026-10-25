@@ -1635,6 +1635,7 @@ mod tests {
         let shrink = Cut {
             tokens: 100_000,
             shrink: true,
+            steps: false,
         };
         let w = cut_window(&[tool(&output, false), pasted], shrink);
         assert!(!w.lines[0].text.contains(middle), "{}", w.lines[0].text);

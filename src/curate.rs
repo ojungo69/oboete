@@ -84,6 +84,11 @@ pub struct Window {
     /// Cut by its size: more records follow. Otherwise it ends at the device's last record, or
     /// where live records give way to imported ones or back.
     pub full: bool,
+    /// A live window not full, cut while the owner is at work (`Cut::steps`), whose work is done so
+    /// far (decision 56): it holds a done step, and no session's prompt or envelope in it waits for
+    /// its work (`window_at` left those to the next window). It goes at once, without the idle
+    /// wait.
+    pub ends: bool,
     /// Records of a session that touched an excluded repository (spec 5.5): covered, never sent.
     pub excluded: Vec<i64>,
     /// Records of this kind set aside, covered and never read (milestone 4 D6): an imported source
@@ -160,6 +165,21 @@ pub enum Role {
     Other,
 }
 
+/// What a record says of the work before it when a live window ends with it (decision 56,
+/// docs/curation-timing.md).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Step {
+    /// A tool call, a reply or a session's end: what the window holds of its turns is done so
+    /// far, and it goes at once.
+    Ends,
+    /// A prompt or a harness envelope: it starts work still to come, so it waits for that work in
+    /// the next window.
+    Starts,
+    /// A memory tool's call, a session's start, a compaction, a record with nothing to read: it
+    /// says nothing of the work.
+    Passes,
+}
+
 /// The part of an event's long text a line shows: from byte `start`, as stored, with the runs of
 /// the long text the gate hides (in its own offsets). None when the gate hides all of it.
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +212,7 @@ struct Piece {
     tokens: u32,
     /// A typed prompt that starts here: a turn boundary (D12).
     turn: bool,
+    step: Step,
     role: Role,
     source: Option<Source>,
     repo: Option<String>,
@@ -389,12 +410,15 @@ impl std::fmt::Display for ListChanged {
 
 impl std::error::Error for ListChanged {}
 
-/// How windows are cut: their size in estimated tokens (D8), and whether tool calls are shown
-/// short (Task 12's shrink, `[summary] shrink`). A size alone cuts with tool calls in full.
+/// How windows are cut: their size in estimated tokens (D8), whether tool calls are shown short
+/// (Task 12's shrink, `[summary] shrink`), and whether a live window that is not full stops before
+/// work still to come (decision 56: while the owner is at work). A size alone cuts with tool
+/// calls in full, and stops nowhere else.
 #[derive(Debug, Clone, Copy)]
 pub struct Cut {
     pub tokens: u32,
     pub shrink: bool,
+    pub steps: bool,
 }
 
 impl From<u32> for Cut {
@@ -402,6 +426,7 @@ impl From<u32> for Cut {
         Cut {
             tokens,
             shrink: false,
+            steps: false,
         }
     }
 }
@@ -417,6 +442,7 @@ pub(crate) fn window_at(
     Cut {
         tokens: budget,
         shrink,
+        steps,
     }: Cut,
     rules: &Rules,
     reading: &Reading,
@@ -520,10 +546,37 @@ pub(crate) fn window_at(
             break 'read;
         }
     }
+    // Decision 56, while the owner is at work (`steps`): a live window that stops before it is
+    // full goes as soon as the work it holds is done so far. A session's prompt or envelope with no
+    // done step of that session after it starts work still to come: the window stops before the
+    // first such start, and goes when what is left holds a done step (a tool call, a reply, a
+    // session's end); the start, and all after it, is the next window's and waits there for its
+    // work. A memory tool's call says nothing, so a window of such calls waits too.
+    let mut ends = false;
+    if steps && !full {
+        let mut open = std::collections::HashMap::new();
+        for (i, p) in pieces.iter().enumerate() {
+            match p.step {
+                Step::Starts => {
+                    open.entry(p.key.as_str()).or_insert(i);
+                }
+                Step::Ends => {
+                    open.remove(p.key.as_str());
+                }
+                Step::Passes => {}
+            }
+        }
+        let cut = open.into_values().min().unwrap_or(pieces.len());
+        if pieces[..cut].iter().any(|p| p.step == Step::Ends) {
+            pieces.truncate(cut);
+            ends = true;
+        }
+    }
     let (Some(first), Some(last)) = (pieces.first(), pieces.last()) else {
         return Ok(None);
     };
-    // What a cut back to a turn boundary left out is the next window's.
+    // What a cut back to a turn boundary, or before work still to come, left out is the next
+    // window's.
     excluded.retain(|&s| s <= last.seq);
     // A queued recuration reads whatever its spans hold, one kind per window (D6): what a window
     // carries in from before it is of its kind, so a parked record stays unread (Codex on #304).
@@ -549,6 +602,7 @@ pub(crate) fn window_at(
             .map(|p| p.seq)
             .collect(),
         full,
+        ends,
         excluded,
         aside,
         lines,
@@ -583,6 +637,7 @@ fn empty(seq: i64) -> Piece {
         text: String::new(),
         tokens: 0,
         turn: false,
+        step: Step::Passes,
         role: Role::Other,
         source: None,
         repo: None,
@@ -832,6 +887,7 @@ struct Prepared<'r> {
     boundaries: Vec<bool>,
     role: Role,
     turn: bool,
+    step: Step,
     key: String,
     heading: String,
     repo: Option<String>,
@@ -963,6 +1019,12 @@ impl<'r> Prepared<'r> {
             head,
             role,
             turn: e.kind == "prompt",
+            step: match e.kind.as_str() {
+                "tool" if memory || note => Step::Passes,
+                "tool" | "reply" | "end" => Step::Ends,
+                "prompt" | "envelope" => Step::Starts,
+                _ => Step::Passes,
+            },
             key: format!("{}\u{0}{}", e.agent, e.session),
             repo: e.repo.clone(),
             heading,
@@ -1047,6 +1109,7 @@ impl<'r> Prepared<'r> {
             heading: self.heading.clone(),
             tokens: line_tokens(&text),
             turn: self.turn && from == 0,
+            step: self.step,
             role: self.role,
             text,
             source: None,
@@ -1540,8 +1603,20 @@ pub fn run_phase(
             up: true,
         });
     }
+    // At most D10's stay-up: a longer wait would not keep the worker up, and once the owner
+    // stopped no hook would start one to curate what waited.
+    let idle = (i64::from(summary.idle_minutes) * 60_000).min(STAY_UP_MS);
+    let working = match raw.last_hook_ts() {
+        Ok(ts) => ts.map(|ts| ts + idle).filter(|&t| t > crate::db::now_ms()),
+        // Unreadable: taken for the owner at work, so the window waits rather than go out short.
+        Err(_) => Some(crate::db::now_ms() + idle),
+    };
     let at = raw.curation_checkpoint(&device)?;
-    let Some(w) = window_at(raw, &device, at, None, summary.cut(), rules, &reading)? else {
+    let cut = Cut {
+        steps: working.is_some(),
+        ..summary.cut()
+    };
+    let Some(w) = window_at(raw, &device, at, None, cut, rules, &reading)? else {
         providers_db::clear_pending(db, &device)?;
         return Ok(Phase::Idle);
     };
@@ -1559,25 +1634,14 @@ pub fn run_phase(
         };
         return cover(raw, db, &w, op, Vec::new());
     }
-    // At most D10's stay-up: a longer wait would not keep the worker up, and once the owner
-    // stopped no hook would start one to curate what waited.
-    let idle = (i64::from(summary.idle_minutes) * 60_000).min(STAY_UP_MS);
-    let working = |raw: &Raw| match raw.last_hook_ts() {
-        Ok(ts) => ts.map(|ts| ts + idle).filter(|&t| t > crate::db::now_ms()),
-        // Unreadable: taken for the owner at work, so the window waits rather than go out short.
-        Err(_) => Some(crate::db::now_ms() + idle),
-    };
-    // Turns that ended are curated at once: when every session's last record in this window is
-    // its reply or its end, nothing of the turns it holds is to come, and their cards are ready
-    // for the next prompt instead of after the idle wait, as claude-mem's observer makes them
-    // while the work goes on (docs/curation-timing.md). A reply appended after the window was
-    // read, or past where it stops, is the next window's, and another session's turn going on in
-    // this one keeps it waiting (Codex on #557).
-    let ended = |raw: &Raw| raw.turns_ended(w.from_seq, w.to_seq).unwrap_or(false);
+    // Decision 56: work done so far is curated at once, a step at a time while the work goes on,
+    // as claude-mem's observer takes each tool call (docs/curation-timing.md). A window that holds
+    // only a start of work still to come, or memory tools' calls, waits for that work; once the
+    // owner stops, it goes whole.
     let now = crate::db::now_ms();
     if !w.full
-        && !ended(raw)
-        && let Some(until) = working(raw)
+        && !w.ends
+        && let Some(until) = working
     {
         return Ok(Phase::Waiting {
             until,
@@ -1592,11 +1656,34 @@ pub fn run_phase(
     // candidates are not part of it: they change while a window waits (a claim a rescan drops),
     // and a window every provider fails must still reach D11's three.
     let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
-    let pending = providers_db::pending_of(db, &device)?.filter(|p| {
+    let held = providers_db::pending_of(db, &device)?;
+    let pending = held.clone().filter(|p| {
         range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
     });
     if let Some(p) = &pending
         && p.next_attempt_at > now
+    {
+        return Ok(waiting(p, now));
+    }
+    // Decision 56: a held window that only grew keeps its hold. A window grows a step at a time
+    // while the owner works, and each step would otherwise send it again at once, before the
+    // providers that failed it are due. Its held part is cut again as it was held: when that is
+    // the request that was held (the same chain, rules, language and records), the hold stands.
+    if pending.is_none()
+        && let Some(p) = &held
+        && p.next_attempt_at > now
+        && (p.from_seq, p.from_offset) == (w.from_seq, w.from_offset)
+        && p.to_seq < w.to_seq
+        && let Some(was) = window_at(
+            raw,
+            &device,
+            at,
+            Some((p.to_seq, p.to_offset)),
+            summary.cut(),
+            rules,
+            &reading,
+        )?
+        && sha256_hex(&format!("{chain}\n{}\n{}", summary.language, was.text)) == p.prompt
     {
         return Ok(waiting(p, now));
     }
@@ -4924,9 +5011,10 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          was decided, what is still open.\n\
          Also return observations: the cards of this stretch for the project's timeline. One \
          card for each thing it built, fixed, changed, decided or found out; a concrete finding \
-         from reading code, logs or data is one too. Usually 1 to 3, at most 5; none only when \
-         every step was routine: an empty status check, an install without errors, a listing \
-         or a search that found nothing, or a result only confirmed again. For each:\n\
+         from reading code, logs or data is one too. At most 5: a step or two usually make one \
+         card or none, and none when every step was routine: an empty status check, an install \
+         without errors, a listing or a search that found nothing, or a result only confirmed \
+         again. For each:\n\
          - type: bugfix (was broken, now fixed), feature (new capability), refactor \
          (restructured, same behaviour), change (docs, config, other edits), discovery (how the \
          existing system works), decision (a design choice and its reason), security_alert \
@@ -5753,6 +5841,7 @@ mod tests {
             Cut {
                 tokens: WINDOW_TOKENS,
                 shrink: false,
+                steps: false,
             },
             &rules,
             &w.reading,
@@ -5778,6 +5867,7 @@ mod tests {
             Cut {
                 tokens: WINDOW_TOKENS,
                 shrink: false,
+                steps: false,
             },
             &rules,
             &w.reading,
@@ -6869,8 +6959,8 @@ mod tests {
         assert_eq!(windows(&raw)[0]["provider"], "sub");
     }
 
-    /// A window that reaches the device's last record is not sent while the owner works: it
-    /// would be sent again and again for every few records.
+    /// A window that reaches the device's last record and holds no done step (decision 56), here
+    /// a prompt alone, is not sent while the owner works: it waits for its work.
     #[test]
     fn a_window_at_the_last_record_waits_until_the_owner_stops() {
         let home = tempfile::tempdir().unwrap();
@@ -6905,122 +6995,171 @@ mod tests {
         assert_eq!((phase, calls.get()), (Phase::Covered, 1));
     }
 
-    /// A window goes at once when every session's last hook record in it ends a turn (its reply,
-    /// or the session's end), not after the idle wait (docs/curation-timing.md); one a later prompt
-    /// follows still waits, so does one past where the window stops, and so does another session's
-    /// turn going on in the same window.
+    /// Decision 56: while the owner is at work, a window goes as soon as its work is done so far, a
+    /// step at a time: a tool call, a reply or a session's end. A prompt waits for its work, one
+    /// after a done step is left to the next window, and a memory tool's call is no step. Another
+    /// session's prompt waits for that session's work, and holds back what follows it in the same
+    /// window. Once the owner stops, a window goes whole.
     #[test]
-    fn a_window_that_ends_a_turn_goes_at_once() {
-        let calls = Cell::new(0);
-        let mut curator = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
-            calls.set(calls.get() + 1);
-            Ok(answered("groq"))
-        };
+    fn a_window_goes_once_a_step_is_done() {
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let mut curator =
+            |_: &str, prompt: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+                sent.borrow_mut().push(prompt.to_owned());
+                Ok(answered("groq"))
+            };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let ts = crate::db::now_ms() - 60_000;
         let at = |e: Event| Event { ts, ..e };
-        for last in ["reply", "end"] {
-            let home = tempfile::tempdir().unwrap();
-            let (mut raw, db) = open(home.path());
-            raw.append(&at(prompt("Build the parser."))).unwrap();
-            raw.append(&at(tool("ok"))).unwrap();
-            let body = match last {
-                "reply" => json!({"assistant": "Built the parser."}),
-                _ => json!({"reason": "exit"}),
-            };
-            raw.append(&at(event(last, body))).unwrap();
-            calls.set(0);
-            let phase =
-                run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-            assert_eq!((phase, calls.get()), (Phase::Covered, 1), "{last}");
-            // The next turn's prompt alone waits for the owner, as before.
-            raw.append(&at(prompt("Now the lexer."))).unwrap();
-            let phase =
-                run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-            assert_eq!(
-                (phase, calls.get()),
-                (
-                    Phase::Waiting {
-                        until: ts + 600_000,
-                        up: true
-                    },
-                    1
-                ),
-                "{last}"
-            );
-        }
-        // A reply the window does not hold, here past an imported record where the window stops
-        // (as one appended after the window was read would be), does not send it (Codex on #557).
-        let home = tempfile::tempdir().unwrap();
-        let (mut raw, db) = open(home.path());
-        raw.append(&at(prompt("Build the parser."))).unwrap();
-        raw.append(&Event {
-            source: "transcript".into(),
-            ..at(prompt("An imported turn."))
-        })
-        .unwrap();
-        raw.append(&at(event("reply", json!({"assistant": "Built."}))))
-            .unwrap();
-        calls.set(0);
-        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-        assert_eq!(
-            (phase, calls.get()),
-            (
-                Phase::Waiting {
-                    until: ts + 600_000,
-                    up: true
-                },
-                0
-            )
-        );
-        // A reply a later prompt follows in the same window: the turn going on waits.
-        let home = tempfile::tempdir().unwrap();
-        let (mut raw, db) = open(home.path());
-        raw.append(&at(prompt("Build the parser."))).unwrap();
-        raw.append(&at(event("reply", json!({"assistant": "Built."}))))
-            .unwrap();
-        raw.append(&at(prompt("And the lexer?"))).unwrap();
-        calls.set(0);
-        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-        assert_eq!(
-            (phase, calls.get()),
-            (
-                Phase::Waiting {
-                    until: ts + 600_000,
-                    up: true
-                },
-                0
-            )
-        );
-        // Two sessions in one window: one's reply leaves the other's turn going on, which waits;
-        // once that one replies too, the window goes (Codex on #557).
-        let home = tempfile::tempdir().unwrap();
-        let (mut raw, db) = open(home.path());
         let other = |e: Event| Event {
             session: "other".into(),
             ..at(e)
         };
-        raw.append(&at(prompt("Build the parser."))).unwrap();
-        raw.append(&other(prompt("Fix the lexer."))).unwrap();
-        raw.append(&other(tool("ok"))).unwrap();
-        raw.append(&at(event("reply", json!({"assistant": "Built."}))))
-            .unwrap();
-        calls.set(0);
-        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-        assert_eq!(
-            (phase, calls.get()),
-            (
-                Phase::Waiting {
-                    until: ts + 600_000,
-                    up: true
-                },
-                0
-            )
+        let waiting = Phase::Waiting {
+            until: ts + 600_000,
+            up: true,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let mut step = |raw: &mut Raw, events: Vec<Event>| {
+            for e in events {
+                raw.append(&e).unwrap();
+            }
+            run_phase(raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
+        };
+        let memory = event(
+            "tool",
+            json!({"tool": "mem_search", "input": {"query": "parser"}, "output": "", "failed": false}),
         );
-        raw.append(&other(event("reply", json!({"assistant": "Fixed."}))))
-            .unwrap();
+        let reply = |text: &str| event("reply", json!({"assistant": text}));
+        assert_eq!(
+            step(&mut raw, vec![at(prompt("Build the parser."))]),
+            waiting
+        );
+        assert_eq!(step(&mut raw, vec![at(memory)]), waiting);
+        assert!(sent.borrow().is_empty());
+        assert_eq!(step(&mut raw, vec![at(tool("parsed"))]), Phase::Covered);
+        let last = || sent.borrow().last().cloned().unwrap();
+        assert!(last().contains("Build the parser.") && last().contains("parsed"));
+        // The reply goes, and the next prompt is left to the next window, which waits for its work.
+        let next = vec![at(reply("Built the parser.")), at(prompt("Now the lexer."))];
+        assert_eq!(step(&mut raw, next), Phase::Covered);
+        assert!(last().contains("Built the parser.") && !last().contains("Now the lexer."));
+        assert_eq!(step(&mut raw, vec![]), waiting);
+        // Another session's prompt between this one's prompt and its work holds both back.
+        let both = vec![other(prompt("Fix the docs.")), at(tool("lexed"))];
+        assert_eq!(step(&mut raw, both), waiting);
+        assert_eq!(sent.borrow().len(), 2);
+        assert_eq!(step(&mut raw, vec![other(tool("fixed"))]), Phase::Covered);
+        for text in ["Now the lexer.", "Fix the docs.", "lexed", "fixed"] {
+            assert!(last().contains(text), "{text}");
+        }
+        // A harness envelope starts work as a prompt does.
+        let envelope = event("envelope", json!({"prompt": "A task finished."}));
+        let started = vec![at(tool("checked")), at(envelope)];
+        assert_eq!(step(&mut raw, started), Phase::Covered);
+        assert!(last().contains("checked") && !last().contains("A task finished."));
+        // Of two sessions' starts after a done step, the first is where the window stops.
+        let starts = vec![
+            at(tool("noted")),
+            other(prompt("Next doc.")),
+            at(prompt("And the index.")),
+        ];
+        assert_eq!(step(&mut raw, starts), Phase::Covered);
+        assert!(last().contains("A task finished.") && last().contains("noted"));
+        assert!(!last().contains("Next doc.") && !last().contains("And the index."));
+        let work = vec![at(tool("indexed")), other(tool("written"))];
+        assert_eq!(step(&mut raw, work), Phase::Covered);
+        for text in ["Next doc.", "And the index.", "indexed", "written"] {
+            assert!(last().contains(text), "{text}");
+        }
+        // A session's end is a step.
+        let end = event("end", json!({"reason": "exit"}));
+        let ended = vec![at(prompt("One more thing.")), at(end)];
+        assert_eq!(step(&mut raw, ended), Phase::Covered);
+        assert_eq!(sent.borrow().len(), 7);
+        assert!(last().contains("One more thing."));
+        // Once the owner stops, a window goes whole, a prompt after a reply too.
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let old = |e: Event| Event {
+            ts: ts - 600_000,
+            ..e
+        };
+        raw.append(&old(reply("Shall I cache it?"))).unwrap();
+        raw.append(&old(prompt("Yes, cache it."))).unwrap();
         let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
-        assert_eq!((phase, calls.get()), (Phase::Covered, 1));
+        assert_eq!(phase, Phase::Covered);
+        assert!(last().contains("Shall I cache it?") && last().contains("Yes, cache it."));
+    }
+
+    /// Decision 56: a window cut by its size while the owner is at work is cut as before (D12):
+    /// another session's prompt that waits for its work stays in it, as a backlog's windows hold
+    /// as much as fits.
+    #[test]
+    fn a_full_window_is_cut_by_its_size_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _db) = open(home.path());
+        let other = |e: Event| Event {
+            session: "other".into(),
+            ..e
+        };
+        let big = "x".repeat(40_000);
+        for e in [
+            prompt("Build the parser."),
+            tool("parsed"),
+            other(prompt("Fix the docs.")),
+            tool("lexed"),
+            prompt("Next step."),
+            tool(&big),
+        ] {
+            raw.append(&e).unwrap();
+        }
+        let dev = raw.device().to_owned();
+        let cut = Cut {
+            tokens: WINDOW_TOKENS,
+            shrink: false,
+            steps: true,
+        };
+        let reading = Reading::default();
+        let rules = Rules::default();
+        let w = window_at(&raw, &dev, (0, None), None, cut, &rules, &reading)
+            .unwrap()
+            .unwrap();
+        assert!(w.full && !w.ends);
+        assert!(
+            w.text.contains("Fix the docs.") && w.text.contains("lexed"),
+            "{}",
+            w.text
+        );
+        assert!(!w.text.contains("Next step."), "{}", w.text);
+    }
+
+    /// Decision 56: a held window that only grew keeps its hold, so the providers that failed it
+    /// are not asked again at each step before they are due; another chain asks at once.
+    #[test]
+    fn a_held_window_that_only_grew_keeps_its_hold() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let ts = crate::db::now_ms() - 60_000;
+        let at = |e: Event| Event { ts, ..e };
+        raw.append(&at(prompt("Build the parser."))).unwrap();
+        raw.append(&at(tool("parsed"))).unwrap();
+        let calls = Cell::new(0);
+        let mut failing = |_: &str, _: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            Err(went_past(&[("fake", "failed", Skip::Failed)]))
+        };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
+        let mut run = |raw: &mut Raw, chain: &str| {
+            run_phase(raw, &kn(), &db, &rules, &summary, chain, &mut failing).unwrap()
+        };
+        assert!(matches!(run(&mut raw, "chain"), Phase::Waiting { .. }));
+        raw.append(&at(tool("lexed"))).unwrap();
+        assert!(matches!(run(&mut raw, "chain"), Phase::Waiting { .. }));
+        assert_eq!(calls.get(), 1, "the grown window keeps its hold");
+        run(&mut raw, "another chain");
+        assert_eq!(calls.get(), 2, "another chain asks at once");
     }
 
     /// D10: a provider's reset is timed from its answer, even after a slow call. The hold's
@@ -7486,6 +7625,7 @@ mod tests {
         Cut {
             tokens,
             shrink: true,
+            steps: false,
         }
     }
 
@@ -11183,6 +11323,7 @@ curate = false
             elided: Vec::new(),
             shortened: Vec::new(),
             full: false,
+            ends: false,
             excluded: Vec::new(),
             aside: None,
             lines: Vec::new(),
@@ -12025,8 +12166,9 @@ curate = false
     }
 
     /// Codex on #304: a live window cut where imported records follow is not full by its size, so
-    /// it waits for its session's idle time as any live window does, one of a tool output too
-    /// long for a window too, and one that reached its record cap.
+    /// it is timed as any live window is: one of a prompt alone waits for its session's idle time,
+    /// one that reached its record cap too; one of a tool call, an output too long for a window
+    /// too, holds a done step and goes at once (decision 56).
     #[test]
     fn a_live_window_before_imported_records_waits_for_the_owner() {
         let long = "x".repeat(4_000);
@@ -12078,9 +12220,13 @@ curate = false
             let phase =
                 run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
             let until = ts + 600_000;
+            let timed = match first.kind.as_str() {
+                "tool" => (Phase::Covered, 1),
+                _ => (Phase::Waiting { until, up: true }, 0),
+            };
             assert_eq!(
                 (phase, calls.get()),
-                (Phase::Waiting { until, up: true }, 0),
+                timed,
                 "{} {removed} {count}",
                 first.kind
             );

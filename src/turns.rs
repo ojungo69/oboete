@@ -232,11 +232,10 @@ impl Turn {
 /// How many turn ends a run reads at a time.
 const PAGE: usize = 64;
 
-/// The curation pass's summaries (T1), in the digest's place: run when `windows` (what the window
-/// phase did) sent nothing, the summary of the oldest turn end of this device after the last one
-/// it kept a summary of, up to where curation has passed. One call per run; a summary every
-/// provider fails waits as a window does, and the turns after it wait with it.
-#[allow(clippy::too_many_arguments)]
+/// The curation pass's summaries (T1), first in each run (`round`): the summary of the oldest turn
+/// end of this device after the last one it kept a summary of, up to where curation has passed.
+/// One call per run; a summary every provider fails waits as a window does, and the turns after it
+/// wait with it.
 pub fn phase(
     raw: &mut Raw,
     k: &Connection,
@@ -245,11 +244,7 @@ pub fn phase(
     summary: &Summary,
     chain: &str,
     summarizer: &mut Curator,
-    windows: Phase,
 ) -> Result<Phase> {
-    if windows == Phase::Covered {
-        return Ok(windows);
-    }
     schema(k)?;
     crate::cards::schema(k)?;
     let device = raw.device().to_owned();
@@ -261,15 +256,11 @@ pub fn phase(
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     // Milestone 5 D1 rule 12: the cards it shows are read once the consumers reach a forget.
     if crate::curate::lagging(raw, k)? {
-        return Ok(sooner(
-            windows,
-            Phase::Waiting {
-                until: now,
-                up: true,
-            },
-        ));
+        return Ok(Phase::Waiting {
+            until: now,
+            up: true,
+        });
     }
-    let out = windows;
     let key = |agent: &str, session: &str| format!("{agent}\u{0}{session}");
     let kept_back = |agent: &str, session: &str| reading.excluded.contains(&key(agent, session));
     // First the oldest turn the list kept back for a session it no longer names: an undo lets it
@@ -325,7 +316,7 @@ pub fn phase(
                 return given_up(raw, db, r.seq, skip);
             }
             if p.next_attempt_at > now {
-                return Ok(sooner(out, held(&p.hold, p.next_attempt_at, now)));
+                return Ok(held(&p.hold, p.next_attempt_at, now));
             }
         }
         let subject = format!("turn {}", r.seq);
@@ -349,13 +340,10 @@ pub fn phase(
             }
             // Nothing more went out: the next pass reads the list again.
             Err(e) if e.is::<crate::curate::ListChanged>() => {
-                return Ok(sooner(
-                    out,
-                    Phase::Waiting {
-                        until: now,
-                        up: true,
-                    },
-                ));
+                return Ok(Phase::Waiting {
+                    until: now,
+                    up: true,
+                });
             }
             Err(e) => e.downcast::<ChainFailed>()?.0,
         };
@@ -377,10 +365,10 @@ pub fn phase(
             return given_up(raw, db, r.seq, skip);
         }
         crate::providers_db::set_turn_pending(db, &p)?;
-        return Ok(sooner(out, held(hold, next, after)));
+        return Ok(held(hold, next, after));
     }
     park(raw, &mut parked)?;
-    Ok(out)
+    Ok(Phase::Idle)
 }
 
 /// The op of a turn the exclusion list keeps back (D13): its labels alone, read from no record's
@@ -497,6 +485,29 @@ fn held(hold: &str, until: i64, now: i64) -> Phase {
         until,
         up: hold == "time" && until - now <= crate::curate::STAY_UP_MS,
     }
+}
+
+/// A run of the curation pass (decision 56, T1): the oldest summary due first (`phase`); then, when
+/// it sent none, one window (`curate::run_phase`). Windows go a step at a time while the work goes
+/// on, and would otherwise hold summaries back for as long as it lasts; a turn's own windows were
+/// curated, and their cards read, in an earlier run.
+#[allow(clippy::too_many_arguments)]
+pub fn round(
+    raw: &mut Raw,
+    k: &Connection,
+    db: &Connection,
+    rules: &Rules,
+    summary: &Summary,
+    chain: &str,
+    summarizer: &mut Curator,
+    curator: &mut Curator,
+) -> Result<Phase> {
+    let turns = phase(raw, k, db, rules, summary, chain, summarizer)?;
+    if turns == Phase::Covered {
+        return Ok(turns);
+    }
+    let windows = crate::curate::run_phase(raw, k, db, rules, summary, chain, curator)?;
+    Ok(sooner(windows, turns))
 }
 
 /// What the worker does next of two phases: covered work first, then the sooner wait.
@@ -1028,17 +1039,7 @@ mod tests {
             })
         };
         let summary = Summary::default();
-        let phase = phase(
-            &mut raw,
-            &k,
-            &db,
-            rules,
-            &summary,
-            "chain",
-            &mut summarizer,
-            Phase::Idle,
-        )
-        .unwrap();
+        let phase = phase(&mut raw, &k, &db, rules, &summary, "chain", &mut summarizer).unwrap();
         drop((raw, k, db));
         crate::worker::run_once(home).unwrap();
         (phase, sent.into_inner())
@@ -1103,7 +1104,6 @@ mod tests {
             &Summary::default(),
             "chain",
             &mut summarizer,
-            Phase::Idle,
         )
         .unwrap();
         assert!(matches!(phase, Phase::Waiting { .. }));
@@ -1135,6 +1135,100 @@ mod tests {
         let shown = shown(home.path(), &Rules::default());
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].fields["request"], "Build the parser");
+    }
+
+    /// Decision 56 (T1): a run asks for the oldest summary due first, and for a window only when
+    /// it sent none, so windows that go a step at a time while the work goes on hold no summary
+    /// back.
+    #[test]
+    fn a_run_asks_for_a_summary_due_before_the_next_window() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "The parser is built."),
+                said("s1", "tool", "The next step."),
+            ],
+            &[window(1, 2, "Built the parser.", &[])],
+        );
+        let asked = RefCell::new(Vec::new());
+        let once = || {
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            let k = crate::knowledge::open(home.path()).unwrap();
+            let db = crate::providers_db::open(home.path()).unwrap();
+            let summary = Summary {
+                curate: true,
+                ..Summary::default()
+            };
+            let answer = |role: &'static str, output: Value| {
+                let asked = &asked;
+                move |_: &str,
+                      _: &str,
+                      _: &crate::provider::AnswerCheck,
+                      _: &crate::provider::Gate|
+                      -> Result<ChainResult> {
+                    asked.borrow_mut().push(role);
+                    Ok(ChainResult {
+                        provider: "fake".into(),
+                        output: output.clone(),
+                        tier: 1,
+                    })
+                }
+            };
+            let mut summarizer = answer("summary", completed("The parser reads a line."));
+            let mut curator = answer("window", json!({"claims": [], "summary": "Stepped."}));
+            let rules = Rules::default();
+            let (s, c) = (&mut summarizer, &mut curator);
+            let phase = round(&mut raw, &k, &db, &rules, &summary, "", s, c).unwrap();
+            drop((raw, k, db));
+            crate::worker::run_once(home.path()).unwrap();
+            phase
+        };
+        assert_eq!(once(), Phase::Covered);
+        assert_eq!(*asked.borrow(), ["summary"]);
+        assert_eq!(once(), Phase::Covered);
+        assert_eq!(*asked.borrow(), ["summary", "window"]);
+        assert_eq!(once(), Phase::Idle);
+    }
+
+    /// Decision 56 (T1): a summary its providers hold keeps the run's wait when no window is due,
+    /// so the worker is up when it may be asked again.
+    #[test]
+    fn a_held_summary_keeps_the_runs_wait_when_no_window_is_due() {
+        let home = home(
+            &[
+                said("s1", "prompt", "Build."),
+                said("s1", "reply", "Built."),
+            ],
+            &[window(1, 2, "Built.", &[])],
+        );
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let until = crate::db::now_ms() + 60_000;
+        let mut failing = |_: &str,
+                           _: &str,
+                           _: &crate::provider::AnswerCheck,
+                           _: &crate::provider::Gate|
+         -> Result<ChainResult> {
+            Err(
+                crate::provider::ChainFailed(vec![crate::provider::Fallback {
+                    provider: "fake".into(),
+                    reason: "rate limited".into(),
+                    skip: crate::provider::Skip::Wait(until),
+                    answer: None,
+                }])
+                .into(),
+            )
+        };
+        let mut curator = |_: &str,
+                           _: &str,
+                           _: &crate::provider::AnswerCheck,
+                           _: &crate::provider::Gate|
+         -> Result<ChainResult> { panic!("no window is due") };
+        let (rules, summary) = (Rules::default(), Summary::default());
+        let (s, c) = (&mut failing, &mut curator);
+        let phase = round(&mut raw, &k, &db, &rules, &summary, "chain", s, c).unwrap();
+        assert_eq!(phase, Phase::Waiting { until, up: true });
     }
 
     /// Codex on C2 (T1): every turn end is reached, however many records follow it.
@@ -1331,17 +1425,7 @@ mod tests {
             )
         };
         let (rules, summary) = (Rules::default(), Summary::default());
-        let phase = phase(
-            &mut raw,
-            &k,
-            &db,
-            &rules,
-            &summary,
-            "chain",
-            &mut failing,
-            Phase::Idle,
-        )
-        .unwrap();
+        let phase = phase(&mut raw, &k, &db, &rules, &summary, "chain", &mut failing).unwrap();
         assert_eq!(calls, 1);
         assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
         drop((raw, k, db));
@@ -1405,17 +1489,7 @@ mod tests {
                 )
             };
             let (rules, summary) = (Rules::default(), Summary::default());
-            phase(
-                &mut raw,
-                &k,
-                &db,
-                &rules,
-                &summary,
-                chain,
-                &mut refuse,
-                Phase::Idle,
-            )
-            .unwrap();
+            phase(&mut raw, &k, &db, &rules, &summary, chain, &mut refuse).unwrap();
             drop((raw, k, db));
             crate::worker::run_once(home.path()).unwrap();
             calls
@@ -1645,7 +1719,6 @@ mod tests {
             &summary,
             "chain",
             &mut summarizer,
-            Phase::Idle,
         )
         .unwrap();
         assert_eq!(crate::crash::count(), 0);

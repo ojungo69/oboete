@@ -17,9 +17,9 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 
 | Status | Rows |
 |---|---|
-| equal_or_better | 35 |
+| equal_or_better | 36 |
 | partial | 19 |
-| missing | 19 |
+| missing | 18 |
 | accepted_difference | 6 |
 | total | 79 |
 
@@ -50,7 +50,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 14 | Since 2026-10-17 oboete also excludes by a folder name or claude-mem pattern (`*`, `**`, `?`, a leading `~`), read as claude-mem reads one (since #587 a whole `**/` part also stands for no folder, as in claude-mem 15.0), and a name with no `/` also covers the folders inside one so named; a pattern that does not start at a root also names the end of a path (`secret/**` names `/work/secret` and the folders in it), where claude-mem tries it against the whole path and the last part alone, so such a pattern with a `/` names no folder there; `oboete import claude-mem` brings claude-mem's patterns over once (docs/settings-privacy.md, docs/claude-mem-import.md I8). | equal_or_better | none | project-filter.ts:68 / src/capture.rs:203 |
 | 15 | Private prompts behave the same. oboete strips claude-mem 15.0's six block names (`private`, `claude-mem-context`, `system-reminder`, `persisted-output`, `system_instruction`, `system-instruction`) and two of its own (`ide_opened_file`, `hook_context`) from a prompt and from every tool field before anything is stored or sent, a block only with its closing tag. One edge differs, on the private side: an unclosed `<private>` in a typed prompt hides the rest, where claude-mem keeps it all. | equal_or_better | rare | tag-stripping.ts:5 / src/hook.rs:32 |
 | 16 | The page has no sessions list, no per-session page and no category chips. Feed items carry no session id. | missing | rare (unmeasured) | SessionDetailPage.tsx:40 / src/view.rs:2078 |
-| 17 | Summaries have the same six fields and can be searched. A summary appears after the turn's windows are curated. Since 2026-10-17 a window whose sessions have all replied goes at once (#557, docs/curation-timing.md), so the summary comes about one curator call after the reply, where it could wait about 10 minutes before; a turn that ends with no reply still waits the idle time. claude-mem writes it at Stop. Since 2026-10-17 a Stop whose message is empty (Claude Code's when a session ends in a tool call) takes the transcript's last assistant text, as claude-mem does. | partial | rare | summarize.ts:103 / src/curate.rs:1471 |
+| 17 | Summaries have the same six fields and can be searched. A summary is asked in the run after its turn's last window, the reply's, which goes as soon as the reply is recorded (decision 56, docs/summaries.md T1); a turn that ends with no reply still waits the idle time. claude-mem writes it at Stop. Since 2026-10-17 a Stop whose message is empty (Claude Code's when a session ends in a tool call) takes the transcript's last assistant text, as claude-mem does. | equal_or_better | rare | summarize.ts:103 / src/curate.rs:1471 |
 | 18 | oboete has no tool, Bash-pattern or agent-type skip settings. The only switch is the coarse `OBOETE_SKIP` (it also skips reads), and it is not documented for users. The owner uses only claude-mem's default skip list, which covers about 0.5% of tool rows. | partial | rare | SettingsDefaultsManager.ts:433 / src/hook.rs:22 |
 | 19 | Counts are fixed at claude-mem's defaults (50 cards, 10 summaries). oboete has no type, concept, field or full-count settings, and no switch to turn work state off. A Context page preview exists. | partial | none | ContextConfigLoader.ts:52 / src/consumer/manifest.rs:56 |
 | 20 | A tool output over about 17.8k characters reaches the curator only as its size. 262 of 1,471 windows (18%) had one. claude-mem condenses such an output with a model call or keeps its head and tail. oboete's `shrink` is off by default. Decision 37 left this out. Since 2026-10-17 the curator sees such an output's head and tail, up to 8,000 characters each as the window holds; claude-mem's model condense is not built. | partial | rare | field-optimizer.ts:257 / src/curate.rs:498 |
@@ -87,7 +87,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | 51 | No README, no `oboete update` and no release pipeline. The installer does not preselect detected agents. A JSON config that starts with a BOM stops setup safely. | missing | rare | npx-cli/index.ts:141 / src/main.rs:70 |
 | 52 | No log files and no log view on the page. Doctor, the provider-call table and the last outcome stand in for them. | partial | rare | LogsRoutes.ts:73 / src/providers_db.rs:22 |
 | 53 | No status-line counter. The owner's status line does not use claude-mem's. | missing | none | statusline-counts.js:1 / src/main.rs:78 |
-| 54 | Cards arrive a window at a time and can be up to about 10 minutes late. All agents share them by design (decision 39). A resume injects nothing on either side. Decision 56: cards are made per tool call, as claude-mem makes its observations, before the switch. | missing | weekly | ClaudeProvider.ts:1315 / src/curate.rs:21 |
+| 54 | Decision 56: while the owner is at work, a window goes as soon as its work is done so far (a tool call, a reply, a session's end), and a prompt is curated with the work it asks for, so cards come a step at a time: on a replay of 2026-10-15 to 2026-10-25 a median of 34 s from a tool call to its window's answer, where the 2026-10-17 rule gave 79 s (docs/curation-timing.md). One call is out at a time for each device: under a backlog a window holds several steps, as claude-mem's Codex observer batches, and several sessions at once queue behind each other (p90 826 s on the busiest days), where claude-mem runs an observer per session. All agents share the cards by design (decision 39). A resume injects nothing on either side. | partial | weekly | ClaudeProvider.ts:1315 / src/curate.rs:549 |
 | 55 | No Docker trial image. oboete uses the dogfood user or a scratch home instead. | missing | none | docker/claude-mem/Dockerfile:1 / src/main.rs:69 |
 | 56 | No maker account and no hosted summariser. Decision 37. Decision 56: a feature of oboete's own like it, after the switch. | accepted_difference | none | cmem-gateway.ts:1 / docs/spec.md:64 |
 | 57 | oboete sends no telemetry. claude-mem's telemetry is on for the owner. | equal_or_better | none | telemetry/consent.ts:43 / docs/spec.md:1135 |
@@ -141,11 +141,10 @@ each milestone and new features are added here.
 
 ## What the owner will notice on the day of the switch
 
-- Memory arrives a window at a time, by design (row 54): claude-mem writes a titled card within seconds of each
-  tool call; oboete writes the same cards, and claims quoting the owner's or the agent's words, as soon as a
-  window is full while the work goes on, and those of the last records once the work pauses for ten minutes (a
-  setting; decision 39).
-- New sessions have no summary card on the page and none in search until row 17 is built.
+- Memory arrives a step at a time while the work goes on (row 54, decision 56): claude-mem writes a titled
+  card within seconds of each tool call; oboete writes the same cards, and claims quoting the owner's or the
+  agent's words, a curator call after each step (a median of 34 s on a replay), the steps of several sessions
+  queuing behind each other.
 - claude-mem's slash commands and its code-structure tools go when its plugin is removed (rows 23 and 24).
 
 ## Where oboete is ahead (measured or read in the code)
@@ -224,6 +223,12 @@ each milestone and new features are added here.
 | N4 | **The three steps as the default memory search.** claude-mem 15.0 teaches search, timeline and get_observations as its default and drops mem_search's modes; its native lookup bridge gives the index alone, and an optional `dumb_search` answers in one shallow call. oboete teaches mem_search in auto and guided mode. Built as claude-mem 15.0 behaves, as decision 45 builds claude-mem 13.35's memory features: the three steps taught as the default in the tools' descriptions, the server's instructions and the session start (N6), the bridge giving the index (N5), and `dumb_search` as claude-mem's, one shallow call that ranks titles by the words asked; mem_search's auto and guided modes stay for an agent or a note that names them, no longer taught. Built: the three steps lead the instructions, the descriptions and the session start's block in 15.0's words, `dumb_search` runs auto mode's steps with 15.0's arguments, lines and title ranking (#4865) and no continuation, and the bridge gives the index alone (docs/mem-search.md, docs/memory-lookup.md). | M |
 | X11 | **Temporary folders of a killed curator run.** claude-mem 15.0 removes those of its Codex app-server whose worker has ended, at a worker's first Codex run. Built: oboete's worker removes those of its CLI runs whose run has ended at each start, by a lock each run holds while it goes on (Unix) or, where that cannot tell, after 6 hours unchanged (docs/spec.md, forget, step 7). | S |
 
+### Before the switch (added 2026-10-25, decision 56)
+
+| # | Difference | Size |
+|---|---|---|
+| 54 | **Memory arrives a step at a time.** claude-mem makes a titled card per tool call within seconds. oboete made its cards a window at a time, the last records after a ten-minute pause. Built: while the owner works, a window goes as soon as its work is done so far, a prompt with the work it asks for, one call at a time for each device (docs/curation-timing.md). | M |
+
 ### After the switch, first
 
 | # | Difference | Size |
@@ -296,7 +301,6 @@ each milestone and new features are added here.
 | 24 | **Code structure tools (smart_search, smart_outline, smart_unfold).** claude-mem's plugin also brings tools that search code by symbol and show a file's outline. oboete is a memory tool and has none. | L |
 | 25 | **Opening the page under another address, or letting another web page call it.** Settings that show the page under another address or let listed web pages call it are in claude-mem's source under development, not in the installed 13.28.0. oboete's page answers on 127.0.0.1 only and sends no CORS headers (spec 6.6). | M |
 | 26 | **Observation TV: a full-screen live display, also from a phone or another PC.** claude-mem serves an unlinked full-screen page of fading title cards, watchable from another device with a token (off for the owner). oboete has no such page. | M |
-| 54 | **Memory arrives a window at a time, by design.** claude-mem makes a titled card per tool call within seconds and injects a dated table. oboete makes the same cards, and its own quoted claims, in one call per window: at once when a window is full while the work goes on, and for the last records after the owner pauses (10 minutes, a setting; the cadence stays, decision 39); it injects the owner's decisions and current state before the same dated table (docs/cards.md S1), does not re-inject on resume, and always shares memory between agents in the same repository. | - |
 | 55 | **Docker image for trying the tool in isolation.** claude-mem's repository has an experimental Docker image for trying it in a sealed box. oboete is tried under a separate OS user (oboete-dogfood) or a scratch home folder. | - |
 | 56 | **cmem.ai account, hosted summariser and login shim.** claude-mem can sign in to its maker's service and use a hosted summariser, or a local shim that reuses the host login. oboete has no account: summaries come from the owner's own subscriptions and keys, in a chain with fallback. | - |
 | 57 | **Usage statistics and error reports sent to the maker.** claude-mem sends anonymous usage data and error reports to its maker by default. oboete sends nothing. | - |
