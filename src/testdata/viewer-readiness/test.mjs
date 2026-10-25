@@ -1230,7 +1230,7 @@ panel.querySelectorAll('button').find(n=>text(n)==='← Back to request').click(
 assert.equal(document.activeElement,streamsOf()[2].querySelector('button'),'the focus returns to that one, not its namesake');
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
 assert(document.activeElement?.dataset.id===masked,'back returns the focus to the card that opened it, a masked id too');
-// Slice 4: a request's work product, read when its page opens, once a version; a link only for
+// Slice 4: a request's work product, read each time its page opens and once a version while it stays open; a link only for
 // http and https, opening apart from the page; a path shown as text; an empty answer, no section.
 {
 const asked=[];let products=[];
@@ -1254,15 +1254,19 @@ assert.equal(links[0].target,'_blank');assert.equal(links[0].rel,'noopener noref
 for(const fragment of ['Commit','Document','notes.pdf','/work/notes.pdf','Not a link']){
   assert(shownProducts.includes(fragment),`the work product shows: ${fragment}`);
 }
+run('myWorkDraw()');
+assert(asked.length===1&&!box().hidden,'a redraw of the open page shows what was read, not read again');
 back();
 card('p1').querySelector('button').click();
-assert(asked.length===1&&!box().hidden,'the same version shows at once, not read again');
+assert(box().hidden,'opened again, the page reads again: records and rules change it, not the version (Codex on #650)');
+await new Promise(resolve=>setImmediate(resolve));
+assert(asked.length===2&&!box().hidden,'and shows the new answer');
 back();
 products=[];
 set([req('p2')]);
 card('p2').querySelector('button').click();
 await new Promise(resolve=>setImmediate(resolve));
-assert.equal(asked.length,2,'another request is read');
+assert.equal(asked.length,3,'another request is read');
 assert(box().hidden,'nothing read, no section');
 back();
 }

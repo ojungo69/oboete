@@ -602,13 +602,18 @@ pub(crate) fn from_command(
     out: &str,
     at: Option<i64>,
     source: Option<Source>,
+    failed: bool,
 ) -> Vec<Product> {
     let pushes = pushes_from(command, response, out);
+    // A failed call made only what its output confirms: the branches its command names may never
+    // have been made (Codex on #650).
+    let created = if failed {
+        Vec::new()
+    } else {
+        created_branches_from(command, out)
+    };
     let mut branches = Vec::new();
-    for branch in created_branches_from(command, out)
-        .into_iter()
-        .chain(pushes.iter().cloned())
-    {
+    for branch in created.into_iter().chain(pushes.iter().cloned()) {
         set_branch(&mut branches, branch);
     }
     let mut products = Vec::new();
@@ -708,6 +713,7 @@ pub(crate) fn from_tool_use(
     response: &Value,
     at: Option<i64>,
     source: Option<Source>,
+    failed: bool,
 ) -> Vec<Product> {
     static API: LazyLock<Regex> = LazyLock::new(|| js_regex(r"/(?:api|oauth)/").unwrap());
     let input = parse(input);
@@ -718,10 +724,11 @@ pub(crate) fn from_tool_use(
     {
         let out = output_text(raw, &response);
         let mut products = pull_request_from(command, &response, &out, at, source.clone());
-        products.extend(from_command(command, &response, &out, at, source));
+        products.extend(from_command(command, &response, &out, at, source, failed));
         return products;
     }
-    let Some(kind) = publisher(tool) else {
+    // A publishing tool that failed published nothing: a link in its error is not its work.
+    let Some(kind) = publisher(tool).filter(|_| !failed) else {
         return Vec::new();
     };
     if !truthy(&response)
@@ -1017,6 +1024,7 @@ mod tests {
             &json!(response.to_string()),
             Some(at),
             Some(source("tool-use", id)),
+            false,
         )
     }
 
@@ -1043,6 +1051,7 @@ mod tests {
             ),
             Some(100),
             Some(source("tool-use", "5")),
+            false,
         );
         assert_eq!(
             products,
@@ -1072,7 +1081,8 @@ mod tests {
                     &input,
                     &json!({ "artifacts": [{ "url": "https://claude.ai/artifact/x" }] }),
                     None,
-                    None
+                    None,
+                    false
                 )
                 .is_empty()
             );
@@ -1083,7 +1093,8 @@ mod tests {
                 &json!({}),
                 &json!({ "url": "https://example.com/report" }),
                 None,
-                None
+                None,
+                false
             )
             .is_empty()
         );
@@ -1221,6 +1232,7 @@ mod tests {
             "[main abc1234] subject",
             None,
             None,
+            false,
         );
         assert_eq!(products.len(), 1);
         assert_eq!(products[0].sha.as_deref(), Some("abc1234"));
@@ -1234,6 +1246,7 @@ mod tests {
             "[main abc1234] subject",
             None,
             None,
+            false,
         );
         assert_eq!(products.len(), 1);
         assert!(
@@ -1242,7 +1255,8 @@ mod tests {
                 &json!({}),
                 "[main abc1234] subject",
                 None,
-                None
+                None,
+                false
             )
             .is_empty()
         );
@@ -1781,6 +1795,7 @@ mod tests {
                 }),
                 None,
                 None,
+                false,
             );
             assert_eq!(products.len(), 1, "{tool}");
             assert_eq!(products[0].kind, kind, "{tool}");
@@ -1818,8 +1833,15 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                from_tool_use("Artifact", &input, &response.to_string().into(), None, None)[0]
-                    .title,
+                from_tool_use(
+                    "Artifact",
+                    &input,
+                    &response.to_string().into(),
+                    None,
+                    None,
+                    false
+                )[0]
+                .title,
                 title
             );
         }
@@ -1829,11 +1851,22 @@ mod tests {
                 &json!({}),
                 &json!({ "text": "https://example.com/ignored" }),
                 None,
-                None
+                None,
+                false
             )
             .is_empty()
         );
-        assert!(from_tool_use("Artifact", &json!({}), &json!("not JSON"), None, None).is_empty());
+        assert!(
+            from_tool_use(
+                "Artifact",
+                &json!({}),
+                &json!("not JSON"),
+                None,
+                None,
+                false
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1898,6 +1931,7 @@ mod tests {
                 &response,
                 None,
                 None,
+                false,
             );
             assert_eq!(products[0].title, "abc1234 subject", "{response}");
         }
@@ -1945,12 +1979,13 @@ mod tests {
             "[main (root-commit) abc1234] subject",
             Some(2),
             None,
+            false,
         );
         assert_eq!(products.len(), 1);
         assert_eq!(products[0].sha.as_deref(), Some("abc1234567890"));
         assert_eq!(products[0].branch.as_deref(), Some("main"));
         assert_eq!(products[0].title, "abc1234 subject");
-        let products = from_command("git status", &response, "", None, None);
+        let products = from_command("git status", &response, "", None, None, false);
         assert_eq!(products[0].title, "abc1234");
         assert!(
             from_command(
@@ -1958,7 +1993,8 @@ mod tests {
                 &json!({ "gitOperation": { "commit": { "sha": "bad" } } }),
                 "",
                 None,
-                None
+                None,
+                false
             )
             .is_empty()
         );
@@ -1972,6 +2008,7 @@ mod tests {
             "[other abc1234] subject\nTo https://github.com/o/r.git\n + 1111111...abc123456  HEAD -> refs/heads/main\n * [new branch] feat/x -> feat/x",
             None,
             None,
+            false,
         );
         assert_eq!(products.len(), 3);
         assert_eq!(products[0].repo.as_deref(), Some("o/r"));
@@ -1985,6 +2022,7 @@ mod tests {
             "",
             None,
             None,
+            false,
         );
         assert_eq!(products.len(), 1);
         assert_eq!(products[0].repo.as_deref(), Some("o/r"));
@@ -2051,5 +2089,39 @@ mod tests {
             short(&"😀".repeat(71)),
             Some(format!("{}\u{fffd}…", "😀".repeat(69)))
         );
+    }
+
+    /// Codex on #650: a failed call made only what its output confirms. A branch its command
+    /// names is none, and a failed publishing tool's answer links nothing; a commit its output
+    /// printed stands although the push after it failed.
+    #[test]
+    fn a_failed_call_makes_only_what_its_output_confirms() {
+        let checkout = |failed| {
+            from_command(
+                "git checkout -b release",
+                &Value::Null,
+                "Permission denied",
+                None,
+                None,
+                failed,
+            )
+        };
+        assert_eq!((checkout(false).len(), checkout(true).len()), (1, 0));
+        let out = "[main abc1234] Fix the parser\n 1 file changed\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs";
+        let products = from_command(
+            "git commit -m 'Fix the parser' && git push",
+            &Value::Null,
+            out,
+            None,
+            None,
+            true,
+        );
+        let titles: Vec<&str> = products.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["abc1234 Fix the parser"]);
+        let answer: Value = json!({"url": "https://example.com/artifacts/abc"})
+            .to_string()
+            .into();
+        let artifact = |failed| from_tool_use("Artifact", &json!({}), &answer, None, None, failed);
+        assert_eq!((artifact(false).len(), artifact(true).len()), (1, 0));
     }
 }

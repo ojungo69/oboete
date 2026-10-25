@@ -522,12 +522,15 @@ newest first, at most 60; a commit links to GitHub once a recorded push sent its
   keeps where each live call that may have made something is (`product_calls`: device, seq, time,
   agent, session), picked as claude-mem picks the calls it reads, and nothing it said. My Work
   reads those records from raw.db when a request's page opens: a forgotten or expired record is
-  no call, and what it made goes with it.
+  no call, and what it made goes with it. A call that failed makes only what its output confirms:
+  no branch inferred from its command alone, and no publishing tool's link (Codex on #650).
 - **The route**, `GET /api/my-work/product?request=<id>`, with the token, as every route: the
   request named by its id as `GET /api/my-work` shows it; one not read is 404, none named 400.
   The list of requests does not carry it, since the page reads every request each minute.
-- **What it shows**: a "Work product" section of the request's page, read when the page opens
-  and again when the request's version changes, each entry with its kind, its title, a link when
+- **What it shows**: a "Work product" section of the request's page, read each time the request
+  opens (new records, expired ones and new rules change it without changing the request's version:
+  Codex on #650) and again when its version changes while it stays open, each entry with its kind,
+  its title, a link when
   it has one, its path when it is a file, and its time. Each is gated as the page's text is; a
   link is http or https with no user name or password, and one the gate changes is shown as its
   title alone. Nothing is shown while it reads, nor when there is nothing.
@@ -542,5 +545,6 @@ Tests: `consumer::products::tests::product_calls_are_the_live_calls_that_may_mak
 `my_work::tests::a_shared_conversations_work_product_follows_its_prompts`,
 `my_work::tests::work_product_is_gated_as_shown_and_names_files`,
 `view::tests::the_my_work_product_route_answers_for_a_request_it_knows`, the viewer harness's
-work product check (read once a version, a link only for http and https, no section when empty),
-and the parser's 39 in `work_product::tests`, from claude-mem's two test files.
+work product check (read at each opening, a link only for http and https, no section when empty),
+the parser's 39 in `work_product::tests`, from claude-mem's two test files, and
+`work_product::tests::a_failed_call_makes_only_what_its_output_confirms`.

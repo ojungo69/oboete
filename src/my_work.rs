@@ -1025,6 +1025,7 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
                     &body["output"],
                     Some(e.ts),
                     Some(source),
+                    body["failed"] == true,
                 ));
             }
         }

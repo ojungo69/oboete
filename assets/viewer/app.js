@@ -6606,6 +6606,9 @@ function myWorkFocus(focus) {
 }
 
 function myWorkOpen(id) {
+  // Its work product is read again: new records, expired ones and new rules change it without
+  // changing the request's version (Codex on #650).
+  mw.products = null;
   mw.unread.delete(id);
   mw.back = { id, scroll: window.scrollY || 0 };
   mw.request = id;
