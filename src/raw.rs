@@ -253,6 +253,20 @@ pub(crate) type PromptLabel = (String, i64, (String, String), bool);
 /// (`Raw::append_note`).
 type Repeats<'a> = &'a dyn Fn(&Connection) -> Result<bool>;
 
+/// docs/page.md S2: an agent's session with a prompt hooks recorded that no removal took
+/// (`Raw::live_sessions`): its first such prompt's record (`device`, `seq`), time (`started`) and
+/// repository, and how many such prompts it has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveSession {
+    pub started: i64,
+    pub device: String,
+    pub seq: i64,
+    pub agent: String,
+    pub session: String,
+    pub repo: Option<String>,
+    pub prompts: usize,
+}
+
 /// One of this store's own work state writes (`Raw::native_work_writes`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkWrite {
@@ -4630,7 +4644,7 @@ impl Raw {
     /// record may be inspected only for the exhaustion flag. The display cut is the API's.
     pub fn prompts(
         &self,
-        repo: Option<&str>,
+        (repo, session): (Option<&str>, Option<(&str, &str)>),
         before: Option<&PromptPosition>,
         limit: usize,
         rules: &crate::redact::Rules,
@@ -4641,6 +4655,7 @@ impl Raw {
              WHERE type = 'event' AND kind = 'prompt'
                AND source IN (SELECT value FROM json_each(?1))
                AND (?2 IS NULL OR repo = ?2)
+               AND (?6 IS NULL OR (agent = ?6 AND session = ?7))
                AND (?3 IS NULL OR (ts, device, seq) < (?3, ?4, ?5))
              ORDER BY ts DESC, device DESC, seq DESC",
         )?;
@@ -4649,7 +4664,9 @@ impl Raw {
             repo,
             before.map(|p| p.0),
             before.map(|p| p.1.as_str()),
-            before.map(|p| p.2)
+            before.map(|p| p.2),
+            session.map(|s| s.0),
+            session.map(|s| s.1)
         ])?;
         let mut out = Vec::new();
         while let Some(r) = rows.next()? {
@@ -4704,6 +4721,60 @@ impl Raw {
             Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?), r.get(4)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// docs/page.md S2: every agent's session with a live prompt that no removal took, as
+    /// claude-mem's session begins at its first prompt; a prompt read as `prompt_labels` reads it,
+    /// a tombstone with no range taking it whole, so a forgotten one lends the session nothing.
+    /// Only this viewer read creates the index, never a hook.
+    pub fn live_sessions(&self) -> Result<Vec<LiveSession>> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        // With one MIN(), SQLite takes the other bare columns from its row: the first prompt's.
+        let mut st = self.conn.prepare(
+            "SELECT MIN(r.ts), r.device, r.seq, r.agent, r.session, r.repo, COUNT(*)
+             FROM records r
+             WHERE r.type = 'event' AND r.kind = 'prompt'
+               AND r.source IN (SELECT value FROM json_each(?1))
+               AND r.agent IS NOT NULL AND r.session IS NOT NULL AND r.session <> ''
+               AND r.expired IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                   AND t.target_device = r.device AND t.target_seq = r.seq
+                   AND t.target_offset IS NULL)
+             GROUP BY r.agent, r.session",
+        )?;
+        let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
+            Ok(LiveSession {
+                started: r.get(0)?,
+                device: r.get(1)?,
+                seq: r.get(2)?,
+                agent: r.get(3)?,
+                session: r.get(4)?,
+                repo: r.get(5)?,
+                prompts: r.get::<_, i64>(6)?.try_into().unwrap_or(0),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// docs/page.md S2: a prompt's text (a session's title, `LiveSession`), gated as the feed gates
+    /// a prompt; none once a removal took it.
+    pub fn prompt_text(
+        &self,
+        (device, seq): (&str, i64),
+        rules: &crate::redact::Rules,
+    ) -> Result<Option<String>> {
+        let Some(record) = self
+            .after(device, seq - 1, 1)?
+            .pop()
+            .filter(|r| r.seq == seq)
+        else {
+            return Ok(None);
+        };
+        let Item::Event(e) = record.item else {
+            return Ok(None);
+        };
+        let text = crate::curate::long_text(&e).unwrap_or_default();
+        Ok(Some(crate::redact::outbound_with(&text, rules)))
     }
 
     /// The forgotten live prompts' places, each with its session's hash (`forget::session`): a

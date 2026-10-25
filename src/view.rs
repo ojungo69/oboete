@@ -1964,13 +1964,33 @@ impl Viewer {
                     (Ok(all), Ok(limit), Ok(cursor)) => (all, limit.min(100), cursor),
                     (Err(bad), _, _) | (_, Err(bad), _) | (_, _, Err(bad)) => return Ok(bad),
                 };
-                let repo = match (all, arg("repo")) {
+                // docs/page.md S4: a session's page, by its key (`session_key`).
+                let session = arg("session");
+                if session.is_some_and(|key| {
+                    key.len() != 16 || !key.bytes().all(|b| b.is_ascii_hexdigit())
+                }) {
+                    return Ok(bad("session"));
+                }
+                let repo = match (all || session.is_some(), arg("repo")) {
                     (true, _) => None,
                     (false, Some(r)) => Some(r.to_owned()),
                     // No checkout (the resident viewer, R8): every repository.
                     (false, None) => self.checkout()?.map(|(repo, _)| repo),
                 };
-                feed(&self.home, repo.as_deref(), cursor, limit)?
+                feed(&self.home, (repo.as_deref(), session), cursor, limit)?
+            }
+            // docs/page.md S2: the sessions hooks recorded, as claude-mem's Sessions tab lists them.
+            "sessions" => {
+                let (all, limit, before) = match (flag(q, "all"), limit(q, 50), session_page(q)) {
+                    (Ok(all), Ok(limit), Ok(before)) => (all, limit.min(100), before),
+                    (Err(bad), _, _) | (_, Err(bad), _) | (_, _, Err(bad)) => return Ok(bad),
+                };
+                let repo = match (all, arg("repo")) {
+                    (true, _) => None,
+                    (false, Some(r)) => Some(r.to_owned()),
+                    (false, None) => self.checkout()?.map(|(repo, _)| repo),
+                };
+                sessions(&self.home, repo.as_deref(), before.as_ref(), limit)?
             }
             // X10 (docs/my-work.md): every repository's requests, as claude-mem's My Work shows them.
             "my-work" => match crate::my_work::Range::of(q.get("range").map(String::as_str)) {
@@ -2087,7 +2107,7 @@ fn failed(e: &anyhow::Error) -> Response {
 /// What leaves the API: every text gated (K6), except a page's cursor, the page's own state of
 /// ids and times, passed back as it came: a rule that matched it broke the paging (Codex on #373).
 fn answered(name: &str, mut answer: Value) -> Value {
-    let next = matches!(name, "feed" | "timeline")
+    let next = matches!(name, "feed" | "timeline" | "sessions")
         .then(|| answer.get_mut("next").map(Value::take))
         .flatten();
     // A My Work request's id leaves the gate's walk and comes back under its key: a masked id's
@@ -2345,19 +2365,136 @@ fn feed_page(q: &HashMap<String, String>) -> std::result::Result<FeedCursor, Res
     serde_json::from_str(cursor).map_err(|_| bad("before"))
 }
 
+/// A session's place in the list (docs/page.md S2): its start, then its first prompt's device
+/// and seq.
+type SessionPosition = (i64, String, i64);
+
+/// docs/page.md S2 and S4: what names a session in the page's requests, 16 hex digits of a hash
+/// of its agent and session: no label of it, and the same whichever of its prompts a forget took.
+fn session_key(agent: &str, session: &str) -> String {
+    let digest = Sha256::digest(format!("{agent}\0{session}"));
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+fn session_page(
+    q: &HashMap<String, String>,
+) -> std::result::Result<Option<SessionPosition>, Response> {
+    let Some(cursor) = q.get("before").filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if cursor.len() > 4096 {
+        return Err(bad("before"));
+    }
+    serde_json::from_str(cursor)
+        .map(Some)
+        .map_err(|_| bad("before"))
+}
+
+/// docs/page.md S2: the sessions hooks recorded in `repo` (every repository's when none), the
+/// newest first after `before`, at most `limit`: each by its first prompt's key, with its agent,
+/// session, repository, title, start and number of items; and the next page's place.
+fn sessions(
+    home: &Path,
+    repo: Option<&str>,
+    before: Option<&SessionPosition>,
+    limit: usize,
+) -> Result<Value> {
+    let Some((raw, k)) = search::b::stores(home)? else {
+        return Ok(json!({"sessions": [], "next": null}));
+    };
+    let rules = redact::Rules::load(home)?;
+    let mut listed: Vec<_> = (raw.live_sessions()?.into_iter())
+        .filter(|s| repo.is_none() || s.repo.as_deref() == repo)
+        .filter(|s| {
+            before.is_none_or(|b| (s.started, s.device.as_str(), s.seq) < (b.0, b.1.as_str(), b.2))
+        })
+        .collect();
+    listed.sort_by(|a, b| (b.started, &b.device, b.seq).cmp(&(a.started, &a.device, a.seq)));
+    let more = listed.len() > limit;
+    listed.truncate(limit);
+    // Each kind as the feed counts it: current cards of the session's own windows (K2), and its
+    // summaries that are no skip.
+    let counts = |table: &str, sql: &str| -> Result<HashMap<(String, String), i64>> {
+        if !crate::consumer::manifest::exists(&k, "table", table)? {
+            return Ok(HashMap::new());
+        }
+        let mut st = k.prepare(sql)?;
+        let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    };
+    let cards = counts(
+        "cards",
+        "SELECT agent, session, COUNT(*) FROM cards
+         WHERE replaced_by IS NULL AND agent IS NOT NULL AND session IS NOT NULL
+         GROUP BY agent, session",
+    )?;
+    let turns = counts(
+        "turns",
+        "SELECT agent, session, COUNT(*) FROM turns WHERE skipped = 0 GROUP BY agent, session",
+    )?;
+    let gate = |s: &str| redact::outbound_with(s, &rules);
+    let mut out = Vec::new();
+    for s in &listed {
+        let key = (s.agent.clone(), s.session.clone());
+        let items = s.prompts as i64
+            + cards.get(&key).copied().unwrap_or(0)
+            + turns.get(&key).copied().unwrap_or(0);
+        // On one line, at most 100 characters, as a title is shown.
+        let title = raw.prompt_text((&s.device, s.seq), &rules)?.map(|t| {
+            let flat = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            match flat.char_indices().nth(100) {
+                Some((at, _)) => format!("{}…", &flat[..at]),
+                None => flat,
+            }
+        });
+        out.push(json!({
+            "key": session_key(&s.agent, &s.session), "agent": gate(&s.agent),
+            "session": gate(&s.session), "repo": s.repo.as_deref().map(gate),
+            "repo_name": crate::consumer::manifest::repo_name(s.repo.as_deref().unwrap_or(""), &rules),
+            "title": title.filter(|t| !t.is_empty()), "started": s.started, "items": items,
+        }));
+    }
+    let next = (listed.last())
+        .filter(|_| more)
+        .map(|s| json!([s.started, s.device, s.seq]).to_string());
+    Ok(json!({"sessions": out, "next": next}))
+}
+
 /// The feed's four bounded pages, merged by own time, kind, then stored ID (newest first).
 /// Every payload is already gated by its table's one reader; `api` gates the answer too.
-fn feed(home: &Path, repo: Option<&str>, mut cursor: FeedCursor, limit: usize) -> Result<Value> {
+fn feed(
+    home: &Path,
+    (repo, session): (Option<&str>, Option<&str>),
+    mut cursor: FeedCursor,
+    limit: usize,
+) -> Result<Value> {
     let Some((raw, k)) = search::b::stores(home)? else {
         return Ok(json!({"items": [], "next": null}));
     };
+    // A session's page (S4): the agent and session its key names; a key of no session hooks
+    // recorded has no items.
+    let named = match session {
+        Some(key) => match (raw.live_sessions()?.into_iter())
+            .find(|s| session_key(&s.agent, &s.session) == key)
+        {
+            Some(s) => Some((s.agent, s.session)),
+            None => return Ok(json!({"items": [], "next": null})),
+        },
+        None => None,
+    };
+    let scope = (repo, named.as_ref().map(|(a, s)| (a.as_str(), s.as_str())));
     let rules = redact::Rules::load(home)?;
     let (cards, cards_more) =
-        crate::cards::page(&k, &raw, repo, cursor.cards.as_ref(), limit, &rules)?;
+        crate::cards::page(&k, &raw, scope, cursor.cards.as_ref(), limit, &rules)?;
     let (summaries, summaries_more) =
-        crate::turns::page(&k, &raw, repo, cursor.summaries.as_ref(), limit, &rules)?;
-    let (prompts, prompts_more) = raw.prompts(repo, cursor.prompts.as_ref(), limit, &rules)?;
-    let (notes, notes_more) = notes_page(&k, &raw, repo, cursor.notes.as_ref(), limit, &rules)?;
+        crate::turns::page(&k, &raw, scope, cursor.summaries.as_ref(), limit, &rules)?;
+    let (prompts, prompts_more) = raw.prompts(scope, cursor.prompts.as_ref(), limit, &rules)?;
+    // A note is its repository's document, of no session's work: a session's page shows none.
+    let (notes, notes_more) = if named.is_some() {
+        (Vec::new(), false)
+    } else {
+        notes_page(&k, &raw, repo, cursor.notes.as_ref(), limit, &rules)?
+    };
     let name =
         |repo: Option<&str>| crate::consumer::manifest::repo_name(repo.unwrap_or(""), &rules);
     // A common sort key, not another reader: summaries and prompts have no card ordinal.
@@ -4589,9 +4726,20 @@ curate = false
 
     /// A window's cards; the source seq and their op seq (also used by their public IDs).
     fn feed_cards(s: &mut Store, repo: &str, ts: i64, texts: &[&str]) -> (i64, i64) {
+        feed_cards_of(s, "s", repo, ts, texts)
+    }
+
+    /// `feed_cards` of `session`'s window.
+    fn feed_cards_of(
+        s: &mut Store,
+        session: &str,
+        repo: &str,
+        ts: i64,
+        texts: &[&str],
+    ) -> (i64, i64) {
         let seq = s.event(
             "tool",
-            "s",
+            session,
             (repo, "main"),
             ts,
             json!({"output": "Read a file."}),
@@ -4617,16 +4765,27 @@ curate = false
 
     /// A turn's summary, as the consumer reads it from the op log; its source seq and public ID.
     fn feed_summary(s: &mut Store, repo: &str, ts: i64, text: &str) -> (i64, String) {
+        feed_summary_of(s, "s", repo, ts, text)
+    }
+
+    /// `feed_summary` of `session`'s turn.
+    fn feed_summary_of(
+        s: &mut Store,
+        session: &str,
+        repo: &str,
+        ts: i64,
+        text: &str,
+    ) -> (i64, String) {
         let seq = s.event(
             "reply",
-            "s",
+            session,
             (repo, "main"),
             ts,
             json!({"assistant": "Done."}),
         );
         let op = crate::turns::TurnOp {
             agent: "claude".into(),
-            session: "s".into(),
+            session: session.into(),
             repo: Some(repo.into()),
             ts,
             from: seq,
@@ -4972,6 +5131,262 @@ curate = false
         );
     }
 
+    /// page.md slice 2 tests 1 and 2: the sessions hooks recorded, the newest first by their first
+    /// prompt, each with its key, title, items and repository; a transcript's session is not
+    /// listed, and a skip and a card of a window of two sessions are no item; pages read each once,
+    /// also when a session starts between them; the repository filter keeps its own.
+    #[test]
+    fn sessions_list_each_live_session_by_its_first_prompt() {
+        let (mut s, v) = feed_fixture();
+        let (fern, moss) = ("example.test/team/fern", "example.test/team/moss");
+        s.said("a", fern, 1_000, "Build the parser.\nWith tests.");
+        s.said("a", fern, 1_500, "Now the docs.");
+        feed_cards_of(&mut s, "a", fern, 1_600, &["Parser built"]);
+        feed_summary_of(&mut s, "a", fern, 1_700, "Parser summary");
+        s.said("b", moss, 2_000, "Fix the build.");
+        // Neither session's: a window of both, and a skip of b's.
+        let x = s.event("tool", "a", (fern, "main"), 2_500, json!({"output": "x"}));
+        let y = s.event("tool", "b", (moss, "main"), 2_600, json!({"output": "y"}));
+        let both = json!({"outcome": "curated", "from_seq": x, "to_seq": y, "observations": [
+            {"type": "change", "title": "Both", "subtitle": "", "narrative": "Both.", "facts": [],
+             "concepts": [], "files_read": [], "files_modified": []}]});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Window, both)])
+            .unwrap();
+        let skip = json!({"agent": "claude", "session": "b", "repo": moss, "ts": 2_700,
+            "from": y, "through": y, "read": [], "goals": [], "removed": [],
+            "fields": {}, "skipped": true});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Turn, skip)])
+            .unwrap();
+        // A transcript's session is history, not one hooks recorded.
+        s.raw
+            .append(&crate::raw::Event {
+                kind: "prompt".into(),
+                source: "transcript".into(),
+                session: "c".into(),
+                repo: Some(fern.into()),
+                ts: 3_000,
+                ..crate::raw::test_event(r#"{"prompt":"Imported."}"#)
+            })
+            .unwrap();
+        s.run();
+        let page = get(&v, "/api/sessions?all=1");
+        let listed = page["sessions"].as_array().unwrap();
+        let named: Vec<_> = listed.iter().map(|e| e["session"].clone()).collect();
+        assert_eq!(named, [json!("b"), json!("a")]);
+        let keys: Vec<_> = listed.iter().map(|e| e["key"].as_str().unwrap()).collect();
+        assert!(
+            keys[0] != keys[1]
+                && keys
+                    .iter()
+                    .all(|k| k.len() == 16 && k.bytes().all(|b| b.is_ascii_hexdigit())),
+            "{keys:?}"
+        );
+        assert_eq!(
+            (
+                &listed[1]["title"],
+                &listed[1]["items"],
+                &listed[1]["repo_name"]
+            ),
+            (
+                &json!("Build the parser. With tests."),
+                &json!(4),
+                &json!("fern")
+            )
+        );
+        assert_eq!(
+            (
+                &listed[0]["agent"],
+                &listed[0]["session"],
+                &listed[0]["items"]
+            ),
+            (&json!("claude"), &json!("b"), &json!(1))
+        );
+        assert_eq!(listed[0]["started"], 2_000);
+        assert!(page["next"].is_null());
+        let fern_only = get(&v, "/api/sessions?repo=example.test%2Fteam%2Ffern");
+        assert_eq!(fern_only["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(fern_only["sessions"][0]["session"], "a");
+        // One a page; a session that starts meanwhile is above them and repeats none.
+        let first = get(&v, "/api/sessions?all=1&limit=1");
+        assert_eq!(first["sessions"][0]["session"], "b");
+        s.said("d", fern, 9_000, "A later session.");
+        let cursor = first["next"].as_str().unwrap();
+        let cursor =
+            percent_encoding::utf8_percent_encode(cursor, percent_encoding::NON_ALPHANUMERIC);
+        let rest = get(&v, &format!("/api/sessions?all=1&limit=1&before={cursor}"));
+        assert_eq!(rest["sessions"][0]["session"], "a");
+        assert!(rest["next"].is_null(), "{rest}");
+        let bad = v.route("GET", "/api/sessions?all=1&before=x", &[HOST, TOKEN]);
+        assert_eq!(bad.status, 400);
+        // A long first prompt is cut at 100 characters; another agent's session of the same id is
+        // another session, with another key.
+        s.said("e", fern, 9_500, &"word ".repeat(40));
+        s.raw
+            .append(&crate::raw::Event {
+                kind: "prompt".into(),
+                agent: "codex".into(),
+                session: "a".into(),
+                repo: Some(fern.into()),
+                ts: 9_600,
+                ..crate::raw::test_event(r#"{"prompt":"Codex's own."}"#)
+            })
+            .unwrap();
+        let page = get(&v, "/api/sessions?all=1&limit=3");
+        let listed = page["sessions"].as_array().unwrap();
+        assert_eq!(
+            (
+                &listed[0]["agent"],
+                &listed[0]["session"],
+                &listed[0]["title"]
+            ),
+            (&json!("codex"), &json!("a"), &json!("Codex's own."))
+        );
+        let cut = listed[1]["title"].as_str().unwrap();
+        assert_eq!(cut.chars().count(), 101, "{cut}");
+        assert!(cut.ends_with('…') && !cut.contains("  "), "{cut}");
+        let all = get(&v, "/api/sessions?all=1");
+        let keys: std::collections::HashSet<_> = (all["sessions"].as_array().unwrap().iter())
+            .map(|e| e["key"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(keys.len(), 5);
+    }
+
+    /// page.md slice 2 test 3: a rule added after a prompt was written masks the title; a first
+    /// prompt a removal took whole is no title, no start and no item, the next one giving them and
+    /// the session keeping its key; a session whose prompts a removal took whole is not listed.
+    #[test]
+    fn a_sessions_title_is_gated_and_passes_over_a_removed_prompt() {
+        let (mut s, v) = feed_fixture();
+        let repo = "example.test/team/fern";
+        let first = s.said("a", repo, 1_000, "The first prompt.");
+        s.said("a", repo, 1_100, "The second prompt.");
+        s.said("b", repo, 2_000, "invented-MOSS");
+        let only = s.said("c", repo, 3_000, "Gone.");
+        let key_of = |page: &Value, session: &str| {
+            (page["sessions"].as_array().unwrap().iter())
+                .find(|e| e["session"] == session)
+                .map(|e| e["key"].clone())
+        };
+        let before = get(&v, "/api/sessions?all=1");
+        for seq in [first, only] {
+            s.raw
+                .append_tombstone(crate::raw::Target::Record {
+                    device: s.raw.device().to_owned(),
+                    seq,
+                })
+                .unwrap();
+        }
+        std::fs::write(s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{id = \"invented\", regex = 'invented-([A-Z]+)$', secret_group = 1}]\n").unwrap();
+        let page = get(&v, "/api/sessions?all=1");
+        let listed = page["sessions"].as_array().unwrap();
+        let named: Vec<_> = listed.iter().map(|e| e["session"].clone()).collect();
+        assert_eq!(named, [json!("b"), json!("a")], "{page}");
+        assert_eq!(listed[0]["title"], "invented-[REDACTED]");
+        assert!(!page.to_string().contains("MOSS"));
+        assert_eq!(
+            (
+                &listed[1]["title"],
+                &listed[1]["items"],
+                &listed[1]["started"]
+            ),
+            (&json!("The second prompt."), &json!(1), &json!(1_100))
+        );
+        assert_eq!(key_of(&page, "a"), key_of(&before, "a"));
+        assert!(key_of(&before, "c").is_some());
+    }
+
+    /// page.md slice 2 test 4: a session's page reads that session's cards, summaries and prompts,
+    /// by its first prompt's key, and no other session's, paged as the feed is; a note an agent
+    /// saved belongs to no session (S4); a key that names no live prompt has no items, and one that
+    /// is no key is refused.
+    #[test]
+    fn a_sessions_page_reads_that_sessions_items_alone() {
+        let (mut s, v) = feed_fixture();
+        let repo = "example.test/team/fern";
+        let first = s.said("a", repo, 1_000, "Build the parser.");
+        let (_, card) = feed_cards_of(&mut s, "a", repo, 1_100, &["Parser built"]);
+        let (_, summary) = feed_summary_of(&mut s, "a", repo, 1_200, "Parser summary");
+        let note = s.note(
+            "n",
+            repo,
+            1_250,
+            "A saved note",
+            "Saved during the session.",
+        );
+        let later = s.said("a", repo, 1_300, "Now the docs.");
+        s.said("b", repo, 2_000, "Another session.");
+        feed_cards_of(&mut s, "b", repo, 2_100, &["Another card"]);
+        feed_summary_of(&mut s, "b", repo, 2_200, "Another summary");
+        // Another agent's session of the same id is another session.
+        s.raw
+            .append(&crate::raw::Event {
+                kind: "prompt".into(),
+                agent: "codex".into(),
+                session: "a".into(),
+                repo: Some(repo.into()),
+                ts: 1_250,
+                ..crate::raw::test_event(r#"{"prompt":"Codex's own."}"#)
+            })
+            .unwrap();
+        s.run();
+        let key = |k: String| {
+            percent_encoding::utf8_percent_encode(&k, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+        };
+        let listed = get(&v, "/api/sessions?all=1");
+        let a = (listed["sessions"].as_array().unwrap().iter())
+            .find(|e| e["session"] == "a" && e["agent"] == "claude")
+            .map(|e| e["key"].as_str().unwrap().to_owned())
+            .unwrap();
+        let expected: Vec<(String, String)> = [
+            ("prompt", s.key(later)),
+            ("summary", summary),
+            ("card", format!("{card}.0")),
+            ("prompt", s.key(first)),
+        ]
+        .into_iter()
+        .map(|(kind, id)| (kind.to_owned(), id))
+        .collect();
+        assert_eq!(
+            feed_ids(&get(&v, &format!("/api/feed?session={a}"))),
+            expected
+        );
+        let feed = feed_ids(&get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern"));
+        assert!(feed.contains(&("note".to_owned(), note)), "{feed:?}");
+        // The checkout's repository filter does not narrow it.
+        let named = get(
+            &v,
+            &format!("/api/feed?session={a}&repo=example.test%2Fteam%2Fmoss"),
+        );
+        assert_eq!(feed_ids(&named), expected);
+        let mut page = get(&v, &format!("/api/feed?session={a}&limit=1"));
+        let mut paged = feed_ids(&page);
+        for _ in 0..5 {
+            let Some(cursor) = page["next"].as_str() else {
+                break;
+            };
+            page = get(
+                &v,
+                &format!(
+                    "/api/feed?session={a}&limit=1&before={}",
+                    key(cursor.to_owned())
+                ),
+            );
+            paged.extend(feed_ids(&page));
+        }
+        assert_eq!(paged, expected);
+        // A key of no listed session has no items; one that is no key is refused.
+        let none = get(&v, "/api/feed?session=0123456789abcdef");
+        assert_eq!((&none["items"], &none["next"]), (&json!([]), &Value::Null));
+        for bad in ["nokey", "0123456789abcdeg", "0123456789abcdef0"] {
+            let answer = v.route("GET", &format!("/api/feed?session={bad}"), &[HOST, TOKEN]);
+            assert_eq!(answer.status, 400, "{bad}");
+        }
+    }
+
     /// page.md test 4: a newly added field-anchored rule applies on read, not only on capture;
     /// each card/summary field and each prompt is gated before the whole API answer.
     #[test]
@@ -5002,7 +5417,7 @@ curate = false
     fn a_page_cursor_leaves_as_it_came_and_the_rest_gated() {
         let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
         let cursor = format!("{{\"prompts\":[1,\"{token}\",2]}}");
-        for name in ["feed", "timeline"] {
+        for name in ["feed", "timeline", "sessions"] {
             let out = answered(
                 name,
                 json!({"items": [{"text": token.clone()}], "next": cursor.clone()}),
@@ -5033,7 +5448,17 @@ curate = false
     #[test]
     fn feed_requires_the_token_local_host_and_read_method() {
         let (dir, v) = viewer("feed-guards");
-        let url = "/api/feed?all=1";
+        // page.md slice 2 test 6: the sessions list is guarded as the feed is.
+        for (url, empty) in [
+            ("/api/feed?all=1", json!({"items": [], "next": null})),
+            ("/api/sessions?all=1", json!({"sessions": [], "next": null})),
+        ] {
+            guarded(&v, url, empty);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn guarded(v: &Viewer, url: &str, empty: Value) {
         assert_eq!(v.route("GET", url, &[HOST]).status, 401);
         assert_eq!(
             v.route("GET", url, &[HOST, ("X-Oboete-Token", "wrong")])
@@ -5052,12 +5477,11 @@ curate = false
             assert_eq!(v.route("GET", url, &[HOST, TOKEN, framing]).status, 400);
         }
         assert_eq!(v.route("HEAD", url, &[HOST, TOKEN]).status, 200);
-        assert_eq!(get(&v, url), json!({"items": [], "next": null}));
+        assert_eq!(get(v, url), empty);
         for cursor in ["%7B", "%7B%22pages%22%3A1%7D", &"7".repeat(4097)] {
             let url = format!("{url}&before={cursor}");
             assert_eq!(v.route("GET", &url, &[HOST, TOKEN]).status, 400, "{cursor}");
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// P5: prompts are read directly, so the poll marker must move on capture even while the

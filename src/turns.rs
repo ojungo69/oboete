@@ -716,13 +716,14 @@ pub fn recent(
     Ok(out)
 }
 
-/// A repository's (or all repositories') summaries after `before`, newest first. T7-hidden
-/// rows and skips take no slot; every returned summary passes `read_row` (T8). One extra
-/// visible row may be inspected only to answer whether the page is exhausted.
+/// A repository's (or all repositories') summaries after `before`, newest first, or one agent's
+/// session's (`session`, `(agent, session)`, docs/page.md S4). T7-hidden rows and skips take no
+/// slot; every returned summary passes `read_row` (T8). One extra visible row may be inspected
+/// only to answer whether the page is exhausted.
 pub fn page(
     k: &Connection,
     raw: &Raw,
-    repo: Option<&str>,
+    (repo, session): (Option<&str>, Option<(&str, &str)>),
     before: Option<&Position>,
     limit: usize,
     rules: &Rules,
@@ -733,6 +734,7 @@ pub fn page(
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS} FROM turns WHERE skipped = 0
            AND (?1 IS NULL OR repo = ?1)
+           AND (?5 IS NULL OR (agent = ?5 AND session = ?6))
            AND (?2 IS NULL OR (ts, device, op_seq) < (?2, ?3, ?4))
          ORDER BY ts DESC, device DESC, op_seq DESC"
     ))?;
@@ -740,7 +742,9 @@ pub fn page(
         repo,
         before.map(|p| p.0),
         before.map(|p| p.1.as_str()),
-        before.map(|p| p.2)
+        before.map(|p| p.2),
+        session.map(|s| s.0),
+        session.map(|s| s.1)
     ])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {

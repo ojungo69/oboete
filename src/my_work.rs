@@ -710,7 +710,8 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let summaries = newest(
         SUMMARIES,
         |before| {
-            let (page, more) = crate::turns::page(&k, &raw, None, before, SUMMARIES, &rules)?;
+            let (page, more) =
+                crate::turns::page(&k, &raw, (None, None), before, SUMMARIES, &rules)?;
             let rows = (page.into_iter())
                 .map(|s| {
                     let (span, key) = k.query_row(
@@ -735,7 +736,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let cards = newest(
         CARDS,
         |before| {
-            let (page, more) = crate::cards::page(&k, &raw, None, before, CARDS, &rules)?;
+            let (page, more) = crate::cards::page(&k, &raw, (None, None), before, CARDS, &rules)?;
             let rows = (page.into_iter())
                 .map(|c| {
                     let (span, agent, session): ((i64, i64), Option<String>, Option<String>) = k

@@ -683,21 +683,51 @@ input.invalid, select.invalid, textarea.invalid { border-color: var(--red); back
 .summary-section .text { margin-top: 2px; }
 
 .feed-pagination { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+
+/* Sessions: the list and a session's page (docs/page.md slice 2). */
+.session-entry { margin: 0 0 10px; }
+.session-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 14px 18px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-s);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.session-card:hover { border-color: var(--accent); }
+.session-title { font-size: 15.5px; font-weight: 600; line-height: 1.45; }
+.session-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.session-id, .session-detail-id code { font-family: var(--mono); }
+.session-back { margin: 0 0 14px; }
+.session-detail-id { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px; color: var(--muted); overflow-wrap: anywhere; }
+.session-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 14px; }
+.session-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.session-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.session-chips-count { color: var(--muted); font-size: 12.5px; }
 .feed-state { width: 100%; margin: 8px 0; color: var(--muted); font-size: 14px; text-align: center; }
 .feed-state:empty { margin: 0; }
 .feed-state.error { color: var(--red); }
-/* The end of the feed: a quiet rule with the words in the middle. */
-#list:not(:empty) ~ #panel .feed-state:not(:empty):not(.error) { display: flex; align-items: center; gap: 14px; font-size: 13px; }
-#list:not(:empty) ~ #panel .feed-state:not(:empty):not(.error)::before,
-#list:not(:empty) ~ #panel .feed-state:not(:empty):not(.error)::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+/* The end of the feed: a quiet rule with the words in the middle. A session's page holds its items
+   in the panel (docs/page.md S4), so the panel's own entries count as the list's. */
+:is(#list:not(:empty) ~ #panel, #panel:has(.feed-entry)) .feed-state:not(:empty):not(.error) { display: flex; align-items: center; gap: 14px; font-size: 13px; }
+:is(#list:not(:empty) ~ #panel, #panel:has(.feed-entry)) .feed-state:not(:empty):not(.error)::before,
+:is(#list:not(:empty) ~ #panel, #panel:has(.feed-entry)) .feed-state:not(:empty):not(.error)::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 /* Nothing shown yet: a composed empty state, or the shape of cards while the first page loads. */
-#list:empty ~ #panel .feed-state:not(:empty) {
+#list:empty ~ #panel:not(:has(.feed-entry)) .feed-state:not(:empty) {
   padding: 48px 24px;
   background: var(--surface);
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-l);
 }
-#list:empty ~ #panel .feed-state:not(:empty)::before {
+#list:empty ~ #panel:not(:has(.feed-entry)) .feed-state:not(:empty)::before {
   content: "";
   display: block;
   width: 36px;
@@ -706,8 +736,8 @@ input.invalid, select.invalid, textarea.invalid { border-color: var(--red); back
   border: 3px solid var(--line-strong);
   border-radius: 50%;
 }
-#list:empty ~ #panel .feed-state.loading { padding: 20px; border-style: solid; border-color: var(--line); text-align: left; }
-#list:empty ~ #panel .feed-state.loading::before {
+#list:empty ~ #panel:not(:has(.feed-entry)) .feed-state.loading { padding: 20px; border-style: solid; border-color: var(--line); text-align: left; }
+#list:empty ~ #panel:not(:has(.feed-entry)) .feed-state.loading::before {
   width: auto;
   height: 112px;
   margin: 0 0 14px;
@@ -908,7 +938,7 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 
 @media (prefers-reduced-motion: no-preference) {
   .live:not(.off)::before { animation: live 2.4s ease-in-out infinite; }
-  #list:empty ~ #panel .feed-state.loading::before { animation: shimmer 1.4s ease-in-out infinite; }
+  #list:empty ~ #panel:not(:has(.feed-entry)) .feed-state.loading::before { animation: shimmer 1.4s ease-in-out infinite; }
   .my-work-card.my-work-updated { animation: my-work-arrived 1.4s ease-out; }
 }
 @keyframes live { 50% { opacity: 0.35; } }
