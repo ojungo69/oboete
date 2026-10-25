@@ -7819,7 +7819,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     }
 
     /// What a call's input is billed as: on a Messages entry a token read from its prompt cache
-    /// at a tenth of the input price, one written at 1.25 times, or twice for an hour's cache;
+    /// at a tenth of the input price and one written at 1.25 times, or twice when the entry asks for
+    /// a cache of its own anywhere in its `extra`, at the top or on a block (Codex on #636);
     /// elsewhere a written token twice and a read one once. A reported prompt counts every input
     /// token, those its cache wrote and read too.
     #[test]
@@ -7833,14 +7834,27 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(messages.billed_input(10_000, None, Some(4_000)), 11_000.0);
         assert_eq!(messages.billed_input(10_000, None, None), 10_000.0);
         assert_eq!(messages.input_weight(), 1.25);
-        if let Provider::Openai { extra, .. } = &mut messages {
-            extra.insert(
-                "cache_control".into(),
-                json!({"type": "ephemeral", "ttl": "1h"}),
+        let own = [
+            ("cache_control", json!({"type": "ephemeral"})),
+            ("cache_control", json!({"type": "ephemeral", "ttl": "1h"})),
+            (
+                "system",
+                json!([{"type": "text", "text": "s",
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}}]),
+            ),
+        ];
+        for (key, value) in own {
+            let mut entry = messages.clone();
+            if let Provider::Openai { extra, .. } = &mut entry {
+                extra.insert(key.into(), value.clone());
+            }
+            assert_eq!(
+                entry.billed_input(10_000, None, Some(4_000)),
+                14_000.0,
+                "{value}"
             );
+            assert_eq!(entry.input_weight(), 2.0, "{value}");
         }
-        assert_eq!(messages.billed_input(10_000, None, Some(4_000)), 14_000.0);
-        assert_eq!(messages.input_weight(), 2.0);
         let other = stub(url);
         assert_eq!(
             other.billed_input(10_000, Some(4_000), Some(1_000)),

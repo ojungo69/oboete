@@ -331,17 +331,17 @@ impl Provider {
     /// The most one input token may be billed, in input prices. A Messages entry writes its prompt
     /// cache: a fenced prompt's instructions (`provider::anthropic_request`) at 1.25 times the input
     /// price, for five minutes' cache, and at up to twice when its `extra` asks for a cache of its
-    /// own (`cache_control`, of the whole request or for an hour); any other entry once. Only
-    /// prices: a paid call's input is priced at this where its usage is not known (admission, the
-    /// reservation, a call whose usage never comes back, recuration's estimate), and its tokens
-    /// count once against every token limit (Codex on #409).
+    /// own anywhere (`own_cache`); any other entry once. Only prices: a paid call's input is priced
+    /// at this where its usage is not known (admission, the reservation, a call whose usage never
+    /// comes back, recuration's estimate), and its tokens count once against every token limit
+    /// (Codex on #409).
     pub fn input_weight(&self) -> f64 {
         match self {
             Provider::Openai {
                 api: Api::Anthropic,
                 extra,
                 ..
-            } if extra.contains_key("cache_control") => 2.0,
+            } if own_cache(extra) => 2.0,
             Provider::Openai {
                 api: Api::Anthropic,
                 ..
@@ -353,9 +353,10 @@ impl Provider {
     /// What a call's input is billed as, in input tokens at the input price, from its reported
     /// `prompt` (every input token, those its cache wrote and read too), never less than the bill.
     /// A Messages entry bills a token read from its prompt cache at a tenth of the input price or
-    /// less (Claude's models), and one written at 1.25 times for five minutes' cache or twice for
-    /// an hour's (`ttl = "1h"` in its `extra`'s `cache_control`); elsewhere a written token counts
-    /// twice and a read one once.
+    /// less (Claude's models), and one written at 1.25 times for oboete's own five-minute marker;
+    /// at twice when its `extra` asks for a cache of its own anywhere (`own_cache`), whose lifetime
+    /// the usage does not tell apart (Codex on #636). Elsewhere a written token counts twice and a
+    /// read one once.
     pub fn billed_input(&self, prompt: i64, cached: Option<i64>, written: Option<i64>) -> f64 {
         let (cached, written) = (cached.unwrap_or(0).max(0), written.unwrap_or(0).max(0));
         match self {
@@ -364,12 +365,7 @@ impl Provider {
                 extra,
                 ..
             } => {
-                let ttl = extra.get("cache_control").and_then(|c| c.get("ttl"));
-                let write = if ttl.and_then(serde_json::Value::as_str) == Some("1h") {
-                    2.0
-                } else {
-                    1.25
-                };
+                let write = if own_cache(extra) { 2.0 } else { 1.25 };
                 let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
                 fresh as f64 + written as f64 * write + cached as f64 * 0.1
             }
@@ -1138,6 +1134,19 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
 #[serde(default, deny_unknown_fields)]
 pub struct Worker {
     pub resident: bool,
+}
+
+/// Whether a Messages entry's `extra` asks for a prompt cache of its own anywhere: at the top of
+/// the request, or on a block of its `system`, `tools` or `messages`, for any lifetime.
+fn own_cache(extra: &serde_json::Map<String, serde_json::Value>) -> bool {
+    fn asks(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(o) => o.contains_key("cache_control") || o.values().any(asks),
+            serde_json::Value::Array(a) => a.iter().any(asks),
+            _ => false,
+        }
+    }
+    extra.contains_key("cache_control") || extra.values().any(asks)
 }
 
 /// `home`'s `[worker]`, by its own parse as `inject`'s. An error is not "off": a worker that

@@ -69,11 +69,12 @@ input price. Curation goes a step at a time while the owner works (decision 56),
 lifetime, as a longer cache must come first.
 
 The usage reports the written tokens (`cache_creation_input_tokens`) and the read ones apart.
-oboete counts a written token at 1.25 times the entry's input price (2 times when its own
-`cache_control` asks for an hour) and a read one at 0.1 times: what it counts toward
-`paid_usd_per_month` is never less than the bill on Claude's models. A Messages entry also prices
-each input token at 1.25 times its input price (2 times with its own `cache_control`) wherever its
-usage is not known yet (admission, the reservation, the recuration estimate), so a call whose usage
+oboete counts a written token at 1.25 times the entry's input price, and at 2 times when the entry's
+`extra` asks for a cache of its own anywhere (at the top or on a block of its `system`, `tools` or
+`messages`), whose lifetimes the usage does not tell apart; a read one at 0.1 times. What it counts
+toward `paid_usd_per_month` is never less than the bill on Claude's models. A Messages entry also
+prices each input token at 1.25 times its input price (2 times with a cache of its own) wherever
+its usage is not known yet (admission, the reservation, the recuration estimate), so a call whose usage
 never comes back (a timeout, an unreadable answer) is counted at least as billed. Only the price is
 raised: its tokens count once against the request ceiling, the rate limits and the daily tokens.
 
