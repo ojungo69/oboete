@@ -1070,8 +1070,8 @@ const TEXT = {
   ],
   idle_minutes: ['Wait after the last activity (minutes, {min} to {max})', '最後の記録から待つ時間(分、{min}〜{max})'],
   idle_minutes_desc: [
-    'Default: 10 minutes. Waits for more activity before sending a short request. Zero skips this wait. The actual wait is at most 30 minutes, even when a larger value is saved. Changing it does not start a paid call.',
-    '既定は 10 分です。短い記録を送る前に、続きの記録を待ちます。0 ではこの待ち時間をなくします。大きい値を保存しても実際に待つのは最大 30 分です。変更しても有料の呼び出しは始まりません。',
+    'Default: 10 minutes. While you work, each step that finishes is sent at once. A new request whose work has not started yet waits for it, up to this time. Zero skips this wait. The actual wait is at most 30 minutes, even when a larger value is saved. Changing it does not start a paid call.',
+    '既定は 10 分です。作業中は、終わった手順をすぐに送ります。まだ作業が始まっていない新しい依頼は、この時間まで作業の始まりを待ちます。0 ではこの待ち時間をなくします。大きい値を保存しても実際に待つのは最大 30 分です。変更しても有料の呼び出しは始まりません。',
   ],
   saved_value: ['Saved: {value}', '保存済み: {value}'],
   value_on: ['On', '入'],

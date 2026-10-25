@@ -31,8 +31,10 @@ subagent's stop writes none, `capture::shaped`), of a session the exclusion list
 cards. A turn is its session's live records from its first event after the session's previous
 reply, through this one: an import of the same session is no boundary and no part of it, so neither
 a card of a window of imports alone nor the removal of an import touches the turn (Codex on #371).
-The worker asks for it where it asked for a digest: when the window phase sent nothing, one call a
-run, the oldest turn end after the last one a summary was kept of (every turn end is reached,
+The worker asks for it first in each run, before a window, one call a run (decision 56: windows go
+a step at a time while the owner works, and would otherwise hold summaries back for as long as the
+work goes on; a turn's own windows were curated, and their cards read, in an earlier run), the
+oldest turn end after the last one a summary was kept of (every turn end is reached,
 however many records follow it), with the digest's holds (a summary every entry fails waits as a
 window does, and the turns after it wait with it; one given up after `ATTEMPTS` is kept as a
 skip, as a window given up is, and not asked again, though its request changes: that is a
@@ -44,7 +46,8 @@ scan goes past it and no run reads it again. A run after an undo asks for it, th
 session the list no longer names first, one a run, though a later turn's summary passed it; each
 run judges those sessions once, not their every turn (Codex on #371). Unlike the digest it does
 not wait for the session to go idle: a turn is whole at its reply, and claude-mem asks at Stop. The
-window phase's own idle wait still holds back the windows of a session's last turn (Codex on C2).
+windows of a turn go as its steps are done, its reply among them (decision 56,
+[curation-timing.md](curation-timing.md)); one that holds only a prompt still waits for its work.
 
 T2. **What it is shown**, between two fence lines, as recorded data, each text gated as a window's
 is: the turn's prompts (at most 2,000 characters in all), the cards of its session's windows that
@@ -125,7 +128,7 @@ and its ops stay in the log, unread; the spec's sections that named it (1.1, 1.4
 
 | | claude-mem | oboete | Why |
 |---|---|---|---|
-| When it is written | at Stop | once the turn's windows are curated (the window phase waits a session's idle time before it cuts its last window) | one call per window (oboete's merit); the newest turn may have no summary at the very next session start |
+| When it is written | at Stop | once the turn's windows are curated, the reply's window as soon as the reply is recorded (decision 56), the summary in the run after it | one call per window (oboete's merit); the newest turn may have no summary at the very next session start |
 | Whose | the calling agent's sessions | every agent's sessions in the repository | one memory across agents |
 | Files | attached from the session's tool evidence | on the cards | the cards carry them |
 | After a forget | stays | hidden (T7) | forget is oboete's |

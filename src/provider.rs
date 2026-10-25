@@ -6773,6 +6773,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             elided: Vec::new(),
             shortened: Vec::new(),
             full: false,
+            ends: false,
             excluded: Vec::new(),
             aside: None,
             lines: Vec::new(),
