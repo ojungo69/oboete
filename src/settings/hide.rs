@@ -299,7 +299,7 @@ mod tests {
     }
 
     /// A summary removed from the page leaves its readers, its row stays (what was asked is not
-    /// asked again), and it comes back.
+    /// asked again), a rebuild keeps it removed, and it comes back.
     #[test]
     fn a_summary_removed_from_the_page_keeps_its_row_and_comes_back() {
         let mut s = Store::new();
@@ -310,39 +310,51 @@ mod tests {
             "fields": {"request": "Zulu request"}, "skipped": false}),
         );
         s.run();
-        let home = s.home.path();
-        let rules = crate::redact::Rules::default();
+        let Store {
+            home: dir,
+            raw: held,
+        } = s;
+        drop(held);
+        let home = dir.path();
         let shown = || {
+            let raw = crate::raw::open(home).unwrap();
             let k = crate::knowledge::open(home).unwrap();
-            let recent = crate::turns::recent(&k, &s.raw, R, 10, &rules).unwrap();
-            let got = crate::turns::get(&k, &s.raw, &id, &rules).unwrap();
+            let rules = crate::redact::Rules::default();
+            let recent = crate::turns::recent(&k, &raw, R, 10, &rules).unwrap();
+            let got = crate::turns::get(&k, &raw, &id, &rules).unwrap();
             let (page, _) =
-                crate::turns::page(&k, &s.raw, (Some(R), None), None, 10, &rules).unwrap();
+                crate::turns::page(&k, &raw, (Some(R), None), None, 10, &rules).unwrap();
             let around =
-                crate::turns::around(&k, &s.raw, Some(R), i64::MAX, true, 10, &rules).unwrap();
+                crate::turns::around(&k, &raw, Some(R), i64::MAX, true, 10, &rules).unwrap();
             let found = found(home, "Zulu") > 0;
             (recent.len(), got.is_some(), page.len(), around.len(), found)
         };
+        let rows = || -> i64 {
+            (crate::knowledge::open(home).unwrap())
+                .query_row(
+                    "SELECT count(*) FROM turns WHERE op_seq = ?1 AND hidden = 1",
+                    [&id[1..]],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
         assert_eq!(shown(), (1, true, 1, 1, true));
         hide(home, "summary", &id, true).unwrap();
-        assert_eq!(shown(), (0, false, 0, 0, false));
-        let k = crate::knowledge::open(home).unwrap();
-        let rows: i64 = k
-            .query_row(
-                "SELECT count(*) FROM turns WHERE op_seq = ?1 AND hidden = 1",
-                [&id[1..]],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(rows, 1);
+        assert_eq!((shown(), rows()), ((0, false, 0, 0, false), 1));
         assert_eq!(list(home).unwrap()["items"][0]["id"], json!(id));
+        crate::worker::rebuild(home).unwrap();
+        assert_eq!(
+            (shown(), rows()),
+            ((0, false, 0, 0, false), 1),
+            "a rebuild keeps it removed"
+        );
         hide(home, "summary", &id, false).unwrap();
         assert_eq!(shown(), (1, true, 1, 1, true));
     }
 
     /// A rewind past a hide op shows what it removed again: the op is gone from the log.
     #[test]
-    fn a_rewind_past_its_hide_op_shows_the_card_again() {
+    fn a_rewind_past_its_hide_op_shows_the_card_and_the_summary_again() {
         let mut s = Store::new();
         let seq = s.said("s1", R, 1_000, "Ship the parser.");
         let ids = s.cards(
@@ -351,18 +363,35 @@ mod tests {
             json!([{"type": "feature", "title": "Azimuth parser"}]),
             false,
         );
+        let summary = s.turn(
+            json!({"agent": "claude", "session": "s1", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Zulu request"}, "skipped": false}),
+        );
         s.run();
         let device = s.raw.device().to_owned();
         let before = s.raw.max_op_seq().unwrap();
         let home = s.home.path();
         hide(home, "card", &ids[0], true).unwrap();
-        assert!(card_titles(home).is_empty());
+        hide(home, "summary", &summary, true).unwrap();
+        let summaries = || {
+            let k = crate::knowledge::open(home).unwrap();
+            let rules = crate::redact::Rules::default();
+            crate::turns::recent(&k, &s.raw, R, 10, &rules)
+                .unwrap()
+                .len()
+        };
+        assert_eq!((card_titles(home).len(), summaries()), (0, 0));
         let k = crate::knowledge::open(home).unwrap();
         crate::consumer::cards::Cards
             .rewind(&k, &device, before)
             .unwrap();
+        crate::consumer::turns::Turns
+            .rewind(&k, &device, before)
+            .unwrap();
         drop(k);
         assert_eq!(card_titles(home), ["Azimuth parser"]);
+        assert_eq!(summaries(), 1);
     }
 
     /// A hide op raises the home to the format that reads it, in the transaction that writes it,

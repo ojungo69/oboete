@@ -2916,6 +2916,57 @@ mod tests {
         }
     }
 
+    /// Parity row 3 (docs/card-hide.md): a card and a summary removed from the page lose their
+    /// vectors and are sent to no embedder while removed; brought back, they are embedded again.
+    #[test]
+    fn a_card_and_a_summary_removed_from_the_page_lose_their_vectors_until_brought_back() {
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let seq = s.said("s", R, 1_000, "Ship the parser.");
+        let card = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Azimuth"}]),
+            false,
+        )[0]
+        .clone();
+        let summary = s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R,
+            "ts": 2_000, "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Fix the parser."}, "skipped": false}),
+        );
+        s.run();
+        embed_all(&s);
+        let device = s.raw.device().to_owned();
+        let both = vec![
+            format!("{device}.{card}"),
+            format!("S{device}.{}", &summary[1..]),
+        ];
+        let kept = |s: &Store| -> Vec<String> {
+            (keys(s).into_iter())
+                .filter(|(kind, _, why)| ["o", "s"].contains(&kind.as_str()) && why.is_none())
+                .map(|(_, key, _)| key)
+                .collect()
+        };
+        assert_eq!(kept(&s), both);
+        let hide = |kind: &str, id: &str, hidden: bool| {
+            let body = serde_json::json!({"item": {"kind": kind, "id": id}, "hidden": hidden});
+            let body = serde_json::to_vec(&body).unwrap();
+            crate::settings::hide::save(s.home.path(), &std::sync::Mutex::new(()), &body).unwrap();
+        };
+        hide("card", &card, true);
+        hide("summary", &summary, true);
+        assert!(kept(&s).is_empty(), "their vectors go");
+        let sent = stub.requests();
+        embed_all(&s);
+        assert_eq!(stub.requests(), sent, "nothing removed is sent");
+        hide("card", &card, false);
+        hide("summary", &summary, false);
+        embed_all(&s);
+        assert_eq!(kept(&s), both, "brought back, they are embedded again");
+    }
+
     /// Tools slice 3 (V1, K6; Codex): each value of a card or a summary is gated alone, as its
     /// reader gates it, so a rule on a whole value that spans its lines holds in the text sent.
     #[test]
