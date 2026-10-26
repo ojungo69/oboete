@@ -1704,7 +1704,8 @@ pub fn status(home: &Path) -> Result<()> {
 }
 
 fn status_lines(home: &Path) -> Vec<String> {
-    let mut lines = vec![if running(home) {
+    let running = running(home);
+    let mut lines = vec![if running {
         match progress(home) {
             Some((pid, 0)) => format!("worker: running (process {pid}), making progress"),
             // How long a call out may keep it still is the watchdog's: no fixed limit is shown
@@ -1718,6 +1719,9 @@ fn status_lines(home: &Path) -> Vec<String> {
     } else {
         format!("worker: not running now ({})", who_starts(home))
     }];
+    if running && !crate::config::autostart(home) {
+        lines.push(format!("worker: {MANAGED}"));
+    }
     if crate::config::worker(home).is_ok_and(|w| w.resident)
         && let Ok(view) = crate::config::view(home)
     {
@@ -1729,6 +1733,9 @@ fn status_lines(home: &Path) -> Vec<String> {
     lines.extend(left_line(home));
     lines
 }
+
+/// R16: said beside a running worker where no hook would start another once it stops (#678).
+pub(crate) const MANAGED: &str = "when it stops, no hook starts one ([worker] autostart = false)";
 
 /// What starts a worker that is not running (R15), or that nothing here does (R16).
 pub(crate) fn who_starts(home: &Path) -> &'static str {
@@ -4995,7 +5002,8 @@ mod tests {
         drop(held);
     }
 
-    /// R16: where `[worker] autostart = false` loads, `status` says that no hook starts a worker.
+    /// R16: where `[worker] autostart = false` loads, `status` says that no hook starts a worker,
+    /// while none runs and beside a running one (#678).
     #[test]
     fn status_says_no_hook_starts_one_where_autostart_is_off() {
         let home = tempfile::tempdir().unwrap();
@@ -5005,6 +5013,17 @@ mod tests {
             status_lines(p),
             ["worker: not running now (no hook starts one: [worker] autostart = false)"]
         );
+        let held = lock(p).unwrap().unwrap();
+        assert_eq!(
+            status_lines(p),
+            [
+                "worker: running",
+                "worker: when it stops, no hook starts one ([worker] autostart = false)"
+            ]
+        );
+        std::fs::write(p.join("config.toml"), "").unwrap();
+        assert_eq!(status_lines(p), ["worker: running"]);
+        drop(held);
     }
 
     /// R15: `status` says whether a worker holds the lock, and what its watchdog last wrote only

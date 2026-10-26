@@ -2255,6 +2255,20 @@ delete status.textContent;status.children=[];
     assert.deepEqual(Array.from(k.hidden.items,i=>i.id),[],'the page read for the list before is dropped');
     ctx.fetch=prior;
   }
+  // #679: a Bring back from a later page leaves the first page and its next position as they were;
+  // the page read for the list before is dropped all the same.
+  {
+    const k={hidden:{items:[g.hidden.items[0]],next}};ctx.ui.setForm(k);
+    const prior=ctx.fetch;let release;
+    ctx.fetch=(url,options)=>url.startsWith('/api/hidden?before=')
+      ?new Promise(resolve=>{release=()=>resolve(json({items:[{kind:'card',id:'back',title:'Back',repo_name:'fern',ts:1}],next:null}));})
+      :prior(url,options);
+    showMore(run('hiddenSection')(k)).click();
+    k.hidden={items:[g.hidden.items[0]],next};
+    release();await settle();
+    assert.deepEqual(Array.from(k.hidden.items,i=>i.id),['12.0'],'a page read before a reread with the same next is dropped');
+    ctx.fetch=prior;
+  }
   hidden={items:[]};
   ctx.drawSettings=drawSettings;ctx.ui.setForm(null);run('setView("timeline")');
   delete status.textContent;status.children=[];

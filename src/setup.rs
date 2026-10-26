@@ -2536,6 +2536,10 @@ fn cursor_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String 
 /// Below this, doctor is red: the next hooks may not be able to write.
 const LOW_FREE_BYTES: u64 = 100 * 1024 * 1024;
 
+/// R16: doctor's line for a worker that is not resident under `[worker] autostart = false`.
+const UNMANAGED_IDLE: &str = "no hook starts one ([worker] autostart = false); it leaves when idle, for \
+     what manages it to start again";
+
 pub fn doctor(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
     println!("oboete {} at {}", env!("CARGO_PKG_VERSION"), exe.display());
@@ -2730,19 +2734,27 @@ pub fn doctor(home: &Path) -> Result<()> {
     match (config::worker(home), config::view(home)) {
         (Ok(worker), Ok(view)) if worker.resident => {
             if cfg!(target_os = "linux") {
+                let running = crate::worker::running(home);
                 println!(
                     "  worker: resident, {}",
-                    if crate::worker::running(home) {
+                    if running {
                         "running".to_owned()
                     } else {
                         format!("not running now ({})", crate::worker::who_starts(home))
                     }
                 );
+                // R16 beside a running worker too (#678).
+                if running && !worker.autostart {
+                    println!("  worker: {}", crate::worker::MANAGED);
+                }
                 println!("  {}", crate::view::resident_line(home, view.port.get()));
             } else {
                 println!(
                     "  worker: resident is configured but not supported here; it exits when idle"
                 );
+                if !worker.autostart {
+                    println!("  worker: {UNMANAGED_IDLE}");
+                }
             }
         }
         (Err(error), _) | (_, Err(error)) => {
@@ -2751,10 +2763,7 @@ pub fn doctor(home: &Path) -> Result<()> {
         }
         // R16: a worker that is not resident leaves when idle, and only what manages it starts
         // it again.
-        (Ok(worker), _) if !worker.autostart => println!(
-            "  worker: no hook starts one ([worker] autostart = false); it leaves when idle, for \
-             what manages it to start again"
-        ),
+        (Ok(worker), _) if !worker.autostart => println!("  worker: {UNMANAGED_IDLE}"),
         _ => {}
     }
     if db_path.exists() {

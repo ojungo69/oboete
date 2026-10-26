@@ -1743,6 +1743,25 @@ fn autostart_off_leaves_the_worker_to_what_manages_it() {
             .unwrap(),
     );
     until("the managed worker's lock", || held(p, "worker.lock"));
+    // While it runs, status and doctor say no hook would start another (#678).
+    let managed_line = "worker: when it stops, no hook starts one ([worker] autostart = false)";
+    let status = run(&["worker", "status"], "");
+    assert!(status.lines().any(|l| l == managed_line), "{status}");
+    let text = doctor(&format!(
+        "{config}[worker]\nresident = true\nautostart = false\n[view]\nport = {}\n",
+        free_port()
+    ));
+    assert!(
+        text.lines()
+            .any(|l| l.trim() == "worker: resident, running"),
+        "{text}"
+    );
+    assert!(text.lines().any(|l| l.trim() == managed_line), "{text}");
+    std::fs::write(
+        p.join("config.toml"),
+        format!("{config}[worker]\nautostart = false\n"),
+    )
+    .unwrap();
     assert!(
         run(&["worker", "stop"], "").starts_with(
             "worker: stopped; no hook starts it again ([worker] autostart = false), and the page stays up"
