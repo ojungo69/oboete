@@ -1816,6 +1816,9 @@ fn answer(
     let readings = crate::my_work_progress::readings(k, &r.id.held(), raw.device(), hidden)?;
     let at = lifecycle(&items).map(|l| (l.0).0);
     let counts = (readings.first()).filter(|x| at.is_none_or(|at| x.ts >= at));
+    // The review the card and the story show: the one that counts, else the newest below 100, a
+    // status recorded after it notwithstanding (claude-mem's `progress`).
+    let review = counts.or(readings.first().filter(|x| x.percent < 100));
     let status = status(&items, activity, now, counts);
     let recorded = (r.title.as_deref())
         .map(|t| crate::redact::outbound_with(t, rules))
@@ -1979,8 +1982,8 @@ fn answer(
             "follow_ups": follow_ups,
             "updates": updates,
             "work": work,
-            "progress": progress(&readings, counts, (status, at), rules),
-            "story": story(counts.or(readings.first().filter(|x| x.percent < 100)), rules),
+            "progress": progress(&readings, (review, counts), (status, at), rules),
+            "story": story(review, rules),
             "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
             "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
         }),
@@ -2070,16 +2073,18 @@ fn lifecycle(items: &[&Work]) -> Option<(Stamp, bool, String)> {
     recorded.into_iter().next()
 }
 
-/// P5, claude-mem's `progress`: the percent of the reading that counts (`counts`), or of the
-/// newest below 100, a status recorded after it notwithstanding; 100 for shipped. When it was
-/// reviewed, the date it was completed, and the estimate. None with no reading and no ship.
+/// P5, claude-mem's `progress`: the percent of `review`, the one the card shows; 100 for shipped.
+/// When it was reviewed, the date it was completed, a recorded ship's when no review `counts`, and
+/// the estimate. None with no review and no ship.
 fn progress(
     readings: &[crate::my_work_progress::Reviewed],
-    counts: Option<&crate::my_work_progress::Reviewed>,
+    (review, counts): (
+        Option<&crate::my_work_progress::Reviewed>,
+        Option<&crate::my_work_progress::Reviewed>,
+    ),
     (status, at): (&str, Option<i64>),
     rules: &Rules,
 ) -> Value {
-    let review = counts.or(readings.first().filter(|x| x.percent < 100));
     let shipped = status == "shipped";
     if review.is_none() && !shipped {
         return Value::Null;

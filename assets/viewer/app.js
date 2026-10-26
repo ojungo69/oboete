@@ -6641,15 +6641,15 @@ function myWorkOpener(cls, row, label) {
   return button;
 }
 
-// docs/my-work-model.md P5, as claude-mem 15.1's card shows a request's progress: the percent of its
-// review with when it was reviewed, or the day it was completed, and the pace's estimate. Nothing
-// before a review, as no empty field is shown.
 // A recorded day (YYYY-MM-DD) or a time, as claude-mem's work view shows a milestone's: "Oct 25".
 function myWorkDay(value) {
   const at = typeof value === 'number' ? new Date(value) : new Date(`${value}T00:00:00`);
   return Number.isNaN(at.getTime()) ? String(value) : at.toLocaleDateString(lang, { month: 'short', day: 'numeric' });
 }
 
+// docs/my-work-model.md P5, as claude-mem 15.1's card shows a request's progress: the percent of its
+// review with when it was reviewed, or the day it was completed, and the pace's estimate. Nothing
+// before a review, as no empty field is shown.
 function myWorkProgress(row) {
   const p = row.progress;
   if (p?.percent == null) return null;

@@ -98,9 +98,9 @@ pub(crate) fn hidden(
     reading: &crate::curate::Reading,
 ) -> Result<std::collections::HashSet<(String, i64)>> {
     let mut hidden = std::collections::HashSet::new();
-    if (reading.excluded.is_empty() && reading.exclusions.is_empty())
-        || !crate::consumer::manifest::exists(k, "table", "my_work")?
-    {
+    // No session excluded, none of their records, summaries or cards to leave out, whatever the
+    // list holds: a pattern no recorded session matched, as the owner's from claude-mem.
+    if reading.excluded.is_empty() || !crate::consumer::manifest::exists(k, "table", "my_work")? {
         return Ok(hidden);
     }
     // The summaries and cards of an excluded session, judged by their session as their readers
