@@ -6644,20 +6644,22 @@ function myWorkOpener(cls, row, label) {
 // docs/my-work-model.md P5, as claude-mem 15.1's card shows a request's progress: the percent of its
 // review with when it was reviewed, or the day it was completed, and the pace's estimate. Nothing
 // before a review, as no empty field is shown.
+// A recorded day (YYYY-MM-DD) or a time, as claude-mem's work view shows a milestone's: "Oct 25".
+function myWorkDay(value) {
+  const at = typeof value === 'number' ? new Date(value) : new Date(`${value}T00:00:00`);
+  return Number.isNaN(at.getTime()) ? String(value) : at.toLocaleDateString(lang, { month: 'short', day: 'numeric' });
+}
+
 function myWorkProgress(row) {
   const p = row.progress;
   if (p?.percent == null) return null;
-  const day = (value) => {
-    const at = typeof value === 'number' ? new Date(value) : new Date(`${value}T00:00:00`);
-    return Number.isNaN(at.getTime()) ? String(value) : at.toLocaleDateString(lang, { month: 'short', day: 'numeric' });
-  };
   const meter = el('meter', 'my-work-meter');
   Object.assign(meter, { min: 0, max: 100, value: p.percent });
   meter.setAttribute('aria-label', t('my_work_progress_label'));
-  const text = row.status === 'shipped' && p.completed ? t('my_work_completed', { date: day(p.completed) })
+  const text = row.status === 'shipped' && p.completed ? t('my_work_completed', { date: myWorkDay(p.completed) })
     : p.reviewed ? t('my_work_progress', { p: p.percent, ago: myWorkAgo(p.reviewed) }) : `${p.percent}%`;
   return el('div', 'my-work-progress', meter, el('span', 'my-work-progress-text', text),
-    p.estimate ? el('span', 'my-work-estimate', t('my_work_pace', { date: day(p.estimate) })) : null);
+    p.estimate ? el('span', 'my-work-estimate', t('my_work_pace', { date: myWorkDay(p.estimate) })) : null);
 }
 
 // P5: the build story on the request's page, the review's narrative and its milestones, the
@@ -6668,7 +6670,7 @@ function myWorkStory(row) {
   return el('section', 'my-work-story', word('h3', null, 'my_work_story'),
     s.narrative ? el('p', 'text', s.narrative) : null,
     s.milestones?.length ? el('ol', 'my-work-milestones', ...s.milestones.map((m) =>
-      el('li', null, el('span', 'meta', m.date), ' ', m.text))) : null);
+      el('li', null, el('span', 'my-work-milestone-date', myWorkDay(m.date)), ' ', m.text))) : null);
 }
 
 // `request-views.js` `requestCards`: the title opens the request, and the whole card with it.

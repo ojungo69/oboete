@@ -1201,10 +1201,12 @@ set([req('st',{progress:{percent:40,reviewed:now-H,readings:[40],completed:null,
   story:{narrative:'The parser came first.',milestones:[{date:'2026-10-02',text:'Reads a line.'},{date:'2026-10-05',text:'Tests pass.'}]}})]);
 run('myWorkOpen("st")');
 const page=text(panel);
-for(const fragment of ['40% · reviewed','Build story','The parser came first.','2026-10-02','Reads a line.','Tests pass.']){
+for(const fragment of ['40% · reviewed','Build story','The parser came first.','Oct 2','Reads a line.','Oct 5','Tests pass.']){
   assert(page.includes(fragment),`the request's page shows: ${fragment}`);
 }
-assert(page.indexOf('Reads a line.')<page.indexOf('Tests pass.'),'the milestones the oldest first');
+assert(page.indexOf('Oct 2')<page.indexOf('Reads a line.')&&page.indexOf('Reads a line.')<page.indexOf('Oct 5')&&
+  page.indexOf('Oct 5')<page.indexOf('Tests pass.'),'the milestones the oldest first, each after its day');
+assert(!page.includes('2026-10-02'),"a milestone's day as claude-mem's work view shows it");
 run('myWorkClose()');
 ctx.ui.setLang('ja');
 set([req('pj',{progress:{percent:70,reviewed:now-2*H,readings:[70],completed:null,estimate:null}})]);

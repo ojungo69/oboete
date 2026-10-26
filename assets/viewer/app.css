@@ -833,7 +833,7 @@ button.my-work-open:focus-visible { outline: none; }
 .my-work-estimate { font-style: italic; }
 .my-work-milestones { margin: 6px 0 0; padding-left: 1.4em; }
 .my-work-milestones li { margin: 2px 0; }
-.my-work-milestones .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+.my-work-milestone-date { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .my-work-context { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; color: var(--muted); font-size: 12.5px; }
 .my-work-contributors { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
 .my-work-footer { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: flex-end; justify-content: space-between; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
@@ -873,8 +873,8 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-work-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 10px 18px; margin: 14px 0 18px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .my-work-facts dt { color: var(--muted); font-size: 12.5px; }
 .my-work-facts dd { margin: 2px 0 0; }
-.my-work-stands, .my-work-streams, .my-work-changes { margin: 0 0 18px; }
-.my-work-stands h3, .my-work-streams h3, .my-work-changes h3 { font-size: 15px; margin: 0 0 8px; }
+.my-work-stands, .my-work-story, .my-work-streams, .my-work-changes { margin: 0 0 18px; }
+.my-work-stands h3, .my-work-story h3, .my-work-streams h3, .my-work-changes h3 { font-size: 15px; margin: 0 0 8px; }
 .my-work-request-next { margin: 8px 0; }
 .my-work-original { margin: 10px 0 18px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
 .my-work-original summary { cursor: pointer; font-weight: 600; }
