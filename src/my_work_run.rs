@@ -429,8 +429,14 @@ pub(crate) fn home_estimate(
         .cloned()
         .collect();
     Some(crate::raw::open(home).and_then(|raw| {
-        let db = crate::providers_db::open(home)?;
-        let factor = |name: &str| crate::budget::factor(&db, name);
+        // The ledger read-only, as the page's ledger reads are (#680): a missing one, or an older
+        // one without the columns a factor is learned from, is no learned factor yet.
+        let db = crate::providers_db::read_only(home)?;
+        let factor = |name: &str| {
+            Ok(db
+                .as_ref()
+                .map_or(1.0, |db| crate::budget::factor(db, name).unwrap_or(1.0)))
+        };
         let request: Envelope = (cfg.summary.window_tokens, &factor);
         estimate(
             &raw,

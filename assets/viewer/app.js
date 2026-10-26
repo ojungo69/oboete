@@ -5578,7 +5578,11 @@ function saveBody() {
   const [least, most] = form.ranges.paid_usd_per_month;
   if (paid === '' || !Number.isFinite(cap) || cap < least || (most !== null && cap > most)) return { field: 'paid_usd_per_month' };
   if (!['none', 'before-subscriptions', 'after-subscriptions'].includes(form.gemini)) return { field: 'gemini' };
-  const myWork = { curate: form.my_work.curate, calls_a_day: whole(form.my_work.calls_a_day, ...form.ranges.my_work_calls) };
+  // A value the file holds is sent as it is when it is not changed, in range or not, as a
+  // provider's daily budget is (#680).
+  const calls = form.my_work.calls_a_day;
+  const unchangedCalls = /^\d+$/.test(String(calls)) && Number(calls) === form.savedSettings.my_work.calls_a_day;
+  const myWork = { curate: form.my_work.curate, calls_a_day: unchangedCalls ? Number(calls) : whole(String(calls), ...form.ranges.my_work_calls) };
   if (Number.isNaN(myWork.calls_a_day)) return { field: 'my_work.calls_a_day' };
   let embedding = null;
   if (form.embedding) {

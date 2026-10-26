@@ -916,6 +916,9 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         }
         r.work.push(i);
     }
+    // A group's member with no opening ask waits for the member that makes the group, whatever
+    // their order (#684).
+    let mut deferred = Vec::new();
     for (key, c) in &convs {
         let ids = named
             .get(key)
@@ -964,8 +967,15 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
                     r.take(key, Owns::All);
                     requests.push(r);
                 }
+                None if matches!(id, Id::Group(_)) => deferred.push((key, c, id)),
                 _ => unlinked += c.units(&HashSet::new()),
             },
+        }
+    }
+    for (key, c, id) in deferred {
+        match at.get(&id) {
+            Some(&j) => requests[j].take(key, Owns::All),
+            None => unlinked += c.units(&HashSet::new()),
         }
     }
 
@@ -4226,6 +4236,42 @@ mod tests {
         );
         let (joined, _) = version(&h);
         assert_ne!(joined, before);
+    }
+
+    /// #684: a member grouping kept whose conversation has cards and no readable opening ask is in
+    /// its group's request, though it is read before the member that makes the group.
+    #[test]
+    fn a_member_with_no_readable_ask_read_first_is_in_its_groups_request() {
+        let card = json!([{"type": "change", "title": "Tables cached", "subtitle": "Tables cached",
+            "narrative": "x"}]);
+        let mut h = Home::new();
+        // s0 is read before s1 and has no prompt: a reply and its card.
+        let quiet = h.reply("s0", 0);
+        h.s.cards(quiet, quiet, card.clone(), false);
+        let first = h.said("s1", 1_000, "Build the parser.");
+        grouped(&mut h, &[(&["s1", "s0"], "The parser")], &[first]);
+        let v = h.read(Range::All, crate::db::now_ms());
+        let requests = v["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 1, "{v}");
+        assert_eq!(requests[0]["sessions"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(v["unlinked"], 0, "{v}");
+        // No group: the same conversation is counted among the unlinked, as before.
+        let mut h = Home::new();
+        let quiet = h.reply("s0", 0);
+        h.s.cards(quiet, quiet, card.clone(), false);
+        let v = h.read(Range::All, crate::db::now_ms());
+        assert_eq!(v["unlinked"], 1, "{v}");
+        // A group none of whose members has an opening ask: its conversations are among the
+        // unlinked, as before.
+        let mut h = Home::new();
+        for session in ["s0", "s2"] {
+            let quiet = h.reply(session, 0);
+            h.s.cards(quiet, quiet, card.clone(), false);
+        }
+        grouped(&mut h, &[(&["s0", "s2"], "The parser")], &[]);
+        let v = h.read(Range::All, crate::db::now_ms());
+        assert_eq!(v["requests"].as_array().unwrap().len(), 0, "{v}");
+        assert_eq!(v["unlinked"], 2, "{v}");
     }
 
     /// S6: while the repository a group read is excluded, its conversations are not shown as

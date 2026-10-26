@@ -1732,11 +1732,12 @@ fn autostart_off_leaves_the_worker_to_what_manages_it() {
     )
     .unwrap();
     // What manages it runs one; `stop` leaves the next start to it.
+    // An idle time far past the test's own, so its life outlasts the assertions (#683).
     let mut managed = Worker(
         Command::new(env!("CARGO_BIN_EXE_oboete"))
             .arg("--home")
             .arg(p)
-            .arg("worker")
+            .args(["worker", "--idle-ms", "600000"])
             .env("OBOETE_NO_SPAWN", "1")
             .stdin(Stdio::null())
             .spawn()
