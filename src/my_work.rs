@@ -3061,6 +3061,9 @@ mod tests {
                 "{i}"
             );
         }
+        // P5: a ship recorded with no review is 100% on the card.
+        assert_eq!(by_id(&v, "c:claude:s4")["progress"]["percent"], 100);
+        assert_eq!(by_id(&v, "c:claude:s5")["progress"], Value::Null);
         let later = h.read(Range::All, h.t + QUIET_MS + 60_000);
         assert_eq!(by_id(&later, "c:claude:s5")["status"], "quiet");
         assert_eq!(by_id(&later, "c:claude:s2")["status"], "quiet");
