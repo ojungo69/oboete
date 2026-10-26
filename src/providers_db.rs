@@ -109,6 +109,19 @@ CREATE TABLE IF NOT EXISTS turn_pending(
   PRIMARY KEY(device, seq)
 );
 CREATE INDEX IF NOT EXISTS turn_pending_session ON turn_pending(device, agent, session, seq);
+-- A My Work job (docs/my-work-model.md A8) every provider failed, as `turn_pending` is for a
+-- turn: by its key, the ledger span naming the job and what it is about (`group <root>`); it
+-- counts only for the same request, and after D11's three attempts it is kept as a skip.
+CREATE TABLE IF NOT EXISTS my_work_pending(
+  key TEXT PRIMARY KEY,
+  prompt TEXT NOT NULL,                   -- the SHA-256 of the request the attempts were on, with who was asked
+  reason TEXT NOT NULL,
+  hold TEXT NOT NULL,                     -- time, budget or owner
+  attempts INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL
+);
+-- My Work's daily bound (A7) counts its role's calls over a rolling day: a seek, not a scan.
+CREATE INDEX IF NOT EXISTS provider_calls_my_work ON provider_calls(ts) WHERE role = 'my_work';
 ";
 
 /// The viewer's ledger reads never create a database or run a schema upgrade. An absent
@@ -262,6 +275,10 @@ pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
         "UPDATE turn_pending SET next_attempt_at = 0 WHERE hold = 'owner'",
         [],
     )?;
+    conn.execute(
+        "UPDATE my_work_pending SET next_attempt_at = 0 WHERE hold = 'owner'",
+        [],
+    )?;
     Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
 }
 
@@ -286,7 +303,7 @@ pub fn key_saved(conn: &Connection, providers: &[&str]) -> Result<()> {
     for provider in providers {
         conn.execute("DELETE FROM provider_state WHERE provider = ?1", [provider])?;
     }
-    for table in ["pending", "turn_pending"] {
+    for table in ["pending", "turn_pending", "my_work_pending"] {
         conn.execute(
             &format!("UPDATE {table} SET next_attempt_at = 0 WHERE hold IN ('time', 'owner')"),
             [],
@@ -387,11 +404,31 @@ pub fn set_rate(conn: &Connection, provider: &str, r: RateLeft) -> Result<()> {
 /// bounds our requests, not our successes.
 pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<i64>)> {
     Ok(conn.query_row(
-        "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
-           AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored',
-                           'sent','reserved')",
+        &format!(
+            "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE provider=?1 AND ts>=?2
+               AND outcome IN {REQUESTS}"
+        ),
         params![provider, now_ms() - DAY_MS],
         |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// The outcomes of a request that was sent, or may have been: what a daily count counts.
+const REQUESTS: &str = "('ok','error','invalid','wait','empty','prose','shape','over_cap',
+    'unanchored','sent','reserved')";
+
+/// Requests My Work's jobs sent in the last 24 hours, every entry's (docs/my-work-model.md A7):
+/// what `[my_work] calls_a_day` bounds, counted as an entry's daily budget is. It and
+/// `my_work_pending` are the job runner's, which comes with the first job (slice 3).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn my_work_calls_in_a_day(conn: &Connection) -> Result<u32> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM provider_calls WHERE role = 'my_work' AND ts >= ?1
+               AND outcome IN {REQUESTS}"
+        ),
+        [now_ms() - DAY_MS],
+        |r| r.get(0),
     )?)
 }
 
@@ -920,9 +957,156 @@ pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<(
     Ok(())
 }
 
+/// A My Work job waiting (`my_work_pending`) after every provider failed, until its next attempt.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MyWorkPending {
+    /// The ledger span naming the job and what it is about.
+    pub key: String,
+    /// The SHA-256 of the request the attempts were on.
+    pub prompt: String,
+    pub reason: String,
+    pub hold: String,
+    pub attempts: i64,
+    pub next_attempt_at: i64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn my_work_pending_of(conn: &Connection, key: &str) -> Result<Option<MyWorkPending>> {
+    Ok(conn
+        .query_row(
+            "SELECT prompt, reason, hold, attempts, next_attempt_at FROM my_work_pending
+             WHERE key = ?1",
+            [key],
+            |r| {
+                Ok(MyWorkPending {
+                    key: key.into(),
+                    prompt: r.get(0)?,
+                    reason: r.get(1)?,
+                    hold: r.get(2)?,
+                    attempts: r.get(3)?,
+                    next_attempt_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn set_my_work_pending(conn: &Connection, p: &MyWorkPending) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO my_work_pending(key, prompt, reason, hold, attempts,
+           next_attempt_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            p.key,
+            p.prompt,
+            p.reason,
+            p.hold,
+            p.attempts,
+            p.next_attempt_at
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn clear_my_work_pending(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM my_work_pending WHERE key = ?1", [key])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(conn: &Connection, role: &str, outcome: &str) {
+        let c = Call {
+            provider: "p",
+            role,
+            span: "s",
+            outcome,
+            ms: 1,
+            detail: None,
+            bytes_out: 0,
+            est_tokens: None,
+            usage: Usage::default(),
+            usd: None,
+        };
+        record(conn, &c).unwrap();
+    }
+
+    /// docs/my-work-model.md A7: the bound counts My Work's requests of every entry in a rolling
+    /// day, as an entry's daily budget counts its own; a skip sent nothing.
+    #[test]
+    fn my_works_daily_count_is_its_roles_requests_in_a_rolling_day() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        for outcome in ["ok", "error", "shape", "reserved", "budget", "gate"] {
+            call(&conn, "my_work", outcome);
+        }
+        call(&conn, "curator", "ok");
+        call(&conn, "summary", "ok");
+        assert_eq!(my_work_calls_in_a_day(&conn).unwrap(), 4);
+        conn.execute(
+            "UPDATE provider_calls SET ts = ts - ?1 WHERE outcome = 'ok'",
+            [DAY_MS + 1],
+        )
+        .unwrap();
+        assert_eq!(my_work_calls_in_a_day(&conn).unwrap(), 3);
+        let plan: String = conn
+            .query_row(
+                &format!(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM provider_calls WHERE role = 'my_work'
+                       AND ts >= 0 AND outcome IN {REQUESTS}"
+                ),
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("provider_calls_my_work"), "{plan}");
+    }
+
+    /// docs/my-work-model.md A8: a waiting job is kept by its key, and `oboete resume` wakes one
+    /// held for the owner, a saved key one held for time or the owner; a budget's wait stays.
+    #[test]
+    fn a_waiting_my_work_job_wakes_on_resume_and_a_saved_key() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        let later = now_ms() + 3_600_000;
+        let wait = |key: &str, hold: &str| MyWorkPending {
+            key: key.into(),
+            prompt: "sha".into(),
+            reason: "every provider failed".into(),
+            hold: hold.into(),
+            attempts: 1,
+            next_attempt_at: later,
+        };
+        for (key, hold) in [
+            ("group a", "owner"),
+            ("review b", "time"),
+            ("goals c", "budget"),
+        ] {
+            set_my_work_pending(&conn, &wait(key, hold)).unwrap();
+        }
+        assert_eq!(
+            my_work_pending_of(&conn, "group a").unwrap(),
+            Some(wait("group a", "owner"))
+        );
+        let next = |key: &str| {
+            my_work_pending_of(&conn, key)
+                .unwrap()
+                .unwrap()
+                .next_attempt_at
+        };
+        resume(&conn, "p").unwrap();
+        assert_eq!(next("group a"), 0);
+        assert!(next("review b") > 0);
+        key_saved(&conn, &["p"]).unwrap();
+        assert_eq!(next("review b"), 0);
+        assert!(next("goals c") > 0, "a key lifts no cap");
+        clear_my_work_pending(&conn, "group a").unwrap();
+        assert_eq!(my_work_pending_of(&conn, "group a").unwrap(), None);
+    }
 
     #[test]
     fn probes_consume_limits_without_recalibrating_curation() {

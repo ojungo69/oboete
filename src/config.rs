@@ -11,6 +11,11 @@ pub struct Config {
     pub providers: Vec<Provider>,
     #[serde(default)]
     pub summary: Summary,
+    /// `[my_work]`: My Work's jobs on the curator chain, off until the owner turns them on. The
+    /// first job reads it (docs/my-work-model.md, slice 3).
+    #[serde(default)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub my_work: MyWork,
     #[serde(default)]
     pub embedding: Embedding,
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
@@ -184,6 +189,33 @@ impl Default for Summary {
 
 fn default_window_tokens() -> u32 {
     crate::curate::WINDOW_TOKENS
+}
+
+/// `[my_work]` (docs/my-work-model.md, decision 57): whether the worker writes My Work's groups,
+/// reviews, story, goals and rule suggestions with the curator chain, and in how many calls a day
+/// at most.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MyWork {
+    /// Off until a person turns it on on the settings page, its estimate shown first (A6).
+    #[serde(default)]
+    pub curate: bool,
+    /// Calls of role `my_work` in any 24 hours, at most (A7).
+    #[serde(default = "default_my_work_calls")]
+    pub calls_a_day: u32,
+}
+
+impl Default for MyWork {
+    fn default() -> Self {
+        Self {
+            curate: false,
+            calls_a_day: default_my_work_calls(),
+        }
+    }
+}
+
+fn default_my_work_calls() -> u32 {
+    100
 }
 fn default_idle_minutes() -> u32 {
     10
@@ -746,6 +778,7 @@ pub fn load(home: &Path) -> Result<Config> {
         return Ok(Config {
             providers: default_providers(),
             summary: Summary::default(),
+            my_work: MyWork::default(),
             embedding: Embedding::default(),
             gemini: None,
             paid_usd_per_month: default_paid_usd_per_month(),
@@ -1341,6 +1374,8 @@ pub struct CaptureConfig {
     _providers: serde::de::IgnoredAny,
     #[serde(default, rename = "summary")]
     _summary: serde::de::IgnoredAny,
+    #[serde(default, rename = "my_work")]
+    _my_work: serde::de::IgnoredAny,
     #[serde(default, rename = "embedding")]
     _embedding: serde::de::IgnoredAny,
     #[serde(default, rename = "backup")]
@@ -1473,6 +1508,8 @@ resident = true
 port = 17374
 [retention]
 days = 90
+[my_work]
+curate = true
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
@@ -1483,6 +1520,19 @@ days = 90
             assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_out = {bad}")).is_err());
         }
         parse_capture(Some(text)).unwrap();
+        // Every key `Config` reads, as its derived `Deserialize` names them, so that a key a later
+        // version adds there never stops recording (CodeRabbit on #660: `[my_work]` did).
+        let keys = config_keys();
+        assert!(
+            keys.contains(&"my_work") && keys.contains(&"providers"),
+            "{keys:?}"
+        );
+        for key in keys {
+            assert!(
+                parse_capture(Some(&format!("{key} = 1\n"))).is_ok(),
+                "{key}"
+            );
+        }
         // A table no version reads is still an error.
         assert!(parse_capture(Some("[redactions]\n")).is_err());
     }
@@ -1648,6 +1698,60 @@ model = "haiku"
         )
         .unwrap();
         assert!(load(dir).is_err());
+    }
+
+    /// `[my_work]` (docs/my-work-model.md A6, A7): off and 100 calls a day unless set.
+    #[test]
+    fn my_work_is_off_with_100_calls_a_day_unless_set() {
+        let none = tempfile::tempdir().unwrap();
+        let defaults = MyWork {
+            curate: false,
+            calls_a_day: 100,
+        };
+        assert_eq!(load(none.path()).unwrap().my_work, defaults);
+        assert_eq!(load_text("[summary]\ncurate = true\n").my_work, defaults);
+        let set = load_text("[my_work]\ncurate = true\ncalls_a_day = 40\n").my_work;
+        assert_eq!((set.curate, set.calls_a_day), (true, 40));
+    }
+
+    /// CodeRabbit on #660: a key misspelt in `[my_work]` is an error, as in `[worker]`, not a
+    /// switch silently left off.
+    #[test]
+    fn a_key_misspelt_in_my_work_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[my_work]\ncurat = true\n").unwrap();
+        assert!(load(dir.path()).is_err());
+    }
+
+    /// The top-level keys `Config` reads, as its derived `Deserialize` names them.
+    fn config_keys() -> &'static [&'static str] {
+        struct Fields(std::cell::Cell<&'static [&'static str]>);
+        impl<'de> serde::Deserializer<'de> for &Fields {
+            type Error = serde::de::value::Error;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(
+                self,
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                Err(serde::de::Error::custom("only the fields"))
+            }
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                self.0.set(fields);
+                Err(serde::de::Error::custom("only the fields"))
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+                byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+                identifier ignored_any
+            }
+        }
+        let fields = Fields(std::cell::Cell::new(&[]));
+        let _ = Config::deserialize(&fields);
+        fields.0.get()
     }
 
     fn load_text(text: &str) -> Config {
