@@ -986,7 +986,11 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     }
     for (i, id) in deferred_work {
         match at.get(&id) {
-            Some(&j) => requests[j].work.push(i),
+            // In its place in the work, newest first, from which `next` is read (#689).
+            Some(&j) => {
+                let work = &mut requests[j].work;
+                work.insert(work.partition_point(|&x| x < i), i);
+            }
             None => unlinked += 1,
         }
     }
@@ -4344,6 +4348,32 @@ mod tests {
         let v = h.read(Range::All, crate::db::now_ms());
         assert_eq!(v["requests"].as_array().unwrap().len(), 0, "{v}");
         assert_eq!(v["unlinked"], 1, "{v}");
+    }
+
+    /// #689: a work item that waited for its group's request takes its place in the request's
+    /// work, newest first, so the request's next step is the newest one recorded.
+    #[test]
+    fn a_deferred_work_item_keeps_its_place_in_its_requests_work() {
+        let mut h = Home::new();
+        h.reply("s0", 0);
+        let first = h.said("s1", 1_000, "Build the parser.");
+        h.wrote(
+            "s1",
+            "parser-tests",
+            json!({"task": "Test the parser", "status": "todo",
+            "next_step": "Write the first test."}),
+        );
+        h.wrote(
+            "s0",
+            "parser",
+            json!({"task": "Wire the parser", "status": "doing",
+            "next_step": "Wire the lexer in."}),
+        );
+        grouped(&mut h, &[(&["s1", "s0"], "The parser")], &[first]);
+        let v = h.read(Range::All, crate::db::now_ms());
+        let requests = v["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 1, "{v}");
+        assert_eq!(requests[0]["next"], "Wire the lexer in.", "{v}");
     }
 
     /// S6: while the repository a group read is excluded, its conversations are not shown as

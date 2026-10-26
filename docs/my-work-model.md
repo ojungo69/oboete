@@ -977,7 +977,7 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   due check in 0.19 s warm; 124 candidates in 7 repositories, so about 13 calls to decide them all,
   each repository at most every 30 minutes; one call's prompt 650 to 1,440 estimated tokens, read
   in up to 6.4 s, most of it the agent text scan; a peak of 79 MB.
-- **Not yet**: the delegation link (C3, slice 3c).
+- **Then**: the delegation link (C3), slice 3c below.
 
 ### Slice 3b: a group on My Work (2026-10-26)
 
@@ -1020,6 +1020,27 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   #671).
 - **Doctor** prints the switch, "on, waiting for [summary] curate" while summaries are off, and the
   same estimate (`my_work_run::doctor_line`; the page and doctor share `home_estimate`).
+
+### Slice 3c: the delegation link (2026-10-26)
+
+- **Who sent an ask** (C3): the text tests (O3) look for every opening ask of a batch in the
+  agent text before it, marked or not, since a Codex session another agent started is marked at
+  capture and is the commonest delegation. A tool's input that holds an ask's opening names its
+  conversation as the ask's sender (`typed::AgentText::sender`): the one, other than the ask's
+  own, that held it last before the ask in the lookback. A reply names none: it may only print a
+  prompt for the person to send. Which asks are labelled `[agent prompt]` (O4) is as before.
+- **The link**: a conversation to decide whose sender is decided in the same batch is linked to
+  it; a sender that belongs to an open request links that request, which is then shown with the
+  requests other proven links name (A4). The line keeps the direction: `- C1 sent C2's opening ask
+  in a tool call`, or `- a conversation of R1 sent C2's opening ask in a tool call`. It is charged
+  to the room and ordered as the work-list links are (#677, #686), and the instructions name an ask
+  one sent the other among a link's evidence.
+- **Not covered**: an ask shorter than O3's floor (160 normalized characters, or one that opens in
+  lowercase) has no fingerprint, so no sender, marked or not. The sender is the older of the two,
+  so it is decided first or in the same batch; one decided before as ignored, or in no open
+  request, gives no link.
+- **#689** (with this slice): a work item that waited for its group's request (#686) takes its
+  place in the request's work, newest first, from which the request's next step is read.
 
 ## Not built
 

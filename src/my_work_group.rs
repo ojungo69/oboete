@@ -296,8 +296,8 @@ impl Job for Grouping {
         let open: Vec<(&Key, &Group)> = (groups.groups.iter())
             .filter(|(_, g)| g.repo == about)
             .collect();
-        let sent = agent_sent(s.raw, &batch)?;
-        let batch = Batch::fill(s, &batch, &open, &by_key, &sent);
+        let (sent, senders) = agent_sent(s.raw, &batch)?;
+        let batch = Batch::fill(s, &batch, &open, &by_key, (&sent, &senders));
         if batch.conversations.is_empty() {
             return Ok(None);
         }
@@ -328,9 +328,11 @@ impl Job for Grouping {
 
 /// Which of `batch`'s opening asks an agent wrote (O4): the marks (O2), then the text tests over
 /// the agent text recorded in the lookback before them (O3).
-fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<HashSet<i64>> {
+fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
     let mut out = HashSet::new();
-    let mut typed = Vec::new();
+    // Every opening ask, marked or not, is looked for in agent text: a typed one to tell whether an
+    // agent wrote it (O3), any one to tell which conversation sent it in a tool call (C3).
+    let mut asks = Vec::new();
     for c in batch {
         let Some((device, seq, ts, text)) = &c.ask else {
             continue;
@@ -340,16 +342,16 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<HashSet<i64>> {
             continue;
         };
         let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
-        if crate::typed::typed(&e.kind, &e.agent, &e.source, &body) {
-            typed.push((*seq, *ts, text.as_str()));
-        } else {
+        let typed = crate::typed::typed(&e.kind, &e.agent, &e.source, &body);
+        if !typed {
             out.insert(*seq);
         }
+        asks.push((&c.key, *seq, *ts, text.as_str(), typed));
     }
-    let mut index = crate::typed::AgentText::new(typed.iter().map(|(_, ts, t)| (*ts, *t)));
+    let mut index = crate::typed::AgentText::new(asks.iter().map(|a| (a.2, a.3)));
     if !index.is_empty() {
-        let from = typed.iter().map(|t| t.1).min().unwrap_or(0) - crate::typed::LOOKBACK_MS;
-        let through = typed.iter().map(|t| t.1).max().unwrap_or(0);
+        let from = asks.iter().map(|a| a.2).min().unwrap_or(0) - crate::typed::LOOKBACK_MS;
+        let through = asks.iter().map(|a| a.2).max().unwrap_or(0);
         let device = raw.device().to_owned();
         let mut seq = first_at(raw, &device, from)?;
         loop {
@@ -364,18 +366,26 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<HashSet<i64>> {
                     continue;
                 }
                 let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
-                if let Some(text) = crate::typed::agent_text(&e.kind, &body) {
-                    index.add(e.ts, &text);
+                match crate::typed::agent_text(&e.kind, &body) {
+                    Some(text) if e.kind == "tool" => {
+                        index.add_from(e.ts, &text, &(e.agent.clone(), e.session.clone()));
+                    }
+                    Some(text) => index.add(e.ts, &text),
+                    None => {}
                 }
             }
         }
     }
-    for (seq, ts, text) in typed {
-        if index.agent_written(ts, text) {
+    let mut senders = Vec::new();
+    for (key, seq, ts, text, typed) in asks {
+        if typed && index.agent_written(ts, text) {
             out.insert(seq);
         }
+        if let Some(from) = index.sender(ts, text, key) {
+            senders.push((key.clone(), from.clone()));
+        }
     }
-    Ok(out)
+    Ok((out, senders))
 }
 
 /// The seq before this device's first record at or after `ts`, by a search over the seqs: times
@@ -395,6 +405,15 @@ fn first_at(raw: &Raw, device: &str, ts: i64) -> Result<i64> {
         }
     }
     Ok(low)
+}
+
+/// An opening ask's conversation, and the conversation that sent it in a tool call (C3).
+type Sent = (Key, Key);
+
+/// What proves a link (C3): a work list its ends wrote, or an opening ask one sent the other.
+enum Proof<'a> {
+    List(&'a str),
+    Sent,
 }
 
 /// One call's data (C2): the conversations to decide and the open requests, each with its label,
@@ -420,7 +439,7 @@ impl Batch {
         batch: &[&Seen],
         open: &[(&Key, &Group)],
         by_key: &HashMap<&Key, &Seen>,
-        agent_sent: &HashSet<i64>,
+        (agent_sent, senders): (&HashSet<i64>, &[Sent]),
     ) -> Batch {
         let rules = s.rules;
         let room = s.summary.window_tokens;
@@ -449,7 +468,7 @@ impl Batch {
             keys.sort();
         }
         let deciding: HashSet<&Key> = batch.iter().map(|c| &c.key).collect();
-        let mut links: Vec<(&str, Vec<Key>)> = Vec::new();
+        let mut links: Vec<(Proof, Vec<Key>)> = Vec::new();
         let mut linked: HashSet<Key> = HashSet::new();
         for (list, keys) in &writers {
             if keys.len() < 2
@@ -471,7 +490,23 @@ impl Batch {
             }
             if ends.len() >= 2 {
                 linked.extend(ends.iter().filter(|e| !deciding.contains(e)).cloned());
-                links.push((list, ends));
+                links.push((Proof::List(list), ends));
+            }
+        }
+        // C3: a conversation to decide whose opening ask another conversation sent in a tool call
+        // is linked to that conversation, when it is decided here too, else to its open request:
+        // the one sent first, the sender after it.
+        for (to, from) in senders {
+            let end = if deciding.contains(from) {
+                Some(from.clone())
+            } else {
+                request_of(from)
+            };
+            if let Some(end) = end.filter(|e| e != to) {
+                if !deciding.contains(&end) {
+                    linked.insert(end.clone());
+                }
+                links.push((Proof::Sent, vec![to.clone(), end]));
             }
         }
         let request_text = |anchor: &Key, g: &Group| -> (String, BTreeSet<i64>) {
@@ -609,17 +644,32 @@ impl Batch {
         // the first conversation first; the ones left out are counted (#677), on a line whose room
         // is kept before any link takes it (#686).
         let first = conversations.first().map(|c| c.0.clone());
-        let mut ordered: Vec<&(&str, Vec<Key>)> = links.iter().collect();
+        let mut ordered: Vec<&(Proof, Vec<Key>)> = links.iter().collect();
         ordered.sort_by_key(|(_, ends)| !first.as_ref().is_some_and(|f| ends.contains(f)));
         let counted = !links.is_empty() && fits(&format!("- and {} more\n", links.len()));
         let (mut any, mut left_out) = (false, 0);
-        for (list, ends) in ordered {
+        for (proof, ends) in ordered {
             let named: Vec<&String> = ends.iter().filter_map(|e| label_of.get(e)).collect();
             if named.len() >= 2 {
-                let list = crate::work_state::beside("list", list, rules);
-                let mut names: Vec<&str> = named.iter().map(|l| l.as_str()).collect();
-                names.sort_by_key(|l| (l.starts_with('R'), l[1..].parse::<usize>().unwrap_or(0)));
-                let line = format!("- work list {list}: {}\n", names.join(", "));
+                let line = match proof {
+                    Proof::List(list) => {
+                        let list = crate::work_state::beside("list", list, rules);
+                        let mut names: Vec<&str> = named.iter().map(|l| l.as_str()).collect();
+                        names.sort_by_key(|l| {
+                            (l.starts_with('R'), l[1..].parse::<usize>().unwrap_or(0))
+                        });
+                        format!("- work list {list}: {}\n", names.join(", "))
+                    }
+                    // The direction kept: the one sent, then the sender.
+                    Proof::Sent if named[1].starts_with('R') => format!(
+                        "- a conversation of {} sent {}'s opening ask in a tool call\n",
+                        named[1], named[0]
+                    ),
+                    Proof::Sent => format!(
+                        "- {} sent {}'s opening ask in a tool call\n",
+                        named[1], named[0]
+                    ),
+                };
                 if fits(&line) {
                     data.push_str(&line);
                     any = true;
@@ -674,7 +724,8 @@ fn prompt(language: &str, data: &str) -> String {
          a question answered at once).\n\
          An R label goes only first in a group, and only to continue that request. A group of two \
          or more needs links: each link names two or more of the group's labels and gives its \
-         evidence in one sentence (a shared work list, the same task asked again), and every \
+         evidence in one sentence (a shared work list, an ask one sent the other, the same task asked \
+         again), and every \
          label of the group must be reached from its first through links. Never join \
          conversations because they share only a repository or a topic word. An opening ask \
          marked [agent prompt] was written by an agent, not typed by the developer.\n\
@@ -1464,6 +1515,120 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt[c1..c2].contains("[agent prompt]"), "{prompt}");
+    }
+
+    /// 3c (C3): a conversation to decide whose opening ask another conversation sent in a tool
+    /// call is linked to it, the one sent first in the line: to that conversation when it is
+    /// decided in the batch too, else to the open request it belongs to, which is shown. An ask
+    /// the marks say an agent sent is linked as a typed one is; the conversation's own call, and
+    /// a reply, link nothing.
+    #[test]
+    fn an_ask_another_conversation_sent_is_a_proven_link() {
+        let delegated = format!(
+            "Review the parser change in src/parse.rs and report each finding with its line. {}",
+            "Check the error paths, the tables kept between runs and the tests. ".repeat(3)
+        );
+        let call = |text: &str| {
+            let input = json!({"command": format!("codex exec '{text}'")}).to_string();
+            json!({"tool": "Bash", "input": input, "output": "ok", "failed": false})
+        };
+        let links = |h: &Home| {
+            let prompt = h.ask(&Summary::default(), R).unwrap().prompt;
+            let at = prompt.find("## Proven links").unwrap();
+            (prompt.clone(), prompt[at..].to_owned())
+        };
+        // Both decided in the batch.
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.s.event("tool", "s1", (R, "main"), h.t + MINUTE, call(&delegated));
+        h.said("s2", R, 2, &delegated);
+        let (prompt, shown) = links(&h);
+        assert!(
+            shown.contains("- C1 sent C2's opening ask in a tool call\n"),
+            "{prompt}"
+        );
+        // The sender in an open request: the request's line, and the request shown.
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.age(31);
+        h.s.event(
+            "tool",
+            "s1",
+            (R, "main"),
+            h.t + 2 * MINUTE,
+            call(&delegated),
+        );
+        h.said("s2", R, 3, &delegated);
+        let (prompt, shown) = links(&h);
+        assert!(
+            shown.contains("- a conversation of R1 sent C1's opening ask in a tool call\n"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("R1 · \"Parser\""), "{prompt}");
+        // An ask the marks say an agent sent: a Codex session another conversation started.
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.s.event("tool", "s1", (R, "main"), h.t + MINUTE, call(&delegated));
+        let marked = crate::raw::Event {
+            kind: "prompt".into(),
+            agent: "codex".into(),
+            session: "s3".into(),
+            repo: Some(R.into()),
+            ts: h.t + 2 * MINUTE,
+            ..crate::raw::test_event(&json!({"prompt": delegated, "agent_sent": true}).to_string())
+        };
+        h.s.raw.append(&marked).unwrap();
+        let (prompt, shown) = links(&h);
+        assert!(
+            shown.contains("- C1 sent C2's opening ask in a tool call\n"),
+            "{prompt}"
+        );
+        // With room for one open request after the conversation, the sender's goes before a newer
+        // one (A4: the requests a proven link names first).
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.age(31);
+        h.said("s5", R, 1, "Rename the lexer.");
+        h.pass(&|_| answer(&[group(&["C1"], "Lexer")], &[]));
+        h.age(31);
+        h.s.event(
+            "tool",
+            "s1",
+            (R, "main"),
+            h.t + 2 * MINUTE,
+            call(&delegated),
+        );
+        h.said("s2", R, 3, &delegated);
+        let (prompt, _) = links(&h);
+        let start = prompt.find("C1 · ").unwrap();
+        let end = prompt.find("## Open requests").unwrap();
+        let first = crate::budget::estimate(&prompt[start + "C1 · ".len()..end]);
+        let room = Summary {
+            window_tokens: first + 13,
+            ..Summary::default()
+        };
+        let prompt = h.ask(&room, R).unwrap().prompt;
+        assert!(
+            prompt.contains("\"Parser\"") && !prompt.contains("\"Lexer\""),
+            "{prompt}"
+        );
+        // Its own call, and another conversation's reply, link nothing.
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        let reply = json!({"assistant": format!("Here is the task: {delegated}")});
+        h.s.event("reply", "s1", (R, "main"), h.t + MINUTE, reply);
+        h.s.event(
+            "tool",
+            "s2",
+            (R, "main"),
+            h.t + MINUTE + 1_000,
+            call(&delegated),
+        );
+        h.said("s2", R, 2, &delegated);
+        let (prompt, shown) = links(&h);
+        assert!(!shown.contains(" sent "), "{prompt}");
     }
 
     /// A8, C5: a repository every entry fails is kept as a skip after three attempts, and is not
