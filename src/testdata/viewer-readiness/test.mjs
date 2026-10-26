@@ -1038,6 +1038,7 @@ ctx.fetch=(url,options)=>{
 };
 let f=ctx.simpleUi.formOf(plain(saved));
 f.summary.language='Unsaved detailed language';f.inject.session_start_chars='7777';f.paid_usd_per_month='99';
+f.my_work.curate=true;f.my_work.calls_a_day='250';
 f.retention.forever=false;f.retention.edit='90';
 ctx.ui.setForm(f);ctx.ui.setView('settings');ctx.ui.setLang('ja');ctx.ui.drawSettings();
 assert.equal(panel.querySelectorAll('.simple-block').length,8,'all eight blocks are present');
@@ -1059,6 +1060,7 @@ assert.equal(requests[0].body.worker,undefined,'a first simple save does not act
 assert.equal(ctx.ui.getForm().summary.language,'Unsaved detailed language','unrelated drafts survive the saved response');
 assert.equal(ctx.ui.getForm().inject.session_start_chars,'7777');
 assert.deepEqual([ctx.ui.getForm().retention.forever,ctx.ui.getForm().retention.edit],[false,'90'],'an unsaved period survives too');
+assert.deepEqual([ctx.ui.getForm().my_work.curate,ctx.ui.getForm().my_work.calls_a_day],[true,'250'],'an unsaved My Work draft survives too (Codex on #671)');
 assert(text(panel).includes('保存しました'),'a saved receipt is beside the changed block');
 assert(text(panel).includes('記録がたまると、ここに見積もりが出ます。'),'My Work\'s block before anything is recorded');
 change(field('my_work.curate'),true);await settle();

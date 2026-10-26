@@ -4997,6 +4997,8 @@ function preserveSettingsDrafts(next, mine) {
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.neverFolder = mine.neverFolder;
   next.neverPattern = mine.neverPattern;
+  // My Work's switch and bound as edited, with the estimate the answer brings (Codex on #671).
+  if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day };
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {

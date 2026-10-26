@@ -321,6 +321,11 @@ const SIZES: [(&str, u32, u32); 6] = [
 ];
 /// The days an estimate reads (A6).
 const WEEK_MS: i64 = 7 * DAY_MS;
+/// What each job's fixed instructions stay under, in estimated tokens (A4).
+const INSTRUCTIONS: u32 = 1_500;
+/// What an estimate counts a call with: its window of data (`[summary] window_tokens`) and each
+/// entry's learned factor (`budget::factor`), as admission counts a call.
+pub(crate) type Envelope<'a> = (u32, &'a dyn Fn(&str) -> Result<f64>);
 
 /// What My Work's jobs would cost, from this home's last 7 days, before anything is sent (A6).
 #[derive(Debug, Clone, PartialEq)]
@@ -338,11 +343,14 @@ pub(crate) struct Estimate {
 /// conversations of one half hour, one grouping call; a conversation's hours with prompts, one
 /// review each, its links, story and rules as the cost table derives them from the reviews; a day
 /// with prompts, one goals update), at most the bound, priced as the cost table sizes each job's
-/// call. At most: the bound, each call at the largest input and the entry's largest answer.
+/// call. At most: the bound, each call the largest request A4 lets a job send (its instructions
+/// and a window of data, `window_tokens`) and the entry's largest answer. Both count a call's input
+/// as admission does, at the entry's learned `factor` (Codex on #671).
 pub(crate) fn estimate(
     raw: &Raw,
     providers: &[crate::config::Provider],
     calls_a_day: u32,
+    (window_tokens, factor): Envelope<'_>,
     now: i64,
 ) -> Result<Estimate> {
     let since = now - WEEK_MS;
@@ -383,14 +391,18 @@ pub(crate) fn estimate(
             priced: None,
         });
     };
+    let calibration = factor(p.name())?;
     let call = |input: u32, output: u32| {
-        p.limits()
-            .usd(f64::from(input) * p.input_weight(), f64::from(output))
+        (p.limits()).usd(
+            f64::from(input) * calibration * p.input_weight(),
+            f64::from(output),
+        )
     };
     let usd: f64 = (per_job.iter().zip(SIZES))
         .map(|(n, (_, input, output))| n * scale * call(input, output))
         .sum();
-    let largest = SIZES.iter().map(|s| s.1).max().unwrap_or(0);
+    let table = SIZES.iter().map(|s| s.1).max().unwrap_or(0);
+    let largest = table.max(INSTRUCTIONS + window_tokens);
     let most = f64::from(calls_a_day) * call(largest, crate::budget::largest_output(p));
     let model = match p {
         crate::config::Provider::Openai { model, .. } => model.clone(),
@@ -416,10 +428,18 @@ pub(crate) fn home_estimate(
         .filter(|p| p.enabled() && !cfg.chain.turns_off(p.name()))
         .cloned()
         .collect();
-    Some(
-        crate::raw::open(home)
-            .and_then(|raw| estimate(&raw, &chain, cfg.my_work.calls_a_day, crate::db::now_ms())),
-    )
+    Some(crate::raw::open(home).and_then(|raw| {
+        let db = crate::providers_db::open(home)?;
+        let factor = |name: &str| crate::budget::factor(&db, name);
+        let request: Envelope = (cfg.summary.window_tokens, &factor);
+        estimate(
+            &raw,
+            &chain,
+            cfg.my_work.calls_a_day,
+            request,
+            crate::db::now_ms(),
+        )
+    }))
 }
 
 /// Doctor's line on My Work (A6): the switch, and what turning it on would cost.
@@ -972,7 +992,8 @@ mod tests {
             entry("paid", paid),
         ];
         // A day: 2 groupings, 5 reviews, 1 links, 1 story, 0.5 rules, 1 goals.
-        let e = estimate(&s.raw, &chain, 100, now).unwrap();
+        let flat = |_: &str| -> Result<f64> { Ok(1.0) };
+        let e = estimate(&s.raw, &chain, 100, (5_000, &flat), now).unwrap();
         assert_eq!(e.calls, (11, 100));
         assert_eq!(e.priced, Some(("paid".to_owned(), "m".to_owned())));
         let (typical, most) = e.usd.unwrap();
@@ -985,12 +1006,29 @@ mod tests {
             + usd(1.0, 4_000.0, 2_000.0);
         assert!((typical - expected).abs() < 1e-9, "{typical} {expected}");
         assert!((most - usd(100.0, 6_500.0, 4_000.0)).abs() < 1e-9, "{most}");
+        // A larger window and an entry that counts twice the estimate (Codex on #671): each input
+        // at the factor, the largest request its instructions and the window.
+        let twice = |_: &str| -> Result<f64> { Ok(2.0) };
+        let (typical, most) = (estimate(&s.raw, &chain, 100, (8_000, &twice), now).unwrap())
+            .usd
+            .unwrap();
+        let doubled = usd(2.0, 13_000.0, 300.0)
+            + usd(5.0, 8_000.0, 1_000.0)
+            + usd(1.0, 8_000.0, 300.0)
+            + usd(1.0, 8_000.0, 1_700.0)
+            + usd(0.5, 4_000.0, 300.0)
+            + usd(1.0, 8_000.0, 2_000.0);
+        assert!((typical - doubled).abs() < 1e-9, "{typical} {doubled}");
+        assert!(
+            (most - usd(100.0, 19_000.0, 4_000.0)).abs() < 1e-9,
+            "{most}"
+        );
         // Over the bound, every job waits alike.
-        let bound = estimate(&s.raw, &chain, 5, now).unwrap();
+        let bound = estimate(&s.raw, &chain, 5, (5_000, &flat), now).unwrap();
         assert_eq!(bound.calls, (5, 5));
         let (typical, _) = bound.usd.unwrap();
         assert!((typical - expected * 5.0 / 10.5).abs() < 1e-9, "{typical}");
-        let free = estimate(&s.raw, &chain[..1], 100, now).unwrap();
+        let free = estimate(&s.raw, &chain[..1], 100, (5_000, &flat), now).unwrap();
         assert_eq!((free.calls, free.usd, free.priced), ((11, 100), None, None));
     }
 
@@ -1044,5 +1082,34 @@ mod tests {
             "[my_work]\ncurate = true\n[summary]\ncurate = true\n{entry}"
         ));
         assert!(line.starts_with("my work: on ([my_work] curate)"), "{line}");
+        // At most: 100 calls of the largest request, the instructions and the configured window,
+        // at the factor the entry's answers taught (Codex on #671): 100 x 6,500 at the default,
+        // 100 x 9,500 with a window of 8,000, twice that once five answers counted twice.
+        assert!(line.contains("at most USD 0.65"), "{line}");
+        let window = format!("[summary]\nwindow_tokens = 8000\n{entry}");
+        let line = doctor(window.clone());
+        assert!(line.contains("at most USD 0.95"), "{line}");
+        let db = crate::providers_db::open(&home).unwrap();
+        for _ in 0..5 {
+            let usage = crate::providers_db::Usage {
+                prompt: Some(2_000),
+                ..Default::default()
+            };
+            let call = crate::providers_db::Call {
+                provider: "p",
+                role: "curator",
+                span: "s",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1_000),
+                usage,
+                usd: None,
+            };
+            crate::providers_db::record(&db, &call).unwrap();
+        }
+        let line = doctor(window);
+        assert!(line.contains("at most USD 1.90"), "{line}");
     }
 }

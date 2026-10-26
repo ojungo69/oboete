@@ -1010,8 +1010,14 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   day with prompts one goals update, typed or not. Each job's calls are priced at the sizes of the
   cost table, at the first paid entry of the chain the worker builds (an entry off, or turned off
   in `[chain]`, is not priced), whose name and model are shown; over the bound every job waits
-  alike. "At most" is the bound, each call at the largest input and the entry's largest answer.
-  With no paid entry it says so and shows no USD. None before anything is recorded.
+  alike. "At most" is the bound, each call the largest request A4 lets a job send (its
+  instructions and the configured `window_tokens`, or the cost table's largest when that is more)
+  and the entry's largest answer. Both count a call's input at the entry's learned factor
+  (`budget::factor`), as admission does (Codex on #671). With no paid entry it says so and shows
+  no USD. None before anything is recorded.
+- **Drafts**: the full page's switch and bound, edited and not saved, stay through another save
+  on the page, the simple page's included, with the estimate that save's answer brings (Codex on
+  #671).
 - **Doctor** prints the switch, "on, waiting for [summary] curate" while summaries are off, and the
   same estimate (`my_work_run::doctor_line`; the page and doctor share `home_estimate`).
 
