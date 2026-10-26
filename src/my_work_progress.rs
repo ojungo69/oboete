@@ -1100,6 +1100,10 @@ mod tests {
             "parser",
             json!({"task": "OLD TASK", "status": "done"}),
         );
+        let input = json!({"command": "git commit -m 'OLD COMMIT'"}).to_string();
+        let body = json!({"tool": "Bash", "input": input,
+            "output": "[main abc1234] OLD COMMIT\n 1 file changed", "failed": false});
+        h.s.event("tool", "s1", (R, "main"), h.t + 7 * MINUTE, body);
         let b = h.said("s2", 10, "Add tests for the parser.");
         h.grouped(&["s1", "s2"], &[a, b]);
         let id = h.due()[0].0.clone();
@@ -1134,7 +1138,13 @@ mod tests {
         );
         let kept = (ask.keep)(&carried);
         assert_eq!(kept["preferences"].as_array().unwrap().len(), 1, "{kept:?}");
-        for seen in ["OLD SUMMARY", "OLD CARD", "OLD TASK", "old.pdf"] {
+        for seen in [
+            "OLD SUMMARY",
+            "OLD CARD",
+            "OLD TASK",
+            "old.pdf",
+            "OLD COMMIT",
+        ] {
             assert!(!p.contains(seen), "{seen}: {p}");
         }
         assert!(p.contains("LATE CARD") && p.contains("late.pdf"), "{p}");
