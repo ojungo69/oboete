@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::raw::{OpKind, Removal};
+use crate::raw::Removal;
 
 /// The jobs (S1): the curators' six, and `rule`, the owner's action on a suggested rule, which holds
 /// no model text.
@@ -87,10 +87,11 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 }
 
 /// S6: the ops of any job left out while the exclusions stand as `reading` read them, by device and
-/// op seq: one shown a record of an excluded session or repository, and every op built on one
-/// (`read.ops`), followed in op order, as a forget follows them (S5). One built on a left-out op
-/// was shown its text, though its own records may miss the excluded conversation's (Codex on
-/// #669). Read once a round; nothing is left out while nothing is excluded.
+/// op seq: one shown a record of an excluded session or repository, or a summary or a card of one,
+/// and every op built on one (`read.ops`), followed in op order, as a forget follows them (S5). One
+/// built on a left-out op was shown its text, though its own records may miss the excluded
+/// conversation's (Codex on #669). Read once a round; nothing is left out while nothing is
+/// excluded.
 pub(crate) fn hidden(
     raw: &crate::raw::Raw,
     k: &Connection,
@@ -101,6 +102,25 @@ pub(crate) fn hidden(
         || !crate::consumer::manifest::exists(k, "table", "my_work")?
     {
         return Ok(hidden);
+    }
+    // The summaries and cards of an excluded session, judged by their session as their readers
+    // show or keep them back (D13): a review left out for one a reader still shows would be due
+    // again at once, call after call. A card of two sessions has none, and no reader shows it.
+    let sessions: Vec<&String> = reading.excluded.iter().collect();
+    let sessions = serde_json::to_string(&sessions)?;
+    let mut excluded_ops = std::collections::HashSet::new();
+    for table in ["turns", "cards"] {
+        if !crate::consumer::manifest::exists(k, "table", table)? {
+            continue;
+        }
+        let mut st = k.prepare(&format!(
+            "SELECT DISTINCT device, op_seq FROM {table}
+             WHERE agent IS NOT NULL AND session IS NOT NULL
+               AND agent || char(0) || session IN (SELECT value FROM json_each(?1))"
+        ))?;
+        for op in st.query_map([&sessions], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
+            excluded_ops.insert(op?);
+        }
     }
     let mut st = k.prepare("SELECT device, op_seq, read FROM my_work ORDER BY device, op_seq")?;
     let rows = st.query_map([], |r| {
@@ -113,57 +133,19 @@ pub(crate) fn hidden(
     for row in rows {
         let (device, op_seq, read) = row?;
         let read: Read = serde_json::from_str(&read)?;
-        let built_on_hidden = (read.ops.iter()).any(|seq| hidden.contains(&(device.clone(), *seq)));
-        if built_on_hidden || !shown_now(raw, reading, &device, &read)? {
+        let left_out = |seq: &i64| {
+            let op = (device.clone(), *seq);
+            hidden.contains(&op) || excluded_ops.contains(&op)
+        };
+        let mut shown = !read.ops.iter().any(left_out);
+        for &span in &read.spans {
+            shown = shown && !raw.holds_session(&device, span, &reading.excluded)?;
+        }
+        if !shown {
             hidden.insert((device, op_seq));
         }
     }
     Ok(hidden)
-}
-
-/// Whether an op `device` wrote, which was shown `read`, may be shown and sent while the
-/// exclusions stand as `reading` read them (S6): none of its records is of an excluded session or
-/// repository (`Reading::excluded` holds every session with a record in one), nor the session of
-/// a summary it read, nor any of a window whose cards it read.
-fn shown_now(
-    raw: &crate::raw::Raw,
-    reading: &crate::curate::Reading,
-    device: &str,
-    read: &Read,
-) -> Result<bool> {
-    for &span in &read.spans {
-        if raw.holds_session(device, span, &reading.excluded)? {
-            return Ok(false);
-        }
-    }
-    for &seq in &read.ops {
-        let Some(op) = (raw.ops_after(device, seq - 1, 1)?.pop()).filter(|o| o.op_seq == seq)
-        else {
-            continue;
-        };
-        let span = match op.kind {
-            // A summary is its session's, as the turns reader shows or keeps it back (D13): a
-            // review must not be left out for one a reader still shows it, or it would be due at
-            // once again and again.
-            OpKind::Turn => {
-                let (agent, session) = (op.body["agent"].as_str(), op.body["session"].as_str());
-                let key = format!("{}\0{}", agent.unwrap_or(""), session.unwrap_or(""));
-                if reading.excluded.contains(&key) {
-                    return Ok(false);
-                }
-                continue;
-            }
-            // A card is of its window's records, of every session in it.
-            OpKind::Window => crate::provenance::of(op.kind, &op.body).own,
-            _ => continue,
-        };
-        if let Some(span) = span
-            && raw.holds_session(device, span, &reading.excluded)?
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// A kept op as a reader takes it: who wrote it, where, and its body.

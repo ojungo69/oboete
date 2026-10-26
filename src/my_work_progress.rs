@@ -1313,6 +1313,21 @@ mod tests {
         assert!(b.contains("Now tag it."), "{b}");
     }
 
+    /// P3: the later asks are those from the original on, as the page's follow-ups: a member's
+    /// earlier prompt, which asked nothing, is none.
+    #[test]
+    fn a_prompt_before_the_original_is_no_later_ask() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.said("s2", -5, "Keep going.");
+        let b = h.said("s2", 10, "Add tests for the parser.");
+        h.grouped(&["s1", "s2"], &[a, b]);
+        let id = h.due()[0].0.clone();
+        let p = h.ask(&id).unwrap().prompt;
+        assert!(p.contains("Add tests for the parser."), "{p}");
+        assert!(!p.contains("Keep going"), "{p}");
+    }
+
     /// S2, S7: a review shows only this device's records, which its spans can list: in a copy of a
     /// store, another device, the earlier asks are left out.
     #[test]

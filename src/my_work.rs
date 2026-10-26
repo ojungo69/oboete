@@ -977,9 +977,9 @@ pub(crate) fn review_inputs(
                         spans.iter().any(|sp| holds(sp, device, (s.seq, s.seq)))
                     }
                 };
-                if let Some(text) =
-                    (s.text.as_ref()).filter(|_| ours && original.id != Some(s.id.clone()))
-                {
+                // As the page's follow-ups: from the original on, which is shown apart.
+                let later = s.ts >= original.ts && original.id != Some(s.id.clone());
+                if let Some(text) = (s.text.as_ref()).filter(|_| ours && later) {
                     asks.push((s.seq, s.ts, text.clone()));
                 }
             }
