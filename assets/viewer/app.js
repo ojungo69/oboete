@@ -1322,6 +1322,17 @@ const TEXT = {
     '有効にすると、バックグラウンドの要約処理が記録した本文を下の要約役へ送ることがあります。有料の呼び出しには費用がかかります。無効にしても既存の記憶は残り、次の処理で設定を読み直すと、新しい要約を止めます。',
   ],
   curate_on: ['Summarize recorded activity (default: off)', '記録を要約する(既定: 切)'],
+  my_work_h: ['My Work, written by AI', 'AI が書く My Work'],
+  my_work_desc: ['When on, the AI for summaries also groups your conversations into requests and writes their progress, your goals and suggested rules for the My Work page. It runs only while summaries are on.', 'オンにすると、要約に使う AI が会話を依頼ごとにまとめ、進み具合・目標・ルールの提案を書いて My Work の画面に出します。要約がオンのときだけ動きます。'],
+  my_work_on: ['Write My Work with AI (default: off)', 'My Work を AI で書く(既定: 切)'],
+  my_work_calls: ['Calls a day, at most ({min} to {max})', '1 日の呼び出しの上限({min}〜{max} 回)'],
+  my_work_calls_desc: ['At the limit, the work waits for the next day. The monthly limit on paid calls applies too.', '上限に達すると翌日まで待ちます。有料の AI の月額上限もそのまま効きます。'],
+  my_work_estimate: ['Calls a day with it on: about {calls}, at most {most}. At {name} ({model}) prices: about {usd} a day, at most {most_usd}.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。{name}({model})の料金で 1 日およそ {usd}、多くても {most_usd} です。'],
+  my_work_estimate_free: ['Calls a day with it on: about {calls}, at most {most}. No paid AI is in the list, so nothing is charged; a subscription\'s allowance may be used.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。有料の AI が一覧にないため料金はかかりません(サブスクリプションの利用枠は使われることがあります)。'],
+  my_work_estimate_none: ['An estimate appears here once something is recorded.', '記録がたまると、ここに見積もりが出ます。'],
+  simple_my_work_h: ['My Work, written by AI', 'AI が書く My Work'],
+  simple_my_work_desc: ['The AI for summaries groups conversations into requests and writes their progress and your goals. It runs only while summaries are created.', '要約に使う AI が会話を依頼ごとにまとめ、進み具合と目標を書きます。「記録を要約する」がオンのときだけ動きます。'],
+  simple_my_work: ['Write My Work with AI', 'My Work を AI で書く'],
   summary_language: ['Language of summaries', '要約を書く言語'],
   summary_language_desc: [
     'Write the language you want, such as English. Default: Japanese. Changing the language does not start a call.',
@@ -3098,7 +3109,7 @@ function formOf(s) {
     version: s.version,
     savedSettings: s,
     saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
-      worker: { resident: s.worker?.resident ?? false }, view: { port: s.view?.port } },
+      worker: { resident: s.worker?.resident ?? false }, view: { port: s.view?.port }, my_work: { ...s.my_work } },
     firstRun: s.first_run === true,
     residentSupported: s.resident_supported === true,
     worker: { resident: s.first_run && s.resident_supported ? true : s.worker?.resident ?? false },
@@ -3107,6 +3118,8 @@ function formOf(s) {
     viewRuntime: s.view_runtime ?? form?.viewRuntime ?? null,
     summary: { ...s.summary, window_tokens: String(s.summary.window_tokens), idle_minutes: String(s.summary.idle_minutes) },
     paid_usd_per_month: String(s.paid_usd_per_month),
+    // docs/my-work-model.md A6: the switch and the daily bound, with the estimate shown first.
+    my_work: { curate: s.my_work.curate, calls_a_day: String(s.my_work.calls_a_day), estimate: s.my_work.estimate },
     gemini: s.gemini ?? 'none',
     usd_this_month: s.usd_this_month,
     prompt_side: s.prompt_side ?? null,
@@ -4984,6 +4997,8 @@ function preserveSettingsDrafts(next, mine) {
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.neverFolder = mine.neverFolder;
   next.neverPattern = mine.neverPattern;
+  // My Work's switch and bound as edited, with the estimate the answer brings (Codex on #671).
+  if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day };
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
@@ -5563,6 +5578,8 @@ function saveBody() {
   const [least, most] = form.ranges.paid_usd_per_month;
   if (paid === '' || !Number.isFinite(cap) || cap < least || (most !== null && cap > most)) return { field: 'paid_usd_per_month' };
   if (!['none', 'before-subscriptions', 'after-subscriptions'].includes(form.gemini)) return { field: 'gemini' };
+  const myWork = { curate: form.my_work.curate, calls_a_day: whole(form.my_work.calls_a_day, ...form.ranges.my_work_calls) };
+  if (Number.isNaN(myWork.calls_a_day)) return { field: 'my_work.calls_a_day' };
   let embedding = null;
   if (form.embedding) {
     const e = form.embedding.edit, w = form.embedding.workers;
@@ -5599,6 +5616,7 @@ function saveBody() {
       worker: { resident: form.worker.resident },
       ...(port === form.saved.view.port ? {} : { view: { port } }),
       summary,
+      my_work: myWork,
       paid_usd_per_month: cap,
       gemini: form.gemini === 'none' ? null : form.gemini,
       inject: {
@@ -6189,6 +6207,9 @@ function drawSimpleSettings(panel, f) {
   const curate = simpleToggle(f.savedSettings.summary.curate, 'summary.curate', t('simple_curate'), (button, value) =>
     void simpleSettingsSave(button, body => { body.summary.curate = value; },
       (next, answer) => { next.summary = { ...next.summary, curate: answer.summary.curate }; }));
+  const myWork = simpleToggle(f.savedSettings.my_work.curate, 'my_work.curate', t('simple_my_work'), (button, value) =>
+    void simpleSettingsSave(button, body => { body.my_work = { curate: value, calls_a_day: f.savedSettings.my_work.calls_a_day }; },
+      (next, answer) => { next.my_work = { ...next.my_work, curate: answer.my_work.curate }; }));
   const ready = chain.some(row => simpleProviderStatus(row, f.stopped) === 'ready');
   const cap = input('number', simpleCapDraft ?? String(f.savedSettings.paid_usd_per_month), '', 'paid_usd_per_month',
     (v) => { simpleCapDraft = v; });
@@ -6228,6 +6249,7 @@ function drawSimpleSettings(panel, f) {
   panel.append(...present([el('p', 'lead', t('simple_intro')),
     !ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
     simpleBlock('ai', curate, el('ol', 'simple-providers', ...chain.map((row, i) => simpleProviderRow(f, row, i))), simpleCatalog(f)),
+    simpleBlock('my_work', myWorkEstimate(f.my_work.estimate), myWork),
     simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
       el('p', 'spend', f.usd_this_month === null ? t('spend_unavailable') : t('simple_spent', { usd: usdValue(f.usd_this_month) })))),
     f.embedding ? simpleBlock('search', embeddingChoice(f, true)) : null,
@@ -6237,6 +6259,16 @@ function drawSimpleSettings(panel, f) {
     simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents())),
     // Only while something is removed, to bring it back from here too.
     f.hidden?.items?.length ? hiddenSection(f, true) : null]));
+}
+
+// docs/my-work-model.md A6: what My Work's jobs would cost, before the switch is turned on.
+function myWorkEstimate(estimate) {
+  if (!estimate) return el('p', 'desc', t('my_work_estimate_none'));
+  const money = (v) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumSignificantDigits: 2 }).format(v);
+  const [calls, most] = estimate.calls;
+  if (!estimate.usd) return el('p', 'desc', t('my_work_estimate_free', { calls, most }));
+  return el('p', 'desc', t('my_work_estimate', { calls, most, usd: money(estimate.usd[0]), most_usd: money(estimate.usd[1]),
+    name: estimate.priced?.name ?? '', model: estimate.priced?.model ?? '' }));
 }
 
 function drawSettings() {
@@ -6279,6 +6311,10 @@ function drawSettings() {
   [pagePort.min, pagePort.max] = f.ranges.view_port;
   const curate=checkbox(f.summary.curate,(v)=>{f.summary.curate=v;});
   curate.dataset.field='summary.curate';
+  const myWorkCurate = checkbox(f.my_work.curate, (v) => { f.my_work.curate = v; });
+  myWorkCurate.dataset.field = 'my_work.curate';
+  const myWorkCalls = input('number', f.my_work.calls_a_day, '', 'my_work.calls_a_day', (v) => { f.my_work.calls_a_day = v; });
+  [myWorkCalls.min, myWorkCalls.max] = f.ranges.my_work_calls;
   const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
   summaryLanguage.className = 'summary-language';
   const summarySize = (key) => {
@@ -6357,6 +6393,13 @@ function drawSettings() {
           saved(f.saved.summary.language), note(t('summary_language_desc'))),
         el('details', null, el('summary', null, t('summary_advanced')),
           el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes')))),
+      el('section', null,
+        el('h3', null, t('my_work_h')), el('p', 'desc', t('my_work_desc')),
+        myWorkEstimate(f.my_work.estimate),
+        el('label', 'check', myWorkCurate, t('my_work_on')),
+        saved(t(f.saved.my_work.curate ? 'value_on' : 'value_off')),
+        el('label', 'field', el('span', null, t('my_work_calls', { min: f.ranges.my_work_calls[0].toLocaleString(lang), max: f.ranges.my_work_calls[1].toLocaleString(lang) })),
+          myWorkCalls, saved(f.saved.my_work.calls_a_day), note(t('my_work_calls_desc')))),
       el('section', null,
         el('h3', null, t('spending_h')),
         el('div', 'spending-cap',

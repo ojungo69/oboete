@@ -4808,6 +4808,22 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// docs/my-work-model.md A6: the live prompts recorded since `since`, unix ms: each one's time
+    /// and session, by the prompts index; what an estimate counts, never their text.
+    pub(crate) fn prompt_times(&self, since: i64) -> Result<Vec<(i64, (String, String))>> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        let mut st = self.conn.prepare(
+            "SELECT ts, agent, session FROM records
+             WHERE type = 'event' AND kind = 'prompt' AND ts >= ?1
+               AND source IN (SELECT value FROM json_each(?2))
+               AND agent IS NOT NULL AND session IS NOT NULL",
+        )?;
+        let rows = st.query_map(params![since, serde_json::to_string(&LIVE)?], |r| {
+            Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// docs/page.md S2: every agent's session with a live prompt that no removal took, as
     /// claude-mem's session begins at its first prompt; a prompt read as `prompt_labels` reads it,
     /// a tombstone with no range taking it whole, so a forgotten one lends the session nothing.

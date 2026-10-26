@@ -585,8 +585,8 @@ const settings=(mode,extra={})=>({version:'v1',first_run:false,resident_supporte
   retention:{days:null},
   redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:null,
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
-    idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],retention_days:[1,36500]},
-  view_runtime:{port:17373,mode},...extra});
+    idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],retention_days:[1,36500],my_work_calls:[1,10000]},
+  my_work:{curate:false,calls_a_day:100,estimate:null},view_runtime:{port:17373,mode},...extra});
 vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft};',ctx);
 const {w6}=ctx;
 const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
@@ -730,6 +730,23 @@ ctx.ui.setLang('ja');ctx.ui.drawSettings();
 assert(text(panel).includes('渡した記憶の一覧も表示する'),'Japanese list switch');
 ctx.ui.setLang('en');
 console.log('PASS: the session start list');
+// Decision 57 slice 2c: My Work's switch and daily bound, sent as saved or typed, with the estimate
+// of what turning it on costs.
+f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
+shown=text(panel);
+assert(shown.includes('My Work, written by AI')&&shown.includes('An estimate appears here once something is recorded.'),'My Work before anything is recorded');
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:false,calls_a_day:100},'the saved switch and bound are sent');
+tick(field('my_work.curate'),true);typeIn(field('my_work.calls_a_day'),'250');
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:true,calls_a_day:250},'what is ticked and typed is sent');
+for(const bad of ['0','10001','1.5','']){f.my_work.calls_a_day=bad;assert.equal(w6.saveBody().field,'my_work.calls_a_day',`bound ${bad} refused before sending`);}
+f=w6.formOf(settings('resident',{my_work:{curate:true,calls_a_day:250,estimate:{calls:[3,250],usd:null,priced:null}}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('Calls a day with it on: about 3, at most 250. No paid AI is in the list'),'the estimate with no paid entry');
+f=w6.formOf(settings('resident',{my_work:{curate:true,calls_a_day:250,estimate:{calls:[3,250],usd:[0.0123,6.62],priced:{name:'p',model:'m'}}}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert(text(panel).includes('At p (m) prices: about $0.012 a day, at most $6.6.'),'the estimate at the first paid entry\'s prices');
+ctx.ui.setLang('ja');ctx.ui.drawSettings();
+assert(text(panel).includes('オンのときの 1 日の呼び出し: およそ 3 回、多くても 250 回。')&&text(panel).includes('p(m)の料金で'),'the Japanese estimate');
+ctx.ui.setLang('en');
+console.log('PASS: My Work\'s switch, bound and estimate');
 }
 
 // The owner, 2026-10-09: an HTTP entry's API, chosen in its editor and saved as `api`.
@@ -812,7 +829,8 @@ const settings=(extra={})=>({version:'v1',first_run:false,resident_supported:tru
   redaction:{extra_rules:[],allowlist:[]},chain:[],providers:[],warnings:[],key_input:true,
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
     idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],
-    daily_requests:[1,100000],retention_days:[1,36500]},
+    daily_requests:[1,100000],retention_days:[1,36500],my_work_calls:[1,10000]},
+  my_work:{curate:false,calls_a_day:100,estimate:null},
   view_runtime:{port:17373,mode:'foreground'},embedding:embedding(),...extra});
 validSettings=settings;
 const posted=[];let answers=[];let settingsGets=0;let settingsAnswer=null;let runStatus=null;
@@ -999,7 +1017,8 @@ let saved={version:'simple-v1',first_run:true,resident_supported:true,worker:{re
   embedding:{provider:'none',workers_ai:{account_id:null,key_file:'test-key.md',key:'missing',daily_requests:200,monthly_usd:1,
     usd_this_month:0,requests_today:0},local:{unavailable:null,files:'not_downloaded',dir:'/tmp/oboete-test/models',held:0}},
   ranges:{paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],daily_requests:[1,100000],
-    session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[0,100000],idle_minutes:[0,120],retention_days:[1,36500]},
+    session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[0,100000],idle_minutes:[0,120],retention_days:[1,36500],my_work_calls:[1,10000]},
+  my_work:{curate:false,calls_a_day:100,estimate:null},
   chain:[{name:'groq',on:true,key:'missing',effective_model:'openai/gpt-oss-120b',model_rule:'any',model:null,
     daily_budget:null,timeout_s:null,differs:[]}],
   providers:[{name:'groq',selector:{source:'builtin',index:0},saved:{enabled:true,kind:'openai',base_url:'https://api.groq.com/openai/v1',
@@ -1019,9 +1038,10 @@ ctx.fetch=(url,options)=>{
 };
 let f=ctx.simpleUi.formOf(plain(saved));
 f.summary.language='Unsaved detailed language';f.inject.session_start_chars='7777';f.paid_usd_per_month='99';
+f.my_work.curate=true;f.my_work.calls_a_day='250';
 f.retention.forever=false;f.retention.edit='90';
 ctx.ui.setForm(f);ctx.ui.setView('settings');ctx.ui.setLang('ja');ctx.ui.drawSettings();
-assert.equal(panel.querySelectorAll('.simple-block').length,7,'all seven blocks are present');
+assert.equal(panel.querySelectorAll('.simple-block').length,8,'all eight blocks are present');
 assert(text(panel).includes('要約に使える AI がまだない'),'an unusable home has a clear first action');
 assert(!panel.querySelector('form'),'simple settings have no competing whole-page save');
 assert(!text(panel).includes('4294967295'),'field ranges stay in detailed settings');
@@ -1040,7 +1060,13 @@ assert.equal(requests[0].body.worker,undefined,'a first simple save does not act
 assert.equal(ctx.ui.getForm().summary.language,'Unsaved detailed language','unrelated drafts survive the saved response');
 assert.equal(ctx.ui.getForm().inject.session_start_chars,'7777');
 assert.deepEqual([ctx.ui.getForm().retention.forever,ctx.ui.getForm().retention.edit],[false,'90'],'an unsaved period survives too');
+assert.deepEqual([ctx.ui.getForm().my_work.curate,ctx.ui.getForm().my_work.calls_a_day],[true,'250'],'an unsaved My Work draft survives too (Codex on #671)');
 assert(text(panel).includes('保存しました'),'a saved receipt is beside the changed block');
+assert(text(panel).includes('記録がたまると、ここに見積もりが出ます。'),'My Work\'s block before anything is recorded');
+change(field('my_work.curate'),true);await settle();
+assert.deepEqual(requests.at(-1).body.my_work,{curate:true,calls_a_day:100},'My Work\'s switch sends the saved bound');
+assert.equal(requests.at(-1).body.summary.curate,true,'and keeps the saved summary switch');
+assert.equal(field('my_work.curate').checked,true,'the saved switch shows');
 type(field('paid_usd_per_month'),'3.5');for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
 assert.equal(requests.at(-1).body.paid_usd_per_month,3.5);
 assert.equal(requests.at(-1).body.summary.language,'Japanese');
@@ -1068,7 +1094,7 @@ for(const language of ['ja','en']){
   for(const [key,pair] of Object.entries(ctx.simpleUi.TEXT).filter(([key])=>key.startsWith('simple_'))){
     assert.equal(pair.length,2,`${key} is bilingual`);assert(pair.every(value=>typeof value==='string'&&value.length));
   }
-  assert.equal(panel.querySelectorAll('.simple-block').length,7);
+  assert.equal(panel.querySelectorAll('.simple-block').length,8);
 }
 assert.equal(requests.filter(request=>request.url!=='/api/settings').length,0,'rendering never calls a provider');
 saved.chain.push({...saved.chain[0],name:'openrouter',effective_model:'nvidia/nemotron-3-super-120b-a12b:free',model_rule:'free'});

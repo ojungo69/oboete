@@ -199,6 +199,11 @@ pub fn show(home: &Path) -> Value {
             "window_tokens": cfg.summary.window_tokens,
             "idle_minutes": cfg.summary.idle_minutes,
         },
+        "my_work": {
+            "curate": cfg.my_work.curate,
+            "calls_a_day": cfg.my_work.calls_a_day,
+            "estimate": my_work_estimate(home, &cfg),
+        },
         "paid_usd_per_month": cfg.paid_usd_per_month,
         "gemini": cfg.gemini.map(gemini_place),
         "usd_this_month": spend,
@@ -258,7 +263,21 @@ pub fn show(home: &Path) -> Value {
             "timeout_s": [TIMEOUT_S.start(), TIMEOUT_S.end()],
             "view_port": [1, u16::MAX],
             "retention_days": [config::RETENTION_DAYS.start(), config::RETENTION_DAYS.end()],
+            "my_work_calls": [MY_WORK_CALLS.start(), MY_WORK_CALLS.end()],
         },
+    })
+}
+
+/// docs/my-work-model.md A6: what My Work's jobs would cost on this home, priced at the chain's
+/// first paid entry; none before a store exists or when it does not read.
+fn my_work_estimate(home: &Path, cfg: &config::Config) -> Value {
+    let Some(Ok(e)) = crate::my_work_run::home_estimate(home, cfg) else {
+        return Value::Null;
+    };
+    json!({
+        "calls": [e.calls.0, e.calls.1],
+        "usd": e.usd.map(|(typical, most)| [typical, most]),
+        "priced": e.priced.map(|(name, model)| json!({"name": name, "model": model})),
     })
 }
 
@@ -521,6 +540,8 @@ struct Save {
     retention: Option<RetentionIn>,
     /// Workers AI's account and caps; older pages leave them alone (W4).
     embedding: Option<embedding::Values>,
+    /// `[my_work]` (docs/my-work-model.md A6); older pages leave it alone.
+    my_work: Option<MyWorkIn>,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
 }
@@ -559,6 +580,16 @@ struct WorkerIn {
 struct ViewIn {
     port: std::num::NonZeroU16,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MyWorkIn {
+    curate: bool,
+    calls_a_day: u32,
+}
+
+/// `[my_work] calls_a_day` as the page takes it: one call a day at the least.
+const MY_WORK_CALLS: std::ops::RangeInclusive<u32> = 1..=10_000;
 
 /// Only the summary fields the page edits; `shrink` stays as the file has it.
 #[derive(Deserialize)]
@@ -806,6 +837,23 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
             .and_then(toml_edit::Item::as_integer);
         if saved != Some(port) {
             put(&mut doc, "view", "port", port.into());
+        }
+    }
+    if let Some(m) = &posted.my_work {
+        if !MY_WORK_CALLS.contains(&m.calls_a_day) {
+            return Err(refused(422, "range", "my_work.calls_a_day"));
+        }
+        // Turning it on is the owner's act on this page, its estimate shown first (A6).
+        if m.curate != now.my_work.curate {
+            put(&mut doc, "my_work", "curate", m.curate.into());
+        }
+        if m.calls_a_day != now.my_work.calls_a_day {
+            put(
+                &mut doc,
+                "my_work",
+                "calls_a_day",
+                i64::from(m.calls_a_day).into(),
+            );
         }
     }
     if posted.paid_usd_per_month != now.paid_usd_per_month {
@@ -2146,6 +2194,69 @@ mod tests {
         let kept = save_to(&home, &body).unwrap();
         assert_eq!(kept["view"]["port"], 43123);
         assert_eq!(config::view(home.path()).unwrap().port.get(), 43123);
+    }
+
+    /// docs/my-work-model.md A6: the page shows `[my_work]` with its estimate, none before a
+    /// store exists and no USD with no paid entry; it saves the switch and the daily bound, refuses
+    /// a bound out of range, and an older page that sends none leaves them.
+    #[test]
+    fn my_work_shows_its_estimate_and_saves_its_switch_and_bound() {
+        let home = home_with(Some("providers = []\n[summary]\ncurate = true\n"));
+        let shown = show(home.path());
+        assert_eq!(
+            (
+                &shown["my_work"]["curate"],
+                &shown["my_work"]["calls_a_day"]
+            ),
+            (&json!(false), &json!(100))
+        );
+        assert_eq!(shown["my_work"]["estimate"], Value::Null, "no store yet");
+        assert_eq!(shown["ranges"]["my_work_calls"], json!([1, 10_000]));
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let prompt = crate::raw::Event {
+            session: "s1".into(),
+            repo: Some("r".into()),
+            ts: crate::db::now_ms(),
+            ..crate::raw::test_event(&json!({"prompt": "Build the parser."}).to_string())
+        };
+        raw.append(&prompt).unwrap();
+        drop(raw);
+        let shown = show(home.path());
+        let estimate = &shown["my_work"]["estimate"];
+        assert_eq!(
+            (&estimate["usd"], &estimate["priced"]),
+            (&Value::Null, &Value::Null)
+        );
+        assert_eq!(estimate["calls"][1], 100);
+        assert!(estimate["calls"][0].as_u64().unwrap() >= 1, "{estimate}");
+        let body = posted(&shown, |v| {
+            v["my_work"] = json!({"curate": true, "calls_a_day": 40});
+        });
+        let saved = save_to(&home, &body).unwrap();
+        let mine = |v: &Value| {
+            (
+                v["my_work"]["curate"].clone(),
+                v["my_work"]["calls_a_day"].clone(),
+            )
+        };
+        assert_eq!(mine(&saved), (json!(true), json!(40)));
+        let cfg = config::load(home.path()).unwrap().my_work;
+        assert_eq!((cfg.curate, cfg.calls_a_day), (true, 40));
+        for bad in [0, 10_001] {
+            let body = posted(&saved, |v| {
+                v["my_work"] = json!({"curate": true, "calls_a_day": bad});
+            });
+            let r = save_to(&home, &body).unwrap_err();
+            assert_eq!(
+                (r.status, r.code, r.field.as_str()),
+                (422, "range", "my_work.calls_a_day")
+            );
+        }
+        let body = posted(&saved, |v| v["summary"]["language"] = json!("English"));
+        let kept = save_to(&home, &body).unwrap();
+        assert_eq!(mine(&kept), (json!(true), json!(40)));
+        // Recording still reads the file.
+        config::load_capture(home.path()).unwrap();
     }
 
     /// docs/retention.md: the page shows `[retention] days`, saves a day count in range or null for
