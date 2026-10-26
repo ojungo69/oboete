@@ -926,7 +926,6 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   for the hold `curate::hold` gives it (a refused answer is tried again at once and counted), and
   after `ATTEMPTS` counted attempts is kept as a skip op of what it read. A request that changed
   (its digest, with the chain's) is asked whatever an older one waits for.
-- **Not yet**: the settings page's row with its estimate (A6, slice 2c).
 
 ### Slice 3a-2: grouping (2026-10-26)
 
@@ -978,7 +977,7 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   due check in 0.19 s warm; 124 candidates in 7 repositories, so about 13 calls to decide them all,
   each repository at most every 30 minutes; one call's prompt 650 to 1,440 estimated tokens, read
   in up to 6.4 s, most of it the agent text scan; a peak of 79 MB.
-- **Not yet**: the delegation link (C3, slice 3c); the settings page's row (A6, slice 2c).
+- **Not yet**: the delegation link (C3, slice 3c).
 
 ### Slice 3b: a group on My Work (2026-10-26)
 
@@ -997,6 +996,24 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   is a new version, as a new follow-up is; a new title is not part of it.
 - **The agents view** (C7) keeps one card a conversation, each its own id, showing its request's
   title, as the page already does for a request of several conversations.
+
+### Slice 2c: the switch and its estimate (2026-10-26)
+
+- **The settings page** has a My Work section after the summaries', and the simple page a block
+  after its AI list: the estimate first, then the switch (`[my_work] curate`) and, on the full
+  page, the daily bound (`calls_a_day`, 1 to 10,000). Both say it runs only while summaries are on.
+  An older page that sends no `my_work` leaves both as the file has them; a bound out of range is
+  refused (`range`, `my_work.calls_a_day`), on the page before it is sent.
+- **The estimate** (`my_work_run::estimate`, A6), from this home's last 7 days: a repository's new
+  conversations of one half hour count one grouping call; a conversation's hours with prompts one
+  review each, and the links, story and rules as the cost table derives them from the reviews; a
+  day with prompts one goals update, typed or not. Each job's calls are priced at the sizes of the
+  cost table, at the first paid entry of the chain the worker builds (an entry off, or turned off
+  in `[chain]`, is not priced), whose name and model are shown; over the bound every job waits
+  alike. "At most" is the bound, each call at the largest input and the entry's largest answer.
+  With no paid entry it says so and shows no USD. None before anything is recorded.
+- **Doctor** prints the switch, "on, waiting for [summary] curate" while summaries are off, and the
+  same estimate (`my_work_run::doctor_line`; the page and doctor share `home_estimate`).
 
 ## Not built
 

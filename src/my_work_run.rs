@@ -309,6 +309,153 @@ impl<'a> Runner<'a> {
     }
 }
 
+/// Each job's call as the design's cost table counts it ("Cost on this PC's volume"): its
+/// estimated tokens in and out.
+const SIZES: [(&str, u32, u32); 6] = [
+    ("group", 6_500, 300),
+    ("review", 4_000, 1_000),
+    ("links", 4_000, 300),
+    ("story", 4_000, 1_700),
+    ("rules", 2_000, 300),
+    ("goals", 4_000, 2_000),
+];
+/// The days an estimate reads (A6).
+const WEEK_MS: i64 = 7 * DAY_MS;
+
+/// What My Work's jobs would cost, from this home's last 7 days, before anything is sent (A6).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Estimate {
+    /// Calls a day: typical, and at most (the daily bound).
+    pub calls: (u32, u32),
+    /// USD a day, typical and at most, at the first paid entry's prices; none when no entry is
+    /// paid.
+    pub usd: Option<(f64, f64)>,
+    /// That entry's name and model.
+    pub priced: Option<(String, String)>,
+}
+
+/// A6's estimate. Typical: each job's calls a day from the week's volumes (a repository's new
+/// conversations of one half hour, one grouping call; a conversation's hours with prompts, one
+/// review each, its links, story and rules as the cost table derives them from the reviews; a day
+/// with prompts, one goals update), at most the bound, priced as the cost table sizes each job's
+/// call. At most: the bound, each call at the largest input and the entry's largest answer.
+pub(crate) fn estimate(
+    raw: &Raw,
+    providers: &[crate::config::Provider],
+    calls_a_day: u32,
+    now: i64,
+) -> Result<Estimate> {
+    let since = now - WEEK_MS;
+    let halves: std::collections::HashSet<(Option<String>, i64)> =
+        (raw.live_sessions()?.into_iter())
+            .filter(|s| s.started >= since)
+            .map(|s| (s.repo, s.started / (30 * 60_000)))
+            .collect();
+    let prompts = raw.prompt_times(since)?;
+    let hours: std::collections::HashSet<(&(String, String), i64)> = prompts
+        .iter()
+        .map(|(ts, key)| (key, ts / 3_600_000))
+        .collect();
+    let days: std::collections::HashSet<i64> = prompts.iter().map(|(ts, _)| ts / DAY_MS).collect();
+    let week = |n: usize| n as f64 / 7.0;
+    let reviews = week(hours.len());
+    let story = (reviews / 5.0).min(8.0);
+    let per_job = [
+        week(halves.len()),
+        reviews,
+        reviews / 5.0,
+        story,
+        story / 2.0,
+        week(days.len()).min(1.0),
+    ];
+    let typical: f64 = per_job.iter().sum();
+    // Over the bound, every job waits alike (A7).
+    let scale = if typical > f64::from(calls_a_day) {
+        f64::from(calls_a_day) / typical
+    } else {
+        1.0
+    };
+    let calls = ((typical * scale).ceil() as u32, calls_a_day);
+    let Some(p) = providers.iter().find(|p| p.limits().is_paid()) else {
+        return Ok(Estimate {
+            calls,
+            usd: None,
+            priced: None,
+        });
+    };
+    let call = |input: u32, output: u32| {
+        p.limits()
+            .usd(f64::from(input) * p.input_weight(), f64::from(output))
+    };
+    let usd: f64 = (per_job.iter().zip(SIZES))
+        .map(|(n, (_, input, output))| n * scale * call(input, output))
+        .sum();
+    let largest = SIZES.iter().map(|s| s.1).max().unwrap_or(0);
+    let most = f64::from(calls_a_day) * call(largest, crate::budget::largest_output(p));
+    let model = match p {
+        crate::config::Provider::Openai { model, .. } => model.clone(),
+        crate::config::Provider::Cli { model, .. } => model.clone().unwrap_or_default(),
+    };
+    Ok(Estimate {
+        calls,
+        usd: Some((usd, most)),
+        priced: Some((p.name().to_owned(), model)),
+    })
+}
+
+/// A6's estimate for a home, over the chain as the worker builds it (an entry turned off is not
+/// priced); none while nothing is recorded.
+pub(crate) fn home_estimate(
+    home: &std::path::Path,
+    cfg: &crate::config::Config,
+) -> Option<Result<Estimate>> {
+    if !crate::raw::exists(home) {
+        return None;
+    }
+    let chain: Vec<crate::config::Provider> = (cfg.providers.iter())
+        .filter(|p| p.enabled() && !cfg.chain.turns_off(p.name()))
+        .cloned()
+        .collect();
+    Some(
+        crate::raw::open(home)
+            .and_then(|raw| estimate(&raw, &chain, cfg.my_work.calls_a_day, crate::db::now_ms())),
+    )
+}
+
+/// Doctor's line on My Work (A6): the switch, and what turning it on would cost.
+pub(crate) fn doctor_line(home: &std::path::Path, cfg: &crate::config::Config) -> String {
+    let state = if cfg.my_work.curate && cfg.summary.curate {
+        "on"
+    } else if cfg.my_work.curate {
+        "on, waiting for [summary] curate"
+    } else {
+        "off"
+    };
+    let e = match home_estimate(home, cfg) {
+        Some(Ok(e)) => e,
+        Some(Err(_)) => {
+            return format!(
+                "my work: {state} ([my_work] curate); no estimate: the store does not read"
+            );
+        }
+        None => {
+            return format!(
+                "my work: {state} ([my_work] curate); no estimate: nothing is recorded yet"
+            );
+        }
+    };
+    let usd = match (&e.usd, &e.priced) {
+        (Some((typical, most)), Some((name, model))) => format!(
+            ", about USD {typical:.3} a day, at most USD {most:.2}, at {name}'s prices ({model})"
+        ),
+        _ => ", no USD: no paid entry is in the chain".to_owned(),
+    };
+    format!(
+        "my work: {state} ([my_work] curate); calls a day with it on: about {}, at most {}{usd}",
+        e.calls.0, e.calls.1
+    )
+}
+
 /// A job every entry failed `ATTEMPTS` times is kept as a skip of what it read, and not asked
 /// again until what it would read changes (A8).
 fn given_up(raw: &mut Raw, db: &Connection, span: &str, skip: Value) -> Result<Phase> {
@@ -774,5 +921,128 @@ mod tests {
         );
         assert_eq!(kept(&s, "r1"), None);
         assert_eq!(asked.borrow().len(), 2);
+    }
+
+    fn entry(name: &str, limits: crate::config::Limits) -> crate::config::Provider {
+        crate::config::Provider::Openai {
+            enabled: true,
+            name: name.into(),
+            base_url: "http://127.0.0.1:9".into(),
+            api: Default::default(),
+            key_file: None,
+            model: "m".into(),
+            daily_budget: Some(10),
+            timeout_s: 1,
+            retry_429: false,
+            extra: Default::default(),
+            headers: Default::default(),
+            limits,
+            subscription: false,
+        }
+    }
+
+    /// A6: the estimate counts the week's volumes as the cost table does, at most the bound, and
+    /// prices them at the chain's first paid entry, the bound at the largest call; with no paid
+    /// entry, no USD.
+    #[test]
+    fn the_estimate_counts_the_weeks_volumes_and_prices_the_first_paid_entry() {
+        let mut s = Store::new();
+        let now = crate::db::now_ms();
+        let hour = 3_600_000;
+        // Each of the last 7 days: two new conversations of one repository in two half hours
+        // (14 grouping calls), with 3 and 2 hours of prompts (35 reviews); a week before, one more.
+        for d in 0..7 {
+            let day = now - d * DAY_MS;
+            for h in [5, 4, 3] {
+                s.said(&format!("a{d}"), "r", day - h * hour, "Build the parser.");
+            }
+            for h in [3, 2] {
+                s.said(&format!("b{d}"), "r", day - h * hour, "Add its tests.");
+            }
+        }
+        s.said("old", "r", now - 9 * DAY_MS, "Long ago.");
+        let paid = crate::config::Limits {
+            usd_per_mtok_in: 1.0,
+            usd_per_mtok_out: 5.0,
+            max_output_tokens: 4_000,
+            ..Default::default()
+        };
+        let chain = [
+            entry("free", crate::config::Limits::default()),
+            entry("paid", paid),
+        ];
+        // A day: 2 groupings, 5 reviews, 1 links, 1 story, 0.5 rules, 1 goals.
+        let e = estimate(&s.raw, &chain, 100, now).unwrap();
+        assert_eq!(e.calls, (11, 100));
+        assert_eq!(e.priced, Some(("paid".to_owned(), "m".to_owned())));
+        let (typical, most) = e.usd.unwrap();
+        let usd = |calls: f64, input: f64, output: f64| calls * (input + 5.0 * output) / 1e6;
+        let expected = usd(2.0, 6_500.0, 300.0)
+            + usd(5.0, 4_000.0, 1_000.0)
+            + usd(1.0, 4_000.0, 300.0)
+            + usd(1.0, 4_000.0, 1_700.0)
+            + usd(0.5, 2_000.0, 300.0)
+            + usd(1.0, 4_000.0, 2_000.0);
+        assert!((typical - expected).abs() < 1e-9, "{typical} {expected}");
+        assert!((most - usd(100.0, 6_500.0, 4_000.0)).abs() < 1e-9, "{most}");
+        // Over the bound, every job waits alike.
+        let bound = estimate(&s.raw, &chain, 5, now).unwrap();
+        assert_eq!(bound.calls, (5, 5));
+        let (typical, _) = bound.usd.unwrap();
+        assert!((typical - expected * 5.0 / 10.5).abs() < 1e-9, "{typical}");
+        let free = estimate(&s.raw, &chain[..1], 100, now).unwrap();
+        assert_eq!((free.calls, free.usd, free.priced), ((11, 100), None, None));
+    }
+
+    /// A6: doctor names the switch and what turning it on would cost.
+    #[test]
+    fn doctor_names_the_switch_and_what_turning_it_on_costs() {
+        let mut s = Store::new();
+        s.said("s1", "r", crate::db::now_ms(), "Build the parser.");
+        let home = s.home.path().to_owned();
+        std::fs::write(home.join("config.toml"), "providers = []\n").unwrap();
+        let cfg = crate::config::load_chain(&home).unwrap();
+        let line = doctor_line(&home, &cfg);
+        assert!(
+            line.starts_with("my work: off ([my_work] curate)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("calls a day with it on: about 1, at most 100"),
+            "{line}"
+        );
+        assert!(line.ends_with("no paid entry is in the chain"), "{line}");
+        let fresh = tempfile::tempdir().unwrap();
+        let line = doctor_line(fresh.path(), &cfg);
+        assert!(
+            line.ends_with("no estimate: nothing is recorded yet"),
+            "{line}"
+        );
+        // An entry turned off is not priced, as the worker leaves it out of the chain.
+        std::fs::write(
+            home.join("config.toml"),
+            "[[providers]]\nkind = \"openai\"\nname = \"p\"\nenabled = false\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\nlimits = { usd_per_mtok_in = 1.0 }\n",
+        )
+        .unwrap();
+        let cfg = crate::config::load(&home).unwrap();
+        let line = doctor_line(&home, &cfg);
+        assert!(line.ends_with("no paid entry is in the chain"), "{line}");
+        let entry = "[[providers]]\nkind = \"openai\"\nname = \"p\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\nlimits = { usd_per_mtok_in = 1.0 }\n";
+        let doctor = |text: String| {
+            std::fs::write(home.join("config.toml"), text).unwrap();
+            doctor_line(&home, &crate::config::load(&home).unwrap())
+        };
+        let line = doctor(format!("[chain]\noff = [\"p\"]\n{entry}"));
+        assert!(line.ends_with("no paid entry is in the chain"), "{line}");
+        let line = doctor(format!("[my_work]\ncurate = true\n{entry}"));
+        assert!(
+            line.starts_with("my work: on, waiting for [summary] curate"),
+            "{line}"
+        );
+        assert!(line.ends_with("at p's prices (m)"), "{line}");
+        let line = doctor(format!(
+            "[my_work]\ncurate = true\n[summary]\ncurate = true\n{entry}"
+        ));
+        assert!(line.starts_with("my work: on ([my_work] curate)"), "{line}");
     }
 }

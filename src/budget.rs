@@ -654,7 +654,7 @@ pub(crate) fn most_usd_calibrated(
 }
 
 /// The answer a request may get at most: its declared output, or the entry's output cap.
-fn largest_output(p: &Provider) -> u32 {
+pub(crate) fn largest_output(p: &Provider) -> u32 {
     match p.declared_output() {
         0 => p.limits().max_output_tokens,
         n => n,
