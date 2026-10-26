@@ -98,18 +98,14 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             r.get::<_, i64>(7)?,
         ))
     })?;
-    // S6: the ops left out, by device and op seq; an op reads only its own device's ops, older
-    // ones, folded before it. One built on a left-out op was shown its title, though its own
-    // records may miss the excluded conversation's (Codex on #669).
-    let mut hidden: HashSet<(String, i64)> = HashSet::new();
+    // S6: the ops left out while an exclusion stands, any job's (`my_work_ops::hidden`).
+    let hidden = crate::my_work_ops::hidden(raw, k, reading)?;
     for row in rows {
         let (device, ts, repo, read, fields, skipped, forgotten, op_seq) = row?;
-        let read: Read = serde_json::from_str(&read)?;
-        let built_on_hidden = (read.ops.iter()).any(|seq| hidden.contains(&(device.clone(), *seq)));
-        if built_on_hidden || !shown_now(raw, reading, &device, &read)? {
-            hidden.insert((device, op_seq));
+        if hidden.contains(&(device.clone(), op_seq)) {
             continue;
         }
+        let read: Read = serde_json::from_str(&read)?;
         let shown = if forgotten.is_some() {
             HashSet::new()
         } else {
@@ -183,22 +179,6 @@ fn key(v: &Value) -> Option<Key> {
 
 fn keys(v: &Value) -> Vec<Key> {
     v.as_array().into_iter().flatten().filter_map(key).collect()
-}
-
-/// Whether an op `device` wrote, which was shown `read`, may be shown and sent while the
-/// exclusions stand as `reading` read them (S6): none of its records is of an excluded session or
-/// repository.
-fn shown_now(raw: &Raw, reading: &Reading, device: &str, read: &Read) -> Result<bool> {
-    for &(from, to) in &read.spans {
-        let labels = raw.labels_in(device, from, to)?;
-        let session = labels.session.map(|(a, s)| format!("{a}\0{s}"));
-        if session.is_some_and(|s| reading.excluded.contains(&s))
-            || labels.repo.is_some_and(|r| reading.exclusions.contains(&r))
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// The grouping job (S1's `group`), for one round: what it read for its due check, kept for the

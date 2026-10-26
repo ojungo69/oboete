@@ -86,6 +86,62 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// S6: the ops of any job left out while the exclusions stand as `reading` read them, by device and
+/// op seq: one shown a record of an excluded session or repository, and every op built on one
+/// (`read.ops`), followed in op order, as a forget follows them (S5). One built on a left-out op
+/// was shown its text, though its own records may miss the excluded conversation's (Codex on
+/// #669). Read once a round; nothing is left out while nothing is excluded.
+pub(crate) fn hidden(
+    raw: &crate::raw::Raw,
+    k: &Connection,
+    reading: &crate::curate::Reading,
+) -> Result<std::collections::HashSet<(String, i64)>> {
+    let mut hidden = std::collections::HashSet::new();
+    if (reading.excluded.is_empty() && reading.exclusions.is_empty())
+        || !crate::consumer::manifest::exists(k, "table", "my_work")?
+    {
+        return Ok(hidden);
+    }
+    let mut st = k.prepare("SELECT device, op_seq, read FROM my_work ORDER BY device, op_seq")?;
+    let rows = st.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (device, op_seq, read) = row?;
+        let read: Read = serde_json::from_str(&read)?;
+        let built_on_hidden = (read.ops.iter()).any(|seq| hidden.contains(&(device.clone(), *seq)));
+        if built_on_hidden || !shown_now(raw, reading, &device, &read)? {
+            hidden.insert((device, op_seq));
+        }
+    }
+    Ok(hidden)
+}
+
+/// Whether an op `device` wrote, which was shown `read`, may be shown and sent while the
+/// exclusions stand as `reading` read them (S6): none of its records is of an excluded session or
+/// repository.
+fn shown_now(
+    raw: &crate::raw::Raw,
+    reading: &crate::curate::Reading,
+    device: &str,
+    read: &Read,
+) -> Result<bool> {
+    for &(from, to) in &read.spans {
+        let labels = raw.labels_in(device, from, to)?;
+        let session = labels.session.map(|(a, s)| format!("{a}\0{s}"));
+        if session.is_some_and(|s| reading.excluded.contains(&s))
+            || labels.repo.is_some_and(|r| reading.exclusions.contains(&r))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// A kept op as a reader takes it: who wrote it, where, and its body.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Kept {
