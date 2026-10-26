@@ -383,16 +383,16 @@ impl Shown {
             .collect();
         shown.part("## Work items, the newest first\n", &lines);
         // A product shown is listed by where it was read from (S5); one of another device's is
-        // not shown.
+        // not shown. A card's is new by its op, as the card is: its time is its window's last
+        // record's, not when it was written (Codex on #693).
         let device = s.raw.device();
+        let new = |p: &Value| p["at"].as_i64().is_none_or(|at| at > amend.read_at);
         let products: Vec<(Value, Origin)> =
             (crate::my_work::products_read(s.raw, s.k, rules, &input.sources)?.into_iter())
-                .filter(|(p, origin)| {
-                    p["at"].as_i64().is_none_or(|at| at > amend.read_at)
-                        && match origin {
-                            Origin::Record(d, _) | Origin::Card(d, _) => d == device,
-                            Origin::Work => true,
-                        }
+                .filter(|(p, origin)| match origin {
+                    Origin::Card(d, op) => d == device && *op > amend.cards,
+                    Origin::Record(d, _) => d == device && new(p),
+                    Origin::Work => new(p),
                 })
                 .take(PRODUCTS)
                 .collect();
@@ -1108,6 +1108,10 @@ mod tests {
         let first = h.reviews()[0].op_seq;
         assert!(h.due().is_empty(), "{:?}", h.due());
         h.age(61);
+        // A card written after the review, of a window before it: new by its op (Codex on #693).
+        let late = json!([{"type": "feature", "title": "LATE CARD", "narrative": "Done.",
+            "files_modified": ["/home/u/late.pdf"]}]);
+        h.s.cards(b, b, late, false);
         let c = h.said("s2", 100, "Now report the column of each error.");
         let ask = h.ask(&id).unwrap();
         let p = &ask.prompt;
@@ -1133,6 +1137,7 @@ mod tests {
         for seen in ["OLD SUMMARY", "OLD CARD", "OLD TASK", "old.pdf"] {
             assert!(!p.contains(seen), "{seen}: {p}");
         }
+        assert!(p.contains("LATE CARD") && p.contains("late.pdf"), "{p}");
         assert!(ask.read.ops.contains(&first), "{:?}", ask.read);
         assert!(ask.read.spans.contains(&(c, c)), "{:?}", ask.read);
         for seq in [a, old] {
