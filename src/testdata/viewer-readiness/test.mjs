@@ -2211,6 +2211,54 @@ assert.equal(drawn,1,'Settings is drawn again with the list read');
 assert.equal(status.textContent,'Brought back to the page.');
 ctx.drawSettings=drawSettings;ctx.ui.setForm(null);run('setView("timeline")');
 delete status.textContent;status.children=[];
+// #661: past the first page, Show more reads the next one, after the last of each kind shown, and
+// adds it below; the end of the list has none, and the simple page has it too.
+{
+  const next='{"cards":[30,"d",12,0],"summaries":null}';
+  const g={hidden:{items:[{kind:'card',id:'12.0',title:'Azimuth parser',repo_name:'fern',ts:30}],next}};
+  ctx.ui.setView('settings');ctx.ui.setForm(g);
+  let drawnMore=0;ctx.drawSettings=()=>{drawnMore++;};
+  const showMore=node=>node.querySelectorAll('button').find(b=>b.dataset.i18n==='more');
+  const more=showMore(run('hiddenSection')(g));
+  assert(more,'a list with a next page has Show more');
+  hidden={items:[{kind:'summary',id:'S9',title:'Older summary',repo_name:'fern',ts:20}],next:null};
+  more.click();await settle();
+  const asked=requests.filter(r=>r.url.startsWith('/api/hidden?')).at(-1);
+  assert.equal(new URLSearchParams(asked.url.split('?')[1]).get('before'),next,'it reads after the last shown');
+  assert.deepEqual(Array.from(g.hidden.items,i=>i.id),['12.0','S9'],'the next page is added below');
+  assert.equal(g.hidden.next,null);
+  assert.equal(drawnMore,1,'Settings is drawn again with both pages');
+  assert(!showMore(run('hiddenSection')(g)),'no Show more at the end');
+  const simple=run('hiddenSection')({hidden:{items:g.hidden.items,next}},true);
+  assert(showMore(simple)&&text(showMore(simple))==='More','the simple page has it too');
+  ctx.ui.setLang('ja');
+  assert.equal(text(showMore(run('hiddenSection')({hidden:{items:g.hidden.items,next}},true))),'もっと見る');
+  ctx.ui.setLang('en');
+  // A page that cannot be read leaves the list as it was and says so.
+  const h={hidden:{items:g.hidden.items,next}};ctx.ui.setForm(h);
+  hidden=null;
+  const again=showMore(run('hiddenSection')(h));again.click();await settle();
+  assert.deepEqual(Array.from(h.hidden.items,i=>i.id),['12.0','S9'],'what was listed stays');
+  assert.equal(again.disabled,false,'and it can be asked again');
+  assert.equal(status.textContent,'What was removed could not be read.');
+  // A Bring back while a page is read reads the list from its start: the page read for the list
+  // before is dropped.
+  {
+    const k={hidden:{items:[g.hidden.items[0]],next}};ctx.ui.setForm(k);
+    const prior=ctx.fetch;let release;
+    ctx.fetch=(url,options)=>url.startsWith('/api/hidden?before=')
+      ?new Promise(resolve=>{release=()=>resolve(json({items:[{kind:'card',id:'old',title:'Old',repo_name:'fern',ts:1}],next:null}));})
+      :prior(url,options);
+    showMore(run('hiddenSection')(k)).click();
+    k.hidden={items:[],next:null};
+    release();await settle();
+    assert.deepEqual(Array.from(k.hidden.items,i=>i.id),[],'the page read for the list before is dropped');
+    ctx.fetch=prior;
+  }
+  hidden={items:[]};
+  ctx.drawSettings=drawSettings;ctx.ui.setForm(null);run('setView("timeline")');
+  delete status.textContent;status.children=[];
+}
 assert(requests.filter(r=>r.options.method).every(r=>r.options.method==='POST'),'every write is a POST');
-console.log('PASS: Remove from the page: card and summary, Undo through redraws, refusals named, JA/EN, Settings list and Bring back');
+console.log('PASS: Remove from the page: card and summary, Undo through redraws, refusals named, JA/EN, Settings list, Show more and Bring back');
 }

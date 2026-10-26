@@ -829,32 +829,42 @@ pub fn around(
     Ok(out)
 }
 
-/// Parity row 3: the summaries removed from the page, the newest first, at most `limit`, as
-/// Settings lists them to bring back; read as every reader reads a summary.
+/// Parity row 3: the summaries removed from the page, the newest first after `before`, at most
+/// `limit`, as Settings lists them to bring back (#661: page by page); read as every reader reads a
+/// summary. The boolean says another one exists, as `page` does.
 pub(crate) fn removed(
     k: &Connection,
     raw: &Raw,
+    before: Option<&Position>,
     limit: usize,
     rules: &Rules,
-) -> Result<Vec<TurnSummary>> {
+) -> Result<(Vec<TurnSummary>, bool)> {
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     if crate::hide::shown(k, "turns", "")?.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS} FROM turns WHERE skipped = 0 AND hidden = 1
+           AND (?1 IS NULL OR (ts, device, op_seq) < (?1, ?2, ?3))
          ORDER BY ts DESC, device DESC, op_seq DESC"
     ))?;
-    let mut rows = st.query([])?;
+    let mut rows = st.query(rusqlite::params![
+        before.map(|p| p.0),
+        before.map(|p| p.1.as_str()),
+        before.map(|p| p.2)
+    ])?;
     let mut out = Vec::new();
-    while out.len() < limit
-        && let Some(r) = rows.next()?
-    {
-        out.extend(read_row(r, raw, rules)?);
+    while let Some(r) = rows.next()? {
+        if let Some(s) = read_row(r, raw, rules)? {
+            if out.len() == limit {
+                return Ok((out, true));
+            }
+            out.push(s);
+        }
     }
-    Ok(out)
+    Ok((out, false))
 }
 
 /// A summary's ID as `get` takes it, `S<device>.<op seq>` or `S<op seq>` of `local`, in parts.

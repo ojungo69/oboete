@@ -409,12 +409,17 @@ function feedHeader(item) {
     el('span', 'feed-repo', item.repo_name));
 }
 
+// What an entry's footer offers: forget for a prompt or a note, Remove for a card or a summary.
+function feedControl(item) {
+  if (['prompt', 'note'].includes(item.kind)) return forgetControl(item.kind, item.id);
+  if (['card', 'summary'].includes(item.kind)) return hideControl(item.kind, item.id);
+  return null;
+}
+
 function feedFooter(item) {
   const time = localTime(item.ts, lang);
   time.dataset.feedTimestamp = String(item.ts);
-  return el('footer', 'feed-card-footer', el('code', null, item.id), time,
-    ['prompt', 'note'].includes(item.kind) ? forgetControl(item.kind, item.id)
-      : ['card', 'summary'].includes(item.kind) ? hideControl(item.kind, item.id) : null);
+  return el('footer', 'feed-card-footer', el('code', null, item.id), time, feedControl(item));
 }
 
 // A note an agent saved has no subtitle of its own: it says whose it is, as claude-mem's manual
@@ -4502,6 +4507,23 @@ async function refreshHidden(f) {
   return listed !== null;
 }
 
+// #661: the next page of what was removed, after the last of each kind shown, added below them.
+async function moreHidden(f, button) {
+  const before = f.hidden?.next;
+  if (!before || button.disabled) return;
+  button.disabled = true;
+  const page = await api('hidden', { before }).catch(() => null);
+  // A reread meanwhile (a Bring back) replaced the list this page would follow.
+  if (!currentSettings(f) || f.hidden?.next !== before) return;
+  if (!page) {
+    button.disabled = false;
+    setStatus(t('hidden_unavailable'), true, lang);
+    return;
+  }
+  f.hidden = { items: [...f.hidden.items, ...page.items], next: page.next };
+  drawSettings();
+}
+
 function hiddenSection(f, simple = false) {
   const listed = f.hidden;
   const rows = (listed?.items || []).map((item) => {
@@ -4523,6 +4545,13 @@ function hiddenSection(f, simple = false) {
   });
   let listing = word('p', 'desc', 'hidden_unavailable');
   if (listed) listing = rows.length ? el('ul', null, ...rows) : word('p', 'desc', 'hidden_none');
+  if (listed?.next) {
+    const more = word('button', 'quiet more', 'more');
+    more.type = 'button';
+    more.dataset.simpleFocus = 'hidden.more';
+    more.addEventListener('click', () => void moreHidden(f, more));
+    listing = el('div', null, listing, more);
+  }
   if (simple) return simpleBlock('hidden', listing);
   return el('section', 'hidden-settings', word('h3', null, 'hidden_h'), word('p', 'desc', 'hidden_desc'), listing);
 }

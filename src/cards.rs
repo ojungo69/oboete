@@ -1002,27 +1002,43 @@ where
     Some(out.join("\n"))
 }
 
-/// Parity row 3: the current cards removed from the page, the newest first, at most `limit`, as
-/// Settings lists them to bring back; read as every reader reads a card.
-pub(crate) fn removed(k: &Connection, raw: &Raw, limit: usize, rules: &Rules) -> Result<Vec<Card>> {
+/// Parity row 3: the current cards removed from the page, the newest first after `before`, at most
+/// `limit`, as Settings lists them to bring back (#661: page by page); read as every reader reads a
+/// card. The boolean says another one exists, as `page` does.
+pub(crate) fn removed(
+    k: &Connection,
+    raw: &Raw,
+    before: Option<&Position>,
+    limit: usize,
+    rules: &Rules,
+) -> Result<(Vec<Card>, bool)> {
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     if crate::hide::shown(k, "cards", "")?.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let mut st = k.prepare(&format!(
         "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL AND hidden = 1
-         ORDER BY ts DESC, device DESC, op_seq DESC, n"
+           AND (?1 IS NULL OR (ts, device, op_seq, n) < (?1, ?2, ?3, ?4))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
     ))?;
-    let mut rows = st.query([])?;
+    let mut rows = st.query(rusqlite::params![
+        before.map(|p| p.0),
+        before.map(|p| p.1.as_str()),
+        before.map(|p| p.2),
+        before.map(|p| p.3)
+    ])?;
     let mut out = Vec::new();
-    while out.len() < limit
-        && let Some(r) = rows.next()?
-    {
-        out.extend(read(r, raw, rules)?);
+    while let Some(r) = rows.next()? {
+        if let Some(c) = read(r, raw, rules)? {
+            if out.len() == limit {
+                return Ok((out, true));
+            }
+            out.push(c);
+        }
     }
-    Ok(out)
+    Ok((out, false))
 }
 
 /// A card's ID as `get` takes it, `<device>.<op seq>.<n>` or `<op seq>.<n>` of `local`, in parts:
