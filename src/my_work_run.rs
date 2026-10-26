@@ -76,6 +76,19 @@ pub(crate) trait Job {
     fn ask(&self, s: &Stores, about: &str, now: i64) -> Result<Option<Ask>>;
 }
 
+/// A request past `[my_work] calls_a_day`, a retry's or a fallback's too (A7): nothing is sent,
+/// and the job waits until the oldest call counted leaves the rolling day, unix ms.
+#[derive(Debug)]
+pub(crate) struct BoundReached(pub i64);
+
+impl std::fmt::Display for BoundReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("My Work's calls a day are spent")
+    }
+}
+
+impl std::error::Error for BoundReached {}
+
 /// The jobs this binary runs, for one round: none until the first, grouping (slice 3a-2).
 pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
     Vec::new()
@@ -224,7 +237,15 @@ impl<'a> Runner<'a> {
                     continue;
                 }
             }
+            let bound = self.calls_a_day;
             let answer = (self.call)(&span, &ask.prompt, &ask.schema, &*ask.check, &|| {
+                // A7 at each request, the chain's retries and fallbacks too (Codex on #668): the
+                // count holds this request's own reservation.
+                let (calls, oldest) = crate::providers_db::my_work_calls_in_a_day(db)?;
+                if calls > bound {
+                    let until = oldest.map_or_else(crate::db::now_ms, |t| t + DAY_MS);
+                    return Err(BoundReached(until).into());
+                }
                 let dispatch = raw.dispatch()?;
                 reading.still(raw)?;
                 crate::curate::rules_still(raw, self.rules)?;
@@ -251,6 +272,11 @@ impl<'a> Runner<'a> {
                 Ok(()) => {
                     crate::providers_db::clear_my_work_pending(db, &span)?;
                     return Ok(self.called(Phase::Covered));
+                }
+                // At the bound, nothing more went out: the job waits, its attempts as they were.
+                Err(e) if e.is::<BoundReached>() => {
+                    let until = e.downcast_ref::<BoundReached>().map_or(now, |b| b.0);
+                    return Ok(self.called(Phase::Waiting { until, up: false }));
                 }
                 // Nothing went out: the next pass reads the list again.
                 Err(e) if e.is::<crate::curate::ListChanged>() => {
@@ -580,6 +606,68 @@ mod tests {
             pass(&mut s, echo(), (true, 3), false, &grouped, &asked),
             Phase::Covered
         );
+    }
+
+    /// A7 at each request (Codex on #668): a chain that falls through to another entry past the
+    /// bound sends nothing more; the job waits for the oldest call to leave the day, with no
+    /// attempt counted.
+    #[test]
+    fn a_fallback_past_the_bound_is_not_sent() {
+        let mut s = Store::new();
+        let seq = s.said("s1", "r", 1_000, "Build the parser.");
+        let home = s.home.path().to_owned();
+        let sent = std::cell::Cell::new(0);
+        // As the chain asks: each request reserved, then gated, the first failing over.
+        let chain = |gate: &Gate| -> Result<Value> {
+            let db = crate::providers_db::open(&home).unwrap();
+            for outcome in ["error", "ok"] {
+                let call = crate::providers_db::Call {
+                    provider: "fake",
+                    role: crate::my_work::ROLE,
+                    span: "group r1",
+                    outcome: "reserved",
+                    ms: 1,
+                    detail: None,
+                    bytes_out: 1,
+                    est_tokens: None,
+                    usage: Default::default(),
+                    usd: None,
+                };
+                crate::providers_db::record(&db, &call)?;
+                // A request the gate refuses is not sent: its reservation is cancelled.
+                let admitted = gate();
+                if admitted.is_err() {
+                    db.execute("DELETE FROM provider_calls WHERE outcome = 'reserved'", [])?;
+                }
+                drop(admitted?);
+                sent.set(sent.get() + 1);
+                db.execute(
+                    "UPDATE provider_calls SET outcome = ?1 WHERE outcome = 'reserved'",
+                    [outcome],
+                )?;
+            }
+            Ok(json!({"text": "Grouped."}))
+        };
+        let echo = Echo {
+            subjects: vec![("r1", 0)],
+            seq,
+        };
+        let asked = RefCell::new(Vec::new());
+        let phase = pass(&mut s, echo, (true, 1), false, &chain, &asked);
+        assert_eq!(sent.get(), 1, "the fallback was not sent");
+        let db = crate::providers_db::open(&home).unwrap();
+        let (calls, oldest) = crate::providers_db::my_work_calls_in_a_day(&db).unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            phase,
+            Phase::Waiting {
+                until: oldest.unwrap() + DAY_MS,
+                up: false
+            }
+        );
+        assert!(kept(&s, "r1").is_none());
+        let pending = crate::providers_db::my_work_pending_of(&db, "group r1").unwrap();
+        assert!(pending.is_none(), "no attempt counted");
     }
 
     /// A8: a job every entry fails waits for its next attempt, is asked again then, and after

@@ -915,7 +915,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **The switch and the bound** (A1, A6, A7): nothing runs while `[my_work] curate` is off, and the
   worker reaches a round only while `[summary] curate` is on. At `calls_a_day` calls of the role in
   the rolling day (`providers_db::my_work_calls_in_a_day`, which now gives the oldest call's time
-  too), every job waits until the oldest leaves it, without keeping the worker up.
+  too), every job waits until the oldest leaves it, without keeping the worker up. The bound is
+  checked again at each request's gate, so a chain's retry or fallback past it is not sent either
+  (`BoundReached`; Codex on #668): the job waits with its attempts as they were.
 - **The gate** (A5): before each send and each retry the job takes the dispatch lock and checks
   the exclusion list, the forget fence and the rules' version, as a turn summary does; a change
   sends nothing and keeps nothing, and the next pass reads again. The answer is appended under the
