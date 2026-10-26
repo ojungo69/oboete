@@ -2421,6 +2421,12 @@ const TEXT = {
   my_work_status_todo: ['To do', '未着手'],
   my_work_status_unknown: ['Update recorded', '更新を記録'],
   my_work_status_closed: ['Closed', '終了'],
+  my_work_status_shipped: ['Shipped', '完了'],
+  my_work_progress: ['{p}% · reviewed {ago}', '{p}% ・{ago}に確認'],
+  my_work_completed: ['Completed {date}', '{date} に完了'],
+  my_work_pace: ['At this pace, about {date}', 'このペースなら {date} ごろ'],
+  my_work_progress_label: ['Progress', '進み具合'],
+  my_work_story: ['Build story', '作業の経緯'],
   my_work_status_other: ['Other states', 'その他の状態'],
   my_work_all_work: ['All work', 'すべての作業'],
   my_work_count_one: ['{n} request', '{n} 件の依頼'],
@@ -6501,10 +6507,10 @@ function drawIn(panel) {
 // returns the focus to what opened it: the address holds the token (decision 55).
 
 // claude-mem's status tabs (`app.js` `labels`): the first six always, the rest with a count.
-const MY_WORK_TABS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked', 'blocked', 'todo', 'unknown', 'closed', 'other'];
+const MY_WORK_TABS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked', 'shipped', 'blocked', 'todo', 'unknown', 'closed', 'other'];
 const MY_WORK_ALWAYS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked'];
 // `presentation.js` `attention`; a status it does not name ranks with `unknown`.
-const MY_WORK_ATTENTION = { needs: 0, blocked: 1, ready: 2, working: 3, quiet: 4, todo: 5, unknown: 6, closed: 7, checked: 8 };
+const MY_WORK_ATTENTION = { needs: 0, blocked: 1, ready: 2, working: 3, quiet: 4, todo: 5, unknown: 6, closed: 7, checked: 8, shipped: 9 };
 const MY_WORK_LAYOUTS = ['cards', 'list', 'agents'];
 const MY_WORK_NEEDS = ['needs-you', 'needs-input', 'waiting-on-user', 'awaiting-approval', 'needs-approval'];
 const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
@@ -6611,7 +6617,7 @@ function myWorkElapsed(row, now = Date.now()) {
 // `request-views.js` `badge`: `!` for needs, `✓` for ready.
 function myWorkBadge(status) {
   const key = Object.hasOwn(TEXT, `my_work_status_${status}`) ? `my_work_status_${status}` : 'my_work_status_unknown';
-  const glyph = status === 'needs' ? '!' : ['ready', 'checked'].includes(status) ? '✓' : '';
+  const glyph = status === 'needs' ? '!' : ['ready', 'checked', 'shipped'].includes(status) ? '✓' : '';
   const icon = glyph ? el('span', 'my-work-glyph', glyph) : null;
   icon?.setAttribute('aria-hidden', 'true');
   return el('span', `badge my-work-badge my-work-${status}`, icon, word('span', null, key));
@@ -6635,6 +6641,36 @@ function myWorkOpener(cls, row, label) {
   return button;
 }
 
+// docs/my-work-model.md P5, as claude-mem 15.1's card shows a request's progress: the percent of its
+// review with when it was reviewed, or the day it was completed, and the pace's estimate. Nothing
+// before a review, as no empty field is shown.
+function myWorkProgress(row) {
+  const p = row.progress;
+  if (p?.percent == null) return null;
+  const day = (value) => {
+    const at = typeof value === 'number' ? new Date(value) : new Date(`${value}T00:00:00`);
+    return Number.isNaN(at.getTime()) ? String(value) : at.toLocaleDateString(lang, { month: 'short', day: 'numeric' });
+  };
+  const meter = el('meter', 'my-work-meter');
+  Object.assign(meter, { min: 0, max: 100, value: p.percent });
+  meter.setAttribute('aria-label', t('my_work_progress_label'));
+  const text = row.status === 'shipped' && p.completed ? t('my_work_completed', { date: day(p.completed) })
+    : p.reviewed ? t('my_work_progress', { p: p.percent, ago: myWorkAgo(p.reviewed) }) : `${p.percent}%`;
+  return el('div', 'my-work-progress', meter, el('span', 'my-work-progress-text', text),
+    p.estimate ? el('span', 'my-work-estimate', t('my_work_pace', { date: day(p.estimate) })) : null);
+}
+
+// P5: the build story on the request's page, the review's narrative and its milestones, the
+// oldest first; none without them.
+function myWorkStory(row) {
+  const s = row.story;
+  if (!s) return null;
+  return el('section', 'my-work-story', word('h3', null, 'my_work_story'),
+    s.narrative ? el('p', 'text', s.narrative) : null,
+    s.milestones?.length ? el('ol', 'my-work-milestones', ...s.milestones.map((m) =>
+      el('li', null, el('span', 'meta', m.date), ' ', m.text))) : null);
+}
+
 // `request-views.js` `requestCards`: the title opens the request, and the whole card with it.
 function myWorkCard(row) {
   const next = myWorkNextLine(row);
@@ -6644,6 +6680,7 @@ function myWorkCard(row) {
     el('h3', 'my-work-title', myWorkOpener('my-work-open', row, row.title)),
     el('p', 'my-work-summary', myWorkActivity(row)),
     row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
+    myWorkProgress(row),
     el('div', 'my-work-context', myWorkContributors(row), el('span', 'my-work-project', myWorkProjects(row))),
     el('div', next ? 'my-work-footer' : 'my-work-footer no-next',
       next ? el('div', 'my-work-next', word('span', 'my-work-next-label', next.label), el('p', null, next.text)) : null,
@@ -7056,6 +7093,7 @@ function myWorkDrawRequest() {
     el('ul', 'my-work-ids', ...list.map((id) => el('li', null, fullText(id, id))))) : null);
   draw(row.title, [], [back, myWorkSlot(),
     el('div', 'my-work-request-meta', myWorkBadge(row.status), el('span', 'my-work-project', myWorkProjects(row)), myWorkTime(row.updated)),
+    myWorkProgress(row),
     el('dl', 'my-work-facts', myWorkFact('my_work_contributors', myWorkContributors(row)),
       myWorkFact('my_work_started', row.started > 0 ? localTime(row.started, lang) : t('my_work_not_recorded')),
       myWorkFact('my_work_elapsed', elapsed)),
@@ -7064,6 +7102,7 @@ function myWorkDrawRequest() {
       el('p', 'my-work-request-next', el('strong', null, `${t(next?.label || 'my_work_next_step')}:`), ' ', next?.text || myWorkNext(row)),
       el('details', 'my-work-original', word('summary', null, 'my_work_original'),
         el('div', null, el('p', 'text', row.ask?.text ?? ''), row.ask?.id ? fullText(row.ask.id, word('span', null, 'my_work_read_original')) : null))),
+    myWorkStory(row),
     el('section', 'my-work-streams', word('h3', null, 'my_work_streams'),
       streams.length ? el('div', 'my-work-stream-list', ...streams) : word('p', 'text pending', 'my_work_no_streams')),
     myWorkProducts(row),

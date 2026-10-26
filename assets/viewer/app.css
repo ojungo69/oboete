@@ -828,6 +828,12 @@ button.my-work-open:focus-visible { outline: none; }
 .my-work-summary, .my-work-next p, .my-work-agent-requests p { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .my-work-summary { color: var(--text); }
 .my-work-copy-note { color: var(--muted); font-style: italic; }
+.my-work-progress { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.my-work-meter { width: 7rem; height: 8px; accent-color: var(--accent); }
+.my-work-estimate { font-style: italic; }
+.my-work-milestones { margin: 6px 0 0; padding-left: 1.4em; }
+.my-work-milestones li { margin: 2px 0; }
+.my-work-milestones .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
 .my-work-context { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; color: var(--muted); font-size: 12.5px; }
 .my-work-contributors { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
 .my-work-footer { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: flex-end; justify-content: space-between; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
