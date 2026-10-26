@@ -1320,13 +1320,13 @@ mod tests {
         let mut h = Home::new();
         let a = h.said("s1", 0, "Asked on the other device.");
         h.said("s1", 1, "Asked there again.");
-        let commit = |h: &mut Home, title: &str, at: i64| {
+        let commit = |h: &mut Home, (sha, title): (&str, &str), at: i64| {
             let input = json!({"command": format!("git commit -m '{title}'")}).to_string();
             let body = json!({"tool": "Bash", "input": input,
-                "output": format!("[main def5678] {title}\n 1 file changed"), "failed": false});
+                "output": format!("[main {sha}] {title}\n 1 file changed"), "failed": false});
             h.s.event("tool", "s1", (R, "main"), h.t + at * MINUTE, body)
         };
-        commit(&mut h, "Other commit", 1);
+        commit(&mut h, ("abc1111", "Other commit"), 1);
         let r = h.reply("s1", 2);
         h.summarized("s1", (a, r), 2, "Summarized on the other device.");
         let card = json!([{"type": "feature", "title": "Other card", "narrative": "Done."}]);
@@ -1345,7 +1345,7 @@ mod tests {
             t,
         };
         let b = h.said("s1", 5, "Asked on this one.");
-        let c = commit(&mut h, "This commit", 6);
+        let c = commit(&mut h, ("def2222", "This commit"), 6);
         let id = h.due()[0].0.clone();
         let ask = h.ask(&id).unwrap();
         for here in ["Asked on this one.", "This commit"] {
