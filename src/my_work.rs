@@ -863,9 +863,50 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
     };
     let rules = Rules::load(home)?;
-    let Gathered { convs, work, named } = gather(&raw, &k, &rules)?;
     let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
-    let grouped = crate::my_work_group::groups(&raw, &k, &reading)?;
+    let Built {
+        convs,
+        work,
+        requests,
+        unlinked,
+    } = build(&raw, &k, &rules, &reading)?;
+    let since = range.since(now);
+    let mut answers = Vec::new();
+    let mut key = None;
+    let reviews = reviews(home);
+    for r in &requests {
+        let stores = (&raw, &k, &rules);
+        answers.extend(answer(
+            r,
+            (&convs, &work, &reviews),
+            stores,
+            (home, &mut key),
+            (since, now),
+        )?);
+    }
+    answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
+    let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    Ok((json!({"requests": answers, "unlinked": unlinked}), held))
+}
+
+/// What My Work makes of the stores before it answers the page or reviews a request: the
+/// conversations and work it gathered, the requests they make, and how many work records no
+/// request takes.
+struct Built {
+    convs: BTreeMap<Key, Conversation>,
+    work: Vec<Work>,
+    requests: Vec<Request>,
+    unlinked: usize,
+}
+
+fn build(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    reading: &crate::curate::Reading,
+) -> Result<Built> {
+    let Gathered { convs, work, named } = gather(raw, k, rules)?;
+    let grouped = crate::my_work_group::groups(raw, k, reading)?;
     // A conversation's request when it names no request id: its group's, else its own (C6).
     let own = |key: &Key| {
         (grouped.of.get(key))
@@ -886,7 +927,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
             continue;
         }
         let explicit = own_id.or_else(|| ids.filter(|s| s.len() == 1)?.first().cloned());
-        let explicit_text = w.request_text(&rules);
+        let explicit_text = w.request_text(rules);
         let original = key
             .and_then(|k| convs.get(k)?.original(raw.device()))
             .or_else(|| {
@@ -1000,23 +1041,12 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
             r.title = grouped.groups.get(anchor).and_then(|g| g.title.clone());
         }
     }
-    let since = range.since(now);
-    let mut answers = Vec::new();
-    let mut key = None;
-    let reviews = reviews(home);
-    for r in &requests {
-        let stores = (&raw, &k, &rules);
-        answers.extend(answer(
-            r,
-            (&convs, &work, &reviews),
-            stores,
-            (home, &mut key),
-            (since, now),
-        )?);
-    }
-    answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
-    let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
-    Ok((json!({"requests": answers, "unlinked": unlinked}), held))
+    Ok(Built {
+        convs,
+        work,
+        requests,
+        unlinked,
+    })
 }
 
 /// A conversation as grouping reads it (docs/my-work-model.md C1, C2).
@@ -1429,17 +1459,29 @@ fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<Str
 
 /// One request as the route gives it, every text through the gate; none when its newest update is
 /// before `since`, which then gates nothing.
-fn answer(
-    r: &Request,
-    (convs, work, reviews): (
-        &BTreeMap<Key, Conversation>,
-        &[Work],
-        &BTreeMap<String, Review>,
-    ),
-    (raw, k, rules): (&Raw, &Connection, &Rules),
-    (home, key): (&Path, &mut Option<Vec<u8>>),
-    (since, now): (i64, i64),
-) -> Result<Option<(Value, Held)>> {
+/// A request's records as My Work reads them: its work items; the summaries, cards and prompts of
+/// the conversations it owns (of one it owns some prompts of, those prompts' parts); the prompts'
+/// times that count as its activity; its repositories and agents as the gate shows them; each
+/// conversation with its newest record; and its newest prompt. The page's answer and the progress
+/// review read them.
+struct Parts<'a> {
+    items: Vec<&'a Work>,
+    turns: Vec<&'a Turn>,
+    cards: Vec<&'a Shown>,
+    prompts: Vec<&'a Said>,
+    active: Vec<i64>,
+    repos: BTreeSet<String>,
+    agents: BTreeSet<String>,
+    sessions: Vec<(Option<i64>, &'a Key)>,
+    latest_prompt: Option<&'a Said>,
+}
+
+fn parts<'a>(
+    r: &'a Request,
+    convs: &'a BTreeMap<Key, Conversation>,
+    work: &'a [Work],
+    rules: &Rules,
+) -> Parts<'a> {
     let items: Vec<&Work> = r.work.iter().map(|&i| &work[i]).collect();
     let mut turns: Vec<&Turn> = Vec::new();
     let mut cards: Vec<&Shown> = Vec::new();
@@ -1501,6 +1543,72 @@ fn answer(
     turns.sort_by_key(|t| std::cmp::Reverse(t.s.ts));
     cards.sort_by_key(|c| std::cmp::Reverse(c.c.ts));
     prompts.sort_by_key(|p| p.ts);
+    Parts {
+        items,
+        turns,
+        cards,
+        prompts,
+        active,
+        repos,
+        agents,
+        sessions,
+        latest_prompt,
+    }
+}
+
+/// A request's sources of work product (`products`): its conversations, each with the prompt spans
+/// it owns (none: all of it), its work items' fields with the time of their last write, and its
+/// cards' modified files with the time of their window.
+fn sources(r: &Request, items: &[&Work], cards: &[&Shown]) -> Sources {
+    Sources {
+        convs: (r.owns.iter())
+            .map(|(key, own)| {
+                let owned = match own {
+                    Owns::All => None,
+                    Owns::Prompts(spans) => Some(spans.iter().cloned().collect()),
+                };
+                (key.clone(), owned)
+            })
+            .collect(),
+        // A list's own fields attach to it too, as claude-mem reads each entry's fields.
+        fields: (items.iter())
+            .flat_map(|w| {
+                [
+                    (w.fields.clone(), w.updated),
+                    (w.list_fields.clone(), w.updated),
+                ]
+            })
+            .filter(|(fields, _)| !fields.is_empty())
+            .collect(),
+        files: (cards.iter())
+            .map(|c| (c.c.files_modified.clone(), c.c.ts))
+            .filter(|(files, _)| !files.is_empty())
+            .collect(),
+    }
+}
+
+fn answer(
+    r: &Request,
+    (convs, work, reviews): (
+        &BTreeMap<Key, Conversation>,
+        &[Work],
+        &BTreeMap<String, Review>,
+    ),
+    (raw, k, rules): (&Raw, &Connection, &Rules),
+    (home, key): (&Path, &mut Option<Vec<u8>>),
+    (since, now): (i64, i64),
+) -> Result<Option<(Value, Held)>> {
+    let Parts {
+        items,
+        turns,
+        cards,
+        prompts,
+        active,
+        repos,
+        agents,
+        sessions,
+        latest_prompt,
+    } = parts(r, convs, work, rules);
     let original = &r.original;
     let follow_ups: Vec<Value> = {
         let later: Vec<&&Said> = (prompts.iter())
@@ -1662,31 +1770,7 @@ fn answer(
     let swept_by = (r.owns.iter())
         .map(|((agent, session), _)| keyed(&crate::forget::session(agent, session), home, key))
         .collect::<Result<Vec<_>>>()?;
-    let sources = Sources {
-        convs: (r.owns.iter())
-            .map(|(key, own)| {
-                let owned = match own {
-                    Owns::All => None,
-                    Owns::Prompts(spans) => Some(spans.iter().cloned().collect()),
-                };
-                (key.clone(), owned)
-            })
-            .collect(),
-        // A list's own fields attach to it too, as claude-mem reads each entry's fields.
-        fields: (items.iter())
-            .flat_map(|w| {
-                [
-                    (w.fields.clone(), w.updated),
-                    (w.list_fields.clone(), w.updated),
-                ]
-            })
-            .filter(|(fields, _)| !fields.is_empty())
-            .collect(),
-        files: (cards.iter())
-            .map(|c| (c.c.files_modified.clone(), c.c.ts))
-            .filter(|(files, _)| !files.is_empty())
-            .collect(),
-    };
+    let sources = sources(r, &items, &cards);
     let held = Held {
         key: filed,
         sessions: swept_by,
