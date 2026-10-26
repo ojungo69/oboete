@@ -412,9 +412,9 @@ characters), a narrative (1,000; claude-mem 1,200), up to 8 dated milestones of 
 (claude-mem 12 of 200), and up to 3 preferences, each a statement (160) and a quote (240;
 claude-mem 10 of 200 and 300). Shipped needs percent 100 and a ship date; only shipped has one. A
 preference's quote must be found in a typed prompt the review was shown, by curation's matcher
-(`curate::locate`'s rules: exact, then whitespace and Unicode compatibility, outside masked
-ranges), or the preference is dropped. The outcome block, which claude-mem never shows, is not
-asked for.
+(`curate::locate`'s rules: exact, then whitespace and Unicode compatibility), or the preference is
+dropped; one the previous review kept keeps its quote, found then. A mask in a quote is quoted as
+shown: it stands for nothing. The outcome block, which claude-mem never shows, is not asked for.
 
 P5. **On the card.** The newest 20 reviews of a request are its readings. The card shows
 "<percent>% · reviewed <time>", "Completed <date>" for shipped, or "Not reviewed yet", and "at
@@ -1065,13 +1065,15 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   ask; then later asks, session summaries (what was completed, what is next), cards' titles, work
   items and work product, each part the newest first, each piece cut (the original 600
   characters, an ask 300, a summary's field 200, a title 120) and at most 8 to 12 pieces a part. A
-  piece that does not fit is passed over for a smaller one. With the same conversations ("amend"),
-  the parts show only what the previous review could not read; else all.
+  piece that does not fit is passed over for a smaller one. With the same conversations ("an
+  update", claude-mem's amend), the parts show only what the previous review could not read, and
+  not the original ask, which it read; else all. The data names today's date, not the time: the
+  same records make the same prompt, whose digest a wait is kept by (A8).
 - **What does not fit is lost**: the marks move past it, so no later review reads it. After a
-  previous review at its caps (about 3,100 estimated tokens in Japanese) and the original ask at
-  its cut, about 1,300 of the 5,000 are left: some 5 later asks at their cut, or 4 summaries. The
-  trade is the newest over the whole: a review always reads what came last, and the oldest asks of
-  a busy hour may never be read.
+  previous review at its caps (about 3,100 estimated tokens in Japanese), about 1,800 of the 5,000
+  are left in an update: some 7 later asks at their cut, or 5 summaries. The trade is the newest
+  over the whole: a review always reads what came last, and the oldest asks of a busy hour may
+  never be read.
 - **S6 for what a review read**: `my_work_ops::hidden` leaves out an op that read a record of an
   excluded session (any record of a span, `Raw::holds_session`), a summary of one, or a card of a
   window holding a record of one. A summary is judged by its own session alone, as the turns
@@ -1088,7 +1090,10 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   opening asks (`my_work_group::agent_written`: the marks, then O3's text tests over the agent text
   in the lookback); one an agent wrote is labelled `[agent prompt]`. A preference is kept only when
   its quote, unchanged by the gate, is found in a typed ask as it was shown, by curation's matcher
-  (`curate::compatible`: whitespace and compatibility forms aside), never over a mask.
+  (`curate::compatible`: whitespace and compatibility forms aside), or among the quotes of the
+  previous review's preferences, found when it kept them. A mask is quoted as shown: a record's
+  capture masks each character with `*` and the gate shows `[REDACTED]`, and neither shows what it
+  hides.
 - **The answer** (P4, A10): a state of the five, a whole percent from 0 to 100, three dates as
   YYYY-MM-DD or an empty string, kept as null (no nullable types in the schema, which some
   entries' strict modes refuse), a summary, a narrative, milestones and preferences. The check

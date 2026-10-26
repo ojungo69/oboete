@@ -246,17 +246,16 @@ impl Shown {
         let marks = previous.map(|p| Marks::kept(&p.op.fields));
         let amend = marks.filter(|m| m.conversations == digest(&input.conversations));
         let mut shown = Shown {
-            data: format!("Now: {}\n", crate::db::utc(now)),
+            // The day, not the minute: the same records make the same prompt, whose digest a
+            // wait is kept by (A8).
+            data: format!("Today: {}\n", &crate::db::utc(now)[..10]),
             left: s.summary.window_tokens,
             spans: BTreeSet::new(),
             ops: BTreeSet::new(),
             typed: Vec::new(),
         };
         shown.data.push_str(match (previous, amend) {
-            (Some(_), Some(_)) => {
-                "An update: the previous review, the original ask, then only what came after the \
-                 previous review.\n"
-            }
+            (Some(_), Some(_)) => "An update: the previous review, then only what came after it.\n",
             (Some(_), None) => {
                 "The request's conversations changed since the previous review: all that was \
                  recorded for it.\n"
@@ -264,10 +263,14 @@ impl Shown {
             (None, _) => "The first review: all that was recorded for it.\n",
         });
         if let Some(p) = previous {
-            shown.data.push_str(&previous_text(&p.op, rules));
+            let (text, quotes) = previous_text(&p.op, rules);
+            shown.data.push_str(&text);
             shown.ops.insert(p.op_seq);
+            // A preference it kept was found in a typed ask then: kept again, it keeps its quote.
+            shown.typed.extend(quotes);
         }
         shown.left = (shown.left).saturating_sub(crate::budget::estimate(&shown.data));
+        let amending = amend.is_some();
         let amend = amend.unwrap_or_default();
         // The asks shown at most, their labels first (O4): the text tests read the agent text
         // recorded before them.
@@ -275,7 +278,9 @@ impl Shown {
             .filter(|a| a.0 > amend.asks)
             .take(ASKS)
             .collect();
-        let original = input.original.as_ref();
+        // An update reads what came after the previous review, as claude-mem's amend: not the
+        // original ask, which that review read.
+        let original = (input.original.as_ref()).filter(|_| !amending);
         let mut given: Vec<crate::my_work_group::AskRef> = (asks.iter())
             .map(|(seq, ts, text)| (None, s.raw.device(), *seq, *ts, text.as_str()))
             .collect();
@@ -434,8 +439,9 @@ impl Shown {
     }
 }
 
-/// The previous review as the next one reads it: its fields, each gated again.
-fn previous_text(op: &crate::my_work_ops::MyWorkOp, rules: &Rules) -> String {
+/// The previous review as the next one reads it, its fields each gated again, and its
+/// preferences' quotes as shown.
+fn previous_text(op: &crate::my_work_ops::MyWorkOp, rules: &Rules) -> (String, Vec<String>) {
     let f = &op.fields;
     let text = |name: &str, max: usize| {
         let text = f.get(name).and_then(Value::as_str).unwrap_or_default();
@@ -467,6 +473,7 @@ fn previous_text(op: &crate::my_work_ops::MyWorkOp, rules: &Rules) -> String {
         let text = crate::my_work::shown(m["text"].as_str().unwrap_or_default(), MILESTONE, rules);
         out.push_str(&format!("- milestone {date}: {text}\n"));
     }
+    let mut quotes = Vec::new();
     for p in f
         .get("preferences")
         .and_then(Value::as_array)
@@ -474,14 +481,14 @@ fn previous_text(op: &crate::my_work_ops::MyWorkOp, rules: &Rules) -> String {
         .flatten()
     {
         let statement = p["statement"].as_str().unwrap_or_default();
-        let quote = p["quote"].as_str().unwrap_or_default();
+        let quote = crate::my_work::shown(p["quote"].as_str().unwrap_or_default(), QUOTE, rules);
         out.push_str(&format!(
-            "- preference: {} (quote: \"{}\")\n",
+            "- preference: {} (quote: \"{quote}\")\n",
             crate::my_work::shown(statement, STATEMENT, rules),
-            crate::my_work::shown(quote, QUOTE, rules)
         ));
+        quotes.push(quote);
     }
-    out
+    (out, quotes)
 }
 
 fn prompt(language: &str, data: &str) -> String {
@@ -586,16 +593,15 @@ fn check(answer: &Value) -> Option<&'static str> {
     None
 }
 
-/// Whether `quote` is in one of the typed asks as shown (P4), by curation's matcher (exactly, or
-/// but for whitespace and Unicode compatibility forms), never over a mask.
+/// Whether `quote` is in one of the typed asks as shown (P4), by curation's matcher: exactly, or
+/// but for whitespace and Unicode compatibility forms. A mask in it is quoted as shown, standing
+/// for nothing: what it found the ask's record or the gate never showed.
 fn quoted(quote: &str, typed: &[String]) -> bool {
     !quote.is_empty()
-        && typed.iter().any(|text| {
-            let masks: Vec<(usize, usize)> = (text.match_indices(crate::redact::MASK))
-                .map(|(at, m)| (at, at + m.len()))
-                .collect();
+        && (typed.iter()).any(|text| {
             crate::curate::compatible(text, quote, false)
-                .any(|(at, m)| !masks.iter().any(|&(s, e)| s < at + m.len() && at < e))
+                .next()
+                .is_some()
         })
 }
 
@@ -1031,6 +1037,7 @@ mod tests {
         );
         // The earliest ask, so the request's original: an agent's.
         let b = h.sent("s2", 0, "Write the parser's tests with one fixture a case.");
+        h.sent("s2", 7, "Use the fixture builder in every test.");
         h.grouped(&["s1", "s2"], &[a, b]);
         let id = h.due()[0].0.clone();
         let ask = h.ask(&id).unwrap();
@@ -1041,6 +1048,13 @@ mod tests {
             ask.prompt
         );
         assert!(!ask.prompt.contains(&secret));
+        assert!(
+            ask.prompt
+                .contains("[agent prompt] Use the fixture builder"),
+            "{}",
+            ask.prompt
+        );
+        let masked = format!("with {} and keep", "*".repeat(secret.len()));
         let answer = review(
             "in-progress",
             30,
@@ -1048,9 +1062,9 @@ mod tests {
             &[
                 ("English errors", "Keep every error message in English."),
                 ("Errors in English", "Keep  every error message\nin English"),
-                ("Logs", "and keep the logs."),
+                ("Logs", masked.as_str()),
                 ("One fixture a case", "one fixture a case"),
-                ("The key", "with [REDACTED] and keep"),
+                ("A builder", "Use the fixture builder"),
                 ("Tabs", "Use tabs."),
             ],
         );
@@ -1063,7 +1077,7 @@ mod tests {
             [
                 "Keep every error message in English.",
                 "Keep  every error message\nin English",
-                "and keep the logs."
+                masked.as_str()
             ]
         );
     }
@@ -1089,7 +1103,8 @@ mod tests {
         let b = h.said("s2", 10, "Add tests for the parser.");
         h.grouped(&["s1", "s2"], &[a, b]);
         let id = h.due()[0].0.clone();
-        h.pass(&|_| review("in-progress", 40, "", &[]));
+        let comments = [("Comments handled", "Handle comments too.")];
+        h.pass(&|_| review("in-progress", 40, "", &comments));
         let first = h.reviews()[0].op_seq;
         assert!(h.due().is_empty(), "{:?}", h.due());
         h.age(61);
@@ -1100,28 +1115,36 @@ mod tests {
             p.contains("An update") && p.contains("The parser reads lines."),
             "{p}"
         );
+        assert!(p.contains("Now report the column"), "{p}");
         assert!(
-            p.contains("Build the parser.") && p.contains("Now report the column"),
+            !p.contains("Build the parser.") && !p.contains("Add tests"),
             "{p}"
         );
-        assert!(
-            !p.contains("Handle comments too.") && !p.contains("Add tests"),
-            "{p}"
+        // The previous review's preference keeps its quote, though its ask is not shown again.
+        assert!(p.contains("(quote: \"Handle comments too.\")"), "{p}");
+        let carried = review(
+            "in-progress",
+            50,
+            "",
+            &[comments[0], ("Tests", "Add tests for")],
         );
+        let kept = (ask.keep)(&carried);
+        assert_eq!(kept["preferences"].as_array().unwrap().len(), 1, "{kept:?}");
         for seen in ["OLD SUMMARY", "OLD CARD", "OLD TASK", "old.pdf"] {
             assert!(!p.contains(seen), "{seen}: {p}");
         }
         assert!(ask.read.ops.contains(&first), "{:?}", ask.read);
-        for seq in [a, c] {
-            assert!(ask.read.spans.contains(&(seq, seq)), "{:?}", ask.read);
+        assert!(ask.read.spans.contains(&(c, c)), "{:?}", ask.read);
+        for seq in [a, old] {
+            assert!(!ask.read.spans.contains(&(seq, seq)), "{:?}", ask.read);
         }
-        assert!(!ask.read.spans.contains(&(old, old)), "{:?}", ask.read);
         h.said("s3", 101, "Write the parser's docs.");
         h.grouped(&["s1", "s3"], &[]);
         let ask = h.ask(&id).unwrap();
         let p = &ask.prompt;
+        assert!(p.contains("conversations changed"), "{p}");
         assert!(
-            p.contains("conversations changed") && p.contains("Handle comments"),
+            p.contains("Build the parser.") && p.contains("Add tests"),
             "{p}"
         );
     }
@@ -1296,10 +1319,14 @@ mod tests {
     fn a_review_shows_only_this_devices_records() {
         let mut h = Home::new();
         let a = h.said("s1", 0, "Asked on the other device.");
-        let input = json!({"command": "git commit -m 'Other commit'"}).to_string();
-        let body = json!({"tool": "Bash", "input": input,
-            "output": "[main def5678] Other commit", "failed": false});
-        h.s.event("tool", "s1", (R, "main"), h.t + MINUTE, body);
+        h.said("s1", 1, "Asked there again.");
+        let commit = |h: &mut Home, title: &str, at: i64| {
+            let input = json!({"command": format!("git commit -m '{title}'")}).to_string();
+            let body = json!({"tool": "Bash", "input": input,
+                "output": format!("[main def5678] {title}\n 1 file changed"), "failed": false});
+            h.s.event("tool", "s1", (R, "main"), h.t + at * MINUTE, body)
+        };
+        commit(&mut h, "Other commit", 1);
         let r = h.reply("s1", 2);
         h.summarized("s1", (a, r), 2, "Summarized on the other device.");
         let card = json!([{"type": "feature", "title": "Other card", "narrative": "Done."}]);
@@ -1318,15 +1345,23 @@ mod tests {
             t,
         };
         let b = h.said("s1", 5, "Asked on this one.");
+        let c = commit(&mut h, "This commit", 6);
         let id = h.due()[0].0.clone();
         let ask = h.ask(&id).unwrap();
-        assert!(ask.prompt.contains("Asked on this one."), "{}", ask.prompt);
-        for other in ["the other device", "Other commit", "Other card"] {
+        for here in ["Asked on this one.", "This commit"] {
+            assert!(ask.prompt.contains(here), "{here}: {}", ask.prompt);
+        }
+        for other in [
+            "the other device",
+            "Asked there",
+            "Other commit",
+            "Other card",
+        ] {
             assert!(!ask.prompt.contains(other), "{other}: {}", ask.prompt);
         }
         assert_eq!(
             (&ask.read.spans[..], &ask.read.ops[..]),
-            (&[(b, b)][..], &[][..])
+            (&[(b, b), (c, c)][..], &[][..])
         );
     }
 
@@ -1537,6 +1572,27 @@ mod tests {
             "{}",
             peak.lines().find(|l| l.starts_with("VmHWM:")).unwrap_or("")
         );
+    }
+
+    /// A8: the same records make the same prompt, whose digest a wait is kept by: the data names
+    /// the day, not the minute.
+    #[test]
+    fn the_same_records_make_the_same_prompt() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let day = (h.t / DAY_MS + 1) * DAY_MS + 60 * MINUTE;
+        let at = |now: i64| {
+            h.with(|s| {
+                Progress::default()
+                    .ask(s, &id, now)
+                    .unwrap()
+                    .unwrap()
+                    .prompt
+            })
+        };
+        assert_eq!(at(day), at(day + 5 * MINUTE));
     }
 
     /// A4: the fixed instructions stay under their share of an 8,000-token request.
