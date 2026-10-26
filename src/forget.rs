@@ -2634,6 +2634,33 @@ mod tests {
         assert!(!log.contains("canary"), "{log}");
     }
 
+    /// Rule 5, read through docs/provenance.md P1: a claim that quotes a forgotten record, or a
+    /// correction anchored on one, is never recorded; quoting or anchored on another record, each
+    /// is.
+    #[test]
+    fn what_names_a_forgotten_record_is_not_recorded() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let gone = native(&mut raw, "a", r#"{"prompt":"a synthetic canary"}"#);
+        let kept = native(&mut raw, "b", r#"{"prompt":"another record"}"#);
+        let device = raw.device().to_owned();
+        let p = raw.forget_preview(record(&raw, gone)).unwrap();
+        start(home.path(), &p).unwrap();
+        let correction = |seq: i64| {
+            let body = serde_json::json!({"uid": "a".repeat(64),
+                "anchor": {"device": device, "seq": seq}, "status": "done"});
+            (raw::OpKind::Correction, body)
+        };
+        let claim = |seq: i64| claim_op(&device, &[(seq, "a synthetic canary")], "Claimed.");
+        for op in [claim(gone), correction(gone)] {
+            let refused = raw.append_ops(&[op]).unwrap_err();
+            assert!(refused.to_string().contains("invalidated"), "{refused}");
+        }
+        for op in [claim(kept), correction(kept)] {
+            assert_eq!(raw.append_ops(&[op]).unwrap().len(), 1);
+        }
+    }
+
     /// D5: a uid's preview is read from knowledge.db: a claim's ops and the claims it supersedes,
     /// a document's ops and title, no raw record. What names no claim or document here, and a
     /// record's, a card's or a summary's id, is refused before anything is registered.
@@ -4035,6 +4062,67 @@ mod tests {
             store_hits(&home, WINDOW_CANARY.as_bytes()),
             Vec::<&str>::new()
         );
+    }
+
+    /// A turn op that carried a forgotten record in as a goal loses its text, as one over it does
+    /// (docs/provenance.md P1: a turn's goals); one that did not keeps its text.
+    #[test]
+    fn a_turn_that_carried_a_forgotten_record_as_a_goal_loses_its_text() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Parsers stay in {WINDOW_CANARY} mode."),
+        );
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let mut carried = turn_op(r2, r2, &[], &format!("Its turn: {WINDOW_CANARY}."));
+        carried.1["goals"] = serde_json::json!([r1]);
+        let seqs = s
+            .raw
+            .append_ops(&[carried, turn_op(r2, r2, &[], "Kept: deploys.")])
+            .unwrap();
+        let home = s.home.path().to_owned();
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap();
+        let bodies = op_bodies(&home);
+        assert!(
+            bodies[&seqs[0]]["forgotten"].is_string(),
+            "{}",
+            bodies[&seqs[0]]
+        );
+        assert_eq!(bodies[&seqs[1]]["fields"]["learned"], "Kept: deploys.");
+    }
+
+    /// A window op that holds no text, a skip, keeps its body when its span's record is forgotten
+    /// (docs/provenance.md P1: only a curated window holds text made from what it read).
+    #[test]
+    fn a_skipped_window_over_a_forgotten_record_keeps_its_body() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Parsers stay in {WINDOW_CANARY} mode."),
+        );
+        let skipped = serde_json::json!({"outcome": "skipped", "reason": "excluded",
+            "from_seq": r1, "from_offset": null, "to_seq": r1, "to_offset": null});
+        let seq = s
+            .raw
+            .append_ops(&[(raw::OpKind::Window, skipped.clone())])
+            .unwrap()[0];
+        let home = s.home.path().to_owned();
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap();
+        assert_eq!(op_bodies(&home)[&seq], skipped);
     }
 
     /// docs/provenance.md F2, for slice 2: after a restore that lost raw.db's tail gave a new op the
