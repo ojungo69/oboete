@@ -540,7 +540,10 @@ newest first, at most 60; a commit links to GitHub once a recorded push sent its
 - **Differences**: a file is shown by its name and path, not served (claude-mem's viewer serves
   it through the record that names it); oboete's page serves no local file. A request's
   conversations are read whole, or the prompts it owns of one (#570), as its summaries and cards
-  are.
+  are. A commit or a branch takes a push's GitHub repository only from a push recorded in the
+  same repository (the record's `repo`), by its branch or by the commit the push names (#652),
+  where claude-mem's merge takes any later push of its branch: a conversation working in two
+  repositories links no commit of one into the other.
 - No provider is called.
 
 Tests: `consumer::products::tests::product_calls_are_the_live_calls_that_may_make_something`,

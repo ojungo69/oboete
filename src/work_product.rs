@@ -25,6 +25,9 @@ pub(crate) struct Product {
     pub field: Option<String>,
     pub at: Option<i64>,
     pub source: Option<Source>,
+    /// The repository of the record it was read from (`Event.repo`): a commit or a branch takes a
+    /// push's repository only from a push recorded in the same one (#652).
+    pub checkout: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -934,7 +937,9 @@ fn product_key(product: &Product) -> Option<String> {
 
 pub(crate) fn merge(lists: Vec<Vec<Product>>, limit: usize) -> Vec<Product> {
     let mut products = lists.into_iter().flatten().collect::<Vec<_>>();
-    let mut pushes_by_branch: HashMap<Option<String>, Vec<(Option<i64>, String)>> = HashMap::new();
+    // By checkout (#652): a push recorded in another repository of the request links nothing here.
+    type Pushes = HashMap<(Option<String>, Option<String>), Vec<(Option<i64>, String)>>;
+    let mut pushes_by_branch: Pushes = HashMap::new();
     let mut repo_by_head = HashMap::new();
     let mut repo_by_source = HashMap::new();
     for product in &products {
@@ -942,11 +947,12 @@ pub(crate) fn merge(lists: Vec<Vec<Product>>, limit: usize) -> Vec<Product> {
             && let Some(repo) = product.repo.as_ref().filter(|repo| !repo.is_empty())
         {
             pushes_by_branch
-                .entry(product.branch.clone())
+                .entry((product.checkout.clone(), product.branch.clone()))
                 .or_default()
                 .push((product.at, repo.clone()));
             for head in &product.heads {
-                repo_by_head.insert(sha_key(head).to_owned(), repo.clone());
+                let head = (product.checkout.clone(), sha_key(head).to_owned());
+                repo_by_head.insert(head, repo.clone());
             }
         }
     }
@@ -962,14 +968,17 @@ pub(crate) fn merge(lists: Vec<Vec<Product>>, limit: usize) -> Vec<Product> {
             .clone()
             .or_else(|| {
                 pushes_by_branch
-                    .get(&product.branch)?
+                    .get(&(product.checkout.clone(), product.branch.clone()))?
                     .iter()
                     .find(|(at, _)| {
                         product.kind == "branch" || at.unwrap_or(0) >= product.at.unwrap_or(0)
                     })
                     .map(|(_, repo)| repo.clone())
             })
-            .or_else(|| repo_by_head.get(sha_key(product.sha.as_deref()?)).cloned())
+            .or_else(|| {
+                let head = sha_key(product.sha.as_deref()?).to_owned();
+                repo_by_head.get(&(product.checkout.clone(), head)).cloned()
+            })
     };
     for product in &products {
         if product.kind == "commit"
@@ -1723,6 +1732,67 @@ mod tests {
                 .unwrap()
                 .url,
             None
+        );
+    }
+
+    /// #652: a commit takes a push's repository only from a push recorded in its own checkout, by
+    /// its branch or by the heads the push names, whatever its branch.
+    #[test]
+    fn a_commit_takes_a_pushs_repository_only_from_its_own_checkout() {
+        let at = |list: Vec<Product>, checkout: &str| -> Vec<Product> {
+            (list.into_iter())
+                .map(|p| Product {
+                    checkout: Some(checkout.to_owned()),
+                    ..p
+                })
+                .collect()
+        };
+        let commit = at(
+            bash_at(
+                "git commit -m x",
+                json!({"stdout": "[main abc1234] Fix A"}),
+                10,
+                "1",
+            ),
+            "a",
+        );
+        let push = |checkout: &str, command: &str, out: &str| {
+            at(
+                bash_at(command, json!({ "stdout": out }), 20, "2"),
+                checkout,
+            )
+        };
+        let url = |lists: Vec<Vec<Product>>| {
+            (merge(lists, 60).into_iter())
+                .find(|p| p.kind == "commit")
+                .and_then(|p| p.url)
+        };
+        let main = |repo: &str| {
+            format!("To https://github.com/o/{repo}.git\n   0000000..def5678  main -> main")
+        };
+        let b = push("b", "git push origin main", &main("b"));
+        assert_eq!(
+            url(vec![commit.clone(), b]),
+            None,
+            "another checkout's push of main"
+        );
+        let a = push("a", "git push origin main", &main("a"));
+        assert_eq!(
+            url(vec![commit.clone(), a]).as_deref(),
+            Some("https://github.com/o/a/commit/abc1234")
+        );
+        let heads = |checkout: &str| {
+            let out = "To https://github.com/o/c.git\n   0000000..abc1234  HEAD -> release";
+            push(checkout, "git push origin HEAD:release", out)
+        };
+        assert_eq!(
+            url(vec![commit.clone(), heads("b")]),
+            None,
+            "its sha, pushed from another checkout"
+        );
+        assert_eq!(
+            url(vec![commit, heads("a")]).as_deref(),
+            Some("https://github.com/o/c/commit/abc1234")
         );
     }
 

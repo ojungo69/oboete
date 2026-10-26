@@ -1023,14 +1023,18 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
                     index: None,
                 };
                 let tool = body["tool"].as_str().unwrap_or("");
-                lists.push(crate::work_product::from_tool_use(
+                let mut list = crate::work_product::from_tool_use(
                     tool,
                     &body["input"],
                     &body["output"],
                     Some(e.ts),
                     Some(source),
                     body["failed"] == true,
-                ));
+                );
+                for p in &mut list {
+                    p.checkout.clone_from(&e.repo);
+                }
+                lists.push(list);
             }
         }
     }
@@ -2030,6 +2034,42 @@ mod tests {
             .map(|p| p["title"].as_str().unwrap())
             .collect();
         assert_eq!(titles, ["example.com"], "{products:?}");
+    }
+
+    /// #652: a conversation's commit in one repository takes no link from its later push of the
+    /// same branch in another; the push's own commit keeps its link.
+    #[test]
+    fn a_commit_takes_no_link_from_a_push_in_another_repository() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix both repositories.");
+        let tool = |command: &str, out: &str| {
+            json!({"tool": "Bash", "input": json!({"command": command}).to_string(),
+                "output": out, "failed": false})
+        };
+        let t = h.t;
+        let commit = tool("git commit -m 'Fix A'", "[main abc1234] Fix A");
+        h.s.event("tool", "s1", ("github.com/o/a", "main"), t - 59_000, commit);
+        let out = "[main def5678] Fix B\nTo https://github.com/o/b.git\n   0000000..def5678  main -> main";
+        let pushed = tool("git commit -m 'Fix B' && git push origin main", out);
+        h.s.event("tool", "s1", ("github.com/o/b", "main"), t - 58_000, pushed);
+        h.run_read();
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = ids(&answer)
+            .iter()
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let products = super::products(h.s.home.path(), &held[i]).unwrap();
+        let url = |title: &str| {
+            (products.iter())
+                .find(|p| p["title"] == title)
+                .map(|p| p["url"].clone())
+        };
+        assert_eq!(url("abc1234 Fix A"), Some(Value::Null), "{products:?}");
+        assert_eq!(
+            url("def5678 Fix B"),
+            Some(json!("https://github.com/o/b/commit/def5678")),
+            "{products:?}"
+        );
     }
 
     /// Slice 4: of a conversation two requests share, each has the work product of the prompts it
