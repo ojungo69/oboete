@@ -641,7 +641,7 @@ fn probe_attempt(
                 // the gate again.
                 Err(e) if switch && refused_switch(&p, &e) => {
                     let usd = reservation.cost(&p, e.usage, e.sent && e.status.is_none());
-                    let detail = format!("http {}: probe refused", e.status.unwrap_or(400));
+                    let detail = probe_detail(&e, "http");
                     reservation.settle(
                         db,
                         &providers_db::Call {
@@ -717,11 +717,7 @@ fn probe_attempt(
         }
         Err(error) => {
             let code = probe_error_code(&error, forced);
-            // The shared token accounting recognizes an HTTP refusal by this fixed prefix.
-            let detail = error.status.map_or_else(
-                || format!("probe {code}"),
-                |status| format!("http {status}: probe refused"),
-            );
+            let detail = probe_detail(&error, code);
             let usd = reservation.cost(&p, error.usage, error.sent && error.status.is_none());
             let state = reservation.settle(
                 db,
@@ -837,6 +833,17 @@ fn probe_send(
                 .resting(answer.cool_until))
         }
     })
+}
+
+/// What a failed connection test leaves in providers.db: an HTTP refusal keeps the chain's vetted
+/// detail (`http 401: invalid_api_key`, issue #91), so the rest it sets names its cause (#653), and
+/// the `http ` prefix the shared token accounting recognizes a refusal by.
+fn probe_detail(error: &CallError, code: &str) -> String {
+    match error.status {
+        Some(_) if error.message.starts_with("http ") => error.message.clone(),
+        Some(status) => format!("http {status}: probe refused"),
+        None => format!("probe {code}"),
+    }
 }
 
 fn probe_error_code(error: &CallError, forced: bool) -> &'static str {
@@ -6179,6 +6186,30 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 assert!(!text.contains("probe-test-key"));
             }
             assert_eq!(providers_db::usd_this_month(&conn).unwrap(), 0.0);
+        }
+    }
+
+    /// #653: a connection test refused for its key leaves the chain's vetted detail, so the rest it
+    /// sets names the key and its remedy where doctor and a session's start read it; another
+    /// refusal keeps a status and a vetted code, never the provider's words (issue #91).
+    #[test]
+    fn a_connection_test_refused_for_its_key_names_the_cause_of_its_rest() {
+        let cases = [
+            ("401 Unauthorized", "invalid_api_key", Some(Cause::Key)),
+            ("500 Internal Server Error", "server_error", None),
+        ];
+        for (status, code, cause) in cases {
+            let home = tempfile::tempdir().unwrap();
+            let conn = providers_db::open(home.path()).unwrap();
+            let body = json!({"error": {"code": code, "message": "provider-private-canary"}});
+            let (url, _) = serve(status, body.to_string().into_bytes(), "");
+            let result = probe(&conn, &stub(url), 5.0, &|| Ok(None)).unwrap();
+            assert_eq!(result["status"], "failed");
+            let detail = providers_db::last_detail(&conn, "stub").unwrap().unwrap();
+            assert_eq!(detail, format!("http {}: {code}", &status[..3]));
+            assert_eq!(Cause::of(&detail), cause, "{detail}");
+            let resting = providers_db::stopped(&conn).unwrap();
+            assert!(resting.iter().any(|(p, _)| p == "stub"), "{resting:?}");
         }
     }
 
