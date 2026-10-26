@@ -650,8 +650,9 @@ fn keep(answer: &Value, rules: &Rules, typed: &[String], marks: &Marks) -> BTree
     kept
 }
 
-/// A request's readings, the newest this many of its reviews (P5, claude-mem's).
-const READINGS: usize = 20;
+/// A request's readings, its newest reviews: the two the pace is measured by (P5). claude-mem
+/// keeps 20, whose count its page shows only as reviewed or not.
+const READINGS: usize = 2;
 
 /// A review as a request's readings hold it (P5), as the page reads it.
 pub(crate) struct Reviewed {
@@ -1743,23 +1744,28 @@ mod tests {
         assert_eq!(at(day), at(day + 5 * MINUTE));
     }
 
-    /// P5: a request's readings are this device's newest 20 reviews, the oldest first on the page;
-    /// one a forget took is none.
+    /// P5: a request's readings are this device's newest two reviews, the newest's percent and
+    /// the pace of the two; one a forget took is none.
     #[test]
-    fn the_newest_20_reviews_are_the_readings() {
+    fn the_newest_two_reviews_are_the_readings() {
         let mut h = Home::new();
         let a = h.said("s1", 0, "Build the parser.");
         h.grouped(&["s1"], &[a]);
         let id = h.due()[0].0.clone();
-        for i in 0..22 {
-            h.reviewed(&id, 100 - i, review("in-progress", i, "", &[]));
+        for (ago, percent) in [(180, 10), (120, 40), (60, 60)] {
+            h.reviewed(&id, ago, review("in-progress", percent, "", &[]));
         }
-        h.reviewed_with(&id, 50, review("in-progress", 99, "", &[]), &|op| {
+        h.reviewed_with(&id, 30, review("in-progress", 99, "", &[]), &|op| {
             op.forgotten = Some("forget".into())
         });
         let p = &h.page()["progress"];
-        assert_eq!(p["readings"], json!((2..22).collect::<Vec<i64>>()), "{p}");
-        assert_eq!(p["percent"], 21, "{p}");
+        assert_eq!(p["percent"], 60, "{p}");
+        // 20 points an hour, 40 left: two hours on.
+        let (at, reviewed) = (p["estimate"].as_i64(), p["reviewed"].as_i64());
+        assert!(
+            (at.unwrap() - reviewed.unwrap() - 120 * MINUTE).abs() < MINUTE,
+            "{p}"
+        );
     }
 
     /// S6, S7: a review an exclusion hides is no reading, nor, in a copy of a store, one another
@@ -1884,7 +1890,7 @@ mod tests {
     }
 
     /// P5: a ship recorded after the reviews shows 100 and the day it was recorded, with no
-    /// readings stopped short of 100 and no estimate; a shipped review after it, its own day.
+    /// estimate; a shipped review after it, its own day.
     #[test]
     fn a_recorded_ship_shows_100_and_its_day() {
         let mut h = Home::new();
@@ -1903,22 +1909,12 @@ mod tests {
         let p = &r["progress"];
         assert_eq!(r["status"], "shipped");
         assert_eq!(
-            (
-                &p["percent"],
-                &p["readings"],
-                &p["completed"],
-                &p["estimate"]
-            ),
-            (&json!(100), &Value::Null, &json!(today), &Value::Null),
+            (&p["percent"], &p["completed"], &p["estimate"]),
+            (&json!(100), &json!(today), &Value::Null),
             "{p}"
         );
         h.reviewed(&id, 0, review("shipped", 100, "2026-10-20", &[]));
-        let p = &h.page()["progress"];
-        assert_eq!(
-            (&p["readings"], &p["completed"]),
-            (&json!([40, 60, 100]), &json!("2026-10-20")),
-            "{p}"
-        );
+        assert_eq!(h.page()["progress"]["completed"], "2026-10-20");
     }
 
     /// The build story is gated as the page reads it: a rule added after the review masks its

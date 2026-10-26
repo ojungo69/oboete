@@ -2072,8 +2072,7 @@ fn lifecycle(items: &[&Work]) -> Option<(Stamp, bool, String)> {
 
 /// P5, claude-mem's `progress`: the percent of the reading that counts (`counts`), or of the
 /// newest below 100, a status recorded after it notwithstanding; 100 for shipped. When it was
-/// reviewed, the readings' percents (the oldest first) unless shipped stopped them short, the date
-/// it was completed, and the estimate. None with no reading and no ship.
+/// reviewed, the date it was completed, and the estimate. None with no reading and no ship.
 fn progress(
     readings: &[crate::my_work_progress::Reviewed],
     counts: Option<&crate::my_work_progress::Reviewed>,
@@ -2090,8 +2089,6 @@ fn progress(
     } else {
         review.map(|r| r.percent)
     };
-    let percents: Vec<i64> = readings.iter().rev().map(|r| r.percent).collect();
-    let short = shipped && review.is_some_and(|r| r.percent < 100);
     let gate = |text: &str| crate::redact::outbound_with(text, rules);
     // A recorded ship's day, else the review's.
     let completed = shipped
@@ -2104,7 +2101,6 @@ fn progress(
     json!({
         "percent": percent,
         "reviewed": review.map(|r| r.ts),
-        "readings": (!short && review.is_some()).then_some(percents),
         "completed": completed,
         "estimate": (!shipped).then(|| crate::my_work_progress::estimate(readings)).flatten(),
     })

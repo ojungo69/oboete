@@ -1185,8 +1185,8 @@ run('mw.sort="oldest";myWorkDraw()');assert.deepEqual(ids(),['x','y','z'],'oldes
 run('mw.sort="title";myWorkDraw()');assert.deepEqual(ids(),['z','x','y'],'A to Z by title');
 // P5: the progress line, when it was reviewed or the day it shipped, and the pace's estimate; none
 // before a review. Shipped is its own tab, shown with a count, ranked after Checked.
-set([req('p1',{progress:{percent:60,reviewed:now-3*H,readings:[40,60],completed:null,estimate:now+48*H}}),
-  req('p2',{status:'shipped',progress:{percent:100,reviewed:now-2*H,readings:[100],completed:'2026-10-20',estimate:null}}),req('p3')]);
+set([req('p1',{progress:{percent:60,reviewed:now-3*H,completed:null,estimate:now+48*H}}),
+  req('p2',{status:'shipped',progress:{percent:100,reviewed:now-2*H,completed:'2026-10-20',estimate:null}}),req('p3')]);
 assert(text(card('p1')).includes('60% · reviewed 3h ago'),'the percent and when it was reviewed');
 assert(text(card('p1')).includes('At this pace, about'),'the estimate');
 assert.equal(card('p1').querySelectorAll('meter')[0].value,60,'the meter holds the percent');
@@ -1197,7 +1197,7 @@ assert.deepEqual(ids(),['p1','p3','p2'],'shipped after the others');
 const shippedTab=panel.querySelectorAll('button').find(n=>n.dataset.myWork==='tab:shipped');
 assert.equal(text(shippedTab),'Shipped 1','Shipped shows with its count');
 // The request's page: the progress and the build story, the milestones the oldest first.
-set([req('st',{progress:{percent:40,reviewed:now-H,readings:[40],completed:null,estimate:null},
+set([req('st',{progress:{percent:40,reviewed:now-H,completed:null,estimate:null},
   story:{narrative:'The parser came first.',milestones:[{date:'2026-10-02',text:'Reads a line.'},{date:'2026-10-05',text:'Tests pass.'}]}})]);
 run('myWorkOpen("st")');
 const page=text(panel);
@@ -1209,7 +1209,7 @@ assert(page.indexOf('Oct 2')<page.indexOf('Reads a line.')&&page.indexOf('Reads 
 assert(!page.includes('2026-10-02'),"a milestone's day as claude-mem's work view shows it");
 run('myWorkClose()');
 ctx.ui.setLang('ja');
-set([req('pj',{progress:{percent:70,reviewed:now-2*H,readings:[70],completed:null,estimate:null}})]);
+set([req('pj',{progress:{percent:70,reviewed:now-2*H,completed:null,estimate:null}})]);
 assert(text(card('pj')).includes('70% ・2 時間前に確認'),'the Japanese progress line');
 ctx.ui.setLang('en');
 // Status tabs: the six always there, Blocked only with one, counts of the scope, a click filters
