@@ -1387,7 +1387,7 @@ pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims:
 }
 
 /// Compatibility-equivalent stretches, with JSON escapes read once when `escapes` is set.
-fn compatible<'a>(
+pub(crate) fn compatible<'a>(
     text: &'a str,
     quote: &str,
     escapes: bool,

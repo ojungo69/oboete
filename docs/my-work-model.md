@@ -396,7 +396,9 @@ conversation gets no review, as in claude-mem.
 
 P2. **Due.** Never reviewed; or its conversations changed; or a new summary, card or work-state
 write after the last review's input. And the last review at least 60 minutes old. claude-mem's
-check every 10 minutes is the difference that keeps A7. (Claude; overrulable.)
+check every 10 minutes is the difference that keeps A7. A skip counts as a review at its time: due
+again after new activity, an hour on. A forgotten review (S5) is none: due at once; one an
+exclusion hides (S6) is passed over. (Claude; overrulable.)
 
 P3. **Input.** The previous review, then the request's asks (the original and the follow-ups,
 typed or labelled), its session summaries, its cards' titles, its work items' lists, tasks and
@@ -410,9 +412,9 @@ characters), a narrative (1,000; claude-mem 1,200), up to 8 dated milestones of 
 (claude-mem 12 of 200), and up to 3 preferences, each a statement (160) and a quote (240;
 claude-mem 10 of 200 and 300). Shipped needs percent 100 and a ship date; only shipped has one. A
 preference's quote must be found in a typed prompt the review was shown, by curation's matcher
-(`curate::locate`'s rules: exact, then whitespace and Unicode compatibility, outside masked
-ranges), or the preference is dropped. The outcome block, which claude-mem never shows, is not
-asked for.
+(`curate::locate`'s rules: exact, then whitespace and Unicode compatibility), or the preference is
+dropped; one the previous review kept keeps its quote, found then. A mask in a quote is quoted as
+shown: it stands for nothing. The outcome block, which claude-mem never shows, is not asked for.
 
 P5. **On the card.** The newest 20 reviews of a request are its readings. The card shows
 "<percent>% · reviewed <time>", "Completed <date>" for shipped, or "Not reviewed yet", and "at
@@ -1041,6 +1043,74 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   request, gives no link.
 - **#689** (with this slice): a work item that waited for its group's request (#686) takes its
   place in the request's work, newest first, from which the request's next step is read.
+
+### Slice 4a: the review job (2026-10-27)
+
+- **The job** (`my_work_progress::Progress`, S1's `review`) runs in the worker's runner after
+  grouping. Its unit (P1) is each request My Work shows from a group or a request id, with
+  activity in the last 14 days, none of whose conversations is excluded now (S6):
+  `my_work::review_inputs` reads them as the page does (`build`, `parts`), without its answer.
+  S6's walk is one function every job reads (`my_work_ops::hidden`), grouping too.
+- **Due** (P2): never reviewed, due since it was asked; its review forgotten, due at once; a
+  review an exclusion hides is passed over. Else due an hour after the last review, on a change of
+  conversations or on anything the last review could not read. A review keeps marks of what it
+  could read beside the model's fields: its conversations' digest, a number, since a redaction rule
+  added later masks every string of a kept op's fields; and of this device's records and ops, the
+  newest prompt, summary and card it could see, by seq; and when it read the work items, whose
+  time is their write's. Seqs, not times: a summary's time is its reply's and a card's its window's
+  last record, not when they were written, so a summary written after a review, of a turn that
+  ended before it, would never count by time. A skip has no marks (the runner writes it): it waits
+  for activity after its time, so such a summary does not wake it (a `shortcut:` in the code).
+- **The call** (P3): one request. The previous review first, whole, whatever it costs; the original
+  ask; then later asks, session summaries (what was completed, what is next), cards' titles, work
+  items and work product, each part the newest first, each piece cut (the original 600
+  characters, an ask 300, a summary's field 200, a title 120) and at most 8 to 12 pieces a part. A
+  piece that does not fit is passed over for a smaller one. With the same conversations ("an
+  update", claude-mem's amend), the parts show only what the previous review could not read, and
+  not the original ask, which it read; else all. The data names today's date, not the time: the
+  same records make the same prompt, whose digest a wait is kept by (A8).
+- **What does not fit is lost**: the marks move past it, so no later review reads it. After a
+  previous review at its caps (about 3,100 estimated tokens in Japanese), about 1,800 of the 5,000
+  are left in an update: some 7 later asks at their cut, or 5 summaries. The trade is the newest
+  over the whole: a review always reads what came last, and the oldest asks of a busy hour may
+  never be read.
+- **S6 for what a review read**: `my_work_ops::hidden` leaves out an op that read a record of an
+  excluded session (any record of a span, `Raw::holds_session`), or a summary or a card of one.
+  Summaries and cards are judged by their session, as their readers show or keep them back (D13):
+  a review left out for one the readers still show would be due again at once, call after call.
+  They are found in knowledge.db's `turns` and `cards`, one query a table a walk, not by reading
+  each op a review lists; a card of two sessions has none, and no reader shows it.
+- **This device only** (S2, S7): a review lists what it was shown by this device's seqs, so it
+  shows only this device's prompts, summaries, cards and previous reviews, and the products read
+  from this device's records or cards, or from work items. The original ask is listed by where it
+  was read from: a prompt record, a summary's turn op, or a work item, which no forget takes. A
+  product is listed by its call's record or its card's window op (`my_work::Origin`; the cards'
+  files now name their op). A request shows only the prompts it owns: one that owns some prompts
+  of a conversation shares the others on the page, not in its review.
+- **Labels and quotes** (O4, P4): the asks shown and the original are tested as grouping tests
+  opening asks (`my_work_group::agent_written`: the marks, then O3's text tests over the agent text
+  in the lookback); one an agent wrote is labelled `[agent prompt]`. A preference is kept only when
+  its quote, unchanged by the gate, is found in a typed ask as it was shown, by curation's matcher
+  (`curate::compatible`: whitespace and compatibility forms aside), or among the quotes of the
+  previous review's preferences, found when it kept them. A mask is quoted as shown: a record's
+  capture masks each character with `*` and the gate shows `[REDACTED]`, and neither shows what it
+  hides.
+- **The answer** (P4, A10): a state of the five, a whole percent from 0 to 100, three dates as
+  YYYY-MM-DD or an empty string, kept as null (no nullable types in the schema, which some
+  entries' strict modes refuse), a summary, a narrative, milestones and preferences. The check
+  refuses a wrong shape or date, shipped without percent 100 and a shipped date, or a shipped date
+  on another state (`shape`), and more than 8 milestones or 3 preferences (`over_cap`). The keep
+  drops a text over its cap, with the milestone or preference it is part of.
+- **Measured** on a copy of this PC's store (`my_work_progress::tests::measure_review_on_a_copy_of_a_store`,
+  a release build, 2026-10-27), with five grouping ops written to the copy only, since this home
+  has never grouped: four requests to review, read in 2.1 s cold and 0.2 s warm, the due check in
+  0.2 s; one call's prompt 1,240 to 3,216 estimated tokens, read in 1.1 to 6.8 s, most of it the
+  agent text scan; a peak of 80 MB.
+- **#692 (2)**, with this slice: the tool record that proves a delegation is in the grouping op's
+  read spans, so a forget of it takes the op. **#692 (1)**, a blocking call's start time, stays
+  open: the capture does not keep a call's start.
+- **Then**: slice 4b, the readings, the card's percent and estimate, shipped and ready, and the
+  build story on the request's page.
 
 ## Not built
 

@@ -98,18 +98,14 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             r.get::<_, i64>(7)?,
         ))
     })?;
-    // S6: the ops left out, by device and op seq; an op reads only its own device's ops, older
-    // ones, folded before it. One built on a left-out op was shown its title, though its own
-    // records may miss the excluded conversation's (Codex on #669).
-    let mut hidden: HashSet<(String, i64)> = HashSet::new();
+    // S6: the ops left out while an exclusion stands, any job's (`my_work_ops::hidden`).
+    let hidden = crate::my_work_ops::hidden(raw, k, reading)?;
     for row in rows {
         let (device, ts, repo, read, fields, skipped, forgotten, op_seq) = row?;
-        let read: Read = serde_json::from_str(&read)?;
-        let built_on_hidden = (read.ops.iter()).any(|seq| hidden.contains(&(device.clone(), *seq)));
-        if built_on_hidden || !shown_now(raw, reading, &device, &read)? {
-            hidden.insert((device, op_seq));
+        if hidden.contains(&(device.clone(), op_seq)) {
             continue;
         }
+        let read: Read = serde_json::from_str(&read)?;
         let shown = if forgotten.is_some() {
             HashSet::new()
         } else {
@@ -183,22 +179,6 @@ fn key(v: &Value) -> Option<Key> {
 
 fn keys(v: &Value) -> Vec<Key> {
     v.as_array().into_iter().flatten().filter_map(key).collect()
-}
-
-/// Whether an op `device` wrote, which was shown `read`, may be shown and sent while the
-/// exclusions stand as `reading` read them (S6): none of its records is of an excluded session or
-/// repository.
-fn shown_now(raw: &Raw, reading: &Reading, device: &str, read: &Read) -> Result<bool> {
-    for &(from, to) in &read.spans {
-        let labels = raw.labels_in(device, from, to)?;
-        let session = labels.session.map(|(a, s)| format!("{a}\0{s}"));
-        if session.is_some_and(|s| reading.excluded.contains(&s))
-            || labels.repo.is_some_and(|r| reading.exclusions.contains(&r))
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// The grouping job (S1's `group`), for one round: what it read for its due check, kept for the
@@ -329,24 +309,38 @@ impl Job for Grouping {
 /// Which of `batch`'s opening asks an agent wrote (O4): the marks (O2), then the text tests over
 /// the agent text recorded in the lookback before them (O3).
 fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
+    let asks: Vec<AskRef> = (batch.iter())
+        .filter_map(|c| {
+            let (device, seq, ts, text) = c.ask.as_ref()?;
+            Some((Some(&c.key), device.as_str(), *seq, *ts, text.as_str()))
+        })
+        .collect();
+    agent_written(raw, &asks)
+}
+
+/// An ask as `agent_written` reads it: its conversation, when a sender is wanted, its record's
+/// device and seq, its time and its text.
+pub(crate) type AskRef<'a> = (Option<&'a Key>, &'a str, i64, i64, &'a str);
+
+/// Of `asks`, the record seqs of those an agent wrote: the marks (O2), else the text tests over the
+/// agent text recorded before them (O3); and, of each with its conversation, the other
+/// conversation that sent it in a tool call (C3). Grouping and the progress review read it.
+pub(crate) fn agent_written(raw: &Raw, given: &[AskRef]) -> Result<(HashSet<i64>, Vec<Sent>)> {
     let mut out = HashSet::new();
-    // Every opening ask, marked or not, is looked for in agent text: a typed one to tell whether an
-    // agent wrote it (O3), any one to tell which conversation sent it in a tool call (C3).
+    // Every ask, marked or not, is looked for in agent text: a typed one to tell whether an agent
+    // wrote it (O3), any one to tell which conversation sent it in a tool call (C3).
     let mut asks = Vec::new();
-    for c in batch {
-        let Some((device, seq, ts, text)) = &c.ask else {
-            continue;
-        };
-        let record = raw.at(device, &[*seq])?.pop();
+    for &(key, device, seq, ts, text) in given {
+        let record = raw.at(device, &[seq])?.pop();
         let Some(crate::raw::Item::Event(e)) = record.map(|r| r.item) else {
             continue;
         };
         let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
         let typed = crate::typed::typed(&e.kind, &e.agent, &e.source, &body);
         if !typed {
-            out.insert(*seq);
+            out.insert(seq);
         }
-        asks.push((&c.key, *seq, *ts, text.as_str(), typed));
+        asks.push((key, seq, ts, text, typed));
     }
     let mut index = crate::typed::AgentText::new(asks.iter().map(|a| (a.2, a.3)));
     if !index.is_empty() {
@@ -368,7 +362,7 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
                 let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
                 match crate::typed::agent_text(&e.kind, &body) {
                     Some(text) if e.kind == "tool" => {
-                        index.add_from(e.ts, &text, &(e.agent.clone(), e.session.clone()));
+                        index.add_from(e.ts, &text, &(e.agent.clone(), e.session.clone()), r.seq);
                     }
                     Some(text) => index.add(e.ts, &text),
                     None => {}
@@ -381,8 +375,10 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
         if typed && index.agent_written(ts, text) {
             out.insert(seq);
         }
-        if let Some(from) = index.sender(ts, text, key) {
-            senders.push((key.clone(), from.clone()));
+        if let Some(key) = key
+            && let Some((from, record)) = index.sender(ts, text, key)
+        {
+            senders.push((key.clone(), from.clone(), record));
         }
     }
     Ok((out, senders))
@@ -407,13 +403,15 @@ fn first_at(raw: &Raw, device: &str, ts: i64) -> Result<i64> {
     Ok(low)
 }
 
-/// An opening ask's conversation, and the conversation that sent it in a tool call (C3).
-type Sent = (Key, Key);
+/// An opening ask's conversation, the conversation that sent it in a tool call (C3), and the tool
+/// record whose input held it (#692).
+type Sent = (Key, Key, i64);
 
-/// What proves a link (C3): a work list its ends wrote, or an opening ask one sent the other.
+/// What proves a link (C3): a work list its ends wrote, or an opening ask one sent the other, in
+/// the tool record named.
 enum Proof<'a> {
     List(&'a str),
-    Sent,
+    Sent(i64),
 }
 
 /// One call's data (C2): the conversations to decide and the open requests, each with its label,
@@ -496,7 +494,7 @@ impl Batch {
         // C3: a conversation to decide whose opening ask another conversation sent in a tool call
         // is linked to that conversation, when it is decided here too, else to its open request:
         // the one sent first, the sender after it.
-        for (to, from) in senders {
+        for (to, from, record) in senders {
             let end = if deciding.contains(from) {
                 Some(from.clone())
             } else {
@@ -506,7 +504,7 @@ impl Batch {
                 if !deciding.contains(&end) {
                     linked.insert(end.clone());
                 }
-                links.push((Proof::Sent, vec![to.clone(), end]));
+                links.push((Proof::Sent(*record), vec![to.clone(), end]));
             }
         }
         let request_text = |anchor: &Key, g: &Group| -> (String, BTreeSet<i64>) {
@@ -661,11 +659,11 @@ impl Batch {
                         format!("- work list {list}: {}\n", names.join(", "))
                     }
                     // The direction kept: the one sent, then the sender.
-                    Proof::Sent if named[1].starts_with('R') => format!(
+                    Proof::Sent(_) if named[1].starts_with('R') => format!(
                         "- a conversation of {} sent {}'s opening ask in a tool call\n",
                         named[1], named[0]
                     ),
-                    Proof::Sent => format!(
+                    Proof::Sent(_) => format!(
                         "- {} sent {}'s opening ask in a tool call\n",
                         named[1], named[0]
                     ),
@@ -673,6 +671,11 @@ impl Batch {
                 if fits(&line) {
                     data.push_str(&line);
                     any = true;
+                    // The tool record that proved a delegation is read with its link (#692), so a
+                    // forget of it takes the op (S5).
+                    if let Proof::Sent(record) = proof {
+                        shown.insert(*record);
+                    }
                 } else {
                     left_out += 1;
                 }
@@ -1629,6 +1632,48 @@ mod tests {
         h.said("s2", R, 2, &delegated);
         let (prompt, shown) = links(&h);
         assert!(!shown.contains(" sent "), "{prompt}");
+    }
+
+    /// #692: a shown delegation link puts the tool record that proved it in the grouping op's read
+    /// spans, so a forget of that record alone takes the op that showed the link (S5).
+    #[test]
+    fn the_record_that_proves_a_delegation_is_read_and_its_forget_takes_the_op() {
+        let delegated = format!(
+            "Review the parser change in src/parse.rs and report each finding with its line. {}",
+            "Check the error paths, the tables kept between runs and the tests. ".repeat(3)
+        );
+        let input = json!({"command": format!("codex exec '{delegated}'")}).to_string();
+        let call = json!({"tool": "Bash", "input": input, "output": "ok", "failed": false});
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        let tool = h.s.event("tool", "s1", (R, "main"), h.t + MINUTE, call);
+        h.said("s2", R, 2, &delegated);
+        let ask = h.ask(&Summary::default(), R).unwrap();
+        assert!(ask.read.spans.contains(&(tool, tool)), "{:?}", ask.read);
+        let both = answer(&[group(&["C1", "C2"], "The parser")], &[]);
+        h.pass(&|_| both.clone());
+        let (device, home) = (h.s.raw.device().to_owned(), h.s.home.path().to_owned());
+        let Home { s, .. } = h;
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let target = crate::forget::Target::Record { device, seq: tool };
+        crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
+        crate::forget::purge(&home).unwrap();
+        let bodies: Vec<Value> = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .prepare("SELECT body FROM ops WHERE type = 'my_work'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|b| serde_json::from_str(&b.unwrap()).unwrap())
+            .collect();
+        let grouped = (bodies.iter())
+            .find(|b| b["job"] == "group" && !b["skipped"].as_bool().unwrap_or(false))
+            .or_else(|| bodies.iter().find(|b| b["forgotten"].is_string()));
+        assert!(
+            grouped.is_some_and(|b| b["forgotten"].is_string()),
+            "{bodies:?}"
+        );
     }
 
     /// A8, C5: a repository every entry fails is kept as a skip after three attempts, and is not

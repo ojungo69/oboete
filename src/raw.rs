@@ -5204,6 +5204,30 @@ impl Raw {
         })
     }
 
+    /// Whether any of `device`'s events from `from` to `to` is of one of `sessions`, each as agent
+    /// NUL session (`curate::Reading::excluded`).
+    pub fn holds_session(
+        &self,
+        device: &str,
+        (from, to): (i64, i64),
+        sessions: &std::collections::HashSet<String>,
+    ) -> Result<bool> {
+        if sessions.is_empty() {
+            return Ok(false);
+        }
+        // The span's sessions, each looked up: the list may hold thousands, a span one or a few.
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
+        )?;
+        for key in st.query_map(params![device, from, to], |r| r.get::<_, String>(0))? {
+            if sessions.contains(&key?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Parity row X1 (claude-mem's `CONTEXT_MAIN_AGENT_ONLY`): whether `device`'s events from
     /// `from` to `to` are a subagent's work alone, tool calls its hooks or its transcript mark
     /// with an `agent_id`, beside session starts and ends, which hold no work. Any other event,
