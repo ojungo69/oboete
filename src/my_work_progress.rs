@@ -1329,7 +1329,8 @@ mod tests {
         commit(&mut h, ("abc1111", "Other commit"), 1);
         let r = h.reply("s1", 2);
         h.summarized("s1", (a, r), 2, "Summarized on the other device.");
-        let card = json!([{"type": "feature", "title": "Other card", "narrative": "Done."}]);
+        let card = json!([{"type": "feature", "title": "Other card", "narrative": "Done.",
+            "files_modified": ["/home/u/other.pdf"]}]);
         h.s.cards(r, r, card, false);
         h.grouped(&["s1"], &[a]);
         let Home { s, t } = h;
@@ -1356,6 +1357,7 @@ mod tests {
             "Asked there",
             "Other commit",
             "Other card",
+            "other.pdf",
         ] {
             assert!(!ask.prompt.contains(other), "{other}: {}", ask.prompt);
         }
