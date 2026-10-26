@@ -7085,31 +7085,78 @@ impl Rebuild {
     /// them is appended again (D5). Returns how many ops went, those not counted.
     // ponytail: a restore keeping a batch's records but not its migration op imports them again;
     // a check of the restored records against the source's ids would catch it.
+    /// docs/provenance.md P1: where a restore cuts each device's ops, by what they were made from:
+    /// at its first window or migration op made from records the restore did not bring back (its
+    /// span past the device's last record, or, a migration's, missing one of them), every later op
+    /// of the device with it. Slice 2 cuts at every op made from them (F1).
+    fn cut(&self) -> Result<std::collections::BTreeMap<String, i64>> {
+        let mut cut = std::collections::BTreeMap::new();
+        let mut last: Option<(String, i64)> = None;
+        let mut st = self.conn.prepare(
+            "SELECT device, op_seq, type, body FROM ops WHERE type IN ('window', 'migration')
+             ORDER BY device, op_seq",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let device: String = row.get(0)?;
+            if cut.contains_key(&device) {
+                continue;
+            }
+            let kind = OpKind::from_name(row.get_ref(2)?.as_str()?)
+                .context("an op of a kind that cannot be named")?;
+            let body: serde_json::Value = serde_json::from_str(row.get_ref(3)?.as_str()?)
+                .context("a window or migration op whose body does not parse")?;
+            let Some((from, to)) = crate::provenance::of(kind, &body).own else {
+                continue;
+            };
+            let max = match &last {
+                Some((d, max)) if *d == device => *max,
+                _ => {
+                    let max: i64 = self.conn.query_row(
+                        "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
+                        [&device],
+                        |r| r.get(0),
+                    )?;
+                    last = Some((device.clone(), max));
+                    max
+                }
+            };
+            let lost = to > max
+                || kind == OpKind::Migration && {
+                    let held: i64 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3",
+                        params![device, from, to],
+                        |r| r.get(0),
+                    )?;
+                    held < to - from + 1
+                };
+            if lost {
+                cut.insert(device, row.get(1)?);
+            }
+        }
+        Ok(cut)
+    }
+
     pub fn finish(self) -> Result<usize> {
-        let past = "op_seq >= (
-               SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device
-                 AND w.type IN ('window', 'migration')
-                 AND (json_extract(w.body, '$.to_seq') >
-                        (SELECT COALESCE(MAX(r.seq), 0) FROM records r WHERE r.device = w.device)
-                      OR w.type = 'migration' AND
-                        (SELECT COUNT(*) FROM records r WHERE r.device = w.device
-                           AND r.seq BETWEEN json_extract(w.body, '$.from_seq')
-                                         AND json_extract(w.body, '$.to_seq'))
-                        < json_extract(w.body, '$.to_seq') - json_extract(w.body, '$.from_seq') + 1))";
+        let cut = self.cut()?;
         // D5: a forget op among them derives nothing from the lost records. It is appended again
         // below, at a reused op seq as any new op is, so the uid stays forgotten when no request
         // log brings it back (Codex's adversarial review of slice 2a); as this device's, the only
         // one whose ops a backup holds until sync (milestone 6).
-        let forgets: Vec<String> = self
-            .conn
-            .prepare(&format!(
-                "SELECT body FROM ops WHERE type = 'forget' AND {past}"
-            ))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let dropped = self
-            .conn
-            .execute(&format!("DELETE FROM ops WHERE {past}"), [])?;
+        let (mut forgets, mut dropped) = (Vec::<String>::new(), 0);
+        for (device, from) in &cut {
+            let mut st = self.conn.prepare(
+                "SELECT body FROM ops WHERE device = ?1 AND op_seq >= ?2 AND type = 'forget'
+                 ORDER BY op_seq",
+            )?;
+            for body in st.query_map(params![device, from], |r| r.get(0))? {
+                forgets.push(body?);
+            }
+            dropped += self.conn.execute(
+                "DELETE FROM ops WHERE device = ?1 AND op_seq >= ?2",
+                params![device, from],
+            )?;
+        }
         // After that check: a forget's tombstones take new seqs, which must not make an old window
         // look as if the records a damaged backup lost were there.
         let device: String =

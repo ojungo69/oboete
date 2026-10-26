@@ -4037,6 +4037,54 @@ mod tests {
         );
     }
 
+    /// docs/provenance.md F2, for slice 2: after a restore that lost raw.db's tail gave a new op the
+    /// op seq a segment's op still holds, a forget's purge judges the segment's op by its own body:
+    /// a window that showed no forgotten record keeps its text, and is not given the new op's
+    /// rewritten body (a turn's).
+    #[test]
+    #[ignore = "docs/provenance.md slice 2 (F2)"]
+    fn a_segments_op_at_a_reused_seq_is_judged_by_its_own_body() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let home = s.home.path().to_owned();
+        let gone = format!("Parsers stay in {WINDOW_CANARY} mode.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        crate::backup::export(&home).unwrap();
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Logs rotate daily.");
+        let window = "Window marker zq7.";
+        let seq = s
+            .raw
+            .append_ops(&[window_op(r2, r2, window, json!({}))])
+            .unwrap()[0];
+        crate::backup::export(&home).unwrap();
+        // The restore loses r2's records segment: the window over it is cut from raw.db.
+        let lost = backup_hits(&home, "Logs rotate daily.");
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        let dir = crate::backup::dir(&home).unwrap();
+        std::fs::write(dir.join(&lost[0]), b"damaged").unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(f));
+        }
+        std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+        let mut raw = crate::backup::open_raw(&home).unwrap();
+        assert_eq!(raw.max_seq().unwrap(), r1);
+        assert!(!backup_hits(&home, window).is_empty(), "a segment holds it");
+        // The next op, a turn that showed r1, is given the window's op seq.
+        let turn = turn_op(r1, r1, &[], &format!("Its turn: {WINDOW_CANARY}."));
+        assert_eq!(raw.append_ops(&[turn]).unwrap()[0], seq);
+        drop(raw);
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        purge(&home).unwrap();
+        assert!(
+            !backup_hits(&home, window).is_empty(),
+            "the window showed no forgotten record: its text stays"
+        );
+    }
+
     /// Codex and CodeRabbit on #472: the window, turn and claim ops raw.db does not hold (raw.db put
     /// back without them: their ops segment is set aside, and a copy of raw.db holds them) are
     /// judged by their own bodies as raw.db's are, and lose their text in both; another record's
