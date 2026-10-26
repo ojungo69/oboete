@@ -874,6 +874,9 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let mut requests: Vec<Request> = Vec::new();
     let mut at: HashMap<Id, usize> = HashMap::new();
     let mut unlinked = 0;
+    // A group member's work item with no opening ask and no request named waits, as its
+    // conversation does, for the member that makes the group (#686).
+    let mut deferred_work = Vec::new();
     for (i, w) in work.iter().enumerate() {
         let key = w.by.as_ref().map(|(key, ..)| key);
         let ids = key.and_then(|k| named.get(k));
@@ -896,7 +899,10 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
                 })
             });
         let (Some(original), true) = (original, key.is_some() || explicit.is_some()) else {
-            unlinked += 1;
+            match key.map(own) {
+                Some(id @ Id::Group(_)) if explicit.is_none() => deferred_work.push((i, id)),
+                _ => unlinked += 1,
+            }
             continue;
         };
         let id = explicit.map_or_else(|| own(key.unwrap()), Id::Explicit);
@@ -976,6 +982,12 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         match at.get(&id) {
             Some(&j) => requests[j].take(key, Owns::All),
             None => unlinked += c.units(&HashSet::new()),
+        }
+    }
+    for (i, id) in deferred_work {
+        match at.get(&id) {
+            Some(&j) => requests[j].work.push(i),
+            None => unlinked += 1,
         }
     }
 
@@ -4247,13 +4259,14 @@ mod tests {
         let mut h = Home::new();
         // s0 is read before s1 and has no prompt: a reply and its card.
         let quiet = h.reply("s0", 0);
-        h.s.cards(quiet, quiet, card.clone(), false);
+        let card_ids = h.s.cards(quiet, quiet, card.clone(), false);
         let first = h.said("s1", 1_000, "Build the parser.");
         grouped(&mut h, &[(&["s1", "s0"], "The parser")], &[first]);
         let v = h.read(Range::All, crate::db::now_ms());
         let requests = v["requests"].as_array().unwrap();
         assert_eq!(requests.len(), 1, "{v}");
         assert_eq!(requests[0]["sessions"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(requests[0]["cards"], json!(card_ids), "{v}");
         assert_eq!(v["unlinked"], 0, "{v}");
         // No group: the same conversation is counted among the unlinked, as before.
         let mut h = Home::new();
@@ -4272,6 +4285,65 @@ mod tests {
         let v = h.read(Range::All, crate::db::now_ms());
         assert_eq!(v["requests"].as_array().unwrap().len(), 0, "{v}");
         assert_eq!(v["unlinked"], 2, "{v}");
+    }
+
+    /// #686: a work item written in a group member's conversation that has no readable opening
+    /// ask, and names no request, is in the group's request with the work product its fields
+    /// record, though it is read before the member that makes the group; with no group it is
+    /// counted among the unlinked, once.
+    #[test]
+    fn a_quiet_members_work_items_are_in_its_groups_request() {
+        let mut h = Home::new();
+        // s0 is read first: a reply and a work item its agent wrote, no prompt.
+        h.reply("s0", 0);
+        h.wrote(
+            "s0",
+            "parser",
+            json!({"task": "Wire the parser", "status": "doing",
+            "work_product": "https://example.com/parser"}),
+        );
+        let first = h.said("s1", 1_000, "Build the parser.");
+        h.wrote(
+            "s1",
+            "parser-tests",
+            json!({"task": "Test the parser", "status": "todo"}),
+        );
+        grouped(&mut h, &[(&["s1", "s0"], "The parser")], &[first]);
+        let v = h.read(Range::All, crate::db::now_ms());
+        let requests = v["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 1, "{v}");
+        assert_eq!(
+            tasks(&requests[0]),
+            ["Test the parser", "Wire the parser"],
+            "{v}"
+        );
+        assert_eq!(v["unlinked"], 0, "{v}");
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        assert_eq!(ids(&answer).len(), 1, "{answer}");
+        let products = super::products(h.s.home.path(), &held[0]).unwrap();
+        assert!(
+            products
+                .iter()
+                .any(|p| p["url"] == "https://example.com/parser"),
+            "{products:?}"
+        );
+        // No group: the item is among the unlinked, once, and the reply alone counts nothing.
+        let mut h = Home::new();
+        h.reply("s0", 0);
+        h.wrote(
+            "s0",
+            "parser",
+            json!({"task": "Wire the parser", "status": "doing"}),
+        );
+        let v = h.read(Range::All, crate::db::now_ms());
+        assert_eq!(v["requests"].as_array().unwrap().len(), 0, "{v}");
+        assert_eq!(v["unlinked"], 1, "{v}");
+        // A group none of whose members makes its request: the item is among the unlinked, once.
+        h.reply("s2", 10);
+        grouped(&mut h, &[(&["s0", "s2"], "The parser")], &[]);
+        let v = h.read(Range::All, crate::db::now_ms());
+        assert_eq!(v["requests"].as_array().unwrap().len(), 0, "{v}");
+        assert_eq!(v["unlinked"], 1, "{v}");
     }
 
     /// S6: while the repository a group read is excluded, its conversations are not shown as

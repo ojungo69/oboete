@@ -606,10 +606,12 @@ impl Batch {
         }
         data.push_str("## Proven links\n");
         // Each link is charged to the room the conversations and the requests left, those naming
-        // the first conversation first; the ones left out are counted (#677).
+        // the first conversation first; the ones left out are counted (#677), on a line whose room
+        // is kept before any link takes it (#686).
         let first = conversations.first().map(|c| c.0.clone());
         let mut ordered: Vec<&(&str, Vec<Key>)> = links.iter().collect();
         ordered.sort_by_key(|(_, ends)| !first.as_ref().is_some_and(|f| ends.contains(f)));
+        let counted = !links.is_empty() && fits(&format!("- and {} more\n", links.len()));
         let (mut any, mut left_out) = (false, 0);
         for (list, ends) in ordered {
             let named: Vec<&String> = ends.iter().filter_map(|e| label_of.get(e)).collect();
@@ -627,7 +629,9 @@ impl Batch {
             }
         }
         if left_out > 0 {
-            data.push_str(&format!("- and {left_out} more\n"));
+            if counted {
+                data.push_str(&format!("- and {left_out} more\n"));
+            }
         } else if !any {
             data.push_str("None.\n");
         }
@@ -1360,6 +1364,47 @@ mod tests {
             data.contains("R1 · \"Parser\""),
             "the linked request still fits: {data}"
         );
+    }
+
+    /// #686: the line that counts the links left out is charged to the room too: at every window,
+    /// links filling the room to its last token among them, the data stays within it, the section
+    /// heads and labels aside.
+    #[test]
+    fn the_count_of_the_links_left_out_is_charged_to_the_room() {
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.age(31);
+        h.said("s9", R, 3, "Continue the parser.");
+        // Each link line 125 characters, so its cost is whole (`budget::estimate`): no rounding
+        // hides what the count line adds.
+        for n in 0..30 {
+            let list = format!("shared-{n:02}-{}", "y".repeat(94));
+            h.wrote("s1", R, &list, json!({"status": "doing"}));
+            h.wrote("s9", R, &list, json!({"status": "doing"}));
+        }
+        let heads = "## Conversations to decide, the oldest first\nC1 · \
+                     ## Open requests in this repository\nR1 · ## Proven links\n";
+        let mut counted = 0;
+        for window in 1_000..1_060 {
+            let room = Summary {
+                window_tokens: window,
+                ..Summary::default()
+            };
+            let prompt = h.ask(&room, R).unwrap().prompt;
+            let start = prompt.find("## Conversations to decide").unwrap();
+            let fence = (prompt[..start].trim_end_matches('\n').rsplit('\n'))
+                .next()
+                .unwrap();
+            let data = &prompt[start..prompt.len() - fence.len()];
+            assert!(data.contains("- work list "), "{window}: {data}");
+            assert!(
+                crate::budget::estimate(data) <= window + crate::budget::estimate(heads),
+                "{window}: {data}"
+            );
+            counted += usize::from(data.contains(" more\n"));
+        }
+        assert!(counted > 0, "some windows leave links out");
     }
 
     /// #677: a link that names the conversation decided first is kept before one between the
