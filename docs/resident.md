@@ -1,7 +1,7 @@
 # Resident worker and an always-reachable viewer
 
 The design of this unit, written before its code (2026-10-03) and kept up to date as the slices
-land. Rules are numbered R1 to R13; the code cites them.
+land. Rules are numbered R1 to R16; the code cites them.
 
 Owner decision 36 (2026-10-03): the worker is resident by default and the viewer is always reachable
 at the switch. The worker stays up, and the browser page opens from a bookmark. The bot adapter and
@@ -77,6 +77,11 @@ owner's use, and what could be left out); what the review changed is listed at t
   Browser checks cover the visible first-save
   recommendation, switching off and reload. The R11 measurements below pass on this WSL host;
   the terminal/shortcut and copied-real-home checks remain part of the owner's rehearsal.
+- Parity row 27 (R16, decision 58): `[worker] autostart = false` keeps hooks, `oboete view` and
+  `oboete worker restart` from starting a worker; status, stop, restart and doctor say so. Native
+  tests: the table's parse, a free lock that starts nothing under the setting, status's line, and
+  through the binary a hook, `restart`, `status` and `stop` in such a home, then the same hook
+  starting a worker once the line is taken out.
 
 ## Before this unit (main 7f8de51)
 
@@ -360,6 +365,23 @@ R15. **`oboete worker status`, `stop` and `restart` (parity row 2).**
   does not step aside within 30 s is reported busy. One whose loop is stuck leaves by itself
   within 15 minutes.
 - `restart` is `stop`, then a worker started as a hook starts one.
+
+R16. **`[worker] autostart = false`: a worker an outside process manager runs (parity row 27,
+decision 58).** As claude-mem's `CLAUDE_MEM_WORKER_AUTOSTART=false` leaves its worker to whatever
+manages it, `autostart = false` in `[worker]` keeps every hook, `oboete view` and `oboete worker
+restart` from starting a worker; `true`, the default, starts one as before. Only a config.toml that
+loads and says `false` turns it off: one that does not load starts a worker as today (R3), and the
+lock keeps there from being two, though a worker a hook started then holds the lock until it
+leaves. A hook reads the setting only when no worker holds the lock, so a running worker costs it
+nothing more. Nothing is lost while no worker runs: hooks write the records, and the worker goes on
+from them when it next starts. The worker the manager runs (`oboete --home <home> worker`) stays
+when idle only where it is resident (R2), as setup makes it on Linux and WSL; anywhere else it
+leaves after a minute idle, for the manager to start again, where claude-mem keeps its worker's
+idle exit off under the same setting. Run so, it starts and reaps the viewer (R4), replaces itself
+in place on a new binary (R9) and leaves when its loop is stuck (R14). `oboete worker status`,
+`stop` and `restart`, and doctor, say that no hook starts one. Unlike `OBOETE_NO_SPAWN`, the tests'
+switch, the setting keeps no viewer and no `forget --continue` from starting. The settings page
+does not show it, as claude-mem's does not.
 
 ## Owner decision: what the bookmark's token may do
 

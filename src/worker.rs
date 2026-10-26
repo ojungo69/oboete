@@ -1716,7 +1716,7 @@ fn status_lines(home: &Path) -> Vec<String> {
             None => "worker: running".to_owned(),
         }
     } else {
-        "worker: not running now (the next hook starts it)".to_owned()
+        format!("worker: not running now ({})", who_starts(home))
     }];
     if crate::config::worker(home).is_ok_and(|w| w.resident)
         && let Ok(view) = crate::config::view(home)
@@ -1730,16 +1730,29 @@ fn status_lines(home: &Path) -> Vec<String> {
     lines
 }
 
+/// What starts a worker that is not running (R15), or that nothing here does (R16).
+pub(crate) fn who_starts(home: &Path) -> &'static str {
+    if crate::config::autostart(home) {
+        "the next hook starts it"
+    } else {
+        "no hook starts one: [worker] autostart = false"
+    }
+}
+
 /// `oboete worker stop` (R15): the worker steps aside as for a command (R12), and the next hook
-/// starts one again, as claude-mem's `stop` leaves it to the next hook. The page stays (R1).
+/// starts one again, as claude-mem's `stop` leaves it to the next hook, or what manages it does
+/// (R16). The page stays (R1).
 pub fn stop(home: &Path) -> Result<()> {
     let was = step_aside(home)?;
     println!(
         "{}",
-        if was {
+        if !was {
+            "worker: was not running"
+        } else if crate::config::autostart(home) {
             "worker: stopped; the next hook starts it again, and the page stays up"
         } else {
-            "worker: was not running"
+            "worker: stopped; no hook starts it again ([worker] autostart = false), and the page \
+             stays up"
         }
     );
     Ok(())
@@ -1759,11 +1772,18 @@ pub(crate) fn step_aside(home: &Path) -> Result<bool> {
     Ok(was)
 }
 
-/// `oboete worker restart` (R15): `stop`, then a worker started as a hook starts one (D6).
+/// `oboete worker restart` (R15): `stop`, then a worker started as a hook starts one (D6), none
+/// where `[worker] autostart = false` leaves it to what manages it (R16).
 pub fn restart(home: &Path) -> Result<()> {
     stop(home)?;
     if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
         println!("worker: OBOETE_NO_SPAWN is set, so none is started");
+        return Ok(());
+    }
+    if !crate::config::autostart(home) {
+        println!(
+            "worker: none started ([worker] autostart = false); what manages the worker starts it"
+        );
         return Ok(());
     }
     if crate::hook::start_worker(home)?.is_none() {
@@ -4973,6 +4993,18 @@ mod tests {
         assert!(left_line(p).is_some());
         drop(busy);
         drop(held);
+    }
+
+    /// R16: where `[worker] autostart = false` loads, `status` says that no hook starts a worker.
+    #[test]
+    fn status_says_no_hook_starts_one_where_autostart_is_off() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("config.toml"), "[worker]\nautostart = false\n").unwrap();
+        assert_eq!(
+            status_lines(p),
+            ["worker: not running now (no hook starts one: [worker] autostart = false)"]
+        );
     }
 
     /// R15: `status` says whether a worker holds the lock, and what its watchdog last wrote only

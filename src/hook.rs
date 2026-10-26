@@ -3460,9 +3460,11 @@ thread_local! {
     static WORKER_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// After every append (D6): start a worker when none holds the lock, the child for a caller that
+/// After every append (D6): start a worker when none holds the lock, unless `[worker] autostart =
+/// false` leaves it to what manages it (docs/resident.md R16), the child for a caller that
 /// outlives it to reap. The lock is dropped before the spawn; while a worker runs, this costs one
-/// open and one failed `flock`.
+/// open and one failed `flock`, and config.toml is read only when none runs. Unlike
+/// `OBOETE_NO_SPAWN`, the setting keeps no viewer and no `forget --continue` from starting.
 pub(crate) fn start_worker(home: &Path) -> Result<Option<std::process::Child>> {
     #[cfg(test)]
     WORKER_ASKED.set(WORKER_ASKED.get() + 1);
@@ -3471,7 +3473,7 @@ pub(crate) fn start_worker(home: &Path) -> Result<Option<std::process::Child>> {
     }
     // The lock is let go at the end of this statement, before the spawn.
     let free = crate::worker::lock(home)?.is_some();
-    Ok(if free {
+    Ok(if free && crate::config::autostart(home) {
         // `OBOETE_NO_SPAWN` was looked at above: none here is a spawn that failed (Codex on #378).
         Some(
             spawn_detached(home, &["worker"])
@@ -10306,6 +10308,16 @@ mod tests {
         assert_eq!(WORKER_ASKED.get(), asked + 1);
         assert!(crate::failure::since(h).is_some());
         assert_eq!(crate::unwritten::counts(h).unwrap(), (1, 0));
+    }
+
+    /// docs/resident.md R16 (parity row 27): where `[worker] autostart = false` loads, no worker
+    /// is started though none holds the lock, for what manages the worker to start it.
+    #[test]
+    fn autostart_false_starts_no_worker() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::write(h.join("config.toml"), "[worker]\nautostart = false\n").unwrap();
+        assert!(start_worker(h).unwrap().is_none());
     }
 
     /// docs/unwritten.md U3: a call that cannot keep its events behind older kept files appends

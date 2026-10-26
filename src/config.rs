@@ -1166,11 +1166,30 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
     Ok((i, japanese))
 }
 
-/// `[worker]` (docs/resident.md R2): whether the worker a hook starts stays when it is idle.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+/// `[worker]` (docs/resident.md R2): whether the worker a hook starts stays when it is idle, and
+/// whether hooks start one at all (R16): `autostart = false` leaves it to an outside process
+/// manager, as claude-mem's `CLAUDE_MEM_WORKER_AUTOSTART=false` does.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Worker {
     pub resident: bool,
+    pub autostart: bool,
+}
+
+impl Default for Worker {
+    fn default() -> Self {
+        Self {
+            resident: false,
+            autostart: true,
+        }
+    }
+}
+
+/// R16: whether a worker is started here when none runs. Only a config.toml that loads and says
+/// `autostart = false` says no; one that does not load starts it as before, and the worker's lock
+/// keeps there from being two.
+pub fn autostart(home: &Path) -> bool {
+    worker(home).map_or(true, |w| w.autostart)
 }
 
 /// Whether a Messages entry's `extra` asks for a prompt cache of its own anywhere: at the top of
@@ -1503,6 +1522,7 @@ session_start = false
 off = ["codex"]
 [worker]
 resident = true
+autostart = true
 [view]
 port = 17374
 [retention]
@@ -2209,6 +2229,30 @@ model = { gone = "m" }
         // Other tables are not its business.
         let other = at("[chain]\noff = 3\n[worker]\nresident = true\n");
         assert!(other.unwrap().resident);
+    }
+
+    /// `[worker] autostart` (docs/resident.md R16, parity row 27): hooks start a worker unless the
+    /// table says `false`, as claude-mem's `CLAUDE_MEM_WORKER_AUTOSTART` does.
+    #[test]
+    fn hooks_start_a_worker_unless_its_table_says_autostart_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |text: &str| {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            worker(dir.path())
+        };
+        assert!(worker(dir.path()).unwrap().autostart, "no file");
+        assert!(at("[worker]\nresident = true\n").unwrap().autostart);
+        assert!(!at("[worker]\nautostart = false\n").unwrap().autostart);
+        let both = at("[worker]\nresident = true\nautostart = false\n").unwrap();
+        assert!(both.resident && !both.autostart);
+        assert!(at("[worker]\nautostart = \"false\"\n").is_err());
+        // Only a table that loads says no: one that does not load starts a worker as before.
+        at("[worker]\nautostart = false\n").unwrap();
+        assert!(!autostart(dir.path()));
+        at("[worker]\nautostart = false\n[worker\n").unwrap_err();
+        assert!(autostart(dir.path()));
+        std::fs::remove_file(dir.path().join("config.toml")).unwrap();
+        assert!(autostart(dir.path()), "no file");
     }
 
     #[test]
