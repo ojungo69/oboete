@@ -43,6 +43,10 @@ switches to.
   a rebuild that brings one back from the backup's ops is stamped 4 too; a rebuild's expired
   record, and the outstanding expiry batch a restore finishes on the rebuilt store, raise it to 3
   only when it is below. A home with no hide op still opens at 2 or 3.
+- **5, a My Work op** (docs/my-work-model.md S3), for the same reason: the first `my_work` op
+  raises the home to 5 in the transaction that appends it, above a hide op's 4 in the same batch,
+  and a rebuild that brings one back is stamped 5 too. A home whose owner never turned My Work's
+  jobs on still opens at 2, 3 or 4.
 
 ## The refusal
 

@@ -38,6 +38,7 @@ mod memory_lookup;
 mod migrate;
 mod model_fetch;
 mod my_work;
+mod my_work_ops;
 mod provider;
 mod providers_db;
 // Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).

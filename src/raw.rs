@@ -327,6 +327,8 @@ pub enum OpKind {
     /// A card or a session summary removed from the page, or brought back (parity row 3,
     /// decision 57): a `hide::HideOp`, no text.
     Hide,
+    /// What one of My Work's jobs wrote (docs/my-work-model.md S1): a `my_work_ops::MyWorkOp`.
+    MyWork,
 }
 
 impl OpKind {
@@ -343,6 +345,7 @@ impl OpKind {
             OpKind::WorkState => "work_state",
             OpKind::Forget => "forget",
             OpKind::Hide => "hide",
+            OpKind::MyWork => "my_work",
         }
     }
     pub(crate) fn from_name(name: &str) -> Option<Self> {
@@ -358,6 +361,7 @@ impl OpKind {
             Self::WorkState,
             Self::Forget,
             Self::Hide,
+            Self::MyWork,
         ]
         .into_iter()
         .find(|k| k.name() == name)
@@ -679,6 +683,24 @@ struct OpRow {
 
 /// The most one op's body may take (spec 6.5, A42).
 pub const MAX_OP_BYTES: usize = 64 << 10;
+
+/// A job's op `op` (a turn's, a My Work job's) as the op log keeps it (`MAX_OP_BYTES`), so an answer
+/// paid for is never lost to the cap and asked again at every run: whole, else without its
+/// removals, else as a skip of its labels, its fields gone; none when even that is over it.
+pub(crate) fn fitted(op: serde_json::Value) -> Option<serde_json::Value> {
+    let within = |v: &serde_json::Value| v.to_string().len() <= MAX_OP_BYTES;
+    let mut v = op;
+    if within(&v) {
+        return Some(v);
+    }
+    v["removed"] = serde_json::json!([]);
+    if within(&v) {
+        return Some(v);
+    }
+    v["fields"] = serde_json::json!({});
+    v["skipped"] = serde_json::json!(true);
+    within(&v).then_some(v)
+}
 /// The most one append may hold, in ops and in body bytes together: an ops segment ends only
 /// between appends, so a segment is at most `backup::SEGMENT_BYTES` plus one append's lines (each
 /// body escaped once, and a few hundred bytes of fields per op), well within what a restore reads.
@@ -1659,11 +1681,12 @@ impl std::error::Error for Restoring {}
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
 /// writes anything an older binary would mishandle, in any store or a backup segment. The newest
 /// this binary reads.
-pub(crate) const FORMAT: i64 = 4;
+pub(crate) const FORMAT: i64 = 5;
 
 /// What an open stamps, below `FORMAT` while a home holds nothing only a newer binary reads: 3
-/// comes with the first expiry batch (docs/retention.md) and 4 with the first hide op
-/// (docs/card-hide.md), so a home that has neither still opens in the binaries before them.
+/// comes with the first expiry batch (docs/retention.md), 4 with the first hide op
+/// (docs/card-hide.md) and 5 with the first My Work op (docs/my-work-model.md S3), so a home that
+/// has none of them still opens in the binaries before them.
 pub(crate) const OPEN_FORMAT: i64 = 2;
 
 /// The format of a home with an expired record, or an expiry batch begun (docs/retention.md).
@@ -1672,6 +1695,18 @@ pub(crate) const EXPIRED_FORMAT: i64 = 3;
 /// The format of a home with a hide op (docs/card-hide.md): a binary before it stops at an op type
 /// it does not know.
 pub(crate) const HIDDEN_FORMAT: i64 = 4;
+
+/// The format of a home with a My Work op (docs/my-work-model.md S3), for the same reason.
+pub(crate) const MY_WORK_FORMAT: i64 = 5;
+
+/// The format an op of `kind` raises a home to when it is written or brought back.
+fn format_for(kind: OpKind) -> i64 {
+    match kind {
+        OpKind::Hide => HIDDEN_FORMAT,
+        OpKind::MyWork => MY_WORK_FORMAT,
+        _ => OPEN_FORMAT,
+    }
+}
 
 /// `open`'s and `read_only`'s error for a raw.db a newer oboete wrote (`user_version` above
 /// `FORMAT`): nothing reads or writes it with this binary's meaning of it.
@@ -3406,22 +3441,47 @@ impl Raw {
                 break;
             }
         }
-        let mut st = self.conn.prepare(
-            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'turn' ORDER BY device, op_seq",
-        )?;
-        let mut rows = st.query([])?;
-        while let Some(row) = rows.next()? {
-            let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
-            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
-            else {
-                continue;
-            };
+        self.each_op_of("turn", |device, op_seq, ts, body| {
             if let Some(job) = judge.turn(&device, ts, &body) {
                 found.turns.push((device, op_seq, job));
             }
-        }
-        drop(rows);
+        })?;
+        // docs/my-work-model.md S5: then the My Work ops, in op order, each by what it read: a
+        // forgotten record, or an op whose text a forget took before or takes now, a My Work op
+        // judged before it among them, so an update built on a taken op is taken too.
+        let mut taken = taken_ops(&self.forgotten_op_bodies()?);
+        taken.extend(
+            (found.windows.iter().chain(&found.turns))
+                .map(|(device, op_seq, job)| ((device.clone(), *op_seq), job.clone())),
+        );
+        self.each_op_of("my_work", |device, op_seq, ts, body| {
+            if let Some(job) = judge.my_work(&device, ts, &body, &taken) {
+                taken.insert((device.clone(), op_seq), job.clone());
+                found.my_work.push((device, op_seq, job));
+            }
+        })?;
         Ok((found, judge))
+    }
+
+    /// Every op of type `kind` in op order, its device, op seq, time and body; one whose body does
+    /// not read is passed over. The type is in the query's text, so the planner may take a partial
+    /// index of it (`ops_turns`).
+    fn each_op_of(
+        &self,
+        kind: &'static str,
+        mut f: impl FnMut(String, i64, i64, serde_json::Value),
+    ) -> Result<()> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT device, op_seq, ts, body FROM ops WHERE type = '{kind}' ORDER BY device, op_seq"
+        ))?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+            if let Ok(body) = serde_json::from_str(&row.get::<_, String>(3)?) {
+                f(device, op_seq, ts, body);
+            }
+        }
+        Ok(())
     }
 
     /// Slice 3d-4: one pass of `record_ops` over the window ops, in op order, each with the claim
@@ -3696,6 +3756,7 @@ impl Raw {
         }
         let (_, mut judge) = self.record_ops(forgotten)?;
         judge.rewritten = self.forgotten_op_bodies()?;
+        judge.taken = taken_ops(&judge.rewritten);
         if masks {
             judge.now = self
                 .preferences_now()?
@@ -3830,6 +3891,9 @@ impl Raw {
             .chain(ops.turns.iter().map(|(device, op_seq, job)| {
                 (device.as_str(), *op_seq, job.as_str(), OpKind::Turn)
             }))
+            .chain(ops.my_work.iter().map(|(device, op_seq, job)| {
+                (device.as_str(), *op_seq, job.as_str(), OpKind::MyWork)
+            }))
             .collect();
         let mut rewritten = 0;
         for batch in all.chunks(RECORD_PURGE_BATCH) {
@@ -3862,6 +3926,7 @@ impl Raw {
                             }
                             body
                         }
+                        OpKind::MyWork => forgotten_my_work_body(&body, job),
                         _ => forgotten_turn_body(&body, job),
                     };
                     rewritten += tx.execute(
@@ -3892,7 +3957,7 @@ impl Raw {
         Ok(self
             .conn
             .prepare(
-                "SELECT device, op_seq, body FROM ops WHERE type IN ('window', 'turn')
+                "SELECT device, op_seq, body FROM ops WHERE type IN ('window', 'turn', 'my_work')
                    AND json_extract(body, '$.forgotten') IS NOT NULL",
             )?
             .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
@@ -6992,9 +7057,7 @@ impl Rebuild {
                 v["batch"].as_i64().context("batch")?
             ],
         )?;
-        if kind == OpKind::Hide {
-            raise_format(&self.conn, HIDDEN_FORMAT)?;
-        }
+        raise_format(&self.conn, format_for(kind))?;
         Ok(())
     }
 
@@ -7626,7 +7689,7 @@ fn rewrite_copy(
             // not hold judged by its own (Codex and CodeRabbit on #472).
             // A body that does not parse may hold a card's or a summary's text: it fails the copy,
             // as a claim's does (Codex on #472).
-            let now = if matches!(kind, OpKind::Window | OpKind::Turn) {
+            let now = if matches!(kind, OpKind::Window | OpKind::Turn | OpKind::MyWork) {
                 let body =
                     serde_json::from_str(&text).context("an op whose body does not parse")?;
                 judge.purged(kind, (&key.0, key.1), ts, batch, &body)
@@ -7809,6 +7872,9 @@ fn shown_then(removed: &[serde_json::Value], ts: i64, r: &(i64, String, Option<i
 pub(crate) struct RecordOps {
     pub(crate) windows: Vec<(String, i64, String)>,
     pub(crate) turns: Vec<(String, i64, String)>,
+    /// docs/my-work-model.md S5: the My Work ops that read a forgotten record, or an op whose text
+    /// a forget took, in op order.
+    pub(crate) my_work: Vec<(String, i64, String)>,
     /// Slice 3d-4 (rule c): the claim ops of the batch of each window op of `windows` a record job
     /// takes, and of each window op a record job's purge rewrote before 3d-4 whose claims still
     /// hold text, by the window op's device and op seq; and when this read them, which `copied`
@@ -7893,6 +7959,10 @@ fn items(v: &serde_json::Value) -> &[serde_json::Value] {
 #[derive(Debug, Default)]
 pub(crate) struct Judge {
     rewritten: ForgottenOps,
+    /// docs/my-work-model.md S5: the ops a forget takes, with its job, that a My Work op may have
+    /// read: raw.db's rewritten ones, and once `widen` has read them, those only the backup's ops
+    /// segments and the copies of raw.db hold (Codex on #664).
+    taken: std::collections::HashMap<(String, i64), String>,
     forgotten: Forgotten,
     spans: Spans,
     /// Slice 3d-4: each claim taken for repeating what a window showed its curator of a forgotten
@@ -8020,6 +8090,36 @@ impl Judge {
             })
     }
 
+    /// docs/my-work-model.md S5 for a My Work op of `device` written at `ts` that holds its text:
+    /// the job of the first forgotten record it was shown in its `read` spans, else of the first
+    /// op it read whose text a forget took (`taken`, by device and op seq). One that lists no
+    /// `read` is never taken by this rule, as a turn op without `from` is not.
+    fn my_work(
+        &self,
+        device: &str,
+        ts: i64,
+        body: &serde_json::Value,
+        taken: &std::collections::HashMap<(String, i64), String>,
+    ) -> Option<String> {
+        if body.get("forgotten").is_some() {
+            return None;
+        }
+        let removed = items(&body["removed"]);
+        let shown = |r: &&(i64, String, Option<i64>)| shown_then(removed, ts, r);
+        items(&body["read"]["spans"])
+            .iter()
+            .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
+            .flat_map(|(a, b)| self.forgotten.between(device, a, b))
+            .find(shown)
+            .map(|r| r.1.clone())
+            .or_else(|| {
+                items(&body["read"]["ops"])
+                    .iter()
+                    .filter_map(serde_json::Value::as_i64)
+                    .find_map(|seq| taken.get(&(device.to_owned(), seq)).cloned())
+            })
+    }
+
     /// The body an op of `kind` at `at` (device, op seq), written at `ts` in `batch`, is to hold
     /// once a purge takes its text: a window or turn op's as raw.db holds it rewritten, else by the
     /// rules; a claim op's that quotes a forgotten record, the job of the first such record's
@@ -8042,6 +8142,15 @@ impl Judge {
                     _ => forgotten_turn_body(body, &self.turn(at.0, ts, body)?),
                 };
                 Some(body.to_string())
+            }
+            // docs/my-work-model.md S5: as raw.db holds it rewritten, else by what it read, the
+            // ops raw.db holds rewritten among them.
+            OpKind::MyWork => {
+                if let Some(now) = self.rewritten.get(&(at.0.to_owned(), at.1)) {
+                    return Some(now.clone());
+                }
+                let job = self.my_work(at.0, ts, body, &self.taken)?;
+                Some(forgotten_my_work_body(body, &job).to_string())
             }
             OpKind::Claim => {
                 if self
@@ -8134,6 +8243,39 @@ impl Judge {
                 ops.sort_by_key(|o| o.0);
             }
         }
+        // docs/my-work-model.md S5: what a forget takes of the ops only they hold, so that a My
+        // Work op built on one is taken with it there as in raw.db (Codex on #664): the windows
+        // and turns by their rules, those rewritten before by their job, then the My Work ops in
+        // op order, each seeing those judged before it. Every body they hold under an op seq is
+        // judged, as a restore that reused op seqs can leave a copy's differing from a segment's.
+        let mut taken = std::mem::take(&mut self.taken);
+        let mut work = Vec::new();
+        let mut each =
+            |kind: OpKind, at: (&str, i64), ts: i64, _: Option<i64>, body: &serde_json::Value| {
+                let before = body["forgotten"].as_str().map(str::to_owned);
+                let job = match kind {
+                    OpKind::Window => before.or_else(|| self.window(at.0, ts, body)),
+                    OpKind::Turn => before.or_else(|| self.turn(at.0, ts, body)),
+                    OpKind::MyWork => {
+                        work.push(((at.0.to_owned(), at.1), ts, body.clone()));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(job) = job {
+                    taken.entry((at.0.to_owned(), at.1)).or_insert(job);
+                }
+            };
+        crate::backup::each_op(home, &mut each)?;
+        each_copy_op(home, &mut each)?;
+        work.sort_by(|a, b| a.0.cmp(&b.0));
+        for (at, ts, body) in work {
+            let before = body["forgotten"].as_str().map(str::to_owned);
+            if let Some(job) = before.or_else(|| self.my_work(&at.0, ts, &body, &taken)) {
+                taken.entry(at).or_insert(job);
+            }
+        }
+        self.taken = taken;
         Ok(())
     }
 
@@ -8234,6 +8376,29 @@ pub(crate) fn forgotten_turn_body(body: &serde_json::Value, job: &str) -> serde_
         o.insert("forgotten".to_owned(), job.into());
     }
     b
+}
+
+/// docs/my-work-model.md S5: My Work op `body` without its text: its job, subject and what it read
+/// kept, its fields gone and a skip, with the forget's job, so the job is due again.
+pub(crate) fn forgotten_my_work_body(body: &serde_json::Value, job: &str) -> serde_json::Value {
+    let mut b = body.clone();
+    if let Some(o) = b.as_object_mut() {
+        o.insert("fields".to_owned(), serde_json::json!({}));
+        o.insert("skipped".to_owned(), true.into());
+        o.insert("forgotten".to_owned(), job.into());
+    }
+    b
+}
+
+/// The job that took each op of `rewritten`, by device and op seq.
+fn taken_ops(rewritten: &ForgottenOps) -> std::collections::HashMap<(String, i64), String> {
+    rewritten
+        .iter()
+        .filter_map(|(at, body)| {
+            let body: serde_json::Value = serde_json::from_str(body).ok()?;
+            Some((at.clone(), body["forgotten"].as_str()?.to_owned()))
+        })
+        .collect()
 }
 
 /// Slice 3e-1: a row's stored body (`enc` as stored) with each of `ranges` masked (`masked`), stored
@@ -8452,12 +8617,16 @@ pub(crate) type OpText = (String, i64, String, String);
 /// A window's `reason` is one only when oboete set the window aside (`curate::set_aside`, which
 /// `oboete recurate` reads): a provider's failure is free text, masked (Codex on #487).
 const OP_NAMES: &[&str] = &[
+    // A My Work op's subject (its repository, request, week or day) and the entry that wrote it
+    // (docs/my-work-model.md S6).
+    "about",
     "agent",
     "candidates",
     "carried",
     "copied",
     "device",
     "dropped",
+    "entry",
     // A folder never recorded, by its path as an event's `cwd` label holds it (slice 4a, #489).
     "folder",
     "forgotten",
@@ -8738,8 +8907,13 @@ fn insert_ops(tx: &Connection, device: &str, bodies: &[(&str, String)]) -> Resul
         )?;
         seqs.push(op_seq);
     }
-    if bodies.iter().any(|(kind, _)| *kind == OpKind::Hide.name()) {
-        raise_format(tx, HIDDEN_FORMAT)?;
+    let needs = bodies
+        .iter()
+        .filter_map(|(kind, _)| OpKind::from_name(kind))
+        .map(format_for)
+        .max();
+    if let Some(format) = needs {
+        raise_format(tx, format)?;
     }
     Ok(seqs)
 }
@@ -9952,6 +10126,31 @@ mod tests {
         );
         let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// docs/my-work-model.md S6: a My Work op's labels (its job, subject and entry) are names no
+    /// rule masks; the fields it kept are text, masked as any op's.
+    #[test]
+    fn a_my_work_ops_labels_are_names_and_its_fields_text() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let body = serde_json::json!({"job": "group", "about": "github.com/o/acme-482915",
+            "entry": "acme-482915", "ts": 1, "read": {"spans": [[1, 2]], "ops": []},
+            "removed": [], "fields": {"title": "Ship acme-482915"}, "skipped": false});
+        let now = masked_op_text(OpKind::MyWork, &body.to_string(), &rules).unwrap();
+        let now: serde_json::Value = serde_json::from_str(&now).unwrap();
+        for label in ["job", "about", "entry"] {
+            assert_eq!(now[label], body[label], "{label}");
+        }
+        assert_eq!(
+            now["fields"]["title"],
+            serde_json::json!("Ship ***********")
+        );
     }
 
     /// A hide op holds no text a rule masks: its target is oboete's word, so a rule that finds

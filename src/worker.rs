@@ -267,6 +267,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::cards::Cards),
         // The op log's session summaries (docs/summaries.md): what each turn was.
         Box::new(crate::consumer::turns::Turns),
+        // What My Work's jobs wrote (docs/my-work-model.md S4).
+        Box::new(crate::consumer::my_work::MyWork),
         // Imported documents (milestone 4 D5), for search only.
         Box::new(crate::consumer::imported::Imported),
         // The files imported observations name, for the note on a file (docs/file-note.md F12).

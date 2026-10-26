@@ -1504,14 +1504,17 @@ fn judged_line(
         return Line::Unknown(None);
     };
     // Slice 3d-2: a window or turn op given the body raw.db holds now, or one raw.db does not hold
-    // (a segment set aside) judged by its own (Codex and CodeRabbit on #472). A line with no time
-    // is judged as written at once.
+    // (a segment set aside) judged by its own (Codex and CodeRabbit on #472), and a My Work op
+    // (docs/my-work-model.md S5). A line with no time is judged as written at once.
     let at = (
         v["device"].as_str().unwrap_or(""),
         v["op_seq"].as_i64().unwrap_or(0),
     );
     let (ts, batch) = (v["ts"].as_i64().unwrap_or(0), v["batch"].as_i64());
-    if matches!(kind, raw::OpKind::Window | raw::OpKind::Turn) {
+    if matches!(
+        kind,
+        raw::OpKind::Window | raw::OpKind::Turn | raw::OpKind::MyWork
+    ) {
         return match judge.purged(kind, at, ts, batch, &body) {
             Some(now) if v["body"].as_str() != Some(now.as_str()) => {
                 v["body"] = now.into();

@@ -8,6 +8,7 @@ pub mod fts;
 pub mod gaps;
 pub mod imported;
 pub mod manifest;
+pub mod my_work;
 pub mod products;
 pub mod rescan;
 pub mod turns;

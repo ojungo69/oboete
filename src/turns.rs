@@ -478,25 +478,11 @@ fn released(
     Ok(out)
 }
 
-/// `op` as the op log keeps it (`MAX_OP_BYTES`), so an answer paid for is never lost to the cap
-/// and asked again at every run (Codex on C2). Over it, the removal list goes first, as a window
-/// op's does past its bound (the summary is then hidden by any removal, K4), then the fields: it
-/// is kept as a skip. None when even that is over it.
-fn fitted(mut op: TurnOp) -> Result<Option<Value>> {
-    let within = |op: &TurnOp| -> Result<Option<Value>> {
-        let v = serde_json::to_value(op)?;
-        Ok((v.to_string().len() <= crate::raw::MAX_OP_BYTES).then_some(v))
-    };
-    if let Some(v) = within(&op)? {
-        return Ok(Some(v));
-    }
-    op.removed.clear();
-    if let Some(v) = within(&op)? {
-        return Ok(Some(v));
-    }
-    op.fields.clear();
-    op.skipped = true;
-    within(&op)
+/// `op` as the op log keeps it (Codex on C2, `raw::fitted`): over the cap the removal list goes
+/// first, as a window op's does past its bound (the summary is then hidden by any removal, K4),
+/// then the fields: it is kept as a skip. None when even that is over it.
+fn fitted(op: TurnOp) -> Result<Option<Value>> {
+    Ok(crate::raw::fitted(serde_json::to_value(op)?))
 }
 
 /// The reply of the last turn of this device's that a summary was kept of, skipped, kept back or
