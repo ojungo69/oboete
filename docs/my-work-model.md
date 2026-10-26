@@ -1075,10 +1075,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   over the whole: a review always reads what came last, and the oldest asks of a busy hour may
   never be read.
 - **S6 for what a review read**: `my_work_ops::hidden` leaves out an op that read a record of an
-  excluded session (any record of a span, `Raw::holds_session`), a summary of one, or a card of a
-  window holding a record of one. A summary is judged by its own session alone, as the turns
-  reader shows or keeps it back (D13): a review left out for a summary the readers still show
-  would be due again at once, call after call.
+  excluded session (any record of a span, `Raw::holds_session`), or a summary or a card of one.
+  Summaries and cards are judged by their session, as their readers show or keep them back (D13):
+  a review left out for one the readers still show would be due again at once, call after call.
+  They are found in knowledge.db's `turns` and `cards`, one query a table a walk, not by reading
+  each op a review lists; a card of two sessions has none, and no reader shows it.
 - **This device only** (S2, S7): a review lists what it was shown by this device's seqs, so it
   shows only this device's prompts, summaries, cards and previous reviews, and the products read
   from this device's records or cards, or from work items. The original ask is listed by where it
