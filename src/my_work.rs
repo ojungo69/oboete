@@ -633,12 +633,13 @@ struct Original {
     from: &'static str,
 }
 
-/// A request's identity (#570): an agent's session, or a `request_id`, as the stores hold them;
-/// the answer gates it.
+/// A request's identity (#570): an agent's session, a `request_id`, as the stores hold them, or a
+/// group grouping made, by its anchor conversation (docs/my-work-model.md C6); the answer gates it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Id {
     Conversation(Key),
     Explicit(String),
+    Group(Key),
 }
 
 impl Id {
@@ -648,6 +649,7 @@ impl Id {
         match self {
             Id::Conversation((agent, session)) => format!("c:{agent}:{session}"),
             Id::Explicit(e) => format!("r:{e}"),
+            Id::Group((agent, session)) => format!("g:{agent}:{session}"),
         }
     }
 }
@@ -656,6 +658,8 @@ struct Request {
     id: Id,
     original: Original,
     explicit_text: Option<String>,
+    /// A group's title, the newest grouping gave it (C6).
+    title: Option<String>,
     owns: Vec<(Key, Owns)>,
     work: Vec<usize>,
 }
@@ -666,6 +670,7 @@ impl Request {
             id,
             original,
             explicit_text: None,
+            title: None,
             owns: Vec::new(),
             work: Vec::new(),
         }
@@ -859,6 +864,13 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     };
     let rules = Rules::load(home)?;
     let Gathered { convs, work, named } = gather(&raw, &k, &rules)?;
+    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+    let grouped = crate::my_work_group::groups(&raw, &k, &reading)?;
+    // A conversation's request when it names no request id: its group's, else its own (C6).
+    let own = |key: &Key| {
+        (grouped.of.get(key))
+            .map_or_else(|| Id::Conversation(key.clone()), |a| Id::Group(a.clone()))
+    };
     let mut requests: Vec<Request> = Vec::new();
     let mut at: HashMap<Id, usize> = HashMap::new();
     let mut unlinked = 0;
@@ -887,7 +899,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
             unlinked += 1;
             continue;
         };
-        let id = explicit.map_or_else(|| Id::Conversation(key.unwrap().clone()), Id::Explicit);
+        let id = explicit.map_or_else(|| own(key.unwrap()), Id::Explicit);
         let r = match at.get(&id) {
             Some(&j) => &mut requests[j],
             None => {
@@ -934,9 +946,17 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
             unlinked += c.units(&owned);
             continue;
         }
-        let id = (ids.first().cloned()).map_or_else(|| Id::Conversation(key.clone()), Id::Explicit);
+        let id = (ids.first().cloned()).map_or_else(|| own(key), Id::Explicit);
         match at.get(&id) {
-            Some(&j) => requests[j].take(key, Owns::All),
+            Some(&j) => {
+                requests[j].take(key, Owns::All);
+                // A group's ask is the earliest of its conversations' (C6).
+                if let (Id::Group(_), Some(o)) = (&id, c.original(raw.device()))
+                    && o.ts < requests[j].original.ts
+                {
+                    requests[j].original = o;
+                }
+            }
             None => match c.original(raw.device()) {
                 Some(o) if ids.is_empty() => {
                     at.insert(id.clone(), requests.len());
@@ -949,6 +969,11 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         }
     }
 
+    for r in &mut requests {
+        if let Id::Group(anchor) = &r.id {
+            r.title = grouped.groups.get(anchor).and_then(|g| g.title.clone());
+        }
+    }
     let since = range.since(now);
     let mut answers = Vec::new();
     let mut key = None;
@@ -1325,6 +1350,8 @@ fn shown_id(
 ) -> Result<(String, Option<String>)> {
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
     let (shown, kind) = match id {
+        // C6: `g:` and the keyed hash of its anchor, which tells nothing of the conversation.
+        Id::Group(_) => return Ok((format!("g:{}", keyed_print(&id.held(), home, key)?), None)),
         Id::Conversation((agent, session)) => (format!("c:{}:{}", gate(agent), gate(session)), "c"),
         Id::Explicit(e) => (
             format!("r:{}", crate::work_state::beside("request_id", e, rules)),
@@ -1470,7 +1497,9 @@ fn answer(
         return Ok(None);
     }
     let status = status(&items, activity, now);
-    let recorded = (r.explicit_text.as_deref()).map(|t| title(&shown(t, ASK, rules)));
+    let recorded = (r.title.as_deref())
+        .map(|t| crate::redact::outbound_with(t, rules))
+        .or_else(|| (r.explicit_text.as_deref()).map(|t| title(&shown(t, ASK, rules))));
     let ask = shown(&original.text, ASK, rules);
     // Each work item's names as capture keeps them, beside their keys (Codex on #574), and its
     // detail, claude-mem's recorded change of it: its outcome, else its progress.
@@ -4084,5 +4113,129 @@ mod tests {
         assert!(!a[0].ends_with(unkeyed), "{a:?}");
         assert!(key(&homes[0]).exists());
         assert_eq!(read(&homes[0]), a);
+    }
+
+    /// A grouping op that decided `groups` (each its conversations, the anchor first, and its
+    /// title) over the prompts `shown`, as the grouping job keeps one.
+    fn grouped(h: &mut Home, groups: &[(&[&str], &str)], shown: &[i64]) {
+        let groups: Vec<Value> = (groups.iter())
+            .map(|(members, title)| {
+                let keys: Vec<Value> = members.iter().map(|s| json!(["claude", s])).collect();
+                json!({"conversations": keys, "title": title, "links": []})
+            })
+            .collect();
+        let op = crate::my_work_ops::MyWorkOp {
+            job: "group".into(),
+            about: R.into(),
+            entry: "fake".into(),
+            ts: crate::db::now_ms(),
+            read: crate::my_work_ops::Read {
+                spans: shown.iter().map(|&s| (s, s)).collect(),
+                ops: vec![],
+            },
+            removed: vec![],
+            fields: BTreeMap::from([
+                ("groups".to_owned(), json!(groups)),
+                ("ignored".to_owned(), json!([])),
+            ]),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    }
+
+    /// docs/my-work-model.md C6: a group is one request, by `g:` and a keyed hash of its anchor:
+    /// the earliest of its asks, the newest six follow-ups of all its conversations, each
+    /// conversation's own card in the agents view (C7), and the title grouping gave it.
+    #[test]
+    fn a_group_is_one_request_with_the_earliest_ask_and_the_newest_six_follow_ups() {
+        let mut h = Home::new();
+        // The earliest ask is the conversation read second, so the group takes it from there.
+        let first = h.said("s2", 0, "Build the parser.");
+        let second = h.said("s1", 1_000, "Add tests for the parser.");
+        for i in 0..4 {
+            h.said("s2", 2_000 + i, &format!("Handle case {i} in the parser."));
+            h.said("s1", 3_000 + i, &format!("Cover case {i} in the tests."));
+        }
+        grouped(
+            &mut h,
+            &[(&["s1", "s2"], "The parser and its tests")],
+            &[first, second],
+        );
+        let v = h.read(Range::All, crate::db::now_ms());
+        let requests = v["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 1, "{v}");
+        let r = &requests[0];
+        let id = r["id"].as_str().unwrap();
+        assert!(id.starts_with("g:") && id.len() == 14, "{id}");
+        assert!(!id.contains("s1"), "{id}");
+        assert_eq!(r["title"], "The parser and its tests");
+        assert_eq!(r["ask"]["text"], "Build the parser.");
+        let follow_ups: Vec<&str> = (r["follow_ups"].as_array().unwrap().iter())
+            .map(|f| f["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(follow_ups.len(), 6);
+        assert_eq!(follow_ups.last(), Some(&"Cover case 3 in the tests."));
+        let sessions: Vec<&str> = (r["sessions"].as_array().unwrap().iter())
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(sessions.len(), 2);
+        assert!(
+            sessions.iter().all(|s| s.starts_with("c:claude:")),
+            "{sessions:?}"
+        );
+    }
+
+    /// C7: a conversation joining a group is a new version of its request, as a new follow-up is;
+    /// a new title is not.
+    #[test]
+    fn a_joined_conversation_changes_the_version_and_a_new_title_does_not() {
+        let mut h = Home::new();
+        let first = h.said("s1", 0, "Build the parser.");
+        let second = h.said("s2", 1_000, "Add tests for the parser.");
+        let third = h.said("s3", 2_000, "Fix the parser's errors.");
+        grouped(&mut h, &[(&["s1", "s2"], "The parser")], &[first, second]);
+        let version = |h: &Home| {
+            let v = h.read(Range::All, crate::db::now_ms());
+            let r = (v["requests"].as_array().unwrap().iter())
+                .find(|r| r["id"].as_str().unwrap().starts_with("g:"))
+                .unwrap()
+                .clone();
+            (
+                r["version"].as_str().unwrap().to_owned(),
+                r["title"].clone(),
+            )
+        };
+        let (before, _) = version(&h);
+        grouped(&mut h, &[(&["s1"], "The parser, retitled")], &[first]);
+        let (retitled, title) = version(&h);
+        assert_eq!(
+            (retitled.as_str(), title),
+            (before.as_str(), json!("The parser, retitled"))
+        );
+        grouped(
+            &mut h,
+            &[(&["s1", "s3"], "The parser, retitled")],
+            &[first, third],
+        );
+        let (joined, _) = version(&h);
+        assert_ne!(joined, before);
+    }
+
+    /// S6: while the repository a group read is excluded, its conversations are not shown as
+    /// a group; taken back, the group is shown again.
+    #[test]
+    fn a_group_read_from_an_excluded_repository_is_not_shown() {
+        let mut h = Home::new();
+        let first = h.said("s1", 0, "Build the parser.");
+        let second = h.said("s2", 1_000, "Add tests for the parser.");
+        grouped(&mut h, &[(&["s1", "s2"], "The parser")], &[first, second]);
+        h.s.raw.exclude(R, false).unwrap();
+        let v = h.read(Range::All, crate::db::now_ms());
+        assert!(v["requests"].as_array().unwrap().is_empty(), "{v}");
+        h.s.raw.exclude(R, true).unwrap();
+        let v = h.read(Range::All, crate::db::now_ms());
+        assert_eq!(v["requests"].as_array().unwrap().len(), 1, "{v}");
     }
 }
