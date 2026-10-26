@@ -2153,7 +2153,9 @@ fn failed(e: &anyhow::Error) -> Response {
 /// What leaves the API: every text gated (K6), except a page's cursor, the page's own state of
 /// ids and times, passed back as it came: a rule that matched it broke the paging (Codex on #373).
 fn answered(name: &str, mut answer: Value) -> Value {
-    let next = matches!(name, "feed" | "timeline" | "sessions")
+    // A list's position, its last item's time and ids, comes back as it went, as the feed's
+    // cursor does: Settings' list of what is removed too (Codex on #672).
+    let next = matches!(name, "feed" | "timeline" | "sessions" | "hidden")
         .then(|| answer.get_mut("next").map(Value::take))
         .flatten();
     // A My Work request's id leaves the gate's walk and comes back under its key: a masked id's
@@ -5539,7 +5541,7 @@ curate = false
     fn a_page_cursor_leaves_as_it_came_and_the_rest_gated() {
         let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
         let cursor = format!("{{\"prompts\":[1,\"{token}\",2]}}");
-        for name in ["feed", "timeline", "sessions"] {
+        for name in ["feed", "timeline", "sessions", "hidden"] {
             let out = answered(
                 name,
                 json!({"items": [{"text": token.clone()}], "next": cursor.clone()}),

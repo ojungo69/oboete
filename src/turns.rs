@@ -839,32 +839,17 @@ pub(crate) fn removed(
     limit: usize,
     rules: &Rules,
 ) -> Result<(Vec<TurnSummary>, bool)> {
-    if !crate::consumer::manifest::exists(k, "table", "turns")? {
-        return Ok((Vec::new(), false));
-    }
-    if crate::hide::shown(k, "turns", "")?.is_empty() {
-        return Ok((Vec::new(), false));
-    }
-    let mut st = k.prepare(&format!(
+    let sql = format!(
         "SELECT {COLUMNS} FROM turns WHERE skipped = 0 AND hidden = 1
            AND (?1 IS NULL OR (ts, device, op_seq) < (?1, ?2, ?3))
          ORDER BY ts DESC, device DESC, op_seq DESC"
-    ))?;
-    let mut rows = st.query(rusqlite::params![
-        before.map(|p| p.0),
-        before.map(|p| p.1.as_str()),
-        before.map(|p| p.2)
-    ])?;
-    let mut out = Vec::new();
-    while let Some(r) = rows.next()? {
-        if let Some(s) = read_row(r, raw, rules)? {
-            if out.len() == limit {
-                return Ok((out, true));
-            }
-            out.push(s);
-        }
-    }
-    Ok((out, false))
+    );
+    let (ts, device, op_seq) = before.map_or((None, None, None), |(ts, d, s)| {
+        (Some(*ts), Some(d.as_str()), Some(*s))
+    });
+    crate::hide::removed_page(k, "turns", &sql, params![ts, device, op_seq], limit, |r| {
+        read_row(r, raw, rules)
+    })
 }
 
 /// A summary's ID as `get` takes it, `S<device>.<op seq>` or `S<op seq>` of `local`, in parts.
