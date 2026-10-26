@@ -956,8 +956,10 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **When** (C5): a repository is due when it has a candidate the newest op about it was not shown,
   from 30 minutes after that op. A skip shows its batch, so a repository given up on is asked again
   when another candidate comes, the given-up ones with it.
-- **The op** (S2): `about` is the repository; `read` lists the prompt records the call showed, its
-  removals as a turn op's; the fields are `groups` (each its conversations by stored key, the
+- **The op** (S2): `about` is the repository; `read` lists the prompt records the call showed and
+  this device's grouping ops behind the open requests it showed (their members, titles and links,
+  so a forget that takes one takes this op too: Codex's security review of #669), its removals as
+  a turn op's; the fields are `groups` (each its conversations by stored key, the
   anchor first, its title or none, its links) and `ignored` (each conversation and its reason or
   none).
 - **The fold** (`my_work_group::groups`): every grouping op in time order, as S4's "newest wins"

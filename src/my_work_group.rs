@@ -46,6 +46,9 @@ pub(crate) struct Group {
     pub members: Vec<Key>,
     pub title: Option<String>,
     pub links: Vec<(Vec<Key>, String)>,
+    /// The grouping ops that decided a member, gave its title or added a link, by device and op
+    /// seq: what a batch that shows it read (S5).
+    pub ops: BTreeSet<(String, i64)>,
 }
 
 /// What the grouping ops a reader may show say, in time order (C5): each decided conversation's
@@ -75,7 +78,7 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
         return Ok(out);
     }
     let mut st = k.prepare(
-        "SELECT device, ts, about, read, fields, skipped, forgotten FROM my_work
+        "SELECT device, ts, about, read, fields, skipped, forgotten, op_seq FROM my_work
          WHERE job = 'group' ORDER BY ts, device, op_seq",
     )?;
     let rows = st.query_map([], |r| {
@@ -87,10 +90,11 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             r.get::<_, String>(4)?,
             r.get::<_, bool>(5)?,
             r.get::<_, Option<String>>(6)?,
+            r.get::<_, i64>(7)?,
         ))
     })?;
     for row in rows {
-        let (device, ts, repo, read, fields, skipped, forgotten) = row?;
+        let (device, ts, repo, read, fields, skipped, forgotten, op_seq) = row?;
         let read: Read = serde_json::from_str(&read)?;
         if !shown_now(raw, reading, &device, &read)? {
             continue;
@@ -119,7 +123,9 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
                 members: Vec::new(),
                 title: None,
                 links: Vec::new(),
+                ops: BTreeSet::new(),
             });
+            group.ops.insert((device.clone(), op_seq));
             if let Some(title) = g["title"].as_str().filter(|t| !t.is_empty()) {
                 group.title = Some(title.to_owned());
             }
@@ -293,7 +299,7 @@ impl Job for Grouping {
         removed.dedup();
         let read = Read {
             spans: batch.shown.iter().map(|&seq| (seq, seq)).collect(),
-            ops: Vec::new(),
+            ops: batch.ops.iter().copied().collect(),
         };
         let prompt = prompt(&s.summary.language, &batch.data);
         let (labels, check_labels) = (batch.labels.clone(), batch.labels);
@@ -388,6 +394,9 @@ struct Batch {
     /// Each label's conversation: a `C` label the one to decide, an `R` label the request's anchor.
     labels: BTreeMap<String, Key>,
     shown: BTreeSet<i64>,
+    /// This device's grouping ops behind the open requests it shows (S5): a forget that takes one
+    /// takes the op of this batch too (Codex's security review of #669).
+    ops: BTreeSet<i64>,
 }
 
 impl Batch {
@@ -586,11 +595,19 @@ impl Batch {
         if !any {
             data.push_str("None.\n");
         }
+        let device = s.raw.device();
+        let ops = (requests.iter())
+            .filter_map(|(anchor, ..)| open.iter().find(|(a, _)| *a == anchor))
+            .flat_map(|(_, g)| g.ops.iter())
+            .filter(|(d, _)| d == device)
+            .map(|(_, seq)| *seq)
+            .collect();
         Batch {
             data,
             conversations: conversations.into_iter().map(|c| c.0).collect(),
             labels,
             shown,
+            ops,
         }
     }
 }
@@ -942,6 +959,42 @@ mod tests {
             .map(|(c, r)| json!({"conversation": c, "reason": r}))
             .collect();
         json!({"groups": groups, "ignored": ignored})
+    }
+
+    /// Codex's security review of #669: a batch that shows an open request names the grouping
+    /// ops that made it in what it read (S5), so a forget that takes one of them takes the op built
+    /// on it, its title with it, whichever of the request's asks the batch left out.
+    #[test]
+    fn a_batch_names_the_grouping_ops_its_open_requests_came_from() {
+        let mut h = Home::new();
+        h.said(
+            "s1",
+            R,
+            0,
+            "Build the parser and keep its tables between runs.",
+        );
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.s.run();
+        let k = crate::knowledge::open(h.s.home.path()).unwrap();
+        let first: i64 = k
+            .query_row("SELECT op_seq FROM my_work WHERE job = 'group'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        drop(k);
+        h.age(31);
+        h.said("s2", R, 1, "Write the docs for the release notes.");
+        let ask = h.ask(&Summary::default(), R).unwrap();
+        assert!(ask.prompt.contains("\"Parser\""), "{}", ask.prompt);
+        assert_eq!(ask.read.ops, vec![first]);
+        // A batch that shows no open request reads no op.
+        let none = Summary {
+            window_tokens: 0,
+            ..Summary::default()
+        };
+        let ask = h.ask(&none, R).unwrap();
+        assert!(!ask.prompt.contains("\"Parser\""), "{}", ask.prompt);
+        assert!(ask.read.ops.is_empty());
     }
 
     /// C5: a decided conversation is never asked about again; a repository is asked again 30
