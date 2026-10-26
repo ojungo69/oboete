@@ -121,10 +121,16 @@ fn step(hash: u64, c: char) -> u64 {
 /// The fingerprints of some prompts, each with its prompts' times, found in agent text written in
 /// the `LOOKBACK_MS` before a prompt: one streaming pass, a rolling hash over every position,
 /// verified by comparison (claude-mem's `AgentTextIndex`).
+/// A conversation, by its agent and session.
+type Conversation = (String, String);
+
 pub(crate) struct AgentText {
     by_hash: HashMap<u64, Vec<Vec<char>>>,
     prompts: HashMap<Vec<char>, Vec<i64>>,
     found: HashSet<(Vec<char>, i64)>,
+    /// C3: for each prompt found, the conversations whose tool input held its opening, each with
+    /// the last time one did.
+    senders: HashMap<(Vec<char>, i64), HashMap<Conversation, i64>>,
     high: u64,
 }
 
@@ -135,6 +141,7 @@ impl AgentText {
             by_hash: HashMap::new(),
             prompts: HashMap::new(),
             found: HashSet::new(),
+            senders: HashMap::new(),
             high: (1..FINGERPRINT).fold(1u64, |h, _| h.wrapping_mul(BASE)),
         };
         for (ts, text) in prompts {
@@ -159,6 +166,16 @@ impl AgentText {
 
     /// One piece of agent text (a reply, a tool's input) written at `ts`.
     pub(crate) fn add(&mut self, ts: i64, text: &str) {
+        self.scan(ts, text, None);
+    }
+
+    /// A tool's input written at `ts` in conversation `from` (agent, session): it may have sent a
+    /// prompt (C3).
+    pub(crate) fn add_from(&mut self, ts: i64, text: &str, from: &Conversation) {
+        self.scan(ts, text, Some(from));
+    }
+
+    fn scan(&mut self, ts: i64, text: &str, from: Option<&Conversation>) {
         if self.is_empty() || text.chars().count() < FINGERPRINT {
             return;
         }
@@ -176,6 +193,12 @@ impl AgentText {
                     for &p in &self.prompts[f] {
                         if ts < p && p - ts <= LOOKBACK_MS {
                             self.found.insert((f.clone(), p));
+                            if let Some(from) = from {
+                                let at = (self.senders.entry((f.clone(), p)).or_default())
+                                    .entry(from.clone())
+                                    .or_insert(ts);
+                                *at = (*at).max(ts);
+                            }
                         }
                     }
                 }
@@ -187,6 +210,16 @@ impl AgentText {
             let outgoing = (chunk[start] as u64).wrapping_mul(self.high);
             hash = step(hash.wrapping_sub(outgoing), chunk[next]);
         }
+    }
+
+    /// C3: the conversation, other than `own`, whose tool input written last in the `LOOKBACK_MS`
+    /// before the prompt `text` typed at `ts` held its opening.
+    pub(crate) fn sender(&self, ts: i64, text: &str, own: &Conversation) -> Option<&Conversation> {
+        let f: Vec<char> = fingerprint(text)?.chars().collect();
+        (self.senders.get(&(f, ts))?.iter())
+            .filter(|(from, _)| *from != own)
+            .max_by_key(|(from, at)| (**at, *from))
+            .map(|(from, _)| from)
     }
 
     /// Whether the prompt `text`, typed at `ts`, is an agent's (O3): its opening was in agent text
@@ -215,6 +248,31 @@ mod tests {
         let mut body = json!({"prompt": "Fix the parser."});
         (body.as_object_mut().unwrap()).extend(extra.as_object().unwrap().clone());
         body
+    }
+
+    /// C3: a prompt's sender is the conversation, other than its own, whose tool input held its
+    /// opening last before it in the lookback; a reply names none.
+    #[test]
+    fn a_prompts_sender_is_the_last_other_tool_input_that_held_its_opening() {
+        let text = long("Port the lexer to the new parser");
+        let key = |s: &str| ("claude".to_owned(), s.to_owned());
+        let mut index = AgentText::new([(10 * DAY, text.as_str())]);
+        index.add(10 * DAY - 4_000, &format!("I will send it: {text}"));
+        assert_eq!(index.sender(10 * DAY, &text, &key("own")), None);
+        assert!(index.agent_written(10 * DAY, &text));
+        index.add_from(10 * DAY - 5_000, &format!("echo '{text}'"), &key("a"));
+        index.add_from(10 * DAY - 2_000, &format!("codex exec '{text}'"), &key("b"));
+        index.add_from(
+            10 * DAY - 1_000,
+            &format!("cat <<EOF\n{text}\nEOF"),
+            &key("own"),
+        );
+        assert_eq!(index.sender(10 * DAY, &text, &key("own")), Some(&key("b")));
+        // Past the lookback, or after the prompt, names none.
+        let mut late = AgentText::new([(10 * DAY, text.as_str())]);
+        late.add_from(10 * DAY + 1, &text, &key("a"));
+        late.add_from(10 * DAY - LOOKBACK_MS - 1, &text, &key("b"));
+        assert_eq!(late.sender(10 * DAY, &text, &key("own")), None);
     }
 
     /// O2: a Claude Code prompt counts by its entry point: the terminal, the desktop app and the
