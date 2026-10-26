@@ -348,7 +348,7 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
                 let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
                 match crate::typed::agent_text(&e.kind, &body) {
                     Some(text) if e.kind == "tool" => {
-                        index.add_from(e.ts, &text, &(e.agent.clone(), e.session.clone()));
+                        index.add_from(e.ts, &text, &(e.agent.clone(), e.session.clone()), r.seq);
                     }
                     Some(text) => index.add(e.ts, &text),
                     None => {}
@@ -361,8 +361,8 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
         if typed && index.agent_written(ts, text) {
             out.insert(seq);
         }
-        if let Some(from) = index.sender(ts, text, key) {
-            senders.push((key.clone(), from.clone()));
+        if let Some((from, record)) = index.sender(ts, text, key) {
+            senders.push((key.clone(), from.clone(), record));
         }
     }
     Ok((out, senders))
@@ -387,13 +387,15 @@ fn first_at(raw: &Raw, device: &str, ts: i64) -> Result<i64> {
     Ok(low)
 }
 
-/// An opening ask's conversation, and the conversation that sent it in a tool call (C3).
-type Sent = (Key, Key);
+/// An opening ask's conversation, the conversation that sent it in a tool call (C3), and the tool
+/// record whose input held it (#692).
+type Sent = (Key, Key, i64);
 
-/// What proves a link (C3): a work list its ends wrote, or an opening ask one sent the other.
+/// What proves a link (C3): a work list its ends wrote, or an opening ask one sent the other, in
+/// the tool record named.
 enum Proof<'a> {
     List(&'a str),
-    Sent,
+    Sent(i64),
 }
 
 /// One call's data (C2): the conversations to decide and the open requests, each with its label,
@@ -476,7 +478,7 @@ impl Batch {
         // C3: a conversation to decide whose opening ask another conversation sent in a tool call
         // is linked to that conversation, when it is decided here too, else to its open request:
         // the one sent first, the sender after it.
-        for (to, from) in senders {
+        for (to, from, record) in senders {
             let end = if deciding.contains(from) {
                 Some(from.clone())
             } else {
@@ -486,7 +488,7 @@ impl Batch {
                 if !deciding.contains(&end) {
                     linked.insert(end.clone());
                 }
-                links.push((Proof::Sent, vec![to.clone(), end]));
+                links.push((Proof::Sent(*record), vec![to.clone(), end]));
             }
         }
         let request_text = |anchor: &Key, g: &Group| -> (String, BTreeSet<i64>) {
@@ -641,11 +643,11 @@ impl Batch {
                         format!("- work list {list}: {}\n", names.join(", "))
                     }
                     // The direction kept: the one sent, then the sender.
-                    Proof::Sent if named[1].starts_with('R') => format!(
+                    Proof::Sent(_) if named[1].starts_with('R') => format!(
                         "- a conversation of {} sent {}'s opening ask in a tool call\n",
                         named[1], named[0]
                     ),
-                    Proof::Sent => format!(
+                    Proof::Sent(_) => format!(
                         "- {} sent {}'s opening ask in a tool call\n",
                         named[1], named[0]
                     ),
@@ -653,6 +655,11 @@ impl Batch {
                 if fits(&line) {
                     data.push_str(&line);
                     any = true;
+                    // The tool record that proved a delegation is read with its link (#692), so a
+                    // forget of it takes the op (S5).
+                    if let Proof::Sent(record) = proof {
+                        shown.insert(*record);
+                    }
                 } else {
                     left_out += 1;
                 }
@@ -1609,6 +1616,48 @@ mod tests {
         h.said("s2", R, 2, &delegated);
         let (prompt, shown) = links(&h);
         assert!(!shown.contains(" sent "), "{prompt}");
+    }
+
+    /// #692: a shown delegation link puts the tool record that proved it in the grouping op's read
+    /// spans, so a forget of that record alone takes the op that showed the link (S5).
+    #[test]
+    fn the_record_that_proves_a_delegation_is_read_and_its_forget_takes_the_op() {
+        let delegated = format!(
+            "Review the parser change in src/parse.rs and report each finding with its line. {}",
+            "Check the error paths, the tables kept between runs and the tests. ".repeat(3)
+        );
+        let input = json!({"command": format!("codex exec '{delegated}'")}).to_string();
+        let call = json!({"tool": "Bash", "input": input, "output": "ok", "failed": false});
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        let tool = h.s.event("tool", "s1", (R, "main"), h.t + MINUTE, call);
+        h.said("s2", R, 2, &delegated);
+        let ask = h.ask(&Summary::default(), R).unwrap();
+        assert!(ask.read.spans.contains(&(tool, tool)), "{:?}", ask.read);
+        let both = answer(&[group(&["C1", "C2"], "The parser")], &[]);
+        h.pass(&|_| both.clone());
+        let (device, home) = (h.s.raw.device().to_owned(), h.s.home.path().to_owned());
+        let Home { s, .. } = h;
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        let target = crate::forget::Target::Record { device, seq: tool };
+        crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
+        crate::forget::purge(&home).unwrap();
+        let bodies: Vec<Value> = rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .prepare("SELECT body FROM ops WHERE type = 'my_work'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|b| serde_json::from_str(&b.unwrap()).unwrap())
+            .collect();
+        let grouped = (bodies.iter())
+            .find(|b| b["job"] == "group" && !b["skipped"].as_bool().unwrap_or(false))
+            .or_else(|| bodies.iter().find(|b| b["forgotten"].is_string()));
+        assert!(
+            grouped.is_some_and(|b| b["forgotten"].is_string()),
+            "{bodies:?}"
+        );
     }
 
     /// A8, C5: a repository every entry fails is kept as a skip after three attempts, and is not

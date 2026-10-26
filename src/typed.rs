@@ -124,13 +124,17 @@ fn step(hash: u64, c: char) -> u64 {
 /// A conversation, by its agent and session.
 type Conversation = (String, String);
 
+/// The conversations whose tool input held a prompt's opening, each with the last such input's time
+/// and record seq (#692).
+type Inputs = HashMap<Conversation, (i64, i64)>;
+
 pub(crate) struct AgentText {
     by_hash: HashMap<u64, Vec<Vec<char>>>,
     prompts: HashMap<Vec<char>, Vec<i64>>,
     found: HashSet<(Vec<char>, i64)>,
     /// C3: for each prompt found, the conversations whose tool input held its opening, each with
-    /// the last time one did.
-    senders: HashMap<(Vec<char>, i64), HashMap<Conversation, i64>>,
+    /// the last such input's time and record seq.
+    senders: HashMap<(Vec<char>, i64), Inputs>,
     high: u64,
 }
 
@@ -169,13 +173,13 @@ impl AgentText {
         self.scan(ts, text, None);
     }
 
-    /// A tool's input written at `ts` in conversation `from` (agent, session): it may have sent a
-    /// prompt (C3).
-    pub(crate) fn add_from(&mut self, ts: i64, text: &str, from: &Conversation) {
-        self.scan(ts, text, Some(from));
+    /// A tool's input written at `ts` in conversation `from` (agent, session), record `seq`: it
+    /// may have sent a prompt (C3).
+    pub(crate) fn add_from(&mut self, ts: i64, text: &str, from: &Conversation, seq: i64) {
+        self.scan(ts, text, Some((from, seq)));
     }
 
-    fn scan(&mut self, ts: i64, text: &str, from: Option<&Conversation>) {
+    fn scan(&mut self, ts: i64, text: &str, from: Option<(&Conversation, i64)>) {
         if self.is_empty() || text.chars().count() < FINGERPRINT {
             return;
         }
@@ -193,11 +197,13 @@ impl AgentText {
                     for &p in &self.prompts[f] {
                         if ts < p && p - ts <= LOOKBACK_MS {
                             self.found.insert((f.clone(), p));
-                            if let Some(from) = from {
+                            if let Some((from, seq)) = from {
                                 let at = (self.senders.entry((f.clone(), p)).or_default())
                                     .entry(from.clone())
-                                    .or_insert(ts);
-                                *at = (*at).max(ts);
+                                    .or_insert((ts, seq));
+                                if ts > at.0 {
+                                    *at = (ts, seq);
+                                }
                             }
                         }
                     }
@@ -213,13 +219,18 @@ impl AgentText {
     }
 
     /// C3: the conversation, other than `own`, whose tool input written last in the `LOOKBACK_MS`
-    /// before the prompt `text` typed at `ts` held its opening.
-    pub(crate) fn sender(&self, ts: i64, text: &str, own: &Conversation) -> Option<&Conversation> {
+    /// before the prompt `text` typed at `ts` held its opening, with that input's record seq.
+    pub(crate) fn sender(
+        &self,
+        ts: i64,
+        text: &str,
+        own: &Conversation,
+    ) -> Option<(&Conversation, i64)> {
         let f: Vec<char> = fingerprint(text)?.chars().collect();
         (self.senders.get(&(f, ts))?.iter())
             .filter(|(from, _)| *from != own)
-            .max_by_key(|(from, at)| (**at, *from))
-            .map(|(from, _)| from)
+            .max_by_key(|(from, at)| (at.0, *from))
+            .map(|(from, at)| (from, at.1))
     }
 
     /// Whether the prompt `text`, typed at `ts`, is an agent's (O3): its opening was in agent text
@@ -260,18 +271,27 @@ mod tests {
         index.add(10 * DAY - 4_000, &format!("I will send it: {text}"));
         assert_eq!(index.sender(10 * DAY, &text, &key("own")), None);
         assert!(index.agent_written(10 * DAY, &text));
-        index.add_from(10 * DAY - 5_000, &format!("echo '{text}'"), &key("a"));
-        index.add_from(10 * DAY - 2_000, &format!("codex exec '{text}'"), &key("b"));
+        index.add_from(10 * DAY - 5_000, &format!("echo '{text}'"), &key("a"), 5);
+        index.add_from(
+            10 * DAY - 2_000,
+            &format!("codex exec '{text}'"),
+            &key("b"),
+            7,
+        );
         index.add_from(
             10 * DAY - 1_000,
             &format!("cat <<EOF\n{text}\nEOF"),
             &key("own"),
+            9,
         );
-        assert_eq!(index.sender(10 * DAY, &text, &key("own")), Some(&key("b")));
+        assert_eq!(
+            index.sender(10 * DAY, &text, &key("own")),
+            Some((&key("b"), 7))
+        );
         // Past the lookback, or after the prompt, names none.
         let mut late = AgentText::new([(10 * DAY, text.as_str())]);
-        late.add_from(10 * DAY + 1, &text, &key("a"));
-        late.add_from(10 * DAY - LOOKBACK_MS - 1, &text, &key("b"));
+        late.add_from(10 * DAY + 1, &text, &key("a"), 1);
+        late.add_from(10 * DAY - LOOKBACK_MS - 1, &text, &key("b"), 2);
         assert_eq!(late.sender(10 * DAY, &text, &key("own")), None);
     }
 
