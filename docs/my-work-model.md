@@ -926,8 +926,60 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   for the hold `curate::hold` gives it (a refused answer is tried again at once and counted), and
   after `ATTEMPTS` counted attempts is kept as a skip op of what it read. A request that changed
   (its digest, with the chain's) is asked whatever an older one waits for.
-- **Not yet**: the first job, grouping (C1 to C5), and with it S6's exclusion of ops at read time;
-  the settings page's row with its estimate (A6, slice 2c).
+- **Not yet**: the settings page's row with its estimate (A6, slice 2c).
+
+### Slice 3a-2: grouping (2026-10-26)
+
+- **The job** (`my_work_group::Grouping`, S1's `group`), the first `my_work_run::jobs()` names.
+  Its candidates (C1): a conversation whose opening ask, by My Work's rule, is a prompt of this
+  device, last active in the 14 days before, not decided, and whose work names no request id.
+  `my_work::seen` gives what grouping reads of a conversation, through `gather`, the first half of
+  the page's read, which the page and the job share (the page's answer is unchanged).
+- **A call** (C2): one repository by its stored key; up to 10 candidates, the oldest first, each
+  with its agent, time in UTC, the work lists it wrote and its opening ask (400 characters); the
+  repository's open requests (every group of it, until reviews close some), each with its title,
+  opening ask and three recent asks, the opening ask not repeated; and the proven links (C3): a
+  work list written by two to eight of the repository's conversations, read from every write a
+  call of theirs sent (`my_work::writers`), each request by its member that wrote it. They fill
+  `[summary] window_tokens` in A4's order. Every recorded text is gated alone before it is cut.
+  The prompt is the same for the same records (lists and members in one order), so a wait is kept
+  by its digest (A8).
+- **[agent prompt]** (O4): an opening ask the marks count out (O2), or whose opening the text tests
+  find in agent text recorded in the nine days before it (O3), is labelled. The scan starts at the
+  record of that time, found by a search over the seqs, and reads to the end of the device's
+  records.
+- **The check** (C4): every C label decided once; an R label only first, to continue that request;
+  a group of two or more joined by links naming its own labels, with evidence, that reach every
+  member from the first; evidence over 160 characters refuses the answer (`over_cap`), a missing
+  link or a member not reached `unanchored`, the rest `shape`. A title over 120 characters or a
+  reason over 160 is dropped from what is kept, never cut, and each kept text is gated again.
+- **When** (C5): a repository is due when it has a candidate the newest op about it was not shown,
+  from 30 minutes after that op. A skip shows its batch, so a repository given up on is asked again
+  when another candidate comes, the given-up ones with it.
+- **The op** (S2): `about` is the repository; `read` lists the prompt records the call showed and
+  this device's grouping ops behind the open requests it showed (their members, titles and links,
+  so a forget that takes one takes this op too: Codex's security review of #669), its removals as
+  a turn op's; the fields are `groups` (each its conversations by stored key, the
+  anchor first, its title or none, its links) and `ignored` (each conversation and its reason or
+  none).
+- **The fold** (`my_work_group::groups`): every grouping op in time order, as S4's "newest wins"
+  for a request's title. A later decision moves a conversation; continuing a request adds its links
+  where claude-mem replaces them. S4 named a knowledge.db table for the map: it is this fold over
+  the ops the consumer keeps, because S6 must leave ops out when they are read. An op shown a
+  record of a session or repository excluded now is left out while the exclusion stands, and so is
+  every op built on one through its `read.ops` (Codex on #669), so what they decided is undecided
+  again and asked again; a forgotten op decides nothing (S5).
+- **The budget** (A4): the first conversation takes its room first, whatever it costs, and the
+  linked requests, the other conversations and the other requests are shown only in the room it
+  leaves; a conversation shows 20 of its work lists at most, then how many more, where claude-mem
+  shows them all (Codex on #669).
+- **Measured** on a copy of this PC's store (`my_work_group::tests::measure_grouping_on_a_copy_of_a_store`,
+  a release build, 2026-10-26), before any grouping: 126 conversations read in 2.3 s cold and the
+  due check in 0.19 s warm; 124 candidates in 7 repositories, so about 13 calls to decide them all,
+  each repository at most every 30 minutes; one call's prompt 650 to 1,440 estimated tokens, read
+  in up to 6.4 s, most of it the agent text scan; a peak of 79 MB.
+- **Not yet**: My Work showing a group as one request (C6, C7, slice 3b); the delegation link (C3,
+  slice 3c); the settings page's row (A6, slice 2c).
 
 ## Not built
 
