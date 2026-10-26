@@ -1002,27 +1002,32 @@ where
     Some(out.join("\n"))
 }
 
-/// Parity row 3: the current cards removed from the page, the newest first, at most `limit`, as
-/// Settings lists them to bring back; read as every reader reads a card.
-pub(crate) fn removed(k: &Connection, raw: &Raw, limit: usize, rules: &Rules) -> Result<Vec<Card>> {
-    if !crate::consumer::manifest::exists(k, "table", "cards")? {
-        return Ok(Vec::new());
-    }
-    if crate::hide::shown(k, "cards", "")?.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut st = k.prepare(&format!(
+/// Parity row 3: the current cards removed from the page, the newest first after `before`, at most
+/// `limit`, as Settings lists them to bring back (#661: page by page); read as every reader reads a
+/// card. The boolean says another one exists, as `page` does.
+pub(crate) fn removed(
+    k: &Connection,
+    raw: &Raw,
+    before: Option<&Position>,
+    limit: usize,
+    rules: &Rules,
+) -> Result<(Vec<Card>, bool)> {
+    let sql = format!(
         "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL AND hidden = 1
-         ORDER BY ts DESC, device DESC, op_seq DESC, n"
-    ))?;
-    let mut rows = st.query([])?;
-    let mut out = Vec::new();
-    while out.len() < limit
-        && let Some(r) = rows.next()?
-    {
-        out.extend(read(r, raw, rules)?);
-    }
-    Ok(out)
+           AND (?1 IS NULL OR (ts, device, op_seq, n) < (?1, ?2, ?3, ?4))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+    );
+    let (ts, device, op_seq, n) = before.map_or((None, None, None, None), |(ts, d, s, n)| {
+        (Some(*ts), Some(d.as_str()), Some(*s), Some(*n))
+    });
+    crate::hide::removed_page(
+        k,
+        "cards",
+        &sql,
+        rusqlite::params![ts, device, op_seq, n],
+        limit,
+        |r| read(r, raw, rules),
+    )
 }
 
 /// A card's ID as `get` takes it, `<device>.<op seq>.<n>` or `<op seq>.<n>` of `local`, in parts:

@@ -39,15 +39,19 @@ the records it was made from stay, and nothing brings it back.
   `hide_item`), when there is no store (no store is made), and when no current card or summary has
   that id (404 `hide_not_found`). The same state again writes no op. The answer comes when the
   consumer has applied the op (`claims::applied`), or says it is pending (`hide_pending`).
-- **`GET /api/hidden`** lists what is removed, the newest first, each with its kind, id, title,
-  repository and time, through the same gate as the feed, for the page's Settings to bring back.
+- **`GET /api/hidden`** lists what is removed, the newest first (a card before a summary of the
+  same time), each with its kind, id, title, repository and time, through the same gate as the
+  feed, for the page's Settings to bring back: 200 at a time, with `next`, where the next page
+  starts (#661), which the route takes back as `before`, after the last card and summary shown, as
+  the feed's cursor is. A malformed `before`, or any other parameter, is refused (400) before any
+  store is read.
 - **The page**: "Remove from the page" on a feed entry of a card or a summary, on the timeline and
   on a session's page, beside the prompts' and notes' Forget. It asks nothing first, as it is
   undone in one step: the page reads the view again, and the status line says it was removed, with
   Undo, for 15 seconds through the live view's redraws; a refusal is held as long, so a reread
   does not clear why an Undo failed. Settings lists what is removed, with
   "Bring back": the detailed page under "Diagnostics and maintenance", and the simple page while
-  something is removed. In Japanese and English.
+  something is removed; past 200, "More" adds the next page below. In Japanese and English.
 - **The format**: a binary before this one stops at an op type it does not know, so the first hide
   op raises the home to format 4 (`raw::HIDDEN_FORMAT`) in the transaction that writes it, and a
   rebuild that brings one back stamps it too (docs/store-format.md). A home with no hide op still
@@ -85,12 +89,17 @@ both, and erasing them is oboete's forget.
   rebuild from the backup's lines)
 - `settings::hide::tests::what_is_no_card_or_summary_is_refused`
 - `view::tests::the_page_removes_a_card_and_brings_it_back` (through `/api/hide` and
-  `/api/hidden`; the session's count)
+  `/api/hidden`; the session's count; a next page through the same gate, malformed positions
+  refused)
+- `settings::hide::tests::settings_lists_every_removed_card_and_summary_page_by_page` (#661: 201
+  cards and 201 summaries in three pages, each once, in one order; Bring back on the oldest)
 - `view::tests::w3_privacy_and_claim_writes_pass_every_guard_before_store_work` (the route added)
 - the viewer harness: Remove on a card and a summary, Undo through a redraw and a reread that
   writes the status line, Undo pressed before the removal's reread answered (its result, or why it
   was refused, stays), a refusal named, the pending answer, Japanese and English, Settings reading
-  the list when it opens, both views' list, and Bring back
+  the list when it opens, both views' list, Bring back, and More (the next page read after the
+  last shown and added below, none at the end, the simple page's too, an unread page leaving the
+  list as it was)
 
 Mutation checks: each of the server's 33 checks (every reader's condition, the consumers' marks,
 full-text entries and vectors, the rebuild's and the rewind's marks, the embedding phase's

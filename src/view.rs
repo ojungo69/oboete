@@ -1973,11 +1973,16 @@ impl Viewer {
                 })
             }
             // Parity row 3: the cards and summaries removed from the page, to bring back.
-            "hidden" if q.is_empty() => match crate::settings::hide::list(&self.home) {
-                Ok(listed) => listed,
-                Err(refused) => return Ok(saved(Err(refused))),
-            },
-            "hidden" => return Ok(bad("query")),
+            "hidden" => {
+                let after = match hidden_page(q) {
+                    Ok(after) => after,
+                    Err(bad) => return Ok(bad),
+                };
+                match crate::settings::hide::list(&self.home, after) {
+                    Ok(listed) => listed,
+                    Err(refused) => return Ok(saved(Err(refused))),
+                }
+            }
             "doc" => match search::b::get(&self.home, id)? {
                 Some(text) => json!({ "id": id, "text": text }),
                 None => return Ok(Response::text(404, "no such document")),
@@ -2148,7 +2153,9 @@ fn failed(e: &anyhow::Error) -> Response {
 /// What leaves the API: every text gated (K6), except a page's cursor, the page's own state of
 /// ids and times, passed back as it came: a rule that matched it broke the paging (Codex on #373).
 fn answered(name: &str, mut answer: Value) -> Value {
-    let next = matches!(name, "feed" | "timeline" | "sessions")
+    // A list's position, its last item's time and ids, comes back as it went, as the feed's
+    // cursor does: Settings' list of what is removed too (Codex on #672).
+    let next = matches!(name, "feed" | "timeline" | "sessions" | "hidden")
         .then(|| answer.get_mut("next").map(Value::take))
         .flatten();
     // A My Work request's id leaves the gate's walk and comes back under its key: a masked id's
@@ -2409,6 +2416,24 @@ fn notes_page(
         ));
     }
     Ok((out, false))
+}
+
+/// #661: where Settings' list of removed cards and summaries goes on, `before` as the list's last
+/// answer gave it in `next`; it takes no other parameter, and a malformed one is refused before
+/// any store is opened, as the feed's is.
+fn hidden_page(
+    q: &HashMap<String, String>,
+) -> std::result::Result<crate::settings::hide::Position, Response> {
+    if q.keys().any(|k| k != "before") {
+        return Err(bad("query"));
+    }
+    let Some(cursor) = q.get("before").filter(|s| !s.is_empty()) else {
+        return Ok(Default::default());
+    };
+    if cursor.len() > 4096 {
+        return Err(bad("before"));
+    }
+    serde_json::from_str(cursor).map_err(|_| bad("before"))
 }
 
 fn feed_page(q: &HashMap<String, String>) -> std::result::Result<FeedCursor, Response> {
@@ -5516,7 +5541,7 @@ curate = false
     fn a_page_cursor_leaves_as_it_came_and_the_rest_gated() {
         let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
         let cursor = format!("{{\"prompts\":[1,\"{token}\",2]}}");
-        for name in ["feed", "timeline", "sessions"] {
+        for name in ["feed", "timeline", "sessions", "hidden"] {
             let out = answered(
                 name,
                 json!({"items": [{"text": token.clone()}], "next": cursor.clone()}),
@@ -5971,14 +5996,24 @@ curate = false
         let hidden = get(&v, "/api/hidden");
         assert_eq!(hidden["items"][0]["id"], json!(id));
         assert_eq!(hidden["items"][0]["title"], "Azimuth parser");
+        assert_eq!(hidden["next"], Value::Null, "one page");
         assert_eq!(
             v.route("GET", "/api/hidden?x=1", &[HOST, TOKEN]).status,
             400
         );
+        // #661: a next page goes through the same route and gate, and a malformed position is
+        // refused before any store is read.
+        let next = "/api/hidden?before=%7B%22cards%22%3Anull%7D";
+        assert_eq!(get(&v, next)["items"][0]["id"], json!(id));
+        assert_eq!(v.route("GET", next, &[HOST]).status, 401);
+        for bad in ["nope", "%7B%22pages%22%3A1%7D", "%5B1%5D"] {
+            let target = format!("/api/hidden?before={bad}");
+            assert_eq!(v.route("GET", &target, &[HOST, TOKEN]).status, 400, "{bad}");
+        }
         assert_eq!(post(false), json!({"state": "applied", "hidden": false}));
         assert!(in_feed(&v));
         assert_eq!(items(&v), 2);
-        assert_eq!(get(&v, "/api/hidden"), json!({"items": []}));
+        assert_eq!(get(&v, "/api/hidden"), json!({"items": [], "next": null}));
     }
 
     #[test]

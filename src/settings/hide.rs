@@ -118,16 +118,26 @@ pub(crate) fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
     )
 }
 
-/// The cards and summaries removed from the page, the newest first, each with its kind, its ID,
-/// its first line, its repository's name and its time, gated as every reader gates them; the
-/// viewer's answer gate passes over it too, as the feed's.
-pub(crate) fn list(home: &Path) -> Result<Value, Refusal> {
+/// Where Settings' list of removed cards and summaries goes on (#661): the last of each kind it
+/// showed, as the feed's cursor keeps one a kind.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Position {
+    cards: Option<crate::cards::Position>,
+    summaries: Option<crate::turns::Position>,
+}
+
+/// The cards and summaries removed from the page, the newest first after `after`, `LISTED` at
+/// most, each with its kind, its ID, its first line, its repository's name and its time, gated as
+/// every reader gates them, and where the next page starts (`next`, none at the end); the viewer's
+/// answer gate passes over it too, as the feed's.
+pub(crate) fn list(home: &Path, mut after: Position) -> Result<Value, Refusal> {
     let unavailable = |e: anyhow::Error| {
         eprintln!("oboete: the removed cards could not be read: {e:#}");
         refused(503, "hide_unavailable", "")
     };
     let Some((raw, k)) = crate::search::b::stores(home).map_err(unavailable)? else {
-        return Ok(json!({"items": []}));
+        return Ok(json!({"items": [], "next": null}));
     };
     let rules = crate::capture::Settings::load(home)
         .map_err(unavailable)?
@@ -137,23 +147,50 @@ pub(crate) fn list(home: &Path) -> Result<Value, Refusal> {
     let repo_name = |repo: &Option<String>| {
         crate::consumer::manifest::repo_name(repo.as_deref().unwrap_or(""), &rules)
     };
-    let mut items = Vec::new();
-    for c in crate::cards::removed(&k, &raw, LISTED, &rules).map_err(unavailable)? {
-        items.push((
-            c.ts,
+    let (cards, cards_more) = crate::cards::removed(&k, &raw, after.cards.as_ref(), LISTED, &rules)
+        .map_err(unavailable)?;
+    let (summaries, summaries_more) =
+        crate::turns::removed(&k, &raw, after.summaries.as_ref(), LISTED, &rules)
+            .map_err(unavailable)?;
+    // The feed's order: the newest first, a card before a summary of the same time.
+    let mut rows = Vec::new();
+    for c in cards {
+        rows.push((
+            0,
+            c.position(),
             json!({"kind": "card", "id": c.id(&local), "title": c.row_title,
             "repo_name": repo_name(&c.repo), "ts": c.ts}),
         ));
     }
-    for s in crate::turns::removed(&k, &raw, LISTED, &rules).map_err(unavailable)? {
-        items.push((
-            s.ts,
+    for s in summaries {
+        let (ts, device, seq) = s.position();
+        rows.push((
+            1,
+            (ts, device, seq, 0),
             json!({"kind": "summary", "id": s.id(&local), "title": s.row,
             "repo_name": repo_name(&s.repo), "ts": s.ts}),
         ));
     }
-    items.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
-    Ok(json!({"items": items.into_iter().map(|(_, v)| v).collect::<Vec<_>>()}))
+    rows.sort_by(|(ak, a, _), (bk, b, _)| {
+        b.0.cmp(&a.0)
+            .then_with(|| ak.cmp(bk))
+            .then_with(|| b.cmp(a))
+    });
+    let more = rows.len() > LISTED || cards_more || summaries_more;
+    rows.truncate(LISTED);
+    let mut items = Vec::new();
+    for (kind, (ts, device, seq, n), value) in rows {
+        match kind {
+            0 => after.cards = Some((ts, device, seq, n)),
+            _ => after.summaries = Some((ts, device, seq)),
+        }
+        items.push(value);
+    }
+    let next = more
+        .then(|| serde_json::to_string(&after))
+        .transpose()
+        .map_err(|e| unavailable(e.into()))?;
+    Ok(json!({"items": items, "next": next}))
 }
 
 #[cfg(test)]
@@ -275,7 +312,7 @@ mod tests {
         assert_eq!(card_titles(home), ["Bravo lexer"]);
         assert_eq!(seen(home), gone);
         assert!(!indexed(home, &ids[0]), "its full-text entry goes");
-        let listed = list(home).unwrap();
+        let listed = list(home, Position::default()).unwrap();
         assert_eq!(
             (&listed["items"][0]["kind"], &listed["items"][0]["id"]),
             (&json!("card"), &json!(ids[0]))
@@ -290,7 +327,10 @@ mod tests {
         assert_eq!(card_titles(home), ["Azimuth parser", "Bravo lexer"]);
         assert_eq!(seen(home), shown);
         assert!(indexed(home, &ids[0]));
-        assert_eq!(list(home).unwrap(), json!({"items": []}));
+        assert_eq!(
+            list(home, Position::default()).unwrap(),
+            json!({"items": [], "next": null})
+        );
         crate::worker::rebuild(home).unwrap();
         assert_eq!(seen(home), shown, "a rebuild takes the newest op's mark");
     }
@@ -383,7 +423,10 @@ mod tests {
         hide(home, "summary", &id, true).unwrap();
         assert_eq!((shown(), rows()), ((0, false, 0, 0, false), 1));
         assert!(!indexed(home, &id), "its full-text entry goes");
-        assert_eq!(list(home).unwrap()["items"][0]["id"], json!(id));
+        assert_eq!(
+            list(home, Position::default()).unwrap()["items"][0]["id"],
+            json!(id)
+        );
         crate::worker::rebuild(home).unwrap();
         assert_eq!(
             (shown(), rows()),
@@ -393,6 +436,118 @@ mod tests {
         hide(home, "summary", &id, false).unwrap();
         assert_eq!(shown(), (1, true, 1, 1, true));
         assert!(indexed(home, &id));
+    }
+
+    /// A store with `cards` cards (one window) and `summaries` summaries removed from the page, the
+    /// first summary at the cards' time; their ids.
+    fn removed(cards: usize, summaries: usize) -> (Store, Vec<String>) {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Ship the parser.");
+        let device = s.raw.device().to_owned();
+        let observations: Vec<Value> = (0..cards)
+            .map(|i| json!({"type": "feature", "title": format!("Card {i}")}))
+            .collect();
+        let card_ids = if cards > 0 {
+            s.cards(seq, seq, Value::Array(observations), false)
+        } else {
+            Vec::new()
+        };
+        s.run();
+        let card_ts: i64 = if cards > 0 {
+            (crate::knowledge::open(s.home.path()).unwrap())
+                .query_row("SELECT max(ts) FROM cards", [], |r| r.get(0))
+                .unwrap()
+        } else {
+            2_000
+        };
+        let summary_ids: Vec<String> = (0..summaries as i64)
+            .map(|i| {
+                let ts = if i == 0 { card_ts } else { 2_000 + i };
+                s.turn(
+                    json!({"agent": "claude", "session": "s1", "repo": R, "ts": ts,
+                    "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+                    "fields": {"request": format!("Summary {i}")}, "skipped": false}),
+                )
+            })
+            .collect();
+        let mark = |target: &str, op_seq: i64, n: Option<i64>| {
+            let op = HideOp {
+                target: target.into(),
+                device: device.clone(),
+                op_seq,
+                n,
+                hidden: true,
+            };
+            (crate::raw::OpKind::Hide, serde_json::to_value(op).unwrap())
+        };
+        let mut ops: Vec<_> = (card_ids.iter())
+            .map(|id| {
+                let (op_seq, n) = id.split_once('.').unwrap();
+                mark(CARD, op_seq.parse().unwrap(), Some(n.parse().unwrap()))
+            })
+            .collect();
+        ops.extend((summary_ids.iter()).map(|id| mark(SUMMARY, id[1..].parse().unwrap(), None)));
+        s.raw.append_ops(&ops).unwrap();
+        s.run();
+        (s, card_ids.into_iter().chain(summary_ids).collect())
+    }
+
+    /// Every page of Settings' list, each after the one before; a list that does not end fails
+    /// instead of reading on.
+    fn pages(home: &Path) -> Vec<Vec<Value>> {
+        let (mut pages, mut after) = (Vec::new(), Position::default());
+        loop {
+            assert!(pages.len() < 10, "the list does not end");
+            let page = list(home, after).unwrap();
+            pages.push(page["items"].as_array().unwrap().clone());
+            match page["next"].as_str() {
+                Some(next) => after = serde_json::from_str(next).unwrap(),
+                None => return pages,
+            }
+        }
+    }
+
+    /// #661: Settings lists the removed cards, the removed summaries, and both, page by page past
+    /// `LISTED`: each once, the newest first and a card before a summary of the same time, each
+    /// page after the last of each kind the one before showed; Bring back on the oldest brings it
+    /// back.
+    #[test]
+    fn settings_lists_every_removed_card_and_summary_page_by_page() {
+        for (cards, summaries, expected) in [
+            (201, 0, vec![LISTED, 1]),
+            (0, 201, vec![LISTED, 1]),
+            (201, 201, vec![LISTED, LISTED, 2]),
+        ] {
+            let (s, made) = removed(cards, summaries);
+            let home = s.home.path();
+            let read = pages(home);
+            let all: Vec<&Value> = read.iter().flatten().collect();
+            let ids: Vec<&str> = all.iter().map(|i| i["id"].as_str().unwrap()).collect();
+            let case = format!("{cards} cards, {summaries} summaries");
+            assert_eq!(
+                read.iter().map(Vec::len).collect::<Vec<_>>(),
+                expected,
+                "{case}"
+            );
+            let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+            assert_eq!(unique.len(), cards + summaries, "each once: {case}");
+            assert!(made.iter().all(|id| unique.contains(id.as_str())), "{case}");
+            let key = |i: &Value| {
+                (
+                    std::cmp::Reverse(i["ts"].as_i64().unwrap()),
+                    i["kind"] != "card",
+                )
+            };
+            assert!(all.windows(2).all(|w| key(w[0]) <= key(w[1])), "{case}");
+            let oldest = ids.last().unwrap().to_string();
+            let kind = all.last().unwrap()["kind"].as_str().unwrap().to_owned();
+            hide(home, &kind, &oldest, false).unwrap();
+            let ids: Vec<String> = (pages(home).iter().flatten())
+                .map(|i| i["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(ids.len(), cards + summaries - 1, "{case}");
+            assert!(!ids.contains(&oldest), "brought back: {case}");
+        }
     }
 
     /// A hide op read before the card or the summary it names (another device's, read first)
@@ -449,7 +604,13 @@ mod tests {
                 .is_empty()
         );
         assert!(!indexed(home, &ids[0]) && !indexed(home, &id));
-        assert_eq!(list(home).unwrap()["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            list(home, Position::default()).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     /// A rewind past a hide op shows what it removed again: the op is gone from the log.

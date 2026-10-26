@@ -141,6 +141,36 @@ pub(crate) fn newest(
         .map(|(_, hidden)| hidden))
 }
 
+/// Settings' list of what is removed from the page (parity row 3, #661): the rows of `table`
+/// (`cards` or `turns`) that `sql` reads with `params`, the newest first after a position, `limit`
+/// at most, each read as its reader reads one (`read`, `None` for one it does not show), and
+/// whether another one exists, as `page` says. Nothing while the store has no such table, or no
+/// `hidden` column yet, which `sql` names: `shown` finds neither.
+pub(crate) fn removed_page<T>(
+    k: &Connection,
+    table: &str,
+    sql: &str,
+    params: impl rusqlite::Params,
+    limit: usize,
+    mut read: impl FnMut(&rusqlite::Row<'_>) -> Result<Option<T>>,
+) -> Result<(Vec<T>, bool)> {
+    if shown(k, table, "")?.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let mut st = k.prepare(sql)?;
+    let mut rows = st.query(params)?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        if let Some(item) = read(r)? {
+            if out.len() == limit {
+                return Ok((out, true));
+            }
+            out.push(item);
+        }
+    }
+    Ok((out, false))
+}
+
 /// `AND <alias>hidden = 0` for a reader of `table` (`cards` or `turns`), or nothing while the
 /// store has no such column yet: a hook can read a store the worker has not given it.
 pub(crate) fn shown(k: &Connection, table: &str, alias: &str) -> Result<String> {
@@ -154,4 +184,28 @@ pub(crate) fn shown(k: &Connection, table: &str, alias: &str) -> Result<String> 
     } else {
         String::new()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Settings' list over a store the worker has not given the `hidden` column yet, or one with no
+    /// such table: nothing, not an error (#672).
+    #[test]
+    fn a_store_without_the_hidden_column_lists_nothing() {
+        let k = Connection::open_in_memory().unwrap();
+        k.execute_batch("CREATE TABLE cards (ts INTEGER); CREATE TABLE turns (ts INTEGER);")
+            .unwrap();
+        let read = |r: &rusqlite::Row<'_>| Ok(Some(r.get::<_, i64>(0)?));
+        for table in ["cards", "turns"] {
+            let sql = format!("SELECT ts FROM {table} WHERE hidden = 1");
+            let page = removed_page(&k, table, &sql, [], 10, read).unwrap();
+            assert_eq!(page, (Vec::new(), false), "{table}");
+        }
+        let none = Connection::open_in_memory().unwrap();
+        let sql = "SELECT ts FROM cards WHERE hidden = 1";
+        let page = removed_page(&none, "cards", sql, [], 10, read).unwrap();
+        assert_eq!(page, (Vec::new(), false), "no table");
+    }
 }
