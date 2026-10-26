@@ -1632,6 +1632,130 @@ fn worker_restart_status_and_stop() {
     });
 }
 
+/// R16 (parity row 27): where config.toml says `[worker] autostart = false`, neither a hook nor
+/// `oboete worker restart` starts a worker, and status and stop say so; the same hook with the
+/// line taken out starts one.
+#[test]
+fn autostart_off_leaves_the_worker_to_what_manages_it() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let _detached = Detached(p);
+    let config = "[summary]\ncurate = false\n";
+    std::fs::write(
+        p.join("config.toml"),
+        format!("{config}[worker]\nautostart = false\n"),
+    )
+    .unwrap();
+    let run = |args: &[&str], stdin: &str| -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(p)
+            .args(args)
+            .env_remove("OBOETE_NO_SPAWN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let prompt = |text: &str| {
+        let payload = format!(
+            r#"{{"session_id":"s","cwd":{:?},"prompt":{text:?}}}"#,
+            p.display().to_string()
+        );
+        run(&["hook", "claude", "UserPromptSubmit"], &payload);
+    };
+    let records = || {
+        let raw = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+        raw.query_row("SELECT count(*) FROM records", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    prompt("a prompt while autostart is off");
+    assert!(records() > 0, "the hook wrote nothing");
+    let restarted = run(&["worker", "restart"], "");
+    assert_eq!(
+        restarted.lines().last(),
+        Some(
+            "worker: none started ([worker] autostart = false); what manages the worker starts it"
+        ),
+        "{restarted}"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(!held(p, "worker.lock"), "a worker was started");
+    assert_eq!(
+        run(&["worker", "status"], "").lines().next(),
+        Some("worker: not running now (no hook starts one: [worker] autostart = false)")
+    );
+    let doctor = |config: &str| {
+        std::fs::write(p.join("config.toml"), config).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(p)
+            .arg("doctor")
+            .env("OBOETE_NO_SPAWN", "1")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let text = doctor(&format!("{config}[worker]\nautostart = false\n"));
+    assert!(
+        text.lines().any(|l| l.trim()
+            == "worker: no hook starts one ([worker] autostart = false); it leaves when idle, \
+                for what manages it to start again"),
+        "{text}"
+    );
+    let text = doctor(&format!(
+        "{config}[worker]\nresident = true\nautostart = false\n[view]\nport = {}\n",
+        free_port()
+    ));
+    assert!(
+        text.lines().any(|l| l.trim()
+            == "worker: resident, not running now (no hook starts one: [worker] autostart = false)"),
+        "{text}"
+    );
+    std::fs::write(
+        p.join("config.toml"),
+        format!("{config}[worker]\nautostart = false\n"),
+    )
+    .unwrap();
+    // What manages it runs one; `stop` leaves the next start to it.
+    let mut managed = Worker(
+        Command::new(env!("CARGO_BIN_EXE_oboete"))
+            .arg("--home")
+            .arg(p)
+            .arg("worker")
+            .env("OBOETE_NO_SPAWN", "1")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    until("the managed worker's lock", || held(p, "worker.lock"));
+    assert!(
+        run(&["worker", "stop"], "").starts_with(
+            "worker: stopped; no hook starts it again ([worker] autostart = false), and the page stays up"
+        )
+    );
+    managed.0.wait().unwrap();
+    // The line out: the same hook starts one.
+    std::fs::write(p.join("config.toml"), config).unwrap();
+    prompt("a prompt with autostart on");
+    until("a worker the hook started", || held(p, "worker.lock"));
+    run(&["worker", "stop"], "");
+}
+
 /// R15: `oboete worker status` says how the worker stands even when the redaction table is broken,
 /// as doctor does, since it sends nothing out.
 #[test]

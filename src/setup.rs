@@ -2733,9 +2733,9 @@ pub fn doctor(home: &Path) -> Result<()> {
                 println!(
                     "  worker: resident, {}",
                     if crate::worker::running(home) {
-                        "running"
+                        "running".to_owned()
                     } else {
-                        "not running now (the next hook starts it)"
+                        format!("not running now ({})", crate::worker::who_starts(home))
                     }
                 );
                 println!("  {}", crate::view::resident_line(home, view.port.get()));
@@ -2749,6 +2749,12 @@ pub fn doctor(home: &Path) -> Result<()> {
             println!("  cannot read resident settings: {error:#}");
             unhealthy.push("resident settings cannot be read (see above)");
         }
+        // R16: a worker that is not resident leaves when idle, and only what manages it starts
+        // it again.
+        (Ok(worker), _) if !worker.autostart => println!(
+            "  worker: no hook starts one ([worker] autostart = false); it leaves when idle, for \
+             what manages it to start again"
+        ),
         _ => {}
     }
     if db_path.exists() {
@@ -2837,7 +2843,12 @@ pub fn doctor(home: &Path) -> Result<()> {
                 for p in crate::providers_db::pending(&db)? {
                     let at = |o: Option<i64>| o.map_or(String::new(), |o| format!("+{o}"));
                     let overdue = if p.next_attempt_at < now && !crate::worker::running(home) {
-                        " (overdue: no worker is running; the next hook starts one)"
+                        if crate::config::autostart(home) {
+                            " (overdue: no worker is running; the next hook starts one)"
+                        } else {
+                            " (overdue: no worker is running, and no hook starts one: [worker] \
+                             autostart = false)"
+                        }
                     } else {
                         ""
                     };
