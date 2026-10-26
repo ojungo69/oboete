@@ -978,8 +978,25 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   due check in 0.19 s warm; 124 candidates in 7 repositories, so about 13 calls to decide them all,
   each repository at most every 30 minutes; one call's prompt 650 to 1,440 estimated tokens, read
   in up to 6.4 s, most of it the agent text scan; a peak of 79 MB.
-- **Not yet**: My Work showing a group as one request (C6, C7, slice 3b); the delegation link (C3,
-  slice 3c); the settings page's row (A6, slice 2c).
+- **Not yet**: the delegation link (C3, slice 3c); the settings page's row (A6, slice 2c).
+
+### Slice 3b: a group on My Work (2026-10-26)
+
+- **One request** (C6): a conversation that names no request id and that grouping put in a group
+  is shown as that group's request, read through `my_work_group::groups` with the exclusions as
+  they stand (S6), so an op shown an excluded record groups nothing while the exclusion stands. Its
+  ask is the earliest of its conversations', its follow-ups the newest six of all of them, and its
+  summaries, cards and work all of theirs, as a request of a `request_id` shows them; work that
+  names no request id follows its conversation into the group.
+- **Its id** is `g:` and the first 12 hex digits of the keyed SHA-256 of its anchor conversation
+  as stored (`g:<agent>:<session>`), keyed with the home's own key as a masked id is; it tells
+  nothing of the conversation. A check is filed under it (rule 6).
+- **Its title** is the newest grouping gave it, gated as the page reads it, before my-work.md's
+  rule 3; a group with none takes rule 3's.
+- **Versions** (C7): the version a check is of holds the request's conversations, so one joining
+  is a new version, as a new follow-up is; a new title is not part of it.
+- **The agents view** (C7) keeps one card a conversation, each its own id, showing its request's
+  title, as the page already does for a request of several conversations.
 
 ## Not built
 

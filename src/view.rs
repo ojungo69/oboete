@@ -2248,13 +2248,21 @@ fn put_id(v: &mut Value, id: Option<String>) {
 /// gated but for that.
 fn request_id(request: &mut Value) -> Option<String> {
     let request = request.as_object_mut()?;
-    let print = match request.remove("fingerprint") {
-        Some(Value::String(print)) => format!("#{print}"),
-        _ => String::new(),
+    let fingerprint = match request.remove("fingerprint") {
+        Some(Value::String(print)) => Some(print),
+        _ => None,
     };
     let Some(Value::String(id)) = request.remove("id") else {
         return None;
     };
+    // A group's id is its fingerprint alone (docs/my-work-model.md C6): nothing to gate.
+    if fingerprint
+        .as_deref()
+        .is_some_and(|print| id.strip_prefix("g:") == Some(print))
+    {
+        return Some(id);
+    }
+    let print = fingerprint.map_or_else(String::new, |print| format!("#{print}"));
     Some(match id.strip_suffix(print.as_str()) {
         Some(shown) => format!("{}{print}", redact::outbound(shown)),
         None => redact::outbound(&id),
@@ -4670,6 +4678,79 @@ curate = false
             assert_eq!(r["sessions"], sessions, "{first}");
         }
         assert!(!first.to_string().contains("fingerprint"), "{first}");
+    }
+
+    /// Codex on #670: a group's id is its keyed hash alone, so a rule that matches 12 hex digits
+    /// leaves it, and two groups stay two through the route, each with its own products.
+    #[test]
+    fn a_groups_id_leaves_the_route_as_it_came() {
+        if !in_child("view::tests::a_groups_id_leaves_the_route_as_it_came") {
+            return;
+        }
+        let (mut s, v) = feed_fixture();
+        let now = crate::db::now_ms();
+        let mut shown = Vec::new();
+        for (i, session) in ["s1", "s2", "s3", "s4"].iter().enumerate() {
+            shown.push(s.said(
+                session,
+                R,
+                now - 60_000 + i as i64 * 1_000,
+                "Fix the parser.",
+            ));
+        }
+        let group = |members: [&str; 2]| {
+            let keys: Vec<Value> = members.iter().map(|m| json!(["claude", m])).collect();
+            json!({"conversations": keys, "title": format!("Parser {}", members[0]), "links": []})
+        };
+        let op = crate::my_work_ops::MyWorkOp {
+            job: "group".into(),
+            about: R.into(),
+            entry: "fake".into(),
+            ts: now,
+            read: crate::my_work_ops::Read {
+                spans: shown.iter().map(|&s| (s, s)).collect(),
+                ops: vec![],
+            },
+            removed: vec![],
+            fields: std::collections::BTreeMap::from([
+                (
+                    "groups".to_owned(),
+                    json!([group(["s1", "s2"]), group(["s3", "s4"])]),
+                ),
+                ("ignored".to_owned(), json!([])),
+            ]),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::MyWork, op)])
+            .unwrap();
+        s.run();
+        let home = s.home.path();
+        let rules = "{ id = 'hex', regex = '[0-9a-f]{12}' }";
+        let config = format!("[redaction]\nextra_rules = [{rules}]\n");
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        redact::set_home(home).unwrap();
+        let answer = get(&v, "/api/my-work?range=all");
+        let ids: Vec<String> = (answer["requests"].as_array().unwrap().iter())
+            .map(|r| r["id"].as_str().unwrap().to_owned())
+            .filter(|id| id.starts_with("g:"))
+            .collect();
+        assert_eq!(ids.len(), 2, "{answer}");
+        assert_ne!(ids[0], ids[1], "{ids:?}");
+        for id in &ids {
+            let print = id.strip_prefix("g:").unwrap();
+            assert!(
+                print.len() == 12 && print.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            get(&v, "/api/my-work?range=all")["requests"],
+            answer["requests"]
+        );
+        assert!(!answer.to_string().contains("fingerprint"), "{answer}");
     }
 
     /// CodeRabbit on #597: a work stream's fingerprint is its selector too, so a rule that matches
