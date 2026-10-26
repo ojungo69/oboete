@@ -195,6 +195,7 @@ fn default_window_tokens() -> u32 {
 /// reviews, story, goals and rule suggestions with the curator chain, and in how many calls a day
 /// at most.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MyWork {
     /// Off until a person turns it on on the settings page, its estimate shown first (A6).
     #[serde(default)]
@@ -1373,6 +1374,8 @@ pub struct CaptureConfig {
     _providers: serde::de::IgnoredAny,
     #[serde(default, rename = "summary")]
     _summary: serde::de::IgnoredAny,
+    #[serde(default, rename = "my_work")]
+    _my_work: serde::de::IgnoredAny,
     #[serde(default, rename = "embedding")]
     _embedding: serde::de::IgnoredAny,
     #[serde(default, rename = "backup")]
@@ -1505,6 +1508,8 @@ resident = true
 port = 17374
 [retention]
 days = 90
+[my_work]
+curate = true
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
@@ -1515,6 +1520,19 @@ days = 90
             assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_out = {bad}")).is_err());
         }
         parse_capture(Some(text)).unwrap();
+        // Every key `Config` reads, as its derived `Deserialize` names them, so that a key a later
+        // version adds there never stops recording (CodeRabbit on #660: `[my_work]` did).
+        let keys = config_keys();
+        assert!(
+            keys.contains(&"my_work") && keys.contains(&"providers"),
+            "{keys:?}"
+        );
+        for key in keys {
+            assert!(
+                parse_capture(Some(&format!("{key} = 1\n"))).is_ok(),
+                "{key}"
+            );
+        }
         // A table no version reads is still an error.
         assert!(parse_capture(Some("[redactions]\n")).is_err());
     }
@@ -1694,6 +1712,46 @@ model = "haiku"
         assert_eq!(load_text("[summary]\ncurate = true\n").my_work, defaults);
         let set = load_text("[my_work]\ncurate = true\ncalls_a_day = 40\n").my_work;
         assert_eq!((set.curate, set.calls_a_day), (true, 40));
+    }
+
+    /// CodeRabbit on #660: a key misspelt in `[my_work]` is an error, as in `[worker]`, not a
+    /// switch silently left off.
+    #[test]
+    fn a_key_misspelt_in_my_work_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[my_work]\ncurat = true\n").unwrap();
+        assert!(load(dir.path()).is_err());
+    }
+
+    /// The top-level keys `Config` reads, as its derived `Deserialize` names them.
+    fn config_keys() -> &'static [&'static str] {
+        struct Fields(std::cell::Cell<&'static [&'static str]>);
+        impl<'de> serde::Deserializer<'de> for &Fields {
+            type Error = serde::de::value::Error;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(
+                self,
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                Err(serde::de::Error::custom("only the fields"))
+            }
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                self.0.set(fields);
+                Err(serde::de::Error::custom("only the fields"))
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+                byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+                identifier ignored_any
+            }
+        }
+        let fields = Fields(std::cell::Cell::new(&[]));
+        let _ = Config::deserialize(&fields);
+        fields.0.get()
     }
 
     fn load_text(text: &str) -> Config {

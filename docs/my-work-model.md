@@ -849,7 +849,8 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 ### Slice 2a: the providers' side of the job frame (2026-10-26)
 
 - **`[my_work]`** in config.toml (`config::MyWork`): `curate`, false unless set, and `calls_a_day`,
-  100 unless set. No job reads them yet; the settings page's row, with its estimate first (A6),
+  100 unless set. A key it does not know is an error, as in `[worker]`; recording's reader of the
+  file passes the table over, as it passes every table of the curators' (CodeRabbit on #660). No job reads them yet; the settings page's row, with its estimate first (A6),
   comes with slice 2c, after the marks.
 - **The role `my_work`** (`my_work::ROLE`). A CLI entry is told it turns a developer's recorded
   requests, session summaries and work state into the JSON My Work asks for
