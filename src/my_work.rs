@@ -922,8 +922,8 @@ pub(crate) enum AskFrom {
 }
 
 /// docs/my-work-model.md P1, S6: each request My Work shows from a group or a request id, with
-/// activity since `active_since`, and none of whose conversations is excluded now, as a progress
-/// review reads it. A lone conversation is reviewed by no one, as in claude-mem.
+/// activity since `active_since`, as a progress review reads it: an excluded repository's sessions
+/// take no part (`gather`). A lone conversation is reviewed by no one, as in claude-mem.
 pub(crate) fn review_inputs(
     raw: &Raw,
     k: &Connection,
@@ -939,9 +939,7 @@ pub(crate) fn review_inputs(
     } = build(raw, k, rules, reading)?;
     let mut out = Vec::new();
     for r in &requests {
-        if matches!(r.id, Id::Conversation(_))
-            || (r.owns.iter()).any(|((a, s), _)| reading.excluded.contains(&format!("{a}\0{s}")))
-        {
+        if matches!(r.id, Id::Conversation(_)) {
             continue;
         }
         let p = parts(r, &convs, &work, rules);

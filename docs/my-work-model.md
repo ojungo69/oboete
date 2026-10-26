@@ -1072,6 +1072,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   its cut, about 1,300 of the 5,000 are left: some 5 later asks at their cut, or 4 summaries. The
   trade is the newest over the whole: a review always reads what came last, and the oldest asks of
   a busy hour may never be read.
+- **S6 for what a review read**: `my_work_ops::hidden` leaves out an op that read a record of an
+  excluded session (any record of a span, `Raw::holds_session`), a summary of one, or a card of a
+  window holding a record of one. A summary is judged by its own session alone, as the turns
+  reader shows or keeps it back (D13): a review left out for a summary the readers still show
+  would be due again at once, call after call.
 - **This device only** (S2, S7): a review lists what it was shown by this device's seqs, so it
   shows only this device's prompts, summaries, cards and previous reviews, and the products read
   from this device's records or cards, or from work items. The original ask is listed by where it
@@ -1090,6 +1095,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   refuses a wrong shape or date, shipped without percent 100 and a shipped date, or a shipped date
   on another state (`shape`), and more than 8 milestones or 3 preferences (`over_cap`). The keep
   drops a text over its cap, with the milestone or preference it is part of.
+- **Measured** on a copy of this PC's store (`my_work_progress::tests::measure_review_on_a_copy_of_a_store`,
+  a release build, 2026-10-27), with five grouping ops written to the copy only, since this home
+  has never grouped: four requests to review, read in 2.1 s cold and 0.2 s warm, the due check in
+  0.2 s; one call's prompt 1,240 to 3,216 estimated tokens, read in 1.1 to 6.8 s, most of it the
+  agent text scan; a peak of 80 MB.
 - **#692 (2)**, with this slice: the tool record that proves a delegation is in the grouping op's
   read spans, so a forget of it takes the op. **#692 (1)**, a blocking call's start time, stays
   open: the capture does not keep a call's start.

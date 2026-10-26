@@ -1021,19 +1021,16 @@ mod tests {
         let mut h = Home::new();
         let a = h.said(
             "s1",
-            0,
+            5,
             "Build the parser. Keep every error message in English.",
         );
         h.said(
             "s1",
-            5,
+            6,
             &format!("Deploy it with {secret} and keep the logs."),
         );
-        let b = h.sent(
-            "s2",
-            10,
-            "Write the parser's tests with one fixture a case.",
-        );
+        // The earliest ask, so the request's original: an agent's.
+        let b = h.sent("s2", 0, "Write the parser's tests with one fixture a case.");
         h.grouped(&["s1", "s2"], &[a, b]);
         let id = h.due()[0].0.clone();
         let ask = h.ask(&id).unwrap();
@@ -1079,11 +1076,22 @@ mod tests {
         let mut h = Home::new();
         let a = h.said("s1", 0, "Build the parser.");
         let old = h.said("s1", 5, "Handle comments too.");
+        let r = h.reply("s1", 6);
+        h.summarized("s1", (old, r), 6, "OLD SUMMARY");
+        let card = json!([{"type": "feature", "title": "OLD CARD", "narrative": "Done.",
+            "files_modified": ["/home/u/old.pdf"]}]);
+        h.s.cards(r, r, card, false);
+        h.wrote(
+            "s1",
+            "parser",
+            json!({"task": "OLD TASK", "status": "done"}),
+        );
         let b = h.said("s2", 10, "Add tests for the parser.");
         h.grouped(&["s1", "s2"], &[a, b]);
         let id = h.due()[0].0.clone();
         h.pass(&|_| review("in-progress", 40, "", &[]));
         let first = h.reviews()[0].op_seq;
+        assert!(h.due().is_empty(), "{:?}", h.due());
         h.age(61);
         let c = h.said("s2", 100, "Now report the column of each error.");
         let ask = h.ask(&id).unwrap();
@@ -1100,6 +1108,9 @@ mod tests {
             !p.contains("Handle comments too.") && !p.contains("Add tests"),
             "{p}"
         );
+        for seen in ["OLD SUMMARY", "OLD CARD", "OLD TASK", "old.pdf"] {
+            assert!(!p.contains(seen), "{seen}: {p}");
+        }
         assert!(ask.read.ops.contains(&first), "{:?}", ask.read);
         for seq in [a, c] {
             assert!(ask.read.spans.contains(&(seq, seq)), "{:?}", ask.read);
@@ -1253,6 +1264,70 @@ mod tests {
         for w in &windows {
             assert!(ask.read.ops.contains(w), "{w}: {:?}", ask.read);
         }
+    }
+
+    /// P3: a request reviews only the prompts it owns: a conversation that worked on two request
+    /// ids shares its other prompts on the page, never in a review.
+    #[test]
+    fn a_request_reviews_only_the_prompts_it_owns() {
+        let mut h = Home::new();
+        h.said("s1", 0, "Ship the release.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "notes", "request_id": "A", "status": "doing"}),
+        );
+        h.reply("s1", 1);
+        h.said("s1", 2, "Now tag it.");
+        h.wrote(
+            "s1",
+            "release",
+            json!({"task": "tag", "request_id": "B", "status": "doing"}),
+        );
+        h.reply("s1", 3);
+        let (a, b) = (h.ask("r:A").unwrap().prompt, h.ask("r:B").unwrap().prompt);
+        assert!(!a.contains("Now tag it."), "{a}");
+        assert!(b.contains("Now tag it."), "{b}");
+    }
+
+    /// S2, S7: a review shows only this device's records, which its spans can list: in a copy of a
+    /// store, another device, the earlier asks are left out.
+    #[test]
+    fn a_review_shows_only_this_devices_records() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Asked on the other device.");
+        let input = json!({"command": "git commit -m 'Other commit'"}).to_string();
+        let body = json!({"tool": "Bash", "input": input,
+            "output": "[main def5678] Other commit", "failed": false});
+        h.s.event("tool", "s1", (R, "main"), h.t + MINUTE, body);
+        let r = h.reply("s1", 2);
+        h.summarized("s1", (a, r), 2, "Summarized on the other device.");
+        let card = json!([{"type": "feature", "title": "Other card", "narrative": "Done."}]);
+        h.s.cards(r, r, card, false);
+        h.grouped(&["s1"], &[a]);
+        let Home { s, t } = h;
+        let Store { home, raw } = s;
+        let other = raw.device().to_owned();
+        drop(raw);
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        let raw = crate::raw::open(copy.path()).unwrap();
+        assert_ne!(raw.device(), other);
+        let mut h = Home {
+            s: Store { home: copy, raw },
+            t,
+        };
+        let b = h.said("s1", 5, "Asked on this one.");
+        let id = h.due()[0].0.clone();
+        let ask = h.ask(&id).unwrap();
+        assert!(ask.prompt.contains("Asked on this one."), "{}", ask.prompt);
+        for other in ["the other device", "Other commit", "Other card"] {
+            assert!(!ask.prompt.contains(other), "{other}: {}", ask.prompt);
+        }
+        assert_eq!(
+            (&ask.read.spans[..], &ask.read.ops[..]),
+            (&[(b, b)][..], &[][..])
+        );
     }
 
     /// A4: a part takes each line that fits the room left, in order, a long one passed over for a
