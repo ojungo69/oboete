@@ -59,7 +59,6 @@ pub(crate) struct MyWorkOp {
 /// removals, else as a skip of its labels; none when even that passes the cap. A job whose op could
 /// not be kept even as a skip is not asked for, as nothing paid for could be kept (as
 /// `turns::fitted`). A job that drops quotes first does so before this.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fitted(op: MyWorkOp) -> Result<Option<Value>> {
     Ok(crate::raw::fitted(serde_json::to_value(op)?))
 }

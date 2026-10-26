@@ -417,18 +417,17 @@ pub fn calls_in_a_day(conn: &Connection, provider: &str) -> Result<(u32, Option<
 const REQUESTS: &str = "('ok','error','invalid','wait','empty','prose','shape','over_cap',
     'unanchored','sent','reserved')";
 
-/// Requests My Work's jobs sent in the last 24 hours, every entry's (docs/my-work-model.md A7):
-/// what `[my_work] calls_a_day` bounds, counted as an entry's daily budget is. It and
-/// `my_work_pending` are the job runner's, which comes with the first job (slice 3).
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn my_work_calls_in_a_day(conn: &Connection) -> Result<u32> {
+/// Requests My Work's jobs sent in the last 24 hours, every entry's (docs/my-work-model.md A7),
+/// and when the oldest of them was: what `[my_work] calls_a_day` bounds, counted as an entry's
+/// daily budget is.
+pub fn my_work_calls_in_a_day(conn: &Connection) -> Result<(u32, Option<i64>)> {
     Ok(conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM provider_calls WHERE role = 'my_work' AND ts >= ?1
+            "SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE role = 'my_work' AND ts >= ?1
                AND outcome IN {REQUESTS}"
         ),
         [now_ms() - DAY_MS],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 
@@ -958,7 +957,6 @@ pub fn clear_turn_pending(conn: &Connection, device: &str, seq: i64) -> Result<(
 }
 
 /// A My Work job waiting (`my_work_pending`) after every provider failed, until its next attempt.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MyWorkPending {
     /// The ledger span naming the job and what it is about.
@@ -971,7 +969,6 @@ pub struct MyWorkPending {
     pub next_attempt_at: i64,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn my_work_pending_of(conn: &Connection, key: &str) -> Result<Option<MyWorkPending>> {
     Ok(conn
         .query_row(
@@ -992,7 +989,6 @@ pub fn my_work_pending_of(conn: &Connection, key: &str) -> Result<Option<MyWorkP
         .optional()?)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn set_my_work_pending(conn: &Connection, p: &MyWorkPending) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO my_work_pending(key, prompt, reason, hold, attempts,
@@ -1009,7 +1005,6 @@ pub fn set_my_work_pending(conn: &Connection, p: &MyWorkPending) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn clear_my_work_pending(conn: &Connection, key: &str) -> Result<()> {
     conn.execute("DELETE FROM my_work_pending WHERE key = ?1", [key])?;
     Ok(())
@@ -1046,17 +1041,26 @@ mod tests {
         }
         call(&conn, "curator", "ok");
         call(&conn, "summary", "ok");
-        assert_eq!(my_work_calls_in_a_day(&conn).unwrap(), 4);
+        let (calls, oldest) = my_work_calls_in_a_day(&conn).unwrap();
+        assert_eq!(calls, 4);
+        let first: i64 = conn
+            .query_row(
+                "SELECT MIN(ts) FROM provider_calls WHERE role = 'my_work' AND outcome = 'ok'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(oldest, Some(first));
         conn.execute(
             "UPDATE provider_calls SET ts = ts - ?1 WHERE outcome = 'ok'",
             [DAY_MS + 1],
         )
         .unwrap();
-        assert_eq!(my_work_calls_in_a_day(&conn).unwrap(), 3);
+        assert_eq!(my_work_calls_in_a_day(&conn).unwrap().0, 3);
         let plan: String = conn
             .query_row(
                 &format!(
-                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM provider_calls WHERE role = 'my_work'
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*), MIN(ts) FROM provider_calls WHERE role = 'my_work'
                        AND ts >= 0 AND outcome IN {REQUESTS}"
                 ),
                 [],
