@@ -33,6 +33,10 @@ const RECENT: usize = 200;
 const RECENTS: usize = 3;
 /// A list written by more conversations than this links none (C3, claude-mem's).
 const LIST_MOST: usize = 8;
+/// The work lists a conversation to decide shows at most, then how many more: claude-mem shows them
+/// all, but one conversation's 240 lists of 200 characters would pass every capped entry's request
+/// (Codex on #669); the links (C3) are shown on their own.
+const LISTS: usize = 20;
 /// A title, an ignored conversation's reason and a link's evidence, in characters (C4).
 const TITLE: usize = 120;
 const REASON: usize = 160;
@@ -71,7 +75,8 @@ impl Groups {
 /// The grouping ops in knowledge.db, folded in time order (C5, S4): a later decision moves a
 /// conversation, continuing a request adds its links, and the newest title wins. An op that was
 /// shown a record of a session or repository excluded now is left out while the exclusion stands
-/// (S6), so the conversations it decided are undecided again; a forgotten op decides nothing (S5).
+/// (S6), and so is every op built on one (`read.ops`), so the conversations they decided are
+/// undecided again; a forgotten op decides nothing (S5).
 pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Groups> {
     let mut out = Groups::default();
     if !crate::consumer::manifest::exists(k, "table", "my_work")? {
@@ -93,10 +98,16 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             r.get::<_, i64>(7)?,
         ))
     })?;
+    // S6: the ops left out, by device and op seq; an op reads only its own device's ops, older
+    // ones, folded before it. One built on a left-out op was shown its title, though its own
+    // records may miss the excluded conversation's (Codex on #669).
+    let mut hidden: HashSet<(String, i64)> = HashSet::new();
     for row in rows {
         let (device, ts, repo, read, fields, skipped, forgotten, op_seq) = row?;
         let read: Read = serde_json::from_str(&read)?;
-        if !shown_now(raw, reading, &device, &read)? {
+        let built_on_hidden = (read.ops.iter()).any(|seq| hidden.contains(&(device.clone(), *seq)));
+        if built_on_hidden || !shown_now(raw, reading, &device, &read)? {
+            hidden.insert((device, op_seq));
             continue;
         }
         let shown = if forgotten.is_some() {
@@ -400,8 +411,10 @@ struct Batch {
 }
 
 impl Batch {
-    /// Within `[summary] window_tokens` (A4): the open requests a proven link names, then the
-    /// conversations, at least one, then the other open requests, the newest first.
+    /// Within `[summary] window_tokens` (A4): the first conversation, whatever it costs, then the
+    /// open requests a proven link names, the other conversations and the other open requests, the
+    /// newest first, each only in the room left: the conversation is what the call decides (Codex
+    /// on #669).
     fn fill(
         s: &Stores,
         batch: &[&Seen],
@@ -495,10 +508,16 @@ impl Batch {
         };
         let conversation_text = |c: &Seen| -> (String, BTreeSet<i64>) {
             let (_, seq, ts, ask) = c.ask.as_ref().expect("a candidate has an opening ask");
-            let lists: Vec<String> = (c.lists.iter())
+            let mine: Vec<&String> = (c.lists.iter())
                 .filter(|(r, _)| *r == repo)
-                .map(|(_, l)| crate::work_state::beside("list", l, rules))
+                .map(|(_, l)| l)
                 .collect();
+            let mut lists: Vec<String> = (mine.iter().take(LISTS))
+                .map(|l| crate::work_state::beside("list", l, rules))
+                .collect();
+            if mine.len() > LISTS {
+                lists.push(format!("and {} more", mine.len() - LISTS));
+            }
             let label = if agent_sent.contains(seq) {
                 "[agent prompt] "
             } else {
@@ -517,7 +536,12 @@ impl Batch {
             );
             (text, BTreeSet::from([*seq]))
         };
-        let mut left = room;
+        let first = batch.first().map(|c| {
+            let (text, shown) = conversation_text(c);
+            (c.key.clone(), text, shown)
+        });
+        let mut left =
+            room.saturating_sub(first.as_ref().map_or(0, |f| crate::budget::estimate(&f.1)));
         let mut fits = |text: &str| {
             let cost = crate::budget::estimate(text);
             if cost > left {
@@ -543,10 +567,10 @@ impl Batch {
                 requests.push(((*anchor).clone(), text, shown));
             }
         }
-        let mut conversations: Vec<(Key, String, BTreeSet<i64>)> = Vec::new();
-        for c in batch {
+        let mut conversations: Vec<(Key, String, BTreeSet<i64>)> = first.into_iter().collect();
+        for c in batch.iter().skip(1) {
             let (text, shown) = conversation_text(c);
-            if fits(&text) || conversations.is_empty() {
+            if fits(&text) {
                 conversations.push((c.key.clone(), text, shown));
             } else {
                 break;
@@ -1222,6 +1246,72 @@ mod tests {
         assert!(g.groups.is_empty() && g.of.is_empty(), "{g:?}");
         h.s.raw.exclude(R, true).unwrap();
         assert_eq!(h.groups().groups[&key("s1")].members.len(), 2);
+    }
+
+    /// Codex on #669 (S6): an op built on one shown an excluded record (among its `read.ops`)
+    /// decides nothing either while the exclusion stands, though its own records missed the
+    /// excluded conversation's: the request it continued, and its title, came from it.
+    #[test]
+    fn an_op_built_on_an_op_shown_an_excluded_record_decides_nothing_either() {
+        const X: &str = "github.com/o/x";
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.said("s2", R, 5, "Add tests for the parser.");
+        h.pass(&|_| answer(&[group(&["C1", "C2"], "The parser")], &[]));
+        // The next call shows the request's opening ask and its three newest asks, all of s1's.
+        for (at, text) in [
+            (6, "Make it faster."),
+            (7, "Cache the tables."),
+            (8, "Ship it."),
+        ] {
+            h.said("s1", R, at, text);
+        }
+        h.age(31);
+        h.said("s3", R, 10, "Fix the parser's error messages.");
+        let next = answer(&[group(&["R1", "C1"], "The parser and its errors")], &[]);
+        let (_, sent) = h.pass(&|_| next.clone());
+        assert!(
+            !sent[0].contains("Add tests for the parser."),
+            "{}",
+            sent[0]
+        );
+        assert_eq!(h.groups().groups[&key("s1")].members.len(), 3);
+        // s2 is seen in another repository, which is then excluded.
+        h.said("s2", X, 11, "Look at the other repository.");
+        h.s.run();
+        h.s.raw.exclude(X, false).unwrap();
+        let g = h.groups();
+        assert!(g.groups.is_empty() && g.of.is_empty(), "{g:?}");
+        h.s.raw.exclude(X, true).unwrap();
+        assert_eq!(h.groups().groups[&key("s1")].members.len(), 3);
+    }
+
+    /// Codex on #669: the conversation a call decides takes its room first, a linked request only
+    /// what room it leaves, and its work lists are shown `LISTS` at most, then how many more.
+    #[test]
+    fn the_conversation_takes_its_room_first_and_shows_its_lists_bounded() {
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.age(31);
+        h.said("s9", R, 3, "Continue the parser.");
+        h.wrote("s1", R, "parser", json!({"status": "doing"}));
+        h.wrote("s9", R, "parser", json!({"status": "doing"}));
+        for n in 0..30 {
+            let list = format!("list-{n:02}-{}", "x".repeat(150));
+            h.wrote("s9", R, &list, json!({"status": "doing"}));
+        }
+        // Room for the linked request alone, of about 25 estimated tokens: the conversation, of
+        // about 900, takes it.
+        let room = Summary {
+            window_tokens: 150,
+            ..Summary::default()
+        };
+        let prompt = h.ask(&room, R).unwrap().prompt;
+        assert!(prompt.contains("Continue the parser."), "{prompt}");
+        assert!(!prompt.contains("\"Parser\""), "{prompt}");
+        assert!(prompt.contains("and 11 more"), "{prompt}");
+        assert!(prompt.matches("list-").count() <= LISTS, "{prompt}");
     }
 
     /// O4: an opening ask an agent wrote, by its marks or by the text tests, is shown labelled.

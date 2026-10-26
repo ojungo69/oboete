@@ -966,8 +966,13 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   for a request's title. A later decision moves a conversation; continuing a request adds its links
   where claude-mem replaces them. S4 named a knowledge.db table for the map: it is this fold over
   the ops the consumer keeps, because S6 must leave ops out when they are read. An op shown a
-  record of a session or repository excluded now is left out while the exclusion stands, so what
-  it decided is undecided again and asked again; a forgotten op decides nothing (S5).
+  record of a session or repository excluded now is left out while the exclusion stands, and so is
+  every op built on one through its `read.ops` (Codex on #669), so what they decided is undecided
+  again and asked again; a forgotten op decides nothing (S5).
+- **The budget** (A4): the first conversation takes its room first, whatever it costs, and the
+  linked requests, the other conversations and the other requests are shown only in the room it
+  leaves; a conversation shows 20 of its work lists at most, then how many more, where claude-mem
+  shows them all (Codex on #669).
 - **Measured** on a copy of this PC's store (`my_work_group::tests::measure_grouping_on_a_copy_of_a_store`,
   a release build, 2026-10-26), before any grouping: 126 conversations read in 2.3 s cold and the
   due check in 0.19 s warm; 124 candidates in 7 repositories, so about 13 calls to decide them all,
