@@ -4509,12 +4509,14 @@ async function refreshHidden(f) {
 
 // #661: the next page of what was removed, after the last of each kind shown, added below them.
 async function moreHidden(f, button) {
-  const before = f.hidden?.next;
+  const list = f.hidden;
+  const before = list?.next;
   if (!before || button.disabled) return;
   button.disabled = true;
   const page = await api('hidden', { before }).catch(() => null);
-  // A reread meanwhile (a Bring back) replaced the list this page would follow.
-  if (!currentSettings(f) || f.hidden?.next !== before) return;
+  // A reread meanwhile (a Bring back) replaced the list this page would follow, though its first
+  // page and next position stayed as they were (CodeRabbit on #672, #679).
+  if (!currentSettings(f) || f.hidden !== list) return;
   if (!page) {
     button.disabled = false;
     setStatus(t('hidden_unavailable'), true, lang);

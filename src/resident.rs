@@ -282,13 +282,15 @@ mod tests {
         }
     }
 
-    /// Parity row 31: kept, the model stays past its idle time, and goes once no longer kept.
+    /// Parity row 31: kept, the model stays past its idle time, and goes once no longer kept. Kept
+    /// every 50 ms against an idle time of a second, so a CI runner that sleeps a thread long under
+    /// load does not let it go between two keeps (#675).
     #[test]
     fn kept_it_stays_past_its_idle_and_goes_after() {
-        let r = Resident::start(model(Duration::ZERO), Some(Duration::from_millis(200)));
+        let r = Resident::start(model(Duration::ZERO), Some(Duration::from_secs(1)));
         r.embed(&texts(&["a"]), None).unwrap();
         let t = Instant::now();
-        while t.elapsed() < Duration::from_millis(800) {
+        while t.elapsed() < Duration::from_millis(2_500) {
             r.keep();
             std::thread::sleep(Duration::from_millis(50));
         }
