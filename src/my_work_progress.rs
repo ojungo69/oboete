@@ -891,14 +891,15 @@ mod tests {
             .collect();
             let mut out = Vec::new();
             for about in abouts {
-                let mut hidden = HashSet::new();
-                while let Some(kept) =
-                    crate::my_work_ops::newest_shown(&k, (NAME, &about), None, &hidden, false)
-                        .unwrap()
-                {
-                    hidden.insert((kept.device.clone(), kept.op_seq));
-                    out.push(kept);
-                }
+                let all = crate::my_work_ops::shown(
+                    &k,
+                    (NAME, &about),
+                    None,
+                    &HashSet::new(),
+                    false,
+                    usize::MAX,
+                );
+                out.extend(all.unwrap());
             }
             out.sort_by_key(|k| std::cmp::Reverse((k.op.ts, k.op_seq)));
             out
