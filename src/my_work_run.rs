@@ -87,7 +87,10 @@ impl std::error::Error for BoundReached {}
 
 /// The jobs this binary runs, for one round.
 pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
-    vec![Box::new(crate::my_work_group::Grouping::default())]
+    vec![
+        Box::new(crate::my_work_group::Grouping::default()),
+        Box::new(crate::my_work_progress::Progress::default()),
+    ]
 }
 
 /// One round's runner: the switches and bound as the worker read them, the jobs, and the chain.

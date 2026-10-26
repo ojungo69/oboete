@@ -40,6 +40,7 @@ mod model_fetch;
 mod my_work;
 mod my_work_group;
 mod my_work_ops;
+mod my_work_progress;
 mod my_work_run;
 mod provenance;
 mod provider;

@@ -309,24 +309,38 @@ impl Job for Grouping {
 /// Which of `batch`'s opening asks an agent wrote (O4): the marks (O2), then the text tests over
 /// the agent text recorded in the lookback before them (O3).
 fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
+    let asks: Vec<AskRef> = (batch.iter())
+        .filter_map(|c| {
+            let (device, seq, ts, text) = c.ask.as_ref()?;
+            Some((Some(&c.key), device.as_str(), *seq, *ts, text.as_str()))
+        })
+        .collect();
+    agent_written(raw, &asks)
+}
+
+/// An ask as `agent_written` reads it: its conversation, when a sender is wanted, its record's
+/// device and seq, its time and its text.
+pub(crate) type AskRef<'a> = (Option<&'a Key>, &'a str, i64, i64, &'a str);
+
+/// Of `asks`, the record seqs of those an agent wrote: the marks (O2), else the text tests over the
+/// agent text recorded before them (O3); and, of each with its conversation, the other
+/// conversation that sent it in a tool call (C3). Grouping and the progress review read it.
+pub(crate) fn agent_written(raw: &Raw, given: &[AskRef]) -> Result<(HashSet<i64>, Vec<Sent>)> {
     let mut out = HashSet::new();
-    // Every opening ask, marked or not, is looked for in agent text: a typed one to tell whether an
-    // agent wrote it (O3), any one to tell which conversation sent it in a tool call (C3).
+    // Every ask, marked or not, is looked for in agent text: a typed one to tell whether an agent
+    // wrote it (O3), any one to tell which conversation sent it in a tool call (C3).
     let mut asks = Vec::new();
-    for c in batch {
-        let Some((device, seq, ts, text)) = &c.ask else {
-            continue;
-        };
-        let record = raw.at(device, &[*seq])?.pop();
+    for &(key, device, seq, ts, text) in given {
+        let record = raw.at(device, &[seq])?.pop();
         let Some(crate::raw::Item::Event(e)) = record.map(|r| r.item) else {
             continue;
         };
         let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
         let typed = crate::typed::typed(&e.kind, &e.agent, &e.source, &body);
         if !typed {
-            out.insert(*seq);
+            out.insert(seq);
         }
-        asks.push((&c.key, *seq, *ts, text.as_str(), typed));
+        asks.push((key, seq, ts, text, typed));
     }
     let mut index = crate::typed::AgentText::new(asks.iter().map(|a| (a.2, a.3)));
     if !index.is_empty() {
@@ -361,7 +375,9 @@ fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
         if typed && index.agent_written(ts, text) {
             out.insert(seq);
         }
-        if let Some((from, record)) = index.sender(ts, text, key) {
+        if let Some(key) = key
+            && let Some((from, record)) = index.sender(ts, text, key)
+        {
             senders.push((key.clone(), from.clone(), record));
         }
     }

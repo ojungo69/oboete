@@ -889,6 +889,134 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     Ok((json!({"requests": answers, "unlinked": unlinked}), held))
 }
 
+/// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any
+/// gate. Its records and ops are this device's only: a review lists what it was shown by this
+/// device's seqs (S2), so a forget here reaches it (S5).
+pub(crate) struct ReviewInput {
+    pub id: String,
+    /// Every conversation, another device's too, sorted: a new one makes the review due (P2).
+    pub conversations: Vec<Key>,
+    /// When it was asked, and its latest activity, unix ms.
+    pub asked: i64,
+    pub activity: i64,
+    /// Its original ask, when it was read from this device or a work item.
+    pub original: Option<(AskFrom, String)>,
+    /// Its later prompts, the oldest first: record seq, time and text.
+    pub asks: Vec<(i64, i64, String)>,
+    /// Its session summaries, the newest first: turn op seq, time and fields.
+    pub summaries: Vec<(i64, i64, BTreeMap<String, String>)>,
+    /// Its cards, the newest first: window op seq, time and title.
+    pub cards: Vec<(i64, i64, String)>,
+    /// Its work items, the newest first: list, task, status and the time of the last write.
+    pub work: Vec<(String, Option<String>, String, i64)>,
+    pub sources: Sources,
+}
+
+/// Where a request's original ask was read from (S5): a prompt record, a summary's turn op, both by
+/// seq, or a work item, which no forget takes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AskFrom {
+    Prompt(i64),
+    Summary(i64),
+    Work,
+}
+
+/// docs/my-work-model.md P1, S6: each request My Work shows from a group or a request id, with
+/// activity since `active_since`, and none of whose conversations is excluded now, as a progress
+/// review reads it. A lone conversation is reviewed by no one, as in claude-mem.
+pub(crate) fn review_inputs(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    reading: &crate::curate::Reading,
+    active_since: i64,
+) -> Result<Vec<ReviewInput>> {
+    let Built {
+        convs,
+        work,
+        requests,
+        ..
+    } = build(raw, k, rules, reading)?;
+    let mut out = Vec::new();
+    for r in &requests {
+        if matches!(r.id, Id::Conversation(_))
+            || (r.owns.iter()).any(|((a, s), _)| reading.excluded.contains(&format!("{a}\0{s}")))
+        {
+            continue;
+        }
+        let p = parts(r, &convs, &work, rules);
+        let activity = (p.turns.iter().map(|t| t.s.ts))
+            .chain(p.cards.iter().map(|c| c.c.ts))
+            .chain(p.active.iter().copied())
+            .chain(p.items.iter().map(|w| w.updated))
+            .max()
+            .unwrap_or(0);
+        if activity < active_since {
+            continue;
+        }
+        let mut conversations: Vec<Key> = r.owns.iter().map(|(key, _)| key.clone()).collect();
+        conversations.sort();
+        let device = raw.device();
+        let original = &r.original;
+        let from = match original.from {
+            "prompt" => (p.prompts.iter())
+                .find(|s| s.device == device && original.id.as_ref() == Some(&s.id))
+                .map(|s| AskFrom::Prompt(s.seq)),
+            "summary" => (p.turns.iter())
+                .find(|t| t.s.device == device && original.id == Some(t.s.id(device)))
+                .map(|t| AskFrom::Summary(t.s.op_seq)),
+            _ => Some(AskFrom::Work),
+        };
+        // The prompts it owns: one that owns some replies of a conversation shares its prompts
+        // on the page, but its review reads only its own.
+        let mut asks = Vec::new();
+        for (key, own) in &r.owns {
+            let Some(c) = convs.get(key) else { continue };
+            for s in (c.prompts.iter()).filter(|s| s.device == device) {
+                let ours = match own {
+                    Owns::All => true,
+                    Owns::Prompts(spans) => {
+                        spans.iter().any(|sp| holds(sp, device, (s.seq, s.seq)))
+                    }
+                };
+                if let Some(text) =
+                    (s.text.as_ref()).filter(|_| ours && original.id != Some(s.id.clone()))
+                {
+                    asks.push((s.seq, s.ts, text.clone()));
+                }
+            }
+        }
+        asks.sort_by_key(|a| (a.1, a.0));
+        let summaries = (p.turns.iter())
+            .filter(|t| t.s.device == device)
+            .map(|t| (t.s.op_seq, t.s.ts, t.s.fields.clone()))
+            .collect();
+        let cards = (p.cards.iter())
+            .filter(|c| c.c.device == device)
+            .map(|c| (c.c.op_seq, c.c.ts, c.c.title.clone()))
+            .collect();
+        let mut items: Vec<&&Work> = p.items.iter().collect();
+        items.sort_by_key(|w| std::cmp::Reverse(w.updated));
+        let work = (items.into_iter())
+            .map(|w| (w.list.clone(), w.task.clone(), w.status(), w.updated))
+            .collect();
+        let sources = sources(r, &p.items, &p.cards);
+        out.push(ReviewInput {
+            id: r.id.held(),
+            conversations,
+            asked: original.ts,
+            activity,
+            original: from.map(|from| (from, original.text.clone())),
+            asks,
+            summaries,
+            cards,
+            work,
+            sources,
+        });
+    }
+    Ok(out)
+}
+
 /// What My Work makes of the stores before it answers the page or reviews a request: the
 /// conversations and work it gathered, the requests they make, and how many work records no
 /// request takes.
@@ -1164,7 +1292,8 @@ pub(crate) struct Held {
 pub(crate) struct Sources {
     convs: Vec<(Key, Option<Vec<Span>>)>,
     fields: Vec<(Map<String, Value>, i64)>,
-    files: Vec<(Vec<String>, i64)>,
+    /// A card's modified files, its time, and its window op by device and seq.
+    files: Vec<(Vec<String>, i64, (String, i64))>,
 }
 
 /// claude-mem's `mergeProducts` limit: the newest this many entries of a request's work product.
@@ -1181,14 +1310,38 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
         return Ok(Vec::new());
     };
     let rules = Rules::load(home)?;
+    Ok(
+        (products_read(&raw, &k, &rules, &held.sources)?.into_iter())
+            .map(|(p, _)| p)
+            .collect(),
+    )
+}
+
+/// Where a product was read from (docs/my-work-model.md S5): a call's record, a card's window op,
+/// each by device and seq, or a work item, which no forget takes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Origin {
+    Record(String, i64),
+    Card(String, i64),
+    Work,
+}
+
+/// `products` of a request's `sources` from the stores open, each with where it was read from: a
+/// progress review reads them (docs/my-work-model.md P3) and lists those among what it was shown.
+pub(crate) fn products_read(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    sources: &Sources,
+) -> Result<Vec<(Value, Origin)>> {
     let mut lists = Vec::new();
     // The consumer makes its table; before its first step there is nothing to read.
-    if crate::consumer::manifest::exists(&k, "table", "product_calls")? {
+    if crate::consumer::manifest::exists(k, "table", "product_calls")? {
         let mut calls = k.prepare(
             "SELECT device, seq FROM product_calls WHERE agent = ?1 AND session = ?2
              ORDER BY device, seq",
         )?;
-        for ((agent, session), owned) in &held.sources.convs {
+        for ((agent, session), owned) in &sources.convs {
             let rows = (calls
                 .query_map(params![agent, session], |r| Ok((r.get(0)?, r.get(1)?)))?)
             .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
@@ -1227,7 +1380,7 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
             }
         }
     }
-    for (fields, at) in &held.sources.fields {
+    for (fields, at) in &sources.fields {
         // What a work item attaches, as work state's own lines show it beside its key, since a
         // rule may match a value only there; a link the gate changes is its title alone
         // (CodeRabbit on #650).
@@ -1236,7 +1389,7 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
             .filter(|(k, _)| crate::work_product::is_work_product_field(k))
             .map(|(k, v)| {
                 let text = crate::work_state::text(v);
-                let gated = crate::work_state::beside(k, &text, &rules);
+                let gated = crate::work_state::beside(k, &text, rules);
                 if gated == text {
                     (k.clone(), v.clone())
                 } else {
@@ -1253,20 +1406,41 @@ pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
         }
         lists.push(list);
     }
-    for (files, at) in &held.sources.files {
-        lists.push(crate::work_product::from_files(files, Some(*at), None));
+    for (files, at, (device, seq)) in &sources.files {
+        let card = crate::work_product::Source {
+            kind: "card".into(),
+            id: format!("{device}:{seq}"),
+            index: None,
+        };
+        lists.push(crate::work_product::from_files(
+            files,
+            Some(*at),
+            Some(card),
+        ));
     }
-    let gate = |s: &str| crate::redact::outbound_with(s, &rules);
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
     Ok((crate::work_product::merge(lists, PRODUCTS).into_iter())
         .map(|p| {
             let url = p.url.filter(|url| gate(url) == *url);
-            json!({
+            let origin = (p.source.as_ref())
+                .and_then(|s| {
+                    let (device, seq) = s.id.rsplit_once(':')?;
+                    let (device, seq) = (device.to_owned(), seq.parse().ok()?);
+                    match s.kind.as_str() {
+                        "record" => Some(Origin::Record(device, seq)),
+                        "card" => Some(Origin::Card(device, seq)),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(Origin::Work);
+            let shown = json!({
                 "kind": gate(&p.kind),
                 "title": gate(&p.title),
                 "url": url,
                 "path": p.path.as_deref().map(gate),
                 "at": p.at,
-            })
+            });
+            (shown, origin)
         })
         .collect())
 }
@@ -1581,8 +1755,11 @@ fn sources(r: &Request, items: &[&Work], cards: &[&Shown]) -> Sources {
             .filter(|(fields, _)| !fields.is_empty())
             .collect(),
         files: (cards.iter())
-            .map(|c| (c.c.files_modified.clone(), c.c.ts))
-            .filter(|(files, _)| !files.is_empty())
+            .map(|c| {
+                let op = (c.c.device.clone(), c.c.op_seq);
+                (c.c.files_modified.clone(), c.c.ts, op)
+            })
+            .filter(|(files, ..)| !files.is_empty())
             .collect(),
     }
 }

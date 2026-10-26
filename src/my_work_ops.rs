@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -155,45 +155,54 @@ pub(crate) struct Kept {
 /// replaced (S4).
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Kept>> {
+    newest_shown(
+        k,
+        (job, about),
+        None,
+        &std::collections::HashSet::new(),
+        false,
+    )
+}
+
+/// `newest` of `device`'s ops when one is named (a job shows only its own device's, S2), passing
+/// over those left out (`hidden`, S6) and, when `answered`, the skips and the forgotten ones.
+pub(crate) fn newest_shown(
+    k: &Connection,
+    (job, about): (&str, &str),
+    device: Option<&str>,
+    hidden: &std::collections::HashSet<(String, i64)>,
+    answered: bool,
+) -> Result<Option<Kept>> {
     schema(k)?;
-    let row = k
-        .query_row(
-            "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten FROM my_work
-             WHERE job = ?1 AND about = ?2 ORDER BY ts DESC, device DESC, op_seq DESC LIMIT 1",
-            params![job, about],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, bool>(7)?,
-                    r.get::<_, Option<String>>(8)?,
-                ))
+    let mut st = k.prepare(
+        "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten FROM my_work
+         WHERE job = ?1 AND about = ?2 AND (?3 IS NULL OR device = ?3)
+           AND (?4 = 0 OR (skipped = 0 AND forgotten IS NULL))
+         ORDER BY ts DESC, device DESC, op_seq DESC",
+    )?;
+    let mut rows = st.query(params![job, about, device, answered])?;
+    while let Some(r) = rows.next()? {
+        let (device, op_seq): (String, i64) = (r.get(0)?, r.get(1)?);
+        if hidden.contains(&(device.clone(), op_seq)) {
+            continue;
+        }
+        return Ok(Some(Kept {
+            device,
+            op_seq,
+            op: MyWorkOp {
+                job: job.to_owned(),
+                about: about.to_owned(),
+                entry: r.get(3)?,
+                ts: r.get(2)?,
+                read: serde_json::from_str(&r.get::<_, String>(4)?)?,
+                removed: serde_json::from_str(&r.get::<_, String>(5)?)?,
+                fields: serde_json::from_str(&r.get::<_, String>(6)?)?,
+                skipped: r.get(7)?,
+                forgotten: r.get(8)?,
             },
-        )
-        .optional()?;
-    let Some((device, op_seq, ts, entry, read, removed, fields, skipped, forgotten)) = row else {
-        return Ok(None);
-    };
-    Ok(Some(Kept {
-        device,
-        op_seq,
-        op: MyWorkOp {
-            job: job.to_owned(),
-            about: about.to_owned(),
-            entry,
-            ts,
-            read: serde_json::from_str(&read)?,
-            removed: serde_json::from_str(&removed)?,
-            fields: serde_json::from_str(&fields)?,
-            skipped,
-            forgotten,
-        },
-    }))
+        }));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
