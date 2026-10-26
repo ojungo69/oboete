@@ -1350,8 +1350,13 @@ fn shown_id(
 ) -> Result<(String, Option<String>)> {
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
     let (shown, kind) = match id {
-        // C6: `g:` and the keyed hash of its anchor, which tells nothing of the conversation.
-        Id::Group(_) => return Ok((format!("g:{}", keyed_print(&id.held(), home, key)?), None)),
+        // C6: `g:` and the keyed hash of its anchor, which tells nothing of the conversation; the
+        // hash is its fingerprint too, so that no rule's mask merges two groups at the route
+        // (Codex on #670).
+        Id::Group(_) => {
+            let print = keyed_print(&id.held(), home, key)?;
+            return Ok((format!("g:{print}"), Some(print)));
+        }
         Id::Conversation((agent, session)) => (format!("c:{}:{}", gate(agent), gate(session)), "c"),
         Id::Explicit(e) => (
             format!("r:{}", crate::work_state::beside("request_id", e, rules)),
