@@ -895,7 +895,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   due again. The backup's ops segments and the copies of raw.db are judged by the same rule
   (`Judge::purged`): an op only they hold sees the window, turn and My Work ops only they hold
   that the forget takes, those a purge rewrote there before too, in op order (`Judge::widen`;
-  Codex on #664). A restore that gives an op its text back makes the purge go on again.
+  Codex on #664), every body they hold under an op seq, since a restore that reused op seqs can
+  leave a copy's differing from a segment's. A restore that gives an op its text back makes the
+  purge go on again.
   The forget's preview does not count My Work ops yet.
 - **Not yet**: the exclusion's rule (S6), which applies when a reader shows or sends an op, with
   the job runner; nothing writes a `my_work` op until the first job.

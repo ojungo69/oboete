@@ -8246,7 +8246,8 @@ impl Judge {
         // docs/my-work-model.md S5: what a forget takes of the ops only they hold, so that a My
         // Work op built on one is taken with it there as in raw.db (Codex on #664): the windows
         // and turns by their rules, those rewritten before by their job, then the My Work ops in
-        // op order, each seeing those judged before it.
+        // op order, each seeing those judged before it. Every body they hold under an op seq is
+        // judged, as a restore that reused op seqs can leave a copy's differing from a segment's.
         let mut taken = std::mem::take(&mut self.taken);
         let mut work = Vec::new();
         let mut each =
@@ -8268,7 +8269,6 @@ impl Judge {
         crate::backup::each_op(home, &mut each)?;
         each_copy_op(home, &mut each)?;
         work.sort_by(|a, b| a.0.cmp(&b.0));
-        work.dedup_by(|a, b| a.0 == b.0);
         for (at, ts, body) in work {
             let before = body["forgotten"].as_str().map(str::to_owned);
             if let Some(job) = before.or_else(|| self.my_work(&at.0, ts, &body, &taken)) {

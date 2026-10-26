@@ -3764,6 +3764,79 @@ mod tests {
         assert!(!in_copy(&copy));
     }
 
+    /// docs/my-work-model.md S5 (Codex on #664): after a restore reused op seqs, a copy and a
+    /// segment can hold different bodies under one op seq. Each is judged, so the copy's version
+    /// that read a forgotten record is taken, and the copy's op built on it with it.
+    #[test]
+    fn every_body_an_op_seq_has_in_the_backups_and_copies_is_judged() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let r1 = s.said(
+            "s",
+            "github.com/o/r",
+            1_000,
+            &format!("Parsers stay in {WINDOW_CANARY} mode."),
+        );
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let body = |spans: serde_json::Value, ops: serde_json::Value, text: &str| {
+            json!({"job": "review", "about": "R1", "entry": "anthropic", "ts": 5_000,
+                "read": {"spans": spans, "ops": ops}, "removed": [],
+                "fields": {"summary": text}, "skipped": false})
+        };
+        let mut append = |op: serde_json::Value| {
+            s.raw
+                .append_ops(&[(crate::raw::OpKind::MyWork, op)])
+                .unwrap()[0]
+        };
+        // The copy's: one op read the forgotten record, the next was built on it.
+        let a = append(body(
+            json!([[r1, r1]]),
+            json!([]),
+            &format!("Read: {WINDOW_CANARY}."),
+        ));
+        let b = append(body(
+            json!([[r2, r2]]),
+            json!([a]),
+            &format!("On it: {WINDOW_CANARY}."),
+        ));
+        let home = s.home.path().to_owned();
+        let copy = copy_raw(
+            &home,
+            &crate::backup::fresh_name(&home, "raw.db.quarantined-").unwrap(),
+        );
+        // The segment's, from the store a restore made: another op under the first one's seq,
+        // which read nothing forgotten, and none under the second's.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let other = body(json!([[r2, r2]]), json!([]), "Kept: another op.");
+        conn.execute(
+            "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3",
+            rusqlite::params![other.to_string(), device, a],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM ops WHERE device = ?1 AND op_seq = ?2",
+            rusqlite::params![device, b],
+        )
+        .unwrap();
+        crate::backup::export(&home).unwrap();
+        conn.execute("DELETE FROM ops WHERE type = 'my_work'", [])
+            .unwrap();
+        drop(conn);
+        let in_copy = |text: &str| (copy_ops(&copy).iter()).any(|(_, _, body)| body.contains(text));
+        assert!(in_copy(&format!("On it: {WINDOW_CANARY}.")));
+        let target = Target::Record {
+            device: device.clone(),
+            seq: r1,
+        };
+        let shown = preview(&home, target).unwrap();
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert!(!in_copy(WINDOW_CANARY), "{:?}", copy_ops(&copy));
+    }
+
     /// Slice 3d-2: the window ops that showed a curator a forgotten record (in their span or their
     /// goals) or a claim made from one (among their candidates, or the claims carried in), and the
     /// turn ops that rest on such a record or read a card of such a window, keep their structure
