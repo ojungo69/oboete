@@ -416,9 +416,10 @@ preference's quote must be found in a typed prompt the review was shown, by cura
 dropped; one the previous review kept keeps its quote, found then. A mask in a quote is quoted as
 shown: it stands for nothing. The outcome block, which claude-mem never shows, is not asked for.
 
-P5. **On the card.** The newest 20 reviews of a request are its readings. The card shows
-"<percent>% · reviewed <time>", "Completed <date>" for shipped, or "Not reviewed yet", and "at
-this pace, about <date>" when the last two readings rise below 100. Reviews are at least an hour
+P5. **On the card.** The newest two reviews of a request are its readings (claude-mem keeps 20:
+As built 4b). The card shows "<percent>% · reviewed <time>" or "Completed <date>" for shipped,
+nothing before a review (As built 4b), and "at this pace, about <date>" when the two readings rise
+below 100. Reviews are at least an hour
 apart, so two readings minutes apart cannot project today. A review newer than the request's
 recorded status makes shipped `shipped` (a new status and tab, shown when it counts one) and 100%
 `ready`. A status recorded after the review wins. The request's page shows the narrative and
@@ -761,10 +762,15 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `a_review_is_due_after_new_work_at_most_hourly` (P2)
 - `shipped_needs_percent_100_and_a_ship_date` (P4)
 - `a_preference_whose_quote_is_not_in_a_typed_prompt_is_dropped` (P4)
-- `the_newest_20_reviews_are_the_readings` (P5)
+- `the_newest_two_reviews_are_the_readings` (P5)
+- `a_hidden_or_another_devices_review_is_no_reading` (S6, S7)
 - `the_estimate_needs_two_rising_readings_below_100` (P5)
 - `a_status_recorded_after_the_review_wins` (P5)
+- `a_review_at_100_makes_a_quiet_todo_or_unknown_request_ready` (P5)
+- `a_recorded_ship_shows_100_and_its_day` (P5)
 - `a_new_review_does_not_undo_a_check` (C7, P5)
+- `the_build_story_is_the_reviews_narrative_and_milestones` (P5)
+- `the_build_story_is_gated_as_it_is_read` (A5)
 
 ### Slice 5
 
@@ -1111,6 +1117,38 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   open: the capture does not keep a call's start.
 - **Then**: slice 4b, the readings, the card's percent and estimate, shipped and ready, and the
   build story on the request's page.
+
+### Slice 4b: the card's progress and the build story (2026-10-27)
+
+- **Readings** (P5): `my_work_progress::readings`, this device's newest two reviews of a request
+  that were answered, not forgotten (S5) and not left out (S6): the newest's percent and the pace
+  of the two. claude-mem keeps 20; its page uses their count only to tell a reviewed request from
+  one not yet reviewed, and draws no history of them. The page's read walks S6 once for all its
+  requests (`my_work_ops::hidden`).
+- **Which review counts** (claude-mem's `reviewIsNewerThanLifecycle`): the newest, unless the
+  request's status was recorded after it (`request_status` or `request_complete`, by its write's
+  time). One that counts makes shipped `shipped`, and 100% `ready` from in progress, to do, no
+  known state or quiet (`normalizeRequestStatus`). A recorded shipped or delivered is its own
+  state now, `shipped`, apart from done, as in claude-mem 15.2; the Shipped tab shows when it
+  counts one, after Checked.
+- **The progress** in My Work's answer (claude-mem's `progress`): the percent of the review that
+  counts, or of the newest below 100 when a status was recorded after it; 100 for shipped; when it
+  was reviewed; for shipped, the day, a recorded ship's when no review counts, else the review's
+  shipped date; and the estimate, none for shipped. None with no review and no ship.
+- **The estimate** (claude-mem's `measuredEstimate`): when the two readings rise below 100, the
+  time the line through them reaches 100. A day already past is shown as it is, as claude-mem's is.
+- **The card** shows a meter with "70% · reviewed 1h ago", or "Completed Oct 26" for shipped, and
+  "At this pace, about Oct 27". It shows no "Not reviewed yet": with the switch off no request is
+  ever reviewed and every card would say it, as decision 55 leaves out the rows claude-mem shows as
+  "Not recorded".
+- **The build story** on the request's page: the narrative and the milestones, the oldest first,
+  each day as claude-mem's work view shows it ("Oct 25"), of the review the progress shows; none
+  when it has neither. P6's recap and chapters come with slice 7. Its texts are gated as the page
+  reads them, so a rule added after the review masks them before any rescan.
+- **C7**: a review is no part of a request's version, so a new one undoes no check.
+- **On the screen** (Playwright, a home of made-up records, 2026-10-27): the cards' meter, percent
+  and estimate, the Shipped badge and tab, and the request's build story, in English and Japanese.
+- **Then**: #692 (1), provenance slice 2 (#690), then slice 5, goals.
 
 ## Not built
 
