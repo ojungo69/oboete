@@ -3670,6 +3670,8 @@ mod tests {
             r3.op.fields["summary"],
             json!("Kept: it read the kept record.")
         );
+        // Closed before the purges below rebuild knowledge.db: Windows moves no open file.
+        drop(k);
         // A restore from older ops gives a My Work op its text back: purged again.
         assert_eq!(purge(&home).unwrap().unwrap(), Purged::default());
         rusqlite::Connection::open(home.join("raw.db"))

@@ -60,21 +60,8 @@ pub(crate) struct MyWorkOp {
 /// not be kept even as a skip is not asked for, as nothing paid for could be kept (as
 /// `turns::fitted`). A job that drops quotes first does so before this.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn fitted(mut op: MyWorkOp) -> Result<Option<Value>> {
-    let within = |op: &MyWorkOp| -> Result<Option<Value>> {
-        let v = serde_json::to_value(op)?;
-        Ok((v.to_string().len() <= crate::raw::MAX_OP_BYTES).then_some(v))
-    };
-    if let Some(v) = within(&op)? {
-        return Ok(Some(v));
-    }
-    op.removed.clear();
-    if let Some(v) = within(&op)? {
-        return Ok(Some(v));
-    }
-    op.fields.clear();
-    op.skipped = true;
-    within(&op)
+pub(crate) fn fitted(op: MyWorkOp) -> Result<Option<Value>> {
+    Ok(crate::raw::fitted(serde_json::to_value(op)?))
 }
 
 /// knowledge.db's `my_work` (S4): every op kept, as it came; a reader takes the newest of a job and

@@ -683,6 +683,24 @@ struct OpRow {
 
 /// The most one op's body may take (spec 6.5, A42).
 pub const MAX_OP_BYTES: usize = 64 << 10;
+
+/// A job's op `op` (a turn's, a My Work job's) as the op log keeps it (`MAX_OP_BYTES`), so an answer
+/// paid for is never lost to the cap and asked again at every run: whole, else without its
+/// removals, else as a skip of its labels, its fields gone; none when even that is over it.
+pub(crate) fn fitted(op: serde_json::Value) -> Option<serde_json::Value> {
+    let within = |v: &serde_json::Value| v.to_string().len() <= MAX_OP_BYTES;
+    let mut v = op;
+    if within(&v) {
+        return Some(v);
+    }
+    v["removed"] = serde_json::json!([]);
+    if within(&v) {
+        return Some(v);
+    }
+    v["fields"] = serde_json::json!({});
+    v["skipped"] = serde_json::json!(true);
+    within(&v).then_some(v)
+}
 /// The most one append may hold, in ops and in body bytes together: an ops segment ends only
 /// between appends, so a segment is at most `backup::SEGMENT_BYTES` plus one append's lines (each
 /// body escaped once, and a few hundred bytes of fields per op), well within what a restore reads.
@@ -3423,21 +3441,11 @@ impl Raw {
                 break;
             }
         }
-        let mut st = self.conn.prepare(
-            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'turn' ORDER BY device, op_seq",
-        )?;
-        let mut rows = st.query([])?;
-        while let Some(row) = rows.next()? {
-            let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
-            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
-            else {
-                continue;
-            };
+        self.each_op_of("turn", |device, op_seq, ts, body| {
             if let Some(job) = judge.turn(&device, ts, &body) {
                 found.turns.push((device, op_seq, job));
             }
-        }
-        drop(rows);
+        })?;
         // docs/my-work-model.md S5: then the My Work ops, in op order, each by what it read: a
         // forgotten record, or an op whose text a forget took before or takes now, a My Work op
         // judged before it among them, so an update built on a taken op is taken too.
@@ -3446,23 +3454,34 @@ impl Raw {
             (found.windows.iter().chain(&found.turns))
                 .map(|(device, op_seq, job)| ((device.clone(), *op_seq), job.clone())),
         );
-        let mut st = self.conn.prepare(
-            "SELECT device, op_seq, ts, body FROM ops WHERE type = 'my_work' ORDER BY device, op_seq",
-        )?;
-        let mut rows = st.query([])?;
-        while let Some(row) = rows.next()? {
-            let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
-            let Ok(body) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
-            else {
-                continue;
-            };
+        self.each_op_of("my_work", |device, op_seq, ts, body| {
             if let Some(job) = judge.my_work(&device, ts, &body, &taken) {
                 taken.insert((device.clone(), op_seq), job.clone());
                 found.my_work.push((device, op_seq, job));
             }
-        }
-        drop(rows);
+        })?;
         Ok((found, judge))
+    }
+
+    /// Every op of type `kind` in op order, its device, op seq, time and body; one whose body does
+    /// not read is passed over. The type is in the query's text, so the planner may take a partial
+    /// index of it (`ops_turns`).
+    fn each_op_of(
+        &self,
+        kind: &'static str,
+        mut f: impl FnMut(String, i64, i64, serde_json::Value),
+    ) -> Result<()> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT device, op_seq, ts, body FROM ops WHERE type = '{kind}' ORDER BY device, op_seq"
+        ))?;
+        let mut rows = st.query([])?;
+        while let Some(row) = rows.next()? {
+            let (device, op_seq, ts): (String, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+            if let Ok(body) = serde_json::from_str(&row.get::<_, String>(3)?) {
+                f(device, op_seq, ts, body);
+            }
+        }
+        Ok(())
     }
 
     /// Slice 3d-4: one pass of `record_ops` over the window ops, in op order, each with the claim
