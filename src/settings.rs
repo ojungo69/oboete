@@ -840,7 +840,9 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
         }
     }
     if let Some(m) = &posted.my_work {
-        if !MY_WORK_CALLS.contains(&m.calls_a_day) {
+        // A value the file holds stays as it is when it is not changed, in range or not, as a
+        // provider's daily budget does (#680).
+        if m.calls_a_day != now.my_work.calls_a_day && !MY_WORK_CALLS.contains(&m.calls_a_day) {
             return Err(refused(422, "range", "my_work.calls_a_day"));
         }
         // Turning it on is the owner's act on this page, its estimate shown first (A6).
@@ -2194,6 +2196,45 @@ mod tests {
         let kept = save_to(&home, &body).unwrap();
         assert_eq!(kept["view"]["port"], 43123);
         assert_eq!(config::view(home.path()).unwrap().port.get(), 43123);
+    }
+
+    /// #680: a `calls_a_day` written by hand out of range stays as it is through a save that does
+    /// not change it, a save that changes it to a value out of range is refused, and the page's
+    /// estimate reads no ledger into being.
+    #[test]
+    fn a_hand_written_bound_out_of_range_stays_and_the_estimate_makes_no_ledger() {
+        let home = home_with(Some("providers = []\n[my_work]\ncalls_a_day = 0\n"));
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let prompt = crate::raw::Event {
+            session: "s1".into(),
+            repo: Some("r".into()),
+            ts: crate::db::now_ms(),
+            ..crate::raw::test_event(&json!({"prompt": "Build the parser."}).to_string())
+        };
+        raw.append(&prompt).unwrap();
+        drop(raw);
+        let shown = show(home.path());
+        assert!(
+            !home.path().join("providers.db").exists(),
+            "the estimate made a ledger"
+        );
+        assert_eq!(shown["my_work"]["calls_a_day"], 0);
+        assert!(shown["my_work"]["estimate"].is_object(), "{shown}");
+        let body = posted(&shown, |v| {
+            v["summary"]["language"] = json!("English");
+            v["my_work"] = json!({"curate": false, "calls_a_day": 0});
+        });
+        let saved = save_to(&home, &body).unwrap();
+        assert_eq!(saved["my_work"]["calls_a_day"], 0);
+        assert_eq!(config::load(home.path()).unwrap().my_work.calls_a_day, 0);
+        let body = posted(&saved, |v| {
+            v["my_work"] = json!({"curate": false, "calls_a_day": 10_001});
+        });
+        let r = save_to(&home, &body).unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "range", "my_work.calls_a_day")
+        );
     }
 
     /// docs/my-work-model.md A6: the page shows `[my_work]` with its estimate, none before a

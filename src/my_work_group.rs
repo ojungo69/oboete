@@ -605,18 +605,30 @@ impl Batch {
             shown.extend(seqs);
         }
         data.push_str("## Proven links\n");
-        let mut any = false;
-        for (list, ends) in &links {
+        // Each link is charged to the room the conversations and the requests left, those naming
+        // the first conversation first; the ones left out are counted (#677).
+        let first = conversations.first().map(|c| c.0.clone());
+        let mut ordered: Vec<&(&str, Vec<Key>)> = links.iter().collect();
+        ordered.sort_by_key(|(_, ends)| !first.as_ref().is_some_and(|f| ends.contains(f)));
+        let (mut any, mut left_out) = (false, 0);
+        for (list, ends) in ordered {
             let named: Vec<&String> = ends.iter().filter_map(|e| label_of.get(e)).collect();
             if named.len() >= 2 {
                 let list = crate::work_state::beside("list", list, rules);
                 let mut names: Vec<&str> = named.iter().map(|l| l.as_str()).collect();
                 names.sort_by_key(|l| (l.starts_with('R'), l[1..].parse::<usize>().unwrap_or(0)));
-                data.push_str(&format!("- work list {list}: {}\n", names.join(", ")));
-                any = true;
+                let line = format!("- work list {list}: {}\n", names.join(", "));
+                if fits(&line) {
+                    data.push_str(&line);
+                    any = true;
+                } else {
+                    left_out += 1;
+                }
             }
         }
-        if !any {
+        if left_out > 0 {
+            data.push_str(&format!("- and {left_out} more\n"));
+        } else if !any {
             data.push_str("None.\n");
         }
         let device = s.raw.device();
@@ -1312,6 +1324,79 @@ mod tests {
         assert!(!prompt.contains("\"Parser\""), "{prompt}");
         assert!(prompt.contains("and 11 more"), "{prompt}");
         assert!(prompt.matches("list-").count() <= LISTS, "{prompt}");
+    }
+
+    /// #677: the proven links are charged to the room left and the rest are counted, so
+    /// conversations that share 240 lists of 200 characters keep the prompt's data within
+    /// `[summary] window_tokens`, the conversation and the request shown as before.
+    #[test]
+    fn proven_links_fit_the_room_left_and_say_how_many_more() {
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.age(31);
+        h.said("s9", R, 3, "Continue the parser.");
+        for n in 0..240 {
+            let list = format!("shared-{n:03}-{}", "y".repeat(189));
+            h.wrote("s1", R, &list, json!({"status": "doing"}));
+            h.wrote("s9", R, &list, json!({"status": "doing"}));
+        }
+        let summary = Summary::default();
+        let prompt = h.ask(&summary, R).unwrap().prompt;
+        let data = &prompt[prompt.find("## Conversations to decide").unwrap()..];
+        // The section heads and the labels, about 40 tokens, are not charged, as before.
+        assert!(
+            crate::budget::estimate(data) <= summary.window_tokens + 50,
+            "{data}"
+        );
+        let shown = data.matches("- work list ").count();
+        assert!(shown > 0 && shown < 240, "{data}");
+        assert!(
+            data.contains(&format!("- and {} more", 240 - shown)),
+            "{data}"
+        );
+        assert!(data.contains("C1 · claude"), "{data}");
+        assert!(
+            data.contains("R1 · \"Parser\""),
+            "the linked request still fits: {data}"
+        );
+    }
+
+    /// #677: a link that names the conversation decided first is kept before one between the
+    /// others, so the first conversation's proven links fit first.
+    #[test]
+    fn links_naming_the_first_conversation_are_kept_first() {
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Build the parser.");
+        h.pass(&|_| answer(&[group(&["C1"], "Parser")], &[]));
+        h.age(31);
+        h.said("s8", R, 2, "Continue the parser.");
+        h.said("s9", R, 3, "Test the parser.");
+        // The lists the second conversation shares with the request sort before the first's.
+        for (prefix, other, count) in [("a", "s9", 40), ("z", "s8", 3)] {
+            for n in 0..count {
+                let list = format!("{prefix}-{n:02}-{}", "y".repeat(150));
+                h.wrote("s1", R, &list, json!({"status": "doing"}));
+                h.wrote(other, R, &list, json!({"status": "doing"}));
+            }
+        }
+        let room = Summary {
+            window_tokens: 1_500,
+            ..Summary::default()
+        };
+        let prompt = h.ask(&room, R).unwrap().prompt;
+        let data = &prompt[prompt.find("## Conversations to decide").unwrap()..];
+        assert!(
+            data.contains("C2 · claude"),
+            "both conversations fit: {data}"
+        );
+        let links = &data[data.find("## Proven links").unwrap()..];
+        for n in 0..3 {
+            let line = format!("- work list z-{n:02}-{}: C1, R1\n", "y".repeat(150));
+            assert!(links.contains(&line), "{links}");
+        }
+        assert!(links.contains("- work list a-00-"), "{links}");
+        assert!(links.contains(" more\n"), "the others are counted: {links}");
     }
 
     /// O4: an opening ask an agent wrote, by its marks or by the text tests, is shown labelled.

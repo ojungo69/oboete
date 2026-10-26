@@ -739,6 +739,10 @@ assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:
 tick(field('my_work.curate'),true);typeIn(field('my_work.calls_a_day'),'250');
 assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:true,calls_a_day:250},'what is ticked and typed is sent');
 for(const bad of ['0','10001','1.5','']){f.my_work.calls_a_day=bad;assert.equal(w6.saveBody().field,'my_work.calls_a_day',`bound ${bad} refused before sending`);}
+// #680: a bound the file holds out of range is sent as it is while it is not changed.
+f=w6.formOf(settings('resident',{my_work:{curate:false,calls_a_day:0,estimate:null}}));ctx.ui.setForm(f);
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:false,calls_a_day:0},'an unchanged bound out of range is sent as it is');
+f.my_work.calls_a_day='10001';assert.equal(w6.saveBody().field,'my_work.calls_a_day','a changed one out of range is refused');
 f=w6.formOf(settings('resident',{my_work:{curate:true,calls_a_day:250,estimate:{calls:[3,250],usd:null,priced:null}}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(text(panel).includes('Calls a day with it on: about 3, at most 250. No paid AI is in the list'),'the estimate with no paid entry');
 f=w6.formOf(settings('resident',{my_work:{curate:true,calls_a_day:250,estimate:{calls:[3,250],usd:[0.0123,6.62],priced:{name:'p',model:'m'}}}}));ctx.ui.setForm(f);ctx.ui.drawSettings();
