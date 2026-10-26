@@ -1511,44 +1511,16 @@ fn judged_line(
         v["op_seq"].as_i64().unwrap_or(0),
     );
     let (ts, batch) = (v["ts"].as_i64().unwrap_or(0), v["batch"].as_i64());
-    if matches!(
-        kind,
-        raw::OpKind::Window | raw::OpKind::Turn | raw::OpKind::MyWork
-    ) {
-        return match judge.purged(kind, at, ts, batch, &body) {
-            Some(now) if v["body"].as_str() != Some(now.as_str()) => {
-                v["body"] = now.into();
-                Line::Purged(v.to_string())
-            }
-            _ => Line::Kept,
-        };
-    }
-    let Some(uid) = raw::op_uid(kind, &body) else {
-        // A body a purge wrote, exactly (Codex on #453), or an op of a kind whose ops hold no
-        // uid's text.
-        let none = raw::forgotten_body(&body)
-            || !matches!(
-                kind,
-                raw::OpKind::Claim | raw::OpKind::Correction | raw::OpKind::Import
-            );
-        return if none {
-            Line::Kept
-        } else {
-            Line::Unknown(None)
-        };
-    };
-    let now = match jobs.get(&uid) {
-        Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
-        // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2), or of a
-        // window's batch a record job took (3d-4).
-        None => judge.purged(kind, at, ts, batch, &body),
+    // One whose holding a uid's text cannot be told is Unknown (`Judge::verdict`).
+    let Ok(now) = judge.verdict(kind, at, ts, batch, &body, jobs) else {
+        return Line::Unknown(None);
     };
     match now {
-        Some(now) => {
+        Some(now) if v["body"].as_str() != Some(now.as_str()) => {
             v["body"] = now.into();
             Line::Purged(v.to_string())
         }
-        None => Line::Kept,
+        _ => Line::Kept,
     }
 }
 

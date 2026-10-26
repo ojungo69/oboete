@@ -2,6 +2,7 @@
 //! `raw.db`, one sequence per device holding events and tombstones. (device, seq) is the only
 //! ordering and partition key; session, repo and branch are labels, never an index root.
 
+use crate::provenance::Provenance;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -3442,7 +3443,8 @@ impl Raw {
             }
         }
         self.each_op_of("turn", |device, op_seq, ts, body| {
-            if let Some(job) = judge.turn(&device, ts, &body) {
+            let p = crate::provenance::of(OpKind::Turn, &body);
+            if let Some(job) = judge.job(OpKind::Turn, &device, ts, &p, &Taken::new()) {
                 found.turns.push((device, op_seq, job));
             }
         })?;
@@ -3455,7 +3457,8 @@ impl Raw {
                 .map(|(device, op_seq, job)| ((device.clone(), *op_seq), job.clone())),
         );
         self.each_op_of("my_work", |device, op_seq, ts, body| {
-            if let Some(job) = judge.my_work(&device, ts, &body, &taken) {
+            let p = crate::provenance::of(OpKind::MyWork, &body);
+            if let Some(job) = judge.job(OpKind::MyWork, &device, ts, &p, &taken) {
                 taken.insert((device.clone(), op_seq), job.clone());
                 found.my_work.push((device, op_seq, job));
             }
@@ -3519,9 +3522,11 @@ impl Raw {
             else {
                 continue;
             };
-            let gone = body["forgotten"].as_str().map(str::to_owned);
-            let job = gone.clone().or_else(|| judge.window(&device, ts, &body));
-            if let (Some(from), Some(to)) = (body["from_seq"].as_i64(), body["to_seq"].as_i64()) {
+            let p = crate::provenance::of(OpKind::Window, &body);
+            let gone = p.taken_by().map(str::to_owned);
+            let job = (gone.clone())
+                .or_else(|| judge.job(OpKind::Window, &device, ts, &p, &Taken::new()));
+            if let Some((from, to)) = p.own {
                 judge
                     .spans
                     .entry((device.clone(), from, to))
@@ -3599,7 +3604,8 @@ impl Raw {
         }
         let mut copied = Vec::new();
         if !kept.is_empty() {
-            let seqs = judge.shown_records(&w.device, w.ts, &w.body);
+            let p = crate::provenance::of(OpKind::Window, &w.body);
+            let seqs = judge.shown_records(&w.device, w.ts, &p);
             let mut shown = self.stored_texts(&w.device, &seqs)?;
             // docs/retention.md: a forgotten record whose text expired gives nothing to compare
             // with, so every claim the window kept counts as a copy of it.
@@ -3610,10 +3616,7 @@ impl Raw {
                     break;
                 }
             }
-            let named = items(&w.body["candidates"])
-                .iter()
-                .chain(items(&w.body["carried"]));
-            for uid in named.filter_map(|u| u.as_str()) {
+            for &uid in &p.uids {
                 let texts = judge
                     .forgotten
                     .texts
@@ -3917,18 +3920,13 @@ impl Raw {
                     else {
                         continue;
                     };
-                    let body = match kind {
-                        OpKind::Window => {
-                            let mut body = forgotten_window_body(&body, job);
-                            if let Some(c) = claims.filter(|c| !c.copied.is_empty()) {
-                                body["copied"] = c.copied.clone().into();
-                                body["copied_at"] = ops.at.into();
-                            }
-                            body
-                        }
-                        OpKind::MyWork => forgotten_my_work_body(&body, job),
-                        _ => forgotten_turn_body(&body, job),
-                    };
+                    let mut body = without_text(kind, &body, job);
+                    if kind == OpKind::Window
+                        && let Some(c) = claims.filter(|c| !c.copied.is_empty())
+                    {
+                        body["copied"] = c.copied.clone().into();
+                        body["copied_at"] = ops.at.into();
+                    }
                     rewritten += tx.execute(
                         "UPDATE ops SET body = ?1 WHERE device = ?2 AND op_seq = ?3 AND body <> ?1",
                         params![body.to_string(), device, op_seq],
@@ -3956,10 +3954,11 @@ impl Raw {
     pub(crate) fn forgotten_op_bodies(&self) -> Result<ForgottenOps> {
         Ok(self
             .conn
-            .prepare(
-                "SELECT device, op_seq, body FROM ops WHERE type IN ('window', 'turn', 'my_work')
+            .prepare(&format!(
+                "SELECT device, op_seq, body FROM ops WHERE type IN ({})
                    AND json_extract(body, '$.forgotten') IS NOT NULL",
-            )?
+                derived_kinds()
+            ))?
             .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -7705,25 +7704,10 @@ fn rewrite_copy(
             // not hold judged by its own (Codex and CodeRabbit on #472).
             // A body that does not parse may hold a card's or a summary's text: it fails the copy,
             // as a claim's does (Codex on #472).
-            let now = if matches!(kind, OpKind::Window | OpKind::Turn | OpKind::MyWork) {
-                let body =
-                    serde_json::from_str(&text).context("an op whose body does not parse")?;
-                judge.purged(kind, (&key.0, key.1), ts, batch, &body)
-            } else if matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import) {
+            let now = if crate::provenance::DERIVED.contains(&kind) || holds_uid(kind) {
                 let body: serde_json::Value =
                     serde_json::from_str(&text).context("an op whose body does not parse")?;
-                match op_uid(kind, &body) {
-                    Some(uid) => match jobs.get(&uid) {
-                        Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
-                        // A claim op raw.db does not hold that quotes a forgotten record, or of a
-                        // window's batch a record job took (3d-4).
-                        None => judge.purged(kind, (&key.0, key.1), ts, batch, &body),
-                    },
-                    None => {
-                        anyhow::ensure!(forgotten_body(&body), "an op that names no uid");
-                        None
-                    }
-                }
+                judge.verdict(kind, (&key.0, key.1), ts, batch, &body, jobs)?
             } else {
                 None
             };
@@ -7957,6 +7941,9 @@ fn repeats(said: &[String], shown: &[String]) -> bool {
 /// Slice 3d-2: the window and turn ops a purge rewrote, by device and op seq, with their bodies.
 pub(crate) type ForgottenOps = std::collections::HashMap<(String, i64), String>;
 
+/// The ops whose text a forget takes, by device and op seq, with its job.
+type Taken = std::collections::HashMap<(String, i64), String>;
+
 /// Slice 3d-2: each window op's span (device, first and last seq) with its ops in op order: op seq,
 /// when it was written, and the job that took its text.
 type Spans = std::collections::HashMap<(String, i64, i64), Vec<(i64, i64, Option<String>)>>;
@@ -8000,21 +7987,48 @@ pub(crate) struct Judge {
 }
 
 impl Judge {
+    /// docs/provenance.md P1: the job that takes the text of an op of a derived kind
+    /// (`provenance::DERIVED`) of `device`, written at `ts`, made from `p`, by its kind's rules
+    /// (`taken`: the ops a forget took, for a My Work op's): none when it holds no text, or when a
+    /// forget took its text already.
+    fn job(
+        &self,
+        kind: OpKind,
+        device: &str,
+        ts: i64,
+        p: &Provenance,
+        taken: &Taken,
+    ) -> Option<String> {
+        if !p.holds || p.forgotten.is_some() {
+            return None;
+        }
+        match kind {
+            OpKind::Window => self.window(device, ts, p),
+            OpKind::Turn => self.turn(device, ts, p),
+            OpKind::MyWork => self.my_work(device, ts, p, taken),
+            _ => None,
+        }
+    }
+
+    /// The job that took an op's text before, else the one that takes it now (`job`).
+    fn taker(
+        &self,
+        kind: OpKind,
+        device: &str,
+        ts: i64,
+        p: &Provenance,
+        taken: &Taken,
+    ) -> Option<String> {
+        (p.taken_by().map(str::to_owned)).or_else(|| self.job(kind, device, ts, p, taken))
+    }
+
     /// Rules (a) and (b) for a curated window op of `device` written at `ts` that holds its text:
     /// the job of the first forgotten record or claim it showed its curator, a forget's before a
     /// mask's (a forget takes the claims it wrote too, 3d-4).
-    fn window(&self, device: &str, ts: i64, body: &serde_json::Value) -> Option<String> {
-        if body["outcome"] != "curated" || body.get("forgotten").is_some() {
-            return None;
-        }
-        let (from, to) = (body["from_seq"].as_i64()?, body["to_seq"].as_i64()?);
-        let records = || self.shown_in(device, from, to, ts, body);
-        let shown = || {
-            items(&body["candidates"])
-                .iter()
-                .chain(items(&body["carried"]))
-                .filter_map(|u| u.as_str())
-        };
+    fn window(&self, device: &str, ts: i64, p: &Provenance) -> Option<String> {
+        let own = p.own?;
+        let records = || self.shown_in(device, own, ts, p);
+        let shown = || p.uids.iter().copied();
         records()
             .find(|r| r.1 != MASK_JOB)
             .map(|r| r.1.clone())
@@ -8044,13 +8058,12 @@ impl Judge {
     fn shown_in<'a>(
         &'a self,
         device: &'a str,
-        from: i64,
-        to: i64,
+        (from, to): (i64, i64),
         ts: i64,
-        body: &'a serde_json::Value,
+        p: &'a Provenance,
     ) -> impl Iterator<Item = &'a (i64, String, Option<i64>)> + 'a {
-        let removed = items(&body["removed"]);
-        let goals = items(&body["goals"]).iter().filter_map(|g| g.as_i64());
+        let removed = p.removed;
+        let goals = p.goals.iter().copied();
         self.forgotten
             .between(device, from, to)
             .iter()
@@ -8060,29 +8073,22 @@ impl Judge {
 
     /// Slice 3d-4: the records of a forget (not a mask's) window op `body` of `device`, written at
     /// `ts`, showed its curator (rule a), by seq.
-    fn shown_records(&self, device: &str, ts: i64, body: &serde_json::Value) -> Vec<i64> {
-        let (Some(from), Some(to)) = (body["from_seq"].as_i64(), body["to_seq"].as_i64()) else {
+    fn shown_records(&self, device: &str, ts: i64, p: &Provenance) -> Vec<i64> {
+        let Some(own) = p.own else {
             return Vec::new();
         };
-        self.shown_in(device, from, to, ts, body)
+        self.shown_in(device, own, ts, p)
             .filter(|r| r.1 != MASK_JOB)
             .map(|r| r.0)
             .collect()
     }
 
     /// Rules (a) and (b) for a turn op of `device` written at `ts` that holds its text.
-    fn turn(&self, device: &str, ts: i64, body: &serde_json::Value) -> Option<String> {
-        if body.get("forgotten").is_some() {
-            return None;
-        }
-        let (from, through) = (body["from"].as_i64()?, body["through"].as_i64()?);
-        let read: Vec<(i64, i64)> = items(&body["read"])
-            .iter()
-            .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
-            .collect();
-        let removed = items(&body["removed"]);
-        let shown = |r: &&(i64, String, Option<i64>)| shown_then(removed, ts, r);
-        let goals = items(&body["goals"]).iter().filter_map(|g| g.as_i64());
+    fn turn(&self, device: &str, ts: i64, p: &Provenance) -> Option<String> {
+        let (from, through) = p.own?;
+        let read = &p.read;
+        let shown = |r: &&(i64, String, Option<i64>)| shown_then(p.removed, ts, r);
+        let goals = p.goals.iter().copied();
         // (a) T7's set: its own records (of any session: a Removed row has no labels), the spans it
         // read and their goals.
         std::iter::once((from, through))
@@ -8110,29 +8116,14 @@ impl Judge {
     /// the job of the first forgotten record it was shown in its `read` spans, else of the first
     /// op it read whose text a forget took (`taken`, by device and op seq). One that lists no
     /// `read` is never taken by this rule, as a turn op without `from` is not.
-    fn my_work(
-        &self,
-        device: &str,
-        ts: i64,
-        body: &serde_json::Value,
-        taken: &std::collections::HashMap<(String, i64), String>,
-    ) -> Option<String> {
-        if body.get("forgotten").is_some() {
-            return None;
-        }
-        let removed = items(&body["removed"]);
-        let shown = |r: &&(i64, String, Option<i64>)| shown_then(removed, ts, r);
-        items(&body["read"]["spans"])
-            .iter()
-            .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
-            .flat_map(|(a, b)| self.forgotten.between(device, a, b))
+    fn my_work(&self, device: &str, ts: i64, p: &Provenance, taken: &Taken) -> Option<String> {
+        let shown = |r: &&(i64, String, Option<i64>)| shown_then(p.removed, ts, r);
+        (p.read.iter())
+            .flat_map(|&(a, b)| self.forgotten.between(device, a, b))
             .find(shown)
             .map(|r| r.1.clone())
             .or_else(|| {
-                items(&body["read"]["ops"])
-                    .iter()
-                    .filter_map(serde_json::Value::as_i64)
-                    .find_map(|seq| taken.get(&(device.to_owned(), seq)).cloned())
+                (p.ops.iter()).find_map(|&seq| taken.get(&(device.to_owned(), seq)).cloned())
             })
     }
 
@@ -8149,24 +8140,15 @@ impl Judge {
         body: &serde_json::Value,
     ) -> Option<String> {
         match kind {
-            OpKind::Window | OpKind::Turn => {
+            // As raw.db holds it rewritten, else by its kind's rules: a My Work op's by what it
+            // read, the ops raw.db holds rewritten among them (docs/my-work-model.md S5).
+            kind if crate::provenance::DERIVED.contains(&kind) => {
                 if let Some(now) = self.rewritten.get(&(at.0.to_owned(), at.1)) {
                     return Some(now.clone());
                 }
-                let body = match kind {
-                    OpKind::Window => forgotten_window_body(body, &self.window(at.0, ts, body)?),
-                    _ => forgotten_turn_body(body, &self.turn(at.0, ts, body)?),
-                };
-                Some(body.to_string())
-            }
-            // docs/my-work-model.md S5: as raw.db holds it rewritten, else by what it read, the
-            // ops raw.db holds rewritten among them.
-            OpKind::MyWork => {
-                if let Some(now) = self.rewritten.get(&(at.0.to_owned(), at.1)) {
-                    return Some(now.clone());
-                }
-                let job = self.my_work(at.0, ts, body, &self.taken)?;
-                Some(forgotten_my_work_body(body, &job).to_string())
+                let p = crate::provenance::of(kind, body);
+                let job = self.job(kind, at.0, ts, &p, &self.taken)?;
+                Some(without_text(kind, body, &job).to_string())
             }
             OpKind::Claim => {
                 if self
@@ -8183,6 +8165,42 @@ impl Judge {
                 Some(serde_json::json!({ "forgotten": job }).to_string())
             }
             _ => None,
+        }
+    }
+
+    /// docs/provenance.md P1: the body an op of `kind` at `at` (device, op seq), written at `ts` in
+    /// `batch`, is to hold once a purge takes its text, as a backup line or a copy holds it: by
+    /// `jobs` (the uids forget took, with their jobs) and `purged`; none to keep it as it is. An
+    /// error when whether it holds a uid's text cannot be told: a claim, correction or import whose
+    /// body names no uid and is not a body a purge wrote (Codex on #453).
+    pub(crate) fn verdict(
+        &self,
+        kind: OpKind,
+        at: (&str, i64),
+        ts: i64,
+        batch: Option<i64>,
+        body: &serde_json::Value,
+        jobs: &std::collections::HashMap<String, String>,
+    ) -> Result<Option<String>> {
+        // Slice 3d-2: a window, turn or My Work op given the body raw.db holds now, or one raw.db
+        // does not hold judged by its own (Codex and CodeRabbit on #472).
+        if crate::provenance::DERIVED.contains(&kind) {
+            return Ok(self.purged(kind, at, ts, batch, body));
+        }
+        if !holds_uid(kind) {
+            return Ok(None);
+        }
+        match op_uid(kind, body) {
+            Some(uid) => Ok(match jobs.get(&uid) {
+                Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
+                // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2), or
+                // of a window's batch a record job took (3d-4).
+                None => self.purged(kind, at, ts, batch, body),
+            }),
+            None => {
+                anyhow::ensure!(forgotten_body(body), "an op that names no uid");
+                Ok(None)
+            }
         }
     }
 
@@ -8233,14 +8251,11 @@ impl Judge {
             if kind != OpKind::Window || held.contains(&(at.0.to_owned(), at.1)) {
                 return;
             }
-            let (Some(from), Some(to)) = (body["from_seq"].as_i64(), body["to_seq"].as_i64())
-            else {
+            let p = crate::provenance::of(kind, body);
+            let Some((from, to)) = p.own else {
                 return;
             };
-            let job = match body["forgotten"].as_str() {
-                Some(job) => Some(job.to_owned()),
-                None => self.window(at.0, ts, body),
-            };
+            let job = self.taker(kind, at.0, ts, &p, &Taken::new());
             // Slice 3d-4: the claims of its batch with it, with no copy looked for (rule c).
             if let (Some(job), Some(batch)) = (job.as_ref().filter(|j| *j != MASK_JOB), batch) {
                 batches.push(((at.0.to_owned(), batch), job.clone()));
@@ -8268,17 +8283,16 @@ impl Judge {
         let mut work = Vec::new();
         let mut each =
             |kind: OpKind, at: (&str, i64), ts: i64, _: Option<i64>, body: &serde_json::Value| {
-                let before = body["forgotten"].as_str().map(str::to_owned);
-                let job = match kind {
-                    OpKind::Window => before.or_else(|| self.window(at.0, ts, body)),
-                    OpKind::Turn => before.or_else(|| self.turn(at.0, ts, body)),
-                    OpKind::MyWork => {
-                        work.push(((at.0.to_owned(), at.1), ts, body.clone()));
-                        None
-                    }
-                    _ => None,
-                };
-                if let Some(job) = job {
+                if !crate::provenance::DERIVED.contains(&kind) {
+                    return;
+                }
+                // An op built on ops is judged after them, in op order.
+                if kind == OpKind::MyWork {
+                    work.push(((at.0.to_owned(), at.1), ts, body.clone()));
+                    return;
+                }
+                let p = crate::provenance::of(kind, body);
+                if let Some(job) = self.taker(kind, at.0, ts, &p, &taken) {
                     taken.entry((at.0.to_owned(), at.1)).or_insert(job);
                 }
             };
@@ -8286,8 +8300,8 @@ impl Judge {
         each_copy_op(home, &mut each)?;
         work.sort_by(|a, b| a.0.cmp(&b.0));
         for (at, ts, body) in work {
-            let before = body["forgotten"].as_str().map(str::to_owned);
-            if let Some(job) = before.or_else(|| self.my_work(&at.0, ts, &body, &taken)) {
+            let p = crate::provenance::of(OpKind::MyWork, &body);
+            if let Some(job) = self.taker(OpKind::MyWork, &at.0, ts, &p, &taken) {
                 taken.entry(at).or_insert(job);
             }
         }
@@ -8406,6 +8420,28 @@ pub(crate) fn forgotten_my_work_body(body: &serde_json::Value, job: &str) -> ser
     b
 }
 
+/// docs/provenance.md P1: op `body` of a derived kind without its text, with the job that took it.
+fn without_text(kind: OpKind, body: &serde_json::Value, job: &str) -> serde_json::Value {
+    match kind {
+        OpKind::Window => forgotten_window_body(body, job),
+        OpKind::MyWork => forgotten_my_work_body(body, job),
+        _ => forgotten_turn_body(body, job),
+    }
+}
+
+/// The derived kinds' names as an SQL list (`provenance::DERIVED`).
+fn derived_kinds() -> String {
+    (crate::provenance::DERIVED.iter())
+        .map(|k| format!("'{}'", k.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether an op of `kind` may hold a uid's text (`op_uid`).
+fn holds_uid(kind: OpKind) -> bool {
+    matches!(kind, OpKind::Claim | OpKind::Correction | OpKind::Import)
+}
+
 /// The job that took each op of `rewritten`, by device and op seq.
 fn taken_ops(rewritten: &ForgottenOps) -> std::collections::HashMap<(String, i64), String> {
     rewritten
@@ -8483,9 +8519,10 @@ fn quoted_entry<'a>(
     body: &serde_json::Value,
 ) -> Option<&'a (i64, String, Option<i64>)> {
     // Each masked record it quotes by its own mask, not the first one's (Codex on #480).
+    let quotes = crate::provenance::of(OpKind::Claim, body).quotes;
     let quoted = |masked: bool| {
-        items(&body["evidence"]).iter().find_map(|e| {
-            let r = forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?)?;
+        quotes.iter().find_map(|&(device, seq)| {
+            let r = forgotten.entry(device, seq)?;
             let takes = if masked {
                 masked_after(r, ts)
             } else {
@@ -8509,9 +8546,8 @@ fn masked_after(r: &(i64, String, Option<i64>), ts: i64) -> bool {
 /// came before: a window that named its uid before then showed the text of one of them, not only
 /// the first's (Codex on #480). A mask a restore lost the time of is as late as can be.
 fn latest_mask(forgotten: &Forgotten, ts: i64, body: &serde_json::Value) -> i64 {
-    items(&body["evidence"])
-        .iter()
-        .filter_map(|e| forgotten.entry(e["device"].as_str()?, e["seq"].as_i64()?))
+    (crate::provenance::of(OpKind::Claim, body).quotes.iter())
+        .filter_map(|&(device, seq)| forgotten.entry(device, seq))
         .filter(|r| masked_after(r, ts))
         .map(|r| r.2.unwrap_or(i64::MAX))
         .max()
@@ -8598,26 +8634,19 @@ fn forgotten_op(conn: &Connection, kind: OpKind, body: &serde_json::Value) -> Re
     {
         return Ok(true);
     }
-    let anchor = |e: &serde_json::Value| -> Result<bool> {
-        Ok(conn.query_row(
+    // A claim's quotes, a correction's anchor.
+    for (device, seq) in crate::provenance::of(kind, body).quotes {
+        let denied: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM import_origins o JOIN denied_records d
                ON d.origin = o.origin WHERE o.device = ?1 AND o.seq = ?2)",
-            params![e["device"].as_str(), e["seq"].as_i64()],
+            params![device, seq],
             |r| r.get(0),
-        )?)
-    };
-    match kind {
-        OpKind::Claim => {
-            for e in body["evidence"].as_array().into_iter().flatten() {
-                if anchor(e)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
+        )?;
+        if denied {
+            return Ok(true);
         }
-        OpKind::Correction => anchor(&body["anchor"]),
-        _ => Ok(false),
     }
+    Ok(false)
 }
 
 /// Slice 3e-4: an op whose text the rules now mask, its device, op seq, body as read and as masked.
@@ -11593,6 +11622,8 @@ mod tests {
             ..Judge::default()
         };
         let body = serde_json::json!({"outcome": "curated", "from_seq": 1, "to_seq": 2});
-        assert_eq!(judge.window("d", 50, &body).as_deref(), Some(""));
+        let p = crate::provenance::of(OpKind::Window, &body);
+        let job = judge.job(OpKind::Window, "d", 50, &p, &Taken::new());
+        assert_eq!(job.as_deref(), Some(""));
     }
 }
