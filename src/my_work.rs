@@ -2035,7 +2035,7 @@ fn status(
     });
     let mut status = from_work;
     if matches!(status, "done" | "closed")
-        && !matches!(lifecycle.as_deref(), Some("done" | "closed" | "shipped"))
+        && !matches!(lifecycle.as_deref(), Some("done" | "closed"))
     {
         status = "unknown";
     }
@@ -3046,6 +3046,10 @@ mod tests {
             (
                 "working",
                 json!({"task": "t", "status": "todo", "request_status": "Running"}),
+            ),
+            (
+                "shipped",
+                json!({"task": "t", "status": "doing", "request_status": "delivered"}),
             ),
         ];
         for (i, (_, fields)) in cases.iter().enumerate() {
