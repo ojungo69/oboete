@@ -1511,44 +1511,16 @@ fn judged_line(
         v["op_seq"].as_i64().unwrap_or(0),
     );
     let (ts, batch) = (v["ts"].as_i64().unwrap_or(0), v["batch"].as_i64());
-    if matches!(
-        kind,
-        raw::OpKind::Window | raw::OpKind::Turn | raw::OpKind::MyWork
-    ) {
-        return match judge.purged(kind, at, ts, batch, &body) {
-            Some(now) if v["body"].as_str() != Some(now.as_str()) => {
-                v["body"] = now.into();
-                Line::Purged(v.to_string())
-            }
-            _ => Line::Kept,
-        };
-    }
-    let Some(uid) = raw::op_uid(kind, &body) else {
-        // A body a purge wrote, exactly (Codex on #453), or an op of a kind whose ops hold no
-        // uid's text.
-        let none = raw::forgotten_body(&body)
-            || !matches!(
-                kind,
-                raw::OpKind::Claim | raw::OpKind::Correction | raw::OpKind::Import
-            );
-        return if none {
-            Line::Kept
-        } else {
-            Line::Unknown(None)
-        };
-    };
-    let now = match jobs.get(&uid) {
-        Some(job) => Some(serde_json::json!({ "forgotten": job }).to_string()),
-        // A claim op raw.db does not hold that quotes a forgotten record (slice 3d-2), or of a
-        // window's batch a record job took (3d-4).
-        None => judge.purged(kind, at, ts, batch, &body),
+    // One whose holding a uid's text cannot be told is Unknown (`Judge::verdict`).
+    let Ok(now) = judge.verdict(kind, at, ts, batch, &body, jobs) else {
+        return Line::Unknown(None);
     };
     match now {
-        Some(now) => {
+        Some(now) if v["body"].as_str() != Some(now.as_str()) => {
             v["body"] = now.into();
             Line::Purged(v.to_string())
         }
-        None => Line::Kept,
+        _ => Line::Kept,
     }
 }
 
@@ -3962,6 +3934,52 @@ pub(crate) mod tests {
         export(p).unwrap();
         let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
         assert_eq!(ops.last().map(|s| (s.first, s.last)), Some((3, 3)));
+    }
+
+    /// docs/provenance.md F1, for slice 2: a turn op whose own records, or a My Work op whose read
+    /// spans, pass the restored records goes with every op after it, as a window op does.
+    #[test]
+    #[ignore = "docs/provenance.md slice 2 (F1)"]
+    fn a_turn_or_my_work_op_past_the_restored_records_goes_with_every_op_after_it() {
+        let turn = serde_json::json!({"agent": "claude", "session": "s", "repo": "github.com/o/r",
+            "ts": 1, "from": 6, "through": 10, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "r", "learned": "l"}, "skipped": false, "excluded": false});
+        let my_work = serde_json::json!({"job": "review", "about": "R1", "entry": "anthropic",
+            "ts": 1, "read": {"spans": [[6, 10]], "ops": []}, "removed": [],
+            "fields": {"summary": "s"}, "skipped": false});
+        let mut kept = Vec::new();
+        for (kind, body) in [(raw::OpKind::Turn, turn), (raw::OpKind::MyWork, my_work)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 10, 5); // segments 1-5, 6-10
+            let mut raw = raw::open(p).unwrap();
+            let dev = raw.device().to_owned();
+            raw.append_ops(&[window(3), claim("a")]).unwrap();
+            raw.append_ops(&[(kind, body)]).unwrap();
+            raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({"text": "c"}))])
+                .unwrap();
+            drop(raw);
+            export(p).unwrap();
+            // The newest record segment is damaged: seqs 6-10 are not restored.
+            let newest = segments(&p.join("backups"), Kind::Records)
+                .unwrap()
+                .remove(1)
+                .path;
+            std::fs::write(&newest, b"damaged").unwrap();
+            damage_raw(p);
+            crate::worker::run_once(p).unwrap();
+            let restored = raw::open(p).unwrap();
+            assert_eq!(restored.max_seq().unwrap(), 5);
+            let seqs: Vec<i64> = restored
+                .ops_after(&dev, 0, 100)
+                .unwrap()
+                .iter()
+                .map(|o| o.op_seq)
+                .collect();
+            kept.push((kind, seqs));
+        }
+        use raw::OpKind::{MyWork, Turn};
+        assert_eq!(kept, [(Turn, vec![1, 2]), (MyWork, vec![1, 2])]);
     }
 
     /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a forget op past the restored
