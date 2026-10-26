@@ -174,11 +174,23 @@ pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Ke
 /// over those left out (`hidden`, S6) and, when `answered`, the skips and the forgotten ones.
 pub(crate) fn newest_shown(
     k: &Connection,
-    (job, about): (&str, &str),
+    about: (&str, &str),
     device: Option<&str>,
     hidden: &std::collections::HashSet<(String, i64)>,
     answered: bool,
 ) -> Result<Option<Kept>> {
+    Ok(shown(k, about, device, hidden, answered, 1)?.pop())
+}
+
+/// `newest_shown`'s `limit` newest, the newest first: a request's readings (P5).
+pub(crate) fn shown(
+    k: &Connection,
+    (job, about): (&str, &str),
+    device: Option<&str>,
+    hidden: &std::collections::HashSet<(String, i64)>,
+    answered: bool,
+    limit: usize,
+) -> Result<Vec<Kept>> {
     schema(k)?;
     let mut st = k.prepare(
         "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten FROM my_work
@@ -187,12 +199,15 @@ pub(crate) fn newest_shown(
          ORDER BY ts DESC, device DESC, op_seq DESC",
     )?;
     let mut rows = st.query(params![job, about, device, answered])?;
-    while let Some(r) = rows.next()? {
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
         let (device, op_seq): (String, i64) = (r.get(0)?, r.get(1)?);
         if hidden.contains(&(device.clone(), op_seq)) {
             continue;
         }
-        return Ok(Some(Kept {
+        out.push(Kept {
             device,
             op_seq,
             op: MyWorkOp {
@@ -206,9 +221,9 @@ pub(crate) fn newest_shown(
                 skipped: r.get(7)?,
                 forgotten: r.get(8)?,
             },
-        }));
+        });
     }
-    Ok(None)
+    Ok(out)
 }
 
 #[cfg(test)]
