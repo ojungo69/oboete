@@ -33,9 +33,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   prompts of the loaded sessions (1,200 characters each).
 - **Statuses** (`view-model.js` `statusFor` and `buildModel`, `presentation.js`):
   - The request's own recorded status decides first: its completion (`request_complete: true`, or
-    a `request_status` of `done`, `completed`, `complete`, `shipped` or `delivered`) is "Ready to
-    check", and another status a `request_status` names (`blocked`, `needs-you`, `closed` and the
-    like) is that status.
+    a `request_status` of `done`, `completed` or `complete`) is "Ready to check"; `shipped` or
+    `delivered` is "Shipped", its own state since claude-mem 15.2 (decision 57's slice 4b); and
+    another status a `request_status` names (`blocked`, `needs-you`, `closed` and the like) is that
+    status. A review of decision 57 newer than that status makes a shipped request "Shipped" and
+    one at 100% "Ready to check" ([my-work-model.md](my-work-model.md) P5).
   - Otherwise its work decides, the first that holds: "Needs you", a recorded status `needs-you`,
     `needs-input`, `waiting-on-user`, `awaiting-approval` or `needs-approval` (lower-cased, `_` and
     spaces read as `-`); "Blocked", `blocked` or `failed`; "Update recorded", all of it done or all
@@ -45,8 +47,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   - "Checked": a person marked this version of the result checked; it shows in place of the
     status.
   - The status tabs always show All, Needs you, In progress, No recent update, Ready to check and
-    Checked, and Blocked, To do, Update recorded and Closed when they have a count. "Attention
-    first" orders needs you, blocked, ready, working, quiet, todo, unknown, closed, checked.
+    Checked, and Shipped, Blocked, To do, Update recorded and Closed when they have a count.
+    "Attention first" orders needs you, blocked, ready, working, quiet, todo, unknown, closed,
+    checked, shipped.
   No prompt in claude-mem asks an agent to write `request_complete` or `request_status`: an agent
   sets them only if it chooses to.
 - **The card**: its status, the time of its last update, a title, a two-line summary, who worked on
@@ -300,8 +303,8 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   an id of its own ending in `#` and 12 hex digits is gated whole; and it puts the id back under
   its key, which a rule matching `id` does not take away (Codex and Sourcery on #576).
 - **Status names** in the answer: `needs`, `blocked`, `ready`, `quiet`, `working`, `todo`,
-  `unknown`, `closed`: the names claude-mem's page gives `needs-you`, `done` and `in-progress`, and
-  its own for the rest. Checked comes with slice 3.
+  `unknown`, `closed`, `shipped`: the names claude-mem's page gives `needs-you`, `done` and
+  `in-progress`, and its own for the rest. Checked comes with slice 3.
 - **"Summary updating"**: the request shows a summary and its newest prompt (of a request of
   several ids, its own newest; Codex on #574) has no turn op yet, kept or skipped, that covers it.
   Before its first summary the recorded wording carries no such
@@ -413,8 +416,8 @@ them; nothing else in it changes.
   projects; typing redraws the requests but not the field, so an IME's text being composed in it
   is not cut off), the project (every project of every request), the time range (24 hours by default,
   7 days, all) and the status tabs. A tab counts the requests in scope before its own filter;
-  the six that claude-mem always shows are always there, and Blocked, To do, Update recorded and
-  Closed only while they count one.
+  the six that claude-mem always shows are always there, and Shipped, Blocked, To do, Update
+  recorded and Closed only while they count one.
 - **The request page** (decision 55):
   - The facts (contributors, started, elapsed); where it stands (the summary, the next step, and
     the original request with its full text); the work behind it by repository and list, each
