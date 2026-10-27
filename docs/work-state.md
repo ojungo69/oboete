@@ -180,7 +180,8 @@ fit are cut as claude-mem cuts them; a `session_start_chars` near its least, whi
 for the fence, gets the count line alone after the rule (`- ...<N> more lines; read them with
 work_state_read`, no recorded text). When the rule and what follows it would not fit, the rule
 leaves out its attach line (row G01), and when only that leaves the open lines room, they follow
-it in their fence before they become a count (#703). Lines are measured as the fence holds them, a closing tag
+it in their fence before they become a count (#703). A fence that would hold the count alone is
+tried only after both (#711). Lines are measured as the fence holds them, a closing tag
 quoted and so longer. The memory's own fence stays outside the size, as it always was. The viewer's Context page and `oboete inject` show the same text, the page also for a home
 with no store yet (which it does not create). Pi gets no section: its
 extension has no MCP client, so neither tool, and its manifest keeps the whole size.

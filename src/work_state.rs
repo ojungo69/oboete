@@ -729,27 +729,32 @@ pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Sect
         };
     }
     let shown = raw(&l, None, now).shown(rules);
-    // The open lines in their fence after `rule`, when they fit: the room is the limit less the
+    // The open lines in their fence after `rule`, when they fit, and when `some`, when at least one
+    // of them does (a fence of the count alone fits none: #711). The room is the limit less the
     // rule, the newline after it, the one the fence puts before its close, and the one that joins
     // the section to what follows (`Section::units`).
-    let fenced = |rule: &str| {
+    let fenced = |rule: &str, some: bool| {
         let room = limit.saturating_sub(units(rule) + 3 + units(&crate::manifest::fence(OPEN, "")));
-        let open = redact::outbound_with(&fit("", shown.as_deref()?, room), rules);
+        let lines = shown.as_deref()?;
+        let fitted = fit("", lines, room);
+        if some && fitted == more(lines.len(), "") {
+            return None;
+        }
+        let open = redact::outbound_with(&fitted, rules);
         (fenced_units(&open) <= room).then(|| Section {
             rule: rule.to_owned(),
             open: Some(open),
         })
     };
-    // The rule without its attach line when only that leaves the open lines room (#703).
-    (fenced(RULE).or_else(|| fenced(SHORT_RULE)))
-        // A limit with no room for the fence (`session_start_chars` near its least), or lines the
-        // gate hides whole, leave how many lines there are, after the rule: a count made from the
-        // number alone, never recorded text, since the rule stands outside every fence (Codex's
-        // security review of #408).
-        .unwrap_or_else(|| Section {
-            rule: ruled(&more(n, "")),
-            open: None,
-        })
+    // The whole rule with lines, else the rule without its attach line with lines (#703), else
+    // the whole rule's fence of the count alone, as before (#711).
+    (fenced(RULE, true)
+        .or_else(|| fenced(SHORT_RULE, true))
+        .or_else(|| fenced(RULE, false)))
+    .unwrap_or_else(|| Section {
+        rule: ruled(&more(n, "")),
+        open: None,
+    })
 }
 
 /// A write's answer: what is still open in its list among the repository's `entries`, cut as the
@@ -1145,6 +1150,27 @@ mod tests {
             "{open}"
         );
         assert!(s.units() <= small, "{} {small}", s.units());
+        // Where the whole rule leaves room for the count line alone, the short rule's lines still
+        // win: a fence of the count alone is no try (#711).
+        let count = units(&more(entries.len(), ""));
+        let counted = units(RULE) + 3 + fence + count;
+        let s = section(&entries, 0, counted, &Rules::default());
+        let open = s.open.as_deref().unwrap_or_else(|| panic!("{s:?}"));
+        assert_eq!(s.rule, SHORT_RULE);
+        assert!(open.starts_with("- list "), "{open}");
+        assert!(s.units() <= counted, "{} {counted}", s.units());
+        // Where no line fits after either rule, the count follows the whole rule when it fits.
+        let long: Vec<Entry> = (0..3)
+            .map(|i| entry(&format!("list {i}"), json!({"note": "y".repeat(600)}), i))
+            .collect();
+        let s = section(&long, 0, 1_200, &Rules::default());
+        assert_eq!(
+            s,
+            Section {
+                rule: format!("{RULE}\n\n{}", more(3, "")),
+                open: None
+            }
+        );
         assert_eq!(
             section(&[], 0, 1_000, &Rules::default()).rule,
             format!("{SHORT_RULE}\n\nNothing open yet.")
