@@ -242,13 +242,14 @@ pub(crate) fn newest_shown(
     hidden: &std::collections::HashSet<(String, i64)>,
     answered: bool,
 ) -> Result<Option<Kept>> {
-    Ok(shown(k, about, device, hidden, answered, 1)?.pop())
+    Ok(shown(k, (about.0, Some(about.1)), device, hidden, answered, 1)?.pop())
 }
 
-/// `newest_shown`'s `limit` newest, the newest first: a request's readings (P5).
+/// `newest_shown`'s `limit` newest, the newest first: a request's readings (P5). With no `about`,
+/// the newest of every subject of the job: the goals of every day (M2).
 pub(crate) fn shown(
     k: &Connection,
-    (job, about): (&str, &str),
+    (job, about): (&str, Option<&str>),
     device: Option<&str>,
     hidden: &std::collections::HashSet<(String, i64)>,
     answered: bool,
@@ -256,8 +257,8 @@ pub(crate) fn shown(
 ) -> Result<Vec<Kept>> {
     schema(k)?;
     let mut st = k.prepare(
-        "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten FROM my_work
-         WHERE job = ?1 AND about = ?2 AND (?3 IS NULL OR device = ?3)
+        "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten, about
+         FROM my_work WHERE job = ?1 AND (?2 IS NULL OR about = ?2) AND (?3 IS NULL OR device = ?3)
            AND (?4 = 0 OR (skipped = 0 AND forgotten IS NULL))
          ORDER BY ts DESC, device DESC, op_seq DESC",
     )?;
@@ -275,7 +276,7 @@ pub(crate) fn shown(
             op_seq,
             op: MyWorkOp {
                 job: job.to_owned(),
-                about: about.to_owned(),
+                about: r.get(9)?,
                 entry: r.get(3)?,
                 ts: r.get(2)?,
                 read: serde_json::from_str(&r.get::<_, String>(4)?)?,

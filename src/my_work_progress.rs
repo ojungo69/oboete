@@ -596,7 +596,7 @@ fn check(answer: &Value) -> Option<&'static str> {
 /// Whether `quote` is in one of the typed asks as shown (P4), by curation's matcher: exactly, or
 /// but for whitespace and Unicode compatibility forms. A mask in it is quoted as shown, standing
 /// for nothing: what it found the ask's record or the gate never showed.
-fn quoted(quote: &str, typed: &[String]) -> bool {
+pub(crate) fn quoted(quote: &str, typed: &[String]) -> bool {
     !quote.is_empty()
         && (typed.iter()).any(|text| {
             crate::curate::compatible(text, quote, false)
@@ -675,7 +675,8 @@ pub(crate) fn readings(
     device: &str,
     hidden: &Hidden,
 ) -> Result<Vec<Reviewed>> {
-    let kept = crate::my_work_ops::shown(k, (NAME, about), Some(device), hidden, true, READINGS)?;
+    let kept =
+        crate::my_work_ops::shown(k, (NAME, Some(about)), Some(device), hidden, true, READINGS)?;
     Ok((kept.into_iter())
         .filter_map(|r| {
             let f = &r.op.fields;
@@ -893,7 +894,7 @@ mod tests {
             for about in abouts {
                 let all = crate::my_work_ops::shown(
                     &k,
-                    (NAME, &about),
+                    (NAME, Some(&about)),
                     None,
                     &HashSet::new(),
                     false,

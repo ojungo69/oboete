@@ -1182,6 +1182,41 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   and estimate, the Shipped badge and tab, and the request's build story, in English and Japanese.
 - **Then**: #692 (1), provenance slice 2 (#690), then slice 5, goals.
 
+### Slice 5a: the goals job (2026-10-27)
+
+- **The job** (M1, S1): `my_work_goals::OwnerGoals`, op job `goals`, its subject the local date
+  (S2's day). It reads this device's live prompts of the last 31 days that the marks tell typed
+  (O1, O2), none of an excluded session's (S6), each gated alone and cut at 3,000 characters, the
+  oldest first, each headed `P<n> <local time> <agent> <repository>`. The text tests (O3) run in
+  the call, not in the due check, since they read agent text.
+- **When** (M2): a typed prompt the last goals op did not read is due at once when it came before
+  that op (a first run's next chunk, the op having stopped at the budget), else a day after the op.
+  A first run reads in chunks within `[summary] window_tokens`; a first prompt that does not fit is
+  cut to the room left, so each call reads at least one. A call whose prompts the text tests all
+  flag sends nothing: what it read is kept as a skip, with no call (`my_work_run`: an ask with no
+  prompt), so M2's "no op" means no goals op.
+- **The answer** (M3) gives the order of the current ids, the dropped ids, up to 4 new items with
+  up to 2 quotes, up to 4 changed items with 1 quote, and a summary. Code keeps (M4, M5): it
+  carries the items the answer leaves alone and applies the changes; a quote must be found in the
+  prompt it names (`my_work_progress::quoted`, curation's matcher) and keeps that prompt's seq and
+  time; an item with no quote goes; each keeps its newest 3 quotes of the window; `asked` is at
+  least the distinct prompts its quotes name; ids are `g<n>` from a counter kept in the op
+  (`next_id`); ranks follow the answer's order, unique within each kind, at most 10 priorities and
+  10 open asks. Caps are characters: title 80, product 80, quote 240, summary 400. The largest
+  answer in Japanese fits the 4,000-token answer (a test).
+- **Months** (M5): `my_work_goals::months`, the last goals op of each finished local month, read
+  with no call; the page shows it (slice 5b).
+- **Not elsewhere** (M6): the goals are in knowledge.db's `my_work` alone, which search and
+  session start do not read (a test).
+- **Exclusion** (S6): `my_work_ops::hidden` hides a goals op that read an excluded session's
+  prompt, and every op built on it; the next call is a first run, and its prompt leaves the
+  excluded prompts out.
+- **Measured** on this PC's store, read only (2026-10-27): 287 live prompts in 31 days, 152 typed
+  by the marks and 135 marked as an agent's; the typed ones, each cut at 3,000 characters, come to
+  about 16,900 estimated tokens, so the first read takes about 5 calls. No model call: `[my_work]
+  curate` is off here.
+- **Then**: slice 5b, the My Goals page (V2) and its months view.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

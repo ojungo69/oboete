@@ -90,6 +90,7 @@ pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
     vec![
         Box::new(crate::my_work_group::Grouping::default()),
         Box::new(crate::my_work_progress::Progress::default()),
+        Box::new(crate::my_work_goals::OwnerGoals::default()),
     ]
 }
 
@@ -221,6 +222,12 @@ impl<'a> Runner<'a> {
             let Some(skip) = fitted(skip)? else {
                 continue;
             };
+            // Nothing to send (each prompt the goals would show was an agent's): what it read is
+            // kept as a skip with no call, so the job is not due again for it (M2).
+            if ask.prompt.is_empty() {
+                raw.append_ops_fenced(&[(OpKind::MyWork, skip)], reading.fence)?;
+                continue;
+            }
             let sent = crate::curate::sha256_hex(&format!("{}\n{}", self.chain, ask.prompt));
             let pending =
                 crate::providers_db::my_work_pending_of(db, &span)?.filter(|p| p.prompt == sent);
