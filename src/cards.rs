@@ -492,13 +492,13 @@ pub fn work(home: &std::path::Path, raw: &Raw, cards: &[Card]) -> HashMap<i64, i
 }
 
 /// What a reader reads of a card, in `read`'s order.
-const COLUMNS: &str = "device, op_seq, n, ts, agent, session, repo, type, title, subtitle, \
+pub(crate) const COLUMNS: &str = "device, op_seq, n, ts, agent, session, repo, type, title, subtitle, \
                        narrative, facts, concepts, files_read, files_modified, from_seq, to_seq, \
                        removed, goals";
 
-/// A row of `COLUMNS` as a reader gets it, or none while a removal its op does not list took
-/// from a record its curator was shown (K4).
-fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
+/// K4: whether a removal its op does not list took from a record the curator of a row of
+/// `COLUMNS` was shown: its window and its goals.
+pub(crate) fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
     let device: String = r.get(0)?;
     let listed: Vec<Removal> = serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default();
     let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
@@ -506,9 +506,16 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
     for goal in goals {
         removed.extend(raw.removed_in(&device, goal, goal, None)?);
     }
-    if removed.iter().any(|x| !listed.contains(x)) {
+    Ok(removed.iter().any(|x| !listed.contains(x)))
+}
+
+/// A row of `COLUMNS` as a reader gets it, or none while a removal its op does not list took
+/// from a record its curator was shown (K4).
+fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
+    if taken_row(r, raw)? {
         return Ok(None);
     }
+    let device: String = r.get(0)?;
     // K6: every text as the rules are now, the labels it is shown under too.
     let gate = |s: String| crate::redact::outbound_with(&s, rules);
     let list = |i: usize| -> rusqlite::Result<Vec<String>> {

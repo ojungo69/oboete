@@ -1183,6 +1183,43 @@ set([req('x',{updated:now-3*H}),req('y',{updated:now-H}),req('z',{updated:0,titl
 run('mw.range="all";mw.sort="latest";myWorkDraw()');assert.deepEqual(ids(),['y','x','z'],'latest first, no time last');
 run('mw.sort="oldest";myWorkDraw()');assert.deepEqual(ids(),['x','y','z'],'oldest first, no time last');
 run('mw.sort="title";myWorkDraw()');assert.deepEqual(ids(),['z','x','y'],'A to Z by title');
+// P5: the progress line, when it was reviewed or the day it shipped, and the pace's estimate; none
+// before a review. Shipped is its own tab, shown with a count, ranked after Checked.
+set([req('p1',{progress:{percent:60,reviewed:now-3*H,completed:null,estimate:now+48*H}}),
+  req('p2',{status:'shipped',progress:{percent:100,reviewed:now-2*H,completed:'2026-10-20',estimate:null}}),req('p3')]);
+// The text as the browser reads it, with no space between nodes.
+const flat=node=>typeof node==='string'?node:(node?.children||[]).map(flat).join('');
+assert(flat(card('p1')).includes('60% · reviewed 3h ago'),'the percent and when it was reviewed');
+run(`myWorkTimes(${now+2*H})`);
+assert(flat(card('p1')).includes('60% · reviewed 5h ago'),'the review\'s age follows the clock');
+assert(text(card('p1')).includes('At this pace, about'),'the estimate');
+assert.equal(card('p1').querySelectorAll('meter')[0].value,60,'the meter holds the percent');
+assert(text(card('p2')).includes('Completed Oct 20'),'the day it shipped');
+assert(text(card('p2')).includes('Shipped'),'the shipped badge');
+assert(!text(card('p3')).includes('%'),'no progress before a review');
+assert.deepEqual(ids(),['p1','p3','p2'],'shipped after the others');
+const shippedTab=panel.querySelectorAll('button').find(n=>n.dataset.myWork==='tab:shipped');
+assert.equal(text(shippedTab),'Shipped 1','Shipped shows with its count');
+// A check of a result before it shipped: Shipped stays, with its day.
+set([req('ck',{status:'shipped',checked:now-H,progress:{percent:100,reviewed:now-H,completed:'2026-10-20',estimate:null}})]);
+assert(text(card('ck')).includes('Shipped')&&!text(card('ck')).includes('Checked'),'a shipped request stays Shipped though checked');
+assert(text(card('ck')).includes('Completed Oct 20'),'with the day it shipped');
+// The request's page: the progress and the build story, the milestones the oldest first.
+set([req('st',{progress:{percent:40,reviewed:now-H,completed:null,estimate:null},
+  story:{narrative:'The parser came first.',milestones:[{date:'2026-10-02',text:'Reads a line.'},{date:'2026-10-05',text:'Tests pass.'}]}})]);
+run('myWorkOpen("st")');
+const page=text(panel);
+for(const fragment of ['40% · reviewed','Build story','The parser came first.','Oct 2','Reads a line.','Oct 5','Tests pass.']){
+  assert(page.includes(fragment),`the request's page shows: ${fragment}`);
+}
+assert(page.indexOf('Oct 2')<page.indexOf('Reads a line.')&&page.indexOf('Reads a line.')<page.indexOf('Oct 5')&&
+  page.indexOf('Oct 5')<page.indexOf('Tests pass.'),'the milestones the oldest first, each after its day');
+assert(!page.includes('2026-10-02'),"a milestone's day as claude-mem's work view shows it");
+run('myWorkClose()');
+ctx.ui.setLang('ja');
+set([req('pj',{progress:{percent:70,reviewed:now-2*H,completed:null,estimate:null}})]);
+assert(flat(card('pj')).includes('70% ・2 時間前に確認'),'the Japanese progress line');
+ctx.ui.setLang('en');
 // Status tabs: the six always there, Blocked only with one, counts of the scope, a click filters
 // and names the heading.
 set([req('w1'),req('w2'),req('n1',{status:'needs'})]);

@@ -732,7 +732,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 }
 
 /// What a reader reads of a turn op, in `read_row`'s order.
-const COLUMNS: &str = "device, op_seq, ts, agent, session, repo, from_seq, through, read, goals, \
+pub(crate) const COLUMNS: &str = "device, op_seq, ts, agent, session, repo, from_seq, through, read, goals, \
                        removed, fields";
 
 /// `repo`'s newest summaries, at most `limit`, the newest first: none that is skipped, and none
@@ -890,15 +890,14 @@ pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<
     }
 }
 
-/// A row of `COLUMNS` as a reader gets it (K7's one way in): none while a removal its op does not
-/// list took from what it rests on (T7), every field gated with `rules` (T8).
-fn read_row(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<TurnSummary>> {
+/// T7: whether a removal its op does not list took from what a row of `COLUMNS` rests on: its own
+/// session's records as they are stored (before the gate), the other spans it read, its goals.
+pub(crate) fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
     let device: String = r.get(0)?;
     let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
     let read: Vec<(i64, i64)> = serde_json::from_str(&json(8)?).unwrap_or_default();
     let goals: Vec<i64> = serde_json::from_str(&json(9)?).unwrap_or_default();
     let listed: Vec<Removal> = serde_json::from_str(&json(10)?).unwrap_or_default();
-    // The turn is its own session's records, as they are stored (before the gate).
     let (agent, session): (String, String) = (r.get(3)?, r.get(4)?);
     let mut removed =
         raw.removed_in_session(&device, (&agent, &session), r.get(6)?, r.get(7)?, None)?;
@@ -908,9 +907,17 @@ fn read_row(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<TurnSu
     for g in goals {
         removed.extend(raw.removed_in(&device, g, g, None)?);
     }
-    if removed.iter().any(|x| !listed.contains(x)) {
+    Ok(removed.iter().any(|x| !listed.contains(x)))
+}
+
+/// A row of `COLUMNS` as a reader gets it (K7's one way in): none while a removal its op does not
+/// list took from what it rests on (T7), every field gated with `rules` (T8).
+fn read_row(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<TurnSummary>> {
+    if taken_row(r, raw)? {
         return Ok(None);
     }
+    let (device, agent, session): (String, String, String) = (r.get(0)?, r.get(3)?, r.get(4)?);
+    let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
     let gate = |s: String| crate::redact::outbound_with(&s, rules);
     let fields: BTreeMap<String, String> = serde_json::from_str(&json(11)?).unwrap_or_default();
     let row = fields.get("request").map_or_else(String::new, |r| {

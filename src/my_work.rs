@@ -874,8 +874,9 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let mut answers = Vec::new();
     let mut key = None;
     let reviews = reviews(home);
+    let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
     for r in &requests {
-        let stores = (&raw, &k, &rules);
+        let stores = (&raw, &k, &rules, &hidden);
         answers.extend(answer(
             r,
             (&convs, &work, &reviews),
@@ -1769,7 +1770,7 @@ fn answer(
         &[Work],
         &BTreeMap<String, Review>,
     ),
-    (raw, k, rules): (&Raw, &Connection, &Rules),
+    (raw, k, rules, hidden): (&Raw, &Connection, &Rules, &HashSet<(String, i64)>),
     (home, key): (&Path, &mut Option<Vec<u8>>),
     (since, now): (i64, i64),
 ) -> Result<Option<(Value, Held)>> {
@@ -1810,7 +1811,21 @@ fn answer(
     if updated < since {
         return Ok(None);
     }
-    let status = status(&items, activity, now);
+    // P5: the readings, and the newest of them when no status was recorded after it
+    // (claude-mem's `reviewIsNewerThanLifecycle`).
+    let readings = crate::my_work_progress::readings(k, &r.id.held(), raw.device(), hidden)?;
+    let last = lifecycle(&items);
+    let at = last.as_ref().map(|l| (l.0).0);
+    let counts = (readings.first()).filter(|x| at.is_none_or(|at| x.ts >= at));
+    // claude-mem's `completedAtEpoch`: when the newest status recorded completes the request.
+    let completed_at = (last.filter(|l| {
+        ["done", "completed", "complete", "shipped", "delivered"].contains(&l.2.as_str())
+    }))
+    .map(|l| (l.0).0);
+    // The review the card and the story show: the one that counts, else the newest below 100, a
+    // status recorded after it notwithstanding (claude-mem's `progress`).
+    let review = counts.or(readings.first().filter(|x| x.percent < 100));
+    let status = status(&items, activity, now, counts);
     let recorded = (r.title.as_deref())
         .map(|t| crate::redact::outbound_with(t, rules))
         .or_else(|| (r.explicit_text.as_deref()).map(|t| title(&shown(t, ASK, rules))));
@@ -1973,6 +1988,8 @@ fn answer(
             "follow_ups": follow_ups,
             "updates": updates,
             "work": work,
+            "progress": progress(&readings, review, (status, completed_at), rules),
+            "story": story(review, rules),
             "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
             "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
         }),
@@ -1983,7 +2000,12 @@ fn answer(
 /// claude-mem's `statusFor` over a request's work and its records (an observation's row, here the
 /// newest of its prompts, replies and cards), then its lifecycle (`buildModel`), as the page names
 /// them: needs, blocked, ready, quiet, working, todo, unknown, closed.
-fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
+fn status(
+    items: &[&Work],
+    activity: Option<i64>,
+    now: i64,
+    review: Option<&crate::my_work_progress::Reviewed>,
+) -> &'static str {
     let states: Vec<String> = items.iter().map(|w| w.status()).collect();
     let all = |s: &[&str]| {
         activity.is_none() && !items.is_empty() && states.iter().all(|x| s.contains(&x.as_str()))
@@ -2011,20 +2033,15 @@ fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
     } else {
         "unknown"
     };
-    // The newest record of the request's own state among its items decides (claude-mem's
-    // lifecycle): by the write that set it, then `request_complete`'s at the same write.
-    let mut recorded: Vec<(Stamp, bool, String)> =
-        items.iter().flat_map(|w| w.lifecycle()).collect();
-    recorded.sort_by_key(|r| std::cmp::Reverse((r.0, r.1)));
-    let lifecycle = recorded.into_iter().next().map(|r| r.2);
-    let complete = lifecycle
-        .as_deref()
-        .is_some_and(|s| ["done", "completed", "complete", "shipped", "delivered"].contains(&s));
-    let lifecycle = if complete {
-        Some("done".to_owned())
-    } else {
-        lifecycle
-    };
+    // An explicit shipped is its own state, apart from done (claude-mem 15.2).
+    let lifecycle = lifecycle(items).map(|r| r.2).map(|s| {
+        match s.as_str() {
+            "shipped" | "delivered" => "shipped",
+            "done" | "completed" | "complete" => "done",
+            _ => return s,
+        }
+        .to_owned()
+    });
     let mut status = from_work;
     if matches!(status, "done" | "closed")
         && !matches!(lifecycle.as_deref(), Some("done" | "closed"))
@@ -2034,12 +2051,79 @@ fn status(items: &[&Work], activity: Option<i64>, now: i64) -> &'static str {
     if let Some(known) = lifecycle.as_deref().and_then(category) {
         status = known;
     }
+    // P5: a review no status was recorded after makes shipped `shipped`, and 100% done, waiting
+    // for a person's check (claude-mem's `normalizeRequestStatus`).
+    if let Some(review) = review {
+        if review.state == "shipped" {
+            status = "shipped";
+        } else if review.percent == 100
+            && matches!(status, "in-progress" | "todo" | "unknown" | "quiet")
+        {
+            status = "done";
+        }
+    }
     match status {
         "needs-you" => "needs",
         "done" => "ready",
         "in-progress" => "working",
         other => other,
     }
+}
+
+/// The newest record of the request's own state among its items (claude-mem's lifecycle): by the
+/// write that set it, then `request_complete`'s at the same write.
+fn lifecycle(items: &[&Work]) -> Option<(Stamp, bool, String)> {
+    let mut recorded: Vec<(Stamp, bool, String)> =
+        items.iter().flat_map(|w| w.lifecycle()).collect();
+    recorded.sort_by_key(|r| std::cmp::Reverse((r.0, r.1)));
+    recorded.into_iter().next()
+}
+
+/// P5, claude-mem's `progress`: the percent of `review`, the one the card shows; 100 for shipped.
+/// When it was reviewed; for shipped, the day the newest recorded status completed the request
+/// (`completed_at`), else the review's shipped date; and the estimate. None with no review and no
+/// ship.
+fn progress(
+    readings: &[crate::my_work_progress::Reviewed],
+    review: Option<&crate::my_work_progress::Reviewed>,
+    (status, completed_at): (&str, Option<i64>),
+    rules: &Rules,
+) -> Value {
+    let shipped = status == "shipped";
+    if review.is_none() && !shipped {
+        return Value::Null;
+    }
+    let percent = if shipped {
+        Some(100)
+    } else {
+        review.map(|r| r.percent)
+    };
+    let gate = |text: &str| crate::redact::outbound_with(text, rules);
+    let completed = shipped
+        .then(|| {
+            (completed_at.map(|at| crate::db::utc(at)[..10].to_owned()))
+                .or_else(|| review.and_then(|r| r.shipped.as_deref().map(gate)))
+        })
+        .flatten();
+    json!({
+        "percent": percent,
+        "reviewed": review.map(|r| r.ts),
+        "completed": completed,
+        "estimate": (!shipped).then(|| crate::my_work_progress::estimate(readings)).flatten(),
+    })
+}
+
+/// P5: the build story on the request's page, the narrative and the milestones of the review the
+/// progress shows, gated as they are read; none when it has neither.
+fn story(review: Option<&crate::my_work_progress::Reviewed>, rules: &Rules) -> Value {
+    let gate = |text: &str| crate::redact::outbound_with(text, rules);
+    let Some(r) = review.filter(|r| r.narrative.is_some() || !r.milestones.is_empty()) else {
+        return Value::Null;
+    };
+    let milestones: Vec<Value> = (r.milestones.iter())
+        .map(|(date, text)| json!({"date": gate(date), "text": gate(text)}))
+        .collect();
+    json!({"narrative": r.narrative.as_deref().map(gate), "milestones": milestones})
 }
 
 /// The status a recorded request status means, its aliases read as `statusFor` reads an item's
@@ -2053,6 +2137,7 @@ fn category(status: &str) -> Option<&'static str> {
         "todo" | "planned" | "queued" => "todo",
         "closed" | "dropped" => "closed",
         "done" => "done",
+        "shipped" => "shipped",
         "quiet" => "quiet",
         "unknown" => "unknown",
         _ => return None,
@@ -2936,8 +3021,9 @@ mod tests {
     }
 
     /// The design's 4, claude-mem's `statusFor` and its lifecycle: needs you (and its aliases),
-    /// blocked, ready only on the request's own recorded completion, in progress, to do, and no
-    /// recent update after 6 quiet hours; work that is all done is "Update recorded".
+    /// blocked, ready only on the request's own recorded completion, shipped apart from it
+    /// (claude-mem 15.2), in progress, to do, and no recent update after 6 quiet hours; work that
+    /// is all done is "Update recorded".
     #[test]
     fn each_status_comes_from_the_recorded_work_as_claude_mems_does() {
         let mut h = Home::new();
@@ -2950,7 +3036,7 @@ mod tests {
                 json!({"task": "t", "status": "done", "request_complete": true}),
             ),
             (
-                "ready",
+                "shipped",
                 json!({"task": "t", "status": "doing", "request_status": "shipped"}),
             ),
             ("working", json!({"task": "t", "status": "in progress"})),
@@ -2963,6 +3049,10 @@ mod tests {
             (
                 "working",
                 json!({"task": "t", "status": "todo", "request_status": "Running"}),
+            ),
+            (
+                "shipped",
+                json!({"task": "t", "status": "doing", "request_status": "delivered"}),
             ),
         ];
         for (i, (_, fields)) in cases.iter().enumerate() {
@@ -2978,6 +3068,9 @@ mod tests {
                 "{i}"
             );
         }
+        // P5: a ship recorded with no review is 100% on the card.
+        assert_eq!(by_id(&v, "c:claude:s4")["progress"]["percent"], 100);
+        assert_eq!(by_id(&v, "c:claude:s5")["progress"], Value::Null);
         let later = h.read(Range::All, h.t + QUIET_MS + 60_000);
         assert_eq!(by_id(&later, "c:claude:s5")["status"], "quiet");
         assert_eq!(by_id(&later, "c:claude:s2")["status"], "quiet");

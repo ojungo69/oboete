@@ -4171,6 +4171,35 @@ impl Raw {
 
     /// Each request raw holds with its step (D5: 1 registered, 2 its ops' bodies purged), oldest
     /// first.
+    /// Whether what a forget took may not be marked forgotten in knowledge.db yet, so the readers of
+    /// what was made from its records go by its tombstones (docs/my-work-model.md S5): a forget
+    /// before its rebuild (step 3; a finished job stays in `forget_jobs`, past it, and a restore
+    /// that brings its text back sets it back to step 2, `forget::owe_rebuild_again`), or a
+    /// forgotten record whose text a restore brought back with no job row (a restore from segments
+    /// alone: `record_jobs_holding`, which the next purge takes again).
+    pub(crate) fn forget_unrebuilt(&self) -> Result<bool> {
+        let unrebuilt: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM forget_jobs WHERE step < 3)",
+            [],
+            |r| r.get(0),
+        )?;
+        if unrebuilt {
+            return Ok(true);
+        }
+        let tables: bool = self.conn.query_row(
+            "SELECT COUNT(*) = 2 FROM sqlite_master
+             WHERE type = 'table' AND name IN ('denied_records', 'import_origins')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(tables
+            && self.conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {FORGOTTEN_RECORDS} WHERE r.type = 'event')"),
+                [],
+                |r| r.get(0),
+            )?)
+    }
+
     pub(crate) fn forget_jobs(&self) -> Result<Vec<(crate::forget::Request, i64)>> {
         let mut st = self
             .conn

@@ -90,15 +90,23 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 /// op seq: one shown a record of an excluded session or repository, or a summary or a card of one,
 /// and every op built on one (`read.ops`), followed in op order, as a forget follows them (S5). One
 /// built on a left-out op was shown its text, though its own records may miss the excluded
-/// conversation's (Codex on #669). Read once a round; nothing is left out while nothing is
-/// excluded.
+/// conversation's (Codex on #669). And while a forget is not finished, from its tombstone to its
+/// purge (spec 6.2's local purge, step 1, the backstop; S5): one shown a record it took that the op
+/// does not list as removed, or a summary or a card its reader leaves out for one (T7, K4), and
+/// every op built on one, so no review's or group's text made from a forgotten record is shown,
+/// nor sent as a previous review (Codex on #694). Read once a round; nothing is left out while
+/// nothing is excluded and no forget waits for its rebuild.
 pub(crate) fn hidden(
     raw: &crate::raw::Raw,
     k: &Connection,
     reading: &crate::curate::Reading,
 ) -> Result<std::collections::HashSet<(String, i64)>> {
     let mut hidden = std::collections::HashSet::new();
-    if (reading.excluded.is_empty() && reading.exclusions.is_empty())
+    // No session excluded, none of their records, summaries or cards to leave out, whatever the
+    // list holds: a pattern no recorded session matched, as the owner's from claude-mem. A forget
+    // past its rebuild marked what it took (S5), and the readers pass over what is marked.
+    let forgetting = raw.forget_unrebuilt()?;
+    if (reading.excluded.is_empty() && !forgetting)
         || !crate::consumer::manifest::exists(k, "table", "my_work")?
     {
         return Ok(hidden);
@@ -106,46 +114,101 @@ pub(crate) fn hidden(
     // The summaries and cards of an excluded session, judged by their session as their readers
     // show or keep them back (D13): a review left out for one a reader still shows would be due
     // again at once, call after call. A card of two sessions has none, and no reader shows it.
-    let sessions: Vec<&String> = reading.excluded.iter().collect();
-    let sessions = serde_json::to_string(&sessions)?;
     let mut excluded_ops = std::collections::HashSet::new();
-    for table in ["turns", "cards"] {
-        if !crate::consumer::manifest::exists(k, "table", table)? {
-            continue;
-        }
-        let mut st = k.prepare(&format!(
-            "SELECT DISTINCT device, op_seq FROM {table}
-             WHERE agent IS NOT NULL AND session IS NOT NULL
-               AND agent || char(0) || session IN (SELECT value FROM json_each(?1))"
-        ))?;
-        for op in st.query_map([&sessions], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
-            excluded_ops.insert(op?);
+    if !reading.excluded.is_empty() {
+        let sessions: Vec<&String> = reading.excluded.iter().collect();
+        let sessions = serde_json::to_string(&sessions)?;
+        for table in ["turns", "cards"] {
+            if !crate::consumer::manifest::exists(k, "table", table)? {
+                continue;
+            }
+            let mut st = k.prepare(&format!(
+                "SELECT DISTINCT device, op_seq FROM {table}
+                 WHERE agent IS NOT NULL AND session IS NOT NULL
+                   AND agent || char(0) || session IN (SELECT value FROM json_each(?1))"
+            ))?;
+            for op in st.query_map([&sessions], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
+                excluded_ops.insert(op?);
+            }
         }
     }
-    let mut st = k.prepare("SELECT device, op_seq, read FROM my_work ORDER BY device, op_seq")?;
-    let rows = st.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (device, op_seq, read) = row?;
-        let read: Read = serde_json::from_str(&read)?;
-        let left_out = |seq: &i64| {
-            let op = (device.clone(), *seq);
-            hidden.contains(&op) || excluded_ops.contains(&op)
-        };
-        let mut shown = !read.ops.iter().any(left_out);
+    // The summaries and cards a forget's tombstone leaves out, each looked up once.
+    let mut taken = std::collections::HashMap::new();
+    let mut st = k.prepare(
+        "SELECT device, op_seq, read, removed, forgotten IS NOT NULL FROM my_work
+         ORDER BY device, op_seq",
+    )?;
+    let mut rows = st.query([])?;
+    while let Some(r) = rows.next()? {
+        let (device, op_seq): (String, i64) = (r.get(0)?, r.get(1)?);
+        let read: Read = serde_json::from_str(&r.get::<_, String>(2)?)?;
+        // A forgotten op is the forget's already, as its readers take it.
+        let forget = forgetting && !r.get::<_, bool>(4)?;
+        let mut shown = true;
+        for &seq in &read.ops {
+            let op = (device.clone(), seq);
+            if hidden.contains(&op) || excluded_ops.contains(&op) {
+                shown = false;
+            } else if forget {
+                if !taken.contains_key(&op) {
+                    let at = (device.as_str(), seq);
+                    let t = derived_taken(k, raw, TURNS, at)? || derived_taken(k, raw, CARDS, at)?;
+                    taken.insert(op.clone(), t);
+                }
+                shown = shown && !taken[&op];
+            }
+        }
         for &span in &read.spans {
             shown = shown && !raw.holds_session(&device, span, &reading.excluded)?;
+        }
+        if shown && forget {
+            let listed: Vec<Removal> = serde_json::from_str(&r.get::<_, String>(3)?)?;
+            for &(a, b) in &read.spans {
+                if raw
+                    .removed_in(&device, a, b, None)?
+                    .iter()
+                    .any(|x| !listed.contains(x))
+                {
+                    shown = false;
+                }
+            }
         }
         if !shown {
             hidden.insert((device, op_seq));
         }
     }
     Ok(hidden)
+}
+
+/// A derived table as `derived_taken` reads it: its name, its reader's columns, and its reader's
+/// judge of a row.
+type Derived = (
+    &'static str,
+    &'static str,
+    fn(&rusqlite::Row, &crate::raw::Raw) -> Result<bool>,
+);
+const TURNS: Derived = ("turns", crate::turns::COLUMNS, crate::turns::taken_row);
+const CARDS: Derived = ("cards", crate::cards::COLUMNS, crate::cards::taken_row);
+
+/// Whether op `at`'s row in a derived table is one its reader leaves out now (T7, K4): an op built
+/// on it is left out with it (S5). False with no row (an op that is none of the table's).
+fn derived_taken(
+    k: &Connection,
+    raw: &crate::raw::Raw,
+    (table, columns, taken): Derived,
+    (device, op_seq): (&str, i64),
+) -> Result<bool> {
+    if !crate::consumer::manifest::exists(k, "table", table)? {
+        return Ok(false);
+    }
+    let mut st = k.prepare_cached(&format!(
+        "SELECT {columns} FROM {table} WHERE device = ?1 AND op_seq = ?2 LIMIT 1"
+    ))?;
+    let mut rows = st.query(params![device, op_seq])?;
+    match rows.next()? {
+        Some(r) => taken(r, raw),
+        None => Ok(false),
+    }
 }
 
 /// A kept op as a reader takes it: who wrote it, where, and its body.
@@ -174,11 +237,23 @@ pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Ke
 /// over those left out (`hidden`, S6) and, when `answered`, the skips and the forgotten ones.
 pub(crate) fn newest_shown(
     k: &Connection,
-    (job, about): (&str, &str),
+    about: (&str, &str),
     device: Option<&str>,
     hidden: &std::collections::HashSet<(String, i64)>,
     answered: bool,
 ) -> Result<Option<Kept>> {
+    Ok(shown(k, about, device, hidden, answered, 1)?.pop())
+}
+
+/// `newest_shown`'s `limit` newest, the newest first: a request's readings (P5).
+pub(crate) fn shown(
+    k: &Connection,
+    (job, about): (&str, &str),
+    device: Option<&str>,
+    hidden: &std::collections::HashSet<(String, i64)>,
+    answered: bool,
+    limit: usize,
+) -> Result<Vec<Kept>> {
     schema(k)?;
     let mut st = k.prepare(
         "SELECT device, op_seq, ts, entry, read, removed, fields, skipped, forgotten FROM my_work
@@ -187,12 +262,15 @@ pub(crate) fn newest_shown(
          ORDER BY ts DESC, device DESC, op_seq DESC",
     )?;
     let mut rows = st.query(params![job, about, device, answered])?;
-    while let Some(r) = rows.next()? {
+    let mut out = Vec::new();
+    while out.len() < limit
+        && let Some(r) = rows.next()?
+    {
         let (device, op_seq): (String, i64) = (r.get(0)?, r.get(1)?);
         if hidden.contains(&(device.clone(), op_seq)) {
             continue;
         }
-        return Ok(Some(Kept {
+        out.push(Kept {
             device,
             op_seq,
             op: MyWorkOp {
@@ -206,9 +284,9 @@ pub(crate) fn newest_shown(
                 skipped: r.get(7)?,
                 forgotten: r.get(8)?,
             },
-        }));
+        });
     }
-    Ok(None)
+    Ok(out)
 }
 
 #[cfg(test)]

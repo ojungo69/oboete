@@ -650,6 +650,68 @@ fn keep(answer: &Value, rules: &Rules, typed: &[String], marks: &Marks) -> BTree
     kept
 }
 
+/// A request's readings, its newest reviews: the two the pace is measured by (P5). claude-mem
+/// keeps 20, whose count its page shows only as reviewed or not.
+const READINGS: usize = 2;
+
+/// A review as a request's readings hold it (P5), as the page reads it.
+pub(crate) struct Reviewed {
+    /// When it was written, unix ms.
+    pub ts: i64,
+    pub percent: i64,
+    pub state: String,
+    /// Its shipped date, YYYY-MM-DD.
+    pub shipped: Option<String>,
+    pub narrative: Option<String>,
+    /// Each a date and a text, the oldest first.
+    pub milestones: Vec<(String, String)>,
+}
+
+/// P5: the readings of request `about`, this device's newest reviews of it, the newest first:
+/// none an exclusion leaves out (S6), a forget took (S5) or a skip.
+pub(crate) fn readings(
+    k: &rusqlite::Connection,
+    about: &str,
+    device: &str,
+    hidden: &Hidden,
+) -> Result<Vec<Reviewed>> {
+    let kept = crate::my_work_ops::shown(k, (NAME, about), Some(device), hidden, true, READINGS)?;
+    Ok((kept.into_iter())
+        .filter_map(|r| {
+            let f = &r.op.fields;
+            let text = |name: &str| f.get(name).and_then(Value::as_str).map(str::to_owned);
+            let mut milestones: Vec<(String, String)> = (f.get("milestones"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|m| Some((m["date"].as_str()?.into(), m["text"].as_str()?.into())))
+                .collect();
+            milestones.sort_by(|a, b| a.0.cmp(&b.0));
+            Some(Reviewed {
+                ts: r.op.ts,
+                percent: f.get("percent")?.as_i64()?,
+                state: text("state")?,
+                shipped: text("shipped"),
+                narrative: text("narrative"),
+                milestones,
+            })
+        })
+        .collect())
+}
+
+/// P5, claude-mem's `measuredEstimate`: when the last two `readings` (the newest first) rise
+/// below 100, the time the line through them reaches 100; none with one, or a flat or falling
+/// pace. Reviews are an hour apart at least (P2), so a pace is never one of minutes.
+pub(crate) fn estimate(readings: &[Reviewed]) -> Option<i64> {
+    let (last, before) = (readings.first()?, readings.get(1)?);
+    if last.percent <= before.percent || last.ts <= before.ts || last.percent >= 100 {
+        return None;
+    }
+    let left = (100 - last.percent) as f64;
+    let pace = (last.percent - before.percent) as f64 / (last.ts - before.ts) as f64;
+    Some(last.ts + (left / pace) as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,17 +891,62 @@ mod tests {
             .collect();
             let mut out = Vec::new();
             for about in abouts {
-                let mut hidden = HashSet::new();
-                while let Some(kept) =
-                    crate::my_work_ops::newest_shown(&k, (NAME, &about), None, &hidden, false)
-                        .unwrap()
-                {
-                    hidden.insert((kept.device.clone(), kept.op_seq));
-                    out.push(kept);
-                }
+                let all = crate::my_work_ops::shown(
+                    &k,
+                    (NAME, &about),
+                    None,
+                    &HashSet::new(),
+                    false,
+                    usize::MAX,
+                );
+                out.extend(all.unwrap());
             }
             out.sort_by_key(|k| std::cmp::Reverse((k.op.ts, k.op_seq)));
             out
+        }
+
+        /// A review of request `id` written `ago` minutes ago, its fields as the job keeps
+        /// `answer`'s.
+        fn reviewed(&mut self, id: &str, ago: i64, answer: Value) {
+            self.reviewed_with(id, ago, answer, &|_| ());
+        }
+
+        /// `reviewed`, the op as `edit` leaves it.
+        fn reviewed_with(
+            &mut self,
+            id: &str,
+            ago: i64,
+            answer: Value,
+            edit: &dyn Fn(&mut MyWorkOp),
+        ) {
+            let rules = Rules::load(self.s.home.path()).unwrap();
+            let mut op = MyWorkOp {
+                job: NAME.into(),
+                about: id.into(),
+                entry: "fake".into(),
+                ts: crate::db::now_ms() - ago * MINUTE,
+                read: Read::default(),
+                removed: vec![],
+                fields: keep(&answer, &rules, &[], &Marks::default()),
+                skipped: false,
+                forgotten: None,
+            };
+            edit(&mut op);
+            let op = serde_json::to_value(op).unwrap();
+            self.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        }
+
+        /// The one request of repository `R` My Work shows, as the page reads it.
+        fn page(&self) -> Value {
+            self.s.run();
+            let now = crate::db::now_ms();
+            let v = crate::my_work::read(self.s.home.path(), crate::my_work::Range::All, now);
+            let v = v.unwrap();
+            let of_r: Vec<&Value> = (v["requests"].as_array().unwrap().iter())
+                .filter(|r| r["repos"].as_array().unwrap().contains(&json!(R)))
+                .collect();
+            assert_eq!(of_r.len(), 1, "{v}");
+            of_r[0].clone()
         }
 
         /// The reviews as long ago as `minutes` more, as P2 counts them.
@@ -850,6 +957,17 @@ mod tests {
                 rusqlite::params![minutes * MINUTE, NAME],
             )
             .unwrap();
+        }
+    }
+
+    fn reading(ts: i64, percent: i64) -> Reviewed {
+        Reviewed {
+            ts,
+            percent,
+            state: "in-progress".into(),
+            shipped: None,
+            narrative: None,
+            milestones: Vec::new(),
         }
     }
 
@@ -1625,6 +1743,382 @@ mod tests {
             })
         };
         assert_eq!(at(day), at(day + 5 * MINUTE));
+    }
+
+    /// P5: a request's readings are this device's newest two reviews, the newest's percent and
+    /// the pace of the two; one a forget took is none.
+    #[test]
+    fn the_newest_two_reviews_are_the_readings() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        for (ago, percent) in [(180, 10), (120, 40), (60, 60)] {
+            h.reviewed(&id, ago, review("in-progress", percent, "", &[]));
+        }
+        h.reviewed_with(&id, 30, review("in-progress", 99, "", &[]), &|op| {
+            op.forgotten = Some("forget".into())
+        });
+        let p = &h.page()["progress"];
+        assert_eq!(p["percent"], 60, "{p}");
+        // 20 points an hour, 40 left: two hours on.
+        let (at, reviewed) = (p["estimate"].as_i64(), p["reviewed"].as_i64());
+        assert!(
+            (at.unwrap() - reviewed.unwrap() - 120 * MINUTE).abs() < MINUTE,
+            "{p}"
+        );
+    }
+
+    /// S6, S7: a review an exclusion hides is no reading, nor, in a copy of a store, one another
+    /// device wrote.
+    #[test]
+    fn a_hidden_or_another_devices_review_is_no_reading() {
+        const OTHER: &str = "github.com/o/other";
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let x = h.s.said("s9", OTHER, h.t + MINUTE, "Tune the build.");
+        h.reviewed_with(&id, 20, review("in-progress", 40, "", &[]), &|op| {
+            op.read.spans = vec![(x, x)]
+        });
+        assert_eq!(h.page()["progress"]["percent"], 40);
+        h.s.exclude(OTHER);
+        assert_eq!(h.page()["progress"], Value::Null);
+        h.reviewed(&id, 10, review("in-progress", 60, "", &[]));
+        let Home { s, t } = h;
+        let Store { home, raw } = s;
+        drop(raw);
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::copy(home.path().join("raw.db"), copy.path().join("raw.db")).unwrap();
+        let raw = crate::raw::open(copy.path()).unwrap();
+        let h = Home {
+            s: Store { home: copy, raw },
+            t,
+        };
+        assert_eq!(h.page()["progress"], Value::Null);
+    }
+
+    /// Spec 6.2 step 1, S5: from a forget's start to its purge, a review shown a record it took is no
+    /// reading, and no call is shown it as the previous review; one written after the forget, which
+    /// lists the removal, is a reading.
+    #[test]
+    fn a_review_a_forget_took_is_no_reading_before_its_purge() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        let x = h.said("s1", 10, "Keep the canary-4827 note.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let mut told = review("in-progress", 40, "", &[]);
+        told["narrative"] = json!("It keeps the canary-4827 note.");
+        h.reviewed_with(&id, 20, told, &|op| op.read.spans = vec![(x, x)]);
+        assert_eq!(h.page()["progress"]["percent"], 40);
+        let (path, device) = (h.s.home.path().to_owned(), h.s.raw.device().to_owned());
+        let target = crate::forget::Target::Record {
+            device: device.clone(),
+            seq: x,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        let r = h.page();
+        assert_eq!(
+            (&r["progress"], &r["story"]),
+            (&Value::Null, &Value::Null),
+            "{r}"
+        );
+        let ask = h.ask(&id).unwrap();
+        assert!(!ask.prompt.contains("canary-4827"), "{}", ask.prompt);
+        let listed = h.s.raw.removed_in(&device, x, x, None).unwrap();
+        h.reviewed_with(&id, 0, review("in-progress", 60, "", &[]), &|op| {
+            op.read.spans = vec![(x, x)];
+            op.removed = listed.clone();
+        });
+        assert_eq!(h.page()["progress"]["percent"], 60);
+    }
+
+    /// S5: before the purge, a review built on a summary or a card its reader leaves out for a
+    /// forgotten record (T7, K4) is no reading either, though the review's own records are not it.
+    #[test]
+    fn a_review_built_on_a_summary_or_a_card_a_forget_took_is_no_reading() {
+        for card in [false, true] {
+            let mut h = Home::new();
+            let a = h.said("s1", 0, "Build the parser.");
+            let r = h.reply("s1", 1);
+            let built: i64 = if card {
+                let c = json!([{"type": "feature", "title": "Parser", "narrative": "Built."}]);
+                let id = h.s.cards(a, r, c, false)[0].clone();
+                id.split('.').next().unwrap().parse().unwrap()
+            } else {
+                h.summarized("s1", (a, r), 1, "Built.")
+            };
+            h.grouped(&["s1"], &[a]);
+            let id = h.due()[0].0.clone();
+            h.reviewed_with(&id, 20, review("in-progress", 40, "", &[]), &|op| {
+                op.read.spans = vec![(a, a)];
+                op.read.ops = vec![built];
+            });
+            assert_eq!(h.page()["progress"]["percent"], 40, "card {card}");
+            let path = h.s.home.path().to_owned();
+            let target = crate::forget::Target::Record {
+                device: h.s.raw.device().to_owned(),
+                seq: r,
+            };
+            crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+            assert_eq!(h.page()["progress"], Value::Null, "card {card}");
+        }
+    }
+
+    /// S5: past a forget's rebuild, what it took is marked, and the walk is off again: an op shown
+    /// its record that is not marked, as none is once the rebuild has run, is no longer left out
+    /// (Codex on #694: a finished forget stays in `forget_jobs`).
+    #[test]
+    fn a_forget_past_its_rebuild_leaves_the_walk_off() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        let x = h.said("s1", 10, "Keep the note.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let path = h.s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: h.s.raw.device().to_owned(),
+            seq: x,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        // The purge has raw.db to itself, as `oboete forget` has it.
+        let Home { s, t } = h;
+        let Store { home, raw } = s;
+        drop(raw);
+        assert!(crate::forget::purge(home.path()).unwrap().is_some());
+        let raw = crate::raw::open(home.path()).unwrap();
+        assert!(!raw.forget_unrebuilt().unwrap());
+        let mut h = Home {
+            s: Store { home, raw },
+            t,
+        };
+        h.reviewed_with(&id, 0, review("in-progress", 40, "", &[]), &|op| {
+            op.read.spans = vec![(x, x)]
+        });
+        assert_eq!(h.page()["progress"]["percent"], 40);
+    }
+
+    /// S5: before the purge, a grouping op shown a record a forget took decides nothing, so its
+    /// title is not shown.
+    #[test]
+    fn a_group_a_forget_took_decides_nothing_before_its_purge() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        let b = h.said("s2", 10, "Add the canary-4827 tests.");
+        h.grouped(&["s1", "s2"], &[a, b]);
+        assert_eq!(h.page()["title"], "The parser");
+        let path = h.s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: h.s.raw.device().to_owned(),
+            seq: b,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        let r = h.page();
+        assert_ne!(r["title"], "The parser", "{r}");
+    }
+
+    /// P5, claude-mem's `measuredEstimate`: the line through the last two readings when they rise
+    /// below 100; none with one reading, a flat or falling pace, or at 100.
+    #[test]
+    fn the_estimate_needs_two_rising_readings_below_100() {
+        let hour = 60 * MINUTE;
+        assert_eq!(estimate(&[reading(hour, 50)]), None);
+        let rising = [reading(2 * hour, 60), reading(hour, 50)];
+        assert_eq!(estimate(&rising), Some(6 * hour));
+        for flat in [
+            [reading(2 * hour, 50), reading(hour, 50)],
+            [reading(2 * hour, 40), reading(hour, 50)],
+            [reading(2 * hour, 100), reading(hour, 50)],
+            [reading(hour, 60), reading(hour, 50)],
+        ] {
+            assert_eq!(estimate(&flat), None);
+        }
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        h.reviewed(&id, 120, review("in-progress", 40, "", &[]));
+        h.reviewed(&id, 60, review("in-progress", 70, "", &[]));
+        let p = &h.page()["progress"];
+        let (at, reviewed) = (
+            p["estimate"].as_i64().unwrap(),
+            p["reviewed"].as_i64().unwrap(),
+        );
+        // 30 points an hour, 30 left: an hour on, but for the moments between the two writes.
+        assert!((at - reviewed - 60 * MINUTE).abs() < MINUTE, "{p}");
+    }
+
+    /// P5: a review no status was recorded after makes shipped `shipped`, with its date, and 100%
+    /// ready; a status recorded after it wins, and then its percent shows only below 100.
+    #[test]
+    fn a_status_recorded_after_the_review_wins() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.wrote("s1", "parser", json!({"task": "parse", "status": "doing"}));
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        assert_eq!(h.page()["status"], "working");
+        h.reviewed(&id, 30, review("in-progress", 100, "", &[]));
+        assert_eq!(h.page()["status"], "ready");
+        h.reviewed(&id, 20, review("shipped", 100, "2026-10-20", &[]));
+        let r = h.page();
+        assert_eq!(
+            (&r["status"], &r["progress"]["completed"]),
+            (&json!("shipped"), &json!("2026-10-20"))
+        );
+        h.wrote("s1", "parser", json!({"request_status": "doing"}));
+        let r = h.page();
+        assert_eq!(
+            (&r["status"], &r["progress"], &r["story"]),
+            (&json!("working"), &Value::Null, &Value::Null),
+            "{r}"
+        );
+        h.reviewed(&id, 10, review("in-progress", 80, "", &[]));
+        let r = h.page();
+        assert_eq!(
+            (&r["status"], &r["progress"]["percent"]),
+            (&json!("working"), &json!(80)),
+            "{r}"
+        );
+    }
+
+    /// P5: a review at 100% makes ready a request to do, of no known state or quiet, as one in
+    /// progress (claude-mem's `normalizeRequestStatus`).
+    #[test]
+    fn a_review_at_100_makes_a_quiet_todo_or_unknown_request_ready() {
+        for (status, planned, at) in [
+            ("todo", true, 0),
+            ("unknown", false, 0),
+            ("quiet", false, -600),
+        ] {
+            let mut h = Home::new();
+            let a = h.said("s1", at, "Build the parser.");
+            if planned {
+                h.wrote(
+                    "s1",
+                    "parser",
+                    json!({"task": "parse", "status": "planned"}),
+                );
+            }
+            h.grouped(&["s1"], &[a]);
+            let id = h.due()[0].0.clone();
+            assert_eq!(h.page()["status"], status);
+            h.reviewed(&id, 0, review("in-progress", 100, "", &[]));
+            assert_eq!(h.page()["status"], "ready", "{status}");
+        }
+    }
+
+    /// P5: a ship recorded after the reviews shows 100 and the day it was recorded, with no
+    /// estimate, whatever review comes after it.
+    #[test]
+    fn a_recorded_ship_shows_100_and_its_day() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        h.reviewed(&id, 60, review("in-progress", 40, "", &[]));
+        h.reviewed(&id, 30, review("in-progress", 60, "", &[]));
+        h.wrote(
+            "s1",
+            "parser",
+            json!({"task": "parse", "request_status": "shipped"}),
+        );
+        let today = crate::db::utc(crate::db::now_ms())[..10].to_owned();
+        let r = h.page();
+        let p = &r["progress"];
+        assert_eq!(r["status"], "shipped");
+        assert_eq!(
+            (&p["percent"], &p["completed"], &p["estimate"]),
+            (&json!(100), &json!(today), &Value::Null),
+            "{p}"
+        );
+        // A later review counts, and the recorded ship's day stays, a shipped one's date too
+        // (claude-mem's `completedAtEpoch` first).
+        h.reviewed(&id, 0, review("in-progress", 80, "", &[]));
+        let r = h.page();
+        assert_eq!(
+            (&r["status"], &r["progress"]["completed"]),
+            (&json!("shipped"), &json!(today)),
+            "{r}"
+        );
+        h.reviewed(&id, 0, review("shipped", 100, "2026-10-20", &[]));
+        assert_eq!(h.page()["progress"]["completed"], json!(today));
+    }
+
+    /// The build story is gated as the page reads it: a rule added after the review masks its
+    /// narrative and milestones before any rescan.
+    #[test]
+    fn the_build_story_is_gated_as_it_is_read() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let mut told = review("in-progress", 50, "", &[]);
+        told["narrative"] = json!("It signs in with code=123456 first.");
+        told["milestones"] = json!([{"date": "2026-10-02", "text": "code=654321 works."}]);
+        h.reviewed(&id, 10, told);
+        assert!(h.page()["story"].to_string().contains("123456"));
+        let rule = "[redaction]\nextra_rules = [{ id = \"r\", regex = 'code=([0-9]{6})', secret_group = 1 }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let now = crate::db::now_ms();
+        let v = crate::my_work::read(h.s.home.path(), crate::my_work::Range::All, now).unwrap();
+        let story = v["requests"][0]["story"].to_string();
+        assert!(
+            story.contains("signs in") && !story.contains("123456") && !story.contains("654321"),
+            "{story}"
+        );
+    }
+
+    /// C7, P5: a review is no part of the version a check is of, so a new one undoes no check.
+    #[test]
+    fn a_new_review_does_not_undo_a_check() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let home = h.s.home.path().to_owned();
+        h.s.run();
+        let now = crate::db::now_ms();
+        let (v, held) = crate::my_work::reviewing(&home, now).unwrap();
+        let version = v["requests"][0]["version"].clone();
+        let lock = crate::my_work::reviews_lock(&home).unwrap();
+        let filed = (&held[0], &held[..]);
+        crate::my_work::set_review((&home, &lock), filed, version.as_str().unwrap(), true, now)
+            .unwrap();
+        drop(lock);
+        h.reviewed(&id, 0, review("in-progress", 100, "", &[]));
+        let r = h.page();
+        assert_eq!(r["version"], version);
+        assert!(r["checked"].is_i64(), "{r}");
+    }
+
+    /// P5: the build story is the narrative and the milestones, the oldest first, of the review the
+    /// progress shows; a review with neither has none.
+    #[test]
+    fn the_build_story_is_the_reviews_narrative_and_milestones() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let mut told = review("in-progress", 50, "", &[]);
+        told["milestones"] = json!([
+            {"date": "2026-10-05", "text": "Tests pass."},
+            {"date": "2026-10-02", "text": "The parser reads a line."}
+        ]);
+        h.reviewed(&id, 10, told);
+        let story = &h.page()["story"];
+        assert_eq!(story["narrative"], "The parser came first, then its tests.");
+        let dates: Vec<&str> = (story["milestones"].as_array().unwrap().iter())
+            .map(|m| m["date"].as_str().unwrap())
+            .collect();
+        assert_eq!(dates, ["2026-10-02", "2026-10-05"]);
+        let mut bare = review("in-progress", 60, "", &[]);
+        bare["narrative"] = json!("");
+        bare["milestones"] = json!([]);
+        h.reviewed(&id, 5, bare);
+        assert_eq!(h.page()["story"], Value::Null);
     }
 
     /// A4: the fixed instructions stay under their share of an 8,000-token request.
