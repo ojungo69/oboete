@@ -1686,14 +1686,15 @@ mod tests {
 
     /// #692: a call that starts another agent and waits for it is recorded at its end, after that
     /// agent's opening ask. Its start is the time compared: begun before the ask, it sent it, and
-    /// its record is in the op's read spans; begun after it, or with no start, it sent nothing.
+    /// its record is in the op's read spans; begun after it, or with no start, it sent nothing. A
+    /// call that ran over a day is compared at its end (#709).
     #[test]
     fn a_waiting_call_that_began_before_the_ask_sent_it() {
         let delegated = format!(
             "Review the parser change in src/parse.rs and report each finding with its line. {}",
             "Check the error paths, the tables kept between runs and the tests. ".repeat(3)
         );
-        let sent = |begun: Option<i64>| {
+        let sent = |begun: Option<i64>, ended: i64| {
             let mut h = Home::new();
             h.said("s1", R, 0, "Build the parser.");
             h.said("s2", R, 2, &delegated);
@@ -1702,7 +1703,7 @@ mod tests {
             if let Some(ms) = begun {
                 call["started"] = json!(h.t + ms);
             }
-            let tool = h.s.event("tool", "s1", (R, "main"), h.t + 3 * MINUTE, call);
+            let tool = h.s.event("tool", "s1", (R, "main"), h.t + ended, call);
             let ask = h.ask(&Summary::default(), R).unwrap();
             let at = ask.prompt.find("## Proven links").unwrap();
             let linked = ask.prompt[at..].contains("- C1 sent C2's opening ask in a tool call\n");
@@ -1713,9 +1714,12 @@ mod tests {
             );
             linked
         };
-        assert!(sent(Some(MINUTE)));
-        assert!(!sent(Some(2 * MINUTE + 1_000)));
-        assert!(!sent(None));
+        assert!(sent(Some(MINUTE), 3 * MINUTE));
+        assert!(!sent(Some(2 * MINUTE + 1_000), 3 * MINUTE));
+        assert!(!sent(None, 3 * MINUTE));
+        let day = crate::typed::LONGEST_CALL_MS;
+        assert!(sent(Some(62 * MINUTE - day), 62 * MINUTE));
+        assert!(!sent(Some(2 * MINUTE - 2 * day), 62 * MINUTE));
     }
 
     /// A8, C5: a repository every entry fails is kept as a skip after three attempts, and is not
