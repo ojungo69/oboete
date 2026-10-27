@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::config::Summary;
 use crate::curate::Phase;
@@ -490,6 +490,58 @@ pub(crate) fn doctor_line(home: &std::path::Path, cfg: &crate::config::Config) -
         "my work: {state} ([my_work] curate); calls a day with it on: about {}, at most {}{usd}",
         e.calls.0, e.calls.1
     )
+}
+
+/// V1: the status line of a page that shows `jobs`' ops, read with no call from config.toml,
+/// providers.db and knowledge.db: off, or on and waiting for summaries; waiting at the daily
+/// bound (A7), or for a request of one of the jobs that is held (A8), by its hold (a budget,
+/// every entry resting, the owner); else when the newest answered op of the jobs that this device
+/// wrote and S6 shows was written, if one was.
+pub(crate) fn status(home: &std::path::Path, jobs: &[&str], now: i64) -> Result<Value> {
+    let cfg = crate::config::load(home)?;
+    if !cfg.my_work.curate {
+        return Ok(json!({"state": "off"}));
+    }
+    if !cfg.summary.curate {
+        return Ok(json!({"state": "summaries_off"}));
+    }
+    if let Some(db) = crate::providers_db::read_only(home)? {
+        // A ledger older than My Work holds nothing it waits on, as the page's other ledger reads
+        // take it (#680).
+        let (calls, oldest) = crate::providers_db::my_work_calls_in_a_day(&db).unwrap_or((0, None));
+        if calls >= cfg.my_work.calls_a_day {
+            return Ok(json!({"state": "waiting", "why": "bound",
+                "until": oldest.map(|t| t + DAY_MS), "calls_a_day": cfg.my_work.calls_a_day}));
+        }
+        let held = (crate::providers_db::my_work_pending_all(&db).unwrap_or_default())
+            .into_iter()
+            .filter(|p| p.next_attempt_at > now)
+            .filter(|p| jobs.iter().any(|j| p.key.split(' ').next() == Some(j)))
+            .min_by_key(|p| p.next_attempt_at);
+        if let Some(p) = held {
+            let why = match p.hold.as_str() {
+                "budget" => "budget",
+                "owner" => "owner",
+                _ => "resting",
+            };
+            return Ok(json!({"state": "waiting", "why": why, "until": p.next_attempt_at}));
+        }
+    }
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(json!({"state": "none"}));
+    };
+    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+    let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
+    let mut written = None;
+    for job in jobs {
+        let newest =
+            crate::my_work_ops::shown(&k, (job, None), Some(raw.device()), &hidden, true, 1)?;
+        written = written.max(newest.first().map(|o| o.op.ts));
+    }
+    Ok(match written {
+        Some(at) => json!({"state": "written", "at": at}),
+        None => json!({"state": "none"}),
+    })
 }
 
 /// A job every entry failed `ATTEMPTS` times is kept as a skip of what it read, and not asked
@@ -1127,5 +1179,102 @@ mod tests {
         }
         let line = doctor(window);
         assert!(line.contains("at most USD 1.90"), "{line}");
+    }
+
+    /// V1: the status line says off, on and waiting for summaries, waiting at the daily bound or
+    /// for a held request of the page's own jobs, or when they last wrote, with no call.
+    #[test]
+    fn the_status_line_says_off_waiting_or_written_with_no_call() {
+        let s = Store::new();
+        let p = s.home.path();
+        let status = |jobs: &[&str]| status(p, jobs, crate::db::now_ms()).unwrap();
+        let config = |text: &str| std::fs::write(p.join("config.toml"), text).unwrap();
+        assert_eq!(status(&["goals"]), json!({"state": "off"}));
+        config("[my_work]\ncurate = true\n");
+        assert_eq!(status(&["goals"]), json!({"state": "summaries_off"}));
+        config("[summary]\ncurate = true\n[my_work]\ncurate = true\ncalls_a_day = 2\n");
+        assert_eq!(status(&["goals"]), json!({"state": "none"}));
+        let op = MyWorkOp {
+            job: "goals".into(),
+            about: "2026-10-27".into(),
+            entry: "fake".into(),
+            ts: 1_000,
+            read: Read::default(),
+            removed: vec![],
+            fields: BTreeMap::new(),
+            skipped: false,
+            forgotten: None,
+        };
+        let mut raw = crate::raw::open(p).unwrap();
+        raw.append_ops(&[(OpKind::MyWork, serde_json::to_value(&op).unwrap())])
+            .unwrap();
+        s.run();
+        assert_eq!(status(&["goals"]), json!({"state": "written", "at": 1_000}));
+        assert_eq!(status(&["group", "review"]), json!({"state": "none"}));
+        let review = MyWorkOp {
+            job: "review".into(),
+            about: "r1".into(),
+            ts: 2_000,
+            ..op
+        };
+        raw.append_ops(&[(OpKind::MyWork, serde_json::to_value(review).unwrap())])
+            .unwrap();
+        s.run();
+        // The newest of the page's jobs, in whatever order they are named.
+        for jobs in [["goals", "review"], ["review", "goals"]] {
+            assert_eq!(status(&jobs), json!({"state": "written", "at": 2_000}));
+        }
+        let db = crate::providers_db::open(p).unwrap();
+        let later = crate::db::now_ms() + 60_000;
+        let held = crate::providers_db::MyWorkPending {
+            key: "goals 2026-10-27".into(),
+            prompt: "sha".into(),
+            reason: "every entry failed".into(),
+            hold: "budget".into(),
+            attempts: 1,
+            next_attempt_at: later,
+        };
+        crate::providers_db::set_my_work_pending(&db, &held).unwrap();
+        let waiting = json!({"state": "waiting", "why": "budget", "until": later});
+        assert_eq!(status(&["goals"]), waiting);
+        for (hold, why) in [("time", "resting"), ("owner", "owner")] {
+            let other = crate::providers_db::MyWorkPending {
+                hold: hold.into(),
+                ..held.clone()
+            };
+            crate::providers_db::set_my_work_pending(&db, &other).unwrap();
+            assert_eq!(status(&["goals"])["why"], why, "{hold}");
+        }
+        // Another page's job is not held, and a time passed holds nothing.
+        let review = json!({"state": "written", "at": 2_000});
+        assert_eq!(status(&["group", "review"]), review);
+        let past = crate::providers_db::MyWorkPending {
+            next_attempt_at: crate::db::now_ms() - 60_000,
+            ..held
+        };
+        crate::providers_db::set_my_work_pending(&db, &past).unwrap();
+        assert_eq!(status(&["goals"]), json!({"state": "written", "at": 1_000}));
+        for _ in 0..2 {
+            let call = crate::providers_db::Call {
+                provider: "fake",
+                role: "my_work",
+                span: "group r1",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 0,
+                est_tokens: None,
+                usage: crate::providers_db::Usage::default(),
+                usd: None,
+            };
+            crate::providers_db::record(&db, &call).unwrap();
+        }
+        let bound = status(&["goals"]);
+        assert_eq!(
+            (bound["state"].as_str(), bound["why"].as_str()),
+            (Some("waiting"), Some("bound"))
+        );
+        assert_eq!(bound["calls_a_day"], 2);
+        assert!(bound["until"].as_i64().unwrap() > crate::db::now_ms());
     }
 }

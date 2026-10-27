@@ -969,6 +969,25 @@ pub struct MyWorkPending {
     pub next_attempt_at: i64,
 }
 
+/// Every held My Work request (A8), for the pages' status line (docs/my-work-model.md V1).
+pub fn my_work_pending_all(conn: &Connection) -> Result<Vec<MyWorkPending>> {
+    let mut st = conn.prepare(
+        "SELECT key, prompt, reason, hold, attempts, next_attempt_at FROM my_work_pending
+         ORDER BY key",
+    )?;
+    let rows = st.query_map([], |r| {
+        Ok(MyWorkPending {
+            key: r.get(0)?,
+            prompt: r.get(1)?,
+            reason: r.get(2)?,
+            hold: r.get(3)?,
+            attempts: r.get(4)?,
+            next_attempt_at: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn my_work_pending_of(conn: &Connection, key: &str) -> Result<Option<MyWorkPending>> {
     Ok(conn
         .query_row(

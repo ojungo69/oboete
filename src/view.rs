@@ -2029,6 +2029,24 @@ impl Viewer {
                 Some(range) => crate::my_work::read(&self.home, range, crate::db::now_ms())?,
                 None => return Ok(bad("range")),
             },
+            // V1 (docs/my-work-model.md): My Work's status line, a route of its own so that the
+            // requests' answer stays as the page's held updates compare it.
+            "my-work/status" => {
+                let jobs: Vec<&str> = (crate::my_work_run::jobs().iter())
+                    .map(|j| j.name())
+                    .filter(|&n| n != crate::my_work_goals::NAME)
+                    .collect();
+                crate::my_work_run::status(&self.home, &jobs, crate::db::now_ms())?
+            }
+            // V2: the owner's goals, as claude-mem's My Goals shows them, with the goals job's
+            // status line (V1).
+            "my-goals" => {
+                let now = crate::db::now_ms();
+                let mut answer = crate::my_work_goals::page(&self.home, now)?;
+                let goals = [crate::my_work_goals::NAME];
+                answer["status"] = crate::my_work_run::status(&self.home, &goals, now)?;
+                answer
+            }
             // Slice 4 (docs/my-work.md): what one request produced, read when its page opens, by
             // the id the page has, as a check names it (`my_work_review`).
             "my-work/product" => {
@@ -4587,6 +4605,23 @@ curate = false
         }
         let year = v.route("GET", "/api/my-work?range=year", &[HOST, TOKEN]);
         assert_eq!(year.status, 400);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// V1, V2: the My Goals route and My Work's status route take the token; over an empty home
+    /// they answer no goals and the status line "off".
+    #[test]
+    fn the_my_goals_and_status_routes_take_the_token() {
+        let (dir, v) = viewer("my-goals");
+        for target in ["/api/my-goals", "/api/my-work/status"] {
+            assert_eq!(v.route("GET", target, &[HOST]).status, 401, "{target}");
+        }
+        let goals = get(&v, "/api/my-goals");
+        assert!(goals["current"].is_null(), "{goals}");
+        assert_eq!(goals["months"], json!([]));
+        assert_eq!(goals["window"], json!({"days": 31, "prompts": 0}));
+        assert_eq!(goals["status"], json!({"state": "off"}));
+        assert_eq!(get(&v, "/api/my-work/status"), json!({"state": "off"}));
         std::fs::remove_dir_all(&dir).ok();
     }
 
