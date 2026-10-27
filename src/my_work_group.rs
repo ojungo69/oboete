@@ -356,15 +356,23 @@ pub(crate) fn agent_written(raw: &Raw, given: &[AskRef]) -> Result<(HashSet<i64>
                 let crate::raw::Item::Event(e) = &r.item else {
                     continue;
                 };
-                if e.ts < from || e.ts > through {
+                // A tool's record after the last ask may be of a call that began before it (#692).
+                let late = e.ts > through;
+                if e.ts < from
+                    || late && (e.kind != "tool" || e.ts > through + crate::typed::LONGEST_CALL_MS)
+                {
                     continue;
                 }
                 let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
+                let at = crate::typed::written_at(&e.kind, &body, e.ts);
+                if at < from || at > through {
+                    continue;
+                }
                 match crate::typed::agent_text(&e.kind, &body) {
                     Some(text) if e.kind == "tool" => {
-                        index.add_from(e.ts, &text, &(e.agent.clone(), e.session.clone()), r.seq);
+                        index.add_from(at, &text, &(e.agent.clone(), e.session.clone()), r.seq);
                     }
-                    Some(text) => index.add(e.ts, &text),
+                    Some(text) => index.add(at, &text),
                     None => {}
                 }
             }
@@ -1674,6 +1682,40 @@ mod tests {
             grouped.is_some_and(|b| b["forgotten"].is_string()),
             "{bodies:?}"
         );
+    }
+
+    /// #692: a call that starts another agent and waits for it is recorded at its end, after that
+    /// agent's opening ask. Its start is the time compared: begun before the ask, it sent it, and
+    /// its record is in the op's read spans; begun after it, or with no start, it sent nothing.
+    #[test]
+    fn a_waiting_call_that_began_before_the_ask_sent_it() {
+        let delegated = format!(
+            "Review the parser change in src/parse.rs and report each finding with its line. {}",
+            "Check the error paths, the tables kept between runs and the tests. ".repeat(3)
+        );
+        let sent = |begun: Option<i64>| {
+            let mut h = Home::new();
+            h.said("s1", R, 0, "Build the parser.");
+            h.said("s2", R, 2, &delegated);
+            let input = json!({"command": format!("codex exec '{delegated}'")}).to_string();
+            let mut call = json!({"tool": "Bash", "input": input, "output": "ok", "failed": false});
+            if let Some(ms) = begun {
+                call["started"] = json!(h.t + ms);
+            }
+            let tool = h.s.event("tool", "s1", (R, "main"), h.t + 3 * MINUTE, call);
+            let ask = h.ask(&Summary::default(), R).unwrap();
+            let at = ask.prompt.find("## Proven links").unwrap();
+            let linked = ask.prompt[at..].contains("- C1 sent C2's opening ask in a tool call\n");
+            assert!(
+                !linked || ask.read.spans.contains(&(tool, tool)),
+                "{:?}",
+                ask.read
+            );
+            linked
+        };
+        assert!(sent(Some(MINUTE)));
+        assert!(!sent(Some(2 * MINUTE + 1_000)));
+        assert!(!sent(None));
     }
 
     /// A8, C5: a repository every entry fails is kept as a skip after three attempts, and is not

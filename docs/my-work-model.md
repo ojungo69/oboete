@@ -1043,6 +1043,13 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   conversation as the ask's sender (`typed::AgentText::sender`): the one, other than the ask's
   own, that held it last before the ask in the lookback. A reply names none: it may only print a
   prompt for the person to send. Which asks are labelled `[agent prompt]` (O4) is as before.
+- **A call that waits** (#692): a call that starts another agent and waits for it, such as
+  `codex exec '<ask>'`, is recorded when it ends, after that agent's opening ask. So a tool's
+  input is compared at its call's start (`typed::written_at`), in O3 as in C3. The hook keeps a
+  shell call's start at its PreToolUse (Claude Code's and Codex's `Bash`, Grok's
+  `run_terminal_command`), under the call's id, and puts it in the call's record as `started`;
+  an imported call's start is its call's line time, which leaves the line's identity as it was. A
+  tool's record after a batch's last ask is read for its start up to a day after that ask.
 - **The link**: a conversation to decide whose sender is decided in the same batch is linked to
   it; a sender that belongs to an open request links that request, which is then shown with the
   requests other proven links name (A4). The line keeps the direction: `- C1 sent C2's opening ask
@@ -1050,7 +1057,8 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   to the room and ordered as the work-list links are (#677, #686), and the instructions name an ask
   one sent the other among a link's evidence.
 - **Not covered**: an ask shorter than O3's floor (160 normalized characters, or one that opens in
-  lowercase) has no fingerprint, so no sender, marked or not. The sender is the older of the two,
+  lowercase) has no fingerprint, so no sender, marked or not. A call whose PreToolUse gives no call
+  id, or that ran over a day, is compared at its end, so it sends nothing it started. The sender is the older of the two,
   so it is decided first or in the same batch; one decided before as ignored, or in no open
   request, gives no link.
 - **#689** (with this slice): a work item that waited for its group's request (#686) takes its
@@ -1119,8 +1127,8 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   0.2 s; one call's prompt 1,240 to 3,216 estimated tokens, read in 1.1 to 6.8 s, most of it the
   agent text scan; a peak of 80 MB.
 - **#692 (2)**, with this slice: the tool record that proves a delegation is in the grouping op's
-  read spans, so a forget of it takes the op. **#692 (1)**, a blocking call's start time, stays
-  open: the capture does not keep a call's start.
+  read spans, so a forget of it takes the op. **#692 (1)**, a blocking call's start time, came
+  later: slice 3c's "A call that waits".
 - **Then**: slice 4b, the readings, the card's percent and estimate, shipped and ready, and the
   build story on the request's page.
 

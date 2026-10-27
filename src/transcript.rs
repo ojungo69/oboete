@@ -241,11 +241,13 @@ impl Emitter {
         let Some(i) = self.pending.iter().position(|p| p.0 == id) else {
             return Ok(());
         };
-        let (_, name, mut input, _, agent_id, _) = self.pending.remove(i);
+        let (_, name, mut input, started, agent_id, _) = self.pending.remove(i);
         if let Some(a) = answers {
             input["answers"] = a.clone();
         }
-        let mut p = json!({"tool_name": name, "tool_input": input});
+        // When the call began, as its line's time (#692): the import reads it as it reads a line's.
+        let mut p =
+            json!({"tool_name": name, "tool_input": input, crate::capture::STARTED: started});
         if let Some(a) = agent_id {
             p["agent_id"] = json!(a);
         }
@@ -1230,7 +1232,7 @@ fn import_files(
             let mut occurrences = HashMap::<String, u64>::new();
             let mut batch = Vec::<(Captured, raw::ImportIdentity)>::new();
             let mut bytes = 0;
-            for (line, event_hash) in lines.into_iter().zip(&fingerprints) {
+            for (mut line, event_hash) in lines.into_iter().zip(&fingerprints) {
                 let occurrence = occurrences.entry(event_hash.clone()).or_default();
                 let identity = format!("{event_hash}:{occurrence}");
                 *occurrence += 1;
@@ -1243,6 +1245,13 @@ fn import_files(
                 let fingerprint = Some(format!("{:x}", prefix.clone().finalize()));
                 let ts = crate::replay::fixture_ms(&clock, &json!(line.ts))
                     .context("a transcript event has no valid timestamp")?;
+                // A call's start, as the record keeps a time (#692); none when it does not read.
+                if let Some(fields) = line.payload.as_object_mut()
+                    && let Some(start) = fields.remove(capture::STARTED)
+                    && let Some(ms) = crate::replay::fixture_ms(&clock, &start)
+                {
+                    fields.insert(capture::STARTED.into(), json!(ms));
+                }
                 if earliest.is_some_and(|cut| ts >= cut) {
                     stats.cut += 1;
                     checkpoint.through = through;
@@ -1325,13 +1334,14 @@ fn import_files(
 
 fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
     // A copied transcript keeps its event contents; its file path is not its identity. Nor are the
-    // marks read from a Claude Code line (O2): a transcript imported before they were read keeps
-    // its checkpoint and its records' identities (Codex on #659). A Codex rollout's mark (#273)
-    // was always part of them.
+    // marks read from a Claude Code line (O2), nor a call's start (#692): a transcript imported
+    // before they were read keeps its checkpoint and its records' identities (Codex on #659). A
+    // Codex rollout's mark (#273) was always part of them.
     let mut payload = line.payload.clone();
     if let Some(fields) = payload.as_object_mut() {
         fields.remove("transcript_path");
         fields.remove(crate::capture::ENTRYPOINT);
+        fields.remove(crate::capture::STARTED);
         if line.agent == "claude" {
             fields.remove(crate::capture::AGENT_SENT);
         }
@@ -2064,6 +2074,24 @@ mod tests {
             0
         );
         assert_eq!(records(&home), got);
+    }
+
+    /// #692: an imported call's record is at its result's time, and keeps its call's time as its
+    /// start, a second before in the fixture.
+    #[test]
+    fn an_imported_call_keeps_its_calls_time_as_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        std::fs::create_dir(&root).unwrap();
+        let fixture = std::fs::read_to_string(CODEX).unwrap();
+        let first_call = fixture.lines().take(6).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(root.join("rollout-call.jsonl"), first_call).unwrap();
+        let home = dir.path().join("home");
+        import(&home, &[("codex", root.as_path())], true, &mut Vec::new()).unwrap();
+        let got = records(&home);
+        let tool = got.iter().find(|e| e.kind == "tool").unwrap();
+        let body: Value = serde_json::from_str(&tool.body).unwrap();
+        assert_eq!(body["started"], tool.ts - 1_000, "{body}");
     }
 
     #[test]
@@ -2966,7 +2994,19 @@ mod tests {
         );
         let mut codex = before.clone();
         codex[crate::capture::AGENT_SENT] = json!(true);
-        assert_ne!(hash(&line("codex", codex)), hash(&line("codex", before)));
+        assert_ne!(
+            hash(&line("codex", codex)),
+            hash(&line("codex", before.clone()))
+        );
+        // Nor does a call's start (#692), whatever the agent.
+        for agent in ["claude", "codex"] {
+            let mut started = before.clone();
+            started[crate::capture::STARTED] = json!("2026-09-02T00:00:00.500Z");
+            assert_eq!(
+                hash(&line(agent, started)),
+                hash(&line(agent, before.clone()))
+            );
+        }
     }
 
     #[test]
