@@ -14,6 +14,8 @@ pub(crate) struct Provenance<'a> {
     pub(crate) holds: bool,
     /// Its own span of its device's records, by seq: a window's, a turn's, a migration's.
     pub(crate) own: Option<(i64, i64)>,
+    /// That span's end alone, which a restore's cut reads with or without its start (#690).
+    pub(crate) end: Option<i64>,
     /// The other spans of its device's records it read: a turn's (whose cards it read too), a My
     /// Work op's.
     pub(crate) read: Vec<(i64, i64)>,
@@ -34,6 +36,16 @@ impl Provenance<'_> {
     pub(crate) fn taken_by(&self) -> Option<&str> {
         self.forgotten.and_then(Value::as_str)
     }
+
+    /// The highest seq of `device`'s records it names, `device` being its own: its span's end, the
+    /// spans it read, its goals and its quotes of that device. A restore's cut reads it (F1).
+    pub(crate) fn top(&self, device: &str) -> Option<i64> {
+        (self.end.into_iter())
+            .chain(self.read.iter().map(|r| r.1))
+            .chain(self.goals.iter().copied())
+            .chain((self.quotes.iter()).filter(|q| q.0 == device).map(|q| q.1))
+            .max()
+    }
 }
 
 /// The kinds whose body holds text made from what they read: a forget judges each by it, and
@@ -49,6 +61,7 @@ pub(crate) fn of(kind: OpKind, body: &Value) -> Provenance<'_> {
             forgotten,
             holds: body["outcome"] == "curated",
             own: span(&body["from_seq"], &body["to_seq"]),
+            end: body["to_seq"].as_i64(),
             goals: seqs(&body["goals"]),
             uids: (items(&body["candidates"]).iter())
                 .chain(items(&body["carried"]))
@@ -61,6 +74,7 @@ pub(crate) fn of(kind: OpKind, body: &Value) -> Provenance<'_> {
             forgotten,
             holds: true,
             own: span(&body["from"], &body["through"]),
+            end: body["through"].as_i64(),
             read: pairs(&body["read"]),
             goals: seqs(&body["goals"]),
             removed,
@@ -76,6 +90,7 @@ pub(crate) fn of(kind: OpKind, body: &Value) -> Provenance<'_> {
         },
         OpKind::Migration => Provenance {
             own: span(&body["from_seq"], &body["to_seq"]),
+            end: body["to_seq"].as_i64(),
             ..Provenance::default()
         },
         OpKind::Claim => Provenance {
@@ -162,6 +177,21 @@ mod tests {
             (p.holds, p.own, &p.read[..], &p.ops[..], p.removed.len()),
             (true, None, &[(1, 4), (6, 6)][..], &[10, 12][..], 1)
         );
+    }
+
+    /// F1, #690: a restore's cut reads the highest record an op names on its own device: a span's
+    /// end even without its start, the spans it read, its goals, and its quotes of that device.
+    #[test]
+    fn the_top_is_the_highest_record_an_op_names_on_its_device() {
+        let window = json!({"to_seq": 9, "goals": [12]});
+        assert_eq!(of(OpKind::Window, &window).end, Some(9));
+        assert_eq!(of(OpKind::Window, &window).top("d"), Some(12));
+        let turn = json!({"from": 5, "through": 8, "read": [[1, 20]]});
+        assert_eq!(of(OpKind::Turn, &turn).top("d"), Some(20));
+        let claim = json!({"evidence": [{"device": "d", "seq": 3}, {"device": "e", "seq": 50}]});
+        assert_eq!(of(OpKind::Claim, &claim).top("d"), Some(3));
+        assert_eq!(of(OpKind::Claim, &claim).top("f"), None);
+        assert_eq!(of(OpKind::Forget, &json!({"uid": "u"})).top("d"), None);
     }
 
     #[test]

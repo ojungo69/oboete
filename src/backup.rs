@@ -3950,10 +3950,9 @@ pub(crate) mod tests {
         assert_eq!(ops.last().map(|s| (s.first, s.last)), Some((3, 3)));
     }
 
-    /// docs/provenance.md F1, for slice 2: a turn op whose own records, or a My Work op whose read
-    /// spans, pass the restored records goes with every op after it, as a window op does.
+    /// docs/provenance.md F1: a turn op whose own records, or a My Work op whose read spans, pass
+    /// the restored records goes with every op after it, as a window op does.
     #[test]
-    #[ignore = "docs/provenance.md slice 2 (F1)"]
     fn a_turn_or_my_work_op_past_the_restored_records_goes_with_every_op_after_it() {
         let turn = serde_json::json!({"agent": "claude", "session": "s", "repo": "github.com/o/r",
             "ts": 1, "from": 6, "through": 10, "read": [], "goals": [], "removed": [],
@@ -3994,6 +3993,63 @@ pub(crate) mod tests {
         }
         use raw::OpKind::{MyWork, Turn};
         assert_eq!(kept, [(Turn, vec![1, 2]), (MyWork, vec![1, 2])]);
+    }
+
+    /// #690 item 3: a window op is judged by its `to_seq` alone, as the SQL before #687 did, so one
+    /// with no `from_seq` past the restored records goes with every op after it; and a claim that
+    /// quotes, or a window whose goals name, a record the restore did not bring back goes the same
+    /// way (F1).
+    #[test]
+    fn an_op_judged_by_its_end_alone_or_its_quotes_goes_with_every_op_after_it() {
+        let mut kept = Vec::new();
+        for case in ["end alone", "quote", "goal"] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            segmented(p, 10, 5); // segments 1-5, 6-10
+            let mut raw = raw::open(p).unwrap();
+            let dev = raw.device().to_owned();
+            raw.append_ops(&[window(3), claim("a")]).unwrap();
+            let op = match case {
+                "end alone" => serde_json::json!({"to_seq": 10, "outcome": "skipped"}),
+                "quote" => {
+                    serde_json::json!({"text": "q", "evidence": [{"device": dev, "seq": 8}]})
+                }
+                _ => {
+                    serde_json::json!({"from_seq": 1, "to_seq": 3, "goals": [8], "outcome": "curated"})
+                }
+            };
+            let kind = match case {
+                "quote" => raw::OpKind::Claim,
+                _ => raw::OpKind::Window,
+            };
+            raw.append_ops(&[(kind, op)]).unwrap();
+            raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({"text": "c"}))])
+                .unwrap();
+            drop(raw);
+            export(p).unwrap();
+            // The newest record segment is damaged: seqs 6-10 are not restored.
+            let newest = segments(&p.join("backups"), Kind::Records)
+                .unwrap()
+                .remove(1)
+                .path;
+            std::fs::write(&newest, b"damaged").unwrap();
+            damage_raw(p);
+            crate::worker::run_once(p).unwrap();
+            let restored = raw::open(p).unwrap();
+            assert_eq!(restored.max_seq().unwrap(), 5);
+            let seqs: Vec<i64> = (restored.ops_after(&dev, 0, 100).unwrap().iter())
+                .map(|o| o.op_seq)
+                .collect();
+            kept.push((case, seqs));
+        }
+        assert_eq!(
+            kept,
+            [
+                ("end alone", vec![1, 2]),
+                ("quote", vec![1, 2]),
+                ("goal", vec![1, 2])
+            ]
+        );
     }
 
     /// Milestone 5 D5 (Codex's adversarial review of slice 2a): a forget op past the restored
