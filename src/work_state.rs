@@ -19,19 +19,37 @@ pub const SECTION: usize = 3_000;
 /// agent's context (Codex's security review of #408).
 pub const READ: usize = 20_000;
 
-/// claude-mem's rule (`WorkStateRenderer.ts`), with oboete's tool and "repository" (L7).
-pub const RULE: &str = "# Work state: your to-do lists and working state\n\
-    Use oboete's work_state_write tool to track all to-do lists and multi-step work. It is your \
-    canonical to-do list: use it instead of any built-in to-do tool. Also use it to track the state \
-    of anything you need an ongoing understanding of. Whatever is still open is shown here at the \
-    start of every session in this repository.\n\
-    - One list per to-do list or tracked thing: work_state_write with list=\"<name>\" and the fields \
-    to set\n\
-    - To-do item: fields {\"task\": \"<name>\", \"status\": \"todo\" | \"doing\" | \"done\" | \
-    \"dropped\", ...any details}\n\
-    - State: fields {\"<key>\": <value>} (the latest value of each key wins; null clears a key; \
-    \"status\": \"done\" closes the list)\n\
-    - Read every list, closed items included: work_state_read with includeClosed=true";
+/// claude-mem's rule (`WorkStateRenderer.ts`), with oboete's tool and "repository" (L7), and
+/// `$attach`, its line on what an agent made (row G01).
+macro_rules! rule {
+    ($attach:expr) => {
+        concat!(
+            "# Work state: your to-do lists and working state\n\
+            Use oboete's work_state_write tool to track all to-do lists and multi-step work. It is \
+            your canonical to-do list: use it instead of any built-in to-do tool. Also use it to \
+            track the state of anything you need an ongoing understanding of. Whatever is still \
+            open is shown here at the start of every session in this repository.\n\
+            - One list per to-do list or tracked thing: work_state_write with list=\"<name>\" and \
+            the fields to set\n\
+            - To-do item: fields {\"task\": \"<name>\", \"status\": \"todo\" | \"doing\" | \"done\" \
+            | \"dropped\", ...any details}\n\
+            - State: fields {\"<key>\": <value>} (the latest value of each key wins; null clears a \
+            key; \"status\": \"done\" closes the list)\n",
+            $attach,
+            "- Read every list, closed items included: work_state_read with includeClosed=true"
+        )
+    };
+}
+
+/// claude-mem's rule, its attach line too.
+pub const RULE: &str = rule!(
+    "- Made something a person can open (PR, deck, page, image, report)? Attach it to that item: \
+    fields {\"work_product\": \"https://…\" or \"/absolute/file\"}; several, with titles, as one \
+    JSON string: \"[{\\\"title\\\": \\\"<name>\\\", \\\"url\\\": \\\"https://…\\\"}]\"\n"
+);
+/// The rule without its attach line, for a section too small for both (`session_start_chars`
+/// near its least): the rest is what an agent needs to keep its lists.
+pub(crate) const SHORT_RULE: &str = rule!("");
 
 /// What the fence around the open lines says they are (spec 6.5).
 pub const OPEN: &str = "What agents wrote in this repository with work_state_write and is still \
@@ -694,9 +712,19 @@ pub fn nothing_open() -> String {
 pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Section {
     let l = lists(entries, None, false, rules, now);
     let n = l.rows.len();
+    // The rule and what follows it, without the attach line when the whole, with the newline that
+    // joins it to what follows (`Section::units`), does not fit.
+    let ruled = |after: &str| {
+        let whole = format!("{RULE}\n\n{after}");
+        if units(&whole) < limit {
+            whole
+        } else {
+            format!("{SHORT_RULE}\n\n{after}")
+        }
+    };
     if n == 0 {
         return Section {
-            rule: format!("{RULE}\n\n{NOTHING_OPEN}"),
+            rule: ruled(NOTHING_OPEN),
             open: None,
         };
     }
@@ -716,7 +744,7 @@ pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Sect
         // number alone, never recorded text, since the rule stands outside every fence (Codex's
         // security review of #408).
         _ => Section {
-            rule: format!("{RULE}\n\n{}", more(n, "")),
+            rule: ruled(&more(n, "")),
             open: None,
         },
     }
@@ -1024,7 +1052,8 @@ mod tests {
             for limit in [1_000, SECTION] {
                 let s = section(&entries, MIN, limit, &Rules::default());
                 assert!(
-                    s.rule == RULE || s.rule == format!("{RULE}\n\n{}", more(3, "")),
+                    [RULE.to_owned(), format!("{RULE}\n\n{}", more(3, ""))].contains(&s.rule)
+                        || s.rule == format!("{SHORT_RULE}\n\n{}", more(3, "")),
                     "{long} {limit}"
                 );
                 assert!(s.units() <= limit, "{long} {limit}: {}", s.units());
@@ -1032,7 +1061,8 @@ mod tests {
         }
     }
 
-    /// The rule is claude-mem's, with oboete's tool and its repository.
+    /// The rule is claude-mem's, with oboete's tool and its repository; claude-mem 15.3's line on
+    /// the deliverables it copies waits for row X23, as oboete copies no file.
     #[test]
     fn the_rule_is_claude_mems() {
         let theirs = [
@@ -1041,6 +1071,7 @@ mod tests {
             "- One list per to-do list or tracked thing: work_state_write with list=\"<name>\" and the fields to set",
             "- To-do item: fields {\"task\": \"<name>\", \"status\": \"todo\" | \"doing\" | \"done\" | \"dropped\", ...any details}",
             "- State: fields {\"<key>\": <value>} (the latest value of each key wins; null clears a key; \"status\": \"done\" closes the list)",
+            "- Made something a person can open (PR, deck, page, image, report)? Attach it to that item: fields {\"work_product\": \"https://…\" or \"/absolute/file\"}; several, with titles, as one JSON string: \"[{\\\"title\\\": \\\"<name>\\\", \\\"url\\\": \\\"https://…\\\"}]\"",
             "- Read every list, closed items included: work_state_read with includeClosed=true",
         ]
         .join("\n");
@@ -1082,16 +1113,33 @@ mod tests {
         assert!(s.units() <= SECTION, "{}", s.units());
         assert!(s.units() > SECTION - 80, "{}", s.units());
         assert!(s.text().contains("<oboete-memory>\nWhat agents wrote"));
-        // `session_start_chars` at its least leaves no room for the fence: the count alone.
+        // `session_start_chars` at its least leaves no room for the fence: the count alone, after
+        // the rule without its attach line (row G01).
         let least = section(&entries, 0, 1_000, &Rules::default());
         assert_eq!(
             least,
             Section {
-                rule: format!("{RULE}\n\n- ...200 more lines; read them with work_state_read"),
+                rule: format!(
+                    "{SHORT_RULE}\n\n- ...200 more lines; read them with work_state_read"
+                ),
                 open: None
             }
         );
         assert!(least.units() <= 1_000, "{}", least.units());
+        assert_eq!(
+            section(&[], 0, 1_000, &Rules::default()).rule,
+            format!("{SHORT_RULE}\n\nNothing open yet.")
+        );
+        // The whole rule as soon as it fits, with the newline that joins it to what follows.
+        let whole = format!("{RULE}\n\nNothing open yet.");
+        let fits = units(&whole) + 1;
+        assert_eq!(section(&[], 0, fits, &Rules::default()).rule, whole);
+        assert_eq!(section(&[], 0, fits, &Rules::default()).units(), fits);
+        assert!(
+            section(&[], 0, fits - 1, &Rules::default())
+                .rule
+                .starts_with(SHORT_RULE)
+        );
     }
 
     fn user(extra: &str) -> Rules {

@@ -8452,9 +8452,10 @@ mod tests {
         let config = home.join("config.toml");
         std::fs::write(&config, "[inject]\nmemory_instructions = false\n").unwrap();
         assert!(!start("b").contains("# oboete memory use"));
+        // The least size takes the rule without its attach line (row G01), and no use block.
         std::fs::write(&config, "[inject]\nsession_start_chars = 1000\n").unwrap();
         let small = start("c");
-        assert!(small.starts_with(crate::work_state::RULE), "{small}");
+        assert!(small.starts_with(crate::work_state::SHORT_RULE), "{small}");
         assert!(!small.contains("# oboete memory use"), "{small}");
     }
 
