@@ -68,10 +68,11 @@ struct Typed {
 }
 
 /// What the job read for one round: the newest goals op S6 leaves shown, the newest of those with
-/// items, and the typed prompts after the first's.
+/// items, the next item id, and the typed prompts after the first's.
 struct Round {
     last: Option<Kept>,
     current: Option<Kept>,
+    next_id: u64,
     unread: Vec<Typed>,
 }
 
@@ -99,13 +100,18 @@ impl OwnerGoals {
 fn round(s: &Stores, now: i64) -> Result<Round> {
     let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
     let device = s.raw.device().to_owned();
-    let ops = crate::my_work_ops::shown(s.k, (NAME, None), Some(&device), &hidden, false, 64)?;
-    let mut ops = ops.into_iter().filter(|o| o.op.forgotten.is_none());
-    let last = ops.next();
-    let current = match &last {
-        Some(l) if !l.op.skipped => Some(l.clone()),
-        _ => ops.find(|o| !o.op.skipped),
-    };
+    let goals = (NAME, None);
+    let ops = crate::my_work_ops::shown(s.k, goals, Some(&device), &hidden, false, 64)?;
+    let last = ops.into_iter().find(|o| o.op.forgotten.is_none());
+    // The newest with items, however many skips came after it.
+    let current = crate::my_work_ops::shown(s.k, goals, Some(&device), &hidden, true, 1)?.pop();
+    // Past every id any goals op gave, hidden ones too, so an id names one goal for good.
+    let next_id: i64 = s.k.query_row(
+        "SELECT COALESCE(MAX(json_extract(fields, '$.next_id')), 1) FROM my_work
+         WHERE job = ?1 AND device = ?2",
+        rusqlite::params![NAME, device],
+        |r| r.get(0),
+    )?;
     let through = last.as_ref().map_or(0, read_through);
     let seqs: Vec<i64> = (s.raw.prompt_seqs_since(now - WINDOW_MS)?.into_iter())
         .filter(|&seq| seq > through)
@@ -136,6 +142,7 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
     Ok(Round {
         last,
         current,
+        next_id: u64::try_from(next_id).unwrap_or(1).max(1),
         unread,
     })
 }
@@ -194,11 +201,7 @@ impl Job for OwnerGoals {
         }
         let device = s.raw.device().to_owned();
         let current: Vec<Item> = round.current.as_ref().map(items).unwrap_or_default();
-        let next_id = round
-            .current
-            .as_ref()
-            .and_then(|c| c.op.fields.get("next_id").and_then(Value::as_u64))
-            .unwrap_or(1);
+        let next_id = round.next_id;
         // O3 here, not in the due check: the text tests read the agent text before each prompt.
         let given: Vec<crate::my_work_group::AskRef> = (round.unread.iter())
             .map(|p| (None, device.as_str(), p.seq, p.ts, p.text.as_str()))
@@ -280,8 +283,9 @@ struct Filled {
 
 /// M1, M2 within `[summary] window_tokens` (A4): the current goals without their quotes (M3), then
 /// the typed prompts the oldest first, each gated alone and cut at 3,000 characters, while they
-/// fit; the first is cut to the room left when it does not, so a call always reads one. An agent's
-/// prompt (O3) is passed over, read but not shown.
+/// fit; the first is cut to the room left when it does not, to at most 40 characters when the
+/// current goals take it all, so a call always reads one. An agent's prompt (O3) is passed over,
+/// read but not shown.
 fn fill(
     s: &Stores,
     current: &[Item],
@@ -337,14 +341,14 @@ fn fill(
             let line = format!("{head}{text}\n");
             let fits = crate::budget::estimate(&line) <= left;
             if fits || !filled.shown.is_empty() || max <= 40 {
-                break fits.then_some((line, text));
+                break (fits || filled.shown.is_empty()).then_some((line, text));
             }
             max = max * 2 / 3;
         };
         let Some((line, text)) = line else {
             break;
         };
-        left -= crate::budget::estimate(&line);
+        left = left.saturating_sub(crate::budget::estimate(&line));
         filled.data.push_str(&line);
         filled.through = p.seq;
         filled.shown.push(ShownPrompt {
@@ -656,6 +660,7 @@ mod tests {
     struct Home {
         s: Store,
         t: i64,
+        summary: Summary,
     }
 
     impl Home {
@@ -663,6 +668,7 @@ mod tests {
             Self {
                 s: Store::new(),
                 t: crate::db::now_ms() - 120 * MINUTE,
+                summary: Summary::default(),
             }
         }
 
@@ -698,13 +704,12 @@ mod tests {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let rules = Rules::load(self.s.home.path()).unwrap();
-            let summary = Summary::default();
             let reading = Reading::now(&self.s.raw, Reads::Live).unwrap();
             f(&Stores {
                 raw: &self.s.raw,
                 k: &k,
                 rules: &rules,
-                summary: &summary,
+                summary: &self.summary,
                 reading: &reading,
             })
         }
@@ -720,7 +725,8 @@ mod tests {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let db = crate::providers_db::open(self.s.home.path()).unwrap();
-            let (rules, summary) = (Rules::load(self.s.home.path()).unwrap(), Summary::default());
+            let rules = Rules::load(self.s.home.path()).unwrap();
+            let summary = self.summary.clone();
             let sent = RefCell::new(Vec::new());
             let call = |_: &str,
                         prompt: &str,
@@ -1123,13 +1129,138 @@ mod tests {
         h.s.exclude(B);
         assert_eq!(h.hidden().len(), 1);
         assert_eq!(h.due().len(), 1, "a first run of what is left");
-        let (_, sent) = h.pass(&|_| nothing());
+        let (_, sent) = h.pass(&|_| {
+            let new = item("priority", "Fail fast", &[("P1", "fail fast")]);
+            answer(json!([new]), json!([]), json!([]))
+        });
         assert!(
             sent[0].contains("fail fast") && !sent[0].contains("billing"),
             "{}",
             sent[0]
         );
         assert!(sent[0].contains("No goals yet"), "{}", sent[0]);
+        // The rewrite's item takes an id the hidden op never gave, so an id names one goal.
+        assert_eq!(items(&h.goals()[0])[0].id, "g2");
+    }
+
+    /// M2: the current goals are the newest op with items, however many skips came after it.
+    #[test]
+    fn the_current_goals_survive_any_number_of_skips() {
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
+        h.pass(&|_| {
+            let new = item("priority", "Fail fast", &[("P1", "fail fast")]);
+            answer(json!([new]), json!([]), json!([]))
+        });
+        let now = crate::db::now_ms();
+        let skips: Vec<(OpKind, Value)> = (0..70)
+            .map(|i| {
+                let op = MyWorkOp {
+                    job: NAME.into(),
+                    about: day(now, &chrono::Local),
+                    entry: String::new(),
+                    ts: now + i,
+                    read: Read {
+                        spans: vec![],
+                        ops: vec![],
+                    },
+                    removed: vec![],
+                    fields: BTreeMap::new(),
+                    skipped: true,
+                    forgotten: None,
+                };
+                (OpKind::MyWork, serde_json::to_value(op).unwrap())
+            })
+            .collect();
+        h.s.raw.append_ops(&skips).unwrap();
+        h.later("s2", R, "The parser should also fail fast on a bad footer.");
+        h.age();
+        let (_, sent) = h.pass(&|_| nothing());
+        assert!(
+            sent[0].contains("g1 priority rank 1: Fail fast"),
+            "{}",
+            sent[0]
+        );
+    }
+
+    /// A4: current goals that take all the room leave the next prompt cut short but read, so the
+    /// goals still update (Codex on #714).
+    #[test]
+    fn a_call_reads_a_prompt_however_much_room_the_current_goals_take() {
+        let mut h = Home::new();
+        h.summary.window_tokens = 1_000;
+        let seq = h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
+        let now = crate::db::now_ms();
+        let long = "目".repeat(TITLE);
+        let goals: Vec<Item> = (0..2 * EACH)
+            .map(|i| Item {
+                id: format!("g{}", i + 1),
+                kind: KINDS[i / EACH].into(),
+                rank: u32::try_from(i % EACH).unwrap() + 1,
+                title: long.clone(),
+                product: long.clone(),
+                asked: 1,
+                quotes: vec![Quote {
+                    seq,
+                    ts: now,
+                    text: "fail fast".into(),
+                }],
+            })
+            .collect();
+        let op = MyWorkOp {
+            job: NAME.into(),
+            about: day(now, &chrono::Local),
+            entry: String::new(),
+            ts: now,
+            read: Read {
+                spans: vec![(seq, seq)],
+                ops: vec![],
+            },
+            removed: vec![],
+            fields: BTreeMap::from([
+                ("items".to_owned(), serde_json::to_value(&goals).unwrap()),
+                ("next_id".to_owned(), json!(2 * EACH + 1)),
+            ]),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.s.run();
+        h.later("s2", R, "The parser should also fail fast on a bad footer.");
+        h.age();
+        let (_, sent) = h.pass(&|_| nothing());
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].contains("P1 ") && sent[0].contains("The parser"),
+            "{}",
+            sent[0]
+        );
+        assert!(h.due().is_empty(), "{:?}", h.due());
+    }
+
+    /// R14: prompts recorded one after another but stamped out of order, the clock having stepped
+    /// back, are each read once when the budget cuts a call short: the prompts go in seq order, so
+    /// the last seq read covers every one before it.
+    #[test]
+    fn a_clock_step_neither_loses_nor_repeats_a_prompt() {
+        let mut h = Home::new();
+        // Each fills about half a call: two fit, the third waits.
+        let long = |mark: &str| format!("{mark} {}", "目".repeat(3_000));
+        for (mark, at) in [("Alpha", 10), ("Bravo", 0), ("Charlie", 5)] {
+            h.said(mark, R, at, &long(mark));
+        }
+        let mut sent_all = Vec::new();
+        while !h.due().is_empty() {
+            let (_, sent) = h.pass(&|_| nothing());
+            sent_all.extend(sent);
+            assert!(sent_all.len() < 6, "{}", sent_all.len());
+        }
+        assert!(sent_all.len() >= 2, "{}", sent_all.len());
+        for mark in ["Alpha", "Bravo", "Charlie"] {
+            let n = sent_all.iter().filter(|p| p.contains(mark)).count();
+            assert_eq!(n, 1, "{mark}");
+        }
     }
 
     /// S6: an op built on a hidden goals op is hidden with it, and taking the exclusion back shows

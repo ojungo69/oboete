@@ -1192,9 +1192,10 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **When** (M2): a typed prompt the last goals op did not read is due at once when it came before
   that op (a first run's next chunk, the op having stopped at the budget), else a day after the op.
   A first run reads in chunks within `[summary] window_tokens`; a first prompt that does not fit is
-  cut to the room left, so each call reads at least one. A call whose prompts the text tests all
-  flag sends nothing: what it read is kept as a skip, with no call (`my_work_run`: an ask with no
-  prompt), so M2's "no op" means no goals op.
+  cut to the room left, to at most 40 characters when the current goals take it all, so each call
+  reads at least one. A call whose prompts the text tests all flag sends nothing: what it read is
+  kept as a skip, with no call (`my_work_run`: an ask with no prompt), so M2's "no op" means no
+  goals op.
 - **The answer** (M3) gives the order of the current ids, the dropped ids, up to 4 new items with
   up to 2 quotes, up to 4 changed items with 1 quote, and a summary. Code keeps (M4, M5): it
   carries the items the answer leaves alone and applies the changes; a quote must be found in the

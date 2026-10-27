@@ -4837,14 +4837,15 @@ impl Raw {
     }
 
     /// docs/my-work-model.md M1: this device's live prompts recorded since `since`, unix ms, by the
-    /// prompts index: each one's seq, the oldest first. `at` reads them as a forget leaves them.
+    /// prompts index: each one's seq, in seq order as `at` reads them. `at` reads them as a forget
+    /// leaves them.
     pub(crate) fn prompt_seqs_since(&self, since: i64) -> Result<Vec<i64>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
         let mut st = self.conn.prepare(
             "SELECT seq FROM records
              WHERE device = ?1 AND type = 'event' AND kind = 'prompt' AND ts >= ?2
                AND source IN (SELECT value FROM json_each(?3))
-             ORDER BY ts, seq",
+             ORDER BY seq",
         )?;
         let rows = st.query_map(
             params![self.device, since, serde_json::to_string(&LIVE)?],
