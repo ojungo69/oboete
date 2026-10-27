@@ -4836,6 +4836,24 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// docs/my-work-model.md M1: this device's live prompts recorded since `since`, unix ms, by the
+    /// prompts index: each one's seq, in seq order as `at` reads them. `at` reads them as a forget
+    /// leaves them.
+    pub(crate) fn prompt_seqs_since(&self, since: i64) -> Result<Vec<i64>> {
+        self.conn.execute_batch(PROMPT_INDEX)?;
+        let mut st = self.conn.prepare(
+            "SELECT seq FROM records
+             WHERE device = ?1 AND type = 'event' AND kind = 'prompt' AND ts >= ?2
+               AND source IN (SELECT value FROM json_each(?3))
+             ORDER BY seq",
+        )?;
+        let rows = st.query_map(
+            params![self.device, since, serde_json::to_string(&LIVE)?],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// docs/my-work-model.md A6: the live prompts recorded since `since`, unix ms: each one's time
     /// and session, by the prompts index; what an estimate counts, never their text.
     pub(crate) fn prompt_times(&self, since: i64) -> Result<Vec<(i64, (String, String))>> {
