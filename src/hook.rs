@@ -504,7 +504,7 @@ fn run_io(
                 &m.text[..m.text.floor_char_boundary(end)]
             });
             match got.filter(|list| !list.trim().is_empty()) {
-                Some(list) => format!("{}\n\n{line}", terminal_list(list)),
+                Some(list) => terminal_message(list, line),
                 None => line,
             }
         });
@@ -1001,6 +1001,33 @@ enum Handed {
     Nothing,
     /// This many claim lines and cards.
     Shown(usize, usize),
+}
+
+/// The most of the session start's terminal message, in UTF-16 units: Claude Code shows a hook
+/// field over 10,000 characters only as a stub that names a saved file (claude-mem 15.3, #695).
+const TERMINAL_ROOM: usize = 10_000;
+
+/// #695: `list` as the terminal shows it above `line`, cut after its last line that leaves the
+/// whole message within `TERMINAL_ROOM`, so no line or colour is split; `line` alone when not one
+/// line fits.
+fn terminal_message(list: &str, line: String) -> String {
+    let room = TERMINAL_ROOM.saturating_sub(line.encode_utf16().count() + 2);
+    let shown = terminal_list(list);
+    let (mut used, mut end) = (0, 0);
+    for l in shown.split_inclusive('\n') {
+        // The newline that joins it to the lines before it counts.
+        let need = used + l.trim_end_matches('\n').encode_utf16().count() + usize::from(end > 0);
+        if need > room {
+            break;
+        }
+        (used, end) = (need, end + l.len());
+    }
+    let kept = shown[..end].trim_end_matches('\n');
+    if kept.trim().is_empty() {
+        line
+    } else {
+        format!("{kept}\n\n{line}")
+    }
 }
 
 /// Decision 51: the memory list as the terminal shows it, its headings bold and cyan and its
@@ -7750,6 +7777,49 @@ mod tests {
             "\u{1b}[2mStats: 1 obs (4t read) | 3t work\u{1b}[0m\nA card\n\
              \u{1b}[2mAccess 2k tokens of past work via get(ID).\u{1b}[0m"
         );
+    }
+
+    /// #695: Claude Code shows a hook field over 10,000 characters only as a stub, so a list at the
+    /// manifest's cap is cut after a whole line, colours and all, and the line below stays whole.
+    #[test]
+    fn the_terminal_message_fits_claude_codes_limit_with_the_line_whole() {
+        let cap = crate::consumer::manifest::CAP;
+        let mut list = String::new();
+        for i in 0.. {
+            let row = match i % 3 {
+                0 => format!("### Oct {i}, 2026\n"),
+                1 => format!("Legend: 🎯session ●bugfix {i}\n"),
+                _ => format!("- 記憶 {i}: パーサのエラーは stderr へ\n"),
+            };
+            if (list.clone() + &row).encode_utf16().count() > cap {
+                break;
+            }
+            list.push_str(&row);
+        }
+        let line = "oboete: memory is on.\noboete: curation has stopped for 3h. ".repeat(20);
+        let shown = terminal_message(&list, line.clone());
+        assert!(
+            shown.encode_utf16().count() <= TERMINAL_ROOM,
+            "{}",
+            shown.len()
+        );
+        let (above, below) = shown.rsplit_once("\n\n").unwrap();
+        assert_eq!(below, line);
+        let whole = terminal_list(&list);
+        assert!(above.len() < whole.len() && whole[above.len()..].starts_with('\n'));
+        assert!(whole.starts_with(above));
+        // A list that fits is shown whole; with no room for one line, the line alone.
+        let note = "oboete: memory is on.".to_owned();
+        assert_eq!(
+            terminal_message("### Today\n- one", note.clone()),
+            format!("{}\n\n{note}", terminal_list("### Today\n- one"))
+        );
+        let long = "x".repeat(TERMINAL_ROOM - 5);
+        assert_eq!(terminal_message("### Today\n- one", long.clone()), long);
+        // The blank line between them counts: a message of exactly the limit is kept whole.
+        let (a, b) = ("a".repeat(4_000), "b".repeat(TERMINAL_ROOM - 4_002));
+        assert_eq!(terminal_message(&a, b.clone()), format!("{a}\n\n{b}"));
+        assert_eq!(terminal_message(&format!("{a}a"), b.clone()), b);
     }
 
     /// Decision 51: the terminal shows the memory list the agent got above the line, its headings
