@@ -1187,7 +1187,11 @@ run('mw.sort="title";myWorkDraw()');assert.deepEqual(ids(),['z','x','y'],'A to Z
 // before a review. Shipped is its own tab, shown with a count, ranked after Checked.
 set([req('p1',{progress:{percent:60,reviewed:now-3*H,completed:null,estimate:now+48*H}}),
   req('p2',{status:'shipped',progress:{percent:100,reviewed:now-2*H,completed:'2026-10-20',estimate:null}}),req('p3')]);
-assert(text(card('p1')).includes('60% · reviewed 3h ago'),'the percent and when it was reviewed');
+// The text as the browser reads it, with no space between nodes.
+const flat=node=>typeof node==='string'?node:(node?.children||[]).map(flat).join('');
+assert(flat(card('p1')).includes('60% · reviewed 3h ago'),'the percent and when it was reviewed');
+run(`myWorkTimes(${now+2*H})`);
+assert(flat(card('p1')).includes('60% · reviewed 5h ago'),'the review\'s age follows the clock');
 assert(text(card('p1')).includes('At this pace, about'),'the estimate');
 assert.equal(card('p1').querySelectorAll('meter')[0].value,60,'the meter holds the percent');
 assert(text(card('p2')).includes('Completed Oct 20'),'the day it shipped');
@@ -1214,7 +1218,7 @@ assert(!page.includes('2026-10-02'),"a milestone's day as claude-mem's work view
 run('myWorkClose()');
 ctx.ui.setLang('ja');
 set([req('pj',{progress:{percent:70,reviewed:now-2*H,completed:null,estimate:null}})]);
-assert(text(card('pj')).includes('70% ・2 時間前に確認'),'the Japanese progress line');
+assert(flat(card('pj')).includes('70% ・2 時間前に確認'),'the Japanese progress line');
 ctx.ui.setLang('en');
 // Status tabs: the six always there, Blocked only with one, counts of the scope, a click filters
 // and names the heading.

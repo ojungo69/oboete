@@ -496,9 +496,9 @@ const COLUMNS: &str = "device, op_seq, n, ts, agent, session, repo, type, title,
                        narrative, facts, concepts, files_read, files_modified, from_seq, to_seq, \
                        removed, goals";
 
-/// A row of `COLUMNS` as a reader gets it, or none while a removal its op does not list took
-/// from a record its curator was shown (K4).
-fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
+/// K4: whether a removal its op does not list took from a record the curator of a row of
+/// `COLUMNS` was shown: its window and its goals.
+fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
     let device: String = r.get(0)?;
     let listed: Vec<Removal> = serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default();
     let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
@@ -506,9 +506,32 @@ fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
     for goal in goals {
         removed.extend(raw.removed_in(&device, goal, goal, None)?);
     }
-    if removed.iter().any(|x| !listed.contains(x)) {
+    Ok(removed.iter().any(|x| !listed.contains(x)))
+}
+
+/// Whether window op `op_seq` of `device` is one K4 leaves out now (its cards share its window):
+/// an op built on it is left out with it (docs/my-work-model.md S5). False for an op with no card.
+pub(crate) fn taken(k: &Connection, raw: &Raw, (device, op_seq): (&str, i64)) -> Result<bool> {
+    if !crate::consumer::manifest::exists(k, "table", "cards")? {
+        return Ok(false);
+    }
+    let mut st = k.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM cards WHERE device = ?1 AND op_seq = ?2 LIMIT 1"
+    ))?;
+    let mut rows = st.query(rusqlite::params![device, op_seq])?;
+    match rows.next()? {
+        Some(r) => taken_row(r, raw),
+        None => Ok(false),
+    }
+}
+
+/// A row of `COLUMNS` as a reader gets it, or none while a removal its op does not list took
+/// from a record its curator was shown (K4).
+fn read(r: &rusqlite::Row, raw: &Raw, rules: &Rules) -> Result<Option<Card>> {
+    if taken_row(r, raw)? {
         return Ok(None);
     }
+    let device: String = r.get(0)?;
     // K6: every text as the rules are now, the labels it is shown under too.
     let gate = |s: String| crate::redact::outbound_with(&s, rules);
     let list = |i: usize| -> rusqlite::Result<Vec<String>> {

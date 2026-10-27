@@ -1799,6 +1799,93 @@ mod tests {
         assert_eq!(h.page()["progress"], Value::Null);
     }
 
+    /// Spec 6.2 step 1, S5: from a forget's start to its purge, a review shown a record it took is no
+    /// reading, and no call is shown it as the previous review; one written after the forget, which
+    /// lists the removal, is a reading.
+    #[test]
+    fn a_review_a_forget_took_is_no_reading_before_its_purge() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        let x = h.said("s1", 10, "Keep the canary-4827 note.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let mut told = review("in-progress", 40, "", &[]);
+        told["narrative"] = json!("It keeps the canary-4827 note.");
+        h.reviewed_with(&id, 20, told, &|op| op.read.spans = vec![(x, x)]);
+        assert_eq!(h.page()["progress"]["percent"], 40);
+        let (path, device) = (h.s.home.path().to_owned(), h.s.raw.device().to_owned());
+        let target = crate::forget::Target::Record {
+            device: device.clone(),
+            seq: x,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        let r = h.page();
+        assert_eq!(
+            (&r["progress"], &r["story"]),
+            (&Value::Null, &Value::Null),
+            "{r}"
+        );
+        let ask = h.ask(&id).unwrap();
+        assert!(!ask.prompt.contains("canary-4827"), "{}", ask.prompt);
+        let listed = h.s.raw.removed_in(&device, x, x, None).unwrap();
+        h.reviewed_with(&id, 0, review("in-progress", 60, "", &[]), &|op| {
+            op.read.spans = vec![(x, x)];
+            op.removed = listed.clone();
+        });
+        assert_eq!(h.page()["progress"]["percent"], 60);
+    }
+
+    /// S5: before the purge, a review built on a summary or a card its reader leaves out for a
+    /// forgotten record (T7, K4) is no reading either, though the review's own records are not it.
+    #[test]
+    fn a_review_built_on_a_summary_or_a_card_a_forget_took_is_no_reading() {
+        for card in [false, true] {
+            let mut h = Home::new();
+            let a = h.said("s1", 0, "Build the parser.");
+            let r = h.reply("s1", 1);
+            let built: i64 = if card {
+                let c = json!([{"type": "feature", "title": "Parser", "narrative": "Built."}]);
+                let id = h.s.cards(a, r, c, false)[0].clone();
+                id.split('.').next().unwrap().parse().unwrap()
+            } else {
+                h.summarized("s1", (a, r), 1, "Built.")
+            };
+            h.grouped(&["s1"], &[a]);
+            let id = h.due()[0].0.clone();
+            h.reviewed_with(&id, 20, review("in-progress", 40, "", &[]), &|op| {
+                op.read.spans = vec![(a, a)];
+                op.read.ops = vec![built];
+            });
+            assert_eq!(h.page()["progress"]["percent"], 40, "card {card}");
+            let path = h.s.home.path().to_owned();
+            let target = crate::forget::Target::Record {
+                device: h.s.raw.device().to_owned(),
+                seq: r,
+            };
+            crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+            assert_eq!(h.page()["progress"], Value::Null, "card {card}");
+        }
+    }
+
+    /// S5: before the purge, a grouping op shown a record a forget took decides nothing, so its
+    /// title is not shown.
+    #[test]
+    fn a_group_a_forget_took_decides_nothing_before_its_purge() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        let b = h.said("s2", 10, "Add the canary-4827 tests.");
+        h.grouped(&["s1", "s2"], &[a, b]);
+        assert_eq!(h.page()["title"], "The parser");
+        let path = h.s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: h.s.raw.device().to_owned(),
+            seq: b,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        let r = h.page();
+        assert_ne!(r["title"], "The parser", "{r}");
+    }
+
     /// P5, claude-mem's `measuredEstimate`: the line through the last two readings when they rise
     /// below 100; none with one reading, a flat or falling pace, or at 100.
     #[test]

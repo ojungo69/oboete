@@ -90,8 +90,12 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 /// op seq: one shown a record of an excluded session or repository, or a summary or a card of one,
 /// and every op built on one (`read.ops`), followed in op order, as a forget follows them (S5). One
 /// built on a left-out op was shown its text, though its own records may miss the excluded
-/// conversation's (Codex on #669). Read once a round; nothing is left out while nothing is
-/// excluded.
+/// conversation's (Codex on #669). And while a forget is not finished, from its tombstone to its
+/// purge (spec 6.2's local purge, step 1, the backstop; S5): one shown a record it took that the op
+/// does not list as removed, or a summary or a card its reader leaves out for one (T7, K4), and
+/// every op built on one, so no review's or group's text made from a forgotten record is shown,
+/// nor sent as a previous review (Codex on #694). Read once a round; nothing is left out while
+/// nothing is excluded or being forgotten.
 pub(crate) fn hidden(
     raw: &crate::raw::Raw,
     k: &Connection,
@@ -99,8 +103,12 @@ pub(crate) fn hidden(
 ) -> Result<std::collections::HashSet<(String, i64)>> {
     let mut hidden = std::collections::HashSet::new();
     // No session excluded, none of their records, summaries or cards to leave out, whatever the
-    // list holds: a pattern no recorded session matched, as the owner's from claude-mem.
-    if reading.excluded.is_empty() || !crate::consumer::manifest::exists(k, "table", "my_work")? {
+    // list holds: a pattern no recorded session matched, as the owner's from claude-mem. A finished
+    // forget marked what it took (S5), and the readers pass over what is marked.
+    let forgetting = !raw.forget_jobs()?.is_empty();
+    if (reading.excluded.is_empty() && !forgetting)
+        || !crate::consumer::manifest::exists(k, "table", "my_work")?
+    {
         return Ok(hidden);
     }
     // The summaries and cards of an excluded session, judged by their session as their readers
@@ -122,24 +130,54 @@ pub(crate) fn hidden(
             excluded_ops.insert(op?);
         }
     }
-    let mut st = k.prepare("SELECT device, op_seq, read FROM my_work ORDER BY device, op_seq")?;
+    // The summaries and cards a forget's tombstone leaves out, each looked up once.
+    let mut taken = std::collections::HashMap::new();
+    let mut st = k.prepare(
+        "SELECT device, op_seq, read, removed, forgotten IS NOT NULL FROM my_work
+         ORDER BY device, op_seq",
+    )?;
     let rows = st.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, bool>(4)?,
         ))
     })?;
     for row in rows {
-        let (device, op_seq, read) = row?;
+        let (device, op_seq, read, removed, forgotten) = row?;
         let read: Read = serde_json::from_str(&read)?;
-        let left_out = |seq: &i64| {
-            let op = (device.clone(), *seq);
-            hidden.contains(&op) || excluded_ops.contains(&op)
-        };
-        let mut shown = !read.ops.iter().any(left_out);
+        // A forgotten op is the forget's already, as its readers take it.
+        let forget = forgetting && !forgotten;
+        let mut shown = true;
+        for &seq in &read.ops {
+            let op = (device.clone(), seq);
+            if hidden.contains(&op) || excluded_ops.contains(&op) {
+                shown = false;
+            } else if forget {
+                if !taken.contains_key(&op) {
+                    let at = (device.as_str(), seq);
+                    let t = crate::turns::taken(k, raw, at)? || crate::cards::taken(k, raw, at)?;
+                    taken.insert(op.clone(), t);
+                }
+                shown = shown && !taken[&op];
+            }
+        }
         for &span in &read.spans {
             shown = shown && !raw.holds_session(&device, span, &reading.excluded)?;
+        }
+        if shown && forget {
+            let listed: Vec<Removal> = serde_json::from_str(&removed)?;
+            for &(a, b) in &read.spans {
+                if raw
+                    .removed_in(&device, a, b, None)?
+                    .iter()
+                    .any(|x| !listed.contains(x))
+                {
+                    shown = false;
+                }
+            }
         }
         if !shown {
             hidden.insert((device, op_seq));

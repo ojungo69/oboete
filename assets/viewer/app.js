@@ -6656,8 +6656,10 @@ function myWorkProgress(row) {
   const meter = el('meter', 'my-work-meter');
   Object.assign(meter, { min: 0, max: 100, value: p.percent });
   meter.setAttribute('aria-label', t('my_work_progress_label'));
+  // The review's age is a time each poll's tick rewrites, as the card's own (Codex on #694).
+  const [before, after = ''] = t('my_work_progress', { p: p.percent, ago: '\u0000' }).split('\u0000');
   const text = p.completed ? t('my_work_completed', { date: myWorkDay(p.completed) })
-    : p.reviewed ? t('my_work_progress', { p: p.percent, ago: myWorkAgo(p.reviewed) }) : `${p.percent}%`;
+    : p.reviewed ? el('span', null, before, myWorkTime(p.reviewed), after) : `${p.percent}%`;
   return el('div', 'my-work-progress', meter, el('span', 'my-work-progress-text', text),
     p.estimate ? el('span', 'my-work-estimate', t('my_work_pace', { date: myWorkDay(p.estimate) })) : null);
 }

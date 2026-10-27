@@ -771,6 +771,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `a_new_review_does_not_undo_a_check` (C7, P5)
 - `the_build_story_is_the_reviews_narrative_and_milestones` (P5)
 - `the_build_story_is_gated_as_it_is_read` (A5)
+- `a_review_a_forget_took_is_no_reading_before_its_purge` (S5)
+- `a_review_built_on_a_summary_or_a_card_a_forget_took_is_no_reading` (S5)
+- `a_group_a_forget_took_decides_nothing_before_its_purge` (S5)
 
 ### Slice 5
 
@@ -1150,6 +1153,16 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   when it has neither. P6's recap and chapters come with slice 7. Its texts are gated as the page
   reads them, so a rule added after the review masks them before any rescan.
 - **C7**: a review is no part of a request's version, so a new one undoes no check.
+- **A forget before its purge** (spec 6.2's local purge, step 1, the backstop; S5): from a forget's
+  tombstone to its purge, S6's walk (`my_work_ops::hidden`) also leaves out an op shown a record
+  the forget took that the op does not list as removed, or a summary or a card its reader leaves
+  out for one (T7, K4: `turns::taken`, `cards::taken`), and every op built on one. So no review's
+  progress or story, nor a group's title, made from a forgotten record is shown, nor sent as a
+  previous review, until the purge marks the op forgotten (Codex's review of this slice; 4a's
+  previous review had the same gap). The walk runs while a forget is unfinished (`forget_jobs`), or
+  a session is excluded. A rescan's masks are the gate's: every text is gated with the rules as
+  they are when it is read.
+- **The review's age** on the card is a time each poll's tick rewrites, as the card's own.
 - **On the screen** (Playwright, a home of made-up records, 2026-10-27): the cards' meter, percent
   and estimate, the Shipped badge and tab, and the request's build story, in English and Japanese.
 - **Then**: #692 (1), provenance slice 2 (#690), then slice 5, goals.
