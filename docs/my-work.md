@@ -44,11 +44,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
     spaces read as `-`); "Ready to check", needs review: `needs-review`, `review`, `in-review`,
     `awaiting-review` or `ready-for-review` (claude-mem 15.1); "Blocked", `blocked` or `failed`;
     "Update recorded", all of it done (a finished task or an ended session does not finish its
-    request); "Closed", all of it dropped (claude-mem 15.1; before, "Update recorded"); "No recent
-    update", nothing newer recorded for 6 hours; "In progress", `doing`, `in-progress`, `active`,
-    `running` or `open`; "To do", `todo`, `planned` or `queued`; else "Update recorded". A list's
-    status on the request's page reads its items by the same rules, all of them done being "Ready
-    to check" there.
+    request); "Closed", all of it dropped, for a request with no record besides its work
+    (claude-mem 15.1; before, "Update recorded"); "No recent update", nothing newer recorded for
+    6 hours; "In progress", `doing`, `in-progress`, `active`, `running` or `open`; "To do",
+    `todo`, `planned` or `queued`; else "Update recorded". A list's status on the request's page
+    reads its items by the same rules, all of them done being "Ready to check" there.
   - "Checked": a person marked this version of the result checked; it shows in place of the
     status.
   - The status tabs always show All, Needs you, In progress, No recent update, Ready to check and

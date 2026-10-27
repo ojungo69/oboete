@@ -2130,7 +2130,9 @@ fn story(review: Option<&crate::my_work_progress::Reviewed>, rules: &Rules) -> V
 
 /// The status a recorded request status means, its aliases read as `statusFor` reads an item's
 /// (Codex on #574: claude-mem's lifecycle takes only its exact status names, so a recorded
-/// `failed` left the work to decide); none for one that names no status.
+/// `failed` left the work to decide); none for one that names no status. `open`, which
+/// `request_complete: false` records too, names none, as in claude-mem's lifecycle: as in
+/// progress it would hide needs you and blocked (CodeRabbit on #697).
 fn category(status: &str) -> Option<&'static str> {
     Some(match status {
         "needs-you" => "needs-you",
