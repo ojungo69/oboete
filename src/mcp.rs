@@ -321,7 +321,7 @@ impl Oboete {
 
     #[tool(
         name = "search",
-        description = "Smart search (default), step 1: search memory for an index with IDs. Review it, use timeline for context, then get only for selected IDs. Current claims first, then cards, session summaries and imported documents fused by rank, then raw records, then ended claims unless history is set. Filter by type; orderBy is relevance, date_desc or date_asc. One ranked line per hit: id, UTC time, kind and standing, repository when all are searched, title and snippet; cards and imported observations show ~N read tokens. structuredContent reports vector = used or the full-text fallback reason and why.",
+        description = "Smart search (default), step 1: search memory for an index with IDs. Review it, use timeline for context, then get only for selected IDs. Current claims first, then cards, session summaries and imported documents fused by rank, then raw records, then ended claims unless history is set. Filter by type; orderBy is relevance, date_desc or date_asc. One ranked line per hit: id, UTC time, kind and standing, repository when all are searched, title and snippet; cards and imported observations show ~N read tokens. A first line, full text only: and why, says when the hits are full text alone.",
         annotations(read_only_hint = true)
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
@@ -370,17 +370,16 @@ impl Oboete {
         let out: String = (answer.hits.iter())
             .map(|h| search::line(h, q.all, &rules))
             .collect();
-        let mut result = text(if out.is_empty() {
-            "no hits".into()
-        } else {
-            out
-        })?;
-        let (vector, why) = match answer.vector {
-            search::Vector::Used => (json!("used"), None),
-            search::Vector::Skipped(s) => (json!(s), Some(s.why())),
+        // In the text, not in structured content: Claude Code and Codex hand a model a result's
+        // structured content in place of its text when it has any.
+        let status = match answer.vector {
+            search::Vector::Used => String::new(),
+            search::Vector::Skipped(s) => format!("full text only: {}\n", s.why()),
         };
-        result.structured_content = Some(json!({"vector": vector, "why": why}));
-        Ok(result)
+        text(format!(
+            "{status}{}",
+            if out.is_empty() { "no hits" } else { &out }
+        ))
     }
 
     #[tool(
@@ -1800,7 +1799,10 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect();
-            assert_eq!(cli(argv).trim_end(), payload(mcp));
+            // MCP says on its first line why the hits are full text alone, the CLI on stderr.
+            let hits = payload(mcp);
+            let hits = hits.strip_prefix("full text only: embedding is off\n");
+            assert_eq!(Some(cli(argv).trim_end()), hits);
         }
         let mcp = body(
             server
@@ -2172,7 +2174,9 @@ mod tests {
     }
 
     /// A93: the public tool result says whether search was hybrid or why it used full text,
-    /// even with no hits. The search fixtures drive real provider/configuration states.
+    /// even with no hits. The search fixtures drive real provider/configuration states. Its text
+    /// says it, with no structured content: Claude Code and Codex hand a model a result's
+    /// structured content in place of its text when it has any, so the hits never reached it.
     #[test]
     fn search_reports_its_vector_status_in_the_tool_result() {
         use crate::embed::stub::Stub;
@@ -2180,13 +2184,22 @@ mod tests {
 
         let stub = Stub::start();
         let (mut s, server, uid) = seeded("Use the trigram tokenizer.");
-        let legacy = body(
+        let status = |why: Option<&str>| why.map(|w| format!("full text only: {w}\n"));
+        // The hit's line, as the search with embedding off shows it after its status line.
+        let off = body(
             server
                 .search(Parameters(args("trigram", None, None)))
                 .unwrap(),
         );
-        assert!(legacy.contains(&uid[..12]));
-        let check = |vector: &str, why: Option<&str>, limit: Option<usize>| {
+        let empty = search::fenced("");
+        let (head, tail) = empty.split_at(empty.find("</oboete-memory>").unwrap());
+        let hits = (off.strip_prefix(head))
+            .and_then(|t| t.strip_suffix(tail))
+            .and_then(|t| t.strip_prefix(&status(Some("embedding is off")).unwrap()))
+            .unwrap_or_else(|| panic!("{off}"))
+            .to_owned();
+        assert!(hits.contains(&uid[..12]), "{off}");
+        let check = |why: Option<&str>, limit: Option<usize>| {
             let result = server
                 .search(Parameters(SearchArgs {
                     limit,
@@ -2194,39 +2207,34 @@ mod tests {
                 }))
                 .unwrap();
             let wire = serde_json::to_value(&result).unwrap();
-            assert_eq!(
-                wire["structuredContent"],
-                json!({"vector": vector, "why": why})
-            );
+            assert_eq!(wire.get("structuredContent"), None, "{wire}");
             assert_eq!(result.content.len(), 1);
             assert_eq!(result.is_error, Some(false));
+            let found = if limit == Some(0) {
+                "no hits"
+            } else {
+                hits.as_str()
+            };
             assert_eq!(
                 body(result),
-                if limit == Some(0) {
-                    search::fenced("no hits")
-                } else {
-                    legacy.clone()
-                }
+                search::fenced(&format!("{}{found}", status(why).unwrap_or_default()))
             );
         };
-        let both = |vector, why| {
+        let both = |why| {
             for limit in [None, Some(0)] {
-                check(vector, why, limit);
+                check(why, limit);
             }
         };
-        both("off", Some("embedding is off"));
+        both(Some("embedding is off"));
         crate::embed_phase::fixture::config(&s, &stub);
-        both("no-vectors", Some("no document has a vector yet"));
+        both(Some("no document has a vector yet"));
         crate::embed_phase::fixture::embed_all(&s);
-        both("used", None);
+        both(None);
 
         let k = crate::knowledge::open(s.home.path()).unwrap();
         k.execute("UPDATE vec_generation SET embedder = 'older'", [])
             .unwrap();
-        both(
-            "building",
-            Some("the new embedder's vectors are still being made"),
-        );
+        both(Some("the new embedder's vectors are still being made"));
         k.execute(
             "UPDATE vec_generation SET embedder = ?1",
             [crate::embed::EMBEDDER],
@@ -2242,25 +2250,21 @@ mod tests {
             },
         )
         .unwrap();
-        both(
-            "waiting",
-            Some("the embedder is resting, or its cap is spent"),
-        );
+        both(Some("the embedder is resting, or its cap is spent"));
         pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
         for limit in [None, Some(0)] {
             stub.fail_next(500, None);
-            check("error", Some("the query could not be embedded"), limit);
+            check(Some("the query could not be embedded"), limit);
         }
         let held = stub.hold();
-        both("timeout", Some("the query's embedding took too long"));
+        both(Some("the query's embedding took too long"));
         drop(held);
 
         s.raw.exclude("github.com/o/r", false).unwrap();
         let sent = stub.requests();
-        both(
-            "excluded",
-            Some("this repository or the one searched is excluded, so the query is not sent out"),
-        );
+        both(Some(
+            "this repository or the one searched is excluded, so the query is not sent out",
+        ));
         assert_eq!(stub.requests(), sent, "an excluded query is never sent");
     }
 

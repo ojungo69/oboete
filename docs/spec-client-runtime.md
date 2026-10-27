@@ -128,7 +128,7 @@ milestone 6のremote MCPはhub OAuth/read grants/cloud syncの別境界。local 
 
 2026-10-02、[PR #348](https://github.com/ojungo69/oboete/pull/348)（main `b8d3e19`）で実装済み（[#343](https://github.com/ojungo69/oboete/issues/343)）。それまでの `src/mcp.rs` は `Answer.hits` の行だけ返し、`Answer.vector` を落としていた。§4.10/A93の「full-text fallbackと理由を返す」をMCPでも満たすための修正で、新しい検索engineではない。
 
-実装された形：searchのtool結果の `structuredContent` に `vector`（`used`、または off / excluded / no-vectors / building / waiting / timeout / error のいずれか）と `why`（viewerと同じ安全な説明文、usedでは `null`）を入れ、**no hitsの場合にも**返す。既存の本文（fenceとredactionを通した行、順位、ID、scope）は変えない。query、hit本文、認証情報、providerの生errorは入れない。excludedではqueryを送信しない。CLIはfull textだけになった理由をstderrへ出し（embeddingがoffの場合を除く）、viewerは同じ状態を表示する。任意local HTTP（§7）を作る時は同じ状態を返すことを受け入れ条件に含める。
+実装された形：searchのtool結果の本文の1行目に `full text only: <why>`（`why` はviewerと同じ安全な説明文）を置き、**no hitsの場合にも**返す。vector検索を使った答えにはこの行がない。PR #348 では `structuredContent` に `vector` と `why` を入れていたが、Claude Code と Codex は `structuredContent` があると本文の代わりにそれだけをモデルに渡すため、2026-10-28 まで hit の行がモデルに届いていなかった。hitの行（fenceとredactionを通した行、順位、ID、scope）は変えない。理由の行にquery、hit本文、認証情報、providerの生errorは入れない。excludedではqueryを送信しない。CLIはfull textだけになった理由をstderrへ出し（embeddingがoffの場合を除く）、viewerは同じ状態を表示する。任意local HTTP（§7）を作る時は同じ状態を返すことを受け入れ条件に含める。
 
 ### 選択的portable export（低優先のplanned要件）
 
