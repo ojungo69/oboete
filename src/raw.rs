@@ -7138,17 +7138,16 @@ impl Rebuild {
     /// them is appended again (D5). Returns how many ops went, those not counted.
     // ponytail: a restore keeping a batch's records but not its migration op imports them again;
     // a check of the restored records against the source's ids would catch it.
-    /// docs/provenance.md P1: where a restore cuts each device's ops, by what they were made from:
-    /// at its first window or migration op made from records the restore did not bring back (its
-    /// span past the device's last record, or, a migration's, missing one of them), every later op
-    /// of the device with it. Slice 2 cuts at every op made from them (F1).
+    /// docs/provenance.md P1 and F1: where a restore cuts each device's ops, by what they were made
+    /// from: at its first op made from records the restore did not bring back (one it names past
+    /// the device's last record, whatever its kind, or, a migration's, missing one of its span),
+    /// every later op of the device with it.
     fn cut(&self) -> Result<std::collections::BTreeMap<String, i64>> {
         let mut cut = std::collections::BTreeMap::new();
         let mut last: Option<(String, i64)> = None;
-        let mut st = self.conn.prepare(
-            "SELECT device, op_seq, type, body FROM ops WHERE type IN ('window', 'migration')
-             ORDER BY device, op_seq",
-        )?;
+        let mut st = self
+            .conn
+            .prepare("SELECT device, op_seq, type, body FROM ops ORDER BY device, op_seq")?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
             let device: String = row.get(0)?;
@@ -7158,8 +7157,9 @@ impl Rebuild {
             let kind = OpKind::from_name(row.get_ref(2)?.as_str()?)
                 .context("an op of a kind that cannot be named")?;
             let body: serde_json::Value = serde_json::from_str(row.get_ref(3)?.as_str()?)
-                .context("a window or migration op whose body does not parse")?;
-            let Some((from, to)) = crate::provenance::of(kind, &body).own else {
+                .context("an op whose body does not parse")?;
+            let p = crate::provenance::of(kind, &body);
+            let Some(to) = p.top(&device) else {
                 continue;
             };
             let max = match &last {
@@ -7175,13 +7175,16 @@ impl Rebuild {
                 }
             };
             let lost = to > max
-                || kind == OpKind::Migration && {
-                    let held: i64 = self.conn.query_row(
-                        "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3",
-                        params![device, from, to],
-                        |r| r.get(0),
-                    )?;
-                    held < to - from + 1
+                || match (kind, p.own) {
+                    (OpKind::Migration, Some((from, to))) => {
+                        let held: i64 = self.conn.query_row(
+                            "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3",
+                            params![device, from, to],
+                            |r| r.get(0),
+                        )?;
+                        held < to - from + 1
+                    }
+                    _ => false,
                 };
             if lost {
                 cut.insert(device, row.get(1)?);

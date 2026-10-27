@@ -115,3 +115,22 @@ builder did not name is walked.
 This note's own PR stops after two review rounds whose findings are mechanism only (no change of a
 rule): what is left goes into an issue as acceptance tests for slice 1, and the PR merges without a
 further commit.
+
+## As built
+
+### Slice 2a: a restore's cut for every kind (2026-10-27)
+
+- **F1**: a restore cuts each device's ops at the first op made from records it did not bring
+  back, whatever its kind, every later op of the device with it (`Rebuild::cut`). An op is past
+  the restored records when the highest record of its device it names (`Provenance::top`: its
+  span's end, the spans it read, its goals, its quotes of that device) passes the device's last
+  restored record. A migration whose span misses a record is cut too, as before. A turn op and a
+  My Work op were kept before.
+- **#690 item 3**: a span's end is read alone (`Provenance::end`), so a window op with `to_seq` and
+  no `from_seq` is judged by it, as the SQL before #687 did.
+- **The order after it**: slice 3 (P4) comes before the rest of slice 2. My Work's next slice
+  (goals) needs S6 for every job, and P4 closes within raw.db, which the rest of slice 2 does not
+  change. That rest, slice 2b (P2, P3 across stores, F2 to F5), follows as disaster-recovery work.
+  Its plan was reviewed before the code: P2's marker record and op (the way this note offers)
+  rather than a floor kept in raw.db's meta, which no backup holds; and the backup's segment check
+  and set-aside rule must accept the gap a marker names.
