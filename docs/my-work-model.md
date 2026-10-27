@@ -1133,8 +1133,12 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   counts one, after Checked.
 - **The progress** in My Work's answer (claude-mem's `progress`): the percent of the review that
   counts, or of the newest below 100 when a status was recorded after it; 100 for shipped; when it
-  was reviewed; for shipped, the day, a recorded ship's when no review counts, else the review's
-  shipped date; and the estimate, none for shipped. None with no review and no ship.
+  was reviewed; for shipped, the day: the newest recorded status's when it completes the request
+  (done or shipped, claude-mem's `completedAtEpoch`), whatever review comes after it, else the
+  review's shipped date; and the estimate, none for shipped. None with no review and no ship.
+- **Checked** shows over a result ready to check only, as in claude-mem 15's
+  `normalizeRequestStatus`: a request checked before a review said it shipped is Shipped, with its
+  day.
 - **The estimate** (claude-mem's `measuredEstimate`): when the two readings rise below 100, the
   time the line through them reaches 100. A day already past is shown as it is, as claude-mem's is.
 - **The card** shows a meter with "70% · reviewed 1h ago", or "Completed Oct 26" for shipped, and

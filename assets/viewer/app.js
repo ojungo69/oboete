@@ -6656,7 +6656,7 @@ function myWorkProgress(row) {
   const meter = el('meter', 'my-work-meter');
   Object.assign(meter, { min: 0, max: 100, value: p.percent });
   meter.setAttribute('aria-label', t('my_work_progress_label'));
-  const text = row.status === 'shipped' && p.completed ? t('my_work_completed', { date: myWorkDay(p.completed) })
+  const text = p.completed ? t('my_work_completed', { date: myWorkDay(p.completed) })
     : p.reviewed ? t('my_work_progress', { p: p.percent, ago: myWorkAgo(p.reviewed) }) : `${p.percent}%`;
   return el('div', 'my-work-progress', meter, el('span', 'my-work-progress-text', text),
     p.estimate ? el('span', 'my-work-estimate', t('my_work_pace', { date: myWorkDay(p.estimate) })) : null);
@@ -7277,8 +7277,9 @@ const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, 
 
 function myWorkAccept(answer) {
   mw.signature = JSON.stringify([answer.requests, answer.unlinked]);
-  // `presentation.js` `effectiveStatus`: a checked request is Checked on the page.
-  for (const row of answer.requests) if (row.checked) row.status = 'checked';
+  // claude-mem 15's `normalizeRequestStatus`: a checked result ready to check is Checked on the
+  // page; a shipped one stays Shipped.
+  for (const row of answer.requests) if (row.checked && row.status === 'ready') row.status = 'checked';
   // `app.js` `apply`: a request new or changed since the last answer flashes, and one whose record
   // changed is marked new until it is opened; the first answer marks none, an empty one is a
   // first answer too (#600).

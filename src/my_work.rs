@@ -1814,8 +1814,14 @@ fn answer(
     // P5: the readings, and the newest of them when no status was recorded after it
     // (claude-mem's `reviewIsNewerThanLifecycle`).
     let readings = crate::my_work_progress::readings(k, &r.id.held(), raw.device(), hidden)?;
-    let at = lifecycle(&items).map(|l| (l.0).0);
+    let last = lifecycle(&items);
+    let at = last.as_ref().map(|l| (l.0).0);
     let counts = (readings.first()).filter(|x| at.is_none_or(|at| x.ts >= at));
+    // claude-mem's `completedAtEpoch`: when the newest status recorded completes the request.
+    let completed_at = (last.filter(|l| {
+        ["done", "completed", "complete", "shipped", "delivered"].contains(&l.2.as_str())
+    }))
+    .map(|l| (l.0).0);
     // The review the card and the story show: the one that counts, else the newest below 100, a
     // status recorded after it notwithstanding (claude-mem's `progress`).
     let review = counts.or(readings.first().filter(|x| x.percent < 100));
@@ -1982,7 +1988,7 @@ fn answer(
             "follow_ups": follow_ups,
             "updates": updates,
             "work": work,
-            "progress": progress(&readings, (review, counts), (status, at), rules),
+            "progress": progress(&readings, review, (status, completed_at), rules),
             "story": story(review, rules),
             "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
             "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
@@ -2074,15 +2080,13 @@ fn lifecycle(items: &[&Work]) -> Option<(Stamp, bool, String)> {
 }
 
 /// P5, claude-mem's `progress`: the percent of `review`, the one the card shows; 100 for shipped.
-/// When it was reviewed, the date it was completed, a recorded ship's when no review `counts`, and
-/// the estimate. None with no review and no ship.
+/// When it was reviewed; for shipped, the day the newest recorded status completed the request
+/// (`completed_at`), else the review's shipped date; and the estimate. None with no review and no
+/// ship.
 fn progress(
     readings: &[crate::my_work_progress::Reviewed],
-    (review, counts): (
-        Option<&crate::my_work_progress::Reviewed>,
-        Option<&crate::my_work_progress::Reviewed>,
-    ),
-    (status, at): (&str, Option<i64>),
+    review: Option<&crate::my_work_progress::Reviewed>,
+    (status, completed_at): (&str, Option<i64>),
     rules: &Rules,
 ) -> Value {
     let shipped = status == "shipped";
@@ -2095,12 +2099,10 @@ fn progress(
         review.map(|r| r.percent)
     };
     let gate = |text: &str| crate::redact::outbound_with(text, rules);
-    // A recorded ship's day, else the review's.
     let completed = shipped
         .then(|| {
-            (at.filter(|_| counts.is_none())
-                .map(|at| crate::db::utc(at)[..10].to_owned()))
-            .or_else(|| review.and_then(|r| r.shipped.as_deref().map(gate)))
+            (completed_at.map(|at| crate::db::utc(at)[..10].to_owned()))
+                .or_else(|| review.and_then(|r| r.shipped.as_deref().map(gate)))
         })
         .flatten();
     json!({

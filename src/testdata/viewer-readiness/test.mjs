@@ -1196,6 +1196,10 @@ assert(!text(card('p3')).includes('%'),'no progress before a review');
 assert.deepEqual(ids(),['p1','p3','p2'],'shipped after the others');
 const shippedTab=panel.querySelectorAll('button').find(n=>n.dataset.myWork==='tab:shipped');
 assert.equal(text(shippedTab),'Shipped 1','Shipped shows with its count');
+// A check of a result before it shipped: Shipped stays, with its day.
+set([req('ck',{status:'shipped',checked:now-H,progress:{percent:100,reviewed:now-H,completed:'2026-10-20',estimate:null}})]);
+assert(text(card('ck')).includes('Shipped')&&!text(card('ck')).includes('Checked'),'a shipped request stays Shipped though checked');
+assert(text(card('ck')).includes('Completed Oct 20'),'with the day it shipped');
 // The request's page: the progress and the build story, the milestones the oldest first.
 set([req('st',{progress:{percent:40,reviewed:now-H,completed:null,estimate:null},
   story:{narrative:'The parser came first.',milestones:[{date:'2026-10-02',text:'Reads a line.'},{date:'2026-10-05',text:'Tests pass.'}]}})]);

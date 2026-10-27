@@ -1891,7 +1891,7 @@ mod tests {
     }
 
     /// P5: a ship recorded after the reviews shows 100 and the day it was recorded, with no
-    /// estimate; a shipped review after it, its own day.
+    /// estimate, whatever review comes after it.
     #[test]
     fn a_recorded_ship_shows_100_and_its_day() {
         let mut h = Home::new();
@@ -1914,8 +1914,17 @@ mod tests {
             (&json!(100), &json!(today), &Value::Null),
             "{p}"
         );
+        // A later review counts, and the recorded ship's day stays, a shipped one's date too
+        // (claude-mem's `completedAtEpoch` first).
+        h.reviewed(&id, 0, review("in-progress", 80, "", &[]));
+        let r = h.page();
+        assert_eq!(
+            (&r["status"], &r["progress"]["completed"]),
+            (&json!("shipped"), &json!(today)),
+            "{r}"
+        );
         h.reviewed(&id, 0, review("shipped", 100, "2026-10-20", &[]));
-        assert_eq!(h.page()["progress"]["completed"], "2026-10-20");
+        assert_eq!(h.page()["progress"]["completed"], json!(today));
     }
 
     /// The build story is gated as the page reads it: a rule added after the review masks its
