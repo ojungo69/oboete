@@ -1836,7 +1836,11 @@ pub(crate) fn restore_report_holding(
             if let Some(guard) = guard {
                 guard.check(home)?;
             }
-            crate::forget::reconcile(home, &mut raw)
+            let report = crate::forget::reconcile(home, &mut raw)?;
+            // docs/my-work-model.md S5: a forget whose text this restore brought back owes its
+            // rebuild again, so what was made from it is left out until its purge marks it.
+            crate::forget::owe_rebuild_again(&raw)?;
+            Ok(report)
         }) {
             Ok(r) => report.problems.extend(r.problems),
             Err(e) => report.problems.push(format!("{e:#}")),

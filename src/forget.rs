@@ -1002,6 +1002,24 @@ pub struct Purged {
     pub copies_removed: usize,
 }
 
+/// A restore (spec 6.3): every job whose text came back owes its rebuild again (step 2, as its purge
+/// records when it finds the text), now rather than at that purge's next look, so until the purge
+/// marks what it took again, the readers of what was made from its records go by its tombstones
+/// (`Raw::forget_unrebuilt`, docs/my-work-model.md S5).
+pub(crate) fn owe_rebuild_again(raw: &crate::raw::Raw) -> Result<()> {
+    let holding = record_jobs_with_text(raw)?;
+    for (request, step) in raw.forget_jobs()? {
+        let held = match &request.target {
+            Target::Uid { uid } => raw.uid_has_ops(uid)?,
+            _ => holding.contains(&request.job),
+        };
+        if held && step > 2 {
+            raw.restart_forget_step(&request.job, 2)?;
+        }
+    }
+    Ok(())
+}
+
 /// Each uid job a purge goes on with, by state rather than step (D5 item 7): one not past step 5,
 /// or whose ops hold text again (a restore can bring the bodies back): its job, uid and step, and
 /// whether its ops hold text.
@@ -5478,6 +5496,39 @@ mod tests {
         assert_eq!((purged.jobs, purged.ops), (1, 1));
         assert_eq!(uid_jobs(&home)[0].2, 5);
         assert!(!op_rows(&home).iter().any(|o| o.3.contains("Use tabs.")));
+    }
+
+    /// A restore that brings a forget's text back owes its rebuild again at once (step 2), so the
+    /// readers go by its tombstones until the purge marks what it took again (docs/my-work-model.md
+    /// S5); the purge then finishes it again.
+    #[test]
+    fn a_restore_bringing_text_back_owes_the_rebuild_again() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let uid = s.decided("github.com/o/r", 2_000, "Use tabs.", &[]);
+        let home = s.home.path().to_owned();
+        let before = op_rows(&home);
+        forget(&home, &uid);
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        assert!(!raw::open(&home).unwrap().forget_unrebuilt().unwrap());
+        // The bodies an older raw.db held, back in place.
+        let conn = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        for (device, seq, _, body) in &before {
+            conn.execute(
+                "UPDATE ops SET body = ?3 WHERE device = ?1 AND op_seq = ?2",
+                rusqlite::params![device, seq, body],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let raw = raw::open(&home).unwrap();
+        owe_rebuild_again(&raw).unwrap();
+        assert!(raw.forget_unrebuilt().unwrap());
+        drop(raw);
+        assert_eq!(uid_jobs(&home)[0].2, 2);
+        purge(&home).unwrap().unwrap();
+        assert!(!raw::open(&home).unwrap().forget_unrebuilt().unwrap());
     }
 
     /// Parity row 3 (Codex and CodeRabbit on #655): a purge started while another runs waits for
