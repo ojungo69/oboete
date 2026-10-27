@@ -3,6 +3,8 @@
 //! keywords gate its regex (one case-insensitive Aho-Corasick pass), the regex is compiled only
 //! when a keyword hits, the secret is the first capture group, and entropy plus allowlists
 //! filter the candidates. Rules that depend on a file path are skipped: hook text has none.
+//! One line of the file differs from upstream: the global allowlist's `true`, `false` or `null`
+//! is anchored as a whole (gitleaks#2293). A copy taken again from upstream must keep it.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -2572,6 +2574,27 @@ extra_rules = [
             !masked.contains("123456") && !masked.contains("1234 "),
             "{masked}"
         );
+    }
+
+    /// gitleaks's global allowlist passes over a value that is `true`, `false` or `null`, not one
+    /// that only starts with `true`, holds `false` or ends with `null`: its alternation was not
+    /// anchored as a whole (gitleaks#2293), so such a password was stored as written.
+    #[test]
+    fn only_a_whole_true_false_or_null_is_passed_over() {
+        let rules = Rules::default();
+        // split: scanners
+        for value in [
+            "True".to_owned() + "Blue4417x",
+            "xq7FALSE".to_owned() + "hood2",
+            "W9kd2zz".to_owned() + "Null",
+        ] {
+            let (masked, _) = scan(&format!("DB_PASSWORD={value}"), &rules);
+            assert_eq!(masked, "DB_PASSWORD=[REDACTED]", "{value}");
+        }
+        for value in ["true", "False", "NULL"] {
+            let text = format!("{{\"db_password\": \"{value}\"}}");
+            assert_eq!(scan(&text, &rules).0, text);
+        }
     }
 
     #[test]
