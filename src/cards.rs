@@ -492,13 +492,13 @@ pub fn work(home: &std::path::Path, raw: &Raw, cards: &[Card]) -> HashMap<i64, i
 }
 
 /// What a reader reads of a card, in `read`'s order.
-const COLUMNS: &str = "device, op_seq, n, ts, agent, session, repo, type, title, subtitle, \
+pub(crate) const COLUMNS: &str = "device, op_seq, n, ts, agent, session, repo, type, title, subtitle, \
                        narrative, facts, concepts, files_read, files_modified, from_seq, to_seq, \
                        removed, goals";
 
 /// K4: whether a removal its op does not list took from a record the curator of a row of
 /// `COLUMNS` was shown: its window and its goals.
-fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
+pub(crate) fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
     let device: String = r.get(0)?;
     let listed: Vec<Removal> = serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default();
     let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
@@ -507,22 +507,6 @@ fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
         removed.extend(raw.removed_in(&device, goal, goal, None)?);
     }
     Ok(removed.iter().any(|x| !listed.contains(x)))
-}
-
-/// Whether window op `op_seq` of `device` is one K4 leaves out now (its cards share its window):
-/// an op built on it is left out with it (docs/my-work-model.md S5). False for an op with no card.
-pub(crate) fn taken(k: &Connection, raw: &Raw, (device, op_seq): (&str, i64)) -> Result<bool> {
-    if !crate::consumer::manifest::exists(k, "table", "cards")? {
-        return Ok(false);
-    }
-    let mut st = k.prepare_cached(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE device = ?1 AND op_seq = ?2 LIMIT 1"
-    ))?;
-    let mut rows = st.query(rusqlite::params![device, op_seq])?;
-    match rows.next()? {
-        Some(r) => taken_row(r, raw),
-        None => Ok(false),
-    }
 }
 
 /// A row of `COLUMNS` as a reader gets it, or none while a removal its op does not list took

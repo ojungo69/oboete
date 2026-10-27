@@ -776,6 +776,7 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `a_group_a_forget_took_decides_nothing_before_its_purge` (S5)
 - `a_forget_past_its_rebuild_leaves_the_walk_off` (S5)
 - `forget::tests::a_restore_bringing_text_back_owes_the_rebuild_again` (S5)
+- `forget::tests::a_denial_whose_text_came_back_with_no_job_keeps_the_backstop` (S5)
 
 ### Slice 5
 
@@ -1165,7 +1166,8 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   `Raw::forget_unrebuilt`: a finished forget stays in `forget_jobs`, past it), or a session is
   excluded. A restore that brings a forget's text back sets its job back to step 2 at once
   (`forget::owe_rebuild_again`, as its purge would at its next look), so the walk runs again until
-  the purge marks what it took again. A rescan's masks are the gate's: every text is gated with the rules as
+  the purge marks what it took again; a forgotten record whose text a restore from segments alone
+  brought back, with no job row, keeps it running too, until a purge takes the text again. A rescan's masks are the gate's: every text is gated with the rules as
   they are when it is read.
 - **The review's age** on the card is a time each poll's tick rewrites, as the card's own.
 - **On the screen** (Playwright, a home of made-up records, 2026-10-27): the cards' meter, percent

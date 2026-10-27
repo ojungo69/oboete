@@ -732,7 +732,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 }
 
 /// What a reader reads of a turn op, in `read_row`'s order.
-const COLUMNS: &str = "device, op_seq, ts, agent, session, repo, from_seq, through, read, goals, \
+pub(crate) const COLUMNS: &str = "device, op_seq, ts, agent, session, repo, from_seq, through, read, goals, \
                        removed, fields";
 
 /// `repo`'s newest summaries, at most `limit`, the newest first: none that is skipped, and none
@@ -892,7 +892,7 @@ pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<
 
 /// T7: whether a removal its op does not list took from what a row of `COLUMNS` rests on: its own
 /// session's records as they are stored (before the gate), the other spans it read, its goals.
-fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
+pub(crate) fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
     let device: String = r.get(0)?;
     let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
     let read: Vec<(i64, i64)> = serde_json::from_str(&json(8)?).unwrap_or_default();
@@ -908,22 +908,6 @@ fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
         removed.extend(raw.removed_in(&device, g, g, None)?);
     }
     Ok(removed.iter().any(|x| !listed.contains(x)))
-}
-
-/// Whether turn op `op_seq` of `device` is one T7 leaves out now: an op built on it is left out
-/// with it (docs/my-work-model.md S5). False for an op that is no turn's.
-pub(crate) fn taken(k: &Connection, raw: &Raw, (device, op_seq): (&str, i64)) -> Result<bool> {
-    if !crate::consumer::manifest::exists(k, "table", "turns")? {
-        return Ok(false);
-    }
-    let mut st = k.prepare_cached(&format!(
-        "SELECT {COLUMNS} FROM turns WHERE device = ?1 AND op_seq = ?2"
-    ))?;
-    let mut rows = st.query(params![device, op_seq])?;
-    match rows.next()? {
-        Some(r) => taken_row(r, raw),
-        None => Ok(false),
-    }
 }
 
 /// A row of `COLUMNS` as a reader gets it (K7's one way in): none while a removal its op does not

@@ -1836,10 +1836,20 @@ pub(crate) fn restore_report_holding(
             if let Some(guard) = guard {
                 guard.check(home)?;
             }
-            let report = crate::forget::reconcile(home, &mut raw)?;
-            // docs/my-work-model.md S5: a forget whose text this restore brought back owes its
-            // rebuild again, so what was made from it is left out until its purge marks it.
-            crate::forget::owe_rebuild_again(&raw)?;
+            // Each on its own, both kept as warnings (CodeRabbit on #694). docs/my-work-model.md
+            // S5: a forget whose text this restore brought back owes its rebuild again, so what was
+            // made from it is left out until its purge marks it.
+            let mut report = crate::forget::reconcile(home, &mut raw).unwrap_or_else(|e| {
+                crate::forget::Report {
+                    problems: vec![format!("{e:#}")],
+                    ..Default::default()
+                }
+            });
+            if let Err(e) = crate::forget::owe_rebuild_again(&raw) {
+                report.problems.push(format!(
+                    "a forget whose text came back was not set back to its rebuild: {e:#}"
+                ));
+            }
             Ok(report)
         }) {
             Ok(r) => report.problems.extend(r.problems),

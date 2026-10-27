@@ -3169,6 +3169,17 @@ mod tests {
         (guard, home, device, forgotten, kept)
     }
 
+    /// CodeRabbit on #694: a restore from segments alone brings back the denials with no job row,
+    /// and the forgotten records' text: the readers go by the tombstones (docs/my-work-model.md S5)
+    /// until a purge takes the text again.
+    #[test]
+    fn a_denial_whose_text_came_back_with_no_job_keeps_the_backstop() {
+        let (_kept, home, _, _, _) = restored_without_jobs();
+        assert!(raw::open(&home).unwrap().forget_unrebuilt().unwrap());
+        purge(&home).unwrap().unwrap();
+        assert!(!raw::open(&home).unwrap().forget_unrebuilt().unwrap());
+    }
+
     /// Codex on #470: a purge of denials with no job row stopped inside a record segment's
     /// replacement leaves the backups owed in raw.db: a worker starts a continuation for them, the
     /// next purge, with no job and no row holding text, rewrites them, and the one after has
