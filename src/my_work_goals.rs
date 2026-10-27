@@ -147,6 +147,12 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
     })
 }
 
+/// M2: whether a goals op stopped at the budget with prompts left, a first run's chunk; a skip
+/// never did.
+fn stopped(k: &Kept) -> bool {
+    (k.op.fields.get("more").and_then(Value::as_bool)).unwrap_or(false)
+}
+
 /// The last prompt seq a goals op read: its spans' end, and its `through`, which counts the agents'
 /// prompts it saw and did not show.
 fn read_through(k: &Kept) -> i64 {
@@ -184,7 +190,7 @@ impl Job for OwnerGoals {
             return Ok(Vec::new());
         };
         let since = match &round.last {
-            Some(last) if first.ts < last.op.ts => last.op.ts,
+            Some(last) if stopped(last) => last.op.ts,
             Some(last) => last.op.ts + DAY_MS,
             None => first.ts,
         };
@@ -242,6 +248,7 @@ impl Job for OwnerGoals {
             current,
             shown: filled.shown,
             through: filled.through,
+            more: filled.more,
             next_id,
             now,
             rules: s.rules.clone(),
@@ -279,6 +286,8 @@ struct Filled {
     shown: Vec<ShownPrompt>,
     /// The last prompt it read: shown, or an agent's it passed over.
     through: i64,
+    /// Whether it stopped at the budget with prompts left (M2: the next chunk goes on at once).
+    more: bool,
 }
 
 /// M1, M2 within `[summary] window_tokens` (A4): the current goals without their quotes (M3), then
@@ -322,6 +331,7 @@ fn fill(
         data,
         shown: Vec::new(),
         through: 0,
+        more: false,
     };
     for p in unread {
         if agent.contains(&p.seq) {
@@ -346,6 +356,7 @@ fn fill(
             max = max * 2 / 3;
         };
         let Some((line, text)) = line else {
+            filled.more = true;
             break;
         };
         left = left.saturating_sub(crate::budget::estimate(&line));
@@ -479,6 +490,7 @@ struct Context {
     current: Vec<Item>,
     shown: Vec<ShownPrompt>,
     through: i64,
+    more: bool,
     next_id: u64,
     now: i64,
     rules: Rules,
@@ -613,6 +625,7 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
             json!(capped(&answer["summary"], SUMMARY)),
         ),
         ("through".to_owned(), json!(c.through)),
+        ("more".to_owned(), json!(c.more)),
         ("next_id".to_owned(), json!(next_id)),
     ])
 }
@@ -880,6 +893,32 @@ mod tests {
         assert_eq!(due[0].1, written + DAY_MS);
     }
 
+    /// M2 (#716): a prompt typed while the goals call is out waits a day after the op, as one
+    /// typed after it does; only a read that stopped at the budget goes on at once.
+    #[test]
+    fn a_prompt_typed_while_the_call_is_out_waits_a_day() {
+        let mut h = Home::new();
+        h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
+        let home = h.s.home.path().to_owned();
+        h.pass(&|_| {
+            // Recorded after the job read and before its op is written.
+            let body = json!({"prompt": "Add a test for the header check."}).to_string();
+            let typed = crate::raw::Event {
+                kind: "prompt".into(),
+                session: "s2".into(),
+                repo: Some(R.into()),
+                ts: crate::db::now_ms() - 1,
+                ..crate::raw::test_event(&body)
+            };
+            crate::raw::open(&home).unwrap().append(&typed).unwrap();
+            nothing()
+        });
+        let written = h.goals()[0].op.ts;
+        let due = h.due();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].1, written + DAY_MS);
+    }
+
     /// M4: a quote must be found in the prompt it names, else it goes; an item with none goes.
     #[test]
     fn a_quote_must_be_found_in_the_prompt_it_names() {
@@ -950,6 +989,7 @@ mod tests {
                 text: "日本語のタイトルを試す".into(),
             }],
             through: 9,
+            more: false,
             next_id: 1,
             now,
             rules: Rules::default(),
