@@ -338,13 +338,14 @@ fn meaningful(v: &Value) -> Option<String> {
 }
 
 /// claude-mem's `normalizeRecordedStatus`: lower-cased, `_` and spaces read as `-`, and the
-/// aliases of needs you.
+/// aliases of needs you and, since claude-mem 15.1, of needs review.
 fn normalized(status: &str) -> String {
     let s = status.trim().to_lowercase().replace(['_', ' '], "-");
     match s.as_str() {
         "needs-input" | "waiting-on-user" | "awaiting-approval" | "needs-approval" => {
             "needs-you".into()
         }
+        "review" | "in-review" | "awaiting-review" | "ready-for-review" => "needs-review".into(),
         _ => s,
     }
 }
@@ -2016,6 +2017,8 @@ fn status(
         .unwrap_or(0);
     let from_work = if states.iter().any(|s| s == "needs-you") {
         "needs-you"
+    } else if states.iter().any(|s| s == "needs-review") {
+        "needs-review"
     } else if states.iter().any(|s| s == "blocked" || s == "failed") {
         "blocked"
     } else if all(&["done", "completed"]) {
@@ -2025,7 +2028,7 @@ fn status(
     } else if now - updated > QUIET_MS {
         "quiet"
     } else if (states.iter())
-        .any(|s| ["doing", "in-progress", "active", "running"].contains(&s.as_str()))
+        .any(|s| ["doing", "in-progress", "active", "running", "open"].contains(&s.as_str()))
     {
         "in-progress"
     } else if (states.iter()).any(|s| ["todo", "planned", "queued"].contains(&s.as_str())) {
@@ -2042,10 +2045,9 @@ fn status(
         }
         .to_owned()
     });
+    // Work all done does not complete its request; work all dropped closes it (claude-mem 15.1).
     let mut status = from_work;
-    if matches!(status, "done" | "closed")
-        && !matches!(lifecycle.as_deref(), Some("done" | "closed"))
-    {
+    if status == "done" && !matches!(lifecycle.as_deref(), Some("done" | "shipped")) {
         status = "unknown";
     }
     if let Some(known) = lifecycle.as_deref().and_then(category) {
@@ -2064,7 +2066,7 @@ fn status(
     }
     match status {
         "needs-you" => "needs",
-        "done" => "ready",
+        "done" | "needs-review" => "ready",
         "in-progress" => "working",
         other => other,
     }
@@ -2132,6 +2134,7 @@ fn story(review: Option<&crate::my_work_progress::Reviewed>, rules: &Rules) -> V
 fn category(status: &str) -> Option<&'static str> {
     Some(match status {
         "needs-you" => "needs-you",
+        "needs-review" => "needs-review",
         "blocked" | "failed" => "blocked",
         "doing" | "in-progress" | "active" | "running" => "in-progress",
         "todo" | "planned" | "queued" => "todo",
@@ -3021,9 +3024,10 @@ mod tests {
     }
 
     /// The design's 4, claude-mem's `statusFor` and its lifecycle: needs you (and its aliases),
-    /// blocked, ready only on the request's own recorded completion, shipped apart from it
-    /// (claude-mem 15.2), in progress, to do, and no recent update after 6 quiet hours; work that
-    /// is all done is "Update recorded".
+    /// needs review before blocked (and its aliases, claude-mem 15.1), blocked, ready on the
+    /// request's own recorded completion or review, shipped apart from it (claude-mem 15.2), in
+    /// progress (`open` too), to do, and no recent update after 6 quiet hours; work that is all
+    /// done is "Update recorded", and work all dropped closes a request with no other record.
     #[test]
     fn each_status_comes_from_the_recorded_work_as_claude_mems_does() {
         let mut h = Home::new();
@@ -3054,12 +3058,39 @@ mod tests {
                 "shipped",
                 json!({"task": "t", "status": "doing", "request_status": "delivered"}),
             ),
+            ("ready", json!({"task": "t", "status": "Ready for review"})),
+            (
+                "ready",
+                json!({"task": "t", "status": "doing", "request_status": "in_review"}),
+            ),
+            ("working", json!({"task": "t", "status": "open"})),
+            ("ready", json!({"task": "t", "status": "review"})),
         ];
         for (i, (_, fields)) in cases.iter().enumerate() {
             let session = format!("s{i}");
             h.said(&session, -60_000, "Do the thing.");
             h.wrote(&session, &format!("list {i}"), fields.clone());
         }
+        h.said("review", -60_000, "Do the thing.");
+        h.wrote("review", "a", json!({"task": "a", "status": "failed"}));
+        h.wrote(
+            "review",
+            "b",
+            json!({"task": "b", "status": "awaiting_review"}),
+        );
+        // Each request of a conversation that names two owns only its prompts, not their times,
+        // so it has no record besides its work.
+        h.said("ids", -60_000, "Do the two things.");
+        h.wrote(
+            "ids",
+            "d",
+            json!({"task": "t", "request_id": "D", "status": "dropped"}),
+        );
+        h.wrote(
+            "ids",
+            "e",
+            json!({"task": "u", "request_id": "E", "status": "doing"}),
+        );
         let v = h.read(Range::All, h.t + 10_000);
         for (i, (status, _)) in cases.iter().enumerate() {
             assert_eq!(
@@ -3068,6 +3099,8 @@ mod tests {
                 "{i}"
             );
         }
+        assert_eq!(by_id(&v, "c:claude:review")["status"], "ready");
+        assert_eq!(by_id(&v, "r:D")["status"], "closed");
         // P5: a ship recorded with no review is 100% on the card.
         assert_eq!(by_id(&v, "c:claude:s4")["progress"]["percent"], 100);
         assert_eq!(by_id(&v, "c:claude:s5")["progress"], Value::Null);
@@ -3075,6 +3108,9 @@ mod tests {
         assert_eq!(by_id(&later, "c:claude:s5")["status"], "quiet");
         assert_eq!(by_id(&later, "c:claude:s2")["status"], "quiet");
         assert_eq!(by_id(&later, "c:claude:s0")["status"], "needs");
+        // Needs review and closed come before no recent update, as needs you does.
+        assert_eq!(by_id(&later, "c:claude:s11")["status"], "ready");
+        assert_eq!(by_id(&later, "r:D")["status"], "closed");
     }
 
     /// Of two writes in one millisecond, the later one's item is the newer, as claude-mem reads its

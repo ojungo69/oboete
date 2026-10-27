@@ -1179,6 +1179,13 @@ assert(text(card('a')).includes('Claude Code'),'the contributor is named as the 
 // Attention first: needs, blocked, ready, working, quiet, todo, unknown, closed; ties newest first.
 set(['closed','unknown','todo','quiet','working','ready','blocked','needs'].map((status,i)=>req(status,{status,updated:now-(i+1)*60000})));
 assert.deepEqual(ids(),['needs','blocked','ready','working','quiet','todo','unknown','closed'],'attention order');
+// A list's status (claude-mem 15.1's statusFor): needs review, by any of its names, before
+// blocked; `open` in progress; all dropped closed.
+const stream=states=>run(`myWorkStreamStatus(${JSON.stringify(states.map(status=>({status,updated:now})))},${now})`);
+assert.equal(stream(['failed','Ready for review']),'ready','needs review comes before blocked');
+assert.equal(stream(['doing','in_review']),'ready','in review is needs review');
+assert.equal(stream(['open']),'working','open is in progress');
+assert.equal(stream(['dropped','dropped']),'closed','all dropped is closed');
 set([req('x',{updated:now-3*H}),req('y',{updated:now-H}),req('z',{updated:0,title:'A first'})]);
 run('mw.range="all";mw.sort="latest";myWorkDraw()');assert.deepEqual(ids(),['y','x','z'],'latest first, no time last');
 run('mw.sort="oldest";myWorkDraw()');assert.deepEqual(ids(),['x','y','z'],'oldest first, no time last');

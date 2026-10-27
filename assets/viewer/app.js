@@ -6513,6 +6513,7 @@ const MY_WORK_ALWAYS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked'];
 const MY_WORK_ATTENTION = { needs: 0, blocked: 1, ready: 2, working: 3, quiet: 4, todo: 5, unknown: 6, closed: 7, checked: 8, shipped: 9 };
 const MY_WORK_LAYOUTS = ['cards', 'list', 'agents'];
 const MY_WORK_NEEDS = ['needs-you', 'needs-input', 'waiting-on-user', 'awaiting-approval', 'needs-approval'];
+const MY_WORK_REVIEW = ['needs-review', 'review', 'in-review', 'awaiting-review', 'ready-for-review'];
 const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
 // The answer and the page's place in it. The filters live in the page, as claude-mem's live in
 // its address; the layout is remembered.
@@ -7004,18 +7005,20 @@ function myWorkFact(term, ...value) {
   return el('div', null, word('dt', null, term), el('dd', null, ...value));
 }
 
-// `view-model.js` `statusFor` over a work stream's items, as the page names its statuses.
+// `statusFor` over a work stream's items, as the page names its statuses: needs review comes
+// before blocked and `open` is in progress since claude-mem 15.1.
 function myWorkStreamStatus(items, now = Date.now()) {
   const states = items.map((w) => {
     const s = String(w.status || '').trim().toLowerCase().replace(/[_ ]/g, '-');
     return MY_WORK_NEEDS.includes(s) ? 'needs-you' : s;
   });
   if (states.includes('needs-you')) return 'needs';
+  if (states.some((s) => MY_WORK_REVIEW.includes(s))) return 'ready';
   if (states.some((s) => ['blocked', 'failed'].includes(s))) return 'blocked';
   if (items.length && states.every((s) => ['done', 'completed'].includes(s))) return 'ready';
   if (items.length && states.every((s) => s === 'dropped')) return 'closed';
   if (now - Math.max(0, ...items.map((w) => w.updated || 0)) > 6 * 3600000) return 'quiet';
-  if (states.some((s) => ['doing', 'in-progress', 'active', 'running'].includes(s))) return 'working';
+  if (states.some((s) => ['doing', 'in-progress', 'active', 'running', 'open'].includes(s))) return 'working';
   if (states.some((s) => ['todo', 'planned', 'queued'].includes(s))) return 'todo';
   return 'unknown';
 }
