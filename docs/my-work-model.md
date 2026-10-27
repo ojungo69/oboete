@@ -514,7 +514,7 @@ R3. **The owner's actions**, each through `save_gate`, each an op so it survives
 R4. **Delivery.** An approved rule is a decided preference, so it reaches session start in the
 fenced "Global preferences" block, or the repository's claims, in every agent: Claude Code, Codex
 and Grok. claude-mem writes a file that Claude Code alone loads as instructions. No file is
-written here (owner: item 1).
+written here (decision 60).
 
 R5. **Forget and approved rules.** An approved rule stands on the owner's own directive, as a
 `pref add` does. A forget of the prompts it was learned from takes the suggestion (S5), not the
@@ -650,15 +650,15 @@ to fit.
 | Story trigger | never by itself | due when facts changed | stale story |
 | Suggestion identity | a hash of its wording | an id | rejections stick |
 | Preference quotes | unchecked | found in a typed prompt | shown as the owner's |
-| Rules delivery | a file Claude Code loads as instructions | decided preferences at every agent's session start | spec 6.5 (owner: item 1) |
+| Rules delivery | a file Claude Code loads as instructions | decided preferences at every agent's session start | spec 6.5, decision 60 |
 | Undo after a reload | none | an op | kept |
 | Multi-device | rows sync | this device's ops | sync not built |
 | Forget | none of derived text | ops taken with what they read | forget is oboete's |
 | Cloud at setup (row X22) | goals, rules and groups from cmem.ai | none | decisions 56 and 57 |
 
-## What needs the owner
+## What needed the owner
 
-The code can be built without it; slice 8 waits for it.
+Decision 60 settled it; slice 8 waited for it.
 
 1. **Where approved rules go.** claude-mem writes approved rules to a file and adds one line to
    Claude Code's instructions file, so Claude Code alone obeys them as instructions. oboete's
@@ -667,7 +667,7 @@ The code can be built without it; slice 8 waits for it.
    start of every session in Claude Code, Codex and Grok, as quoted data. Its words are the
    model's, which the owner approves or edits, and approving records them as the owner's own. The
    file is the exact copy of claude-mem; it puts memory outside the fence and changes spec 6.5.
-   The owner chooses.
+   Decided 2026-10-27 (decision 60): the decided preference, as proposed.
 
 Decided by Claude, overrulable, as their rules above say: the jobs are off until turned on, with
 the estimate shown first (A6); one monthly pool, with no share kept back for cards (A7); the
@@ -696,8 +696,8 @@ goals' window is the last 31 days, rolling, and each finished calendar month is 
    words. It needs slices 4 and 5.
 7. **The story and suggestions** (P6, P7, R1). The story's chapters and recap on My Work, the rules
    job. It needs slice 4.
-8. **My Rules** (R2 to R5, V3). The page, the actions, delivery. It needs slice 7 and the owner's
-   item 1.
+8. **My Rules** (R2 to R5, V3). The page, the actions, delivery. It needs slice 7; decision 60
+   settles the delivery.
 9. **Removing a card or a summary** (decision 57's other part): reversible, as a correction is, in a
    note of its own ([card-hide.md](card-hide.md)), built first, after the page's forget (row 3).
 
