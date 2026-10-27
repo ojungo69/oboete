@@ -34,16 +34,21 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
 - **Statuses** (`view-model.js` `statusFor` and `buildModel`, `presentation.js`):
   - The request's own recorded status decides first: its completion (`request_complete: true`, or
     a `request_status` of `done`, `completed` or `complete`) is "Ready to check"; `shipped` or
-    `delivered` is "Shipped", its own state since claude-mem 15.2 (decision 57's slice 4b); and
-    another status a `request_status` names (`blocked`, `needs-you`, `closed` and the like) is that
-    status. A review of decision 57 newer than that status makes a shipped request "Shipped" and
-    one at 100% "Ready to check" ([my-work-model.md](my-work-model.md) P5).
+    `delivered` is "Shipped", its own state since claude-mem 15.2 (decision 57's slice 4b); needs
+    review (below) is "Ready to check"; and another status a `request_status` names (`blocked`,
+    `needs-you`, `closed` and the like) is that status. A review of decision 57 newer than that
+    status makes a shipped request "Shipped" and one at 100% "Ready to check"
+    ([my-work-model.md](my-work-model.md) P5).
   - Otherwise its work decides, the first that holds: "Needs you", a recorded status `needs-you`,
     `needs-input`, `waiting-on-user`, `awaiting-approval` or `needs-approval` (lower-cased, `_` and
-    spaces read as `-`); "Blocked", `blocked` or `failed`; "Update recorded", all of it done or all
-    of it dropped (a finished task or an ended session does not finish its request); "No recent
-    update", nothing newer recorded for 6 hours; "In progress", `doing`, `in-progress`, `active` or
-    `running`; "To do", `todo`, `planned` or `queued`; else "Update recorded".
+    spaces read as `-`); "Ready to check", needs review: `needs-review`, `review`, `in-review`,
+    `awaiting-review` or `ready-for-review` (claude-mem 15.1); "Blocked", `blocked` or `failed`;
+    "Update recorded", all of it done (a finished task or an ended session does not finish its
+    request); "Closed", all of it dropped, for a request with no record besides its work
+    (claude-mem 15.1; before, "Update recorded"); "No recent update", nothing newer recorded for
+    6 hours; "In progress", `doing`, `in-progress`, `active`, `running` or `open`; "To do",
+    `todo`, `planned` or `queued`; else "Update recorded". A list's status on the request's page
+    reads its items by the same rules, all of them done being "Ready to check" there.
   - "Checked": a person marked this version of the result checked; it shows in place of the
     status.
   - The status tabs always show All, Needs you, In progress, No recent update, Ready to check and
@@ -202,7 +207,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   call sent; work state imported from claude-mem is neither read nor counted.
 - Each status and alias above, from the request's recorded status and its work state, each
   recorded status dated by the write that set it and, at the same millisecond, the later write
-  first; work that is all done, or an ended session, alone is not "Ready to check"; 6 quiet hours
+  first; needs review, by each of its names, comes before blocked, and work all dropped with no
+  other record is "Closed"; work that is all done, or an ended session, alone is not "Ready to
+  check"; 6 quiet hours
   is "No recent update"; attention first orders them.
 - The card's title, summary and next step come from the session summaries in their order, cut at a
   word; a newer reply not summarized keeps the last summary and says "Summary updating"; a request
@@ -280,7 +287,8 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   `running` in progress, `queued` to do, `dropped` closed), where claude-mem's lifecycle takes only
   its exact status names and leaves the rest to the work (Codex on #574). A request's prompts,
   replies and cards are one more row of its work, as claude-mem's observations are, so work that
-  is all done reads "Update recorded" until it has been quiet for 6 hours. A task's update time is
+  is all done, or all dropped, reads "Update recorded" until it has been quiet for 6 hours; work
+  with no such row is "Closed" when all of it is dropped (claude-mem 15.1). A task's update time is
   its own writes', as claude-mem's (`reduceWorkState`; the 240 read and `lastUpdateEpoch` go by
   it), while a status it takes from its list is dated by the list's write; the list's state
   reaches the request as an item of its own (Codex on #574).
