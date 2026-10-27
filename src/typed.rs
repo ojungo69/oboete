@@ -112,6 +112,21 @@ pub(crate) fn agent_text(kind: &str, body: &Value) -> Option<String> {
     }
 }
 
+/// When the agent text a record of `kind` with `body` holds was written, for the text tests (O3,
+/// C3): a tool's input when its call began (#692), since a call that starts another agent and
+/// waits for it records that agent's ask before its own end; else the record's time `ts`.
+pub(crate) fn written_at(kind: &str, body: &Value, ts: i64) -> i64 {
+    match kind {
+        "tool" => body["started"].as_i64().unwrap_or(ts),
+        _ => ts,
+    }
+}
+
+/// How long after the last ask a tool's record is read for a call that began before it (#692).
+// shortcut: a call that ran longer than a day is not read for its start; widen it if delegations
+// ever wait that long.
+pub(crate) const LONGEST_CALL_MS: i64 = 24 * 60 * 60 * 1000;
+
 const BASE: u64 = 1_000_003;
 
 fn step(hash: u64, c: char) -> u64 {

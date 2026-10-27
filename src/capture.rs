@@ -93,6 +93,10 @@ pub(crate) const AGENT_SENT: &str = "oboete_agent_sent";
 /// from `CLAUDE_CODE_ENTRYPOINT`, or by the transcript parser from the line, and never by an agent.
 pub(crate) const ENTRYPOINT: &str = "oboete_entrypoint";
 
+/// The hook payload's start of a tool's call, in ms (#692): set by the hook from the call's
+/// PreToolUse, or by the transcript parser from the call's line, and never by an agent.
+pub(crate) const STARTED: &str = "oboete_started";
+
 /// The events one hook call of a ported agent records: none for events that carry nothing, nor
 /// in a checkout whose `.oboete.toml` stops recording (slice 4a, `checkout_records`).
 pub fn events(
@@ -521,6 +525,10 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
                 if let Some(v) = payload.get(key) {
                     body[key] = clean(v);
                 }
+            }
+            // When the call began, its record's time being when it ended (#692).
+            if let Some(ms) = payload[STARTED].as_i64() {
+                body["started"] = json!(ms);
             }
             // A read of stored memory keeps its call and not its output, which repeats memory
             // (claude-mem stores nothing of it); a note saved to memory keeps neither its input

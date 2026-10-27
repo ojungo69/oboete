@@ -117,12 +117,13 @@ fn run_io(
         } else {
             serde_json::from_str(raw)?
         };
-        // The agent mark and the entry point are oboete's own, from a rollout, the environment or
-        // the transcript parser (#273, O2): a live hook's payload is the agent's, so any it
-        // carries is dropped.
+        // The agent mark, the entry point and a call's start are oboete's own, from a rollout,
+        // the environment, the hook's own state or the transcript parser (#273, O2, #692): a live
+        // hook's payload is the agent's, so any it carries is dropped.
         if let Some(fields) = payload.as_object_mut() {
             fields.remove(crate::capture::AGENT_SENT);
             fields.remove(crate::capture::ENTRYPOINT);
+            fields.remove(crate::capture::STARTED);
         }
         let Some(resolved) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
             return Ok(());
@@ -138,6 +139,7 @@ fn run_io(
         // Nothing is recorded here (the read's PostToolUse is), and a failure is no note: the
         // read goes on. Grok's read gets it beside what else its PreToolUse shows (below).
         if matches!((agent, event), ("claude" | "codex", "PreToolUse")) {
+            note_start(home, agent, &payload);
             // claude-mem's bridge first (docs/memory-lookup.md): a lookup of the agent's own memory
             // gets oboete's search of it, and then no file note; nor does one past its wait, which
             // spent the hook's time (CodeRabbit on #568).
@@ -169,6 +171,12 @@ fn run_io(
         let labels = agent_labels(agent, &payload);
         if (agent, event) == ("grok", "PreToolUse") {
             grok_read = Some(labels.clone());
+            note_start(home, agent, &labels);
+        }
+        if matches!(event, "PostToolUse" | "PostToolUseFailure")
+            && let Some(ms) = taken_start(home, agent, &labels)
+        {
+            payload[crate::capture::STARTED] = json!(ms);
         }
         // claude-mem 13.39: Codex sends a subagent's thread no SessionStart, so a compaction marks
         // its thread, whose next tool call takes the manifest back (the root's SessionStart
@@ -623,6 +631,52 @@ fn codex_thread(payload: &Value) -> String {
         Some(id) => format!("compacted-{}", &crate::curate::sha256_hex(id)[..16]),
         None => "compacted".into(),
     }
+}
+
+/// The shell tools whose call may start another agent and wait for it (#692): Claude Code's and
+/// Codex's, and Grok's by the name its hooks show and by its id.
+const SHELLS: &[&str] = &["Bash", "run_terminal_command", "run_terminal_cmd"];
+
+/// The session value that keeps a shell call's start (#692): its call's id hashed, as the id is
+/// the agent's text.
+fn start_key(labels: &Value) -> Option<String> {
+    let tool = str_field(labels, &["tool_name", "toolName"])?;
+    let id = str_field(labels, &["tool_use_id", "toolUseId"]).filter(|id| !id.is_empty())?;
+    SHELLS.contains(&tool).then(|| {
+        let hash: String = (sha2::Sha256::digest(id.as_bytes())[..6].iter())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("started-{hash}")
+    })
+}
+
+/// #692: a shell call's start, kept for its record: a call that starts another agent and waits
+/// for it records that agent's ask before its own end. A start that cannot be kept is none.
+fn note_start(home: &Path, agent: &str, labels: &Value) {
+    let Some(key) = start_key(labels) else {
+        return;
+    };
+    let now = db::now_ms().to_string();
+    let kept = crate::hookstate::update(home, agent, session_label(labels), &key, |_| Some(now));
+    if let Err(e) = kept {
+        eprintln!("oboete: the call's start is not kept: {e}");
+    }
+}
+
+/// The start `note_start` kept for this call, taken from the session's values.
+// shortcut: a start whose call never ends stays with the session's values until they are pruned
+// (`hookstate::KEEP`); sweep them at the session's end if they ever add up.
+fn taken_start(home: &Path, agent: &str, labels: &Value) -> Option<i64> {
+    let key = start_key(labels)?;
+    let mut kept = None;
+    let taken = crate::hookstate::update(home, agent, session_label(labels), &key, |v| {
+        kept = v;
+        None
+    });
+    if let Err(e) = taken {
+        eprintln!("oboete: the call's start is not taken: {e}");
+    }
+    kept?.trim().parse().ok()
 }
 
 /// The session a hook's state is kept under (`run_io` sets Cursor's compaction marker with it).
@@ -9405,6 +9459,61 @@ mod tests {
             let body: Value = serde_json::from_str(&ev[0].body).unwrap();
             assert_eq!(body["failed"], failed, "{id}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #692: a shell call's start, kept at its PreToolUse, is in its record, written when the
+    /// call ends, and is taken then. A call with no PreToolUse, another tool's call, and a start
+    /// the agent's payload claims have none.
+    #[test]
+    fn a_shell_calls_record_keeps_when_it_began() {
+        let dir = tmp("call-start");
+        let tools = |agent: &str, session: &str| -> Vec<(Option<i64>, i64)> {
+            (recorded(&dir, agent, session).iter())
+                .filter(|e| e.kind == "tool")
+                .map(|e| {
+                    let body: Value = serde_json::from_str(&e.body).unwrap();
+                    (body["started"].as_i64(), e.ts)
+                })
+                .collect()
+        };
+        for agent in ["claude", "codex"] {
+            let call = |tool: &str, id: &str| {
+                json!({"session_id": agent, "cwd": &*dir, "tool_name": tool,
+                       "tool_input": {"command": "codex exec 'Review the parser.'"},
+                       "tool_response": "ok", "tool_use_id": id})
+            };
+            let before = db::now_ms();
+            hook(&dir, agent, "PreToolUse", &call("Bash", "c1"));
+            hook(&dir, agent, "PostToolUse", &call("Bash", "c1"));
+            hook(&dir, agent, "PostToolUse", &call("Bash", "c1"));
+            hook(&dir, agent, "PreToolUse", &call("Read", "c2"));
+            hook(&dir, agent, "PostToolUse", &call("Read", "c2"));
+            let mut claimed = call("Bash", "c3");
+            claimed[crate::capture::STARTED] = json!(before);
+            hook(&dir, agent, "PostToolUse", &claimed);
+            let got = tools(agent, agent);
+            assert_eq!(got.len(), 4, "{agent}: {got:?}");
+            assert!(
+                got[0].0.is_some_and(|s| before <= s && s <= got[0].1),
+                "{agent}: {got:?}"
+            );
+            assert!(got[1..].iter().all(|t| t.0.is_none()), "{agent}: {got:?}");
+        }
+        // Grok's shell, by the name its hooks show, with its camelCase fields.
+        let call = |event: &str| {
+            json!({"sessionId": "g1", "workspaceRoot": &*dir, "hookEventName": event,
+                   "toolName": "run_terminal_command", "toolInput": {"command": "codex exec 'go'"},
+                   "toolResult": "ok", "toolUseId": "g-c1"})
+        };
+        let before = db::now_ms();
+        hook(&dir, "grok", "PreToolUse", &call("PreToolUse"));
+        hook(&dir, "grok", "PostToolUse", &call("PostToolUse"));
+        let got = tools("grok", "g1");
+        assert!(
+            got.len() == 1 && got[0].0.is_some_and(|s| before <= s && s <= got[0].1),
+            "{got:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
