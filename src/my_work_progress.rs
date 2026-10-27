@@ -1867,6 +1867,39 @@ mod tests {
         }
     }
 
+    /// S5: past a forget's rebuild, what it took is marked, and the walk is off again: an op shown
+    /// its record that is not marked, as none is once the rebuild has run, is no longer left out
+    /// (Codex on #694: a finished forget stays in `forget_jobs`).
+    #[test]
+    fn a_forget_past_its_rebuild_leaves_the_walk_off() {
+        let mut h = Home::new();
+        let a = h.said("s1", 0, "Build the parser.");
+        let x = h.said("s1", 10, "Keep the note.");
+        h.grouped(&["s1"], &[a]);
+        let id = h.due()[0].0.clone();
+        let path = h.s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: h.s.raw.device().to_owned(),
+            seq: x,
+        };
+        crate::forget::start(&path, &crate::forget::preview(&path, target).unwrap()).unwrap();
+        // The purge has raw.db to itself, as `oboete forget` has it.
+        let Home { s, t } = h;
+        let Store { home, raw } = s;
+        drop(raw);
+        assert!(crate::forget::purge(home.path()).unwrap().is_some());
+        let raw = crate::raw::open(home.path()).unwrap();
+        assert!(!raw.forget_unrebuilt().unwrap());
+        let mut h = Home {
+            s: Store { home, raw },
+            t,
+        };
+        h.reviewed_with(&id, 0, review("in-progress", 40, "", &[]), &|op| {
+            op.read.spans = vec![(x, x)]
+        });
+        assert_eq!(h.page()["progress"]["percent"], 40);
+    }
+
     /// S5: before the purge, a grouping op shown a record a forget took decides nothing, so its
     /// title is not shown.
     #[test]

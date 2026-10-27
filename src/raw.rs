@@ -4171,6 +4171,17 @@ impl Raw {
 
     /// Each request raw holds with its step (D5: 1 registered, 2 its ops' bodies purged), oldest
     /// first.
+    /// Whether a forget has not had its rebuild (step 3) yet: what it took is not marked forgotten
+    /// in knowledge.db, so the readers of what was made from its records go by its tombstones
+    /// (docs/my-work-model.md S5). A finished job stays in `forget_jobs`, past step 3.
+    pub(crate) fn forget_unrebuilt(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM forget_jobs WHERE step < 3)",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     pub(crate) fn forget_jobs(&self) -> Result<Vec<(crate::forget::Request, i64)>> {
         let mut st = self
             .conn

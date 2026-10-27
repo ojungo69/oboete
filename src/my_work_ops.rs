@@ -95,7 +95,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
 /// does not list as removed, or a summary or a card its reader leaves out for one (T7, K4), and
 /// every op built on one, so no review's or group's text made from a forgotten record is shown,
 /// nor sent as a previous review (Codex on #694). Read once a round; nothing is left out while
-/// nothing is excluded or being forgotten.
+/// nothing is excluded and no forget waits for its rebuild.
 pub(crate) fn hidden(
     raw: &crate::raw::Raw,
     k: &Connection,
@@ -103,9 +103,9 @@ pub(crate) fn hidden(
 ) -> Result<std::collections::HashSet<(String, i64)>> {
     let mut hidden = std::collections::HashSet::new();
     // No session excluded, none of their records, summaries or cards to leave out, whatever the
-    // list holds: a pattern no recorded session matched, as the owner's from claude-mem. A finished
-    // forget marked what it took (S5), and the readers pass over what is marked.
-    let forgetting = !raw.forget_jobs()?.is_empty();
+    // list holds: a pattern no recorded session matched, as the owner's from claude-mem. A forget
+    // past its rebuild marked what it took (S5), and the readers pass over what is marked.
+    let forgetting = raw.forget_unrebuilt()?;
     if (reading.excluded.is_empty() && !forgetting)
         || !crate::consumer::manifest::exists(k, "table", "my_work")?
     {

@@ -774,6 +774,7 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - `a_review_a_forget_took_is_no_reading_before_its_purge` (S5)
 - `a_review_built_on_a_summary_or_a_card_a_forget_took_is_no_reading` (S5)
 - `a_group_a_forget_took_decides_nothing_before_its_purge` (S5)
+- `a_forget_past_its_rebuild_leaves_the_walk_off` (S5)
 
 ### Slice 5
 
@@ -1159,8 +1160,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   out for one (T7, K4: `turns::taken`, `cards::taken`), and every op built on one. So no review's
   progress or story, nor a group's title, made from a forgotten record is shown, nor sent as a
   previous review, until the purge marks the op forgotten (Codex's review of this slice; 4a's
-  previous review had the same gap). The walk runs while a forget is unfinished (`forget_jobs`), or
-  a session is excluded. A rescan's masks are the gate's: every text is gated with the rules as
+  previous review had the same gap). The walk runs while a forget waits for its rebuild (step 3,
+  `Raw::forget_unrebuilt`: a finished forget stays in `forget_jobs`, past it), or a session is
+  excluded. A rescan's masks are the gate's: every text is gated with the rules as
   they are when it is read.
 - **The review's age** on the card is a time each poll's tick rewrites, as the card's own.
 - **On the screen** (Playwright, a home of made-up records, 2026-10-27): the cards' meter, percent
