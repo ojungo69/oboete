@@ -1190,8 +1190,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   oldest first, each headed `P<n> <local time> <agent> <repository>`. The text tests (O3) run in
   the call, not in the due check, since they read agent text.
 - **When** (M2): a typed prompt the last goals op did not read is due at once when that op stopped
-  at the budget with prompts left (a first run's next chunk; the op says so in `more`), else a day
-  after the op, a prompt typed while the call was out too (#716).
+  at the budget with prompts left (a first run's next chunk; the op says so in `more`, which a skip
+  kept in its place over the op cap keeps too, #719), else a day after the op, a prompt typed while
+  the call was out too (#716).
   A first run reads in chunks within `[summary] window_tokens`; a first prompt that does not fit is
   cut to the room left, to at most 40 characters when the current goals take it all, so each call
   reads at least one. A call whose prompts the text tests all flag sends nothing: what it read is

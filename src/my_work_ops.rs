@@ -60,7 +60,20 @@ pub(crate) struct MyWorkOp {
 /// not be kept even as a skip is not asked for, as nothing paid for could be kept (as
 /// `turns::fitted`). A job that drops quotes first does so before this.
 pub(crate) fn fitted(op: MyWorkOp) -> Result<Option<Value>> {
-    Ok(crate::raw::fitted(serde_json::to_value(op)?))
+    let more = op.fields.get("more").cloned();
+    let mut kept = crate::raw::fitted(serde_json::to_value(op)?);
+    // M2 (#719): a skip kept in a goals op's place still says that its read stopped at the
+    // budget, so the next chunk of a first run goes on at once; only while the cap holds.
+    if let (Some(v), Some(more)) = (kept.as_mut(), more)
+        && v["fields"].get("more").is_none()
+    {
+        let mut with = v.clone();
+        with["fields"]["more"] = more;
+        if with.to_string().len() <= crate::raw::MAX_OP_BYTES {
+            *v = with;
+        }
+    }
+    Ok(kept)
 }
 
 /// knowledge.db's `my_work` (S4): every op kept, as it came; a reader takes the newest of a job and
@@ -392,6 +405,26 @@ mod tests {
             let kept = newest(&k, "review", "R1").unwrap().unwrap();
             assert_eq!(kept.op.fields["summary"], json!("Old."), "{older} {newer}");
         }
+    }
+
+    /// M2 (#719): a goals op over the cap, kept as a skip, still says that its read stopped at
+    /// the budget; nothing else of its fields is kept.
+    #[test]
+    fn a_skip_kept_in_a_goals_ops_place_keeps_more() {
+        let big = "x".repeat(crate::raw::MAX_OP_BYTES);
+        let w = op(
+            "goals",
+            "2026-10-27",
+            1,
+            json!({"items": big, "more": true}),
+        );
+        let v = fitted(w).unwrap().unwrap();
+        assert_eq!(
+            (v["skipped"].clone(), v["fields"].clone()),
+            (json!(true), json!({"more": true}))
+        );
+        let w = op("goals", "2026-10-27", 1, json!({"items": big}));
+        assert_eq!(fitted(w).unwrap().unwrap()["fields"], json!({}));
     }
 
     /// S2: an op over the op cap loses its removals first, then is kept as a skip of its labels.
