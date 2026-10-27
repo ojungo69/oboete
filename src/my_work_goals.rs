@@ -690,8 +690,9 @@ mod tests {
             self.s.event("prompt", session, (R, "main"), ts, body)
         }
 
-        /// The goals ops, a day older (M2's wait).
+        /// The goals ops, a day older (M2's wait): those not yet applied too.
         fn age(&self) {
+            self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             (k.execute(
                 "UPDATE my_work SET ts = ts - ?1 WHERE job = ?2",
@@ -1147,7 +1148,7 @@ mod tests {
     #[test]
     fn the_current_goals_survive_any_number_of_skips() {
         let mut h = Home::new();
-        h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
+        let seq = h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
         h.pass(&|_| {
             let new = item("priority", "Fail fast", &[("P1", "fail fast")]);
             answer(json!([new]), json!([]), json!([]))
@@ -1161,7 +1162,7 @@ mod tests {
                     entry: String::new(),
                     ts: now + i,
                     read: Read {
-                        spans: vec![],
+                        spans: vec![(seq, seq)],
                         ops: vec![],
                     },
                     removed: vec![],
