@@ -728,26 +728,28 @@ pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Sect
             open: None,
         };
     }
-    // The newline after the rule, the one the fence puts before its close, and the one that
-    // joins the section to what follows (`Section::units`).
-    let room = limit.saturating_sub(units(RULE) + 3 + units(&crate::manifest::fence(OPEN, "")));
-    let open = raw(&l, None, now)
-        .shown(rules)
-        .map(|lines| redact::outbound_with(&fit("", &lines, room), rules));
-    match open {
-        Some(open) if fenced_units(&open) <= room => Section {
-            rule: RULE.to_owned(),
+    let shown = raw(&l, None, now).shown(rules);
+    // The open lines in their fence after `rule`, when they fit: the room is the limit less the
+    // rule, the newline after it, the one the fence puts before its close, and the one that joins
+    // the section to what follows (`Section::units`).
+    let fenced = |rule: &str| {
+        let room = limit.saturating_sub(units(rule) + 3 + units(&crate::manifest::fence(OPEN, "")));
+        let open = redact::outbound_with(&fit("", shown.as_deref()?, room), rules);
+        (fenced_units(&open) <= room).then(|| Section {
+            rule: rule.to_owned(),
             open: Some(open),
-        },
+        })
+    };
+    // The rule without its attach line when only that leaves the open lines room (#703).
+    (fenced(RULE).or_else(|| fenced(SHORT_RULE)))
         // A limit with no room for the fence (`session_start_chars` near its least), or lines the
         // gate hides whole, leave how many lines there are, after the rule: a count made from the
         // number alone, never recorded text, since the rule stands outside every fence (Codex's
         // security review of #408).
-        _ => Section {
+        .unwrap_or_else(|| Section {
             rule: ruled(&more(n, "")),
             open: None,
-        },
-    }
+        })
 }
 
 /// A write's answer: what is still open in its list among the repository's `entries`, cut as the
@@ -1049,11 +1051,15 @@ mod tests {
                 entry("other", json!({"task": "x"}), 0),
                 entry("release", json!({"note": "n".repeat(long)}), MIN),
             ];
-            for limit in [1_000, SECTION] {
+            for limit in [1_000, 1_150, 1_250, 1_350, SECTION] {
                 let s = section(&entries, MIN, limit, &Rules::default());
                 assert!(
                     [RULE.to_owned(), format!("{RULE}\n\n{}", more(3, ""))].contains(&s.rule)
-                        || s.rule == format!("{SHORT_RULE}\n\n{}", more(3, "")),
+                        || [
+                            SHORT_RULE.to_owned(),
+                            format!("{SHORT_RULE}\n\n{}", more(3, ""))
+                        ]
+                        .contains(&s.rule),
                     "{long} {limit}"
                 );
                 assert!(s.units() <= limit, "{long} {limit}: {}", s.units());
@@ -1110,6 +1116,7 @@ mod tests {
             open.ends_with("more lines; read them with work_state_read"),
             "{open}"
         );
+        assert_eq!(s.rule, RULE);
         assert!(s.units() <= SECTION, "{}", s.units());
         assert!(s.units() > SECTION - 80, "{}", s.units());
         assert!(s.text().contains("<oboete-memory>\nWhat agents wrote"));
@@ -1126,6 +1133,18 @@ mod tests {
             }
         );
         assert!(least.units() <= 1_000, "{}", least.units());
+        // Where the whole rule leaves no room for a line and the short rule does, the open lines
+        // follow the short rule (#703).
+        let fence = units(&crate::manifest::fence(OPEN, ""));
+        let small = units(RULE) + 3 + fence + 10;
+        let s = section(&entries, 0, small, &Rules::default());
+        let open = s.open.as_deref().unwrap_or_else(|| panic!("{s:?}"));
+        assert_eq!(s.rule, SHORT_RULE);
+        assert!(
+            open.starts_with("- list ") && open.contains("more lines"),
+            "{open}"
+        );
+        assert!(s.units() <= small, "{} {small}", s.units());
         assert_eq!(
             section(&[], 0, 1_000, &Rules::default()).rule,
             format!("{SHORT_RULE}\n\nNothing open yet.")
