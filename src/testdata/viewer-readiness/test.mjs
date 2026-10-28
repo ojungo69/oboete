@@ -2350,3 +2350,79 @@ delete status.textContent;status.children=[];
 assert(requests.filter(r=>r.options.method).every(r=>r.options.method==='POST'),'every write is a POST');
 console.log('PASS: Remove from the page: card and summary, Undo through redraws, refusals named, JA/EN, Settings list, Show more and Bring back');
 }
+
+// Decision 57 slice 5b (docs/my-work-model.md V1, V2): the My Goals page and the status line, in
+// English and in Japanese.
+{
+const run=code=>vm.runInContext(code,ctx);
+const panel=document.getElementById('panel');
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const day=Date.UTC(2026,9,27,12,0);
+const quote=(words,ts)=>({text:words,ts});
+const goal=(id,kind,rank,title,asked,quotes,product='')=>({id,kind,rank,title,product,asked,last:quotes[0].ts,quotes});
+const priorities=Array.from({length:7},(_,i)=>goal(`g${i+1}`,'priority',i+1,`Priority ${i+1}`,i===0?1:3,
+  [quote(`quote ${i+1}`,day-i*3600000)],i===1?'oboete':''));
+const asks=[goal('a1','ask',1,'Header test',2,[quote('add a header test',day),quote('the header test again',day-60000)]),
+  goal('a2','ask',2,'Logs in UTC',1,[quote('logs in UTC',day)])];
+const answer=status=>({current:{written:day,items:[...priorities,...asks]},window:{days:31,prompts:152},
+  month:{month:'2026-10',prompts:40},months:[{month:'2026-09',summary:'Worked on the parser.',prompts:112,
+  priorities:[{title:'Export',product:'billing',asked:4,quote:quote('ship the export',day-30*86400000)}]}],status});
+const draw=(a,tab='now')=>{ctx.__goals=a;run(`mg.answer=globalThis.__goals;mg.tab=${JSON.stringify(tab)};myGoalsDraw()`);return text(panel);};
+run('lang="en"');
+let shown=draw(answer({state:'written',at:day}));
+assert(shown.includes('This month · 31 days to'),'the inner tab names the window');
+assert(shown.includes('Top priorities')&&shown.includes('ranked by how recent, how often and how strongly you asked'),'the priorities heading');
+const section=panel.querySelectorAll('.my-goals-priorities')[0];
+assert.equal(section.children[1].children.length,5,'the top 5 first');
+assert.equal(section.children[2].className,'my-goals-more','the rest behind a disclosure');
+assert(text(section.children[2]).includes('2 more priorities')&&text(section.children[2]).includes('Priority 7'),'"2 more priorities" holds them');
+assert.equal(panel.querySelectorAll('.my-goals-first').length,1,'rank 1 stands out');
+assert(shown.includes('asked once')&&shown.includes('asked 3×')&&shown.includes(' · oboete'),'times asked and the product');
+assert(shown.includes('Why it’s here · 1 quote')&&shown.includes('Why it’s here · 2 quotes'),'the quotes behind a disclosure');
+assert.equal(panel.querySelectorAll('time')[0].dateTime,new Date(day).toISOString(),'a quote has the time it was typed');
+assert(shown.includes('Open asks')&&shown.includes('1 of 2 came up more than once.'),'the open asks panel');
+assert(shown.includes('Asked 2×, last'),'an ask says how often');
+assert(shown.includes('152 prompts you typed in the last 31 days'),'what it was read from');
+assert(shown.includes('Written'),'the status line says when it wrote');
+shown=draw(answer({state:'none'}),'months');
+assert(shown.includes('History')&&shown.includes('Current')&&shown.includes('Archived'),'the months, this one and the archived');
+assert(shown.includes('October 2026')&&shown.includes('Priority 1')&&shown.includes('40 prompts'),'this month from the current goals');
+assert(shown.includes('September 2026')&&shown.includes('Export')&&shown.includes('112 prompts')&&shown.includes('Worked on the parser.'),'a finished month opens to its goals');
+assert(shown.includes('billing')&&shown.includes('ship the export'),'with each priority\'s quote');
+assert(shown.includes('No request reviews cover this month, so it shows what you asked for, not what moved.'),'archived is not done');
+shown=draw({current:null,window:{days:31,prompts:0},month:{month:'2026-10',prompts:0},months:[],status:{state:'off'}});
+assert(shown.includes('No goals yet')&&shown.includes('Off: My Work is not written with AI.')&&shown.includes('Open Settings'),'none yet, and why');
+const line=status=>text(run(`myWorkStatusLine(${JSON.stringify(status)})`));
+assert.equal(line({state:'off'}),'Off: My Work is not written with AI. Open Settings');
+assert.equal(line({state:'summaries_off'}),'On, but waiting: summaries are off. Open Settings');
+assert(line({state:'waiting',why:'bound',until:day,calls_a_day:100}).startsWith('Waiting: the daily limit of 100 calls is reached. Next try:'),'the daily bound');
+assert(line({state:'waiting',why:'budget',until:day}).startsWith('Waiting: an AI provider’s spending or call limit is reached. Next try:'),'a budget');
+assert(line({state:'waiting',why:'resting',until:day}).startsWith('Waiting: every AI provider is resting. Next try:'),'every entry resting');
+assert.equal(line({state:'waiting',why:'owner',until:day}),'Waiting: no AI provider can take it. Check the AI providers in Settings.');
+assert(line({state:'written',at:day}).startsWith('Written'),'when it wrote');
+assert.equal(line({state:'none'}),'Nothing written yet.');
+assert.equal(run('myWorkStatusLine(null)'),null,'no line when the status did not read');
+// The same answer again draws nothing, so the quotes opened stay open.
+ctx.fetch=()=>Promise.resolve(response(answer({state:'none'})));
+run('mg.signature=null');
+(await run('showMyGoals()'))();
+const first=panel.children;
+(await run('showMyGoals()'))();
+assert.equal(panel.children,first,'the same answer again draws nothing');
+run('lang="ja"');
+shown=draw(answer({state:'waiting',why:'resting',until:day}));
+assert(shown.includes('今月 · ')&&shown.includes('までの 31 日')&&shown.includes('優先していること'),'the page in Japanese');
+assert(shown.includes('1 回頼みました')&&shown.includes('3 回頼みました')&&shown.includes('ほかに 2 件'),'asked and more, in Japanese');
+assert(shown.includes('ここにある理由 · 引用 1 件')&&shown.includes('まだ済んでいない頼みごと')&&shown.includes('2 件のうち 1 件は 2 回以上頼んでいます。'),'quotes and asks, in Japanese');
+assert(shown.includes('この 31 日にあなたが入力したプロンプト 152 件')&&shown.includes('待機中: どの AI も休んでいます。'),'source and status line, in Japanese');
+shown=draw(answer({state:'none'}),'months');
+assert(shown.includes('履歴')&&shown.includes('今月')&&shown.includes('記録')&&shown.includes('プロンプト 112 件'),'the months, in Japanese');
+run('lang="en"');
+// My Work's status line comes by a read of its own, after the requests'.
+ctx.fetch=url=>Promise.resolve(response(String(url).includes('my-work/status')?{state:'none'}:{requests:[],unlinked:0}));
+run('ui.setView("my_work")');
+(await run('showMyWork()'))();
+await new Promise(resolve=>setTimeout(resolve,0));
+assert(text(panel).includes('Nothing written yet.'),'My Work shows its status line once it reads');
+console.log('PASS: My Goals: top 5 and the rest, quotes with their times, open asks, the months, the status line, JA/EN');
+}
