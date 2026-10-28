@@ -305,7 +305,7 @@ function timelineEntry(item, all) {
 // --- Views ----------------------------------------------------------------------------------
 
 const LIMIT = 100;
-const VIEWS = ['my_work', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
+const VIEWS = ['my_work', 'my_goals', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
 // My Work opens first once (decision 55), whatever view was stored before it existed; from then
 // on the page opens on the view last used.
 const firstMyWork = recall('oboete-tab', '') !== 'my_work';
@@ -319,9 +319,10 @@ function setView(name) {
   view = name;
   remember('oboete-view', name);
   document.querySelector('main').classList.toggle('timeline-view', name === 'timeline');
-  document.querySelector('main').classList.toggle('my-work-view', name === 'my_work');
-  // My Work has its own search and filters, and its tab opens on the requests, not on one.
-  $('controls').hidden = name === 'settings' || name === 'my_work';
+  document.querySelector('main').classList.toggle('my-work-view', name === 'my_work' || name === 'my_goals');
+  // My Work has its own search and filters, and its tab opens on the requests, not on one; My
+  // Goals reads no repository.
+  $('controls').hidden = name === 'settings' || name === 'my_work' || name === 'my_goals';
   if (name === 'my_work') Object.assign(mw, { request: null, work: null, back: null });
   // The tab opens on the list, not on a session (docs/page.md S1).
   if (name === 'sessions') Object.assign(ses, { open: null, back: null });
@@ -2475,6 +2476,42 @@ const TEXT = {
   my_work_back_request: ['← Back to request', '← 依頼に戻る'],
   my_work_missing: ['This request is outside the loaded history', 'この依頼は、読み込んだ記録の範囲にありません'],
   my_work_missing_body: ['Return to My Work to see the current requests.', 'マイワークに戻ると、いまの依頼を見られます。'],
+  my_work_line_off: ['Off: My Work is not written with AI.', 'オフ: My Work は AI で書いていません。'],
+  my_work_line_summaries_off: ['On, but waiting: summaries are off.', 'オンですが、要約がオフのため待っています。'],
+  my_work_line_settings: ['Open Settings', '設定を開く'],
+  my_work_line_waiting_bound: ['Waiting: the daily limit of {n} calls is reached.', '待機中: 1 日の上限の {n} 回に達しました。'],
+  my_work_line_waiting_budget: ['Waiting: an AI provider’s spending or call limit is reached.', '待機中: AI の利用上限に達しています。'],
+  my_work_line_waiting_resting: ['Waiting: every AI provider is resting.', '待機中: どの AI も休んでいます。'],
+  my_work_line_waiting_owner: ['Waiting: no AI provider can take it. Check the AI providers in Settings.', '待機中: 使える AI がありません。設定の AI を確かめてください。'],
+  my_work_line_until: ['Next try:', '次に試すのは'],
+  my_work_line_written: ['Written', '書いたのは'],
+  my_work_line_none: ['Nothing written yet.', 'まだ何も書いていません。'],
+  my_goals: ['My Goals', '目標'],
+  my_goals_eyebrow: ['What you asked for most, from the prompts you typed', 'あなたが入力したプロンプトから、いちばん多く頼んだこと'],
+  my_goals_tabs_label: ['Goals view', '目標の表示'],
+  my_goals_tab_now: ['This month · 31 days to {end}', '今月 · {end} までの 31 日'],
+  my_goals_tab_months: ['Month by month', '月ごと'],
+  my_goals_priorities: ['Top priorities', '優先していること'],
+  my_goals_ranked: ['ranked by how recent, how often and how strongly you asked', '頼んだ時期の新しさ、回数、強さの順'],
+  my_goals_asked_once: ['asked once', '1 回頼みました'],
+  my_goals_asked_n: ['asked {n}×', '{n} 回頼みました'],
+  my_goals_last: ['last {day}', '最後は {day}'],
+  my_goals_more: ['{n} more priorities', 'ほかに {n} 件'],
+  my_goals_why_one: ['Why it’s here · 1 quote', 'ここにある理由 · 引用 1 件'],
+  my_goals_why_n: ['Why it’s here · {n} quotes', 'ここにある理由 · 引用 {n} 件'],
+  my_goals_asks: ['Open asks', 'まだ済んでいない頼みごと'],
+  my_goals_asks_note: ['{k} of {n} came up more than once. Repetition shows what keeps coming back, not what’s finished.', '{n} 件のうち {k} 件は 2 回以上頼んでいます。何度も出てくるのは気にかけていることの表れで、済んだという意味ではありません。'],
+  my_goals_ask_meta: ['Asked {n}×, last {day}', '{n} 回、最後は {day}'],
+  my_goals_source: ['{n} prompts you typed in the last {days} days, read on this machine from what oboete recorded.', 'この {days} 日にあなたが入力したプロンプト {n} 件を、この PC で oboete が記録したものから読みました。'],
+  my_goals_empty: ['No goals yet', 'まだ目標はありません'],
+  my_goals_empty_body: ['Once My Work is written with AI, your goals are gathered here from the prompts you typed in the last 31 days.', 'My Work を AI で書くようにすると、この 31 日にあなたが入力したプロンプトから、ここに目標をまとめます。'],
+  my_goals_history: ['History', '履歴'],
+  my_goals_history_note: ['What you asked for most, month by month, as the last update of each month kept it. A month closing archives its asks; it doesn’t mean they were done.', '月ごとに、いちばん多く頼んだことを、その月の最後の更新のとおりに残しています。月が終わると頼みごとは記録に移りますが、済んだという意味ではありません。'],
+  my_goals_current: ['Current', '今月'],
+  my_goals_archived: ['Archived', '記録'],
+  my_goals_no_top: ['No priority yet', 'まだ優先していることはありません'],
+  my_goals_prompts: ['{n} prompts', 'プロンプト {n} 件'],
+  my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
   my_work_stands: ['Where it stands', '現在の状況'],
   my_work_original: ['Original request', '元の依頼'],
   my_work_read_original: ['Read full original', '元の依頼の全文を読む'],
@@ -2590,6 +2627,7 @@ function applyLanguage() {
   }
   // My Work's heading before its first read, which the page opens on.
   if (view === 'my_work' && mw.rows === null) $('heading').textContent = t('my_work');
+  if (view === 'my_goals' && mg.answer) myGoalsDraw();
 }
 
 function labelRepo(option) {
@@ -6524,6 +6562,8 @@ const mw = {
   agent: null, request: null, work: null, back: null,
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
+  // The status line's last answer and its place (V1).
+  status: null, line: null,
   // claude-mem's `changed` (a flash, once) and `unread` (the "New update" mark until opened).
   changed: new Set(), unread: new Set(),
   // A check or its Undo being saved (`saveReview`'s `busy`).
@@ -6916,7 +6956,7 @@ function myWorkDraw(focus = null) {
   mw.results = el('div', 'my-work-results');
   myWorkResults();
   draw(word('span', null, 'my_work'), [], [
-    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle')),
+    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot()),
     switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
   ]);
   mw.changed.clear();
@@ -7321,6 +7361,7 @@ async function myWorkLive() {
   // Nor one older than a read the page took: the read after a check begins while a poll's may be
   // out (`myWorkReread`).
   if (mine !== generation || view !== 'my_work' || read < mw.taken) return true;
+  void myWorkLineRead();
   // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on #597).
   mw.taken = read;
   mw.fetched = Date.now();
@@ -7343,6 +7384,7 @@ async function showMyWork() {
   const read = ++mw.reads;
   const answer = await api('my-work', { range: 'all' });
   return () => {
+    void myWorkLineRead();
     // A poll's read that began after this one and came first keeps its answer; the page is drawn.
     if (read > mw.taken) {
       mw.taken = read;
@@ -7352,8 +7394,198 @@ async function showMyWork() {
   };
 }
 
+// V1 (docs/my-work-model.md): My Work's status line has a place of its own, filled by a read of
+// its own after the requests': it is no part of the held updates, and a line that does not read
+// leaves the requests as they are.
+function myWorkLineSlot() {
+  mw.line = el('div', 'my-work-line', myWorkStatusLine(mw.status));
+  return mw.line;
+}
+
+async function myWorkLineRead() {
+  let status = null;
+  try {
+    status = await api('my-work/status');
+  } catch {
+    return;
+  }
+  if (view !== 'my_work' || JSON.stringify(status) === JSON.stringify(mw.status)) return;
+  mw.status = status;
+  mw.line?.replaceChildren(...present([myWorkStatusLine(status)]));
+}
+
+// V1: the status line of My Work and My Goals, as the reads say it, with no call: off or waiting
+// for summaries with a way to Settings, waiting and why, or when they last wrote.
+function myWorkStatusLine(status) {
+  if (!status?.state) return null;
+  let parts;
+  if (status.state === 'off' || status.state === 'summaries_off') {
+    const open = word('button', 'small', 'my_work_line_settings');
+    open.type = 'button';
+    open.addEventListener('click', () => {
+      setView('settings');
+      void show();
+    });
+    parts = [word('span', null, `my_work_line_${status.state}`), ' ', open];
+  } else if (status.state === 'waiting') {
+    const why = ['bound', 'budget', 'resting', 'owner'].includes(status.why) ? status.why : 'resting';
+    parts = [word('span', null, `my_work_line_waiting_${why}`, { n: status.calls_a_day ?? '' })];
+    if (why !== 'owner' && Number.isFinite(status.until)) parts.push(' ', word('span', null, 'my_work_line_until'), ' ', myGoalsAt(status.until));
+  } else if (status.state === 'written') {
+    parts = [word('span', null, 'my_work_line_written'), ' ', myWorkTime(status.at)];
+  } else {
+    parts = [word('span', null, 'my_work_line_none')];
+  }
+  const node = el('p', 'my-work-status-line', ...parts);
+  node.setAttribute('aria-live', 'polite');
+  return node;
+}
+
+// --- My Goals (docs/my-work-model.md V2): the owner's goals, as claude-mem's page shows them ---
+
+// claude-mem's `TOP_COUNT`: the priorities shown before "more".
+const MY_GOALS_TOP = 5;
+// What a redraw keeps: the inner tab, the goals and months opened, "more"; and the answer drawn,
+// so that a poll that brings the same one draws nothing.
+const mg = { tab: 'now', open: new Set(), months: new Set(), more: false, signature: null, answer: null };
+
+async function showMyGoals() {
+  const answer = await api('my-goals');
+  return () => {
+    const signature = JSON.stringify(answer);
+    if (signature === mg.signature && $('panel').querySelector('.my-goals')) return setStatus('');
+    mg.signature = signature;
+    mg.answer = answer;
+    myGoalsDraw();
+  };
+}
+
+// A quote's time, and when a wait ends: to the minute, in the page's language.
+function myGoalsAt(ms) {
+  const at = new Date(ms);
+  const node = el('time', 'my-goals-at', at.toLocaleString(lang, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+  node.dateTime = at.toISOString();
+  return node;
+}
+
+function myGoalsDay(ms) {
+  return new Date(ms).toLocaleDateString(lang, { month: 'short', day: 'numeric' });
+}
+
+// "2026-10", as the page names a month.
+function myGoalsMonthName(month) {
+  const [y, m] = String(month ?? '').split('-').map(Number);
+  return y && m ? new Date(y, m - 1, 1).toLocaleDateString(lang, { year: 'numeric', month: 'long' }) : String(month ?? '');
+}
+
+function myGoalsAsked(n) {
+  return n === 1 ? t('my_goals_asked_once') : t('my_goals_asked_n', { n });
+}
+
+// A goal's or a month's line of facts, its product last when it has one.
+function myGoalsMeta(facts, product) {
+  return el('span', 'my-goals-meta', [...facts, ...(product ? [product] : [])].join(' · '));
+}
+
+// "Why it's here": every quote behind one disclosure, each with the time it was typed.
+function myGoalsWhy(goal) {
+  const n = goal.quotes.length;
+  const why = el('details', 'my-goals-why', el('summary', null, t(n === 1 ? 'my_goals_why_one' : 'my_goals_why_n', { n })),
+    el('ul', 'my-goals-quotes', ...goal.quotes.map((q) => el('li', null, el('q', null, q.text), ' ', myGoalsAt(q.ts)))));
+  why.open = mg.open.has(goal.id);
+  why.addEventListener('toggle', () => (why.open ? mg.open.add(goal.id) : mg.open.delete(goal.id)));
+  return why;
+}
+
+function myGoalsPriority(goal) {
+  const rank = el('span', goal.rank === 1 ? 'my-goals-rank my-goals-first' : 'my-goals-rank', String(goal.rank));
+  const facts = [myGoalsAsked(goal.asked), t('my_goals_last', { day: myGoalsDay(goal.last) })];
+  return el('li', 'my-goals-item', el('div', 'my-goals-row', rank, el('span', 'my-goals-title', goal.title),
+    myGoalsMeta(facts, goal.product)), myGoalsWhy(goal));
+}
+
+function myGoalsAsks(asks) {
+  const repeated = asks.filter((a) => a.asked > 1).length;
+  return el('section', 'my-goals-asks', word('h3', null, 'my_goals_asks'),
+    word('p', 'my-goals-note', 'my_goals_asks_note', { k: repeated, n: asks.length }),
+    el('ul', 'my-goals-list', ...asks.map((ask) => {
+      const facts = [t('my_goals_ask_meta', { n: ask.asked, day: myGoalsDay(ask.last) })];
+      return el('li', 'my-goals-item', el('div', 'my-goals-row', el('span', 'my-goals-title', ask.title),
+        myGoalsMeta(facts, ask.product)), myGoalsWhy(ask));
+    })));
+}
+
+function myGoalsNow(a) {
+  const items = a.current?.items ?? [];
+  if (!items.length) return [myWorkEmpty('my_goals_empty', 'my_goals_empty_body')];
+  const priorities = items.filter((i) => i.kind === 'priority');
+  const asks = items.filter((i) => i.kind === 'ask');
+  const out = [];
+  if (priorities.length) {
+    const section = el('section', 'my-goals-priorities',
+      el('div', 'my-goals-head', word('h3', null, 'my_goals_priorities'), word('span', 'my-goals-note', 'my_goals_ranked')),
+      el('ul', 'my-goals-list', ...priorities.slice(0, MY_GOALS_TOP).map(myGoalsPriority)));
+    const rest = priorities.slice(MY_GOALS_TOP);
+    if (rest.length) {
+      const more = el('details', 'my-goals-more', el('summary', null, t('my_goals_more', { n: rest.length })),
+        el('ul', 'my-goals-list', ...rest.map(myGoalsPriority)));
+      more.open = mg.more;
+      more.addEventListener('toggle', () => { mg.more = more.open; });
+      section.append(more);
+    }
+    out.push(section);
+  }
+  if (asks.length) out.push(myGoalsAsks(asks));
+  out.push(el('p', 'my-work-note', t('my_goals_source', { n: a.window?.prompts ?? 0, days: a.window?.days ?? 31 })));
+  return out;
+}
+
+// Month by month: this month's goals, then each finished month's as its last update kept them.
+// Archived is not done.
+function myGoalsMonths(a) {
+  const top = (a.current?.items ?? []).find((i) => i.kind === 'priority');
+  const row = (month, badge, title, prompts) => [el('span', 'my-goals-month', myGoalsMonthName(month)),
+    word('span', 'my-goals-badge', badge), el('span', 'my-goals-title', title ?? t('my_goals_no_top')),
+    myGoalsMeta([t('my_goals_prompts', { n: prompts })])];
+  const rows = [el('li', 'my-goals-month-row', el('div', 'my-goals-row', ...row(a.month?.month, 'my_goals_current', top?.title, a.month?.prompts ?? 0)))];
+  for (const m of a.months ?? []) {
+    const details = el('details', 'my-goals-month-detail',
+      el('summary', 'my-goals-row', ...row(m.month, 'my_goals_archived', m.priorities[0]?.title, m.prompts)),
+      m.summary ? el('p', null, m.summary) : null,
+      el('ul', 'my-goals-list', ...m.priorities.map((p) => el('li', 'my-goals-item',
+        el('div', 'my-goals-row', el('span', 'my-goals-title', p.title), myGoalsMeta([myGoalsAsked(p.asked)], p.product)),
+        p.quote ? el('p', 'my-goals-quote', el('q', null, p.quote.text), ' ', myGoalsAt(p.quote.ts)) : null))),
+      word('p', 'my-goals-note', 'my_goals_no_reviews'));
+    details.open = mg.months.has(m.month);
+    details.addEventListener('toggle', () => (details.open ? mg.months.add(m.month) : mg.months.delete(m.month)));
+    rows.push(el('li', 'my-goals-month-row', details));
+  }
+  return [word('h3', null, 'my_goals_history'), word('p', 'my-goals-note', 'my_goals_history_note'), el('ul', 'my-goals-months', ...rows)];
+}
+
+function myGoalsDraw() {
+  const a = mg.answer ?? {};
+  const end = myGoalsDay(Date.now());
+  const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
+    const button = el('button', 'tab', label);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(mg.tab === key));
+    button.addEventListener('click', () => {
+      mg.tab = key;
+      myGoalsDraw();
+    });
+    return button;
+  }));
+  tabs.setAttribute('aria-label', t('my_goals_tabs_label'));
+  draw(word('span', null, 'my_goals'), [], [
+    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_goals_eyebrow'), myWorkStatusLine(a.status)),
+    tabs, el('div', 'my-goals', ...(mg.tab === 'months' ? myGoalsMonths(a) : myGoalsNow(a))),
+  ]);
+  setStatus('');
+}
+
 const LOADERS = new Map([
-  ['my_work', showMyWork], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
+  ['my_work', showMyWork], ['my_goals', showMyGoals], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
@@ -7378,7 +7610,7 @@ async function show() {
   }
   setStatus(t('loading'));
   try {
-    const search = q && !['settings', 'my_work'].includes(view);
+    const search = q && !['settings', 'my_work', 'my_goals'].includes(view);
     const render = search ? await showSearch(repo, q) : await LOADERS.get(view)(repo);
     if (mine !== generation) return false;
     render();
@@ -7450,7 +7682,7 @@ async function poll() {
   if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
-    if (view === 'my_work' && mw.rows) myWorkTimes();
+    if ((view === 'my_work' && mw.rows) || view === 'my_goals') myWorkTimes();
     await pollMaintenance();
     const { v } = await api('version');
     $('live').classList.remove('off');
