@@ -65,6 +65,21 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
     )
 }
 
+/// What `agent` is given at the start of session `session` in `cwd`: the SessionStart of Claude
+/// Code and Codex, Grok's first tool call (for tests of other modules).
+#[cfg(test)]
+pub(crate) fn started(home: &Path, agent: &str, session: &str, cwd: &Path) -> String {
+    let event = if agent == "grok" {
+        "PreToolUse"
+    } else {
+        "SessionStart"
+    };
+    let payload = json!({"session_id": session, "cwd": cwd, "source": "startup"});
+    let mut out = Vec::new();
+    run_io(home, agent, event, payload.to_string().as_bytes(), &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
 fn run_io(
     home: &Path,
     mut agent: &str,

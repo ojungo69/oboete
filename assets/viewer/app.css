@@ -914,6 +914,13 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-goals-item > .my-goals-request { margin: 6px 0 0; }
 .my-goals-next, .my-goals-again { margin: 6px 0; font-size: 13px; }
 .my-goals-again { color: var(--yellow); }
+.my-rules-statement { margin: 0 0 4px; font-weight: 600; }
+.my-rules-off .my-rules-statement { color: var(--muted); }
+.my-rules-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; }
+.my-rules-editor { display: grid; gap: 4px; margin: 8px 0 0; }
+.my-rules-editor textarea { width: 100%; min-height: 4.5em; }
+.my-rules-add { margin: 12px 0 0; }
+.my-rules-last { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px; }
 .my-goals-lead { margin: 0 0 18px; }
 .my-goals-lead-line { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
 .my-work-goal { align-self: flex-start; min-height: 24px; padding: 0; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12.5px; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
