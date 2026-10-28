@@ -520,6 +520,11 @@ mod tests {
             "a cleared placement is not sorted"
         );
         assert_eq!(f.of("c:claude:s9"), None);
+        // Both live and apart: the owner's wins, whatever came later.
+        f.apply("fa_8", area("Search", "kept", "owner"));
+        f.apply("c:claude:s3", placement(Some("fa_8"), "owner"));
+        f.apply("c:claude:s3", placement(Some("fa_1"), "router"));
+        assert_eq!(f.of("c:claude:s3"), Some("fa_8"));
         // Listed: the owner's rank, then the goals' rank, then the name; merged ones left out.
         let mut ranked = area("Zeta", "kept", "owner");
         ranked.insert("owner_rank".into(), json!(1));
@@ -528,7 +533,7 @@ mod tests {
         by_goals.insert("priority_rank".into(), json!(2));
         f.apply("fa_7", by_goals);
         let names: Vec<&str> = f.listed().iter().map(|a| a.name()).collect();
-        assert_eq!(names, ["Zeta", "Beta", "Dropped", "Viewer"]);
+        assert_eq!(names, ["Zeta", "Beta", "Dropped", "Search", "Viewer"]);
     }
 
     #[test]
@@ -647,6 +652,22 @@ mod tests {
         assert_eq!(h.focus().areas["fa_a"].status(), "suggested");
         assert_eq!(h.page().0[0].1, json!("fa_a"));
         ok(h.act(json!({"action": "move-request", "request": id, "area": OTHER})));
+        // A name and a goal go through the gate as they are written.
+        std::fs::write(
+            h.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"t\", regex = 'tok-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        ok(h.act(json!({"action": "rename", "area": "fa_b", "name": "Search tok-123456"})));
+        ok(h.act(json!({"action": "edit-goal", "area": "fa_b", "goal": "Find tok-654321."})));
+        let b = &h.focus().areas["fa_b"];
+        assert!(
+            !format!("{:?}", b.fields).contains("tok-"),
+            "{:?}",
+            b.fields
+        );
+        std::fs::remove_file(h.s.home.path().join("config.toml")).unwrap();
+        ok(h.act(json!({"action": "rename", "area": "fa_b", "name": "Search"})));
         ok(h.act(json!({"action": "dismiss", "area": "fa_c"})));
         ok(h.act(json!({"action": "done", "area": "fa_b"})));
         // Refusals, none of which writes.
