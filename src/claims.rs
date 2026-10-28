@@ -330,6 +330,10 @@ pub(crate) enum OwnerRefusalCode {
     CorrectionInvalid,
     PreferenceEmpty,
     PreferenceTooLong,
+    /// Slice 8b: a repository no record names.
+    PreferenceRepoUnknown,
+    /// Slice 8b: a repository the owner stopped recording.
+    PreferenceRepoExcluded,
 }
 
 impl OwnerRefusal {
@@ -613,13 +617,20 @@ pub(crate) fn applied(
     Ok(())
 }
 
+/// `pref_add_in` of every repository.
+#[cfg(test)]
+pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
+    pref_add_in(home, text, None)
+}
+
 /// `oboete pref add`: the owner's directive as an event, and a claim op quoting it whole, a
-/// decided preference of global scope (spec 3.3: global scope only through this or the viewer).
-/// Returns its uid, once the claims consumer has applied it: the next SessionStart shows it.
+/// decided preference of global scope (spec 3.3: global scope only through this or the viewer),
+/// or, slice 8b, of repository `repo` (a key as records name it). Returns its uid, once the claims
+/// consumer has applied it: the next SessionStart shows it.
 // ponytail: two appends; a crash between them leaves the directive event with no claim. The
 // receipt reports that partial state without retrying. One transaction when raw supports both.
-pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
-    pref_add_recorded(home, text)
+pub fn pref_add_in(home: &std::path::Path, text: &str, repo: Option<&str>) -> Result<String> {
+    pref_add_recorded(home, text, repo)
         .map_err(|e| e.cause)?
         .into_cli()
 }
@@ -628,15 +639,16 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
 pub(crate) const PREF_RECIPE: &str = "oboete pref add";
 
 /// The claim op `oboete pref add` writes for a directive whose whole text is `evidence`'s quote: a
-/// decided global preference in the owner's own words, its body the quote. Slice 3e-2: a purge
-/// writes it again from a directive's masked text.
-pub(crate) fn preference_op(evidence: Evidence) -> ClaimOp {
+/// decided preference in the owner's own words, its body the quote, global or, for a directive
+/// that names a repository (`in_repo`), of that repository. Slice 3e-2: a purge writes it again
+/// from a directive's masked text.
+pub(crate) fn preference_op(evidence: Evidence, in_repo: bool) -> ClaimOp {
     ClaimOp {
         id: "p1".into(),
         kind: "preference".into(),
         status: "decided".into(),
         speaker: "user".into(),
-        scope: "global".into(),
+        scope: if in_repo { "repo" } else { "global" }.into(),
         body: evidence.quote.clone(),
         evidence: vec![evidence],
         supersedes: Vec::new(),
@@ -651,9 +663,10 @@ pub(crate) fn preference_op(evidence: Evidence) -> ClaimOp {
 pub(crate) fn pref_add_recorded(
     home: &std::path::Path,
     text: &str,
+    repo: Option<&str>,
 ) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
     let settings = crate::capture::Settings::load(home).map_err(OwnerRefusal::unavailable)?;
-    let c = crate::capture::directive(text, crate::db::now_ms(), &settings);
+    let c = crate::capture::directive(text, crate::db::now_ms(), &settings, repo);
     // What the gate stores: the quote reads verbatim there. Checked before either append, so a
     // preference that cannot be a claim leaves no event behind.
     let quote = crate::curate::long_text(&c.event).unwrap_or_default();
@@ -678,6 +691,9 @@ pub(crate) fn pref_add_recorded(
     // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
     let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
+    if let (Some(given), Some(label)) = (repo, &c.event.repo) {
+        repo_refusal(&raw, &k, &settings, (given, label))?;
+    }
     let seq = raw
         .append_with_ledger(&c.event, &c.ledger, settings.rules.version())
         .and_then(|seq| anyhow::Context::context(seq, "its session is forgotten: not recorded"))
@@ -692,7 +708,7 @@ pub(crate) fn pref_add_recorded(
         claim_at: None,
     };
     let uid = uid("preference", &evidence);
-    let op = preference_op(evidence);
+    let op = preference_op(evidence, c.event.repo.is_some());
     // Owner decision 43: a text gated under rules turned off owes the op text scan.
     raw.gates_with(&settings.rules);
     let append = (|| -> Result<Vec<i64>> {
@@ -736,6 +752,75 @@ pub(crate) fn pref_add_recorded(
         },
     })
 }
+
+/// Slice 8b: why a preference of repository `given`, labelled `label` by the gate, is refused before
+/// anything is appended: it is one the owner stopped recording, as every writer asks it
+/// (`CaptureExclusions::refuses`), or no record names it (a key mistyped, or a repository
+/// forgotten).
+fn repo_refusal(
+    raw: &crate::raw::Raw,
+    k: &Connection,
+    settings: &crate::capture::Settings,
+    (given, label): (&str, &str),
+) -> std::result::Result<(), OwnerRefusal> {
+    let refusal = |code, cause| Err(OwnerRefusal { code, cause });
+    let list = raw
+        .capture_exclusions()
+        .map_err(OwnerRefusal::unavailable)?;
+    let now = crate::capture::never_recorded(&list, settings);
+    if list.refuses(Some(&now), (Some(label), None), Some((given, None))) {
+        return refusal(
+            OwnerRefusalCode::PreferenceRepoExcluded,
+            anyhow::anyhow!(
+                "{label} is not recorded (oboete capture exclude): nothing is kept for it"
+            ),
+        );
+    }
+    // shortcut: a scan of every document for a key no record names (2 s on 630,000), an index on
+    // raw_docs(repo) when an owner action needs it often.
+    let known = k
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM raw_docs WHERE repo = ?1)",
+            [label],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(OwnerRefusal::unavailable)?;
+    if !known {
+        return refusal(
+            OwnerRefusalCode::PreferenceRepoUnknown,
+            anyhow::anyhow!("no record names the repository {label}"),
+        );
+    }
+    Ok(())
+}
+
+/// Slice 8b (R2, R4): `repo`'s current preferences the owner made (`oboete pref add --repo` or My
+/// Rules' approve): its chain tips whose active derivation is `PREF_RECIPE`'s, in `current`'s
+/// order. SessionStart gives each, and My Rules lists each, as a rule of that repository.
+pub fn owned(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
+    tips(
+        k,
+        &format!("{TIPS} AND {OWNED} ORDER BY a.valid_from, a.anchor_device, a.anchor_seq, a.uid"),
+        (repo, PREF_RECIPE),
+    )
+}
+
+/// Slice 8b: the repositories a claim the owner made (`owned`) names, current or not: `owned` of
+/// each says which hold one now.
+pub fn owned_repos(k: &Connection) -> Result<Vec<String>> {
+    let mut st = k.prepare_cached(
+        "SELECT DISTINCT d.repo FROM claims c
+         JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+         WHERE d.recipe = ?1 AND d.repo IS NOT NULL ORDER BY d.repo",
+    )?;
+    let rows = st.query_map([PREF_RECIPE], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `owned`'s filter on a row `a` of the `active` view: its active derivation's recipe is `?2`.
+const OWNED: &str = "EXISTS (SELECT 1 FROM claims oc JOIN derivations od
+                     ON od.op_device = oc.op_device AND od.op_seq = oc.op_seq
+                     WHERE oc.uid = a.uid AND od.recipe = ?2)";
 
 /// A current claim.
 #[derive(Debug, Clone, PartialEq)]

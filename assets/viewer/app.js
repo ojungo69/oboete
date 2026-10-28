@@ -2550,7 +2550,12 @@ const TEXT = {
   my_work_goal_unlinked: ['Goal not linked yet', 'まだ目標と結びついていません'],
   my_rules: ['My Rules', '規則'],
   my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],
-  my_rules_where: ['Rules you approve or add reach Claude Code, Codex and Grok at the start of every session, as your preferences.', '承認した規則と追加した規則は、あなたの好みとして、Claude Code・Codex・Grok の毎回のセッションの始めに渡ります。'],
+  my_rules_where: ['Rules you approve or add reach Claude Code, Codex and Grok at the start of every session, as your preferences. A rule of one repository reaches only the sessions in it.', '承認した規則と追加した規則は、あなたの好みとして、Claude Code・Codex・Grok の毎回のセッションの始めに渡ります。1 つのリポジトリの規則は、そのリポジトリのセッションにだけ渡ります。'],
+  my_rules_applies: ['Applies', '適用する範囲'],
+  my_rules_everywhere: ['Every repository', 'すべてのリポジトリ'],
+  my_rules_in_repo: ['In {name}', '{name} の中だけ'],
+  my_rules_removed: ['Rule removed', '外れた規則'],
+  my_rules_removed_note: ['You approved these, but the rule was retracted or forgotten since. Undo makes the suggestion wait for your decision again.', '承認したあとで、規則が取り消されたか忘れられたものです。元に戻すと、提案はまたあなたの判断を待ちます。'],
   my_rules_decide: ['Needs your decision', 'あなたの判断を待っています'],
   my_rules_decide_note: ['Suggested · learned from your requests, not yours until you approve', '提案 · 依頼から学んだもので、承認するまではあなたの規則ではありません'],
   my_rules_nothing_waiting: ['Nothing waiting. New suggestions show up here after the next learning run.', '判断を待つものはありません。次に学ぶと、新しい提案がここに出ます。'],
@@ -2591,7 +2596,9 @@ const TEXT = {
   rule_not_found: ['That suggestion is no longer there. The page reads again.', 'その提案はもうありません。ページを読み直します。'],
   rule_decided: ['That suggestion is already decided. The page reads again.', 'その提案はもう判断済みです。ページを読み直します。'],
   rule_not_decided: ['That suggestion has no decision to undo. The page reads again.', 'その提案には元に戻す判断がありません。ページを読み直します。'],
-  rule_scope: ['A rule is saved for every repository.', '規則はすべてのリポジトリに保存します。'],
+  rule_scope: ['Choose where the rule applies: every repository, or one.', '規則を適用する範囲 (すべてのリポジトリか、1 つのリポジトリ) を選んでください。'],
+  preference_repo_unknown: ['No record names that repository, so no rule is kept for it.', 'そのリポジトリの記録が無いので、規則は保存しません。'],
+  preference_repo_excluded: ['That repository is not recorded, so no rule is kept for it.', 'そのリポジトリは記録しない設定なので、規則は保存しません。'],
   rule_partly_recorded: ['The rule is saved, but the suggestion still shows as waiting. Reject it, or leave it: approving it again adds the rule twice.', '規則は保存しましたが、提案は判断待ちのまま表示されます。却下するか、そのままにしてください。もう一度承認すると規則が 2 つになります。'],
   rule_pending: ['That decision is still being applied. The page reads again shortly.', 'その判断はまだ反映中です。少ししてからページを読み直します。'],
   rule_unavailable: ['My Rules could not save now. Try again shortly.', 'いまは保存できませんでした。少ししてからもう一度お試しください。'],
@@ -7895,7 +7902,9 @@ function myGoalsDraw() {
 
 // What a redraw keeps: the answer drawn, the suggestion or rule being edited and its draft, the
 // rule being added, and the last approve or reject, which "Undo" takes back.
-const mr = { answer: null, signature: null, editing: null, draft: '', adding: null, last: null, busy: false, open: new Set() };
+// `applies` is where an edited approve or an added rule applies: '' for every repository, else
+// a repository's key.
+const mr = { answer: null, signature: null, editing: null, draft: '', applies: '', adding: null, last: null, busy: false, open: new Set() };
 
 async function showMyRules() {
   const answer = await api('my-rules');
@@ -7973,20 +7982,45 @@ function myRulesEditor(focus, label) {
   return el('label', 'field my-rules-editor', el('span', null, t(label)), field);
 }
 
+// Slice 8b: where a rule applies, every repository or one the sessions started in (as claude-mem's
+// "Applies"); a key no longer offered falls back to every repository.
+function myRulesApplies(focus) {
+  const repos = mr.answer?.repos ?? [];
+  if (!repos.some((r) => r.repo === mr.applies)) mr.applies = '';
+  const choice = el('select', null, el('option', null, t('my_rules_everywhere')),
+    ...repos.map((r) => {
+      const option = el('option', null, t('my_rules_in_repo', { name: r.name }));
+      option.value = r.repo;
+      option.title = r.repo;
+      return option;
+    }));
+  choice.options[0].value = '';
+  choice.value = mr.applies;
+  choice.dataset.focus = focus;
+  choice.disabled = mr.busy;
+  choice.addEventListener('change', () => { mr.applies = choice.value; });
+  return el('label', 'field my-rules-editor', el('span', null, t('my_rules_applies')), choice);
+}
+
+// The scope fields of a post: `/api/my-rules`' approve and `/api/preferences`' add.
+const myRulesScope = () => (mr.applies ? { scope: 'repo', repo: mr.applies } : { scope: 'global' });
+const myRulesWhere = () => (mr.applies ? { apply_to_all_repos: false, repo: mr.applies } : { apply_to_all_repos: true });
+
 // A suggestion waiting: approve it as it is, edit then approve it, or reject it (R3).
 function myRulesSuggestion(sg) {
   const meta = [t(sg.seen === 1 ? 'my_rules_seen_one' : 'my_rules_seen_n', { n: sg.seen }), t(`my_rules_strength_${myRulesBand(sg.strength)}`)];
-  const approve = (statement) => myRulesWrite('my-rules', { suggestion: sg.id, action: 'approve', scope: 'global', ...(statement === undefined ? {} : { statement }) }, 'my_rules_approved')
+  // As it is, every repository's; edited, where the editor says.
+  const approve = (statement) => myRulesWrite('my-rules', { suggestion: sg.id, action: 'approve', ...(statement === undefined ? { scope: 'global' } : { statement, ...myRulesScope() }) }, 'my_rules_approved')
     .then((ok) => { if (ok) { mr.editing = null; mr.last = { id: sg.id, action: 'approve' }; myRulesDraw(); } });
   let actions;
   if (mr.editing === `suggestion:${sg.id}`) {
-    actions = [myRulesEditor(`draft:${sg.id}`, 'my_rules_text'), el('div', 'my-rules-actions',
+    actions = [myRulesEditor(`draft:${sg.id}`, 'my_rules_text'), myRulesApplies(`applies:${sg.id}`), el('div', 'my-rules-actions',
       myRulesButton('my_rules_save_approve', `save:${sg.id}`, () => void approve(mr.draft), 'small'),
       myRulesButton('my_rules_cancel', `cancel:${sg.id}`, () => { mr.editing = null; myRulesDraw(); }))];
   } else {
     actions = [el('div', 'my-rules-actions',
       myRulesButton('my_rules_approve', `approve:${sg.id}`, () => void approve(undefined), 'small'),
-      myRulesButton('my_rules_edit_approve', `edit:${sg.id}`, () => { mr.editing = `suggestion:${sg.id}`; mr.draft = sg.statement; myRulesDraw(); }),
+      myRulesButton('my_rules_edit_approve', `edit:${sg.id}`, () => { mr.editing = `suggestion:${sg.id}`; mr.draft = sg.statement; mr.applies = ''; myRulesDraw(); }),
       myRulesButton('my_rules_reject', `reject:${sg.id}`, () => void myRulesWrite('my-rules', { suggestion: sg.id, action: 'reject' }, 'my_rules_rejected_now')
         .then((ok) => { if (ok) { mr.last = { id: sg.id, action: 'reject' }; myRulesDraw(); } })))];
   }
@@ -8021,18 +8055,19 @@ function myRulesRule(rule) {
     el('p', 'my-rules-statement', rule.text), el('p', 'my-goals-meta', meta.join(' · ')), why, ...body);
 }
 
-// Add rule: a preference of every repository, as the settings page's preference adds one.
+// Add rule: a preference of every repository, as the settings page's preference adds one, or of
+// one repository.
 function myRulesAdd() {
   if (mr.adding === null) {
-    return el('div', 'my-rules-actions', myRulesButton('my_rules_add', 'add', () => { mr.adding = ''; myRulesDraw(); }));
+    return el('div', 'my-rules-actions', myRulesButton('my_rules_add', 'add', () => { mr.adding = ''; mr.applies = ''; myRulesDraw(); }));
   }
   const field = input('textarea', mr.adding, '', 'add:text', (v) => { mr.adding = v; });
   field.dataset.focus = 'add:text';
   field.disabled = mr.busy;
   return el('div', 'my-rules-add', word('h4', null, 'my_rules_add_h'),
-    el('label', 'field my-rules-editor', el('span', null, t('my_rules_text')), field),
+    el('label', 'field my-rules-editor', el('span', null, t('my_rules_text')), field), myRulesApplies('add:applies'),
     el('div', 'my-rules-actions',
-      myRulesButton('my_rules_save', 'add:save', () => void myRulesWrite('preferences', { text: mr.adding, apply_to_all_repos: true }, 'my_rules_saved')
+      myRulesButton('my_rules_save', 'add:save', () => void myRulesWrite('preferences', { text: mr.adding, ...myRulesWhere() }, 'my_rules_saved')
         .then((ok) => { if (ok) { mr.adding = null; myRulesDraw(); } }), 'small'),
       myRulesButton('my_rules_cancel', 'add:cancel', () => { mr.adding = null; myRulesDraw(); })));
 }
@@ -8057,26 +8092,37 @@ function myRulesDraw() {
   const a = mr.answer ?? {};
   const waiting = a.waiting ?? [];
   const rejected = a.rejected ?? [];
-  const rules = (a.yours ?? []).flatMap((scope) => scope.rules ?? []);
+  const removed = a.removed ?? [];
+  const scopes = a.yours ?? [];
+  const rules = scopes.flatMap((scope) => scope.rules ?? []);
   // A suggestion decided since, or a rule gone, is no longer edited.
   if (mr.editing && ![...waiting.map((sg) => `suggestion:${sg.id}`), ...rules.map((r) => `rule:${r.uid}`)].includes(mr.editing)) mr.editing = null;
   const decide = [word('h3', null, 'my_rules_decide'), word('p', 'my-goals-note', 'my_rules_decide_note'),
     waiting.length ? el('ul', 'my-goals-list', ...waiting.map(myRulesSuggestion)) : word('p', 'my-goals-note', 'my_rules_nothing_waiting')];
+  // Each scope with rules under its own heading, every repository's first (slice 8b).
+  const byScope = scopes.filter((scope) => scope.rules?.length).flatMap((scope) => [
+    el('h4', 'my-rules-scope', scope.scope === 'repo' ? t('my_rules_in_repo', { name: scope.name }) : t('my_rules_everywhere')),
+    el('ul', 'my-goals-list', ...scope.rules.map(myRulesRule))]);
   const yours = [word('h3', null, 'my_rules_yours'),
-    rules.length ? el('ul', 'my-goals-list', ...rules.map(myRulesRule)) : word('p', 'my-goals-note', 'my_rules_none'), myRulesAdd()];
+    ...(byScope.length ? byScope : [word('p', 'my-goals-note', 'my_rules_none')]), myRulesAdd()];
   const sections = [el('section', 'my-rules-decide', ...decide), el('section', 'my-rules-yours', ...yours)];
+  const undoable = (sg) => el('li', 'my-goals-item my-rules-item', el('p', 'my-rules-statement', sg.statement),
+    el('div', 'my-rules-actions', myRulesButton('my_rules_undo', `undo:${sg.id}`,
+      () => void myRulesWrite('my-rules', { suggestion: sg.id, action: 'undo' }, 'my_rules_undone'))));
+  if (removed.length) {
+    sections.push(el('section', 'my-rules-removed', word('h3', null, 'my_rules_removed'), word('p', 'my-goals-note', 'my_rules_removed_note'),
+      el('ul', 'my-goals-list', ...removed.map(undoable))));
+  }
   if (rejected.length) {
     sections.push(el('section', 'my-rules-rejected', word('h3', null, 'my_rules_rejected'), word('p', 'my-goals-note', 'my_rules_rejected_note'),
-      el('ul', 'my-goals-list', ...rejected.map((sg) => el('li', 'my-goals-item my-rules-item', el('p', 'my-rules-statement', sg.statement),
-        el('div', 'my-rules-actions', myRulesButton('my_rules_undo', `undo:${sg.id}`,
-          () => void myRulesWrite('my-rules', { suggestion: sg.id, action: 'undo' }, 'my_rules_undone'))))))));
+      el('ul', 'my-goals-list', ...rejected.map(undoable))));
   }
   draw(word('span', null, 'my_rules'), [], [
     el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_rules_eyebrow'), myWorkStatusLine(a.status)),
     word('p', 'my-goals-note', 'my_rules_where'), myRulesLast(),
     el('div', 'my-goals my-rules', ...sections),
   ]);
-  if (focus) [...$('panel').querySelectorAll('button, summary, textarea')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
+  if (focus) [...$('panel').querySelectorAll('button, summary, textarea, select')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
   setStatus('');
 }
 

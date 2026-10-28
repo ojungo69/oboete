@@ -430,7 +430,8 @@ fn stored(
 /// claim as `Shown` names it.
 type Body = (std::ops::Range<usize>, Shown);
 
-/// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first; the
+/// Spec 4.4's SessionStart around the checkout's `manifest`: the global preferences first, then the
+/// preferences of `repo` the owner made (`claims::owned`, slice 8b); the
 /// manifest, with `repo`'s delivered decisions, preferences, open items and lessons (spec 3.4) in
 /// its third place (spec 4.9's order); `live` after
 /// the manifest; last, the rest of the delivered claims one line each, after the tools that find
@@ -462,8 +463,18 @@ fn delivered(
                 prefs.push(c);
             }
         }
+        // Slice 8b (R4): the owner's own rules of this repository, every one, and not again
+        // among its decisions.
+        let owned = claims::owned(k, repo)?;
+        let mut ours = Vec::new();
+        for c in &owned {
+            if !hidden(&c.uid)? {
+                ours.push(c.clone());
+            }
+        }
         let words = terms(manifest);
         let mut ranked = claims::decisions(k, repo, POOL)?;
+        ranked.retain(|c| !owned.iter().any(|o| o.uid == c.uid));
         // Stable: among claims that share as many words, the newest first.
         ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
         let (mut units, rest) = claims::place(claims::units(k, &ranked, hidden)?, BODIES);
@@ -501,10 +512,15 @@ fn delivered(
             line.append(gate(&c.body, BRIEF));
             line
         };
-        if !prefs.is_empty() {
-            d.first.push_str("## Global preferences\n");
-            for c in &prefs {
-                full(&mut d.first, &mut d.first_bodies, c, &[]);
+        for (heading, claims) in [
+            ("Global preferences", &prefs),
+            ("Preferences of this repository", &ours),
+        ] {
+            if !claims.is_empty() {
+                d.first.push_str(&format!("## {heading}\n"));
+                for c in claims {
+                    full(&mut d.first, &mut d.first_bodies, c, &[]);
+                }
             }
         }
         if !units.is_empty() {
@@ -748,7 +764,7 @@ impl Consumer for Manifest {
 /// docs/retention.md: the facts an expired record's labels give (its text gave the others, and it
 /// is gone), and its checkout marked for a rebuild, as `facts` marks it.
 fn label_facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
-    if !crate::raw::is_live(&e.source) {
+    if !crate::raw::is_live(&e.source) || e.kind == "directive" {
         return Ok(());
     }
     let Some(repo) = e.repo.as_deref() else {
@@ -789,8 +805,10 @@ fn dirty(k: &Connection, device: &str, repo: &str, branch: &str) -> Result<()> {
 /// belong to no checkout.
 fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
     // Imported records are history, not the checkout's state (milestone 4 D6): its facts and its
-    // count of records not yet curated come from live records only.
-    if !crate::raw::is_live(&e.source) {
+    // count of records not yet curated come from live records only. Slice 8b: nor is the owner's
+    // directive of a repository (`pref add --repo`) any session's work: its claim is read when the
+    // start is (`delivered`).
+    if !crate::raw::is_live(&e.source) || e.kind == "directive" {
         return Ok(());
     }
     let Some(repo) = e.repo.as_deref() else {

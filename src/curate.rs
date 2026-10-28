@@ -10540,7 +10540,7 @@ curate = false
         assert_eq!(carried(&raw, &k), [(old.clone(), json!(new))]);
         if owners == "claim" {
             // The owner's own claim of that uid, as `oboete pref add` writes one.
-            let op = crate::claims::preference_op(first);
+            let op = crate::claims::preference_op(first, false);
             raw.append_ops(&[(OpKind::Claim, serde_json::to_value(op).unwrap())])
                 .unwrap();
         } else {
