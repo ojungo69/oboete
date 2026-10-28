@@ -544,8 +544,11 @@ system, owner-restore). Other is no area: it is the id `other`, used only by pla
 F2. **Placements.** A request sits in one live area, in Other, or is not sorted yet ("Sorting…"). A
 placement is keyed by the request's anchor conversation, by its stored key, as claude-mem's: a
 group's id is keyed by this home (C6) and changes when grouping moves a conversation. It resolves to
-the request at read time through the groups (`my_work_group::groups`). The owner's placement wins
-while its area is live; a merged area's placements follow the merge; a dismissed area holds none.
+the request at read time through the groups (`my_work_group::groups`): a group is read by its
+anchor's placement alone, as claude-mem reads its placements by a group's anchor; a member's own
+placement is kept, and is its own again when it leaves the group (CodeRabbit on #746). The owner's
+placement wins while its area is live; a merged area's placements follow the merge; a dismissed area
+holds none.
 
 F3. **The placement job** (job `focus`), in place of the links job (L). A request is queued when it
 has no placement, when its router placement points to an area that takes no requests now, or when
