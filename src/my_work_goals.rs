@@ -723,24 +723,42 @@ fn page_at(home: &std::path::Path, now: i64, tz: &impl TimeZone) -> Result<Value
 /// The current goals as the page shows them (M5): each item's quotes since `since`, the newest
 /// first; an item with none left out; ranks counted again within each kind.
 fn current_items(items: &[Item], since: i64, gate: &impl Fn(&str) -> String) -> Vec<Value> {
+    (current(items, since).into_iter())
+        .map(|i| {
+            let quotes: Vec<Value> = (i.quotes.iter())
+                .map(|q| json!({"text": gate(&q.text), "ts": q.ts}))
+                .collect();
+            json!({"id": i.id, "kind": i.kind, "rank": i.rank, "title": gate(&i.title),
+                "product": gate(&i.product), "asked": i.asked, "last": i.quotes[0].ts,
+                "quotes": quotes})
+        })
+        .collect()
+}
+
+/// M5: the current goals, as the page, the links job and My Work's cards all take them (#728,
+/// CodeRabbit on #729): each item with a quote since `since`, its quotes those alone, the newest
+/// first, ranked again within each kind, the priorities first.
+pub(crate) fn current(items: &[Item], since: i64) -> Vec<Item> {
     let mut out = Vec::new();
     for kind in KINDS {
         let mut of: Vec<&Item> = items.iter().filter(|i| i.kind == kind).collect();
         of.sort_by_key(|i| i.rank);
+        let mut rank = 0;
         for i in of {
-            let mut quotes: Vec<&Quote> = i.quotes.iter().filter(|q| q.ts >= since).collect();
-            quotes.sort_by_key(|q| std::cmp::Reverse(q.ts));
-            let Some(last) = quotes.first().map(|q| q.ts) else {
-                continue;
-            };
-            let rank = out.iter().filter(|v: &&Value| v["kind"] == kind).count() + 1;
-            let quotes: Vec<Value> = (quotes.into_iter())
-                .map(|q| json!({"text": gate(&q.text), "ts": q.ts}))
+            let mut quotes: Vec<Quote> = (i.quotes.iter())
+                .filter(|q| q.ts >= since)
+                .cloned()
                 .collect();
-            out.push(
-                json!({"id": i.id, "kind": i.kind, "rank": rank, "title": gate(&i.title),
-                "product": gate(&i.product), "asked": i.asked, "last": last, "quotes": quotes}),
-            );
+            if quotes.is_empty() {
+                continue;
+            }
+            quotes.sort_by_key(|q| std::cmp::Reverse(q.ts));
+            rank += 1;
+            out.push(Item {
+                rank,
+                quotes,
+                ..i.clone()
+            });
         }
     }
     out

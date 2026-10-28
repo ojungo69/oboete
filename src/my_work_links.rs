@@ -139,16 +139,7 @@ pub(crate) fn current(
         return Ok(None);
     };
     let since = now - crate::my_work_goals::WINDOW_MS;
-    let mut items: Vec<Item> = (crate::my_work_goals::items(&op).into_iter())
-        .filter(|i| i.quotes.iter().any(|q| q.ts >= since))
-        .collect();
-    items.sort_by_key(|i| (i.kind != "priority", i.rank));
-    let mut ranks = BTreeMap::new();
-    for i in &mut items {
-        let rank: &mut u32 = ranks.entry(i.kind.clone()).or_default();
-        *rank += 1;
-        i.rank = *rank;
-    }
+    let items = crate::my_work_goals::current(&crate::my_work_goals::items(&op), since);
     Ok((!items.is_empty()).then_some((op, items)))
 }
 

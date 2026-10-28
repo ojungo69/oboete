@@ -6764,6 +6764,8 @@ function myWorkGoalChip(row) {
   button.addEventListener('click', (event) => {
     event?.stopPropagation?.();
     Object.assign(mg, { tab: 'now', jump: goal.id });
+    // A priority past the top five is behind "more" (Codex and CodeRabbit on #729).
+    if (goal.kind === 'priority' && goal.rank > MY_GOALS_TOP) mg.more = true;
     mg.goals.add(goal.id);
     setView('my_goals');
     void show();
@@ -7513,7 +7515,9 @@ const mg = { tab: 'now', open: new Set(), goals: new Set(), months: new Set(), m
 async function showMyGoals() {
   // My Work's requests with them, as claude-mem's page reads its goals' requests from the work
   // model: a request's state here is always the one My Work shows (slice 6b).
-  const [answer, work] = await Promise.all([api('my-goals'), api('my-work', { range: 'all' })]);
+  // A failed read of My Work leaves the goals as slice 5b drew them, until the next poll (CodeRabbit
+  // on #729).
+  const [answer, work] = await Promise.all([api('my-goals'), api('my-work', { range: 'all' }).catch(() => null)]);
   return () => {
     mg.fetched = Date.now();
     const requests = work?.requests ?? [];
@@ -7601,6 +7605,9 @@ function myGoalsRequest(row) {
   button.dataset.focus = `request:${row.id}`;
   button.addEventListener('click', () => {
     setView('my_work');
+    // As `myWorkOpen`: its work product is read again (Codex on #729, on #650).
+    mw.products = null;
+    mw.unread.delete(row.id);
     mw.request = row.id;
     void show();
   });
@@ -7789,8 +7796,10 @@ function myGoalsDraw() {
     tabs, el('div', 'my-goals', ...(mg.tab === 'months' ? myGoalsMonths(a) : myGoalsNow(a))),
   ]);
   if (focus) [...$('panel').querySelectorAll('button, summary')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
-  // A goal a card opened (V4): in view, with the focus on it.
-  const jump = mg.jump && [...$('panel').querySelectorAll('summary')].find((node) => node.dataset.focus === `goal:${mg.jump}`);
+  // A goal a card opened (V4): in view, with the focus on it; an open ask by its quotes' disclosure.
+  const summaries = [...$('panel').querySelectorAll('summary')];
+  const jump = mg.jump && (summaries.find((node) => node.dataset.focus === `goal:${mg.jump}`)
+    ?? summaries.find((node) => node.dataset.focus === `why:${mg.jump}`));
   mg.jump = null;
   if (jump) {
     jump.scrollIntoView?.({ block: 'start' });
