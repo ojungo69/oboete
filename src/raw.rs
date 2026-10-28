@@ -3811,16 +3811,13 @@ impl Raw {
         };
         let written =
             |in_repo| serde_json::to_value(crate::claims::preference_op(e.clone(), in_repo));
-        // Slice 8b: global, or of the repository its directive names.
-        let in_repo = match (*body == written(false)?, *body == written(true)?) {
-            (false, false) => return Ok(false),
-            (global, _) => !global,
-        };
+        // Slice 8b: global, or of a repository.
+        if *body != written(false)? && *body != written(true)? {
+            return Ok(false);
+        }
         Ok(
             crate::consumer::claims::live(self, e)?.is_some_and(|event| {
-                event.repo.is_some() == in_repo
-                    && crate::curate::long_text(&event)
-                        .is_some_and(|text| text.len() == e.quote.len())
+                crate::curate::long_text(&event).is_some_and(|text| text.len() == e.quote.len())
             }),
         )
     }

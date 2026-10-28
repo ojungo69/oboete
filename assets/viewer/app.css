@@ -915,6 +915,7 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-goals-next, .my-goals-again { margin: 6px 0; font-size: 13px; }
 .my-goals-again { color: var(--yellow); }
 .my-rules-statement { margin: 0 0 4px; font-weight: 600; }
+.my-goals h4.my-rules-scope { margin: 14px 0 6px; color: inherit; font-size: 13.5px; font-weight: 600; }
 .my-rules-off .my-rules-statement { color: var(--muted); }
 .my-rules-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; }
 .my-rules-editor { display: grid; gap: 4px; margin: 8px 0 0; }

@@ -28,6 +28,10 @@ const REQUESTS: usize = 200;
 const STATEMENT: usize = 200;
 const QUOTE: usize = 240;
 const QUOTES: usize = 3;
+
+/// The most a suggestion's fields take of its op (`raw::MAX_OP_BYTES`), the rest left to the op's
+/// job, subject and `read` (#741).
+const FIELDS_BYTES: usize = crate::raw::MAX_OP_BYTES / 2;
 /// R1, P7: the suggestions are merged again at most this often, as the story is written.
 const AGAIN_MS: i64 = 3 * 60 * 60 * 1000;
 
@@ -200,8 +204,9 @@ const OFFERED: usize = 20;
 /// with `oboete correct`); and the repositories a rule of one can be made for. Every text through
 /// the gate (S6).
 pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
-    let rules = Rules::load(home)?;
-    let gate = |t: &str| crate::redact::outbound_with(t, &rules);
+    let settings = crate::capture::Settings::load(home)?;
+    let rules = &settings.rules;
+    let gate = |t: &str| crate::redact::outbound_with(t, rules);
     type Rule = (crate::claims::Claim, bool);
     let mut scopes: Vec<(Option<String>, Vec<Rule>)> = vec![(None, Vec::new())];
     let mut offered = Vec::new();
@@ -211,7 +216,10 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
             let s = shown(&raw, &k)?;
             let with_on = |claims: Vec<crate::claims::Claim>| -> Result<Vec<Rule>> {
                 (claims.into_iter())
-                    .map(|c| Ok((c.clone(), !crate::claims::muted(&k, &c.uid)?)))
+                    .map(|c| {
+                        let on = !crate::claims::muted(&k, &c.uid)?;
+                        Ok((c, on))
+                    })
                     .collect()
             };
             scopes[0].1 = with_on(crate::claims::global(&k)?)?;
@@ -221,7 +229,9 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
                     scopes.push((Some(repo), owned));
                 }
             }
-            let excluded = raw.exclusions_now()?;
+            // As every writer asks it (`CaptureExclusions::refuses`), with no index to build.
+            let list = raw.capture_exclusions()?;
+            let never = crate::capture::never_recorded(&list, &settings);
             let started = crate::consumer::manifest::exists(&k, "table", "session_start")?;
             let mut st = k.prepare(if started {
                 "SELECT repo FROM session_start GROUP BY repo ORDER BY MAX(ts) DESC, repo"
@@ -230,7 +240,7 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
             })?;
             for repo in st.query_map([], |r| r.get::<_, String>(0))? {
                 let repo = repo?;
-                if !excluded.contains(&repo) {
+                if !list.refuses(Some(&never), (Some(&repo), None), None) {
                     offered.push(repo);
                 }
                 if offered.len() == OFFERED {
@@ -281,7 +291,7 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
         })
         .collect();
     removed.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
-    let name = |repo: &str| crate::consumer::manifest::repo_name(repo, &rules);
+    let name = |repo: &str| crate::consumer::manifest::repo_name(repo, rules);
     let yours: Vec<Value> = (scopes.iter_mut())
         .map(|(repo, owned)| {
             owned.sort_by_key(|(c, on)| (!*on, std::cmp::Reverse(c.valid_from)));
@@ -716,17 +726,27 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
     let gate = |text: &str| crate::redact::outbound_with(text, &c.rules);
     let mut out = BTreeMap::from([(THROUGH.to_owned(), json!({"through": through}))]);
     for sg in suggestions.iter().filter(|sg| changed.contains(&sg.id)) {
-        // Gated again as every kept field (A5): a rule added since a quote was kept masks it too.
-        let quotes: Vec<Value> = (sg.quotes.iter())
-            .map(|q| json!({"text": gate(&q.text), "request": q.request, "at": q.at}))
-            .collect();
-        out.insert(
-            sg.id.clone(),
-            json!({"statement": gate(&sg.statement), "seen": sg.seen, "requests": sg.requests,
-                "quotes": quotes}),
-        );
+        out.insert(sg.id.clone(), fields(sg, &gate));
     }
     out
+}
+
+/// What a suggestion's op keeps, every text gated again as every kept field is (A5): a rule added
+/// since a quote was kept masks it too. Within `FIELDS_BYTES` (#741): the oldest requests go first,
+/// then the oldest quotes, so an op of long request ids is never written as a skip; `seen` keeps
+/// its count.
+fn fields(sg: &Suggestion, gate: &dyn Fn(&str) -> String) -> Value {
+    let quotes: Vec<Value> = (sg.quotes.iter())
+        .map(|q| json!({"text": gate(&q.text), "request": q.request, "at": q.at}))
+        .collect();
+    let mut kept = json!({"statement": gate(&sg.statement), "seen": sg.seen,
+        "requests": sg.requests, "quotes": quotes});
+    let size = |v: &Value| v.to_string().len();
+    for list in ["requests", "quotes"] {
+        while size(&kept) > FIELDS_BYTES && kept[list].as_array_mut().and_then(Vec::pop).is_some() {
+        }
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -1520,6 +1540,9 @@ mod tests {
             Err((422, "preference_repo_unknown"))
         );
         assert_eq!(code(repo(&stopped)), Err((422, "preference_repo_excluded")));
+        // Not offered either.
+        let offered = h.page()["repos"].clone();
+        assert!(!offered.to_string().contains(&stopped), "{offered}");
         assert_eq!(
             code(json!({"suggestion": "s1", "action": "undo"})),
             Err((409, "rule_not_decided"))
@@ -1543,6 +1566,48 @@ mod tests {
             Err((409, "rule_decided"))
         );
         assert_eq!(h.yours(), Vec::<(String, bool)>::new());
+    }
+
+    /// #741: a suggestion of long request ids is kept in an op that fits, the newest requests and
+    /// quotes first, its count unchanged; a short one is kept whole.
+    #[test]
+    fn a_suggestion_of_long_request_ids_is_kept_within_its_op() {
+        let id = |n: usize| format!("c:claude:{n}-{}", "x".repeat(1_000));
+        let sg = Suggestion {
+            id: "s1".into(),
+            statement: "Tests first.".into(),
+            seen: 250,
+            requests: (0..REQUESTS).map(id).collect(),
+            quotes: (0..QUOTES)
+                .map(|n| Quote {
+                    text: "q".repeat(QUOTE),
+                    request: id(n),
+                    at: 10 - n as i64,
+                })
+                .collect(),
+        };
+        let gate = |t: &str| t.to_owned();
+        let kept = fields(&sg, &gate);
+        assert!(kept.to_string().len() <= FIELDS_BYTES);
+        let requests = kept["requests"].as_array().unwrap();
+        assert!(!requests.is_empty() && requests.len() < REQUESTS);
+        assert_eq!(requests[0], json!(id(0)), "the newest first");
+        assert_eq!(kept["seen"], 250);
+        let short = Suggestion {
+            requests: vec!["g:1".into()],
+            ..sg.clone()
+        };
+        let whole = fields(&short, &gate);
+        assert_eq!(
+            (
+                whole["requests"].clone(),
+                whole["quotes"].as_array().unwrap().len()
+            ),
+            (json!(["g:1"]), QUOTES)
+        );
+        // Kept as the runner writes it: no skip.
+        let op = json!({"job": NAME, "about": "s1", "entry": "e", "ts": 1, "fields": kept});
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
     }
 
     /// V3: the waiting suggestions strongest first, claude-mem's strength: the requests that saw

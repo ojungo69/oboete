@@ -7955,9 +7955,11 @@ async function myRulesWrite(path, body, done) {
   } finally {
     mr.busy = false;
     mr.signature = null;
-    await show();
+    // Another tab opened meanwhile is not read again, nor given this page's message (#741): on
+    // Settings that would replace a form not saved yet.
+    if (view === 'my_rules') await show();
     // Held through the redraw that follows a done action (Undo's line, a closed editor).
-    if (message) setStatus(message, failed, lang, 8000);
+    if (message && view === 'my_rules') setStatus(message, failed, lang, 8000);
   }
 }
 

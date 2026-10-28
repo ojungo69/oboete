@@ -796,7 +796,9 @@ fn repo_refusal(
 
 /// Slice 8b (R2, R4): `repo`'s current preferences the owner made (`oboete pref add --repo` or My
 /// Rules' approve): its chain tips whose active derivation is `PREF_RECIPE`'s, in `current`'s
-/// order. SessionStart gives each, and My Rules lists each, as a rule of that repository.
+/// order. SessionStart gives each, and My Rules lists each, as a rule of that repository. One a
+/// later claim superseded is not: a decided one the owner backs keeps it among the decisions, as
+/// the earlier claim of its unit (`units`); any other link ends it there too (spec 3.4).
 pub fn owned(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
     tips(
         k,
@@ -817,10 +819,12 @@ pub fn owned_repos(k: &Connection) -> Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// `owned`'s filter on a row `a` of the `active` view: its active derivation's recipe is `?2`.
-const OWNED: &str = "EXISTS (SELECT 1 FROM claims oc JOIN derivations od
+/// `owned`'s filter on a row `a` of the `active` view of repository `?1`: its active derivation's
+/// recipe is `?2`. As a list of the repository's (14 ms on the owner's 13,654 derivations of one
+/// repository, where a test of each row took 60).
+const OWNED: &str = "a.uid IN (SELECT oc.uid FROM claims oc JOIN derivations od
                      ON od.op_device = oc.op_device AND od.op_seq = oc.op_seq
-                     WHERE oc.uid = a.uid AND od.recipe = ?2)";
+                     WHERE od.recipe = ?2 AND od.repo = ?1)";
 
 /// A current claim.
 #[derive(Debug, Clone, PartialEq)]

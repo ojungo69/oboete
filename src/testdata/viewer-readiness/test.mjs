@@ -2763,9 +2763,13 @@ draw(answer);
 let release;answers=[new Promise(r=>{release=r;})];
 button('reject:s4').click();
 run('ui.setView("timeline")');panel.replaceChildren();
+let reads=0;run('globalThis.__reads=()=>{};show=async()=>{globalThis.__reads();}');ctx.__reads=()=>{reads++;};
+run('$("status").textContent=""');
 release(json({state:'applied'}));await settle();
 assert(!panel.querySelector('.my-rules'),'the other tab keeps its panel');
-run('ui.setView("my_rules")');
+assert.equal(reads,0,'the other tab is not read again (#741)');
+assert.equal(run('$("status").textContent'),'','nor given this page\'s message');
+run('show=async()=>{};ui.setView("my_rules")');
 // #739: only what was applied is done: a partial add keeps its form open.
 draw(answer);
 button('add').click();

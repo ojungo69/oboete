@@ -1492,6 +1492,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   none the owner stopped recording; Approve as it is stays every repository's. An approved
   suggestion whose rule is gone (retracted with `oboete correct`, or forgotten) is listed under
   "Rule removed" with Undo.
+- **#741** (the reviews of #740): a suggestion's op keeps its fields within half the op cap, the
+  oldest requests and then the oldest quotes going first, `seen` keeping its count; and a My Rules
+  write that ends on another tab reads nothing again and shows no message there.
 - **Then**: My Focus (decision 61).
 
 ## Not built
