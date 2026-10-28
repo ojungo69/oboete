@@ -205,6 +205,50 @@ has a note of its own (card-hide.md, slice 9).
   (`WorkViewRoutes.ts:672-689`), so Claude Code loads the rules as instructions. No other agent
   gets them.
 
+### My Focus and the judges (15.4.0, rows X12 and X15)
+
+Read at tag v15.4.0 (2026-10-28); paths under `src/services/work-view/` unless named.
+
+- **My Focus replaces My Goals and the goal links** (`pages/my-goals.tsx` deleted; Align's
+  `align-input` and `record-alignment` removed). Every request sits in one focus area, in Other, or
+  is "Sorting…" until placed. Areas and placements are rows of the work-state list `my-focus`,
+  append-only and replayed in write order (`my-focus.mjs:1-8,14`).
+- **An area** has a random id `fa_` and 12 hex digits, a name (80 characters, never a page word:
+  my focus, my work, my rules, other, suggested, past focus, monitor, steer), a goal (300), an
+  about, a status (suggested, kept, dismissed, done), a priority rank from the goals run and an
+  owner rank from reordering, a source (owner-goals, clustering, promotion, seed, owner), the area
+  it was merged into, evidence, and who decided (owner, system, owner-restore). A system row is
+  skipped once the owner decided the area; Undo writes an owner-restore row
+  (`my-focus.mjs:43-57,153-206`, `nav-words.mjs:8-14`).
+- **A placement** is keyed by the request's anchor conversation, by the router or the owner, the
+  owner's winning while its area is live; a dismissed area holds none (`my-focus.mjs:61-71,213-234`).
+- **Where areas come from.** The goals run is shown the saved areas and names, for each mined area,
+  the area it already is (`matches`), never by name; a new one is a suggested area
+  (`my-focus.mjs:94-124`, `refresh-task.ts:286-332`). The focus step (the light model, 20 requests
+  a call) places each queued request (no placement, a placement into an area that no longer takes
+  requests, or a changed title, anchor ask or membership) in a kept or suggested area or Other,
+  and may propose promoting one request that holds several asks. Then the Other pass, when the
+  router's Other set changed, proposes new areas from two or more Other requests that are steps of
+  one thing (`request-groups.mjs:452-627`). A dismissed area is never proposed again.
+- **The owner's actions** (`WorkViewRoutes.ts:782-836`): keep, rename, edit goal, merge, dismiss,
+  done, reorder the kept areas, move a request to an area or Other, and put back in Suggested (the
+  Undo of a decision on a suggestion).
+- **The page**: a "My focus" rail (kept areas, Other, "N suggested", Past focus) and chips on narrow
+  screens filter My Work; an area's header (goal, rollup, status word, shipped count, times asked,
+  Not started asks, Why it's here, a menu); a Suggested page (Keep, Rename, Merge, Dismiss, Undo);
+  Past focus (done areas, month by month); the card's chip names its area; Move to… on the request
+  (`components/focus-nav.tsx`, `focus-header.tsx`, `pages/suggested-areas.tsx`, `past-focus.tsx`).
+- **The judges**, with Typesafe's decision model Jev (`typesafe/jev-1.14`), only through
+  OpenRouter's Decisions API or the CMEM Pro gateway (`request-judge.mjs:49-50,176-191`). The
+  request judge runs before grouping: a new conversation of the last 14 days that no single code
+  link places gets a choice over its project's 19 most recently active open requests and none,
+  then a yes/no check that it is the same work; at 0.8 it joins, from 0.5 it becomes its own request
+  with a suggestion to join (Join or Not this: a worker route, no button on the 15.4 page), below
+  it its own request; a failure leaves it to the grouping model, with no retry
+  (`request-judge.mjs:27-35,115-144,225-299,306-348`). The focus judge asks, for each queued
+  request, one choice over the kept areas and none, and gives the pick to the focus step as a hint;
+  its threshold to place alone is null (`focus-judge.mjs:15-23,30-72`).
+
 ## What oboete has
 
 - **The chain** (`provider::Chain`): every JSON call tries the configured entries in order, skips
@@ -440,6 +484,9 @@ shown, as in claude-mem.
 
 ### L. Goal links
 
+Replaced by F3 (decision 61): the placement job takes the links job's place, and no goal link is
+read once it is built.
+
 L1. **Due.** A request reviewed since its last link; every request once when a goal is added; a
 request whose linked goal is gone. Up to 5 due requests a call (claude-mem: all at once).
 
@@ -485,6 +532,106 @@ M6. **Not elsewhere.** Goals are not in session start, search or what agents are
 claude-mem.
 
 M7. **The page**: V2.
+
+### F. My Focus (decision 61, row X12)
+
+F1. **Areas**, as claude-mem's: a random id (`fa_` and 12 hex digits), a name (80 characters, never a
+page word: claude-mem's eight and the page's Japanese tab names), a goal (300), an about, a status
+(suggested, kept, dismissed, done), a priority rank and an owner rank, a source (owner-goals,
+clustering, promotion, owner), the area it was merged into, evidence, and who decided (owner,
+system, owner-restore). Other is no area: it is the id `other`, used only by placements.
+
+F2. **Placements.** A request sits in one live area, in Other, or is not sorted yet ("Sorting…"). A
+placement is keyed by the request's anchor conversation, by its stored key, as claude-mem's: a
+group's id is keyed by this home (C6) and changes when grouping moves a conversation. It resolves to
+the request at read time through the groups (`my_work_group::groups`). The owner's placement wins
+while its area is live; a merged area's placements follow the merge; a dismissed area holds none.
+
+F3. **The placement job** (job `focus`), in place of the links job (L). A request is queued when it
+has no placement, when its router placement points to an area that takes no requests now, or when
+its version (C7) moved since this device's router placement. Up to 20 a call, in A4's room: the
+kept and suggested areas (id, name, goal, about), the dismissed ones as never to propose again, and
+each request's title, first ask (400 characters), state, summary, repository (a tag, never a
+grouping) and its conversations' opening asks (400 each). The answer places every request shown
+once, in a listed area or Other, with evidence (300); it may propose promoting one request that
+holds several separate asks. Checked by code as claude-mem checks it: an unlisted or dismissed id
+refuses the answer, never maps to Other.
+
+F4. **The Other pass.** When the requests the router put in Other, with their versions, changed since
+this device's last pass, one call proposes new areas: two or more Other requests that are steps of
+one larger thing (`new`), or one that holds several asks (`promote`), each with a name, goal,
+about, its requests, the live area it is the same as or none, and evidence. A proposed area is
+suggested. A dismissed area is never proposed again.
+
+F5. **The goals job** (M) keeps its prompts, window and months. Its items become claude-mem's kinds,
+focus areas and asks. It is shown the areas (id, name, goal, status; one the system withdrew left
+out) and names, for each area it mines, the area it already is or none, never by name: a new one
+is a suggested area (source owner-goals) with its rank; a match to a suggested area no owner
+decided may update its rank and fill an empty goal. An ask sits under its area, else under Other.
+
+F6. **The owner's actions**, through `save_gate` on `POST /api/my-focus`, each an op so it survives a
+rebuild: keep, rename (a page word refused), edit goal, merge into a live area (not itself, not a
+dismissed or merged one), dismiss, done, reorder (exactly the kept areas), move a request to a live
+area or Other, and put back in Suggested (only an area the system suggested). Undo is the action
+that puts the last change back, as claude-mem's page builds it.
+
+F7. **The page**, in place of V2: My Work's "My focus" rail and chips (kept areas in order, Other,
+"N suggested", Past focus), each with the count of its requests that need the owner; the area's
+header (goal, the rollup of its reviewed requests, the status word by claude-mem's rules, shipped
+count, times asked and the latest, its Not started asks, Why it's here, and the menu of F6's
+actions); Other's header; the Suggested page with Keep, Rename, Merge and Dismiss, each with Undo;
+Past focus (done areas, and the months from the goals ops, as V2's month by month); the card's
+chip naming its area or "Sorting…"; and Move to… on the request's page. Both languages.
+
+F8. **Kept** as ops of job `focus` (S1): an area op (subject its id, the area's fields), a placement
+op (subject the conversation's stored key) and the Other pass's op (its set's digest), each a patch
+(a null field removes it). The fold reads them oldest first with claude-mem's two rules. Not in
+session start, as in claude-mem.
+
+F9. **Not built**: claude-mem's seed from an earlier sorting and Cloud's areas at setup (row X22),
+none of which any store here has, and the calibration script, which needs the owner's own
+placements. No older op is read again in the new shape: no store holds a `links` or a `goals` op
+(the owner's, and the dogfood user's two, counted 2026-10-28).
+
+### J. The judges (decision 62, rows X12 and X15)
+
+J1. **Jev**, Typesafe's decision model: answers with probabilities, not text. Called through
+Typesafe's own API, `POST https://api.typesafe.ai/v1/systemone`, model `jev-latest` (it answered
+as `jev-1.14.0` on 2026-10-28), with a key in a key file as `config::read_key` reads one (the token
+on line 2), set on the settings page. Off until a key is set. Not in the curator chain: its own
+`[judge]` table. Cloudflare's Workers AI serves `typesafe/jev` too, but answered "Insufficient
+balance" without prepaid credit, so it is not built. Every state goes through the outbound gate
+(S6); a conversation or request of a repository the owner excluded is never sent (spec 5.5),
+checked before the call; each call is in the provider ledger; the spending cap counts its input
+tokens at USD 0.042 a million (output is free). No retry, as claude-mem: what a failed call would
+have decided goes to the model that decides it without a judge.
+
+J2. **The context** of a conversation, as claude-mem's: its repository, when it started, its first 3
+asks (250 characters each) and its first 8 card titles (120 each), each text gated; a request's adds
+its title.
+
+J3. **The request judge**, before grouping (C). For each candidate conversation (C1) a single proven
+link to one open request (C3: the same work list, a delegation) joins it with no call.
+Otherwise Jev chooses among the repository's 19 most recently active open requests and none, then
+answers whether the conversation is the same work as the pick. From 0.8 it joins: a grouping op as
+the model's, its link of kind `judge` with the scores as evidence. From 0.5 it is its own request,
+with a suggestion to join. Below, or none, its own request. A failure leaves it to grouping.
+
+J4. **Join or Not this**, on the card of a conversation the judge suggested: "Looks like part of
+<title>", with Join and Not this, each an owner op. Join moves it, and anything it anchored, into
+that request; Not this keeps it its own and it is never suggested again. claude-mem 15.4 has the
+route and no button.
+
+J5. **The focus judge**, before placement (F3), when a kept area exists: one choice per queued request
+over the kept areas and none, 19 areas a question, more asked in sets and a final question over
+the winners. Its pick is a hint shown to the placement model; it places nothing alone, as
+claude-mem's threshold is null.
+
+J6. **Measured** (2026-10-28, a made-up conversation and 19 requests of that size): a choice 9,378
+input tokens in English and 14,222 in Japanese, a check 1,106 and 1,532, 0.16 to 0.25 s a call.
+Both languages picked the continued request (0.74, 0.94) and judged it the same work (0.96, 0.97).
+Jev's documentation says English is where it is best and CJK is handled less well: the owner's own
+pairs measure it once it runs.
 
 ### R. My Rules (row X13)
 
@@ -576,7 +723,7 @@ V1. **The status line**, on My Work, My Goals and My Rules: "Written <time>", "W
 (the daily bound, the monthly cap, every provider resting), or "Off" with a link to the setting.
 Read from providers.db and knowledge.db, no call.
 
-V2. **My Goals**, a tab after My Work. Tabs "This month · 31 days to <local date>" and "Month by
+V2. **My Goals**, a tab after My Work, until F7 replaces it (decision 61). Tabs "This month · 31 days to <local date>" and "Month by
 month". The lead sentence, top priorities (5, then the rest), the open asks panel and the "No
 goal" list, as claude-mem's page. Each priority's status word from its requests' statuses, by
 claude-mem's rules, with full dates for "Asked again after ship". The progress bar is the average
@@ -617,7 +764,11 @@ month. The first goals read adds about 10 to 15 calls once, about USD 0.02. Deci
 about USD 0.20 and at most about 100 calls a day; the typical day is well under it. With a
 subscription CLI first in the chain the money is USD 0, and the calls use its allowance and wait
 while the owner works (decision 15). The real figures are the ledger's, by role, after a week.
-These jobs draw on the same monthly pool as windows and summaries. When the pool is spent, a paid
+From slice 10 the placement job (F3) takes the goal links' row, at about the same size, and the
+Other pass (F4) adds a call when Other changes, about one a day. The judges (J) are Jev's, not
+the chain's: at J6's sizes a judged conversation is about 10,500 to 15,800 input tokens, USD
+0.00044 to 0.00066, and a focus pick is less; at about 9 new conversations a day, under USD 0.01 a
+day. These jobs draw on the same monthly pool as windows and summaries. When the pool is spent, a paid
 entry refuses them, and they go to the free entries and subscriptions, which A4 sizes every call
 to fit.
 
@@ -657,6 +808,10 @@ to fit.
 | Multi-device | rows sync | this device's ops | sync not built |
 | Forget | none of derived text | ops taken with what they read | forget is oboete's |
 | Cloud at setup (row X22) | goals, rules and groups from cmem.ai | none | decisions 56 and 57 |
+| My Focus storage (15.4) | rows of the work-state list `my-focus` | ops of job `focus` | S1; work state is what agents read |
+| Jev's route (15.4) | OpenRouter's Decisions API or the CMEM gateway | Typesafe's own API | the owner's key; no account of claude-mem's |
+| Join or Not this (15.4) | a worker route, no button | buttons on the card | a suggestion needs an answer |
+| A page word in an area's name | eight English words | those and the page's Japanese tab names | both languages |
 
 ## What needed the owner
 
@@ -702,8 +857,14 @@ goals' window is the last 31 days, rolling, and each finished calendar month is 
    settles the delivery.
 9. **Removing a card or a summary** (decision 57's other part): reversible, as a correction is, in a
    note of its own ([card-hide.md](card-hide.md)), built first, after the page's forget (row 3).
+10. **My Focus** (F1 to F9, decision 61). 10a: the focus ops, their fold, the owner's actions and
+    `/api/my-focus`, no call. 10b: the goals job's kinds and matches, the placement job and the
+    Other pass; the links job removed. 10c: the page, My Goals' tab removed. It needs slices 5 to 8.
+11. **The judges** (J1 to J6, decision 62). 11a: the `[judge]` provider, its key on the settings
+    page, its probe in doctor, the gate, the cap and the ledger. 11b: the request judge and Join or
+    Not this. 11c: the focus judge's hint. It needs slice 3 and, for 11c, slice 10.
 
-After slice 8, the side by side with claude-mem that decision 50 asks for.
+After slice 11, the side by side with claude-mem that decision 50 asks for.
 
 ## Tests
 
