@@ -7432,7 +7432,8 @@ function myWorkAccept(answer) {
 function myWorkReading() {
   if (mw.request !== null || (window.scrollY || 0) > 220) return true;
   const active = document.activeElement;
-  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents']
+  // The build story's disclosure too, at the page's top (#733).
+  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story']
     .some((selector) => active?.closest?.(selector));
 }
 

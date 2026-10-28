@@ -309,7 +309,7 @@ impl<'a> Runner<'a> {
                     for s in batch {
                         crate::providers_db::clear_my_work_held(db, (name, s))?;
                     }
-                    return given_up(raw, db, (name, &span), &skips);
+                    return given_up(raw, db, (name, &span), &skips, now);
                 }
                 if p.next_attempt_at > now {
                     if held[i].is_none_or(|until| p.next_attempt_at < until) {
@@ -404,7 +404,8 @@ impl<'a> Runner<'a> {
                 for s in batch {
                     crate::providers_db::clear_my_work_held(db, (name, s))?;
                 }
-                return given_up(raw, db, (name, &span), &skips).map(|phase| self.called(phase));
+                return given_up(raw, db, (name, &span), &skips, now)
+                    .map(|phase| self.called(phase));
             }
             for s in batch {
                 crate::providers_db::set_my_work_held(db, (name, s), hold, next)?;
@@ -657,10 +658,18 @@ fn given_up(
     db: &Connection,
     (job, span): (&str, &str),
     skips: &[(OpKind, Value)],
+    now: i64,
 ) -> Result<Phase> {
     raw.append_ops(skips)?;
     crate::providers_db::clear_my_work_pending(db, span)?;
-    crate::providers_db::clear_my_work_round(db, job)?;
+    // #733: a job with another subject still held goes on saying it waits, on the earliest.
+    let left = (crate::providers_db::my_work_held(db, now)?.into_iter())
+        .filter(|(j, ..)| j == job)
+        .min_by_key(|(.., until)| *until);
+    match left {
+        Some((_, _, hold, until)) => crate::providers_db::set_my_work_round(db, job, &hold, until)?,
+        None => crate::providers_db::clear_my_work_round(db, job)?,
+    }
     Ok(Phase::Covered)
 }
 
@@ -1469,10 +1478,29 @@ mod tests {
             &mut s.raw,
             &db,
             ("group", "group r1"),
-            &[(OpKind::MyWork, skip)],
+            &[(OpKind::MyWork, skip.clone())],
+            crate::db::now_ms(),
         )
         .unwrap();
         assert!(crate::providers_db::my_work_rounds(&db).unwrap().is_empty());
+        // #733: given up while another subject of the job is held, the line stays on that hold.
+        let now = crate::db::now_ms();
+        let until = now + 30 * MINUTE;
+        crate::providers_db::set_my_work_held(&db, ("group", "r2"), "budget", until).unwrap();
+        crate::providers_db::set_my_work_held(&db, ("links", "r9"), "resting", now + MINUTE)
+            .unwrap();
+        given_up(
+            &mut s.raw,
+            &db,
+            ("group", "group r1"),
+            &[(OpKind::MyWork, skip)],
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::providers_db::my_work_rounds(&db).unwrap(),
+            [("group".to_owned(), "budget".to_owned(), until)]
+        );
     }
 
     /// A store whose `[my_work]` and `[summary]` curate, with record `seq` said.
