@@ -166,7 +166,8 @@ fn due_since(u: &Unit, focus: &Focus, last: Option<&Kept>, device: &str) -> Opti
 
 /// F4: the requests the router put in Other, none the owner placed, and since when a pass over
 /// them is due: when their digest moved since this device's last pass; after a refused one, once
-/// a request of them is placed again. None while Other holds none.
+/// a request of them is placed again. None while Other holds none, or while a failed pass waits
+/// (#730).
 fn other_due(
     s: &Stores,
     (units, focus): (&[Unit], &Focus),
@@ -176,7 +177,8 @@ fn other_due(
     let set: Vec<&Unit> = (units.iter())
         .filter(|u| !focus.owner_placed(&u.subject) && focus.router_of(&u.subject) == Some(OTHER))
         .collect();
-    let Some(newest) = set.iter().filter_map(|u| u.placed).max() else {
+    let held = s.held.contains(&(NAME.to_owned(), OTHER.to_owned()));
+    let Some(newest) = set.iter().filter_map(|u| u.placed).max().filter(|_| !held) else {
         return Ok(None);
     };
     let last = crate::my_work_ops::newest_shown(s.k, (NAME, OTHER), Some(device), hidden, false)?;
@@ -769,6 +771,14 @@ mod tests {
         }
 
         fn with<T>(&self, f: impl FnOnce(&Stores) -> T) -> T {
+            self.with_held(&crate::my_work_run::NOT_HELD, f)
+        }
+
+        fn with_held<T>(
+            &self,
+            held: &BTreeSet<(String, String)>,
+            f: impl FnOnce(&Stores) -> T,
+        ) -> T {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let rules = Rules::load(self.s.home.path()).unwrap();
@@ -779,7 +789,7 @@ mod tests {
                 rules: &rules,
                 summary: &self.summary,
                 reading: &reading,
-                held: &crate::my_work_run::NOT_HELD,
+                held,
             })
         }
 
@@ -795,7 +805,11 @@ mod tests {
 
         /// Every subject due, in any batch, and `other` when the Other pass is.
         fn due(&self) -> Vec<String> {
-            let mut due: Vec<String> = self.with(|s| {
+            self.due_held(&crate::my_work_run::NOT_HELD)
+        }
+
+        fn due_held(&self, held: &BTreeSet<(String, String)>) -> Vec<String> {
+            let mut due: Vec<String> = self.with_held(held, |s| {
                 let round = round(s, crate::db::now_ms()).unwrap();
                 let other = round.other.map(|_| OTHER.to_owned());
                 (round.batches.into_iter().flat_map(|(_, b)| b))
@@ -1129,6 +1143,11 @@ mod tests {
             [Some(id.as_str()), Some(id.as_str()), Some(OTHER)]
         );
         assert!(h.due().is_empty(), "{:?}", h.due());
+        // #730: a pass a failure holds waits.
+        h.op(NAME, OTHER, json!({"digest": 1}));
+        assert_eq!(h.due(), [OTHER]);
+        let held = BTreeSet::from([(NAME.to_owned(), OTHER.to_owned())]);
+        assert!(h.due_held(&held).is_empty());
     }
 
     /// S6: an exclusion of the repository hides the placements made on what it showed.

@@ -1738,7 +1738,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   places its requests in that area.
 - **The Other pass** (F4), subject `other`, while no request is queued: the requests the router put
   in Other, none the owner placed. Due when the digest of their subjects and bases differs from this
-  device's newest `other` op, or, after a refused pass, once one of them is placed again. One call
+  device's newest `other` op, or, after a refused pass, once one of them is placed again; a pass a
+  failure holds waits (#730). One call
   shows the areas and the set as far as they fit; it places nothing and proposes `new` (two or more
   requests) or `promote` (one). Its op keeps the digest of the set less the requests its proposals
   took, as claude-mem's `otherPassHash`; a set larger than one call waits for the set to move.
