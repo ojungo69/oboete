@@ -301,6 +301,7 @@ impl Job for Grouping {
             read,
             removed,
             check: Box::new(move |answer: &Value| check(answer, &check_labels)),
+            subjects: Vec::new(),
             keep: Box::new(move |answer: &Value| keep(answer, &labels, &rules)),
         }))
     }
