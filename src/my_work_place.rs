@@ -723,15 +723,27 @@ mod tests {
 
         /// A `job` op about `about` keeping `fields`: its op seq.
         fn op(&mut self, job: &str, about: &str, fields: Value) -> i64 {
+            self.op_of(job, about, fields, (crate::db::now_ms(), false))
+        }
+
+        /// The op the runner keeps of a job it gave up on (`my_work_run::given_up`), at `at`
+        /// minutes from the start.
+        fn skip(&mut self, about: &str, at: i64) -> i64 {
+            let ts = self.t + at * MINUTE;
+            self.op_of(NAME, about, json!({}), (ts, true))
+        }
+
+        fn op_of(&mut self, job: &str, about: &str, fields: Value, at: (i64, bool)) -> i64 {
+            let (ts, skipped) = at;
             let op = MyWorkOp {
                 job: job.into(),
                 about: about.into(),
                 entry: "fake".into(),
-                ts: crate::db::now_ms(),
+                ts,
                 read: Read::default(),
                 removed: vec![],
                 fields: fields.as_object().unwrap().clone().into_iter().collect(),
-                skipped: false,
+                skipped,
                 forgotten: None,
             };
             let op = serde_json::to_value(op).unwrap();
@@ -740,11 +752,20 @@ mod tests {
             seqs[0]
         }
 
-        /// An area of `status`, decided by `by`.
-        fn area(&mut self, id: &str, name: &str, status: &str, by: &str) {
+        /// An area of `status`, decided by `by`: its op seq.
+        fn area(&mut self, id: &str, name: &str, status: &str, by: &str) -> i64 {
             let fields = json!({"kind": "area", "name": name, "status": status,
                 "source": "owner-goals", "decided_by": by});
-            self.op(crate::my_work_focus::NAME, id, fields);
+            self.op(crate::my_work_focus::NAME, id, fields)
+        }
+
+        /// The newest place op about `subject`, a skip too.
+        fn last(&self, subject: &str) -> Option<Kept> {
+            self.with(|s| {
+                let none = HashSet::new();
+                crate::my_work_ops::newest_shown(s.k, (NAME, subject), None, &none, false)
+            })
+            .unwrap()
         }
 
         fn with<T>(&self, f: impl FnOnce(&Stores) -> T) -> T {
@@ -865,7 +886,7 @@ mod tests {
     fn every_request_is_placed_once_and_a_moved_one_again() {
         let mut h = Home::new();
         let subjects = h.requests(2);
-        h.area(AREA, "The parser", "kept", "owner");
+        let area = h.area(AREA, "The parser", "kept", "owner");
         let mut due = subjects.clone();
         due.sort();
         assert_eq!(h.due(), due);
@@ -883,6 +904,9 @@ mod tests {
             (Some(AREA), Some(OTHER))
         );
         assert!(!h.due().contains(&subjects[0]), "{:?}", h.due());
+        // S2: it read each first and opening ask, and the area's op.
+        let read = h.last(&subjects[0]).unwrap().op.read;
+        assert_eq!((read.spans.len(), read.ops.contains(&area)), (4, true));
         // Request 1 gains a conversation.
         h.said("s1c", 90, "Document part 1 of the parser.");
         let groups = json!([
@@ -993,6 +1017,29 @@ mod tests {
         assert_eq!(run(Question::Other, other(twice)), Some("shape"));
         let unknown = proposal("new", "Lexer", &["R1", "R3"], "");
         assert_eq!(run(Question::Other, other(json!([unknown]))), Some("shape"));
+        let into_other = proposal("new", "Lexer", &["R1", "R2"], OTHER);
+        assert_eq!(
+            run(Question::Other, other(json!([into_other]))),
+            Some("unanchored")
+        );
+    }
+
+    /// F3: a request the runner gave up on waits until it moves again; one whose area the owner
+    /// dismissed is placed again.
+    #[test]
+    fn a_given_up_request_waits_and_a_dismissed_area_places_again() {
+        let mut h = Home::new();
+        let subjects = h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        h.skip(&subjects[0], 60);
+        assert!(h.due().is_empty(), "{:?}", h.due());
+        h.said("s1a", 100, "And make part 1 faster.");
+        assert_eq!(h.due(), subjects);
+        h.pass(&|p| placed(p, &[AREA]));
+        assert!(h.due().is_empty(), "{:?}", h.due());
+        let dismissed = json!({"kind": "area", "status": "dismissed", "decided_by": "owner"});
+        h.op(crate::my_work_focus::NAME, AREA, dismissed);
+        assert_eq!(h.due(), subjects);
     }
 
     /// F3: a request promoted while it is placed makes a suggested area, by the system, sourced
