@@ -1243,6 +1243,31 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   built then.
 - **Then**: the page itself (V2's tabs and panels), and V1's line on My Work.
 
+### Slice 5b, the page (2026-10-28)
+
+- **My Goals** (V2), a tab after My Work, as claude-mem's page without slice 6's links:
+  - **Two inner tabs**: "This month · 31 days to <local date>" and "Month by month".
+  - **This month**: the top 5 priorities, then "<n> more priorities" behind a disclosure. A row
+    gives the rank (rank 1 stands out), the title, how often and when it was last asked, and the
+    product. "Why it's here · <n> quotes" opens to the quotes, each with the time it was typed, to
+    the minute. Then the open asks, and how many of them came up more than once. Last, the prompts
+    the goals read in the window, read on this machine from what oboete recorded.
+  - **Month by month**: this month (Current), its top priority and its prompts, then each
+    finished month (Archived), the newest first. A finished month opens to its summary and its
+    priorities, each with its newest quote, and says that no request review covers it, as
+    claude-mem does before its links.
+  - **No goals yet**: what turning My Work on brings, and the status line.
+- **The status line** (V1) on My Goals and on My Work. When off, or when summaries are off, it
+  says so and opens Settings; when waiting, it says why and when the next try is; else, when it
+  last wrote. My Work reads its line after its requests, into a place of its own, so the line is
+  no part of the requests' held updates.
+- **Redraws**: a poll that brings the same answer draws nothing, and a redraw keeps the inner tab,
+  the quotes and months opened and "more". A language switch draws the page again, its dates
+  too. Every text is put in as text, never as markup.
+- **Checked** in a browser (2026-10-28, a debug build over a home of made-up goals, its providers
+  empty): both inner tabs, the disclosures and the status line, in English and in Japanese.
+- **Then**: #720 (a held request that no longer applies still reads as waiting), and slice 6.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's
