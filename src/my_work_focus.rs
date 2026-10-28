@@ -874,7 +874,10 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!((stored("Viewer 0123456789ab"), stored("Viewer ****")), (0, 1));
+        assert_eq!(
+            (stored("Viewer 0123456789ab"), stored("Viewer ****")),
+            (0, 1)
+        );
         let raw = crate::raw::open(home.path()).unwrap();
         let h = Home {
             s: Store { home, raw },

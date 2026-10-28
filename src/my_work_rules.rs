@@ -1370,7 +1370,11 @@ mod tests {
             ..Default::default()
         });
         let uid = &crate::claims::owned(&k, &in_a).unwrap()[0].uid;
-        assert!(found.hits.iter().any(|hit| &hit.key == uid), "{:?}", found.hits);
+        assert!(
+            found.hits.iter().any(|hit| &hit.key == uid),
+            "{:?}",
+            found.hits
+        );
         // Item 6: excluding another repository with a rule leaves this one's rule, and a global
         // one, of no excluded session.
         let (_b, in_b) = h.known();
