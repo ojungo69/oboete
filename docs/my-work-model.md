@@ -672,7 +672,7 @@ rule the owner adopted.
 ### S. Where it is kept
 
 S1. **One new op kind, `my_work`**, whose `job` is `group`, `review`, `links`, `story`, `rules`,
-`goals` or `rule` (the owner's action). Approved, edited and turned-off rules also use the
+`goals`, `rule` (the owner's action) or `focus` (My Focus, F8). Approved, edited and turned-off rules also use the
 existing kinds: `claim` through `pref add`, and `correction` through correct, mute and unmute.
 Checks stay in `state/my-work-reviews.json`. Nothing goes to `state/` or providers.db that a
 rebuild needs.
@@ -1664,6 +1664,38 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   oldest requests and then the oldest quotes going first, `seen` keeping its count; and a My Rules
   write that ends on another tab reads nothing again and shows no message there.
 - **Then**: My Focus (decision 61).
+
+### Slice 10a: My Focus's ops and the owner's actions (2026-10-28)
+
+- **The ops** (F8): job `focus`, one of S1's jobs. An area op is about the area's id, its fields
+  `kind: area` and the area's own (F1); a placement op is about the request's anchor, as the
+  stores hold its id (`Id::held`, not the id keyed by the home's key: CodeRabbit on #746; a
+  group's is its anchor conversation's, `c:`: `my_work_focus::subject`), its
+  fields `kind: placement`, `area` (an id, `other`, or none to clear it) and `by` (`router` or
+  `owner`). Each is a patch: a null field removes it.
+- **The fold** (`my_work_focus::Focus`): every focus op oldest first (time, device, op seq), past
+  those an exclusion leaves out (S6) and the forgotten ones (S5). claude-mem's two rules: a system
+  row is skipped once the owner decided the area, until an owner-restore; the owner's placement
+  wins while its area is live, else the router's. A merge forwards through every merge; a loop, an
+  unknown area or a dismissed one resolves to nothing. A row that would leave an area unreadable
+  (no name, an unknown status, source or decider, or the id `other`) is not applied, where
+  claude-mem's fold throws.
+- **My Work's answer**: each request's `focus` (its area's id, `other`, or null: not sorted yet),
+  and `areas`, the areas not merged away, by the owner's rank, the goals' rank, then the name,
+  every text through the gate.
+- **The owner's actions** (F6), `POST /api/my-focus` through `save_gate`, `{action, area, into,
+  name, goal, order, request}`: keep, dismiss, done, rename (80 characters; a page word is
+  `focus_page_word`, 422), edit goal (300), merge (`focus_merge_self`, `focus_merge_target`),
+  reorder (exactly the kept areas, `focus_order`), move a request (by the id My Work shows) to a
+  live area or Other (`focus_move_target`), and put back in Suggested (not an area the owner wrote,
+  `focus_restore`); any action but that one on a merged area is `focus_merged` (409); an unknown
+  area or request `focus_not_found` (404). Each writes its change alone, decided by the owner, a
+  patch on the area, through `my_work_ops::record`, which the `rule` op shares: claude-mem's
+  `ownRow` writes the whole area, which would keep the model's text in an op a forget or an
+  exclusion cannot follow (Codex on #746). A name and a goal go through the gate as they are
+  written. An area's id and each request's `focus` pass the answer's gate as selectors.
+- **No call.** Areas come with slice 10b, the page with 10c.
+- **Then**: slice 10b, the goals job's areas, the placement job and the Other pass.
 
 ## Not built
 

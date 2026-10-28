@@ -894,11 +894,18 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         )?);
     }
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
-    let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    let (mut answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    // F2, F7: where each request sits, and the areas.
+    let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
+    for (a, h) in answers.iter_mut().zip(&held) {
+        a["focus"] = json!(focus.of(&crate::my_work_focus::subject(h.id())));
+    }
+    let areas = crate::my_work_focus::areas(&focus, &rules);
     let goals = goals.len();
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
-    let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story});
+    let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story,
+        "areas": areas});
     Ok((answer, held))
 }
 
@@ -1304,8 +1311,17 @@ struct Review {
 /// from (slice 4).
 pub(crate) struct Held {
     key: String,
+    /// The request's id as the stores hold it (`Id::held`), where `key` is it keyed by the home's
+    /// key (CodeRabbit on #746).
+    id: String,
     sessions: Vec<String>,
     sources: Sources,
+}
+
+impl Held {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 /// A request's conversations, each with the prompt spans it owns (none: all of it), its work
@@ -1988,6 +2004,7 @@ fn answer(
     let sources = sources(r, &items, &cards);
     let held = Held {
         key: filed,
+        id: held,
         sessions: swept_by,
         sources,
     };
@@ -4631,6 +4648,43 @@ mod tests {
             sessions.iter().all(|s| s.starts_with("c:claude:")),
             "{sessions:?}"
         );
+    }
+
+    /// F2 (CodeRabbit on #746): a placement is about its request's anchor conversation as the stores
+    /// hold it, so it holds when the conversation joins a group, and when the home's key is new.
+    #[test]
+    fn a_placement_holds_when_its_conversation_joins_a_group() {
+        let mut h = Home::new();
+        let first = h.said("s1", 0, "Build the parser.");
+        let second = h.said("s2", 1_000, "Add tests for the parser.");
+        let home = h.s.home.path().to_owned();
+        let id = "fa_0123456789ab";
+        let area = json!({"kind": "area", "name": "Parser", "status": "kept", "source": "owner",
+            "decided_by": "owner"});
+        crate::my_work_ops::record(&home, "focus", vec![(id.into(), area)]).unwrap();
+        let focus = |h: &Home, prefix: &str| {
+            let v = h.read(Range::All, crate::db::now_ms());
+            (v["requests"].as_array().unwrap().iter())
+                .find(|r| r["id"].as_str().unwrap().starts_with(prefix))
+                .map(|r| r["focus"].clone())
+        };
+        assert_eq!(
+            focus(&h, "c:claude:s1"),
+            Some(Value::Null),
+            "not sorted yet"
+        );
+        let body = json!({"action": "move-request", "request": "c:claude:s1", "area": id});
+        crate::my_work_focus::act(
+            &home,
+            &std::sync::Mutex::new(()),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(focus(&h, "c:claude:s1"), Some(json!(id)));
+        grouped(&mut h, &[(&["s1", "s2"], "The parser")], &[first, second]);
+        assert_eq!(focus(&h, "g:"), Some(json!(id)));
+        std::fs::remove_file(home.join("state").join("my-work.key")).unwrap();
+        assert_eq!(focus(&h, "g:"), Some(json!(id)));
     }
 
     /// C7: a conversation joining a group is a new version of its request, as a new follow-up is;

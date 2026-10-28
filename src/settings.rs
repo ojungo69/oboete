@@ -32,7 +32,7 @@ pub struct Refusal {
     pub field: String,
 }
 
-fn refused(status: u16, code: &'static str, field: impl Into<String>) -> Refusal {
+pub(crate) fn refused(status: u16, code: &'static str, field: impl Into<String>) -> Refusal {
     Refusal {
         status,
         code,

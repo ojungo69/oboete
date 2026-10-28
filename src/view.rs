@@ -1211,6 +1211,7 @@ impl Viewer {
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
             ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
+            ("POST", "/api/my-focus") => (MAX_BODY, |v, b, _| v.my_focus(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
             ("POST", "/api/setup/preview") => (MAX_BODY, |v, b, _| v.agent_preview(b)),
             ("POST", "/api/setup/start") => (MAX_BODY, |v, b, _| v.agent_start(b)),
@@ -1678,6 +1679,11 @@ impl Viewer {
             &self.saving,
             body,
         ))
+    }
+
+    /// F6: the owner's action on My Focus.
+    fn my_focus(&self, body: &[u8]) -> Response {
+        saved(crate::my_work_focus::act(&self.home, &self.saving, body))
     }
 
     /// Parity row 3: what forgetting an item the page shows takes, and the key its start brings.
@@ -2190,7 +2196,7 @@ fn failed(e: &anyhow::Error) -> Response {
 /// `v` with every string through the outbound gate (spec 6.5), keys included.
 /// What leaves the API: every text gated (K6), except a page's cursor, the page's own state of
 /// ids and times, passed back as it came: a rule that matched it broke the paging (Codex on #373).
-fn answered(name: &str, mut answer: Value) -> Value {
+pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     // A list's position, its last item's time and ids, comes back as it went, as the feed's
     // cursor does: Settings' list of what is removed too (Codex on #672).
     let next = matches!(name, "feed" | "timeline" | "sessions" | "hidden")
@@ -2228,6 +2234,22 @@ fn answered(name: &str, mut answer: Value) -> Value {
             .collect(),
         _ => Vec::new(),
     };
+    // My Focus's ids (F1), random and code's own, are selectors as a request's id is: an area's,
+    // and the area each request sits in, leave the walk and come back (Codex on #746). A value no
+    // code made goes through it.
+    let take = |items: Option<&mut Value>, key: &str| -> Vec<Option<Value>> {
+        match items {
+            Some(Value::Array(items)) if name == "my-work" => (items.iter_mut())
+                .map(|i| {
+                    let i = i.as_object_mut()?;
+                    crate::my_work_focus::is_id(i.get(key)?).then(|| i.remove(key))?
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let area_ids = take(answer.get_mut("areas"), "id");
+    let placed = take(answer.get_mut("requests"), "focus");
     // A session's key, a hash that names it in the page's requests (docs/page.md S2), leaves the
     // gate's walk and comes back as a cursor does, so no rule of the user's masks a selector
     // (CodeRabbit on #635).
@@ -2252,6 +2274,15 @@ fn answered(name: &str, mut answer: Value) -> Value {
     }
     if let Some(next) = next {
         answer["next"] = next;
+    }
+    for (key, list, values) in [("id", "areas", area_ids), ("focus", "requests", placed)] {
+        if let Some(Value::Array(items)) = answer.get_mut(list) {
+            for (item, value) in items.iter_mut().zip(values) {
+                if let (Value::Object(item), Some(value)) = (item, value) {
+                    item.insert(key.to_owned(), value);
+                }
+            }
+        }
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
         for (request, (id, sessions, streams, version)) in requests.iter_mut().zip(ids) {
