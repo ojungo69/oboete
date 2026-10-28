@@ -218,6 +218,19 @@ impl Focus {
     }
 }
 
+/// Whether `v` is an id of My Focus as code makes one: `other`, or `fa_` and 12 hex digits.
+pub(crate) fn is_id(v: &Value) -> bool {
+    v.as_str().is_some_and(|id| {
+        id == OTHER
+            || id.strip_prefix("fa_").is_some_and(|hex| {
+                hex.len() == 12
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+    })
+}
+
 /// The subject of a request's placement (F2): its anchor conversation, by the request's held id;
 /// a group is known by its anchor, so a conversation keeps its placement when grouping moves it out.
 pub(crate) fn subject(held: &str) -> String {
@@ -301,12 +314,7 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
                 return Err(refused(400, "focus_order", "order"));
             }
             (order.iter().enumerate())
-                .map(|(i, id)| {
-                    (
-                        id.clone(),
-                        owned(&focus.areas[id.as_str()], json!({"owner_rank": i + 1})),
-                    )
-                })
+                .map(|(i, id)| (id.clone(), owned(json!({"owner_rank": i + 1}))))
                 .collect()
         }
         "move-request" => {
@@ -389,25 +397,23 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
                     if area.text("source") == Some("owner") {
                         return Err(refused(409, "focus_restore", "area"));
                     }
-                    let mut fields =
-                        owned(area, json!({"status": "suggested", "merged_into": null}));
+                    let mut fields = owned(json!({"status": "suggested", "merged_into": null}));
                     fields.insert("decided_by".into(), json!("owner-restore"));
                     return write(home, vec![(id, fields)]);
                 }
                 _ => return Err(refused(400, "bad_request", "action")),
             };
-            vec![(id, owned(area, change))]
+            vec![(id, owned(change))]
         }
     };
     write(home, ops)
 }
 
-/// The whole area with `change` on it, decided by the owner, as claude-mem's `ownRow` writes it.
-fn owned(area: &Area, change: Value) -> Map<String, Value> {
-    let mut fields = area.fields.clone();
-    for (key, value) in change.as_object().cloned().unwrap_or_default() {
-        fields.insert(key, value);
-    }
+/// `change` alone, decided by the owner: a patch on the area, where claude-mem's `ownRow` writes
+/// the whole area. A copy would keep the model's text of an area op a forget or an exclusion
+/// takes (S5, S6), in an op that read nothing (Codex on #746).
+fn owned(change: Value) -> Map<String, Value> {
+    let mut fields = change.as_object().cloned().unwrap_or_default();
     fields.insert("kind".into(), json!("area"));
     fields.insert("decided_by".into(), json!("owner"));
     fields
@@ -744,6 +750,90 @@ mod tests {
         let after = h.focus().areas;
         assert_eq!(after["fa_c"], before["fa_c"]);
         assert_eq!(after["fa_a"].merged_into(), Some("fa_b"));
+    }
+
+    /// #746: an owner's action writes its change alone: an area whose model text an exclusion
+    /// takes (S6) is gone with the owner's decision on it, and no owner op holds the text.
+    #[test]
+    fn an_owners_action_keeps_none_of_the_models_text() {
+        let mut h = Home::new();
+        let repo = "github.com/o/x";
+        let seq = h.s.said(
+            "s1",
+            repo,
+            crate::db::now_ms() - 60_000,
+            "Fix the save button.",
+        );
+        h.s.run();
+        let op = crate::my_work_ops::MyWorkOp {
+            job: NAME.into(),
+            about: "fa_a".into(),
+            entry: "fake".into(),
+            ts: crate::db::now_ms(),
+            read: crate::my_work_ops::Read {
+                spans: vec![(seq, seq)],
+                ops: Vec::new(),
+            },
+            removed: Vec::new(),
+            fields: area("Save button work", "suggested", "system")
+                .into_iter()
+                .collect(),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw
+            .append_ops(&[(crate::raw::OpKind::MyWork, op)])
+            .unwrap();
+        h.s.run();
+        h.act(json!({"action": "keep", "area": "fa_a"})).unwrap();
+        assert_eq!(h.focus().areas["fa_a"].status(), "kept");
+        let owner: i64 = rusqlite::Connection::open(h.s.home.path().join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ops WHERE type = 'my_work' AND instr(body, 'Save button') > 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, 1, "the system op alone holds the name");
+        (h.s.raw).exclude_capture(("repo", repo), false).unwrap();
+        h.s.run();
+        assert!(!h.focus().areas.contains_key("fa_a"));
+    }
+
+    /// #746: an area's id, and the area a request sits in, pass the answer's gate as selectors,
+    /// so a rule that would mask them leaves the actions working.
+    #[test]
+    fn focus_ids_pass_the_answer_gate() {
+        let mut h = Home::new();
+        h.s.said(
+            "s1",
+            "github.com/o/r",
+            crate::db::now_ms() - 60_000,
+            "Fix the save button.",
+        );
+        h.s.run();
+        let id = "fa_0123456789ab";
+        h.suggested(id, "Viewer");
+        h.act(json!({"action": "keep", "area": id})).unwrap();
+        std::fs::write(
+            h.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"hex\", regex = '[0-9a-f]{12}' }]\n",
+        )
+        .unwrap();
+        let request = h.page().0[0].0.clone();
+        h.act(json!({"action": "move-request", "request": request, "area": id}))
+            .unwrap();
+        let (answer, _) = crate::my_work::reviewing(h.s.home.path(), crate::db::now_ms()).unwrap();
+        let answer = crate::view::answered("my-work", answer);
+        assert_eq!(
+            (&answer["areas"][0]["id"], &answer["requests"][0]["focus"]),
+            (&json!(id), &json!(id))
+        );
+        assert!(
+            is_id(&json!(OTHER)) && !is_id(&json!("fa_0123456789AB")) && !is_id(&json!("fa_1"))
+        );
     }
 
     /// F8: the areas and placements are ops, so a rebuild keeps them.

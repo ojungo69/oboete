@@ -1688,9 +1688,11 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   reorder (exactly the kept areas, `focus_order`), move a request (by the id My Work shows) to a
   live area or Other (`focus_move_target`), and put back in Suggested (not an area the owner wrote,
   `focus_restore`); any action but that one on a merged area is `focus_merged` (409); an unknown
-  area or request `focus_not_found` (404). Each writes the whole area decided by the owner, as
-  claude-mem's `ownRow`, through `my_work_ops::record`, which the `rule` op shares. A name and a
-  goal go through the gate as they are written.
+  area or request `focus_not_found` (404). Each writes its change alone, decided by the owner, a
+  patch on the area, through `my_work_ops::record`, which the `rule` op shares: claude-mem's
+  `ownRow` writes the whole area, which would keep the model's text in an op a forget or an
+  exclusion cannot follow (Codex on #746). A name and a goal go through the gate as they are
+  written. An area's id and each request's `focus` pass the answer's gate as selectors.
 - **No call.** Areas come with slice 10b, the page with 10c.
 - **Then**: slice 10b, the goals job's areas, the placement job and the Other pass.
 

@@ -2234,6 +2234,22 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
             .collect(),
         _ => Vec::new(),
     };
+    // My Focus's ids (F1), random and code's own, are selectors as a request's id is: an area's,
+    // and the area each request sits in, leave the walk and come back (Codex on #746). A value no
+    // code made goes through it.
+    let take = |items: Option<&mut Value>, key: &str| -> Vec<Option<Value>> {
+        match items {
+            Some(Value::Array(items)) if name == "my-work" => (items.iter_mut())
+                .map(|i| {
+                    let i = i.as_object_mut()?;
+                    crate::my_work_focus::is_id(i.get(key)?).then(|| i.remove(key))?
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let area_ids = take(answer.get_mut("areas"), "id");
+    let placed = take(answer.get_mut("requests"), "focus");
     // A session's key, a hash that names it in the page's requests (docs/page.md S2), leaves the
     // gate's walk and comes back as a cursor does, so no rule of the user's masks a selector
     // (CodeRabbit on #635).
@@ -2258,6 +2274,15 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     }
     if let Some(next) = next {
         answer["next"] = next;
+    }
+    for (key, list, values) in [("id", "areas", area_ids), ("focus", "requests", placed)] {
+        if let Some(Value::Array(items)) = answer.get_mut(list) {
+            for (item, value) in items.iter_mut().zip(values) {
+                if let (Value::Object(item), Some(value)) = (item, value) {
+                    item.insert(key.to_owned(), value);
+                }
+            }
+        }
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
         for (request, (id, sessions, streams, version)) in requests.iter_mut().zip(ids) {
