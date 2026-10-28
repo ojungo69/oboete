@@ -70,6 +70,9 @@ fn answer(result: Result<OwnerReceipt, OwnerRefusal>) -> Result<Value, Refusal> 
             OwnerRefusalCode::PreferenceRepoExcluded => {
                 refused(422, "preference_repo_excluded", "repo")
             }
+            OwnerRefusalCode::PreferenceRepoMasked => {
+                refused(422, "preference_repo_masked", "repo")
+            }
         }),
     }
 }

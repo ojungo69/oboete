@@ -473,8 +473,12 @@ fn delivered(
             }
         }
         let words = terms(manifest);
-        let mut ranked = claims::decisions(k, repo, POOL)?;
-        ranked.retain(|c| !owned.iter().any(|o| o.uid == c.uid));
+        // #743: the pool counts no owner rule, which leaves it below.
+        let mut ranked = claims::decisions(k, repo, POOL + owned.len())?;
+        let owned_uids: std::collections::HashSet<&str> =
+            owned.iter().map(|o| o.uid.as_str()).collect();
+        ranked.retain(|c| !owned_uids.contains(c.uid.as_str()));
+        ranked.truncate(POOL);
         // Stable: among claims that share as many words, the newest first.
         ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
         let (mut units, rest) = claims::place(claims::units(k, &ranked, hidden)?, BODIES);
@@ -3663,6 +3667,58 @@ extra_rules = [
         let text = shown(home.path(), &store).unwrap();
         assert!(!text.contains("## Decisions and open items"), "{text}");
         assert!(!text.contains("## More from memory"), "{text}");
+    }
+
+    /// #743: the owner's rules of the repository leave the decisions their pool: with 200 of them,
+    /// a decision still has its body.
+    #[test]
+    fn the_owners_rules_leave_the_decisions_their_pool() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let mut ops = Vec::new();
+        for i in 0..POOL as i64 {
+            let c = crate::capture::directive(&format!("Rule {i}."), DAY + i, &settings, Some("r"));
+            let seq = store.append(&c.event).unwrap();
+            let quote = crate::curate::long_text(&c.event).unwrap();
+            let evidence = crate::claims::Evidence {
+                device: store.device().to_owned(),
+                seq,
+                offset: 0,
+                length: quote.len() as i64,
+                sentence: 0,
+                quote,
+                claim_at: None,
+            };
+            let op = crate::claims::preference_op(evidence, true);
+            ops.push((raw::OpKind::Claim, serde_json::to_value(op).unwrap()));
+        }
+        let decided = "Ship the beta on Friday.";
+        ops.push(
+            claimed(
+                &mut store,
+                // Older than every rule: the pool's 200 newest are the rules.
+                said(cwd.path(), DAY / 2, decided),
+                "decision",
+                "decided",
+                vec![],
+            )
+            .0,
+        );
+        store.append_ops(&ops).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert_eq!(
+            lines_of(&text, "Preferences of this repository").len(),
+            POOL
+        );
+        let decisions = lines_of(&text, "Decisions and open items");
+        assert!(
+            decisions.iter().any(|l| l.ends_with(decided)),
+            "{decisions:?}"
+        );
     }
 
     /// Spec 4.4: the owner's global preferences first, then about 10 claims with their bodies, and

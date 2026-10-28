@@ -78,7 +78,8 @@ fn started(k: &Connection, session: &str) -> Result<()> {
 /// 42). Its `raw_docs` row stays, for its labels and the counts. SQL that picks records says
 /// `kind <> 'tool'` for the same rule.
 pub(crate) fn indexed(kind: &str) -> bool {
-    kind != "tool"
+    // #745: nor the owner's directive, when a row of it from before #743 is indexed again.
+    kind != "tool" && kind != "directive"
 }
 
 /// The text a person would search for: every string in the event's JSON body (not its keys), or
@@ -334,6 +335,11 @@ impl Consumer for Fts {
                 }
                 Item::Removed => continue,
             };
+            // #743: the owner's directive (`pref add`) is its claim, searched and delivered as one:
+            // no raw search hit of its own, and no session that no agent ran.
+            if e.kind == "directive" {
+                continue;
+            }
             k.execute(
                 "INSERT INTO raw_docs(device, seq, kind, ts, repo, session) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![r.device, r.seq, e.kind, e.ts, e.repo, e.session],
