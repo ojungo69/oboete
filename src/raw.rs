@@ -8859,7 +8859,13 @@ pub(crate) fn masked_op_text(
     body: &str,
     rules: &crate::redact::Rules,
 ) -> Option<String> {
-    fn walk(v: &mut serde_json::Value, rules: &crate::redact::Rules, names: bool) -> bool {
+    // `ids`: the object is a My Focus op's own fields (#751).
+    fn walk(
+        v: &mut serde_json::Value,
+        rules: &crate::redact::Rules,
+        names: bool,
+        ids: bool,
+    ) -> bool {
         match v {
             serde_json::Value::String(text) => {
                 let found = crate::redact::ranges(text, rules);
@@ -8877,20 +8883,21 @@ pub(crate) fn masked_op_text(
                 *text = now;
                 changed
             }
-            serde_json::Value::Array(items) => items
-                .iter_mut()
-                .fold(false, |changed, item| walk(item, rules, names) | changed),
+            serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+                walk(item, rules, names, false) | changed
+            }),
             serde_json::Value::Object(map) => map.iter_mut().fold(false, |changed, (key, item)| {
                 // Any depth: see `OP_NAMES` before naming a new op field.
                 let name = OP_NAMES.contains(&key.as_str())
                     || key == "reason" && item.as_str().is_some_and(crate::curate::set_aside);
                 // #747: the area a placement or a merge names, masked, would name none.
-                let area = matches!(key.as_str(), "area" | "merged_into")
+                let area = ids
+                    && matches!(key.as_str(), "area" | "merged_into")
                     && crate::my_work_focus::is_id(item);
                 if names && name || area {
                     changed
                 } else {
-                    walk(item, rules, names && key != "fields") | changed
+                    walk(item, rules, names && key != "fields", false) | changed
                 }
             }),
             _ => false,
@@ -8900,7 +8907,21 @@ pub(crate) fn masked_op_text(
         return None;
     }
     let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
-    walk(&mut v, rules, true).then(|| v.to_string())
+    let job = v.get("job").and_then(serde_json::Value::as_str);
+    let focus = kind == OpKind::MyWork
+        && matches!(
+            job,
+            Some(crate::my_work_focus::NAME | crate::my_work_place::NAME)
+        );
+    let mut fields = (v.get_mut("fields").filter(|_| focus)).map(std::mem::take);
+    let mut changed = walk(&mut v, rules, true, false);
+    if let Some(fields) = fields.as_mut() {
+        changed |= walk(fields, rules, false, true);
+    }
+    if let Some(fields) = fields {
+        v["fields"] = fields;
+    }
+    changed.then(|| v.to_string())
 }
 
 /// `body` with the bytes from `offset` for `length` replaced by `*`, widened to whole characters
@@ -10358,6 +10379,44 @@ mod tests {
         );
         let other = serde_json::json!({"note": "/w/acme-482915"}).to_string();
         assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
+    }
+
+    /// #751: My Focus's ids are kept in a My Focus op's own fields only, of jobs `focus` and
+    /// `place`; the same keys of another op, or nested deeper, are text.
+    #[test]
+    fn my_focus_ids_are_kept_in_a_my_focus_ops_own_fields() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"hex\", regex = '[0-9a-f]{12}' }]\n",
+        )
+        .unwrap();
+        let rules = crate::redact::Rules::load(home.path()).unwrap();
+        let id = "fa_0123456789ab";
+        let op = |job: &str| {
+            serde_json::json!({"job": job, "about": "c:claude:s1", "fields": {"area": id,
+                "merged_into": id, "nested": {"area": id}}})
+        };
+        let masked = |kind, body: serde_json::Value| -> serde_json::Value {
+            let text = masked_op_text(kind, &body.to_string(), &rules).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        for job in [crate::my_work_focus::NAME, crate::my_work_place::NAME] {
+            let fields = &masked(OpKind::MyWork, op(job))["fields"];
+            assert_eq!(
+                (&fields["area"], &fields["merged_into"]),
+                (&serde_json::json!(id), &serde_json::json!(id))
+            );
+            assert_ne!(fields["nested"]["area"], serde_json::json!(id), "{job}");
+        }
+        assert_ne!(
+            masked(OpKind::MyWork, op("rules"))["fields"]["area"],
+            serde_json::json!(id)
+        );
+        assert_ne!(
+            masked(OpKind::WorkState, op("focus"))["fields"]["area"],
+            serde_json::json!(id)
+        );
     }
 
     /// docs/my-work-model.md S6: a My Work op's labels (its job, subject and entry) are names no

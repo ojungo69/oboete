@@ -1701,7 +1701,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   `ownRow` writes the whole area, which would keep the model's text in an op a forget or an
   exclusion cannot follow (Codex on #746). A name and a goal go through the gate as they are
   written. An area's id and each request's `focus` pass the answer's gate as selectors, and the
-  area a placement or a merge names passes the op text rescan (`raw::masked_op_text`, #747).
+  area a placement or a merge names passes the op text rescan (`raw::masked_op_text`, #747), in a
+  My Focus op's own fields only, of jobs `focus` and `place` (#751).
 - **No call.** Areas come with slice 10b, the page with 10c.
 - **Then**: slice 10b, the placement job and the Other pass (10b-1), the goals job's areas (10b-2).
 
