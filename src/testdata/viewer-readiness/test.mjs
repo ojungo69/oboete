@@ -2424,5 +2424,31 @@ run('ui.setView("my_work")');
 (await run('showMyWork()'))();
 await new Promise(resolve=>setTimeout(resolve,0));
 assert(text(panel).includes('Nothing written yet.'),'My Work shows its status line once it reads');
-console.log('PASS: My Goals: top 5 and the rest, quotes with their times, open asks, the months, the status line, JA/EN');
+// #722: My Goals reads again each minute though the version stays as it was, and not before.
+const urls=[];
+ctx.fetch=url=>{const u=String(url);urls.push(u);return Promise.resolve(response(u.startsWith('/api/version')?{v:'v1'}
+  :u.startsWith('/api/repos')?{current:'',repos:[]}:answer({state:'none'})));};
+run('ui.setView("my_goals");version="v1";reposLoaded=true;mg.fetched=0');
+document.visibilityState='visible';
+await run('poll()');
+assert(urls.some(u=>u.startsWith('/api/my-goals')),'a minute on, My Goals reads again');
+urls.length=0;
+await run('poll()');
+delete document.visibilityState;
+assert(!urls.some(u=>u.startsWith('/api/my-goals')),'within the minute, it does not');
+// #722: of two reads of My Work's status line in flight, the later one's answer stays.
+const pending=[];
+ctx.fetch=()=>new Promise(resolve=>pending.push(resolve));
+run('ui.setView("my_work");mw.status=null;myWorkLineSlot()');
+const older=run('myWorkLineRead()');const newer=run('myWorkLineRead()');
+pending[1](response({state:'written',at:day}));await newer;
+pending[0](response({state:'none'}));await older;
+assert(text(run('mw.line')).startsWith('Written'),'an older read landing later is dropped');
+// #722: choosing an inner tab keeps the keyboard's focus on it.
+draw(answer({state:'none'}));
+const monthsTab=panel.querySelectorAll('.tab').find(b=>text(b)==='Month by month');
+monthsTab.focus();monthsTab.click();
+assert.equal(text(document.activeElement),'Month by month','the focus is on the tab chosen');
+assert(document.activeElement.className.includes('my-goals-tab-on'),'in the new drawing');
+console.log('PASS: My Goals: top 5 and the rest, quotes with their times, open asks, the months, the status line, JA/EN, a reread each minute, the latest line, the focus kept');
 }

@@ -1234,9 +1234,13 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   is. Every text goes through the gate as it is read, so a rule added later masks it (S6).
 - **The status line** (V1, `my_work_run::status`), no call, from config.toml, providers.db and
   knowledge.db: `off`; `summaries_off` (on, `[summary] curate` off); `waiting` at the daily bound
-  (A7, with the bound and when the oldest call counted leaves the day) or for a held request of
-  the page's own jobs (A8), `budget`, `resting` or `owner` by its hold, until its next attempt;
-  else `written` at the newest answered op of those jobs this device wrote, or `none`. A ledger
+  (A7, with the bound and when the oldest call counted leaves the day) or on the hold the runner
+  last left one of the page's jobs in (A8), `budget`, `resting` or `owner`, until its next attempt;
+  else `written` at the newest answered op of those jobs this device wrote, or `none`. The runner
+  keeps that hold in providers.db's `my_work_round`, a row per job (#720): set when it finds the
+  job's request held or a call fails, removed when the round finds nothing due for the job, asks
+  it with success or gives it up. A held request whose subject has gone, as a goals request of an
+  earlier day, so no longer reads as waiting. A ledger
   older than My Work holds nothing it waits on (#680). `/api/my-goals` carries it for the goals
   job, and `/api/my-work/status` for My Work's other jobs, a route of its own so that the
   requests' answer stays as the page's held updates compare it. V1 was in slice 2's tests but not
@@ -1266,7 +1270,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   too. Every text is put in as text, never as markup.
 - **Checked** in a browser (2026-10-28, a debug build over a home of made-up goals, its providers
   empty): both inner tabs, the disclosures and the status line, in English and in Japanese.
-- **Then**: #720 (a held request that no longer applies still reads as waiting), and slice 6.
+- **Reads** (#722): the page reads again each minute, as My Work does, so that a wait that ended
+  and a quote that left the window go with no change of the version, and the inner tab's date
+  follows midnight. Of two reads of My Work's status line in flight, only the later one's answer
+  is drawn. Choosing an inner tab keeps the keyboard's focus on it.
+- **Then**: slice 6.
 
 ## Not built
 

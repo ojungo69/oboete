@@ -6562,8 +6562,8 @@ const mw = {
   agent: null, request: null, work: null, back: null,
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
-  // The status line's last answer and its place (V1).
-  status: null, line: null,
+  // The status line's last answer, its place, and how many reads of it began (V1).
+  status: null, line: null, lineReads: 0,
   // claude-mem's `changed` (a flash, once) and `unread` (the "New update" mark until opened).
   changed: new Set(), unread: new Set(),
   // A check or its Undo being saved (`saveReview`'s `busy`).
@@ -7403,13 +7403,15 @@ function myWorkLineSlot() {
 }
 
 async function myWorkLineRead() {
+  // Only the latest read draws: an older one that lands later is dropped (#722).
+  const read = ++mw.lineReads;
   let status = null;
   try {
     status = await api('my-work/status');
   } catch {
     return;
   }
-  if (view !== 'my_work' || JSON.stringify(status) === JSON.stringify(mw.status)) return;
+  if (read !== mw.lineReads || view !== 'my_work' || JSON.stringify(status) === JSON.stringify(mw.status)) return;
   mw.status = status;
   mw.line?.replaceChildren(...present([myWorkStatusLine(status)]));
 }
@@ -7447,12 +7449,14 @@ function myWorkStatusLine(status) {
 const MY_GOALS_TOP = 5;
 // What a redraw keeps: the inner tab, the goals and months opened, "more"; and the answer drawn,
 // so that a poll that brings the same one draws nothing.
-const mg = { tab: 'now', open: new Set(), months: new Set(), more: false, signature: null, answer: null };
+const mg = { tab: 'now', open: new Set(), months: new Set(), more: false, signature: null, answer: null, fetched: 0 };
 
 async function showMyGoals() {
   const answer = await api('my-goals');
   return () => {
-    const signature = JSON.stringify(answer);
+    mg.fetched = Date.now();
+    // Today's date with it: the inner tab names the window's end (#722).
+    const signature = JSON.stringify([answer, myGoalsDay(Date.now())]);
     if (signature === mg.signature && $('panel').querySelector('.my-goals')) return setStatus('');
     mg.signature = signature;
     mg.answer = answer;
@@ -7567,12 +7571,15 @@ function myGoalsDraw() {
   const a = mg.answer ?? {};
   const end = myGoalsDay(Date.now());
   const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
-    const button = el('button', 'tab', label);
+    const button = el('button', mg.tab === key ? 'tab my-goals-tab-on' : 'tab', label);
     button.type = 'button';
     button.setAttribute('aria-pressed', String(mg.tab === key));
     button.addEventListener('click', () => {
+      // The drawing replaces the tabs: the keyboard's focus goes to the one chosen (#722).
+      const focused = document.activeElement === button;
       mg.tab = key;
       myGoalsDraw();
+      if (focused) $('panel').querySelector('.my-goals-tab-on')?.focus({ preventScroll: true });
     });
     return button;
   }));
@@ -7694,7 +7701,10 @@ async function poll() {
     // reads again each minute: its statuses age, and a write's link to its session comes later
     // (claude-mem ages its requests each minute).
     const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())
-      || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
+      || (view === 'my_work' && Date.now() - mw.fetched >= 60000)
+      // My Goals reads again each minute too: a wait ends and a quote leaves the window with no
+      // change of the version (#722).
+      || (view === 'my_goals' && Date.now() - mg.fetched >= 60000)));
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;
