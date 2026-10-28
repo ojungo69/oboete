@@ -879,8 +879,8 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let reviews = reviews(home);
     let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
     // V4: the current goals once, for each card's goal (L3).
-    let goals = (crate::my_work_links::current(&k, raw.device(), &hidden)?)
-        .map(|op| crate::my_work_goals::items(&op))
+    let goals = (crate::my_work_links::current(&k, raw.device(), &hidden, now)?)
+        .map(|(_, items)| items)
         .unwrap_or_default();
     for r in &requests {
         let stores = (&raw, &k, &rules, &hidden);

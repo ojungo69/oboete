@@ -1335,6 +1335,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   on", a part with none left out; "No goal" lists the requests linked to none. A goal on a card
   opens My Goals on it, in view, with the focus on it. Until the links job has decided any request,
   the tab is as slice 5b drew it: no word can say what serves a goal.
+- **#728** (Codex on #727): the due requests go in batches of five, the oldest first, each asked by
+  its first, so a batch held after a failure keeps its requests out of the others while it waits.
+  The current goals, for the job, its due check and the cards, are those My Goals shows: each
+  goal with a quote in the 31 days, ranked again within each kind; a goal whose quotes all left is
+  gone, so a request linked to it is due again and no card names it.
 - **Checked** in a browser (2026-10-28, a debug build over a home of made-up requests, reviews,
   goals and links, its providers empty): the lead, the words, the rollups, a request opening on
   My Work with its goal, the cards' goals and a card's goal opening My Goals.
