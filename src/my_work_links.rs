@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::my_work::{AskFrom, ReviewInput};
 use crate::my_work_goals::Item;
 use crate::my_work_ops::{Kept, Read};
-use crate::my_work_run::{Ask, Due, Job, Stores};
+use crate::my_work_run::{Ask, Due, Job, Stores, strict};
 use crate::redact::Rules;
 
 pub(crate) const NAME: &str = "links";
@@ -345,8 +345,7 @@ impl Shown {
 }
 
 fn prompt(language: &str, data: &str) -> String {
-    let fence = format!("=== LINKS {} ===", &crate::curate::sha256_hex(data)[..16]);
-    format!(
+    let instructions = format!(
         "You link pieces of work a developer asked coding agents for to the developer's goals \
          they serve. At the end of this prompt, between two fence lines, are the developer's \
          current goals, each with its id, kind (a priority or an open ask), rank, title and \
@@ -358,35 +357,17 @@ fn prompt(language: &str, data: &str) -> String {
          alone is not enough. A request that serves no goal gets none.\n\
          Answer with requests: one entry for each request shown, with its label and its goals, \
          each goal by its id with evidence: what in the request advances the goal, at most \
-         {EVIDENCE} characters, in {language}.\n\
-         {FENCE}{fence}`.\n\n\
-         {fence}\n{data}{fence}",
-        FENCE = crate::curate::FENCE_SENTENCE,
-    )
+         {EVIDENCE} characters, in {language}.",
+    );
+    crate::my_work_run::fenced("LINKS", &instructions, data)
 }
 
 /// The answer the links job asks for (A10): every key required, nothing more, no length keywords.
 fn schema() -> Value {
     let text = json!({"type": "string"});
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["requests"],
-        "properties": {"requests": {"type": "array", "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["request", "goals"],
-            "properties": {
-                "request": text,
-                "goals": {"type": "array", "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["goal", "evidence"],
-                    "properties": {"goal": text, "evidence": text}
-                }}
-            }
-        }}}
-    })
+    let goal = strict(json!({"goal": text, "evidence": text}));
+    let request = strict(json!({"request": text, "goals": {"type": "array", "items": goal}}));
+    strict(json!({"requests": {"type": "array", "items": request}}))
 }
 
 /// L2, checked by code (A10): each request shown answered once and no other, at most three goals

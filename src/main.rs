@@ -43,6 +43,7 @@ mod my_work_group;
 mod my_work_links;
 mod my_work_ops;
 mod my_work_progress;
+mod my_work_rules;
 mod my_work_run;
 mod my_work_story;
 mod provenance;
