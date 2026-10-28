@@ -3,7 +3,7 @@
 //! the daily bound (A7), and the waits and the give-up of a job every entry fails (A8). The jobs
 //! say when they are due, what they send and what they keep (`Job`); the runner sends and writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -36,7 +36,13 @@ pub(crate) struct Stores<'a> {
     pub summary: &'a Summary,
     /// The exclusion list as the pass read it, which the gate holds every send to (A5, S6).
     pub reading: &'a crate::curate::Reading,
+    /// #730: each job and subject a failed batch holds, which the job leaves out of its batches.
+    pub held: &'a BTreeSet<(String, String)>,
 }
+
+/// No subject held (#730), as a `Stores` built outside a round has it.
+#[cfg(test)]
+pub(crate) static NOT_HELD: BTreeSet<(String, String)> = BTreeSet::new();
 
 /// A job's subject that is due, and since when, unix ms (A3): a time to come is when it will be.
 pub(crate) struct Due {
@@ -159,12 +165,18 @@ impl<'a> Runner<'a> {
             });
         }
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+        // #730: the subjects a failed batch holds, each by its own wait.
+        let holds = crate::providers_db::my_work_held(db, now)?;
+        let held_by: BTreeSet<(String, String)> = (holds.iter())
+            .map(|(job, about, ..)| (job.clone(), about.clone()))
+            .collect();
         let stores = Stores {
             raw,
             k,
             rules: self.rules,
             summary: self.summary,
             reading: &reading,
+            held: &held_by,
         };
         let mut due = Vec::new();
         for (i, job) in self.jobs.iter().enumerate() {
@@ -190,6 +202,17 @@ impl<'a> Runner<'a> {
         // A subject due later (a repository asked about minutes ago) is waited for, the worker
         // staying up for it as for a window (D10).
         let mut wait = Phase::Idle;
+        // #730: a job whose batch is held waits on its earliest subject, though none is due.
+        for (job, _, hold, until) in &holds {
+            let Some(i) = self.jobs.iter().position(|j| j.name() == job) else {
+                continue;
+            };
+            if held[i].is_none_or(|u| *until < u) {
+                crate::providers_db::set_my_work_round(db, job, hold, *until)?;
+                held[i] = Some(*until);
+            }
+            wait = crate::turns::sooner(wait, crate::turns::held(hold, *until, now));
+        }
         due.retain(|&(since, ..)| {
             let later = since > now;
             if later {
@@ -230,6 +253,7 @@ impl<'a> Runner<'a> {
                 rules: self.rules,
                 summary: self.summary,
                 reading: &reading,
+                held: &held_by,
             };
             let Some(ask) = self.jobs[i].ask(&stores, &about, now)? else {
                 passed_over()?;
@@ -240,6 +264,12 @@ impl<'a> Runner<'a> {
                 vec![about.clone()]
             } else {
                 ask.subjects.clone()
+            };
+            // #730: a batch's subjects each wait as their batch does, whatever batch comes next.
+            let batch = if ask.subjects.is_empty() {
+                &[][..]
+            } else {
+                &subjects[..]
             };
             let op = |about: &str, fields, entry, ts, skipped| MyWorkOp {
                 job: name.into(),
@@ -276,6 +306,9 @@ impl<'a> Runner<'a> {
                 crate::providers_db::my_work_pending_of(db, &span)?.filter(|p| p.prompt == sent);
             if let Some(p) = &pending {
                 if p.attempts >= crate::curate::ATTEMPTS {
+                    for s in batch {
+                        crate::providers_db::clear_my_work_held(db, (name, s))?;
+                    }
                     return given_up(raw, db, (name, &span), &skips);
                 }
                 if p.next_attempt_at > now {
@@ -332,8 +365,14 @@ impl<'a> Runner<'a> {
             });
             let failed = match answer {
                 Ok(()) => {
+                    for s in batch {
+                        crate::providers_db::clear_my_work_held(db, (name, s))?;
+                    }
                     crate::providers_db::clear_my_work_pending(db, &span)?;
-                    crate::providers_db::clear_my_work_round(db, name)?;
+                    // #730: a job with a subject still held keeps saying it waits.
+                    if held[i].is_none() {
+                        crate::providers_db::clear_my_work_round(db, name)?;
+                    }
                     return Ok(self.called(Phase::Covered));
                 }
                 // At the bound, nothing more went out: the job waits, its attempts as they were.
@@ -362,7 +401,13 @@ impl<'a> Runner<'a> {
                 next_attempt_at: next,
             };
             if p.attempts >= crate::curate::ATTEMPTS {
+                for s in batch {
+                    crate::providers_db::clear_my_work_held(db, (name, s))?;
+                }
                 return given_up(raw, db, (name, &span), &skips).map(|phase| self.called(phase));
+            }
+            for s in batch {
+                crate::providers_db::set_my_work_held(db, (name, s), hold, next)?;
             }
             crate::providers_db::set_my_work_pending(db, &p)?;
             if held[i].is_none_or(|until| next < until) {

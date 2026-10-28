@@ -1369,6 +1369,14 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **The page** (V4): My Work's answer carries `story`, the recap and the chapters, the newest week
   first, as far as 12,000 characters go, each gated as it is read; none before one is written.
   My Work's top shows it: the recap, then the chapters behind one disclosure.
+- **#730** (CodeRabbit on #729): a batch's subjects each wait as their batch does. When every
+  entry fails a call of a batch (`Ask::subjects`), providers.db's `my_work_held` keeps each subject
+  with the batch's hold and next attempt; the links job leaves a held request out of every batch,
+  as a lead or a member, until its wait ends, so batches cut again cannot ask it early. The runner
+  reads the holds at each pass: a job with a subject held keeps its status line's row on the
+  earliest, a success of another batch included, and waits for it. A success or a give-up of the
+  batch clears its subjects; `oboete resume` and a saved key wake them as they wake
+  `my_work_pending`.
 - **Then**: slice 7b, the rule suggestions.
 
 ## Not built

@@ -106,7 +106,9 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
             };
             let about = (NAME, input.id.as_str());
             let last = crate::my_work_ops::newest_shown(s.k, about, Some(&device), &hidden, false)?;
-            if let Some(since) = due_since(&review, last.as_ref(), goals) {
+            // #730: a request a failed batch holds waits, in no batch, until its wait ends.
+            let held = s.held.contains(&(NAME.to_owned(), input.id.clone()));
+            if let Some(since) = due_since(&review, last.as_ref(), goals).filter(|_| !held) {
                 due.push((since, input.id.clone()));
             }
             units.push(Unit { input, review });
@@ -564,6 +566,7 @@ mod tests {
                 rules: &rules,
                 summary: &self.summary,
                 reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
             })
         }
 
@@ -1051,6 +1054,65 @@ mod tests {
         let fields = json!({"items": items, "next_id": 10, "summary": ""});
         h.op(crate::my_work_goals::NAME, "day", fields, &[]);
         assert!(h.due().is_empty(), "no goal left");
+    }
+
+    /// #730: a failed batch's requests each wait, in no batch, until their wait ends, the line
+    /// saying so; a key saved wakes them.
+    #[test]
+    fn a_held_request_is_in_no_batch_until_its_wait_ends() {
+        let mut h = Home::new();
+        let (ids, _) = h.requests(6);
+        h.goals(&[("g1", "priority", 1, "Fail fast")]);
+        let (_, sent) = h.pass(&|_| json!({}));
+        assert_eq!(sent.len(), 1);
+        let db = crate::providers_db::open(h.s.home.path()).unwrap();
+        let until = crate::db::now_ms() + 10 * MINUTE;
+        let held = crate::providers_db::my_work_held(&db, 0).unwrap();
+        assert_eq!(held.len(), 5, "each request of the batch: {held:?}");
+        for (job, about, hold, _) in &held {
+            crate::providers_db::set_my_work_held(&db, (job, about), hold, until).unwrap();
+        }
+        let first: Vec<String> = held.iter().map(|(_, about, ..)| about.clone()).collect();
+        // Waiting, they go in no batch: the sixth is asked alone, however the batches are cut.
+        let rest: Vec<String> = ids
+            .iter()
+            .filter(|id| !first.contains(id))
+            .cloned()
+            .collect();
+        let due = h.with(|s| {
+            let set: BTreeSet<(String, String)> = first
+                .iter()
+                .map(|id| (NAME.to_owned(), id.clone()))
+                .collect();
+            let stores = Stores { held: &set, ..*s };
+            let round = round(&stores, crate::db::now_ms()).unwrap();
+            round
+                .batches
+                .into_iter()
+                .flat_map(|(_, b)| b)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(due, rest);
+        let (_, sent) = h.pass(&|p| by_title(p, &[&["g1"][..]; 6]));
+        assert!(
+            sent[0].contains("### R1") && !sent[0].contains("### R2"),
+            "{}",
+            sent[0]
+        );
+        let config = "[summary]\ncurate = true\n[my_work]\ncurate = true\n";
+        std::fs::write(h.s.home.path().join("config.toml"), config).unwrap();
+        let line = crate::my_work_run::status(h.s.home.path(), &[NAME], crate::db::now_ms());
+        assert_eq!(
+            line.unwrap()["state"],
+            "waiting",
+            "the line says the job waits"
+        );
+        crate::providers_db::key_saved(&db, &[]).unwrap();
+        assert!(
+            crate::providers_db::my_work_held(&db, crate::db::now_ms())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A5: a link's evidence over its cap is dropped and the link kept; a request answered with no

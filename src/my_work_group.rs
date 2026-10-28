@@ -1019,6 +1019,7 @@ mod tests {
                 rules: &rules,
                 summary,
                 reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
             };
             let due = Grouping::default()
                 .due(&stores, crate::db::now_ms())
@@ -1037,6 +1038,7 @@ mod tests {
                 rules: &rules,
                 summary,
                 reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
             };
             Grouping::default()
                 .ask(&stores, about, crate::db::now_ms())
@@ -1768,6 +1770,7 @@ mod tests {
             rules: &rules,
             summary: &summary,
             reading: &reading,
+            held: &crate::my_work_run::NOT_HELD,
         };
         let now = crate::db::now_ms();
         let started = std::time::Instant::now();

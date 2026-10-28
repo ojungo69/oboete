@@ -120,6 +120,15 @@ CREATE TABLE IF NOT EXISTS my_work_pending(
   attempts INTEGER NOT NULL,
   next_attempt_at INTEGER NOT NULL
 );
+-- #730: each subject of a My Work batch (docs/my-work-model.md L1) every provider failed, held
+-- until its next attempt whatever batch it would be in next; woken as `my_work_pending` is.
+CREATE TABLE IF NOT EXISTS my_work_held(
+  job TEXT NOT NULL,
+  about TEXT NOT NULL,
+  hold TEXT NOT NULL,                     -- time, budget or owner
+  until INTEGER NOT NULL,
+  PRIMARY KEY(job, about)
+);
 -- docs/my-work-model.md V1 (#720): what the runner last decided for a My Work job it asked about,
 -- held by `hold` until `until`. A job it found nothing due for, or asked with success, has none.
 CREATE TABLE IF NOT EXISTS my_work_round(
@@ -286,6 +295,7 @@ pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
         "UPDATE my_work_pending SET next_attempt_at = 0 WHERE hold = 'owner'",
         [],
     )?;
+    conn.execute("UPDATE my_work_held SET until = 0 WHERE hold = 'owner'", [])?;
     Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
 }
 
@@ -316,6 +326,10 @@ pub fn key_saved(conn: &Connection, providers: &[&str]) -> Result<()> {
             [],
         )?;
     }
+    conn.execute(
+        "UPDATE my_work_held SET until = 0 WHERE hold IN ('time', 'owner')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1032,6 +1046,38 @@ pub fn clear_my_work_round(conn: &Connection, job: &str) -> Result<()> {
     Ok(())
 }
 
+/// #730: `about` of `job` held by `hold` until `until`, whatever batch it would be in next.
+pub fn set_my_work_held(
+    conn: &Connection,
+    (job, about): (&str, &str),
+    hold: &str,
+    until: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO my_work_held(job, about, hold, until) VALUES(?1, ?2, ?3, ?4)",
+        params![job, about, hold, until],
+    )?;
+    Ok(())
+}
+
+/// #730: `about` of `job` asked with success, or given up, is held by nothing.
+pub fn clear_my_work_held(conn: &Connection, (job, about): (&str, &str)) -> Result<()> {
+    conn.execute(
+        "DELETE FROM my_work_held WHERE job = ?1 AND about = ?2",
+        params![job, about],
+    )?;
+    Ok(())
+}
+
+/// #730: each subject held after `now`: its job, subject, hold and until when.
+pub fn my_work_held(conn: &Connection, now: i64) -> Result<Vec<(String, String, String, i64)>> {
+    let mut st = conn.prepare(
+        "SELECT job, about, hold, until FROM my_work_held WHERE until > ?1 ORDER BY job, about",
+    )?;
+    let rows = st.query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// V1: each job the runner last left held, with its hold and until when, for the pages' status
 /// line.
 pub fn my_work_rounds(conn: &Connection) -> Result<Vec<(String, String, i64)>> {
@@ -1140,6 +1186,29 @@ mod tests {
         assert!(next("goals c") > 0, "a key lifts no cap");
         clear_my_work_pending(&conn, "group a").unwrap();
         assert_eq!(my_work_pending_of(&conn, "group a").unwrap(), None);
+    }
+
+    /// #730: a batch's held subjects wake as `my_work_pending` does: resume ends a wait for the
+    /// owner, a saved key one for time or the owner; a budget's wait stays; a clear ends one.
+    #[test]
+    fn held_subjects_wake_on_resume_and_a_saved_key() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        let later = now_ms() + 3_600_000;
+        for (about, hold) in [("a", "owner"), ("b", "time"), ("c", "budget")] {
+            set_my_work_held(&conn, ("links", about), hold, later).unwrap();
+        }
+        let held = |conn: &Connection| -> Vec<String> {
+            let rows = my_work_held(conn, now_ms()).unwrap();
+            rows.into_iter().map(|(_, about, ..)| about).collect()
+        };
+        assert_eq!(held(&conn), ["a", "b", "c"]);
+        resume(&conn, "p").unwrap();
+        assert_eq!(held(&conn), ["b", "c"]);
+        key_saved(&conn, &["p"]).unwrap();
+        assert_eq!(held(&conn), ["c"], "a key lifts no cap");
+        clear_my_work_held(&conn, ("links", "c")).unwrap();
+        assert!(held(&conn).is_empty());
     }
 
     #[test]
