@@ -886,7 +886,8 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         let stores = (&raw, &k, &rules, &hidden);
         answers.extend(answer(
             r,
-            (&convs, &work, &reviews, &goals),
+            (&convs, &work, &reviews),
+            &goals,
             stores,
             (home, &mut key),
             (since, now),
@@ -1788,12 +1789,12 @@ fn sources(r: &Request, items: &[&Work], cards: &[&Shown]) -> Sources {
 
 fn answer(
     r: &Request,
-    (convs, work, reviews, goals): (
+    (convs, work, reviews): (
         &BTreeMap<Key, Conversation>,
         &[Work],
         &BTreeMap<String, Review>,
-        &[crate::my_work_goals::Item],
     ),
+    goals: &[crate::my_work_goals::Item],
     (raw, k, rules, hidden): (&Raw, &Connection, &Rules, &HashSet<(String, i64)>),
     (home, key): (&Path, &mut Option<Vec<u8>>),
     (since, now): (i64, i64),
