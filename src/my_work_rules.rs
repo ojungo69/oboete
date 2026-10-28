@@ -255,6 +255,29 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
     }))
 }
 
+/// #739: whether a `rule` op of suggestion `id` is recorded but not applied yet, so the decision it
+/// makes is not read: another action on it now would act on what it was before.
+pub(crate) fn unapplied(raw: &crate::raw::Raw, k: &rusqlite::Connection, id: &str) -> Result<bool> {
+    let device = raw.device();
+    let checkpoint = crate::knowledge::checkpoint::OPS;
+    let mut after = crate::knowledge::checkpoint::get_in(k, checkpoint, "my_work", device)?;
+    loop {
+        let ops = raw.ops_after(device, after, 500)?;
+        let Some(last) = ops.last() else {
+            return Ok(false);
+        };
+        after = last.op_seq;
+        let rule = |op: &crate::raw::Op| {
+            op.kind == crate::raw::OpKind::MyWork
+                && op.body["job"] == RULE
+                && op.body["about"] == id
+        };
+        if ops.iter().any(rule) {
+            return Ok(true);
+        }
+    }
+}
+
 /// R3: the owner's action on suggestion `id`, a `rule` op holding `fields` (no text: the action and
 /// an approve's preference uid). Whether the my_work consumer applied it within 10 seconds; an
 /// error when nothing was recorded.
@@ -1522,5 +1545,41 @@ mod tests {
         });
         assert!(ask.prompt.contains("P1: Tabs."), "{}", ask.prompt);
         assert!(!ask.prompt.contains("- s1 "), "{}", ask.prompt);
+    }
+
+    /// #739: while a decision is recorded but not applied, the suggestion takes no other action,
+    /// so an approve is not sent twice.
+    #[test]
+    fn a_decision_not_applied_yet_is_not_made_again() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let op = MyWorkOp {
+            job: RULE.into(),
+            about: "s1".into(),
+            entry: String::new(),
+            ts: crate::db::now_ms(),
+            read: Read::default(),
+            removed: vec![],
+            fields: BTreeMap::from([("action".to_owned(), json!("reject"))]),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let refused = h.act(approve.clone()).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+        assert_eq!(
+            h.yours(),
+            Vec::<(String, bool)>::new(),
+            "no preference made"
+        );
+        h.s.run();
+        let refused = h.act(approve).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (409, "rule_decided"),
+            "applied, it holds"
+        );
     }
 }

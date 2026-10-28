@@ -1461,6 +1461,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   strongest first, then the approved. A join is of an id shown; a new statement matching one left
   out still joins it by its wording. The runner writes an op for each subject a keep gives beyond
   the ones it waits on; links and the story give exactly theirs.
+- **#739** (the reviews of #738): an action on a suggestion whose last decision is recorded but not
+  applied yet is refused (`rule_pending`, 409), so an approve is not sent twice; only an applied
+  answer closes a form or offers Undo, and a partial one says what it kept; a write that ends
+  after the owner opened another tab draws nothing over it; and `/api/my-rules` keeps its uids
+  through the answer gate, as the routes that hand claim uids to the page do.
 - **Then**: slice 8b, a rule for one repository.
 
 ## Not built
