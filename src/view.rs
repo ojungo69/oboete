@@ -1211,6 +1211,7 @@ impl Viewer {
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
             ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
+            ("POST", "/api/my-focus") => (MAX_BODY, |v, b, _| v.my_focus(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
             ("POST", "/api/setup/preview") => (MAX_BODY, |v, b, _| v.agent_preview(b)),
             ("POST", "/api/setup/start") => (MAX_BODY, |v, b, _| v.agent_start(b)),
@@ -1678,6 +1679,11 @@ impl Viewer {
             &self.saving,
             body,
         ))
+    }
+
+    /// F6: the owner's action on My Focus.
+    fn my_focus(&self, body: &[u8]) -> Response {
+        saved(crate::my_work_focus::act(&self.home, &self.saving, body))
     }
 
     /// Parity row 3: what forgetting an item the page shows takes, and the key its start brings.
@@ -2190,7 +2196,7 @@ fn failed(e: &anyhow::Error) -> Response {
 /// `v` with every string through the outbound gate (spec 6.5), keys included.
 /// What leaves the API: every text gated (K6), except a page's cursor, the page's own state of
 /// ids and times, passed back as it came: a rule that matched it broke the paging (Codex on #373).
-fn answered(name: &str, mut answer: Value) -> Value {
+pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     // A list's position, its last item's time and ids, comes back as it went, as the feed's
     // cursor does: Settings' list of what is removed too (Codex on #672).
     let next = matches!(name, "feed" | "timeline" | "sessions" | "hidden")

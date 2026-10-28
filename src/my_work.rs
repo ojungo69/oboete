@@ -894,11 +894,18 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         )?);
     }
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
-    let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    let (mut answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    // F2, F7: where each request sits, and the areas.
+    let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
+    for (a, h) in answers.iter_mut().zip(&held) {
+        a["focus"] = json!(focus.of(&crate::my_work_focus::subject(&h.key)));
+    }
+    let areas = crate::my_work_focus::areas(&focus, &rules);
     let goals = goals.len();
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
-    let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story});
+    let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story,
+        "areas": areas});
     Ok((answer, held))
 }
 
@@ -1306,6 +1313,13 @@ pub(crate) struct Held {
     key: String,
     sessions: Vec<String>,
     sources: Sources,
+}
+
+impl Held {
+    /// The request's id as the stores hold it (`Id::held`).
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
 }
 
 /// A request's conversations, each with the prompt spans it owns (none: all of it), its work

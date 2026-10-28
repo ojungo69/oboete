@@ -348,31 +348,7 @@ pub(crate) fn unapplied(raw: &crate::raw::Raw, k: &rusqlite::Connection, id: &st
 /// an approve's preference uid). Whether the my_work consumer applied it within 10 seconds; an
 /// error when nothing was recorded.
 pub(crate) fn record(home: &std::path::Path, id: &str, fields: Value) -> Result<bool> {
-    let rules = crate::capture::Settings::load(home)?.rules;
-    let mut raw = crate::raw::open(home)?;
-    let k = crate::knowledge::open(home)?;
-    let op = crate::my_work_ops::MyWorkOp {
-        job: RULE.to_owned(),
-        about: id.to_owned(),
-        entry: String::new(),
-        ts: crate::db::now_ms(),
-        read: Read::default(),
-        removed: Vec::new(),
-        fields: fields
-            .as_object()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect(),
-        skipped: false,
-        forgotten: None,
-    };
-    raw.gates_with(&rules);
-    let op = (crate::raw::OpKind::MyWork, serde_json::to_value(op)?);
-    let seqs = raw.append_ops(&[op])?;
-    let device = raw.device().to_owned();
-    drop(raw);
-    Ok(crate::claims::applied(home, &k, &device, &seqs, ("rule", "my_work")).is_ok())
+    crate::my_work_ops::record(home, RULE, vec![(id.to_owned(), fields)])
 }
 
 /// R1, S6: the rules ops and the owner's decisions this device shows, and the preferences of each

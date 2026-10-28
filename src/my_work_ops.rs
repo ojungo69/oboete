@@ -12,10 +12,10 @@ use serde_json::Value;
 
 use crate::raw::Removal;
 
-/// The jobs (S1): the curators' six, and `rule`, the owner's action on a suggested rule, which holds
-/// no model text.
+/// The jobs (S1): the curators' six, `rule`, the owner's action on a suggested rule, which holds
+/// no model text, and `focus`, My Focus's areas and placements (F8).
 pub(crate) const JOBS: &[&str] = &[
-    "group", "review", "links", "story", "rules", "goals", "rule",
+    "group", "review", "links", "story", "rules", "goals", "rule", "focus",
 ];
 
 /// What a job was shown (S2): the spans of this device's records, and the op seqs of the turn,
@@ -244,6 +244,40 @@ pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Ke
         &std::collections::HashSet::new(),
         false,
     )
+}
+
+/// The owner's ops of `job` (R3, F6), each `(about, fields)`, holding no record it read: whether the
+/// my_work consumer applied them within 10 seconds; an error when nothing was recorded.
+pub(crate) fn record(home: &std::path::Path, job: &str, ops: Vec<(String, Value)>) -> Result<bool> {
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let mut raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    let ts = crate::db::now_ms();
+    let mut bodies = Vec::new();
+    for (about, fields) in ops {
+        let op = MyWorkOp {
+            job: job.to_owned(),
+            about,
+            entry: String::new(),
+            ts,
+            read: Read::default(),
+            removed: Vec::new(),
+            fields: fields
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            skipped: false,
+            forgotten: None,
+        };
+        bodies.push((crate::raw::OpKind::MyWork, serde_json::to_value(op)?));
+    }
+    raw.gates_with(&rules);
+    let seqs = raw.append_ops(&bodies)?;
+    let device = raw.device().to_owned();
+    drop(raw);
+    Ok(crate::claims::applied(home, &k, &device, &seqs, (job, "my_work")).is_ok())
 }
 
 /// `newest` of `device`'s ops when one is named (a job shows only its own device's, S2), passing
