@@ -88,15 +88,11 @@ fn linked(fields: &BTreeMap<String, Value>) -> Vec<String> {
 fn round(s: &Stores, now: i64) -> Result<Round> {
     let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
     let device = s.raw.device().to_owned();
-    let goals_job = (crate::my_work_goals::NAME, None);
-    let goals = (crate::my_work_ops::shown(s.k, goals_job, Some(&device), &hidden, true, 1)?)
-        .pop()
-        .map(|op| {
-            let items = crate::my_work_goals::items(&op);
-            let top = items.iter().map(|i| number(&i.id)).max().unwrap_or(0);
-            Goals { op, items, top }
-        })
-        .filter(|g| !g.items.is_empty());
+    let goals = current(s.k, &device, &hidden)?.map(|op| {
+        let items = crate::my_work_goals::items(&op);
+        let top = items.iter().map(|i| number(&i.id)).max().unwrap_or(0);
+        Goals { op, items, top }
+    });
     let (mut units, mut due) = (Vec::new(), Vec::new());
     // With no goals there is nothing to link to, as in claude-mem.
     if let Some(goals) = &goals {
@@ -118,6 +114,50 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
     }
     due.sort();
     Ok(Round { units, goals, due })
+}
+
+/// The current goals' op: the newest goals op with items `device` shows, `hidden` passed over (S6);
+/// none while there is none.
+pub(crate) fn current(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &HashSet<(String, i64)>,
+) -> Result<Option<Kept>> {
+    let goals = (crate::my_work_goals::NAME, None);
+    Ok(
+        (crate::my_work_ops::shown(k, goals, Some(device), hidden, true, 1)?.pop())
+            .filter(|op| !crate::my_work_goals::items(op).is_empty()),
+    )
+}
+
+/// L3, V4: the current goals `request`'s newest links op names, each its id, kind, rank and
+/// title as the gate shows it, the priorities first by rank, then the open asks: none ("Goal not
+/// linked yet") when no answered links op is shown or each goal it names is gone; empty ("No
+/// goal") when it named none.
+pub(crate) fn of_request(
+    k: &rusqlite::Connection,
+    (request, device): (&str, &str),
+    hidden: &HashSet<(String, i64)>,
+    goals: &[Item],
+    rules: &Rules,
+) -> Result<Value> {
+    let Some(last) =
+        crate::my_work_ops::newest_shown(k, (NAME, request), Some(device), hidden, true)?
+    else {
+        return Ok(Value::Null);
+    };
+    let ids = linked(&last.op.fields);
+    let mut named: Vec<&Item> = goals.iter().filter(|g| ids.contains(&g.id)).collect();
+    if named.is_empty() && !ids.is_empty() {
+        return Ok(Value::Null);
+    }
+    named.sort_by_key(|g| (g.kind != "priority", g.rank));
+    let gate = |text: &str| crate::redact::outbound_with(text, rules);
+    Ok(Value::Array(
+        (named.into_iter())
+            .map(|g| json!({"id": g.id, "kind": g.kind, "rank": g.rank, "title": gate(&g.title)}))
+            .collect(),
+    ))
 }
 
 /// L1: since when a request is due, given its newest review and the newest links op of it this
@@ -884,6 +924,38 @@ mod tests {
         assert!(h.due().is_empty());
         h.reviewed(&ids[1], "The parser fails fast now.");
         assert_eq!(h.due(), [ids[1].clone()]);
+    }
+
+    /// L3, V4: My Work's card names the current goals its request links, the priorities first;
+    /// one not linked yet has none (null), one linked to none an empty list, and one whose goals
+    /// are all gone is not linked yet.
+    #[test]
+    fn a_card_names_its_goals_priorities_first() {
+        let mut h = Home::new();
+        h.requests(2);
+        h.goals(&[("g2", "ask", 1, "Logs"), ("g1", "priority", 1, "Fail fast")]);
+        let card = |h: &Home, title: &str| -> Value {
+            h.s.run();
+            let now = crate::db::now_ms();
+            let v = crate::my_work::read(h.s.home.path(), crate::my_work::Range::All, now);
+            let v = v.unwrap();
+            assert!(
+                v["goals"].as_u64().unwrap() > 0,
+                "the current goals counted"
+            );
+            let rows = v["requests"].as_array().unwrap();
+            let row = rows.iter().find(|r| r["title"] == title).unwrap();
+            row["goals"].clone()
+        };
+        assert_eq!(card(&h, "Request 1"), Value::Null);
+        h.pass(&|p| by_title(p, &[&["g2", "g1"], &[]]));
+        let both = json!([{"id": "g1", "kind": "priority", "rank": 1, "title": "Fail fast"},
+            {"id": "g2", "kind": "ask", "rank": 1, "title": "Logs"}]);
+        assert_eq!(card(&h, "Request 1"), both);
+        assert_eq!(card(&h, "Request 2"), json!([]));
+        h.goals(&[("g3", "priority", 1, "Other")]);
+        assert_eq!(card(&h, "Request 1"), Value::Null);
+        assert_eq!(card(&h, "Request 2"), json!([]));
     }
 
     /// A5: a link's evidence over its cap is dropped and the link kept; a request answered with no

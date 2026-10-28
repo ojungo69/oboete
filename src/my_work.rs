@@ -878,11 +878,15 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let mut key = None;
     let reviews = reviews(home);
     let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
+    // V4: the current goals once, for each card's goal (L3).
+    let goals = (crate::my_work_links::current(&k, raw.device(), &hidden)?)
+        .map(|op| crate::my_work_goals::items(&op))
+        .unwrap_or_default();
     for r in &requests {
         let stores = (&raw, &k, &rules, &hidden);
         answers.extend(answer(
             r,
-            (&convs, &work, &reviews),
+            (&convs, &work, &reviews, &goals),
             stores,
             (home, &mut key),
             (since, now),
@@ -890,7 +894,11 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     }
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
-    Ok((json!({"requests": answers, "unlinked": unlinked}), held))
+    let goals = goals.len();
+    Ok((
+        json!({"requests": answers, "unlinked": unlinked, "goals": goals}),
+        held,
+    ))
 }
 
 /// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any
@@ -1780,10 +1788,11 @@ fn sources(r: &Request, items: &[&Work], cards: &[&Shown]) -> Sources {
 
 fn answer(
     r: &Request,
-    (convs, work, reviews): (
+    (convs, work, reviews, goals): (
         &BTreeMap<Key, Conversation>,
         &[Work],
         &BTreeMap<String, Review>,
+        &[crate::my_work_goals::Item],
     ),
     (raw, k, rules, hidden): (&Raw, &Connection, &Rules, &HashSet<(String, i64)>),
     (home, key): (&Path, &mut Option<Vec<u8>>),
@@ -2005,6 +2014,7 @@ fn answer(
             "work": work,
             "progress": progress(&readings, review, (status, completed_at), rules),
             "story": story(review, rules),
+            "goals": crate::my_work_links::of_request(k, (&r.id.held(), raw.device()), hidden, goals, rules)?,
             "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
             "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
         }),
