@@ -78,7 +78,8 @@ fn started(k: &Connection, session: &str) -> Result<()> {
 /// 42). Its `raw_docs` row stays, for its labels and the counts. SQL that picks records says
 /// `kind <> 'tool'` for the same rule.
 pub(crate) fn indexed(kind: &str) -> bool {
-    kind != "tool"
+    // #745: nor the owner's directive, when a row of it from before #743 is indexed again.
+    kind != "tool" && kind != "directive"
 }
 
 /// The text a person would search for: every string in the event's JSON body (not its keys), or

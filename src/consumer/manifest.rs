@@ -475,7 +475,9 @@ fn delivered(
         let words = terms(manifest);
         // #743: the pool counts no owner rule, which leaves it below.
         let mut ranked = claims::decisions(k, repo, POOL + owned.len())?;
-        ranked.retain(|c| !owned.iter().any(|o| o.uid == c.uid));
+        let owned_uids: std::collections::HashSet<&str> =
+            owned.iter().map(|o| o.uid.as_str()).collect();
+        ranked.retain(|c| !owned_uids.contains(c.uid.as_str()));
         ranked.truncate(POOL);
         // Stable: among claims that share as many words, the newest first.
         ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));

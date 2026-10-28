@@ -2554,6 +2554,7 @@ const TEXT = {
   my_rules_applies: ['Applies', '適用する範囲'],
   my_rules_everywhere: ['Every repository', 'すべてのリポジトリ'],
   my_rules_in_repo: ['In {name}', '{name} の中だけ'],
+  my_rules_chosen_repo: ['In the repository you chose', '選んだリポジトリの中だけ'],
   my_rules_removed: ['Rule removed', '外れた規則'],
   my_rules_removed_note: ['You approved these, but the rule was retracted or forgotten since. Undo makes the suggestion wait for your decision again.', '承認したあとで、規則が取り消されたか忘れられたものです。元に戻すと、提案はまたあなたの判断を待ちます。'],
   my_rules_decide: ['Needs your decision', 'あなたの判断を待っています'],
@@ -7990,12 +7991,13 @@ function myRulesEditor(focus, label) {
 function myRulesApplies(form, focus) {
   const offered = mr.answer?.repos ?? [];
   const chosen = mr.applies[form];
-  const repos = chosen && !offered.some((r) => r.repo === chosen) ? [...offered, { repo: chosen, name: chosen }] : offered;
+  // Kept by its key, shown by no text of it: a rule added since may mask the name (#745).
+  const repos = chosen && !offered.some((r) => r.repo === chosen) ? [...offered, { repo: chosen, name: null }] : offered;
   const choice = el('select', null, el('option', null, t('my_rules_everywhere')),
     ...repos.map((r) => {
-      const option = el('option', null, t('my_rules_in_repo', { name: r.name }));
+      const option = el('option', null, r.name === null ? t('my_rules_chosen_repo') : t('my_rules_in_repo', { name: r.name }));
       option.value = r.repo;
-      option.title = r.repo;
+      if (r.name !== null) option.title = r.repo;
       return option;
     }));
   choice.options[0].value = '';

@@ -694,8 +694,9 @@ pub(crate) fn pref_add_recorded(
     let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
     if let (Some(given), Some(label)) = (repo, &c.event.repo) {
-        // #743: a name the gate masks could stand for another repository's.
-        if label != given {
+        // #743: a name the gate masks could stand for another repository's, and so could its
+        // directives' session (#745).
+        if label != given || c.event.session != format!("owner:{given}") {
             return Err(OwnerRefusal {
                 code: OwnerRefusalCode::PreferenceRepoMasked,
                 cause: anyhow::anyhow!("the repository's name holds a value the gate masks"),

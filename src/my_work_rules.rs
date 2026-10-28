@@ -1420,6 +1420,20 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(refused.code, "preference_repo_masked");
+        // #745: so is one whose directives' session the gate masks.
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"s\", regex = 'owner:github[.]com/o/r' }]\n",
+        )
+        .unwrap();
+        let body = json!({"text": "Hi.", "apply_to_all_repos": false, "repo": "github.com/o/r"});
+        let refused = crate::settings::claims::pref_add(
+            &home,
+            &std::sync::Mutex::new(()),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "preference_repo_masked");
         std::fs::remove_file(home.join("config.toml")).unwrap();
     }
 
