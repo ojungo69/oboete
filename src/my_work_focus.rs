@@ -1,7 +1,8 @@
 //! My Focus (docs/my-work-model.md F, decision 61): the focus areas and where each request sits,
-//! as claude-mem 15.4 keeps them, from the ops of job `focus` (F8): an area op (subject its id), a
-//! placement op (subject the request's anchor conversation) and the Other pass's op, each a patch.
-//! The owner's actions (F6) are such ops with `decided_by: owner`.
+//! as claude-mem 15.4 keeps them, from the ops of jobs `focus` and `place` (F8): an area op
+//! (subject its id), a placement op (subject the request's anchor conversation) and the Other
+//! pass's op, each a patch. The owner's actions (F6) are `focus` ops with `decided_by: owner`; the
+//! placement job's (`my_work_place`) are `place` ops.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -19,8 +20,8 @@ pub(crate) const NAME: &str = "focus";
 /// The bucket of the requests that fit no area: an id of placements only (F1).
 pub(crate) const OTHER: &str = "other";
 /// F1's caps, in characters.
-const NAME_CHARS: usize = 80;
-const GOAL_CHARS: usize = 300;
+pub(crate) const NAME_CHARS: usize = 80;
+pub(crate) const GOAL_CHARS: usize = 300;
 /// claude-mem's page words (`nav-words.mjs:8`), as whole words of a name.
 const PAGE_WORDS: &[&str] = &[
     "my focus",
@@ -48,7 +49,7 @@ pub(crate) struct Area {
 }
 
 impl Area {
-    fn text(&self, key: &str) -> Option<&str> {
+    pub(crate) fn text(&self, key: &str) -> Option<&str> {
         self.fields.get(key).and_then(Value::as_str)
     }
     pub fn status(&self) -> &str {
@@ -67,7 +68,7 @@ impl Area {
             .unwrap_or(f64::INFINITY)
     }
     /// Takes requests (F2): kept or suggested, not merged.
-    fn placeable(&self) -> bool {
+    pub(crate) fn placeable(&self) -> bool {
         matches!(self.status(), "kept" | "suggested") && self.merged_into().is_none()
     }
     /// Whole and readable: a row that leaves it otherwise is not applied (claude-mem throws).
@@ -85,11 +86,13 @@ pub(crate) struct Focus {
     pub areas: BTreeMap<String, Area>,
     owner: HashMap<String, String>,
     router: HashMap<String, String>,
+    /// Each area's ops, by device and op seq: what a call that shows the area read (S2).
+    sources: HashMap<String, Vec<(String, i64)>>,
 }
 
 impl Focus {
-    /// The focus ops in knowledge.db, oldest first (time, device, op seq), passing over those left
-    /// out while an exclusion stands (S6) and the forgotten ones (S5).
+    /// The focus and place ops in knowledge.db, oldest first (time, device, op seq), passing over
+    /// those left out while an exclusion stands (S6) and the forgotten ones (S5).
     pub(crate) fn read(
         raw: &crate::raw::Raw,
         k: &Connection,
@@ -102,9 +105,10 @@ impl Focus {
         let hidden = crate::my_work_ops::hidden(raw, k, reading)?;
         let mut st = k.prepare(
             "SELECT device, op_seq, about, fields FROM my_work
-             WHERE job = ?1 AND skipped = 0 AND forgotten IS NULL ORDER BY ts, device, op_seq",
+             WHERE job IN (?1, ?2) AND skipped = 0 AND forgotten IS NULL
+             ORDER BY ts, device, op_seq",
         )?;
-        let rows = st.query_map([NAME], |r| {
+        let rows = st.query_map([NAME, crate::my_work_place::NAME], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -114,10 +118,15 @@ impl Focus {
         })?;
         for row in rows {
             let (device, op_seq, about, fields) = row?;
-            if hidden.contains(&(device, op_seq)) {
+            let op = (device, op_seq);
+            if hidden.contains(&op) {
                 continue;
             }
             let fields: Map<String, Value> = serde_json::from_str(&fields)?;
+            if fields.get("kind").and_then(Value::as_str) == Some("area") {
+                let ops = out.sources.entry(about.clone()).or_default();
+                ops.push(op);
+            }
             out.apply(&about, fields);
         }
         Ok(out)
@@ -204,6 +213,22 @@ impl Focus {
         owner.or_else(|| self.router.get(subject).and_then(|a| self.resolve(a)))
     }
 
+    /// F3: whether the owner placed the request of anchor `subject` in an area that is live, which
+    /// the router then never places again (claude-mem's `focusDue`).
+    pub(crate) fn owner_placed(&self, subject: &str) -> bool {
+        (self.owner.get(subject)).is_some_and(|a| self.resolve(a).is_some())
+    }
+
+    /// The live area of the router's placement of anchor `subject`.
+    pub(crate) fn router_of(&self, subject: &str) -> Option<&str> {
+        self.router.get(subject).and_then(|a| self.resolve(a))
+    }
+
+    /// The ops of area `id`, by device and op seq.
+    pub(crate) fn sources(&self, id: &str) -> &[(String, i64)] {
+        self.sources.get(id).map_or(&[], Vec::as_slice)
+    }
+
     /// The areas not merged away, by the owner's rank, then the goals' rank, then the name.
     pub(crate) fn listed(&self) -> Vec<&Area> {
         let mut out: Vec<&Area> = (self.areas.values())
@@ -259,7 +284,7 @@ pub(crate) fn areas(focus: &Focus, rules: &crate::redact::Rules) -> Vec<Value> {
 
 /// claude-mem's `navWordIn`: the page word a name reuses, as whole words of its ASCII letters and
 /// digits, or the page's Japanese tab name it is.
-fn page_word(name: &str) -> Option<String> {
+pub(crate) fn page_word(name: &str) -> Option<String> {
     let lower = name.to_lowercase();
     let words: Vec<&str> = lower
         .split(|c: char| !c.is_ascii_alphanumeric())

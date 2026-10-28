@@ -923,6 +923,11 @@ pub(crate) struct ReviewInput {
     pub original: Option<(AskFrom, String)>,
     /// Its later prompts, the oldest first: record seq, time and text.
     pub asks: Vec<(i64, i64, String)>,
+    /// F3: each of its other conversations' opening ask, this device's, by its conversation's
+    /// order: record seq and text.
+    pub openings: Vec<(i64, String)>,
+    /// Its repositories as the gate shows them.
+    pub repos: Vec<String>,
     /// Its session summaries, the newest first: turn op seq, time and fields.
     pub summaries: Vec<(i64, i64, BTreeMap<String, String>)>,
     /// Its cards, the newest first: window op seq, time and title.
@@ -990,9 +995,10 @@ pub(crate) fn review_inputs(
         };
         // The prompts it owns: one that owns some replies of a conversation shares its prompts
         // on the page, but its review reads only its own.
-        let mut asks = Vec::new();
+        let (mut asks, mut openings) = (Vec::new(), Vec::new());
         for (key, own) in &r.owns {
             let Some(c) = convs.get(key) else { continue };
+            let mut opened = false;
             for s in (c.prompts.iter()).filter(|s| s.device == device) {
                 let ours = match own {
                     Owns::All => true,
@@ -1004,6 +1010,13 @@ pub(crate) fn review_inputs(
                 let later = s.ts >= original.ts && original.id != Some(s.id.clone());
                 if let Some(text) = (s.text.as_ref()).filter(|_| ours && later) {
                     asks.push((s.seq, s.ts, text.clone()));
+                }
+                // A conversation's first ask: the original's, which is shown apart, opens none.
+                if let Some(text) = (s.text.as_ref()).filter(|_| ours && !opened) {
+                    opened = true;
+                    if original.id != Some(s.id.clone()) {
+                        openings.push((s.seq, text.clone()));
+                    }
                 }
             }
         }
@@ -1033,6 +1046,8 @@ pub(crate) fn review_inputs(
             activity,
             original: from.map(|from| (from, original.text.clone())),
             asks,
+            openings,
+            repos: p.repos.iter().cloned().collect(),
             summaries,
             cards,
             work,

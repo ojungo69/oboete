@@ -1042,6 +1042,8 @@ mod tests {
             activity: 50_000,
             original: Some((AskFrom::Prompt(2), "Build the parser.".into())),
             asks: vec![(5, 40_000, "And its tests.".into())],
+            openings: vec![],
+            repos: vec![],
             summaries: vec![(7, 30_000, BTreeMap::new())],
             cards: vec![(9, 20_000, "The parser".into())],
             work: vec![("parser".into(), None, "doing".into(), 50_000)],
