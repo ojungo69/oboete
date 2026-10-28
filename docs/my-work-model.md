@@ -1388,8 +1388,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **The job** (R1, S1): `my_work_rules::Suggestions`, op job `rules`, its subject the local day.
   One op a run carries every suggestion forward, as the goals op carries its goals: each its id
   (`s<n>`, from a counter kept in the op, `next_id`), its wording for good, the requests whose
-  preferences joined it (its "seen") and their newest three quotes; and `through`, the newest
-  review op whose preferences it merged.
+  preferences joined it (its "seen") and their newest three quotes, each with its review's time
+  (`at`, which My Rules ranks by, V3); and `through`, the newest review op whose preferences it
+  merged.
 - **The new preferences**: those of each request's newest review this device shows past
   `through`, the oldest review first, whole reviews while ten fit; the rest are due at once. Due
   with the story's cadence (P7): at once with none merged, else three hours after the last run once

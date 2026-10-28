@@ -43,6 +43,9 @@ pub(crate) struct Suggestion {
 pub(crate) struct Quote {
     pub text: String,
     pub request: String,
+    /// When its review was written, unix ms: My Rules ranks a suggestion by its newest quote (V3).
+    #[serde(default)]
+    pub at: i64,
 }
 
 /// A preference of a request's newest review not merged yet.
@@ -412,6 +415,7 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
             Quote {
                 text: quote,
                 request: p.request.clone(),
+                at: p.ts,
             },
         );
         sg.quotes.truncate(QUOTES);
@@ -486,6 +490,7 @@ mod tests {
                 rules: &rules,
                 summary: &summary,
                 reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
             })
         }
 
@@ -575,10 +580,12 @@ mod tests {
         let first = h.suggestions();
         assert_eq!(first.len(), 1);
         assert_eq!((first[0].id.as_str(), first[0].requests.len()), ("s1", 1));
+        let before = crate::db::now_ms();
         h.reviewed(
             "g:2",
             &[("Tests before code, always.", "tests before the code please")],
         );
+        let written = before..=crate::db::now_ms();
         h.age(4 * 60);
         let (_, sent) = h.pass(&|_| answer(&[("s1", "")]));
         assert!(
@@ -600,6 +607,11 @@ mod tests {
             after[0].quotes[0].text, "tests before the code please",
             "the newest quote first"
         );
+        assert!(
+            written.contains(&after[0].quotes[0].at),
+            "its review's time"
+        );
+        assert!(after[0].quotes[1].at <= after[0].quotes[0].at);
         h.reviewed("g:2", &[("Tests first, really.", "tests first really")]);
         h.age(4 * 60);
         h.pass(&|_| answer(&[("s1", "")]));
