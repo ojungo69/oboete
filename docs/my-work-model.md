@@ -1638,7 +1638,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   directive event is labelled with that repository alone (no folder, no branch) and its body's
   scope is `repo`; its claim op's scope is `repo` (`claims::preference_op`), and the purge that
   writes a masked preference again keeps it. Refused before anything is appended: a repository no
-  record names (`preference_repo_unknown`) and one the owner stopped recording, as every writer
+  record and no rule of the owner's names (`preference_repo_unknown`, `claims::owned_repos`: #748)
+  and one the owner stopped recording, as every writer
   asks it (`preference_repo_excluded`). The directive is no session's work: it makes no manifest
   fact, so it is never an active session or a record waiting for curation.
 - **The owner's own** (`claims::owned`): a repository's current claims whose active derivation is
@@ -1693,7 +1694,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   patch on the area, through `my_work_ops::record`, which the `rule` op shares: claude-mem's
   `ownRow` writes the whole area, which would keep the model's text in an op a forget or an
   exclusion cannot follow (Codex on #746). A name and a goal go through the gate as they are
-  written. An area's id and each request's `focus` pass the answer's gate as selectors.
+  written. An area's id and each request's `focus` pass the answer's gate as selectors, and the
+  area a placement or a merge names passes the op text rescan (`raw::masked_op_text`, #747).
 - **No call.** Areas come with slice 10b, the page with 10c.
 - **Then**: slice 10b, the goals job's areas, the placement job and the Other pass.
 
