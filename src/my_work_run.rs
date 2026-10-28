@@ -376,6 +376,18 @@ impl<'a> Runner<'a> {
                     let answered = fitted(answered)?.map(|v| (OpKind::MyWork, v));
                     ops.push(answered.unwrap_or_else(|| skip.clone()));
                 }
+                // A subject keep gives beyond those the job waits on gets an op too, one that does
+                // not fit none (the rules job's suggestions, #737): links and the story give
+                // exactly theirs.
+                if !ask.subjects.is_empty() {
+                    for (subject, fields) in kept.iter().filter(|(s, _)| !subjects.contains(s)) {
+                        let fields = (fields.as_object().cloned())
+                            .map(|o| o.into_iter().collect())
+                            .unwrap_or_default();
+                        let answered = op(subject, fields, res.provider.clone(), ts, false);
+                        ops.extend(fitted(answered)?.map(|v| (OpKind::MyWork, v)));
+                    }
+                }
                 // A forget after the job read its records keeps none of the answer; the batch's
                 // ops go in one append, all or none.
                 raw.append_ops_fenced(&ops, reading.fence)?;
