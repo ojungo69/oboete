@@ -102,6 +102,7 @@ pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
         Box::new(crate::my_work_progress::Progress::default()),
         Box::new(crate::my_work_links::Links::default()),
         Box::new(crate::my_work_story::Story::default()),
+        Box::new(crate::my_work_rules::Suggestions::default()),
         Box::new(crate::my_work_goals::OwnerGoals::default()),
     ]
 }
