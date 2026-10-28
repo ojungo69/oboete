@@ -334,6 +334,8 @@ pub(crate) enum OwnerRefusalCode {
     PreferenceRepoUnknown,
     /// Slice 8b: a repository the owner stopped recording.
     PreferenceRepoExcluded,
+    /// #743: a repository whose name the gate masks.
+    PreferenceRepoMasked,
 }
 
 impl OwnerRefusal {
@@ -692,6 +694,13 @@ pub(crate) fn pref_add_recorded(
     let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
     if let (Some(given), Some(label)) = (repo, &c.event.repo) {
+        // #743: a name the gate masks could stand for another repository's.
+        if label != given {
+            return Err(OwnerRefusal {
+                code: OwnerRefusalCode::PreferenceRepoMasked,
+                cause: anyhow::anyhow!("the repository's name holds a value the gate masks"),
+            });
+        }
         repo_refusal(&raw, &k, &settings, (given, label))?;
     }
     let seq = raw

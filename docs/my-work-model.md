@@ -1492,6 +1492,11 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   none the owner stopped recording; Approve as it is stays every repository's. An approved
   suggestion whose rule is gone (retracted with `oboete correct`, or forgotten) is listed under
   "Rule removed" with Undo.
+- **#743** (the reviews of #742): each form keeps its own "Applies", and a chosen repository
+  stays offered when a reread leaves it out; a repository's directive has a session of its own
+  (`owner:<repository>`), and no directive is a raw search hit or a session start; a repository
+  name the gate masks is refused (`preference_repo_masked`); and the decisions' pool of 200
+  counts no owner rule.
 - **#741** (the reviews of #740): a suggestion's op keeps its fields within half the op cap, the
   oldest requests and then the oldest quotes going first, `seen` keeping its count; and a My Rules
   write that ends on another tab reads nothing again and shows no message there.

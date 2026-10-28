@@ -2599,6 +2599,7 @@ const TEXT = {
   rule_scope: ['Choose where the rule applies: every repository, or one.', '規則を適用する範囲 (すべてのリポジトリか、1 つのリポジトリ) を選んでください。'],
   preference_repo_unknown: ['No record names that repository, so no rule is kept for it.', 'そのリポジトリの記録が無いので、規則は保存しません。'],
   preference_repo_excluded: ['That repository is not recorded, so no rule is kept for it.', 'そのリポジトリは記録しない設定なので、規則は保存しません。'],
+  preference_repo_masked: ['That repository’s name holds a value the privacy rules hide, so no rule is kept for it.', 'そのリポジトリ名には伏せ字の対象が含まれるので、規則は保存しません。'],
   rule_partly_recorded: ['The rule is saved, but the suggestion still shows as waiting. Reject it, or leave it: approving it again adds the rule twice.', '規則は保存しましたが、提案は判断待ちのまま表示されます。却下するか、そのままにしてください。もう一度承認すると規則が 2 つになります。'],
   rule_pending: ['That decision is still being applied. The page reads again shortly.', 'その判断はまだ反映中です。少ししてからページを読み直します。'],
   rule_unavailable: ['My Rules could not save now. Try again shortly.', 'いまは保存できませんでした。少ししてからもう一度お試しください。'],
@@ -7902,9 +7903,9 @@ function myGoalsDraw() {
 
 // What a redraw keeps: the answer drawn, the suggestion or rule being edited and its draft, the
 // rule being added, and the last approve or reject, which "Undo" takes back.
-// `applies` is where an edited approve or an added rule applies: '' for every repository, else
-// a repository's key.
-const mr = { answer: null, signature: null, editing: null, draft: '', applies: '', adding: null, last: null, busy: false, open: new Set() };
+// `applies` is where each form's rule applies, the edited approve's (`edit`) and the added rule's
+// (`add`) apart (#743): '' for every repository, else a repository's key.
+const mr = { answer: null, signature: null, editing: null, draft: '', applies: { edit: '', add: '' }, adding: null, last: null, busy: false, open: new Set() };
 
 async function showMyRules() {
   const answer = await api('my-rules');
@@ -7984,11 +7985,12 @@ function myRulesEditor(focus, label) {
   return el('label', 'field my-rules-editor', el('span', null, t(label)), field);
 }
 
-// Slice 8b: where a rule applies, every repository or one the sessions started in (as claude-mem's
-// "Applies"); a key no longer offered falls back to every repository.
-function myRulesApplies(focus) {
-  const repos = mr.answer?.repos ?? [];
-  if (!repos.some((r) => r.repo === mr.applies)) mr.applies = '';
+// Slice 8b: where `form`'s rule applies, every repository or one the sessions started in (as
+// claude-mem's "Applies"). A repository chosen stays offered when a reread leaves it out (#743).
+function myRulesApplies(form, focus) {
+  const offered = mr.answer?.repos ?? [];
+  const chosen = mr.applies[form];
+  const repos = chosen && !offered.some((r) => r.repo === chosen) ? [...offered, { repo: chosen, name: chosen }] : offered;
   const choice = el('select', null, el('option', null, t('my_rules_everywhere')),
     ...repos.map((r) => {
       const option = el('option', null, t('my_rules_in_repo', { name: r.name }));
@@ -7997,16 +7999,16 @@ function myRulesApplies(focus) {
       return option;
     }));
   choice.options[0].value = '';
-  choice.value = mr.applies;
+  choice.value = chosen;
   choice.dataset.focus = focus;
   choice.disabled = mr.busy;
-  choice.addEventListener('change', () => { mr.applies = choice.value; });
+  choice.addEventListener('change', () => { mr.applies[form] = choice.value; });
   return el('label', 'field my-rules-editor', el('span', null, t('my_rules_applies')), choice);
 }
 
 // The scope fields of a post: `/api/my-rules`' approve and `/api/preferences`' add.
-const myRulesScope = () => (mr.applies ? { scope: 'repo', repo: mr.applies } : { scope: 'global' });
-const myRulesWhere = () => (mr.applies ? { apply_to_all_repos: false, repo: mr.applies } : { apply_to_all_repos: true });
+const myRulesScope = () => (mr.applies.edit ? { scope: 'repo', repo: mr.applies.edit } : { scope: 'global' });
+const myRulesWhere = () => (mr.applies.add ? { apply_to_all_repos: false, repo: mr.applies.add } : { apply_to_all_repos: true });
 
 // A suggestion waiting: approve it as it is, edit then approve it, or reject it (R3).
 function myRulesSuggestion(sg) {
@@ -8016,13 +8018,13 @@ function myRulesSuggestion(sg) {
     .then((ok) => { if (ok) { mr.editing = null; mr.last = { id: sg.id, action: 'approve' }; myRulesDraw(); } });
   let actions;
   if (mr.editing === `suggestion:${sg.id}`) {
-    actions = [myRulesEditor(`draft:${sg.id}`, 'my_rules_text'), myRulesApplies(`applies:${sg.id}`), el('div', 'my-rules-actions',
+    actions = [myRulesEditor(`draft:${sg.id}`, 'my_rules_text'), myRulesApplies('edit', `applies:${sg.id}`), el('div', 'my-rules-actions',
       myRulesButton('my_rules_save_approve', `save:${sg.id}`, () => void approve(mr.draft), 'small'),
       myRulesButton('my_rules_cancel', `cancel:${sg.id}`, () => { mr.editing = null; myRulesDraw(); }))];
   } else {
     actions = [el('div', 'my-rules-actions',
       myRulesButton('my_rules_approve', `approve:${sg.id}`, () => void approve(undefined), 'small'),
-      myRulesButton('my_rules_edit_approve', `edit:${sg.id}`, () => { mr.editing = `suggestion:${sg.id}`; mr.draft = sg.statement; mr.applies = ''; myRulesDraw(); }),
+      myRulesButton('my_rules_edit_approve', `edit:${sg.id}`, () => { mr.editing = `suggestion:${sg.id}`; mr.draft = sg.statement; mr.applies.edit = ''; myRulesDraw(); }),
       myRulesButton('my_rules_reject', `reject:${sg.id}`, () => void myRulesWrite('my-rules', { suggestion: sg.id, action: 'reject' }, 'my_rules_rejected_now')
         .then((ok) => { if (ok) { mr.last = { id: sg.id, action: 'reject' }; myRulesDraw(); } })))];
   }
@@ -8061,13 +8063,13 @@ function myRulesRule(rule) {
 // one repository.
 function myRulesAdd() {
   if (mr.adding === null) {
-    return el('div', 'my-rules-actions', myRulesButton('my_rules_add', 'add', () => { mr.adding = ''; mr.applies = ''; myRulesDraw(); }));
+    return el('div', 'my-rules-actions', myRulesButton('my_rules_add', 'add', () => { mr.adding = ''; mr.applies.add = ''; myRulesDraw(); }));
   }
   const field = input('textarea', mr.adding, '', 'add:text', (v) => { mr.adding = v; });
   field.dataset.focus = 'add:text';
   field.disabled = mr.busy;
   return el('div', 'my-rules-add', word('h4', null, 'my_rules_add_h'),
-    el('label', 'field my-rules-editor', el('span', null, t('my_rules_text')), field), myRulesApplies('add:applies'),
+    el('label', 'field my-rules-editor', el('span', null, t('my_rules_text')), field), myRulesApplies('add', 'add:applies'),
     el('div', 'my-rules-actions',
       myRulesButton('my_rules_save', 'add:save', () => void myRulesWrite('preferences', { text: mr.adding, ...myRulesWhere() }, 'my_rules_saved')
         .then((ok) => { if (ok) { mr.adding = null; myRulesDraw(); } }), 'small'),

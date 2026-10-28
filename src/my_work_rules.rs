@@ -1367,6 +1367,62 @@ mod tests {
         assert_eq!(h.page()["yours"].as_array().unwrap().len(), 1);
     }
 
+    /// #743: a repository rule's directive is no raw search hit and starts no session, and a name
+    /// the gate masks is refused.
+    #[test]
+    fn a_repository_rules_directive_stays_out_of_search_and_sessions() {
+        let mut h = Home::new();
+        let (a, in_a) = h.known();
+        let home = h.s.home.path().to_owned();
+        crate::claims::pref_add_in(&home, "Keep the changelog short.", Some(&in_a)).unwrap();
+        h.s.run();
+        let k = crate::knowledge::open(&home).unwrap();
+        let count = |sql: &str| -> i64 { k.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            (
+                count("SELECT COUNT(*) FROM raw_docs WHERE kind = 'directive'"),
+                count("SELECT COUNT(*) FROM session_start WHERE session = 'owner'"),
+            ),
+            (0, 0)
+        );
+        assert!(h.started_in(a.path(), "changelog")[0], "still delivered");
+        // Item 6: excluding another repository with a rule leaves this one's rule, and a global
+        // one, of no excluded session.
+        let (_b, in_b) = h.known();
+        crate::claims::pref_add_in(&home, "Tag every release.", Some(&in_b)).unwrap();
+        let global = crate::claims::pref_add(&home, "Answer in Japanese.").unwrap();
+        (h.s.raw).exclude_capture(("repo", &in_b), false).unwrap();
+        h.s.run();
+        let k = crate::knowledge::open(&home).unwrap();
+        let excluded =
+            h.s.raw
+                .sessions_in(&h.s.raw.exclusions_now().unwrap())
+                .unwrap();
+        let ours = crate::claims::owned(&k, &in_a).unwrap();
+        for uid in [ours[0].uid.as_str(), global.as_str()] {
+            assert!(
+                !crate::curate::quotes_excluded(&h.s.raw, &k, &excluded, uid).unwrap(),
+                "{uid}"
+            );
+        }
+        // A name the gate masks.
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"t\", regex = 'tok-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let body =
+            json!({"text": "Hi.", "apply_to_all_repos": false, "repo": "github.com/o/tok-123456"});
+        let refused = crate::settings::claims::pref_add(
+            &home,
+            &std::sync::Mutex::new(()),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "preference_repo_masked");
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+    }
+
     /// Slice 8b (ponytail-review of 8a): an approved suggestion whose rule is gone, retracted with
     /// `oboete correct` or forgotten, is listed as removed, with Undo: undone, it waits again.
     #[test]

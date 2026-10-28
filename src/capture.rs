@@ -714,7 +714,10 @@ fn labelled(
 /// key as records name it, it is labelled with that repository alone: its claim is that
 /// repository's. `curate` never shows it in a window: its claim is appended with it.
 pub fn directive(text: &str, ts: i64, settings: &Settings, repo: Option<&str>) -> Captured {
-    let payload = json!({"session_id": "owner"});
+    // #743: a repository's directives a session of their own, so that excluding one repository
+    // marks no other repository's rules, nor the global ones, as of an excluded session.
+    let session = repo.map_or_else(|| "owner".to_owned(), |r| format!("owner:{r}"));
+    let payload = json!({"session_id": session});
     let scope = if repo.is_some() { "repo" } else { "global" };
     // As a typed prompt: an opted-out part is never stored, and binary content is its marker.
     let body = json!({"text": base64_runs(&strip_blocks(text, true)), "scope": scope});
