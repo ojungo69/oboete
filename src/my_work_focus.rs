@@ -433,7 +433,7 @@ fn held_of(home: &Path, shown: &str) -> Result<Option<String>> {
     let (answer, held) = crate::my_work::reviewing(home, crate::db::now_ms())?;
     let answer = crate::view::answered("my-work", answer);
     let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
-    Ok((requests.iter().position(|r| r["id"] == shown)).map(|i| held[i].key().to_owned()))
+    Ok((requests.iter().position(|r| r["id"] == shown)).map(|i| held[i].id().to_owned()))
 }
 
 #[cfg(test)]

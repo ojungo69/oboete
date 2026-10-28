@@ -672,7 +672,7 @@ rule the owner adopted.
 ### S. Where it is kept
 
 S1. **One new op kind, `my_work`**, whose `job` is `group`, `review`, `links`, `story`, `rules`,
-`goals` or `rule` (the owner's action). Approved, edited and turned-off rules also use the
+`goals`, `rule` (the owner's action) or `focus` (My Focus, F8). Approved, edited and turned-off rules also use the
 existing kinds: `claim` through `pref add`, and `correction` through correct, mute and unmute.
 Checks stay in `state/my-work-reviews.json`. Nothing goes to `state/` or providers.db that a
 rebuild needs.
@@ -1669,7 +1669,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 
 - **The ops** (F8): job `focus`, one of S1's jobs. An area op is about the area's id, its fields
   `kind: area` and the area's own (F1); a placement op is about the request's anchor, as the
-  stores hold its id (a group's is its anchor conversation's, `c:`: `my_work_focus::subject`), its
+  stores hold its id (`Id::held`, not the id keyed by the home's key: CodeRabbit on #746; a
+  group's is its anchor conversation's, `c:`: `my_work_focus::subject`), its
   fields `kind: placement`, `area` (an id, `other`, or none to clear it) and `by` (`router` or
   `owner`). Each is a patch: a null field removes it.
 - **The fold** (`my_work_focus::Focus`): every focus op oldest first (time, device, op seq), past
