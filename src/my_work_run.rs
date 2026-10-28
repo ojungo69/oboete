@@ -166,6 +166,12 @@ impl<'a> Runner<'a> {
                 due.push((d.since, i, d.about));
             }
         }
+        // V1 (#720): a job this round finds nothing due for waits on nothing the pages should say.
+        for (i, job) in self.jobs.iter().enumerate() {
+            if !due.iter().any(|d| d.1 == i) {
+                crate::providers_db::clear_my_work_round(db, job.name())?;
+            }
+        }
         // A subject due later (a repository asked about minutes ago) is waited for, the worker
         // staying up for it as for a window (D10).
         let mut wait = Phase::Idle;
@@ -233,9 +239,10 @@ impl<'a> Runner<'a> {
                 crate::providers_db::my_work_pending_of(db, &span)?.filter(|p| p.prompt == sent);
             if let Some(p) = &pending {
                 if p.attempts >= crate::curate::ATTEMPTS {
-                    return given_up(raw, db, &span, skip);
+                    return given_up(raw, db, (name, &span), skip);
                 }
                 if p.next_attempt_at > now {
+                    crate::providers_db::set_my_work_round(db, name, &p.hold, p.next_attempt_at)?;
                     wait = crate::turns::sooner(
                         wait,
                         crate::turns::held(&p.hold, p.next_attempt_at, now),
@@ -277,6 +284,7 @@ impl<'a> Runner<'a> {
             let failed = match answer {
                 Ok(()) => {
                     crate::providers_db::clear_my_work_pending(db, &span)?;
+                    crate::providers_db::clear_my_work_round(db, name)?;
                     return Ok(self.called(Phase::Covered));
                 }
                 // At the bound, nothing more went out: the job waits, its attempts as they were.
@@ -305,9 +313,10 @@ impl<'a> Runner<'a> {
                 next_attempt_at: next,
             };
             if p.attempts >= crate::curate::ATTEMPTS {
-                return given_up(raw, db, &span, skip).map(|phase| self.called(phase));
+                return given_up(raw, db, (name, &span), skip).map(|phase| self.called(phase));
             }
             crate::providers_db::set_my_work_pending(db, &p)?;
+            crate::providers_db::set_my_work_round(db, name, hold, next)?;
             return Ok(self.called(crate::turns::held(hold, next, after)));
         }
         Ok(wait)
@@ -494,9 +503,9 @@ pub(crate) fn doctor_line(home: &std::path::Path, cfg: &crate::config::Config) -
 
 /// V1: the status line of a page that shows `jobs`' ops, read with no call from config.toml,
 /// providers.db and knowledge.db: off, or on and waiting for summaries; waiting at the daily
-/// bound (A7), or for a request of one of the jobs that is held (A8), by its hold (a budget,
-/// every entry resting, the owner); else when the newest answered op of the jobs that this device
-/// wrote and S6 shows was written, if one was.
+/// bound (A7), or on the hold the runner last left one of the jobs in (A8, #720: a budget, every
+/// entry resting, the owner); else when the newest answered op of the jobs that this device wrote
+/// and S6 shows was written, if one was.
 pub(crate) fn status(home: &std::path::Path, jobs: &[&str], now: i64) -> Result<Value> {
     let cfg = crate::config::load(home)?;
     if !cfg.my_work.curate {
@@ -513,18 +522,17 @@ pub(crate) fn status(home: &std::path::Path, jobs: &[&str], now: i64) -> Result<
             return Ok(json!({"state": "waiting", "why": "bound",
                 "until": oldest.map(|t| t + DAY_MS), "calls_a_day": cfg.my_work.calls_a_day}));
         }
-        let held = (crate::providers_db::my_work_pending_all(&db).unwrap_or_default())
+        let held = (crate::providers_db::my_work_rounds(&db).unwrap_or_default())
             .into_iter()
-            .filter(|p| p.next_attempt_at > now)
-            .filter(|p| jobs.iter().any(|j| p.key.split(' ').next() == Some(j)))
-            .min_by_key(|p| p.next_attempt_at);
-        if let Some(p) = held {
-            let why = match p.hold.as_str() {
+            .filter(|(job, _, until)| *until > now && jobs.contains(&job.as_str()))
+            .min_by_key(|(_, _, until)| *until);
+        if let Some((_, hold, until)) = held {
+            let why = match hold.as_str() {
                 "budget" => "budget",
                 "owner" => "owner",
                 _ => "resting",
             };
-            return Ok(json!({"state": "waiting", "why": why, "until": p.next_attempt_at}));
+            return Ok(json!({"state": "waiting", "why": why, "until": until}));
         }
     }
     let Some((raw, k)) = crate::search::b::stores(home)? else {
@@ -546,9 +554,15 @@ pub(crate) fn status(home: &std::path::Path, jobs: &[&str], now: i64) -> Result<
 
 /// A job every entry failed `ATTEMPTS` times is kept as a skip of what it read, and not asked
 /// again until what it would read changes (A8).
-fn given_up(raw: &mut Raw, db: &Connection, span: &str, skip: Value) -> Result<Phase> {
+fn given_up(
+    raw: &mut Raw,
+    db: &Connection,
+    (job, span): (&str, &str),
+    skip: Value,
+) -> Result<Phase> {
     raw.append_ops(&[(OpKind::MyWork, skip)])?;
     crate::providers_db::clear_my_work_pending(db, span)?;
+    crate::providers_db::clear_my_work_round(db, job)?;
     Ok(Phase::Covered)
 }
 
@@ -1226,33 +1240,20 @@ mod tests {
         }
         let db = crate::providers_db::open(p).unwrap();
         let later = crate::db::now_ms() + 60_000;
-        let held = crate::providers_db::MyWorkPending {
-            key: "goals 2026-10-27".into(),
-            prompt: "sha".into(),
-            reason: "every entry failed".into(),
-            hold: "budget".into(),
-            attempts: 1,
-            next_attempt_at: later,
+        let hold = |hold: &str, until: i64| {
+            crate::providers_db::set_my_work_round(&db, "goals", hold, until).unwrap();
         };
-        crate::providers_db::set_my_work_pending(&db, &held).unwrap();
+        hold("budget", later);
         let waiting = json!({"state": "waiting", "why": "budget", "until": later});
         assert_eq!(status(&["goals"]), waiting);
-        for (hold, why) in [("time", "resting"), ("owner", "owner")] {
-            let other = crate::providers_db::MyWorkPending {
-                hold: hold.into(),
-                ..held.clone()
-            };
-            crate::providers_db::set_my_work_pending(&db, &other).unwrap();
-            assert_eq!(status(&["goals"])["why"], why, "{hold}");
+        for (held, why) in [("time", "resting"), ("owner", "owner")] {
+            hold(held, later);
+            assert_eq!(status(&["goals"])["why"], why, "{held}");
         }
         // Another page's job is not held, and a time passed holds nothing.
         let review = json!({"state": "written", "at": 2_000});
         assert_eq!(status(&["group", "review"]), review);
-        let past = crate::providers_db::MyWorkPending {
-            next_attempt_at: crate::db::now_ms() - 60_000,
-            ..held
-        };
-        crate::providers_db::set_my_work_pending(&db, &past).unwrap();
+        hold("budget", crate::db::now_ms() - 60_000);
         assert_eq!(status(&["goals"]), json!({"state": "written", "at": 1_000}));
         for _ in 0..2 {
             let call = crate::providers_db::Call {
@@ -1276,5 +1277,87 @@ mod tests {
         );
         assert_eq!(bound["calls_a_day"], 2);
         assert!(bound["until"].as_i64().unwrap() > crate::db::now_ms());
+    }
+
+    /// V1 (#720): the status line says what the runner last decided. A request held for a budget
+    /// says waiting; once the round finds nothing due for the job, it does not, though the held
+    /// request's row is still there; a later request answered makes it written.
+    #[test]
+    fn the_status_line_follows_what_the_runner_last_decided() {
+        let mut s = Store::new();
+        let seq = s.said("s1", "r", 1_000, "Build the parser.");
+        let config = "[summary]\ncurate = true\n[my_work]\ncurate = true\n";
+        std::fs::write(s.home.path().join("config.toml"), config).unwrap();
+        let until = crate::db::now_ms() + 3_600_000;
+        let budget = |_: &Gate| -> Result<Value> {
+            Err(ChainFailed(vec![Fallback {
+                provider: "fake".into(),
+                reason: "the monthly cap".into(),
+                skip: Skip::Budget(until),
+                answer: None,
+            }])
+            .into())
+        };
+        let asked = RefCell::new(Vec::new());
+        let echo = |subjects: Vec<(&'static str, i64)>| Echo { subjects, seq };
+        let line = |s: &Store| status(s.home.path(), &["group"], crate::db::now_ms()).unwrap();
+        pass(
+            &mut s,
+            echo(vec![("r1", 0)]),
+            (true, 100),
+            false,
+            &budget,
+            &asked,
+        );
+        let waiting = json!({"state": "waiting", "why": "budget", "until": until});
+        assert_eq!(line(&s), waiting);
+        // Held still, the next round finds the same request held and says so again.
+        pass(
+            &mut s,
+            echo(vec![("r1", 0)]),
+            (true, 100),
+            false,
+            &budget,
+            &asked,
+        );
+        assert_eq!((line(&s), asked.borrow().len()), (waiting.clone(), 1));
+        // Its subject gone, nothing is due: the held request's row stays, but the line waits on
+        // nothing.
+        pass(&mut s, echo(vec![]), (true, 100), false, &grouped, &asked);
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        assert!(
+            crate::providers_db::my_work_pending_of(&db, "group r1")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(line(&s), json!({"state": "none"}));
+        // Another subject held, then a later one answered: written.
+        pass(
+            &mut s,
+            echo(vec![("r2", 0)]),
+            (true, 100),
+            false,
+            &budget,
+            &asked,
+        );
+        assert_eq!(line(&s)["state"], "waiting");
+        pass(
+            &mut s,
+            echo(vec![("r3", 0)]),
+            (true, 100),
+            false,
+            &grouped,
+            &asked,
+        );
+        assert_eq!(line(&s)["state"], "written");
+        // The held request found again: waiting again.
+        let r1 = echo(vec![("r1", 0)]);
+        pass(&mut s, r1, (true, 100), false, &grouped, &asked);
+        assert_eq!(line(&s), waiting);
+        // Given up, a request holds the job no longer.
+        let skip = json!({"job": "group", "about": "r1", "entry": "", "ts": 0, "read": {},
+            "removed": [], "fields": {}, "skipped": true, "forgotten": null});
+        given_up(&mut s.raw, &db, ("group", "group r1"), skip).unwrap();
+        assert!(crate::providers_db::my_work_rounds(&db).unwrap().is_empty());
     }
 }

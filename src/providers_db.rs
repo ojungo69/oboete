@@ -120,6 +120,13 @@ CREATE TABLE IF NOT EXISTS my_work_pending(
   attempts INTEGER NOT NULL,
   next_attempt_at INTEGER NOT NULL
 );
+-- docs/my-work-model.md V1 (#720): what the runner last decided for a My Work job it asked about,
+-- held by `hold` until `until`. A job it found nothing due for, or asked with success, has none.
+CREATE TABLE IF NOT EXISTS my_work_round(
+  job TEXT PRIMARY KEY,
+  hold TEXT NOT NULL,                     -- time, budget or owner
+  until INTEGER NOT NULL
+);
 -- My Work's daily bound (A7) counts its role's calls over a rolling day: a seek, not a scan.
 CREATE INDEX IF NOT EXISTS provider_calls_my_work ON provider_calls(ts) WHERE role = 'my_work';
 ";
@@ -969,25 +976,6 @@ pub struct MyWorkPending {
     pub next_attempt_at: i64,
 }
 
-/// Every held My Work request (A8), for the pages' status line (docs/my-work-model.md V1).
-pub fn my_work_pending_all(conn: &Connection) -> Result<Vec<MyWorkPending>> {
-    let mut st = conn.prepare(
-        "SELECT key, prompt, reason, hold, attempts, next_attempt_at FROM my_work_pending
-         ORDER BY key",
-    )?;
-    let rows = st.query_map([], |r| {
-        Ok(MyWorkPending {
-            key: r.get(0)?,
-            prompt: r.get(1)?,
-            reason: r.get(2)?,
-            hold: r.get(3)?,
-            attempts: r.get(4)?,
-            next_attempt_at: r.get(5)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
 pub fn my_work_pending_of(conn: &Connection, key: &str) -> Result<Option<MyWorkPending>> {
     Ok(conn
         .query_row(
@@ -1027,6 +1015,29 @@ pub fn set_my_work_pending(conn: &Connection, p: &MyWorkPending) -> Result<()> {
 pub fn clear_my_work_pending(conn: &Connection, key: &str) -> Result<()> {
     conn.execute("DELETE FROM my_work_pending WHERE key = ?1", [key])?;
     Ok(())
+}
+
+/// docs/my-work-model.md V1 (#720): the runner last left `job` held by `hold` until `until`.
+pub fn set_my_work_round(conn: &Connection, job: &str, hold: &str, until: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO my_work_round(job, hold, until) VALUES(?1, ?2, ?3)",
+        params![job, hold, until],
+    )?;
+    Ok(())
+}
+
+/// V1: the runner last left `job` held by nothing.
+pub fn clear_my_work_round(conn: &Connection, job: &str) -> Result<()> {
+    conn.execute("DELETE FROM my_work_round WHERE job = ?1", [job])?;
+    Ok(())
+}
+
+/// V1: each job the runner last left held, with its hold and until when, for the pages' status
+/// line.
+pub fn my_work_rounds(conn: &Connection) -> Result<Vec<(String, String, i64)>> {
+    let mut st = conn.prepare("SELECT job, hold, until FROM my_work_round ORDER BY job")?;
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 #[cfg(test)]
