@@ -1,12 +1,12 @@
 //! The rule suggestions job (docs/my-work-model.md R1, S1's `rules`): the preferences the reviews
-//! kept (P4), merged into suggestions that keep their ids and wording, for My Rules (slice 8). A
-//! run is one op carrying every suggestion forward, as the goals job carries its goals.
+//! kept (P4), merged into suggestions that keep their ids and wording, for My Rules (slice 8). Each
+//! suggestion is an op of its own, its subject its id, and `through` says how far the reviews were
+//! read (#737): one op could not carry them all within the op cap.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::Result;
-use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -18,8 +18,12 @@ pub(crate) const NAME: &str = "rules";
 /// The owner's action on a suggestion (R3), the op job slice 8 writes: its subject the
 /// suggestion's id, its `action` approve, reject or undo.
 pub(crate) const RULE: &str = "rule";
+/// The subject of the op that says how far the reviews were read: the job's due subject.
+pub(crate) const THROUGH: &str = "through";
 /// R1: the new preferences one call shows at most.
 const PREFERENCES: usize = 10;
+/// The requests a suggestion keeps, the newest first, so that one joining again is counted once.
+const REQUESTS: usize = 200;
 /// R1's caps, in characters, and the quotes a suggestion keeps.
 const STATEMENT: usize = 200;
 const QUOTE: usize = 240;
@@ -29,12 +33,15 @@ const AGAIN_MS: i64 = 3 * 60 * 60 * 1000;
 
 type Hidden = HashSet<(String, i64)>;
 
-/// A suggestion as a rules op keeps it: its id and wording for good (R1), the requests whose
-/// preferences joined it, and the newest of their quotes.
+/// A suggestion as its op keeps it: its id (the op's subject) and wording for good (R1), how many
+/// requests' preferences joined it (`seen`), the newest of those requests, and the newest of their
+/// quotes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Suggestion {
     pub id: String,
     pub statement: String,
+    #[serde(default)]
+    pub seen: u64,
     pub requests: Vec<String>,
     pub quotes: Vec<Quote>,
 }
@@ -58,23 +65,61 @@ struct Preference {
     quote: String,
 }
 
-/// One round's read: the newest answered rules op and its suggestions, the next id, the newest
-/// rules op's time, the owner's decisions by suggestion id, and the preferences not merged yet,
-/// the oldest review first.
+/// One round's read: the suggestions and the op seq that kept each, the next id, the newest rules
+/// op's time, the owner's decisions by suggestion id, and the preferences not merged yet, the
+/// oldest review first.
 struct Round {
-    last: Option<Kept>,
     suggestions: Vec<Suggestion>,
+    seqs: BTreeMap<String, i64>,
     next_id: u64,
     latest: Option<i64>,
     decided: BTreeMap<String, Decision>,
     new: Vec<Preference>,
 }
 
-/// The suggestions a rules op kept.
-pub(crate) fn suggestions(k: &Kept) -> Vec<Suggestion> {
-    (k.op.fields.get("suggestions").cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
+/// The suggestion an op of the job kept; none for `through`, a skip, or an op of another shape.
+fn suggestion(k: &Kept) -> Option<Suggestion> {
+    let f = &k.op.fields;
+    Some(Suggestion {
+        id: k.op.about.clone(),
+        statement: f.get("statement")?.as_str()?.to_owned(),
+        seen: f.get("seen").and_then(Value::as_u64).unwrap_or(0),
+        requests: serde_json::from_value(f.get("requests")?.clone()).ok()?,
+        quotes: serde_json::from_value(f.get("quotes")?.clone()).ok()?,
+    })
+}
+
+/// A suggestion id's number: `s3` is 3.
+fn number(id: &str) -> Option<u64> {
+    id.strip_prefix('s')?.parse().ok()
+}
+
+/// The suggestions as kept (S6): the newest answered op of each this device shows, in their ids'
+/// order, with the op seq of each; and how far the reviews were read.
+fn carried(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &Hidden,
+) -> Result<(Vec<Suggestion>, BTreeMap<String, i64>, i64)> {
+    let (mut out, mut seqs, mut through) = (Vec::new(), BTreeMap::new(), 0);
+    for op in crate::my_work_ops::shown(k, (NAME, None), Some(device), hidden, true, usize::MAX)? {
+        if seqs.contains_key(&op.op.about) {
+            continue;
+        }
+        seqs.insert(op.op.about.clone(), op.op_seq);
+        if op.op.about == THROUGH {
+            through = op
+                .op
+                .fields
+                .get("through")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+        } else if let Some(sg) = suggestion(&op) {
+            out.push(sg);
+        }
+    }
+    out.sort_by_key(|sg| number(&sg.id));
+    Ok((out, seqs, through))
 }
 
 /// The owner's decision on a suggestion (R3): its `rule` op's seq, approved or rejected, and the
@@ -128,9 +173,8 @@ pub(crate) fn shown(raw: &crate::raw::Raw, k: &rusqlite::Connection) -> Result<S
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let hidden = crate::my_work_ops::hidden(raw, k, &reading)?;
     let device = raw.device().to_owned();
-    let last = crate::my_work_ops::shown(k, (NAME, None), Some(&device), &hidden, true, 1)?.pop();
     Ok(Shown {
-        suggestions: last.as_ref().map(suggestions).unwrap_or_default(),
+        suggestions: carried(k, &device, &hidden)?.0,
         decided: decided(k, &device, &hidden)?,
     })
 }
@@ -142,7 +186,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 fn strength(sg: &Suggestion, now: i64) -> f64 {
     let newest = sg.quotes.iter().map(|q| q.at).max().unwrap_or(0);
     let days = ((now - newest).max(0) / DAY_MS) as f64;
-    sg.requests.len() as f64 / (1.0 + days / 7.0)
+    sg.seen as f64 / (1.0 + days / 7.0)
 }
 
 /// V3: what the My Rules page shows, read with no call: the suggestions waiting, strongest first;
@@ -177,7 +221,7 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
             .collect()
     };
     let card = |sg: &Suggestion| {
-        json!({"id": sg.id, "statement": gate(&sg.statement), "seen": sg.requests.len(),
+        json!({"id": sg.id, "statement": gate(&sg.statement), "seen": sg.seen,
             "strength": strength(sg, now), "quotes": quotes(sg)})
     };
     let mut waiting: Vec<&Suggestion> = (suggestions.iter())
@@ -200,7 +244,7 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
         .map(|(c, on)| {
             let sg = from.get(c.uid.as_str());
             json!({"uid": c.uid, "text": gate(&c.body), "on": on, "since": c.valid_from,
-                "suggestion": sg.map(|sg| &sg.id), "seen": sg.map(|sg| sg.requests.len()),
+                "suggestion": sg.map(|sg| &sg.id), "seen": sg.map(|sg| sg.seen),
                 "quotes": sg.map(|sg| quotes(sg)).unwrap_or_default()})
         })
         .collect();
@@ -209,6 +253,29 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
         "rejected": rejected.into_iter().map(|(sg, _)| card(sg)).collect::<Vec<_>>(),
         "yours": [{"scope": "global", "rules": yours}],
     }))
+}
+
+/// #739: whether a `rule` op of suggestion `id` is recorded but not applied yet, so the decision it
+/// makes is not read: another action on it now would act on what it was before.
+pub(crate) fn unapplied(raw: &crate::raw::Raw, k: &rusqlite::Connection, id: &str) -> Result<bool> {
+    let device = raw.device();
+    let checkpoint = crate::knowledge::checkpoint::OPS;
+    let mut after = crate::knowledge::checkpoint::get_in(k, checkpoint, "my_work", device)?;
+    loop {
+        let ops = raw.ops_after(device, after, 500)?;
+        let Some(last) = ops.last() else {
+            return Ok(false);
+        };
+        after = last.op_seq;
+        let rule = |op: &crate::raw::Op| {
+            op.kind == crate::raw::OpKind::MyWork
+                && op.body["job"] == RULE
+                && op.body["about"] == id
+        };
+        if ops.iter().any(rule) {
+            return Ok(true);
+        }
+    }
 }
 
 /// R3: the owner's action on suggestion `id`, a `rule` op holding `fields` (no text: the action and
@@ -247,22 +314,25 @@ pub(crate) fn record(home: &std::path::Path, id: &str, fields: Value) -> Result<
 fn round(s: &Stores) -> Result<Round> {
     let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
     let device = s.raw.device().to_owned();
-    let rules = (NAME, None);
-    let last = crate::my_work_ops::shown(s.k, rules, Some(&device), &hidden, true, 1)?.pop();
-    let newest = crate::my_work_ops::shown(s.k, rules, Some(&device), &hidden, false, 1)?.pop();
-    let latest = newest.as_ref().map(|k| k.op.ts);
-    // Past every id any rules op gave, hidden ones too, so an id names one suggestion for good.
-    let next_id: i64 = s.k.query_row(
-        "SELECT COALESCE(MAX(json_extract(fields, '$.next_id')), 1) FROM my_work
-         WHERE job = ?1 AND device = ?2",
-        rusqlite::params![NAME, device],
-        |r| r.get(0),
-    )?;
-    let through = (last.as_ref())
-        .and_then(|k| k.op.fields.get("through").and_then(Value::as_i64))
-        .unwrap_or(0);
-    // A skip (A8) waits for a review newer than it.
-    let skipped = newest.as_ref().filter(|k| k.op.skipped).map(|k| k.op.ts);
+    let all =
+        crate::my_work_ops::shown(s.k, (NAME, None), Some(&device), &hidden, false, usize::MAX)?;
+    let latest = all.iter().map(|k| k.op.ts).max();
+    // A skip (A8) waits for a review newer than it: a give-up writes one for `through`.
+    let skipped = (all.iter().find(|k| k.op.about == THROUGH))
+        .filter(|k| k.op.skipped)
+        .map(|k| k.op.ts);
+    let (suggestions, seqs, through) = carried(s.k, &device, &hidden)?;
+    // Past every id an op of this device names, the owner's decisions and hidden ones too: a purge
+    // clears an op's fields, never its subject, so an id names one suggestion for good (#737).
+    let mut st =
+        s.k.prepare("SELECT DISTINCT about FROM my_work WHERE device = ?1 AND job IN (?2, ?3)")?;
+    let abouts = st.query_map(rusqlite::params![device, NAME, RULE], |r| {
+        r.get::<_, String>(0)
+    })?;
+    let mut next_id = 1;
+    for about in abouts {
+        next_id = next_id.max(number(&about?).map_or(0, |n| n + 1));
+    }
     let reviews = (crate::my_work_progress::NAME, None);
     let reviews =
         crate::my_work_ops::shown(s.k, reviews, Some(&device), &hidden, true, usize::MAX)?;
@@ -295,9 +365,9 @@ fn round(s: &Stores) -> Result<Round> {
     }
     new.sort_by_key(|p| p.review);
     Ok(Round {
-        suggestions: last.as_ref().map(suggestions).unwrap_or_default(),
-        last,
-        next_id: u64::try_from(next_id).unwrap_or(1).max(1),
+        suggestions,
+        seqs,
+        next_id,
         latest,
         decided: decided(s.k, &device, &hidden)?,
         new,
@@ -335,77 +405,103 @@ impl Suggestions {
     }
 }
 
-/// The local date of `ts`, a rules op's subject.
-fn day(ts: i64, tz: &impl TimeZone) -> String {
-    (tz.timestamp_millis_opt(ts).single())
-        .map(|t| t.naive_local().format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
-}
-
 impl Job for Suggestions {
     fn name(&self) -> &'static str {
         NAME
     }
 
-    fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
+    fn due(&self, s: &Stores, _now: i64) -> Result<Vec<Due>> {
         let round = self.read(s)?;
         Ok((since(&round).into_iter())
             .map(|since| Due {
-                about: day(now, &chrono::Local),
+                about: THROUGH.to_owned(),
                 since,
             })
             .collect())
     }
 
-    /// R1: the current suggestions, then the new preferences of whole reviews, the oldest first,
-    /// up to ten.
-    fn ask(&self, s: &Stores, _about: &str, _now: i64) -> Result<Option<Ask>> {
+    /// R1, #736: the new preferences of whole reviews, the oldest first, up to ten and at least one
+    /// review, while the window allows; then the suggestions while they fit: the rejected ones
+    /// first, as a preference saying one again must stay rejected, then the undecided strongest
+    /// first, then the approved.
+    fn ask(&self, s: &Stores, _about: &str, now: i64) -> Result<Option<Ask>> {
         let round = self.read(s)?;
-        let mut taken: Vec<Preference> = Vec::new();
+        let rules = s.rules;
+        let gate = |text: &str, max: usize| crate::my_work::shown(text, max, rules);
+        let mut left = s.summary.window_tokens;
+        let mut fits = |line: &str| {
+            let cost = crate::budget::estimate(line);
+            let fits = cost <= left;
+            if fits {
+                left -= cost;
+            }
+            fits
+        };
+        let (mut taken, mut preferences): (Vec<Preference>, String) = (Vec::new(), String::new());
+        // One review taken past the window leaves no room for the suggestions.
+        let mut full = false;
         for review in round.new.chunk_by(|a, b| a.review == b.review) {
             if !taken.is_empty() && taken.len() + review.len() > PREFERENCES {
                 break;
             }
+            let lines: String = (review.iter().enumerate())
+                .map(|(i, p)| {
+                    format!(
+                        "- P{}: {} (quote: \"{}\")\n",
+                        taken.len() + i + 1,
+                        gate(&p.statement, STATEMENT),
+                        gate(&p.quote, QUOTE)
+                    )
+                })
+                .collect();
+            let fit = fits(&lines);
+            if !fit && !taken.is_empty() {
+                break;
+            }
+            full |= !fit;
+            preferences.push_str(&lines);
             taken.extend(review.iter().cloned());
         }
         if taken.is_empty() {
             return Ok(None);
         }
-        let rules = s.rules;
-        let gate = |text: &str, max: usize| crate::my_work::shown(text, max, rules);
         let mut ops: BTreeSet<i64> = taken.iter().map(|p| p.review).collect();
+        ops.extend(round.seqs.get(THROUGH));
+        let state = |sg: &Suggestion| round.decided.get(&sg.id).map(|d| d.state);
+        let rank = |sg: &Suggestion| match state(sg) {
+            Some("rejected") => 0,
+            None => 1,
+            _ => 2,
+        };
+        let mut order: Vec<&Suggestion> = round.suggestions.iter().collect();
+        order.sort_by(|a, b| {
+            (rank(a).cmp(&rank(b))).then(strength(b, now).total_cmp(&strength(a, now)))
+        });
         let mut data = String::from("## The suggestions\n");
         if round.suggestions.is_empty() {
             data.push_str("(none yet)\n");
         }
-        for sg in &round.suggestions {
-            let decision = round.decided.get(&sg.id);
-            if let Some(d) = decision {
-                ops.insert(d.seq);
-            }
-            let state = decision.map_or("not decided", |d| d.state);
-            let n = sg.requests.len();
-            data.push_str(&format!(
-                "- {} (seen in {n} request{}, {state}): {}\n",
+        let mut ids = HashSet::new();
+        for sg in order {
+            let n = sg.seen;
+            let line = format!(
+                "- {} (seen in {n} request{}, {}): {}\n",
                 sg.id,
                 if n == 1 { "" } else { "s" },
+                state(sg).unwrap_or("not decided"),
                 gate(&sg.statement, STATEMENT)
-            ));
-        }
-        if let Some(last) = &round.last {
-            ops.insert(last.op_seq);
+            );
+            if full || !fits(&line) {
+                continue;
+            }
+            data.push_str(&line);
+            ids.insert(sg.id.clone());
+            ops.extend(round.seqs.get(&sg.id));
+            ops.extend(round.decided.get(&sg.id).map(|d| d.seq));
         }
         data.push_str("## The new preferences\n");
-        for (n, p) in taken.iter().enumerate() {
-            data.push_str(&format!(
-                "- P{}: {} (quote: \"{}\")\n",
-                n + 1,
-                gate(&p.statement, STATEMENT),
-                gate(&p.quote, QUOTE)
-            ));
-        }
+        data.push_str(&preferences);
         let labels = taken.len();
-        let ids: HashSet<String> = round.suggestions.iter().map(|sg| sg.id.clone()).collect();
         let context = Context {
             suggestions: round.suggestions.clone(),
             taken,
@@ -421,7 +517,7 @@ impl Job for Suggestions {
             },
             removed: vec![],
             check: Box::new(move |answer: &Value| check(answer, labels, &ids)),
-            subjects: Vec::new(),
+            subjects: vec![THROUGH.to_owned()],
             keep: Box::new(move |answer: &Value| keep(answer, &context)),
         }))
     }
@@ -495,12 +591,14 @@ struct Context {
     rules: Rules,
 }
 
-/// R1, S2: the suggestions carried, a join adding its request once and its quote, the newest three
-/// kept; a new statement, gated again, a new suggestion with the next id, or the one an earlier
-/// new statement just made; and how far the reviews were read.
+/// R1, S2: a join adding its request once (`seen` counts it) and its quote, the newest three kept;
+/// a new statement, gated again, a new suggestion with the next id, or the one an earlier new
+/// statement just made; and how far the reviews were read. An op for `through`, and one for each
+/// suggestion the answer changed, its text gated again, carried text too (#737).
 fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
     let mut suggestions = c.suggestions.clone();
     let mut next = c.next_id;
+    let mut changed = BTreeSet::new();
     for item in answer["preferences"].as_array().into_iter().flatten() {
         let n = (item["preference"]
             .as_str()
@@ -528,6 +626,7 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
                 suggestions.push(Suggestion {
                     id: format!("s{next}"),
                     statement,
+                    seen: 0,
                     requests: Vec::new(),
                     quotes: Vec::new(),
                 });
@@ -535,11 +634,14 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
                 suggestions.last_mut().unwrap()
             }
         };
+        changed.insert(sg.id.clone());
+        // shortcut: a request is counted once while it is among the newest REQUESTS kept; one
+        // older than them joining again is counted again.
         if !sg.requests.contains(&p.request) {
-            sg.requests.push(p.request.clone());
+            sg.seen += 1;
+            sg.requests.insert(0, p.request.clone());
+            sg.requests.truncate(REQUESTS);
         }
-        // Gated again as every kept field (A5), though a review keeps only a quote its gate leaves
-        // as it is (P4): a rule added since then masks it here too.
         let quote = crate::redact::outbound_with(&p.quote, &c.rules);
         sg.quotes.retain(|q| q.text != quote);
         sg.quotes.insert(
@@ -555,11 +657,20 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
         sg.quotes.truncate(QUOTES);
     }
     let through = c.taken.iter().map(|p| p.review).max().unwrap_or(0);
-    BTreeMap::from([
-        ("suggestions".to_owned(), json!(suggestions)),
-        ("next_id".to_owned(), json!(next)),
-        ("through".to_owned(), json!(through)),
-    ])
+    let gate = |text: &str| crate::redact::outbound_with(text, &c.rules);
+    let mut out = BTreeMap::from([(THROUGH.to_owned(), json!({"through": through}))]);
+    for sg in suggestions.iter().filter(|sg| changed.contains(&sg.id)) {
+        // Gated again as every kept field (A5): a rule added since a quote was kept masks it too.
+        let quotes: Vec<Value> = (sg.quotes.iter())
+            .map(|q| json!({"text": gate(&q.text), "request": q.request, "at": q.at}))
+            .collect();
+        out.insert(
+            sg.id.clone(),
+            json!({"statement": gate(&sg.statement), "seen": sg.seen, "requests": sg.requests,
+                "quotes": quotes}),
+        );
+    }
+    out
 }
 
 #[cfg(test)]
@@ -674,10 +785,17 @@ mod tests {
         }
 
         fn with<T>(&self, f: impl FnOnce(&Stores) -> T) -> T {
+            self.with_window(Summary::default().window_tokens, f)
+        }
+
+        fn with_window<T>(&self, window_tokens: u32, f: impl FnOnce(&Stores) -> T) -> T {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let rules = Rules::load(self.s.home.path()).unwrap();
-            let summary = Summary::default();
+            let summary = Summary {
+                window_tokens,
+                ..Summary::default()
+            };
             let reading = Reading::now(&self.s.raw, Reads::Live).unwrap();
             f(&Stores {
                 raw: &self.s.raw,
@@ -734,13 +852,20 @@ mod tests {
             (phase, sent.into_inner())
         }
 
-        /// The suggestions the newest rules op keeps.
+        /// The suggestions as kept, in their ids' order.
         fn suggestions(&self) -> Vec<Suggestion> {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let none = HashSet::new();
-            let ops = crate::my_work_ops::shown(&k, (NAME, None), None, &none, true, 1).unwrap();
-            ops.first().map(suggestions).unwrap_or_default()
+            carried(&k, self.s.raw.device(), &none).unwrap().0
+        }
+
+        /// A suggestion `id` kept as its op keeps it.
+        fn suggest(&mut self, id: &str, statement: &str, seen: u64, at: i64) -> i64 {
+            let requests: Vec<String> = (0..seen).map(|n| format!("g:{id}{n}")).collect();
+            let fields = json!({"statement": statement, "seen": seen, "requests": requests,
+                "quotes": [{"text": "q", "request": "g:0", "at": at}]});
+            self.op(NAME, id, fields)
         }
 
         /// The rules ops as if written `minutes` earlier.
@@ -797,7 +922,10 @@ mod tests {
         let after = h.suggestions();
         assert_eq!(after.len(), 1, "joined, not a new one");
         assert_eq!(after[0].statement, "Write the tests before the code.");
-        assert_eq!(after[0].requests, ["g:1", "g:2"]);
+        assert_eq!(
+            (after[0].seen, &after[0].requests[..]),
+            (2, &["g:2".to_owned(), "g:1".to_owned()][..])
+        );
         assert_eq!(
             after[0].quotes[0].text, "tests before the code please",
             "the newest quote first"
@@ -811,7 +939,8 @@ mod tests {
         h.age(4 * 60);
         h.pass(&|_| answer(&[("s1", "")]));
         let again = h.suggestions();
-        assert_eq!(again[0].requests, ["g:1", "g:2"], "a request counts once");
+        assert_eq!(again[0].seen, 2, "a request reviewed again counts once");
+        assert_eq!(again[0].requests, ["g:2", "g:1"]);
         assert_eq!(again[0].quotes.len(), 3);
     }
 
@@ -930,10 +1059,36 @@ mod tests {
             rules,
         };
         let kept = keep(&answer(&[("", "Name things plainly.")]), &c);
-        let text = kept["suggestions"][0]["quotes"][0]["text"]
-            .as_str()
-            .unwrap();
+        let text = kept["s1"]["quotes"][0]["text"].as_str().unwrap();
         assert!(!text.contains("codename-otter"), "{text}");
+        // #737: a suggestion carried as kept before the rule is gated again as it is written.
+        let carried = Suggestion {
+            id: "s1".into(),
+            statement: "Keep codename-otter out of logs.".into(),
+            seen: 1,
+            requests: vec!["g:0".into()],
+            quotes: vec![Quote {
+                text: "codename-otter stays out".into(),
+                request: "g:0".into(),
+                at: 0,
+            }],
+        };
+        let c = Context {
+            suggestions: vec![carried],
+            next_id: 2,
+            ..c
+        };
+        let kept = keep(&answer(&[("s1", "")]), &c);
+        assert!(
+            !kept["s1"].to_string().contains("codename-otter"),
+            "{}",
+            kept["s1"]
+        );
+        assert_eq!(
+            kept.len(),
+            2,
+            "through and the suggestion changed: {kept:?}"
+        );
     }
 
     /// R1, A10: each preference answered once and no other, a join of an id shown, a new
@@ -1199,6 +1354,7 @@ mod tests {
         let sg = |id: &str, requests: usize, days_ago: i64| Suggestion {
             id: id.into(),
             statement: id.into(),
+            seen: requests as u64,
             requests: (0..requests).map(|n| format!("g:{n}")).collect(),
             quotes: vec![Quote {
                 text: "q".into(),
@@ -1207,6 +1363,12 @@ mod tests {
             }],
         };
         assert_eq!(strength(&sg("a", 2, 0), now), 2.0);
+        // `seen` counts the requests past the newest kept (#737).
+        let counted = Suggestion {
+            seen: 6,
+            ..sg("f", 1, 0)
+        };
+        assert_eq!(strength(&counted, now), 6.0);
         assert_eq!(strength(&sg("b", 2, 7), now), 1.0);
         assert_eq!(strength(&sg("c", 3, 14), now), 1.0);
         assert!(strength(&sg("d", 1, 0), now) > strength(&sg("e", 3, 30), now));
@@ -1218,23 +1380,15 @@ mod tests {
     fn my_rules_orders_each_list() {
         let mut h = Home::new();
         let now = crate::db::now_ms();
-        let sg = |id: &str, requests: usize, days_ago: i64| {
-            json!({"id": id, "statement": format!("Rule {id}."),
-                "requests": (0..requests).map(|n| format!("g:{id}{n}")).collect::<Vec<_>>(),
-                "quotes": [{"text": "q", "request": "g:0", "at": now - days_ago * DAY_MS}]})
-        };
-        let all = [
-            sg("s1", 1, 30),
-            sg("s3", 1, 0),
-            sg("s2", 2, 0),
-            sg("s4", 1, 0),
-            sg("s5", 1, 0),
-        ];
-        h.op(
-            NAME,
-            "2026-10-28",
-            json!({"suggestions": all, "next_id": 6, "through": 0}),
-        );
+        for (id, seen, days_ago) in [
+            ("s1", 1, 30),
+            ("s3", 1, 0),
+            ("s2", 2, 0),
+            ("s4", 1, 0),
+            ("s5", 1, 0),
+        ] {
+            h.suggest(id, &format!("Rule {id}."), seen, now - days_ago * DAY_MS);
+        }
         for id in ["s4", "s5"] {
             h.act(json!({"suggestion": id, "action": "reject"}))
                 .unwrap();
@@ -1290,5 +1444,142 @@ mod tests {
             .unwrap();
         assert_eq!(got["state"], "applied");
         assert_eq!(h.waiting(), ["s1"]);
+    }
+
+    /// #737: a new suggestion's id is past every id an op names, a purged one's (its fields
+    /// cleared, its subject kept) and the owner's decisions' too.
+    #[test]
+    fn a_new_id_is_past_every_id_an_op_names() {
+        let mut h = Home::new();
+        h.op(NAME, "s9", json!({}));
+        h.op(RULE, "s12", json!({"action": "reject"}));
+        h.reviewed("g:1", &[("Tests first.", "tests first")]);
+        h.age(4 * 60);
+        h.pass(&|_| answer(&[("", "Write the tests first.")]));
+        let ids: Vec<String> = h.suggestions().into_iter().map(|sg| sg.id).collect();
+        assert_eq!(ids, ["s13"]);
+    }
+
+    /// #737: a call writes an op for `through` and one for each suggestion it changed, none for
+    /// the others.
+    #[test]
+    fn a_call_writes_only_the_suggestions_it_changed() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        h.suggest("s1", "Write the tests first.", 1, now);
+        h.suggest("s2", "Indent with spaces.", 1, now);
+        h.reviewed("g:1", &[("Tests before code.", "tests before code")]);
+        let count = |h: &Home| -> i64 {
+            h.s.run();
+            let k = crate::knowledge::open(h.s.home.path()).unwrap();
+            k.query_row("SELECT count(*) FROM my_work WHERE job = ?1", [NAME], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        h.age(4 * 60);
+        let before = count(&h);
+        h.pass(&|_| answer(&[("s1", "")]));
+        assert_eq!(count(&h), before + 2, "through and s1");
+        let kept = h.suggestions();
+        assert_eq!((kept[0].seen, kept[1].seen), (2, 1));
+    }
+
+    /// #736: a call fits the window however many suggestions there are, the new preferences first;
+    /// a rejected suggestion is shown before stronger undecided ones, so a preference saying it
+    /// again joins it rather than making it new.
+    #[test]
+    fn a_call_fits_the_window_and_shows_the_rejected_first() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        let long = "x".repeat(STATEMENT - 10);
+        for n in 1..=40 {
+            h.suggest(&format!("s{n}"), &format!("{n} {long}"), 9, now);
+        }
+        let s41 = h.suggest("s41", &format!("Tabs {long}"), 1, now - 60 * DAY_MS);
+        let rejected = h.op(RULE, "s41", json!({"action": "reject"}));
+        h.reviewed("g:1", &[("Tabs.", "tabs please")]);
+        let window = 1_500;
+        let ask = h.with_window(window, |s| {
+            Suggestions::default()
+                .ask(s, THROUGH, crate::db::now_ms())
+                .unwrap()
+                .unwrap()
+        });
+        let data = &ask.prompt[ask.prompt.rfind("## The suggestions").unwrap()..];
+        assert!(
+            crate::budget::estimate(data) <= window + 64,
+            "{}",
+            data.len()
+        );
+        assert!(
+            ask.prompt
+                .contains("- s41 (seen in 1 request, rejected): Tabs ")
+        );
+        assert!(
+            ask.prompt.contains("P1: Tabs."),
+            "the new preference is shown"
+        );
+        assert!(!ask.prompt.contains("- s40 "), "the window leaves some out");
+        assert_eq!((ask.check)(&answer(&[("s41", "")])), None);
+        assert!(
+            ask.read.ops.contains(&s41) && ask.read.ops.contains(&rejected),
+            "what it was shown (S2)"
+        );
+        assert_eq!((ask.check)(&answer(&[("s40", "")])), Some("unanchored"));
+    }
+
+    /// #736: a first review past the window is still asked about, with no room left for the
+    /// suggestions.
+    #[test]
+    fn a_review_past_the_window_leaves_no_suggestion_shown() {
+        let mut h = Home::new();
+        h.suggest("s1", "Indent with tabs.", 1, crate::db::now_ms());
+        let long = "y".repeat(QUOTE);
+        h.reviewed("g:1", &[("Tabs.", long.as_str())]);
+        let ask = h.with_window(20, |s| {
+            Suggestions::default()
+                .ask(s, THROUGH, crate::db::now_ms())
+                .unwrap()
+                .unwrap()
+        });
+        assert!(ask.prompt.contains("P1: Tabs."), "{}", ask.prompt);
+        assert!(!ask.prompt.contains("- s1 "), "{}", ask.prompt);
+    }
+
+    /// #739: while a decision is recorded but not applied, the suggestion takes no other action,
+    /// so an approve is not sent twice.
+    #[test]
+    fn a_decision_not_applied_yet_is_not_made_again() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let op = MyWorkOp {
+            job: RULE.into(),
+            about: "s1".into(),
+            entry: String::new(),
+            ts: crate::db::now_ms(),
+            read: Read::default(),
+            removed: vec![],
+            fields: BTreeMap::from([("action".to_owned(), json!("reject"))]),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let refused = h.act(approve.clone()).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+        assert_eq!(
+            h.yours(),
+            Vec::<(String, bool)>::new(),
+            "no preference made"
+        );
+        h.s.run();
+        let refused = h.act(approve).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (409, "rule_decided"),
+            "applied, it holds"
+        );
     }
 }

@@ -2642,7 +2642,7 @@ ctx.fetch=(url,options)=>{
   if(options?.method==='POST'){posted.push({url,body:JSON.parse(options.body)});return Promise.resolve(answers.shift());}
   return new Promise(()=>{});
 };
-run('globalThis.__show=show;show=async()=>{};lang="en"');
+run('globalThis.__show=show;show=async()=>{};lang="en";ui.setView("my_rules")');
 let shown=draw(answer);
 assert(shown.includes('Needs your decision')&&shown.includes('Suggested · learned from your requests, not yours until you approve'),'the suggestions');
 assert(shown.includes('Seen in 3 requests · Strong')&&shown.includes('Seen in 1 request · Light'),'how often seen, and how strong');
@@ -2722,6 +2722,21 @@ const why=panel.querySelectorAll('details').find(d=>d.children[0]?.dataset?.focu
 why.open=true;for(const cb of why.listeners.toggle||[])cb({target:why});
 run('myRulesDraw()');
 assert.equal(panel.querySelectorAll('details').find(d=>d.children[0]?.dataset?.focus==='why:s1').open,true,'kept open');
+// #739: a write that ends after the owner opened another tab draws nothing over it.
+draw(answer);
+let release;answers=[new Promise(r=>{release=r;})];
+button('reject:s4').click();
+run('ui.setView("timeline")');panel.replaceChildren();
+release(json({state:'applied'}));await settle();
+assert(!panel.querySelector('.my-rules'),'the other tab keeps its panel');
+run('ui.setView("my_rules")');
+// #739: only what was applied is done: a partial add keeps its form open.
+draw(answer);
+button('add').click();
+type(panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'Never use /tmp.');
+answers=[json({state:'directive_only',code:'preference_partly_recorded'})];
+button('add:save').click();await settle();
+assert(panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'the form stays open');
 // None yet.
 shown=draw({waiting:[],rejected:[],yours:[{scope:'global',rules:[]}],status:{state:'off'}});
 assert(shown.includes('Nothing waiting. New suggestions show up here after the next learning run.')&&shown.includes('No rules yet'),'none yet');

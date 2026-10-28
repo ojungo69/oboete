@@ -489,11 +489,12 @@ M7. **The page**: V2.
 ### R. My Rules (row X13)
 
 R1. **Suggestions** come from the reviews' preferences, merged by a `rules` job that runs with the
-story (P7) when a review added preferences. It is shown the current suggestions by id and up to
-10 new preferences, and says for each which suggestion it joins, or gives a new statement (200
-characters). The suggestion keeps its id and wording, so a reworded preference is not a new
-suggestion, and a rejected one stays rejected. "Seen" counts the requests whose preferences joined
-it; its quotes (up to 3) are theirs, checked in P4.
+story (P7) when a review added preferences. It is shown up to 10 new preferences and the current
+suggestions by id, as many as the window holds, and says for each preference which suggestion it
+joins, or gives a new statement (200 characters). The suggestion keeps its id and wording, so a
+reworded preference is not a new suggestion, and a rejected one stays rejected. "Seen" counts the
+requests whose preferences joined it, each once while it is among the newest 200 kept; its quotes
+(up to 3) are theirs, checked in P4.
 
 R2. **Your rules** are the decided preferences the owner made: `oboete pref add`, the viewer's, and
 approved suggestions (R3). Global ones, and ones for one repository. A situation is written into
@@ -1397,12 +1398,16 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 
 ### Slice 7b: the rule suggestions (2026-10-28)
 
-- **The job** (R1, S1): `my_work_rules::Suggestions`, op job `rules`, its subject the local day.
-  One op a run carries every suggestion forward, as the goals op carries its goals: each its id
-  (`s<n>`, from a counter kept in the op, `next_id`), its wording for good, the requests whose
-  preferences joined it (its "seen") and their newest three quotes, each with its review's time
-  (`at`, which My Rules ranks by, V3); and `through`, the newest review op whose preferences it
-  merged.
+- **The job** (R1, S1): `my_work_rules::Suggestions`, op job `rules`. Since #737 each suggestion
+  is an op of its own, its subject its id (`s<n>`), and one more op, subject `through`, says the
+  newest review op whose preferences were merged: one op could not carry them all within the op
+  cap (a suggestion with 50 requests and three Japanese quotes is about 5 KB). A suggestion keeps
+  its wording for good, `seen` (how many requests' preferences joined it), the newest 200 of those
+  requests (a request is counted once while it is among them), and their newest three quotes, each
+  with its review's time (`at`, which My Rules ranks by, V3). A call writes `through` and the
+  suggestions it changed, each gated again as it is written, carried text too. A new id is past
+  every `s<n>` an op of this device names, the owner's `rule` ops and purged ops included (a purge
+  clears fields, never the subject).
 - **The new preferences**: those of each request's newest review this device shows past
   `through`, the oldest review first, whole reviews while ten fit; the rest are due at once. Due
   with the story's cadence (P7): at once with none merged, else three hours after the last run once
@@ -1450,6 +1455,17 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **Delivery** (R4, decision 60): none of its own. An approved rule is a decided global
   preference, in the "Global preferences" block of every agent's session start.
 - **My Work's status line** leaves the rules job out, as it leaves the goals job.
+- **#736, #737** (the reviews of #734): a call shows the new preferences first (whole reviews, at
+  least one), then the suggestions while `[summary] window_tokens` holds them: the rejected ones
+  first, so a preference saying one again joins it and it stays rejected, then the undecided
+  strongest first, then the approved. A join is of an id shown; a new statement matching one left
+  out still joins it by its wording. The runner writes an op for each subject a keep gives beyond
+  the ones it waits on; links and the story give exactly theirs.
+- **#739** (the reviews of #738): an action on a suggestion whose last decision is recorded but not
+  applied yet is refused (`rule_pending`, 409), so an approve is not sent twice; only an applied
+  answer closes a form or offers Undo, and a partial one says what it kept; a write that ends
+  after the owner opened another tab draws nothing over it; and `/api/my-rules` keeps its uids
+  through the answer gate, as the routes that hand claim uids to the page do.
 - **Then**: slice 8b, a rule for one repository.
 
 ## Not built

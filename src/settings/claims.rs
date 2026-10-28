@@ -142,8 +142,11 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unavailable = |_| refused(503, "rule_unavailable", "");
-    let shown = match crate::search::b::stores(home).map_err(unavailable)? {
-        Some((raw, k)) => crate::my_work_rules::shown(&raw, &k).map_err(unavailable)?,
+    let (shown, unapplied) = match crate::search::b::stores(home).map_err(unavailable)? {
+        Some((raw, k)) => (
+            crate::my_work_rules::shown(&raw, &k).map_err(unavailable)?,
+            crate::my_work_rules::unapplied(&raw, &k, id).map_err(unavailable)?,
+        ),
         None => return Err(refused(404, "rule_not_found", "suggestion")),
     };
     let Some(suggestion) = shown.suggestions.iter().find(|sg| sg.id == id) else {
@@ -154,6 +157,8 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
     let record =
         |fields: Value| crate::my_work_rules::record(home, id, fields).map_err(unavailable);
     match (posted.action.as_str(), decision) {
+        // #739: a decision recorded but not applied yet is waited for, not made again.
+        _ if unapplied => Err(refused(409, "rule_pending", "suggestion")),
         ("approve" | "reject", Some(_)) => Err(refused(409, "rule_decided", "suggestion")),
         ("undo", None) => Err(refused(409, "rule_not_decided", "suggestion")),
         ("approve", None) => {

@@ -2237,7 +2237,8 @@ fn answered(name: &str, mut answer: Value) -> Value {
             .collect(),
         _ => Vec::new(),
     };
-    let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc") {
+    // My Rules' uids go back to the claim routes as selectors (#739).
+    let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc" | "my-rules") {
         gated_with_ids(answer, true)
     } else {
         gated(answer)
@@ -6053,6 +6054,13 @@ curate = false
                 .unwrap()
                 .iter()
                 .any(|item| item["key"] == x.current)
+        );
+        // #739: My Rules hands its uids to the claim routes too.
+        let pref = crate::claims::pref_add(store.home.path(), "Answer in Japanese.").unwrap();
+        let rules = get(&v, "/api/my-rules");
+        assert!(
+            (rules["yours"][0]["rules"].as_array().unwrap().iter()).any(|r| r["uid"] == pref),
+            "{rules}"
         );
         let post = |path: &str, value: Value| {
             let body = serde_json::to_vec(&value).unwrap();

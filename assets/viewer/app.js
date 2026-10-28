@@ -2593,6 +2593,7 @@ const TEXT = {
   rule_not_decided: ['That suggestion has no decision to undo. The page reads again.', 'その提案には元に戻す判断がありません。ページを読み直します。'],
   rule_scope: ['A rule is saved for every repository.', '規則はすべてのリポジトリに保存します。'],
   rule_partly_recorded: ['The rule is saved, but the suggestion still shows as waiting. Reject it, or leave it: approving it again adds the rule twice.', '規則は保存しましたが、提案は判断待ちのまま表示されます。却下するか、そのままにしてください。もう一度承認すると規則が 2 つになります。'],
+  rule_pending: ['That decision is still being applied. The page reads again shortly.', 'その判断はまだ反映中です。少ししてからページを読み直します。'],
   rule_unavailable: ['My Rules could not save now. Try again shortly.', 'いまは保存できませんでした。少ししてからもう一度お試しください。'],
   my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
   my_work_stands: ['Where it stands', '現在の状況'],
@@ -7931,11 +7932,13 @@ async function myRulesWrite(path, body, done) {
     if (!res.ok) {
       failed = true;
       message = memoryFailure(res, answer);
-    } else {
-      message = answer.state === 'applied' ? t(done) : t(answer.code === 'rule_partly_recorded' ? answer.code : 'my_rules_pending');
-      failed = answer.state !== 'applied';
+      return false;
     }
-    return res.ok;
+    // Only what was applied is done (#739): a partial record says what it kept, and closes nothing.
+    const applied = answer.state === 'applied';
+    message = applied ? t(done) : t(Object.hasOwn(TEXT, answer.code ?? '') ? answer.code : 'my_rules_pending');
+    failed = !applied;
+    return applied;
   } catch {
     failed = true;
     message = t('memory_result_unknown');
@@ -8048,6 +8051,8 @@ function myRulesLast() {
 }
 
 function myRulesDraw() {
+  // A write that ends after the owner opened another tab draws nothing over it (#739).
+  if (view !== 'my_rules') return;
   const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
   const a = mr.answer ?? {};
   const waiting = a.waiting ?? [];
