@@ -371,7 +371,10 @@ impl Shown {
             ops.push(review.op_seq);
         }
         if !u.input.repos.is_empty() {
-            block.push_str(&format!("Repositories: {}\n", u.input.repos.join(", ")));
+            let repos: Vec<String> = (u.input.repos.iter())
+                .map(|repo| crate::redact::outbound_with(repo, rules))
+                .collect();
+            block.push_str(&format!("Repositories: {}\n", repos.join(", ")));
         }
         let cost = crate::budget::estimate(&block);
         if !first && cost > self.left {
@@ -1148,6 +1151,14 @@ mod tests {
         assert_eq!(h.due(), [OTHER]);
         let held = BTreeSet::from([(NAME.to_owned(), OTHER.to_owned())]);
         assert!(h.due_held(&held).is_empty());
+        // A proposal the same as a listed area places its requests there, and adds none.
+        h.area(AREA, "The parser", "kept", "owner");
+        h.pass(&|p| {
+            let label = shown(p).into_iter().find(|(_, i)| *i == 3).unwrap().0;
+            json!({"proposals": [proposal("promote", "Lexer", &[label.as_str()], AREA)]})
+        });
+        let focus = h.focus();
+        assert_eq!((focus.areas.len(), focus.of(&subjects[2])), (2, Some(AREA)));
     }
 
     /// S6: an exclusion of the repository hides the placements made on what it showed.
