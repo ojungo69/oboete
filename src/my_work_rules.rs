@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::my_work_ops::{Kept, Read};
-use crate::my_work_run::{Ask, Due, Job, Stores};
+use crate::my_work_run::{Ask, Due, Job, Stores, strict};
 use crate::redact::Rules;
 
 pub(crate) const NAME: &str = "rules";
@@ -168,9 +168,11 @@ fn round(s: &Stores) -> Result<Round> {
 fn since(round: &Round) -> Option<i64> {
     let first = round.new.first()?;
     let newest = round.new.iter().map(|p| p.ts).max().unwrap_or(0);
+    // One left from before the last run is due at once, whatever came since (#734).
+    let oldest = round.new.iter().map(|p| p.ts).min().unwrap_or(0);
     Some(match round.latest {
         None => first.ts,
-        Some(last) if newest <= last => last,
+        Some(last) if oldest <= last => last,
         Some(last) => (last + AGAIN_MS).max(newest),
     })
 }
@@ -285,8 +287,7 @@ impl Job for Suggestions {
 }
 
 fn prompt(data: &str) -> String {
-    let fence = format!("=== RULES {} ===", &crate::curate::sha256_hex(data)[..16]);
-    format!(
+    let instructions = format!(
         "You keep a list of suggested rules for how a developer likes coding agents to work, \
          learned from the preferences their requests showed. At the end of this prompt, between \
          two fence lines, are the current suggestions, each with its id, how many requests showed \
@@ -298,27 +299,16 @@ fn prompt(data: &str) -> String {
          of the suggestion it says the same as, rejected ones included, or an empty string when it \
          says something none does; with an empty joins, statement: the suggestion it makes, an \
          actionable rule of at most {STATEMENT} characters in the developer's language, else an \
-         empty string. Drop nothing.\n\
-         {FENCE}{fence}`.\n\n\
-         {fence}\n{data}{fence}",
-        FENCE = crate::curate::FENCE_SENTENCE,
-    )
+         empty string. Drop nothing.",
+    );
+    crate::my_work_run::fenced("RULES", &instructions, data)
 }
 
 /// The answer the rules job asks for (A10): every key required, nothing more, no length keywords.
 fn schema() -> Value {
     let text = json!({"type": "string"});
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["preferences"],
-        "properties": {"preferences": {"type": "array", "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["preference", "joins", "statement"],
-            "properties": {"preference": text, "joins": text, "statement": text}
-        }}}
-    })
+    let item = strict(json!({"preference": text, "joins": text, "statement": text}));
+    strict(json!({"preferences": {"type": "array", "items": item}}))
 }
 
 /// R1, checked by code (A10): each preference shown answered once and no other, a join of a
@@ -339,7 +329,8 @@ fn check(answer: &Value, labels: usize, ids: &HashSet<String>) -> Option<&'stati
         let n = label
             .strip_prefix('P')
             .and_then(|n| n.parse::<usize>().ok());
-        if !n.is_some_and(|n| (1..=labels).contains(&n)) || !seen.insert(label) {
+        // Once by its number: `P01` and `P+1` are `P1` again (#734).
+        if !n.is_some_and(|n| (1..=labels).contains(&n) && seen.insert(n)) {
             return Some("shape");
         }
         if !joins.is_empty() && !ids.contains(joins) {
@@ -418,6 +409,8 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
                 at: p.ts,
             },
         );
+        // The newest three by their reviews' times, in whatever order the answer named them.
+        sg.quotes.sort_by_key(|q| std::cmp::Reverse(q.at));
         sg.quotes.truncate(QUOTES);
     }
     let through = c.taken.iter().map(|p| p.review).max().unwrap_or(0);
@@ -680,6 +673,14 @@ mod tests {
         assert_eq!(due.len(), 1, "the rest");
         let last = h.with(|s| round(s).unwrap().latest.unwrap());
         assert_eq!(due[0].since, last, "at once");
+        // #734: one left from before the run and one written since: at once still.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.reviewed("g:5", &[("Rule 5.", "rule 5")]);
+        assert_eq!(
+            h.due()[0].since,
+            last,
+            "at once, though a newer review came"
+        );
         let (_, sent) = h.pass(&new);
         assert!(
             sent[0].contains("Rule 4.0.") && !sent[0].contains("Rule 1.0."),
@@ -760,5 +761,33 @@ mod tests {
         let twice = json!({"preferences": [{"preference": "P1", "joins": "s1", "statement": ""},
             {"preference": "P1", "joins": "s1", "statement": ""}]});
         assert_eq!(check(&twice, 2, &ids), Some("shape"));
+        // #734: P01 or P+1 is P1 again, so P2 would go unanswered.
+        for other in ["P01", "P+1"] {
+            let again = json!({"preferences": [{"preference": "P1", "joins": "s1", "statement": ""},
+                {"preference": other, "joins": "s1", "statement": ""}]});
+            assert_eq!(check(&again, 2, &ids), Some("shape"), "{other}");
+        }
+    }
+
+    /// #734: a suggestion keeps its newest three quotes by their reviews' times, whatever order
+    /// the answer named the preferences in.
+    #[test]
+    fn the_newest_quotes_are_kept_whatever_the_answers_order() {
+        let mut h = Home::new();
+        h.reviewed("g:1", &[("Tests come first.", "first quote")]);
+        h.pass(&|_| answer(&[("", "Write the tests first.")]));
+        for (request, quote) in [("g:2", "second quote"), ("g:3", "third quote")] {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            h.reviewed(request, &[("Tests first.", quote)]);
+        }
+        h.age(4 * 60);
+        let reversed = json!({"preferences": [
+            {"preference": "P2", "joins": "s1", "statement": ""},
+            {"preference": "P1", "joins": "s1", "statement": ""}]});
+        h.pass(&|_| reversed.clone());
+        let quotes: Vec<String> = (h.suggestions()[0].quotes.iter())
+            .map(|q| q.text.clone())
+            .collect();
+        assert_eq!(quotes, ["third quote", "second quote", "first quote"]);
     }
 }

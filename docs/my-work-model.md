@@ -1394,13 +1394,17 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
 - **The new preferences**: those of each request's newest review this device shows past
   `through`, the oldest review first, whole reviews while ten fit; the rest are due at once. Due
   with the story's cadence (P7): at once with none merged, else three hours after the last run once
-  a review added preferences. A skip waits for a newer review.
+  a review added preferences, and at once while any preference is left from before the last run,
+  newer ones beside it or not (#734). A skip waits for a newer review.
 - **The call**: the current suggestions by id, each with how many requests saw it and the owner's
   decision, then the new preferences labelled `P<n>` with their statement and quote. Each answer
   says which suggestion a preference joins, rejected ones included, or gives a new statement of at
-  most 200 characters. The check refuses a preference missed, named twice or not shown (`shape`),
+  most 200 characters. The check refuses a preference missed, named twice (by its number:
+  `P01` is `P1` again) or not shown (`shape`),
   a join of an id not shown (`unanchored`), and a new statement empty (`empty`) or over 200
-  (`over_cap`). The keep gates a new statement again; two new ones of one wording are one.
+  (`over_cap`). The keep gates a new statement again; two new ones of one wording are one. A
+  suggestion keeps the newest three quotes by their reviews' times, in whatever order the answer
+  named its preferences (#734).
 - **The owner's decision** is never the rules op's: it is the newest `rule` op of the suggestion's
   id (R3, slice 8 writes it: `action` approve, reject or undo), read by `my_work_rules::decided`. So
   a rejected suggestion a preference joins again stays rejected, where claude-mem's suggestion,

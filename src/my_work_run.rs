@@ -96,6 +96,23 @@ impl std::fmt::Display for BoundReached {
 impl std::error::Error for BoundReached {}
 
 /// The jobs this binary runs, for one round.
+/// A job's prompt: its instructions, then `data` between two fence lines named by `tag` and by
+/// the data's digest, so the data cannot contain them (spec 3.3: recorded text is data).
+pub(crate) fn fenced(tag: &str, instructions: &str, data: &str) -> String {
+    let fence = format!("=== {tag} {} ===", &crate::curate::sha256_hex(data)[..16]);
+    let sentence = crate::curate::FENCE_SENTENCE;
+    format!("{instructions}\n{sentence}{fence}`.\n\n{fence}\n{data}{fence}")
+}
+
+/// A job's answer object (A10): every key of `properties` required, nothing more.
+pub(crate) fn strict(properties: Value) -> Value {
+    let required: Vec<String> = (properties.as_object().into_iter())
+        .flat_map(|m| m.keys().cloned())
+        .collect();
+    json!({"type": "object", "additionalProperties": false,
+        "required": required, "properties": properties})
+}
+
 pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
     vec![
         Box::new(crate::my_work_group::Grouping::default()),
