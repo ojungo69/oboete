@@ -2470,3 +2470,100 @@ draw(answer({state:'summaries_off'}));
 assert(keyed('button','settings')!==before&&document.activeElement===keyed('button','settings'),'the status line\'s button keeps it');
 console.log('PASS: My Goals: top 5 and the rest, quotes with their times, open asks, the months, the status line, JA/EN, a reread each minute, the latest line, the focus kept');
 }
+
+// Decision 57 slice 6b (docs/my-work-model.md L3, V2, V4): each goal's requests, its status word
+// and rollup, the lead, the open asks split, "No goal", and My Work's goal chip.
+{
+const run=code=>vm.runInContext(code,ctx);
+const panel=document.getElementById('panel');
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const day=Date.UTC(2026,9,20,12,0);
+const goal=(id,kind,rank,title,asked=1,last=day)=>({id,kind,rank,title,product:'',asked,last,quotes:[{text:title,ts:last}]});
+const req=(id,title,status,goals,progress=null)=>({id,title,status,goals,progress,updated:day,checked:null,work:[],sessions:[]});
+const g=(id,kind='priority')=>({id,kind,rank:1,title:id});
+const draw=(items,requests)=>{ctx.__goals={current:{written:day,items},window:{days:31,prompts:9},month:{month:'2026-10',prompts:9},months:[],status:{state:'none'}};
+  ctx.__requests=requests;run('mg.answer=globalThis.__goals;mg.requests=globalThis.__requests;mg.tab="now";myGoalsDraw()');return text(panel);};
+run('lang="en"');
+// The status words, by claude-mem's statusOf over My Work's states.
+const status=(rows,last=day)=>{ctx.__g=goal('g1','priority',1,'Fail fast',1,last);ctx.__rows=rows;return run('myGoalsStatus(globalThis.__g,globalThis.__rows)');};
+assert.equal(status([]),'nothing');
+assert.equal(status([req('a','A','needs',[g('g1')]),req('b','B','working',[g('g1')])]),'your_move');
+assert.equal(status([req('a','A','ready',[g('g1')]),req('b','B','shipped',[g('g1')])]),'moving');
+assert.equal(status([req('a','A','checked',[g('g1')])]),'your_move','a checked request is the owner\'s move, as claude-mem');
+assert.equal(status([req('a','A','quiet',[g('g1')])]),'stalled');
+const shipped=done=>req('a','A','shipped',[g('g1')],{percent:100,reviewed:null,completed:done});
+assert.equal(status([shipped('2026-10-25')]),'shipped');
+assert.equal(status([shipped('2026-10-19')]),'asked_again');
+// asked_again_after_ship_compares_full_dates (V2): asked in a later year, on an earlier month and
+// day than the ship's, is asked again; claude-mem's month and day alone would say shipped.
+assert.equal(status([shipped('2025-10-27')]),'asked_again');
+// The page: before any request is linked, as it was; once one is, the lead, words and rollups.
+let shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs'),goal('g3','ask',1,'Header test',4),goal('g4','ask',2,'Docs')],
+  [req('r1','Request A','working',null)]);
+assert(!shown.includes('Your work is moving')&&!shown.includes('Nothing on it'),'nothing linked: no word yet');
+const rows=[req('r1','Request A','working',[g('g1'),g('g3','ask')],{percent:40,reviewed:day}),
+  req('r2','Request B','todo',[g('g1')]),req('r3','Request C','working',[]),req('r4','Request D','working',null)];
+shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs'),goal('g3','ask',1,'Header test',4),goal('g4','ask',2,'Docs',2)],rows);
+assert(shown.includes('Your work is moving 1 of your top 2 priorities. 0 are waiting on you, and 1 has nothing working on it.'),shown);
+assert(shown.includes('1 open ask has no request yet. The one you’ve asked for most is “Docs”, 2 times.'),'the lead\'s asks');
+assert(shown.includes('Moving')&&shown.includes('Nothing on it'),'each priority\'s word');
+assert(shown.includes('40% · 1 of 2 requests reviewed')&&shown.includes('Not counted: Request B'),'the rollup');
+assert(shown.includes('No requests, so no progress to measure'),'a priority nothing serves');
+assert(shown.includes('Requests serving it · 2')&&shown.includes('Start a request for this. Nothing is working on it.'),'its requests, or the next move');
+assert(shown.includes('Nothing is working on these · 1')&&shown.includes('Being worked on · 1'),'the open asks split');
+assert(shown.includes('No goal · 1')&&shown.includes('Request C'),'the requests linked to none');
+const summaries=panel.querySelectorAll('summary').filter(s=>s.dataset.focus?.startsWith('goal:'));
+assert.equal(summaries.length,2,'each priority opens');
+// Opening a request goes to its page on My Work.
+const open=panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r2');
+run('globalThis.__show=show;show=()=>{}');open.click();
+assert.equal(run('view'),'my_work');assert.equal(run('mw.request'),'r2');
+run('show=globalThis.__show;ui.setView("my_goals")');
+assert(draw([goal('g1','priority',1,'Fail fast'),goal('g5','ask',1,'Tests')],rows).includes('1 open ask has no request yet. The one you’ve asked for most is “Tests”, once.'),'asked once');
+run('lang="ja"');
+shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs'),goal('g3','ask',1,'Header test',4),goal('g4','ask',2,'Docs',2)],rows);
+assert(shown.includes('上位 2 件の優先していることのうち、1 件が進んでいます。0 件はあなたの番で、1 件は何も進んでいません。'),shown);
+assert(shown.includes('進んでいる')&&shown.includes('手つかず')&&shown.includes('目標なし · 1')&&shown.includes('まだ何も進んでいないもの · 1'),'the words in Japanese');
+run('lang="en"');
+// My Work's chip: nothing while there are no goals; then not linked yet, none, or the goal.
+const chip=(row,goals)=>{ctx.__row=row;run(`mw.goals=${goals}`);const n=run('myWorkGoalChip(globalThis.__row)');return n?text(n):null;};
+assert.equal(chip(req('r','R','working',null),0),null);
+assert.equal(chip(req('r','R','working',null),2),'Goal not linked yet');
+assert.equal(chip(req('r','R','working',[]),2),'No goal');
+assert.equal(chip(req('r','R','working',[{id:'g1',kind:'priority',rank:1,title:'Fail fast'}]),2),'Fail fast');
+// The chip opens My Goals on its goal, open and with the focus on it.
+const button=run('myWorkGoalChip(globalThis.__row)');
+run('globalThis.__show=show;show=()=>{}');button.click();run('show=globalThis.__show');
+assert.equal(run('view'),'my_goals');
+draw([goal('g1','priority',1,'Fail fast',3)],[req('r','R','working',[g('g1')])]);
+assert.equal(document.activeElement?.dataset.focus,'goal:g1','the focus on the goal it opened');
+assert(panel.querySelectorAll('details').find(d=>d.className==='my-goals-priority').open,'open');
+// #729: a priority past the top five opens "more" first; an open ask is jumped to by its quotes.
+const six=Array.from({length:6},(_,i)=>goal(`g${i+1}`,'priority',i+1,`P${i+1}`));
+ctx.__row=req('r','R','working',[{id:'g6',kind:'priority',rank:6,title:'P6'}]);run('mw.goals=6;mg.more=false');
+let target=run('myWorkGoalChip(globalThis.__row)');
+run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
+assert.equal(run('mg.more'),true,'"more" opened');
+draw(six,[req('r','R','working',[g('g6')])]);
+assert.equal(document.activeElement?.dataset.focus,'goal:g6');
+ctx.__row=req('r','R','working',[{id:'g7',kind:'ask',rank:1,title:'Docs'}]);
+target=run('myWorkGoalChip(globalThis.__row)');
+run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
+draw([...six,goal('g7','ask',1,'Docs')],[req('r','R','working',[g('g7','ask')])]);
+assert.equal(document.activeElement?.dataset.focus,'why:g7','an open ask by its quotes');
+// #729: a request opened from My Goals reads its work product again.
+draw([goal('g1','priority',1,'Fail fast')],[req('r9','R9','working',[g('g1')])]);
+run('mw.products={id:"r9",items:[]};mw.unread.add("r9")');
+run('globalThis.__show=show;show=()=>{}');
+panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r9').click();
+run('show=globalThis.__show;ui.setView("my_goals")');
+assert.equal(run('mw.products'),null,'the work product read again');
+assert.equal(run('mw.unread.has("r9")'),false);
+// #729: a failed read of My Work leaves the goals drawn.
+ctx.fetch=url=>String(url).includes('my-work')?Promise.reject(new Error('down')):Promise.resolve(response({current:{written:day,items:[goal('g1','priority',1,'Fail fast')]},window:{days:31,prompts:1},month:{month:'2026-10',prompts:1},months:[],status:{state:'none'}}));
+run('mg.signature=null');
+(await run('showMyGoals()'))();
+assert(text(panel).includes('Fail fast'),'the goals without My Work');
+run('mw.goals=0');
+console.log('PASS: My Goals 6b: status words by My Work\'s states, full-date asked again, the rollup, the lead, the open asks split, No goal, requests opening on My Work, JA, the goal chip');
+}

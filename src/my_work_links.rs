@@ -43,11 +43,12 @@ struct Goals {
     top: i64,
 }
 
-/// One round's read: the units, the goals, and each due request with since when, oldest first.
+/// One round's read: the units, the goals, and the due requests in batches of `BATCH`, the oldest
+/// first, each with since when its first is due.
 struct Round {
     units: Vec<Unit>,
     goals: Option<Goals>,
-    due: Vec<(i64, String)>,
+    batches: Vec<(i64, Vec<String>)>,
 }
 
 /// The links job, for one round: what it read for its due check, kept for the call it makes.
@@ -88,15 +89,10 @@ fn linked(fields: &BTreeMap<String, Value>) -> Vec<String> {
 fn round(s: &Stores, now: i64) -> Result<Round> {
     let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
     let device = s.raw.device().to_owned();
-    let goals_job = (crate::my_work_goals::NAME, None);
-    let goals = (crate::my_work_ops::shown(s.k, goals_job, Some(&device), &hidden, true, 1)?)
-        .pop()
-        .map(|op| {
-            let items = crate::my_work_goals::items(&op);
-            let top = items.iter().map(|i| number(&i.id)).max().unwrap_or(0);
-            Goals { op, items, top }
-        })
-        .filter(|g| !g.items.is_empty());
+    let goals = current(s.k, &device, &hidden, now)?.map(|(op, items)| {
+        let top = items.iter().map(|i| number(&i.id)).max().unwrap_or(0);
+        Goals { op, items, top }
+    });
     let (mut units, mut due) = (Vec::new(), Vec::new());
     // With no goals there is nothing to link to, as in claude-mem.
     if let Some(goals) = &goals {
@@ -117,7 +113,64 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
         }
     }
     due.sort();
-    Ok(Round { units, goals, due })
+    // L1 (#728): each batch is asked by its first, so a batch held after a failure keeps its
+    // requests out of the batches the runner asks while it waits.
+    let batches = (due.chunks(BATCH))
+        .map(|b| (b[0].0, b.iter().map(|(_, id)| id.clone()).collect()))
+        .collect();
+    Ok(Round {
+        units,
+        goals,
+        batches,
+    })
+}
+
+/// The current goals as My Goals shows them (M5, #728): the newest goals op with items `device`
+/// shows, `hidden` passed over (S6), and its items with a quote in the window, ranked again within
+/// each kind; none while none is left.
+pub(crate) fn current(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &HashSet<(String, i64)>,
+    now: i64,
+) -> Result<Option<(Kept, Vec<Item>)>> {
+    let goals = (crate::my_work_goals::NAME, None);
+    let Some(op) = crate::my_work_ops::shown(k, goals, Some(device), hidden, true, 1)?.pop() else {
+        return Ok(None);
+    };
+    let since = now - crate::my_work_goals::WINDOW_MS;
+    let items = crate::my_work_goals::current(&crate::my_work_goals::items(&op), since);
+    Ok((!items.is_empty()).then_some((op, items)))
+}
+
+/// L3, V4: the current goals `request`'s newest links op names, each its id, kind, rank and
+/// title as the gate shows it, the priorities first by rank, then the open asks: none ("Goal not
+/// linked yet") when no answered links op is shown or each goal it names is gone; empty ("No
+/// goal") when it named none.
+pub(crate) fn of_request(
+    k: &rusqlite::Connection,
+    (request, device): (&str, &str),
+    hidden: &HashSet<(String, i64)>,
+    goals: &[Item],
+    rules: &Rules,
+) -> Result<Value> {
+    let Some(last) =
+        crate::my_work_ops::newest_shown(k, (NAME, request), Some(device), hidden, true)?
+    else {
+        return Ok(Value::Null);
+    };
+    let ids = linked(&last.op.fields);
+    let mut named: Vec<&Item> = goals.iter().filter(|g| ids.contains(&g.id)).collect();
+    if named.is_empty() && !ids.is_empty() {
+        return Ok(Value::Null);
+    }
+    named.sort_by_key(|g| (g.kind != "priority", g.rank));
+    let gate = |text: &str| crate::redact::outbound_with(text, rules);
+    Ok(Value::Array(
+        (named.into_iter())
+            .map(|g| json!({"id": g.id, "kind": g.kind, "rank": g.rank, "title": gate(&g.title)}))
+            .collect(),
+    ))
 }
 
 /// L1: since when a request is due, given its newest review and the newest links op of it this
@@ -151,15 +204,15 @@ impl Job for Links {
 
     fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
         let round = self.read(s, now)?;
-        Ok((round.due.iter())
-            .map(|(since, about)| Due {
-                about: about.clone(),
+        Ok((round.batches.iter())
+            .map(|(since, batch)| Due {
+                about: batch[0].clone(),
                 since: *since,
             })
             .collect())
     }
 
-    /// L1, L2: `about` and up to four more requests due now, the oldest first, as far as they fit.
+    /// L1, L2: `about`'s batch, the oldest first, as far as it fits.
     fn ask(&self, s: &Stores, about: &str, now: i64) -> Result<Option<Ask>> {
         let round = self.read(s, now)?;
         let Some(goals) = &round.goals else {
@@ -171,13 +224,9 @@ impl Job for Links {
         };
         let mut shown = Shown::goals(s, goals);
         shown.request(s, lead, true);
-        let others = (round.due.iter())
-            .filter(|(_, id)| id != about)
-            .filter_map(|(_, id)| unit(id));
+        let batch = (round.batches.iter()).find(|(_, b)| b[0] == about);
+        let others = (batch.into_iter().flat_map(|(_, b)| &b[1..])).filter_map(|id| unit(id));
         for u in others {
-            if shown.subjects.len() == BATCH {
-                break;
-            }
             shown.request(s, u, false);
         }
         let device = s.raw.device().to_owned();
@@ -528,10 +577,11 @@ mod tests {
             inputs.into_iter().map(|i| i.id).collect()
         }
 
+        /// Every request due, in any batch.
         fn due(&self) -> Vec<String> {
             let mut due: Vec<String> = self.with(|s| {
-                let due = Links::default().due(s, crate::db::now_ms()).unwrap();
-                due.into_iter().map(|d| d.about).collect()
+                let round = round(s, crate::db::now_ms()).unwrap();
+                round.batches.into_iter().flat_map(|(_, b)| b).collect()
             });
             due.sort();
             due
@@ -884,6 +934,123 @@ mod tests {
         assert!(h.due().is_empty());
         h.reviewed(&ids[1], "The parser fails fast now.");
         assert_eq!(h.due(), [ids[1].clone()]);
+    }
+
+    /// L3, V4: My Work's card names the current goals its request links, the priorities first;
+    /// one not linked yet has none (null), one linked to none an empty list, and one whose goals
+    /// are all gone is not linked yet.
+    #[test]
+    fn a_card_names_its_goals_priorities_first() {
+        let mut h = Home::new();
+        h.requests(2);
+        h.goals(&[("g2", "ask", 1, "Logs"), ("g1", "priority", 1, "Fail fast")]);
+        let card = |h: &Home, title: &str| -> Value {
+            h.s.run();
+            let now = crate::db::now_ms();
+            let v = crate::my_work::read(h.s.home.path(), crate::my_work::Range::All, now);
+            let v = v.unwrap();
+            assert!(
+                v["goals"].as_u64().unwrap() > 0,
+                "the current goals counted"
+            );
+            let rows = v["requests"].as_array().unwrap();
+            let row = rows.iter().find(|r| r["title"] == title).unwrap();
+            row["goals"].clone()
+        };
+        assert_eq!(card(&h, "Request 1"), Value::Null);
+        h.pass(&|p| by_title(p, &[&["g2", "g1"], &[]]));
+        let both = json!([{"id": "g1", "kind": "priority", "rank": 1, "title": "Fail fast"},
+            {"id": "g2", "kind": "ask", "rank": 1, "title": "Logs"}]);
+        assert_eq!(card(&h, "Request 1"), both);
+        assert_eq!(card(&h, "Request 2"), json!([]));
+        h.goals(&[("g3", "priority", 1, "Other")]);
+        assert_eq!(card(&h, "Request 1"), Value::Null);
+        assert_eq!(card(&h, "Request 2"), json!([]));
+    }
+
+    /// #728: a batch every entry refused waits whole; the runner asks the next batch, and none of
+    /// the waiting batch's requests goes into it.
+    #[test]
+    fn a_held_batch_keeps_its_requests_out_of_the_next() {
+        let mut h = Home::new();
+        let (ids, _) = h.requests(6);
+        h.goals(&[("g1", "priority", 1, "Fail fast")]);
+        let (_, sent) = h.pass(&|_| json!({}));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("### R5"), "{}", sent[0]);
+        // The refusal waits, as a rest or a cap would make it.
+        let db = crate::providers_db::open(h.s.home.path()).unwrap();
+        let span = format!(
+            "{NAME} {}",
+            h.with(|s| round(s, crate::db::now_ms()).unwrap().batches[0].1[0].clone())
+        );
+        let mut p = crate::providers_db::my_work_pending_of(&db, &span)
+            .unwrap()
+            .unwrap();
+        p.next_attempt_at = crate::db::now_ms() + 10 * MINUTE;
+        crate::providers_db::set_my_work_pending(&db, &p).unwrap();
+        let all: Vec<&[&str]> = vec![&["g1"]; 6];
+        let (_, sent) = h.pass(&|p| by_title(p, &all));
+        assert_eq!(sent.len(), 1, "the next batch");
+        assert!(
+            sent[0].contains("### R1") && !sent[0].contains("### R2"),
+            "{}",
+            sent[0]
+        );
+        assert!(sent[0].contains("Title: Request 6"), "{}", sent[0]);
+        assert_eq!(h.linked(&ids[5]), ["g1"]);
+        assert!(
+            ids[..5].iter().all(|id| h.links(id).is_none()),
+            "the held batch waits"
+        );
+        let (_, sent) = h.pass(&|p| by_title(p, &all));
+        assert!(sent.is_empty(), "still waiting: {sent:?}");
+    }
+
+    /// #728, M5: the goals are those My Goals shows: one whose quotes all left the 31 days is gone,
+    /// so a request linked to it is due again and no card names it; with none left nothing is due.
+    #[test]
+    fn a_goal_whose_quotes_left_the_window_is_gone() {
+        let mut h = Home::new();
+        let (ids, _) = h.requests(1);
+        h.goals(&[("g1", "priority", 1, "Fail fast"), ("g2", "ask", 1, "Logs")]);
+        h.pass(&|p| by_title(p, &[&["g1"]]));
+        assert!(h.due().is_empty());
+        let old = crate::db::now_ms() - crate::my_work_goals::WINDOW_MS - MINUTE;
+        let now = crate::db::now_ms();
+        let item = |id: &str, kind: &str, title: &str, ts: i64| {
+            json!({"id": id, "kind": kind, "rank": 1, "title": title, "product": "", "asked": 1,
+                "quotes": [{"seq": 1, "ts": ts, "text": title}]})
+        };
+        let mut docs = item("g3", "priority", "Docs", now);
+        docs["rank"] = json!(2);
+        let items = json!([
+            item("g1", "priority", "Fail fast", old),
+            item("g2", "ask", "Logs", now),
+            docs
+        ]);
+        let fields = json!({"items": items, "next_id": 10, "summary": ""});
+        h.op(crate::my_work_goals::NAME, "day", fields, &[]);
+        assert_eq!(h.due(), ids, "its goal left the window");
+        let prompt = h.with(|s| {
+            let links = Links::default();
+            links
+                .ask(s, &ids[0], crate::db::now_ms())
+                .unwrap()
+                .unwrap()
+                .prompt
+        });
+        assert!(
+            prompt.contains("- g3, priority 1: Docs") && !prompt.contains("- g1,"),
+            "{prompt}"
+        );
+        let v = crate::my_work::read(h.s.home.path(), crate::my_work::Range::All, now).unwrap();
+        assert_eq!(v["requests"][0]["goals"], Value::Null);
+        assert_eq!(v["goals"], 2);
+        let items = json!([item("g1", "priority", "Fail fast", old)]);
+        let fields = json!({"items": items, "next_id": 10, "summary": ""});
+        h.op(crate::my_work_goals::NAME, "day", fields, &[]);
+        assert!(h.due().is_empty(), "no goal left");
     }
 
     /// A5: a link's evidence over its cap is dropped and the link kept; a request answered with no

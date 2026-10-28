@@ -1308,8 +1308,42 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   refuses a request missed, named twice or not shown (`shape`), more than three goals
   (`over_cap`), and a goal not shown or named twice (`unanchored`). The keep gates each evidence
   again and drops one empty or over 160 characters, keeping its link (A5).
-- **Then**: slice 6b, the reads (each goal's requests and status word, the rollup, the lead, "No
-  goal", the card's chip), and 6c, the page.
+- **Then**: slice 6b, the reads and the page.
+
+### Slice 6b: the reads and the page (2026-10-28)
+
+- **Joined in the page**, as claude-mem's My Goals reads its goals' requests from the work model
+  (`my-goals.tsx` `useGoalRequests`, v15.3.0): the tab reads `/api/my-work` beside
+  `/api/my-goals`, so a request's state there is the one My Work shows, and computes the rest.
+- **Each My Work row** gains `goals` (L3, V4): none when no answered links op is shown or each goal
+  it names is gone ("Goal not linked yet"), an empty list when it was linked to none ("No goal"),
+  else the current goals it links, each its id, kind, rank and title as the gate shows it, the
+  priorities first by rank. The answer counts the current goals (`goals`); while there are none,
+  no card shows a goal.
+- **The status word**, claude-mem's `statusOf` over its `presentStatus`: needs you, blocked and
+  checked are the owner's move; ready is done but not checked; working and to do work; closed and
+  quiet are idle; an unknown one updated in 6 hours works. No request: "Nothing on it"; any the
+  owner's move: "Waiting on you"; any working or not checked: "Moving"; all shipped: "Asked again
+  after ship" when the goal was last asked on a later day than the last ship, by full dates (V2;
+  claude-mem compares the month and day alone), else "Shipped"; else "Stalled".
+- **The rollup**: the average percent of the requests serving it that have a review, with "k of n
+  requests reviewed" and the titles it leaves out; "Not reviewed yet" with none reviewed; "No
+  requests, so no progress to measure" with none.
+- **The page**: the lead over the top 5 priorities and the open asks nothing serves, the one asked
+  most named; each priority opens to the requests serving it (each opens on My Work) or "Start a
+  request for this"; the open asks split into "Nothing is working on these" and "Being worked
+  on", a part with none left out; "No goal" lists the requests linked to none. A goal on a card
+  opens My Goals on it, in view, with the focus on it. Until the links job has decided any request,
+  the tab is as slice 5b drew it: no word can say what serves a goal.
+- **#728** (Codex on #727): the due requests go in batches of five, the oldest first, each asked by
+  its first, so a batch held after a failure keeps its requests out of the others while it waits.
+  The current goals, for the job, its due check and the cards, are those My Goals shows: each
+  goal with a quote in the 31 days, ranked again within each kind; a goal whose quotes all left is
+  gone, so a request linked to it is due again and no card names it.
+- **Checked** in a browser (2026-10-28, a debug build over a home of made-up requests, reviews,
+  goals and links, its providers empty): the lead, the words, the rollups, a request opening on
+  My Work with its goal, the cards' goals and a card's goal opening My Goals.
+- **Then**: slice 7, the story and the rule suggestions.
 
 ## Not built
 

@@ -894,6 +894,32 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-goals-month-detail > summary { color: inherit; font-size: inherit; }
 .my-goals-quotes { gap: 6px; margin: 0 0 6px; }
 .my-goals-quote { margin: 4px 0 0; }
+/* Slice 6b: a priority's status word, its rollup and the requests serving it; the lead; the chip. */
+.my-goals-priority > summary { flex-wrap: wrap; gap: 4px 10px; color: inherit; font-size: inherit; }
+.my-goals-status { font-size: 12.5px; font-weight: 600; }
+.my-goals-status-nothing, .my-goals-status-your_move { color: var(--red); }
+.my-goals-status-moving { color: var(--blue); }
+.my-goals-status-asked_again { color: var(--yellow); }
+.my-goals-status-shipped { color: var(--green); }
+.my-goals-status-stalled { color: var(--muted); }
+.my-goals-rollup { flex: 1 1 100%; display: grid; gap: 2px; margin: 2px 0 0; }
+.my-goals-rollup .my-goals-note, .my-goals-rollup.my-goals-note { margin: 0; }
+.my-goals-serving, .my-goals-no-goal { display: grid; gap: 6px; }
+.my-goals-serving { margin: 4px 0 8px; }
+.my-goals h4 { margin: 10px 0 4px; color: var(--muted); font-size: 12.5px; }
+.my-goals-unserved h4 { color: var(--red); }
+.my-goals-request { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; width: 100%; min-height: 44px; padding: 8px 12px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); color: inherit; font: inherit; cursor: pointer; }
+.my-goals-request:hover { background: var(--surface-2); }
+.my-goals-request .my-goals-title { flex: 1 1 12rem; }
+.my-goals-item > .my-goals-request { margin: 6px 0 0; }
+.my-goals-next, .my-goals-again { margin: 6px 0; font-size: 13px; }
+.my-goals-again { color: var(--yellow); }
+.my-goals-lead { margin: 0 0 18px; }
+.my-goals-lead-line { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.my-work-goal { align-self: flex-start; min-height: 24px; padding: 0; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12.5px; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+span.my-work-goal { font-style: italic; text-decoration: none; cursor: default; }
+/* Above the card's stretched opener, so that a click on the goal opens My Goals (Codex on #729). */
+.my-work-card button.my-work-goal { position: relative; z-index: 1; }
 .my-work-back { margin: 0 0 14px; }
 .my-work-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 10px 18px; margin: 14px 0 18px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .my-work-facts dt { color: var(--muted); font-size: 12.5px; }

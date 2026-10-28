@@ -2511,6 +2511,40 @@ const TEXT = {
   my_goals_archived: ['Archived', '記録'],
   my_goals_no_top: ['No priority yet', 'まだ優先していることはありません'],
   my_goals_prompts: ['{n} prompts', 'プロンプト {n} 件'],
+  my_goals_status_nothing: ['Nothing on it', '手つかず'],
+  my_goals_status_your_move: ['Waiting on you', 'あなたの番'],
+  my_goals_status_moving: ['Moving', '進んでいる'],
+  my_goals_status_asked_again: ['Asked again after ship', '完了のあとにまた頼んだ'],
+  my_goals_status_shipped: ['Shipped', '完了'],
+  my_goals_status_stalled: ['Stalled', '止まっている'],
+  my_goals_rollup: ['{p}% · {k} of {n} requests reviewed', '{p}% · 依頼 {n} 件のうち {k} 件を確認'],
+  my_goals_rollup_one: ['{p}% · {k} of 1 request reviewed', '{p}% · 依頼 1 件のうち {k} 件を確認'],
+  my_goals_rollup_unreviewed: ['Not reviewed yet · 0 of {n} requests', 'まだ確認していません · 依頼 {n} 件のうち 0 件'],
+  my_goals_rollup_unreviewed_one: ['Not reviewed yet · 0 of 1 request', 'まだ確認していません · 依頼 1 件のうち 0 件'],
+  my_goals_rollup_label: ['{p}% from {k} of {n} requests reviewed', '確認した依頼 {n} 件のうち {k} 件から {p}%'],
+  my_goals_rollup_none: ['No requests, so no progress to measure', '依頼がないため、進み具合はありません'],
+  my_goals_not_counted: ['Not counted: {titles}', '数えていない依頼: {titles}'],
+  my_goals_serving: ['Requests serving it · {n}', 'この目標に向けた依頼 · {n}'],
+  my_goals_start: ['Start a request for this. Nothing is working on it.', 'この目標のための依頼を始めてください。まだ何も進んでいません。'],
+  my_goals_again: ['You asked again on {asked}, after the last ship on {shipped}. What shipped doesn’t cover it yet.', '{shipped} の完了のあと、{asked} にまた頼んでいます。完了したものでは、まだ足りていません。'],
+  my_goals_ask_again: ['Asked again after it shipped {shipped}.', '{shipped} の完了のあとに、また頼んでいます。'],
+  my_goals_lead: ['Your work is moving {m} of your top {n} priorities. {rest}', '上位 {n} 件の優先していることのうち、{m} 件が進んでいます。{rest}'],
+  my_goals_lead_rest_11: ['{y} is waiting on you, and {z} has nothing working on it.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
+  my_goals_lead_rest_1n: ['{y} is waiting on you, and {z} have nothing working on them.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
+  my_goals_lead_rest_n1: ['{y} are waiting on you, and {z} has nothing working on it.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
+  my_goals_lead_rest_nn: ['{y} are waiting on you, and {z} have nothing working on them.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
+  my_goals_lead_asks: ['{u} open asks have no request yet.{most}', 'まだ依頼のない頼みごとが {u} 件あります。{most}'],
+  my_goals_lead_asks_one: ['1 open ask has no request yet.{most}', 'まだ依頼のない頼みごとが 1 件あります。{most}'],
+  my_goals_lead_most: [' The one you’ve asked for most is “{title}”, {n} times.', 'いちばん多く頼んだのは「{title}」で、{n} 回です。'],
+  my_goals_lead_most_one: [' The one you’ve asked for most is “{title}”, once.', 'いちばん多く頼んだのは「{title}」で、1 回です。'],
+  my_goals_unserved: ['Nothing is working on these · {n}', 'まだ何も進んでいないもの · {n}'],
+  my_goals_unserved_note: ['Your move: start a request for each, or drop it.', 'あなたの番です: それぞれ依頼を始めるか、やめるかを決めてください。'],
+  my_goals_served: ['Being worked on · {n}', '進めているもの · {n}'],
+  my_goals_no_goal: ['No goal · {n}', '目標なし · {n}'],
+  my_goals_no_goal_note: ['Requests that serve none of your priorities: work happening outside what you said you want.', 'どの目標にも向いていない依頼です。あなたが望むと言ったこと以外で進んでいる作業です。'],
+  my_work_goal: ['Goal', '目標'],
+  my_work_goal_none: ['No goal', '目標なし'],
+  my_work_goal_unlinked: ['Goal not linked yet', 'まだ目標と結びついていません'],
   my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
   my_work_stands: ['Where it stands', '現在の状況'],
   my_work_original: ['Original request', '元の依頼'],
@@ -6556,7 +6590,7 @@ const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: tru
 // The answer and the page's place in it. The filters live in the page, as claude-mem's live in
 // its address; the layout is remembered.
 const mw = {
-  rows: null, unlinked: 0, signature: '', fetched: 0, pending: null, slot: null, results: null,
+  rows: null, unlinked: 0, goals: 0, signature: '', fetched: 0, pending: null, slot: null, results: null,
   layout: MY_WORK_LAYOUTS.includes(recall('oboete-my-work-layout', 'cards')) ? recall('oboete-my-work-layout', 'cards') : 'cards',
   filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
   agent: null, request: null, work: null, back: null,
@@ -6716,6 +6750,29 @@ function myWorkStory(row) {
       el('li', null, el('span', 'my-work-milestone-date', myWorkDay(m.date)), ' ', m.text))) : null);
 }
 
+// L3, V4 (claude-mem's `GoalChip`): the goal a request serves, its priority first, which opens on
+// My Goals; "No goal" when the links job linked it to none; "Goal not linked yet" before, while
+// there are goals to link to. Nothing while there are none.
+function myWorkGoalChip(row) {
+  if (!mw.goals) return null;
+  if (!Array.isArray(row.goals)) return word('span', 'my-work-goal muted', 'my_work_goal_unlinked');
+  if (!row.goals.length) return word('span', 'my-work-goal muted', 'my_work_goal_none');
+  const goal = row.goals[0];
+  const button = el('button', 'my-work-goal', goal.title);
+  button.type = 'button';
+  button.dataset.goal = goal.id;
+  button.addEventListener('click', (event) => {
+    event?.stopPropagation?.();
+    Object.assign(mg, { tab: 'now', jump: goal.id });
+    // A priority past the top five is behind "more" (Codex and CodeRabbit on #729).
+    if (goal.kind === 'priority' && goal.rank > MY_GOALS_TOP) mg.more = true;
+    mg.goals.add(goal.id);
+    setView('my_goals');
+    void show();
+  });
+  return button;
+}
+
 // `request-views.js` `requestCards`: the title opens the request, and the whole card with it.
 function myWorkCard(row) {
   const next = myWorkNextLine(row);
@@ -6726,6 +6783,7 @@ function myWorkCard(row) {
     el('p', 'my-work-summary', myWorkActivity(row)),
     row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
     myWorkProgress(row),
+    myWorkGoalChip(row),
     el('div', 'my-work-context', myWorkContributors(row), el('span', 'my-work-project', myWorkProjects(row))),
     el('div', next ? 'my-work-footer' : 'my-work-footer no-next',
       next ? el('div', 'my-work-next', word('span', 'my-work-next-label', next.label), el('p', null, next.text)) : null,
@@ -7143,7 +7201,8 @@ function myWorkDrawRequest() {
     myWorkProgress(row),
     el('dl', 'my-work-facts', myWorkFact('my_work_contributors', myWorkContributors(row)),
       myWorkFact('my_work_started', row.started > 0 ? localTime(row.started, lang) : t('my_work_not_recorded')),
-      myWorkFact('my_work_elapsed', elapsed)),
+      myWorkFact('my_work_elapsed', elapsed),
+      mw.goals ? myWorkFact('my_work_goal', myWorkGoalChip(row)) : null),
     el('section', 'my-work-stands', word('h3', null, 'my_work_stands'), el('p', null, myWorkActivity(row)),
       row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
       el('p', 'my-work-request-next', el('strong', null, `${t(next?.label || 'my_work_next_step')}:`), ' ', next?.text || myWorkNext(row)),
@@ -7321,7 +7380,7 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 function myWorkAccept(answer) {
-  mw.signature = JSON.stringify([answer.requests, answer.unlinked]);
+  mw.signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals]);
   // claude-mem 15's `normalizeRequestStatus`: a checked result ready to check is Checked on the
   // page; a shipped one stays Shipped.
   for (const row of answer.requests) if (row.checked && row.status === 'ready') row.status = 'checked';
@@ -7339,6 +7398,7 @@ function myWorkAccept(answer) {
   }
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
+  mw.goals = answer.goals ?? 0;
   mw.fetched = Date.now();
   mw.pending = null;
 }
@@ -7365,7 +7425,7 @@ async function myWorkLive() {
   // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on #597).
   mw.taken = read;
   mw.fetched = Date.now();
-  const signature = JSON.stringify([answer.requests, answer.unlinked]);
+  const signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals]);
   if (signature === mw.signature) return true;
   if (myWorkReading()) {
     // The last answer received, as claude-mem's `accept` keeps it: the same answer again stays
@@ -7450,19 +7510,108 @@ function myWorkStatusLine(status) {
 const MY_GOALS_TOP = 5;
 // What a redraw keeps: the inner tab, the goals and months opened, "more"; and the answer drawn,
 // so that a poll that brings the same one draws nothing.
-const mg = { tab: 'now', open: new Set(), months: new Set(), more: false, signature: null, answer: null, fetched: 0 };
+const mg = { tab: 'now', open: new Set(), goals: new Set(), months: new Set(), more: false, signature: null, answer: null, requests: [], fetched: 0, jump: null };
 
 async function showMyGoals() {
-  const answer = await api('my-goals');
+  // My Work's requests with them, as claude-mem's page reads its goals' requests from the work
+  // model: a request's state here is always the one My Work shows (slice 6b).
+  // A failed read of My Work leaves the goals as slice 5b drew them, until the next poll (CodeRabbit
+  // on #729).
+  const [answer, work] = await Promise.all([api('my-goals'), api('my-work', { range: 'all' }).catch(() => null)]);
   return () => {
     mg.fetched = Date.now();
+    const requests = work?.requests ?? [];
+    for (const row of requests) if (row.checked && row.status === 'ready') row.status = 'checked';
     // Today's date with it: the inner tab names the window's end (#722).
-    const signature = JSON.stringify([answer, myGoalsDay(Date.now())]);
+    const signature = JSON.stringify([answer, requests, myGoalsDay(Date.now())]);
     if (signature === mg.signature && $('panel').querySelector('.my-goals')) return setStatus('');
     mg.signature = signature;
     mg.answer = answer;
+    mg.requests = requests;
     myGoalsDraw();
   };
+}
+
+// claude-mem's `presentStatus` (status-normalization.ts): the state a request's status is on My
+// Goals, from which a goal's status word is read.
+function myGoalsState(row, now = Date.now()) {
+  switch (row.status) {
+    case 'needs': case 'blocked': case 'checked': return 'your-move';
+    case 'ready': return 'needs-check';
+    case 'shipped': return 'shipped';
+    case 'closed': case 'quiet': return 'idle';
+    case 'working': case 'todo': return 'working';
+    default: return now - (row.updated || 0) <= 6 * 3600000 ? 'working' : 'idle';
+  }
+}
+
+// L3: the requests My Work shows that link `goal`; an id My Work lacks links to nothing.
+function myGoalsServing(goal) {
+  return mg.requests.filter((row) => row.goals?.some((g) => g.id === goal.id));
+}
+
+// Whether the links job has decided any request: before, no goal can say what serves it.
+function myGoalsLinked() {
+  return mg.requests.some((row) => Array.isArray(row.goals));
+}
+
+function myGoalsIsoDay(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// The last ship among `requests`, its recorded day, when the goal was asked again on a later
+// day, by full dates (V2: claude-mem compares the month and day alone).
+function myGoalsAskedAgain(goal, requests) {
+  const shipped = requests.map((row) => row.progress?.completed).filter(Boolean).sort().at(-1);
+  return shipped && myGoalsIsoDay(goal.last) > shipped ? shipped : null;
+}
+
+// claude-mem's `statusOf`: where a goal stands, from the requests serving it.
+function myGoalsStatus(goal, requests) {
+  if (!requests.length) return 'nothing';
+  const states = requests.map((row) => myGoalsState(row));
+  if (states.includes('your-move')) return 'your_move';
+  if (states.includes('working') || states.includes('needs-check')) return 'moving';
+  if (states.every((s) => s === 'shipped')) return myGoalsAskedAgain(goal, requests) ? 'asked_again' : 'shipped';
+  return 'stalled';
+}
+
+function myGoalsStatusWord(status) {
+  return word('span', `my-goals-status my-goals-status-${status}`, `my_goals_status_${status}`);
+}
+
+// claude-mem's `Rollup`: the average percent of the reviewed requests serving a goal, and what it
+// leaves out.
+function myGoalsRollup(requests) {
+  if (!requests.length) return word('p', 'my-goals-rollup my-goals-note', 'my_goals_rollup_none');
+  const reviewed = requests.filter((row) => row.progress?.reviewed != null);
+  const unreviewed = requests.filter((row) => row.progress?.reviewed == null);
+  const p = reviewed.length ? Math.round(reviewed.reduce((sum, row) => sum + (row.progress.percent ?? 0), 0) / reviewed.length) : 0;
+  const one = requests.length === 1 ? '_one' : '';
+  const vars = { p, k: reviewed.length, n: requests.length };
+  const meter = el('meter', 'my-work-meter');
+  Object.assign(meter, { min: 0, max: 100, value: p });
+  meter.setAttribute('aria-label', t('my_goals_rollup_label', vars));
+  return el('div', 'my-goals-rollup', meter,
+    el('p', 'my-goals-note', t(reviewed.length ? `my_goals_rollup${one}` : `my_goals_rollup_unreviewed${one}`, vars)),
+    unreviewed.length && reviewed.length ? el('p', 'my-goals-note', t('my_goals_not_counted', { titles: unreviewed.map((row) => row.title).join(', ') })) : null);
+}
+
+// A request serving a goal; it opens on My Work.
+function myGoalsRequest(row) {
+  const button = el('button', 'my-goals-request', el('span', 'my-goals-title', row.title), myWorkBadge(row.status), myWorkProgress(row));
+  button.type = 'button';
+  button.dataset.focus = `request:${row.id}`;
+  button.addEventListener('click', () => {
+    setView('my_work');
+    // As `myWorkOpen`: its work product is read again (Codex on #729, on #650).
+    mw.products = null;
+    mw.unread.delete(row.id);
+    mw.request = row.id;
+    void show();
+  });
+  return button;
 }
 
 // A quote's time, and when a wait ends: to the minute, in the page's language.
@@ -7507,19 +7656,69 @@ function myGoalsWhy(goal) {
 function myGoalsPriority(goal) {
   const rank = el('span', goal.rank === 1 ? 'my-goals-rank my-goals-first' : 'my-goals-rank', String(goal.rank));
   const facts = [myGoalsAsked(goal.asked), t('my_goals_last', { day: myGoalsDay(goal.last) })];
-  return el('li', 'my-goals-item', el('div', 'my-goals-row', rank, el('span', 'my-goals-title', goal.title),
-    myGoalsMeta(facts, goal.product)), myGoalsWhy(goal));
+  if (!myGoalsLinked()) {
+    return el('li', 'my-goals-item', el('div', 'my-goals-row', rank, el('span', 'my-goals-title', goal.title),
+      myGoalsMeta(facts, goal.product)), myGoalsWhy(goal));
+  }
+  // claude-mem's `PriorityItem`: one summary row, then on open the requests serving it.
+  const requests = myGoalsServing(goal);
+  const status = myGoalsStatus(goal, requests);
+  const again = myGoalsAskedAgain(goal, requests);
+  const summary = el('summary', 'my-goals-row', rank, el('span', 'my-goals-title', goal.title),
+    myGoalsStatusWord(status), myGoalsMeta(facts, goal.product), myGoalsRollup(requests));
+  summary.dataset.focus = `goal:${goal.id}`;
+  const details = el('details', 'my-goals-priority', summary,
+    requests.length ? el('div', 'my-goals-serving', word('h4', null, 'my_goals_serving', { n: requests.length }), ...requests.map(myGoalsRequest))
+      : word('p', 'my-goals-next', 'my_goals_start'),
+    again ? el('p', 'my-goals-again', t('my_goals_again', { asked: myWorkDay(goal.last), shipped: myWorkDay(again) })) : null,
+    myGoalsWhy(goal));
+  details.open = mg.goals.has(goal.id);
+  details.addEventListener('toggle', () => (details.open ? mg.goals.add(goal.id) : mg.goals.delete(goal.id)));
+  return el('li', 'my-goals-item', details);
 }
 
 function myGoalsAsks(asks) {
   const repeated = asks.filter((a) => a.asked > 1).length;
-  return el('section', 'my-goals-asks', word('h3', null, 'my_goals_asks'),
-    word('p', 'my-goals-note', 'my_goals_asks_note', { k: repeated, n: asks.length }),
-    el('ul', 'my-goals-list', ...asks.map((ask) => {
-      const facts = [t('my_goals_ask_meta', { n: ask.asked, day: myGoalsDay(ask.last) })];
-      return el('li', 'my-goals-item', el('div', 'my-goals-row', el('span', 'my-goals-title', ask.title),
-        myGoalsMeta(facts, ask.product)), myGoalsWhy(ask));
-    })));
+  const row = (ask) => {
+    const facts = [t('my_goals_ask_meta', { n: ask.asked, day: myGoalsDay(ask.last) })];
+    const requests = myGoalsLinked() ? myGoalsServing(ask) : [];
+    const again = myGoalsAskedAgain(ask, requests);
+    return el('li', 'my-goals-item', el('div', 'my-goals-row', el('span', 'my-goals-title', ask.title),
+      myGoalsMeta(facts, ask.product)), ...requests.map(myGoalsRequest),
+      again ? el('p', 'my-goals-again', t('my_goals_ask_again', { shipped: myWorkDay(again) })) : null, myGoalsWhy(ask));
+  };
+  const head = [word('h3', null, 'my_goals_asks'), word('p', 'my-goals-note', 'my_goals_asks_note', { k: repeated, n: asks.length })];
+  if (!myGoalsLinked()) return el('section', 'my-goals-asks', ...head, el('ul', 'my-goals-list', ...asks.map(row)));
+  // claude-mem's `OpenAsks`: what nothing works on, then what something does.
+  const unserved = asks.filter((a) => !myGoalsServing(a).length);
+  const served = asks.filter((a) => myGoalsServing(a).length);
+  return el('section', 'my-goals-asks', ...head,
+    unserved.length ? el('div', 'my-goals-unserved', word('h4', null, 'my_goals_unserved', { n: unserved.length }),
+      word('p', 'my-goals-note', 'my_goals_unserved_note'), el('ul', 'my-goals-list', ...unserved.map(row))) : null,
+    served.length ? el('div', 'my-goals-served', word('h4', null, 'my_goals_served', { n: served.length }),
+      el('ul', 'my-goals-list', ...served.map(row))) : null);
+}
+
+// claude-mem's `Lead`: whether the work moves what you said you want, from the top priorities.
+function myGoalsLead(priorities, asks) {
+  const top = priorities.slice(0, MY_GOALS_TOP).map((goal) => myGoalsStatus(goal, myGoalsServing(goal)));
+  const count = (status) => top.filter((s) => s === status).length;
+  const [y, z] = [count('your_move'), count('nothing')];
+  const unserved = asks.filter((a) => !myGoalsServing(a).length);
+  const most = [...unserved].sort((a, b) => b.asked - a.asked)[0];
+  const rest = `my_goals_lead_rest_${y === 1 ? '1' : 'n'}${z === 1 ? '1' : 'n'}`;
+  return el('div', 'my-goals-lead',
+    el('p', 'my-goals-lead-line', t('my_goals_lead', { m: count('moving'), n: top.length, rest: t(rest, { y, z }) })),
+    asks.length ? el('p', 'my-goals-note', t(unserved.length === 1 ? 'my_goals_lead_asks_one' : 'my_goals_lead_asks',
+      { u: unserved.length, most: most ? t(most.asked === 1 ? 'my_goals_lead_most_one' : 'my_goals_lead_most', { title: most.title, n: most.asked }) : '' })) : null);
+}
+
+// claude-mem's `NoGoal`: the requests the links job linked to none.
+function myGoalsNoGoal() {
+  const rows = mg.requests.filter((row) => Array.isArray(row.goals) && !row.goals.length);
+  if (!rows.length) return null;
+  return el('section', 'my-goals-no-goal', word('h3', null, 'my_goals_no_goal', { n: rows.length }),
+    word('p', 'my-goals-note', 'my_goals_no_goal_note'), ...rows.map(myGoalsRequest));
 }
 
 function myGoalsNow(a) {
@@ -7528,6 +7727,7 @@ function myGoalsNow(a) {
   const priorities = items.filter((i) => i.kind === 'priority');
   const asks = items.filter((i) => i.kind === 'ask');
   const out = [];
+  if (myGoalsLinked() && priorities.length) out.push(myGoalsLead(priorities, asks));
   if (priorities.length) {
     const section = el('section', 'my-goals-priorities',
       el('div', 'my-goals-head', word('h3', null, 'my_goals_priorities'), word('span', 'my-goals-note', 'my_goals_ranked')),
@@ -7544,6 +7744,7 @@ function myGoalsNow(a) {
     out.push(section);
   }
   if (asks.length) out.push(myGoalsAsks(asks));
+  if (myGoalsLinked()) out.push(myGoalsNoGoal());
   out.push(el('p', 'my-work-note', t('my_goals_source', { n: a.window?.prompts ?? 0, days: a.window?.days ?? 31 })));
   return out;
 }
@@ -7595,6 +7796,15 @@ function myGoalsDraw() {
     tabs, el('div', 'my-goals', ...(mg.tab === 'months' ? myGoalsMonths(a) : myGoalsNow(a))),
   ]);
   if (focus) [...$('panel').querySelectorAll('button, summary')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
+  // A goal a card opened (V4): in view, with the focus on it; an open ask by its quotes' disclosure.
+  const summaries = [...$('panel').querySelectorAll('summary')];
+  const jump = mg.jump && (summaries.find((node) => node.dataset.focus === `goal:${mg.jump}`)
+    ?? summaries.find((node) => node.dataset.focus === `why:${mg.jump}`));
+  mg.jump = null;
+  if (jump) {
+    jump.scrollIntoView?.({ block: 'start' });
+    jump.focus({ preventScroll: true });
+  }
   setStatus('');
 }
 
