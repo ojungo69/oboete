@@ -403,11 +403,14 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
         if !sg.requests.contains(&p.request) {
             sg.requests.push(p.request.clone());
         }
-        sg.quotes.retain(|q| q.text != p.quote);
+        // Gated again as every kept field (A5), though a review keeps only a quote its gate leaves
+        // as it is (P4): a rule added since then masks it here too.
+        let quote = crate::redact::outbound_with(&p.quote, &c.rules);
+        sg.quotes.retain(|q| q.text != quote);
         sg.quotes.insert(
             0,
             Quote {
-                text: p.quote.clone(),
+                text: quote,
                 request: p.request.clone(),
             },
         );
@@ -689,6 +692,33 @@ mod tests {
         assert_eq!(due[0].since, last + AGAIN_MS);
         let (_, sent) = h.pass(&|_| answer(&[("", "Commit in small steps.")]));
         assert!(sent.is_empty());
+    }
+
+    /// A5: a quote is gated again as it is kept, so a rule added after its review masks it.
+    #[test]
+    fn a_quote_is_gated_again_as_it_is_kept() {
+        let toml =
+            "[redaction]\nextra_rules = [{ id = \"codename\", regex = \"codename-[a-z]+\" }]\n";
+        let capture = crate::config::parse_capture(Some(toml)).unwrap();
+        let rules = Rules::new(&capture.redaction).unwrap();
+        let p = Preference {
+            request: "g:1".into(),
+            review: 1,
+            ts: 0,
+            statement: "Name it.".into(),
+            quote: "call it codename-otter".into(),
+        };
+        let c = Context {
+            suggestions: Vec::new(),
+            taken: vec![p],
+            next_id: 1,
+            rules,
+        };
+        let kept = keep(&answer(&[("", "Name things plainly.")]), &c);
+        let text = kept["suggestions"][0]["quotes"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(!text.contains("codename-otter"), "{text}");
     }
 
     /// R1, A10: each preference answered once and no other, a join of an id shown, a new
