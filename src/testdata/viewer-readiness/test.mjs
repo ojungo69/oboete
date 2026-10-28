@@ -2565,5 +2565,17 @@ run('mg.signature=null');
 (await run('showMyGoals()'))();
 assert(text(panel).includes('Fail fast'),'the goals without My Work');
 run('mw.goals=0');
+// Slice 7a (P6, V4): the build story at My Work's top: nothing before one is written, then the
+// recap and the chapters behind one disclosure, the newest week first.
+run('mw.story=null');
+assert.equal(run('myWorkBuildStory()'),null,'no story yet');
+ctx.__story={recap:'It ships weekly.',chapters:[{week:'2026-10-19',text:'The parser shipped.\n\nIts tests came next.'},{week:'2026-10-12',text:'The parser began.'}]};
+run('mw.story=globalThis.__story');
+const story=text(run('myWorkBuildStory()'));
+assert(story.startsWith('Build story It ships weekly. Week by week · 2'),story);
+assert(story.includes('Oct 19 to Oct 25 The parser shipped. Its tests came next. Oct 12 to Oct 18 The parser began.'),story);
+run('lang="ja"');
+assert(text(run('myWorkBuildStory()')).includes('作業の経緯')&&text(run('myWorkBuildStory()')).includes('週ごと · 2'),'in Japanese');
+run('lang="en";mw.story=null');
 console.log('PASS: My Goals 6b: status words by My Work\'s states, full-date asked again, the rollup, the lead, the open asks split, No goal, requests opening on My Work, JA, the goal chip');
 }
