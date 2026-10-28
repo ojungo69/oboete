@@ -29,6 +29,8 @@ struct Mute {
 struct Preference {
     text: String,
     apply_to_all_repos: bool,
+    /// Slice 8b: one repository's (a key as records name it), with `apply_to_all_repos` false.
+    repo: Option<String>,
 }
 
 fn full_uid(uid: &str) -> Result<(), Refusal> {
@@ -62,6 +64,12 @@ fn answer(result: Result<OwnerReceipt, OwnerRefusal>) -> Result<Value, Refusal> 
             OwnerRefusalCode::Unavailable => refused(503, "claim_unavailable", ""),
             OwnerRefusalCode::PreferenceEmpty => refused(422, "preference_empty", "text"),
             OwnerRefusalCode::PreferenceTooLong => refused(422, "preference_too_long", "text"),
+            OwnerRefusalCode::PreferenceRepoUnknown => {
+                refused(422, "preference_repo_unknown", "repo")
+            }
+            OwnerRefusalCode::PreferenceRepoExcluded => {
+                refused(422, "preference_repo_excluded", "repo")
+            }
         }),
     }
 }
@@ -97,7 +105,8 @@ pub(crate) fn mute(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
 pub(crate) fn pref_add(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
     let posted: Preference =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
-    if !posted.apply_to_all_repos {
+    // Every repository's only when the owner confirmed it (spec 3.3), else the one named.
+    if posted.apply_to_all_repos == posted.repo.is_some() {
         return Err(refused(
             422,
             "preference_confirmation",
@@ -107,7 +116,11 @@ pub(crate) fn pref_add(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<V
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    answer(crate::claims::pref_add_recorded(home, &posted.text))
+    answer(crate::claims::pref_add_recorded(
+        home,
+        &posted.text,
+        posted.repo.as_deref(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -117,11 +130,13 @@ struct Rule {
     action: String,
     statement: Option<String>,
     scope: Option<String>,
+    repo: Option<String>,
 }
 
 /// V3, R3: the owner's action on a rule suggestion of My Rules: approve it as a preference of every
-/// repository, as `pref add` records one (its text the suggestion's, or the one posted), reject it,
-/// or undo either; an approve is undone by retracting the preference it made.
+/// repository or, slice 8b, of one (`scope: "repo"` with its `repo`), as `pref add` records one
+/// (its text the suggestion's, or the one posted), reject it, or undo either; an approve is undone
+/// by retracting the preference it made.
 pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
     let posted: Rule = serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     let id = posted.suggestion.as_str();
@@ -131,13 +146,18 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
     }
     let approve = posted.action == "approve";
     let known = ["approve", "reject", "undo"].contains(&posted.action.as_str());
-    if !known || (!approve && (posted.statement.is_some() || posted.scope.is_some())) {
+    let given = posted.statement.is_some() || posted.scope.is_some() || posted.repo.is_some();
+    if !known || (!approve && given) {
         return Err(refused(400, "bad_request", "action"));
     }
-    // Slice 8a: a rule of every repository, as only the viewer and `pref add` make one (spec 3.3).
-    if approve && posted.scope.as_deref() != Some("global") {
-        return Err(refused(422, "rule_scope", "scope"));
-    }
+    // A rule of every repository, as only the viewer and `pref add` make one (spec 3.3), or of
+    // the one named (slice 8b).
+    let repo = match (posted.scope.as_deref(), posted.repo.as_deref()) {
+        _ if !approve => None,
+        (Some("global"), None) => None,
+        (Some("repo"), Some(repo)) => Some(repo),
+        _ => return Err(refused(422, "rule_scope", "scope")),
+    };
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -163,7 +183,7 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
         ("undo", None) => Err(refused(409, "rule_not_decided", "suggestion")),
         ("approve", None) => {
             let text = posted.statement.as_deref().unwrap_or(&suggestion.statement);
-            let receipt = crate::claims::pref_add_recorded(home, text);
+            let receipt = crate::claims::pref_add_recorded(home, text, repo);
             let (uid, kept) = match &receipt {
                 Ok(OwnerReceipt::Applied { uid }) => (uid.clone(), true),
                 Ok(OwnerReceipt::Pending { uid, .. }) => (uid.clone(), false),
@@ -835,6 +855,11 @@ mod tests {
                 "preference_confirmation",
             ),
             (pref_add, json!({"text": "text"}), "bad_request"),
+            (
+                pref_add,
+                json!({"text": "text", "apply_to_all_repos": true, "repo": "github.com/o/r"}),
+                "preference_confirmation",
+            ),
             (
                 pref_add,
                 json!({"text": "text", "apply_to_all_repos": true, "scope": "repo"}),

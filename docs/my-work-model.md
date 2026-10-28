@@ -513,7 +513,8 @@ R3. **The owner's actions**, each through `save_gate`, each an op so it survives
 "Replace" is not built; claude-mem's page never sends it.
 
 R4. **Delivery.** An approved rule is a decided preference, so it reaches session start in the
-fenced "Global preferences" block, or the repository's claims, in every agent: Claude Code, Codex
+fenced "Global preferences" block, or, for one repository, in the "Preferences of this repository"
+block after it, every one and not again among the decisions, in every agent: Claude Code, Codex
 and Grok. claude-mem writes a file that Claude Code alone loads as instructions. No file is
 written here (decision 60).
 
@@ -1467,6 +1468,34 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   after the owner opened another tab draws nothing over it; and `/api/my-rules` keeps its uids
   through the answer gate, as the routes that hand claim uids to the page do.
 - **Then**: slice 8b, a rule for one repository.
+
+### Slice 8b: a rule for one repository (2026-10-29)
+
+- **Made** (R2, R3) as `pref add` makes a global one, with the repository named: `oboete pref add
+  --repo <key>` (`.` for the current directory's), `/api/preferences` with `repo` and
+  `apply_to_all_repos` false, and My Rules' approve with `scope` `repo` and its `repo`. The
+  directive event is labelled with that repository alone (no folder, no branch) and its body's
+  scope is `repo`; its claim op's scope is `repo` (`claims::preference_op`), and the purge that
+  writes a masked preference again keeps it. Refused before anything is appended: a repository no
+  record names (`preference_repo_unknown`) and one the owner stopped recording, as every writer
+  asks it (`preference_repo_excluded`). The directive is no session's work: it makes no manifest
+  fact, so it is never an active session or a record waiting for curation.
+- **The owner's own** (`claims::owned`): a repository's current claims whose active derivation is
+  `pref add`'s. A preference the curator found in the same repository is not one: it stays among
+  the decisions, and My Rules does not list it.
+- **Delivery** (R4): session start gives every one of the owner's preferences of the session's
+  repository, not turned off, under "Preferences of this repository" after the global ones, and
+  leaves them out of the decisions and the index.
+- **The page**: `yours` holds every repository's rules first, then each repository's with its key
+  and name, each under its heading. Edit then approve and Add rule have "Applies", as claude-mem's
+  dialog does: every repository, or one of the 20 repositories sessions started in most recently,
+  none the owner stopped recording; Approve as it is stays every repository's. An approved
+  suggestion whose rule is gone (retracted with `oboete correct`, or forgotten) is listed under
+  "Rule removed" with Undo.
+- **#741** (the reviews of #740): a suggestion's op keeps its fields within half the op cap, the
+  oldest requests and then the oldest quotes going first, `seen` keeping its count; and a My Rules
+  write that ends on another tab reads nothing again and shows no message there.
+- **Then**: My Focus (decision 61).
 
 ## Not built
 

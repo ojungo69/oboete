@@ -3809,11 +3809,17 @@ impl Raw {
         let [e] = c.evidence.as_slice() else {
             return Ok(false);
         };
-        let written = serde_json::to_value(crate::claims::preference_op(e.clone()))?;
-        Ok(*body == written
-            && crate::consumer::claims::live(self, e)?.is_some_and(|event| {
+        let written =
+            |in_repo| serde_json::to_value(crate::claims::preference_op(e.clone(), in_repo));
+        // Slice 8b: global, or of a repository.
+        if *body != written(false)? && *body != written(true)? {
+            return Ok(false);
+        }
+        Ok(
+            crate::consumer::claims::live(self, e)?.is_some_and(|event| {
                 crate::curate::long_text(&event).is_some_and(|text| text.len() == e.quote.len())
-            }))
+            }),
+        )
     }
 
     /// Slice 3e-2 (#186): the preference claim ops to append for the directives (`oboete pref
@@ -3859,7 +3865,7 @@ impl Raw {
                 };
                 let uid = crate::claims::uid("preference", &evidence);
                 if !now.contains(&uid) && !self.forgotten(&uid)? {
-                    let op = crate::claims::preference_op(evidence);
+                    let op = crate::claims::preference_op(evidence, e.repo.is_some());
                     ops.push((OpKind::Claim, serde_json::to_value(op)?));
                 }
             }

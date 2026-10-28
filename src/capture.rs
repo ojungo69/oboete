@@ -604,18 +604,6 @@ pub fn checkout(payload: &Value, settings: &Settings) -> (String, String, Option
     (session, repo, branch)
 }
 
-/// One event of `kind` with `body`, its labels from `payload` and the checkout it names.
-fn capture(
-    agent: &str,
-    kind: &str,
-    body: Value,
-    payload: &Value,
-    ts: i64,
-    settings: &Settings,
-) -> Captured {
-    labelled(agent, kind, body, payload, ts, place(payload), settings)
-}
-
 /// Parity row 14: a pattern as `oboete capture exclude --pattern`, the page and the import of
 /// claude-mem's settings store it: trimmed, else as given; refused when empty, over
 /// `PATTERN_BYTES`, or holding a control character.
@@ -720,18 +708,25 @@ fn labelled(
 }
 
 /// The owner's directive `oboete pref add` records (spec 3.3; MUST-M1's owner directive): an
-/// event of its own, through the same gate as every stored string, with no repository or
-/// checkout: its claim is global, in no repository's current claims (milestone 4's injection
-/// reads global ones by scope). `curate` never shows it in a window: its claim is appended with
-/// it.
-pub fn directive(text: &str, ts: i64, settings: &Settings) -> Captured {
+/// event of its own, through the same gate as every stored string, with no checkout. Without
+/// `repo` it names no repository: its claim is global, in no repository's current claims
+/// (milestone 4's injection reads global ones by scope). With `repo` (slice 8b, R2), a repository
+/// key as records name it, it is labelled with that repository alone: its claim is that
+/// repository's. `curate` never shows it in a window: its claim is appended with it.
+pub fn directive(text: &str, ts: i64, settings: &Settings, repo: Option<&str>) -> Captured {
     let payload = json!({"session_id": "owner"});
+    let scope = if repo.is_some() { "repo" } else { "global" };
     // As a typed prompt: an opted-out part is never stored, and binary content is its marker.
-    let body = json!({"text": base64_runs(&strip_blocks(text, true)), "scope": "global"});
-    let mut c = capture("oboete", "directive", body, &payload, ts, settings);
-    c.event.repo = None;
-    c.event.cwd = None;
-    (c.event.branch, c.event.head, c.event.gitdir) = (None, None, None);
+    let body = json!({"text": base64_runs(&strip_blocks(text, true)), "scope": scope});
+    let place = Place {
+        repo: repo.unwrap_or_default().to_owned(),
+        cwd: None,
+        git: Git::default(),
+    };
+    let mut c = labelled("oboete", "directive", body, &payload, ts, place, settings);
+    if repo.is_none() {
+        c.event.repo = None;
+    }
     c
 }
 

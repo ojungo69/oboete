@@ -90,8 +90,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum PrefCmd {
-    /// Keep a preference that applies in every repository
-    Add { text: String },
+    /// Keep a preference that applies in every repository, or in the one named
+    Add {
+        text: String,
+        /// Only in this repository, as oboete labels it (github.com/<owner>/<name>, or its
+        /// path); `.` for the one in the current directory
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -339,8 +345,8 @@ enum Cmd {
     Doctor,
     /// Use a provider again after it stopped for the owner (claude's credits) or cooled down
     Resume { provider: String },
-    /// A preference for every repository, in your own words (the only way to one besides the
-    /// viewer)
+    /// A preference for every repository, or for one, in your own words (the only way to one
+    /// besides the viewer)
     Pref {
         #[command(subcommand)]
         action: PrefCmd,
@@ -829,11 +835,18 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 },
         } => capture_exclude(&home, repo, folder, pattern, undo),
         Cmd::Pref {
-            action: PrefCmd::Add { text },
+            action: PrefCmd::Add { text, repo: named },
         } => {
+            let named = match named.as_deref() {
+                Some(".") => Some(repo::key(&std::env::current_dir()?)),
+                _ => named,
+            };
             // Whole: `oboete correct` takes the full id.
-            let id = claims::pref_add(&home, &text)?;
-            println!("kept for every repository ({id})");
+            let id = claims::pref_add_in(&home, &text, named.as_deref())?;
+            match named {
+                Some(r) => println!("kept for {r} ({id})"),
+                None => println!("kept for every repository ({id})"),
+            }
             Ok(())
         }
         Cmd::Resume { provider } => {

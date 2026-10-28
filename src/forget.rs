@@ -9735,6 +9735,43 @@ mod tests {
         assert_eq!(bodies, [serde_json::json!(twice)]);
     }
 
+    /// Slice 8b: a preference of one repository whose directive a rescan masks part of is written
+    /// again of that repository, with its uid: scope `repo`, its repository the directive's, still
+    /// the owner's own.
+    #[test]
+    fn a_masked_preference_of_a_repository_stays_that_repositorys() {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let repo = "github.com/o/r";
+        s.said("s", repo, 1_000, "Hello.");
+        s.run();
+        let said = format!("Use tabs, key {MASKED}, always.");
+        let uid = crate::claims::pref_add_in(&home, &said, Some(repo)).unwrap();
+        s.run();
+        let acme = r#"{ id = "acme", regex = 'acme-[0-9]{6}' }"#;
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{acme}]\n"),
+        )
+        .unwrap();
+        crate::worker::run_once(&home).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        assert_eq!(purge(&home).unwrap().unwrap().preferences, 1);
+        let k = crate::knowledge::open(&home).unwrap();
+        let shown: (String, String, String) = k
+            .query_row(
+                "SELECT body, scope, repo FROM active WHERE uid = ?1",
+                [&uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        let masked = said.replace(MASKED, &"*".repeat(MASKED.len()));
+        assert_eq!(shown, (masked, "repo".into(), repo.into()));
+        let owned = crate::claims::owned(&k, repo).unwrap();
+        assert_eq!(owned.iter().map(|c| &c.uid).collect::<Vec<_>>(), [&uid]);
+    }
+
     /// Slice 3e-2 (Codex on #485): an op that calls itself a preference, its body its one quote and
     /// that quote reading now, but that holds more than `pref add` writes (a `why`, a field no op of
     /// ours has) is not one it wrote: a mask of its record takes its text, in raw.db and in the
@@ -9752,7 +9789,7 @@ mod tests {
             serde_json::from_value(written["evidence"][0].clone()).unwrap();
         e.quote = "Use tabs".into();
         e.length = 8;
-        let prefix = serde_json::to_value(crate::claims::preference_op(e)).unwrap();
+        let prefix = serde_json::to_value(crate::claims::preference_op(e, false)).unwrap();
         let (mut why, mut extra) = (prefix.clone(), prefix);
         why["why"] = format!("key {MASKED}").into();
         extra["note"] = MASKED.into();
@@ -9797,7 +9834,7 @@ mod tests {
         e.quote = "Use tabs".into();
         e.length = 8;
         assert_eq!(crate::claims::uid("preference", &e), uid);
-        let short = serde_json::to_value(crate::claims::preference_op(e)).unwrap();
+        let short = serde_json::to_value(crate::claims::preference_op(e, false)).unwrap();
         let short = s.raw.append_ops(&[(raw::OpKind::Claim, short)]).unwrap()[0];
         std::fs::write(home.join("config.toml"), MASK_RULE).unwrap();
         s.run();
@@ -9828,7 +9865,7 @@ mod tests {
         let mut ops = Vec::new();
         for i in 0..n {
             let text = format!("Rule {i} keeps {MASKED}.");
-            let c = crate::capture::directive(&text, 1_000 + i as i64, &settings);
+            let c = crate::capture::directive(&text, 1_000 + i as i64, &settings, None);
             let quote = crate::curate::long_text(&c.event).unwrap();
             let evidence = crate::claims::Evidence {
                 device: device.clone(),
@@ -9839,7 +9876,7 @@ mod tests {
                 quote,
                 claim_at: None,
             };
-            let op = crate::claims::preference_op(evidence);
+            let op = crate::claims::preference_op(evidence, false);
             ops.push((raw::OpKind::Claim, serde_json::to_value(op).unwrap()));
         }
         let batches = crate::raw::append_batches(&ops);

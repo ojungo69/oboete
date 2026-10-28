@@ -2705,6 +2705,42 @@ answers=[json({state:'applied',uid:'x'.repeat(64)})];
 button('add:save').click();await settle();
 assert.deepEqual(posted.at(-1),{url:'/api/preferences',body:{text:'Never use /tmp.',apply_to_all_repos:true}});
 assert(!panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'the form closes once added');
+// Slice 8b: rules by scope, every repository's first; a rule of one repository, approved or added
+// with "Applies"; the approved ones whose rule is gone, with Undo; a repository refused.
+const repo='github.com/o/r';
+const scoped={...answer,repos:[{repo,name:'r'}],removed:[{id:'s5',statement:'Squash merges.',seen:1,strength:1,quotes:[]}],
+  yours:[...answer.yours,{scope:'repo',repo,name:'r',rules:[{uid:'y'.repeat(64),text:'Run cargo fmt.',on:true,since:day,suggestion:null,seen:null,quotes:[]}]}]};
+shown=draw(scoped);
+assert(shown.indexOf('Every repository')<shown.indexOf('Ship small PRs.')&&shown.indexOf('Ship small PRs.')<shown.indexOf('In r')&&shown.indexOf('In r')<shown.indexOf('Run cargo fmt.'),'each scope under its heading, every repository first');
+assert(shown.includes('Rule removed')&&shown.includes('Squash merges.'),'an approved one whose rule is gone');
+answers=[json({state:'applied'})];
+button('undo:s5').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s5',action:'undo'}});
+const applies=focus=>panel.querySelectorAll('select').find(n=>n.dataset.focus===focus);
+const choose=(node,value)=>{node.value=value;for(const cb of node.listeners.change||[])cb({target:node});};
+draw(scoped);
+button('edit:s1').click();
+assert.equal(applies('applies:s1').value,'','every repository unless chosen');
+assert.equal(text(applies('applies:s1')),'Every repository In r','the repositories offered');
+choose(applies('applies:s1'),repo);
+answers=[json({state:'applied',uid:'w'.repeat(64)})];
+button('save:s1').click();await settle();
+assert.deepEqual(posted.at(-1).body,{suggestion:'s1',action:'approve',statement:'Write the tests first.',scope:'repo',repo});
+draw(scoped);
+button('add').click();
+type(panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'Run clippy.');
+choose(applies('add:applies'),repo);
+answers=[json({state:'applied',uid:'z'.repeat(64)})];
+button('add:save').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/preferences',body:{text:'Run clippy.',apply_to_all_repos:false,repo}});
+draw(scoped);
+button('add').click();
+assert.equal(applies('add:applies').value,'','a new form applies everywhere again');
+type(panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'Run clippy.');
+choose(applies('add:applies'),repo);
+answers=[json({code:'preference_repo_excluded',field:'repo'},422)];
+button('add:save').click();await settle();
+assert.equal(run('$("status").textContent'),'That repository is not recorded, so no rule is kept for it.');
 // A refusal is named, and nothing is left as done.
 draw(answer);
 answers=[json({code:'rule_decided',field:'suggestion'},409)];
@@ -2727,9 +2763,13 @@ draw(answer);
 let release;answers=[new Promise(r=>{release=r;})];
 button('reject:s4').click();
 run('ui.setView("timeline")');panel.replaceChildren();
+let reads=0;run('globalThis.__reads=()=>{};show=async()=>{globalThis.__reads();}');ctx.__reads=()=>{reads++;};
+run('$("status").textContent=""');
 release(json({state:'applied'}));await settle();
 assert(!panel.querySelector('.my-rules'),'the other tab keeps its panel');
-run('ui.setView("my_rules")');
+assert.equal(reads,0,'the other tab is not read again (#741)');
+assert.equal(run('$("status").textContent'),'','nor given this page\'s message');
+run('show=async()=>{};ui.setView("my_rules")');
 // #739: only what was applied is done: a partial add keeps its form open.
 draw(answer);
 button('add').click();
@@ -2745,6 +2785,9 @@ assert(shown.includes('Off: My Work is not written with AI.'),'and why');
 run('lang="ja"');
 shown=draw(answer);
 assert(shown.includes('あなたの判断を待っています')&&shown.includes('依頼 3 件で見ました · 強い')&&shown.includes('あなたの規則'),'JA');
+shown=draw(scoped);
+assert(shown.includes('すべてのリポジトリ')&&shown.includes('r の中だけ')&&shown.includes('外れた規則'),'JA scopes');
 run('lang="en";show=globalThis.__show');
 console.log('PASS: My Rules 8a: suggestions with approve, edit then approve and reject; your rules with off/on, edit and undo; rejected undone; add rule; Undo; refusals; JA/EN');
+console.log('PASS: My Rules 8b: rules by scope; approve and add with Applies; rules removed undone; a repository refused; JA');
 }

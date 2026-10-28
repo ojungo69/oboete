@@ -28,6 +28,10 @@ const REQUESTS: usize = 200;
 const STATEMENT: usize = 200;
 const QUOTE: usize = 240;
 const QUOTES: usize = 3;
+
+/// The most a suggestion's fields take of its op (`raw::MAX_OP_BYTES`), the rest left to the op's
+/// job, subject and `read` (#741).
+const FIELDS_BYTES: usize = crate::raw::MAX_OP_BYTES / 2;
 /// R1, P7: the suggestions are merged again at most this often, as the story is written.
 const AGAIN_MS: i64 = 3 * 60 * 60 * 1000;
 
@@ -189,23 +193,61 @@ fn strength(sg: &Suggestion, now: i64) -> f64 {
     sg.seen as f64 / (1.0 + days / 7.0)
 }
 
+/// The repositories My Rules offers a rule of one for (slice 8b): those sessions started in, the
+/// newest first, none the owner stopped recording.
+const OFFERED: usize = 20;
+
 /// V3: what the My Rules page shows, read with no call: the suggestions waiting, strongest first;
-/// the rejected ones, the newest decision first; and the owner's rules by scope (global ones only
-/// so far), on ones first, then the newest, an approved one with its suggestion's quotes. Every
-/// text through the gate (S6).
+/// the rejected ones, the newest decision first; the owner's rules by scope, every repository's
+/// first, then each repository's (slice 8b), on ones first, then the newest, an approved one with
+/// its suggestion's quotes; the approved suggestions whose rule is gone (forgotten, or retracted
+/// with `oboete correct`); and the repositories a rule of one can be made for. Every text through
+/// the gate (S6).
 pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
-    let rules = Rules::load(home)?;
-    let gate = |t: &str| crate::redact::outbound_with(t, &rules);
-    let (shown, mut yours) = match crate::search::b::stores(home)? {
-        None => (None, Vec::new()),
+    let settings = crate::capture::Settings::load(home)?;
+    let rules = &settings.rules;
+    let gate = |t: &str| crate::redact::outbound_with(t, rules);
+    type Rule = (crate::claims::Claim, bool);
+    let mut scopes: Vec<(Option<String>, Vec<Rule>)> = vec![(None, Vec::new())];
+    let mut offered = Vec::new();
+    let shown = match crate::search::b::stores(home)? {
+        None => None,
         Some((raw, k)) => {
             let s = shown(&raw, &k)?;
-            let mut yours = Vec::new();
-            for c in crate::claims::global(&k)? {
-                let on = !crate::claims::muted(&k, &c.uid)?;
-                yours.push((c, on));
+            let with_on = |claims: Vec<crate::claims::Claim>| -> Result<Vec<Rule>> {
+                (claims.into_iter())
+                    .map(|c| {
+                        let on = !crate::claims::muted(&k, &c.uid)?;
+                        Ok((c, on))
+                    })
+                    .collect()
+            };
+            scopes[0].1 = with_on(crate::claims::global(&k)?)?;
+            for repo in crate::claims::owned_repos(&k)? {
+                let owned = with_on(crate::claims::owned(&k, &repo)?)?;
+                if !owned.is_empty() {
+                    scopes.push((Some(repo), owned));
+                }
             }
-            (Some(s), yours)
+            // As every writer asks it (`CaptureExclusions::refuses`), with no index to build.
+            let list = raw.capture_exclusions()?;
+            let never = crate::capture::never_recorded(&list, &settings);
+            let started = crate::consumer::manifest::exists(&k, "table", "session_start")?;
+            let mut st = k.prepare(if started {
+                "SELECT repo FROM session_start GROUP BY repo ORDER BY MAX(ts) DESC, repo"
+            } else {
+                "SELECT NULL WHERE 0"
+            })?;
+            for repo in st.query_map([], |r| r.get::<_, String>(0))? {
+                let repo = repo?;
+                if !list.refuses(Some(&never), (Some(&repo), None), None) {
+                    offered.push(repo);
+                }
+                if offered.len() == OFFERED {
+                    break;
+                }
+            }
+            Some(s)
         }
     };
     let Shown {
@@ -239,19 +281,43 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
     let from: std::collections::HashMap<&str, &Suggestion> = (suggestions.iter())
         .filter_map(|sg| Some((decided.get(&sg.id)?.claim.as_deref()?, sg)))
         .collect();
-    yours.sort_by_key(|(c, on)| (!on, std::cmp::Reverse(c.valid_from)));
-    let yours: Vec<Value> = (yours.iter())
-        .map(|(c, on)| {
-            let sg = from.get(c.uid.as_str());
-            json!({"uid": c.uid, "text": gate(&c.body), "on": on, "since": c.valid_from,
-                "suggestion": sg.map(|sg| &sg.id), "seen": sg.map(|sg| sg.seen),
-                "quotes": sg.map(|sg| quotes(sg)).unwrap_or_default()})
+    let current: std::collections::HashSet<&str> = (scopes.iter())
+        .flat_map(|(_, rules)| rules.iter().map(|(c, _)| c.uid.as_str()))
+        .collect();
+    let mut removed: Vec<(&Suggestion, i64)> = (suggestions.iter())
+        .filter_map(|sg| {
+            let d = decided.get(&sg.id).filter(|d| d.state == "approved")?;
+            (!current.contains(d.claim.as_deref()?)).then_some((sg, d.seq))
+        })
+        .collect();
+    removed.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
+    let name = |repo: &str| crate::consumer::manifest::repo_name(repo, rules);
+    let yours: Vec<Value> = (scopes.iter_mut())
+        .map(|(repo, owned)| {
+            owned.sort_by_key(|(c, on)| (!*on, std::cmp::Reverse(c.valid_from)));
+            let rules: Vec<Value> = (owned.iter())
+                .map(|(c, on)| {
+                    let sg = from.get(c.uid.as_str());
+                    json!({"uid": c.uid, "text": gate(&c.body), "on": on, "since": c.valid_from,
+                        "suggestion": sg.map(|sg| &sg.id), "seen": sg.map(|sg| sg.seen),
+                        "quotes": sg.map(|sg| quotes(sg)).unwrap_or_default()})
+                })
+                .collect();
+            match repo {
+                None => json!({"scope": "global", "rules": rules}),
+                Some(repo) => json!({"scope": "repo", "repo": repo, "name": name(repo),
+                    "rules": rules}),
+            }
         })
         .collect();
     Ok(json!({
         "waiting": waiting.into_iter().map(card).collect::<Vec<_>>(),
         "rejected": rejected.into_iter().map(|(sg, _)| card(sg)).collect::<Vec<_>>(),
-        "yours": [{"scope": "global", "rules": yours}],
+        "removed": removed.into_iter().map(|(sg, _)| card(sg)).collect::<Vec<_>>(),
+        "yours": yours,
+        "repos": (offered.iter())
+            .map(|repo| json!({"repo": repo, "name": name(repo)}))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -660,17 +726,27 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
     let gate = |text: &str| crate::redact::outbound_with(text, &c.rules);
     let mut out = BTreeMap::from([(THROUGH.to_owned(), json!({"through": through}))]);
     for sg in suggestions.iter().filter(|sg| changed.contains(&sg.id)) {
-        // Gated again as every kept field (A5): a rule added since a quote was kept masks it too.
-        let quotes: Vec<Value> = (sg.quotes.iter())
-            .map(|q| json!({"text": gate(&q.text), "request": q.request, "at": q.at}))
-            .collect();
-        out.insert(
-            sg.id.clone(),
-            json!({"statement": gate(&sg.statement), "seen": sg.seen, "requests": sg.requests,
-                "quotes": quotes}),
-        );
+        out.insert(sg.id.clone(), fields(sg, &gate));
     }
     out
+}
+
+/// What a suggestion's op keeps, every text gated again as every kept field is (A5): a rule added
+/// since a quote was kept masks it too. Within `FIELDS_BYTES` (#741): the oldest requests go first,
+/// then the oldest quotes, so an op of long request ids is never written as a skip; `seen` keeps
+/// its count.
+fn fields(sg: &Suggestion, gate: &dyn Fn(&str) -> String) -> Value {
+    let quotes: Vec<Value> = (sg.quotes.iter())
+        .map(|q| json!({"text": gate(&q.text), "request": q.request, "at": q.at}))
+        .collect();
+    let mut kept = json!({"statement": gate(&sg.statement), "seen": sg.seen,
+        "requests": sg.requests, "quotes": quotes});
+    let size = |v: &Value| v.to_string().len();
+    for list in ["requests", "quotes"] {
+        while size(&kept) > FIELDS_BYTES && kept[list].as_array_mut().and_then(Vec::pop).is_some() {
+        }
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -685,6 +761,14 @@ mod tests {
     use crate::search::b::fixture::Store;
 
     const MINUTE: i64 = 60_000;
+
+    /// A checkout with no remote: its repository key is its path.
+    fn checkout() -> tempfile::TempDir {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        cwd
+    }
 
     struct Home {
         s: Store,
@@ -757,7 +841,8 @@ mod tests {
             }
         }
 
-        /// The texts of the owner's rules My Rules shows, each with whether it is on.
+        /// The texts of the owner's rules of every repository My Rules shows, each with whether it
+        /// is on.
         fn yours(&self) -> Vec<(String, bool)> {
             let page = self.page();
             let rules = page["yours"][0]["rules"].as_array().unwrap().clone();
@@ -775,13 +860,31 @@ mod tests {
 
         /// Whether each of the three agents is given `text` at the start of a session.
         fn started_with(&self, text: &str) -> [bool; 3] {
-            let cwd = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
-            std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            let cwd = checkout();
+            self.started_in(cwd.path(), text)
+        }
+
+        /// `started_with`, in checkout `cwd`.
+        fn started_in(&self, cwd: &std::path::Path, text: &str) -> [bool; 3] {
+            self.starts(cwd).map(|start| start.contains(text))
+        }
+
+        /// What each of the three agents is given at the start of a session in checkout `cwd`.
+        fn starts(&self, cwd: &std::path::Path) -> [String; 3] {
             ["claude", "codex", "grok"].map(|agent| {
                 let session = format!("start-{agent}-{}", crate::db::now_ms());
-                crate::hook::started(self.s.home.path(), agent, &session, cwd.path()).contains(text)
+                crate::hook::started(self.s.home.path(), agent, &session, cwd)
             })
+        }
+
+        /// A checkout records name (a prompt there), and its repository key.
+        fn known(&mut self) -> (tempfile::TempDir, String) {
+            let cwd = checkout();
+            let repo = crate::repo::key(cwd.path());
+            let session = format!("in-{repo}");
+            self.s.said(&session, &repo, crate::db::now_ms(), "Hello.");
+            self.s.run();
+            (cwd, repo)
         }
 
         fn with<T>(&self, f: impl FnOnce(&Stores) -> T) -> T {
@@ -1193,6 +1296,102 @@ mod tests {
         assert_eq!(rule["quotes"][0]["text"], "write the tests first");
     }
 
+    /// Slice 8b (R2, R4): a suggestion approved for one repository is a decided preference of it,
+    /// at the start of each of the three agents' sessions there under a heading of its own, once,
+    /// and in no other repository's. A preference the curator found there is no rule of the owner's:
+    /// it stays among the decisions, and My Rules does not list it.
+    #[test]
+    fn a_rule_of_one_repository_starts_only_its_sessions() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let ((a, in_a), (b, _)) = (h.known(), h.known());
+        let found = "Keep the changelog short.";
+        let seq = h.s.said("cur", &in_a, crate::db::now_ms(), found);
+        h.s.claim(seq, found, ("preference", "decided", "user"), &[]);
+        h.s.run();
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "approve", "scope": "repo", "repo": in_a}))
+            .unwrap();
+        assert_eq!(got["state"], "applied", "{got}");
+        let claim = crate::search::b::claim(h.s.home.path(), got["uid"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (claim.scope.as_str(), claim.text.as_str()),
+            ("repo", RULE_TEXT)
+        );
+        for start in h.starts(a.path()) {
+            let start = start.replace("\\n", "\n");
+            assert!(
+                !start.contains("- oboete on"),
+                "the directive is no session: {start}"
+            );
+            let heading = "## Preferences of this repository\n";
+            let block = start
+                .split(heading)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{start}"));
+            let block = block.split("\n## ").next().unwrap();
+            assert!(block.contains(RULE_TEXT), "{start}");
+            assert!(!block.contains(found), "{start}");
+            assert!(start.contains(found), "{start}");
+            // Not again among the decisions or the index.
+            for section in start.split("## ").skip(1) {
+                let ours = section.starts_with("Preferences of this repository");
+                assert!(ours || !section.contains(RULE_TEXT), "{start}");
+            }
+        }
+        assert_eq!(h.started_in(b.path(), RULE_TEXT), [false; 3]);
+        assert_eq!(h.started_with(RULE_TEXT), [false; 3]);
+        let page = h.page();
+        assert_eq!(page["yours"][0], json!({"scope": "global", "rules": []}));
+        let ours = &page["yours"][1];
+        assert_eq!(
+            (&ours["scope"], &ours["repo"], &ours["rules"][0]["text"]),
+            (&json!("repo"), &json!(in_a), &json!(RULE_TEXT))
+        );
+        assert_eq!(ours["rules"].as_array().unwrap().len(), 1, "{page}");
+        assert_eq!(ours["rules"][0]["suggestion"], "s1");
+        assert_eq!(page["yours"].as_array().unwrap().len(), 2, "{page}");
+        let offered: Vec<&Value> = (page["repos"].as_array().unwrap().iter())
+            .map(|r| &r["repo"])
+            .collect();
+        assert!(offered.contains(&&json!(in_a)), "{page}");
+        // Turned off, it is given to no agent; undone, it is retracted and waits again.
+        let uid = got["uid"].as_str().unwrap();
+        crate::claims::mute(h.s.home.path(), uid, true).unwrap();
+        assert_eq!(h.started_in(a.path(), RULE_TEXT), [false; 3]);
+        h.act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        assert_eq!(h.waiting(), ["s1"]);
+        assert_eq!(h.page()["yours"].as_array().unwrap().len(), 1);
+    }
+
+    /// Slice 8b (ponytail-review of 8a): an approved suggestion whose rule is gone, retracted with
+    /// `oboete correct` or forgotten, is listed as removed, with Undo: undone, it waits again.
+    #[test]
+    fn an_approved_suggestion_whose_rule_is_gone_is_listed_as_removed() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        assert_eq!(h.page()["removed"], json!([]));
+        let uid = got["uid"].as_str().unwrap();
+        crate::claims::correct(h.s.home.path(), uid, Some("retracted"), None).unwrap();
+        let page = h.page();
+        assert_eq!(page["yours"][0]["rules"], json!([]));
+        assert_eq!(page["removed"][0]["id"], "s1", "{page}");
+        assert_eq!(page["waiting"], json!([]));
+        h.act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        let page = h.page();
+        assert_eq!(
+            (page["removed"].clone(), h.waiting()),
+            (json!([]), vec!["s1".to_owned()])
+        );
+    }
+
     /// R3: edited, approved, then turned off; another rejected, then undone: all ops, so a rebuild
     /// keeps every one of them.
     #[test]
@@ -1296,6 +1495,10 @@ mod tests {
     fn a_rule_action_is_refused_before_it_writes() {
         let mut h = Home::new();
         suggested(&mut h);
+        let (_cwd, stopped) = h.known();
+        (h.s.raw)
+            .exclude_capture(("repo", &stopped), false)
+            .unwrap();
         let code = |body: Value| h.act(body).map(|_| ()).map_err(|r| (r.status, r.code));
         assert_eq!(
             code(json!({"suggestion": "s9", "action": "reject"})),
@@ -1322,6 +1525,25 @@ mod tests {
             Err((422, "rule_scope"))
         );
         assert_eq!(
+            code(json!({"suggestion": "s1", "action": "approve", "scope": "global", "repo": "r"})),
+            Err((422, "rule_scope"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "reject", "repo": "r"})),
+            Err((400, "bad_request"))
+        );
+        // Slice 8b: a repository no record names, or one the owner stopped recording.
+        let repo =
+            |r: &str| json!({"suggestion": "s1", "action": "approve", "scope": "repo", "repo": r});
+        assert_eq!(
+            code(repo("github.com/no/such")),
+            Err((422, "preference_repo_unknown"))
+        );
+        assert_eq!(code(repo(&stopped)), Err((422, "preference_repo_excluded")));
+        // Not offered either.
+        let offered = h.page()["repos"].clone();
+        assert!(!offered.to_string().contains(&stopped), "{offered}");
+        assert_eq!(
             code(json!({"suggestion": "s1", "action": "undo"})),
             Err((409, "rule_not_decided"))
         );
@@ -1344,6 +1566,48 @@ mod tests {
             Err((409, "rule_decided"))
         );
         assert_eq!(h.yours(), Vec::<(String, bool)>::new());
+    }
+
+    /// #741: a suggestion of long request ids is kept in an op that fits, the newest requests and
+    /// quotes first, its count unchanged; a short one is kept whole.
+    #[test]
+    fn a_suggestion_of_long_request_ids_is_kept_within_its_op() {
+        let id = |n: usize| format!("c:claude:{n}-{}", "x".repeat(1_000));
+        let sg = Suggestion {
+            id: "s1".into(),
+            statement: "Tests first.".into(),
+            seen: 250,
+            requests: (0..REQUESTS).map(id).collect(),
+            quotes: (0..QUOTES)
+                .map(|n| Quote {
+                    text: "q".repeat(QUOTE),
+                    request: id(n),
+                    at: 10 - n as i64,
+                })
+                .collect(),
+        };
+        let gate = |t: &str| t.to_owned();
+        let kept = fields(&sg, &gate);
+        assert!(kept.to_string().len() <= FIELDS_BYTES);
+        let requests = kept["requests"].as_array().unwrap();
+        assert!(!requests.is_empty() && requests.len() < REQUESTS);
+        assert_eq!(requests[0], json!(id(0)), "the newest first");
+        assert_eq!(kept["seen"], 250);
+        let short = Suggestion {
+            requests: vec!["g:1".into()],
+            ..sg.clone()
+        };
+        let whole = fields(&short, &gate);
+        assert_eq!(
+            (
+                whole["requests"].clone(),
+                whole["quotes"].as_array().unwrap().len()
+            ),
+            (json!(["g:1"]), QUOTES)
+        );
+        // Kept as the runner writes it: no skip.
+        let op = json!({"job": NAME, "about": "s1", "entry": "e", "ts": 1, "fields": kept});
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
     }
 
     /// V3: the waiting suggestions strongest first, claude-mem's strength: the requests that saw
