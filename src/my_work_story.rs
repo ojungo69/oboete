@@ -53,13 +53,13 @@ struct Week {
 }
 
 /// One round's read: each week with facts, by its Monday; each request's review summary; the
-/// weeks whose facts changed since their chapter, the newest first; and the newest story op's
-/// time.
+/// weeks whose facts changed since their chapter, the newest first; the newest answered chapter of
+/// each week and recap, the story so far; and the newest story op's time.
 struct Round {
     weeks: BTreeMap<String, Week>,
     summaries: BTreeMap<String, String>,
     changed: Vec<String>,
-    chapters: BTreeMap<String, Kept>,
+    said: BTreeMap<String, Kept>,
     recap: Option<Kept>,
     last: Option<i64>,
 }
@@ -148,14 +148,16 @@ fn facts(request: &str, review: &Kept, tz: &impl TimeZone) -> Vec<(String, Fact)
     out
 }
 
-/// P6, P7, S6: each request's newest answered review this device shows, its facts by week; each
-/// week's chapter and the recap as kept; and the weeks whose facts changed since their chapter.
-fn round(s: &Stores, tz: &impl TimeZone) -> Result<Round> {
-    let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
-    let device = s.raw.device().to_owned();
+/// P6, S6: each request's newest answered review this device shows, its facts by week, and its
+/// summary.
+fn facts_by_week(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &Hidden,
+    tz: &impl TimeZone,
+) -> Result<(BTreeMap<String, Week>, BTreeMap<String, String>)> {
     let reviews = (crate::my_work_progress::NAME, None);
-    let reviews =
-        crate::my_work_ops::shown(s.k, reviews, Some(&device), &hidden, true, usize::MAX)?;
+    let reviews = crate::my_work_ops::shown(k, reviews, Some(device), hidden, true, usize::MAX)?;
     let (mut weeks, mut summaries) = (BTreeMap::<String, Week>::new(), BTreeMap::new());
     let mut seen = HashSet::new();
     for review in reviews {
@@ -175,19 +177,48 @@ fn round(s: &Stores, tz: &impl TimeZone) -> Result<Round> {
     for week in weeks.values_mut() {
         week.facts.sort();
     }
-    let all =
-        crate::my_work_ops::shown(s.k, (NAME, None), Some(&device), &hidden, false, usize::MAX)?;
+    Ok((weeks, summaries))
+}
+
+/// P6, P7, S6: the weeks' facts; each week's chapter and the recap as kept; and the weeks whose
+/// facts changed since their chapter, less those a failed batch holds (#730, #733).
+fn round(s: &Stores, tz: &impl TimeZone) -> Result<Round> {
+    let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
+    let device = s.raw.device().to_owned();
+    let (weeks, summaries) = facts_by_week(s.k, &device, &hidden, tz)?;
+    let ops = |answered| {
+        crate::my_work_ops::shown(
+            s.k,
+            (NAME, None),
+            Some(&device),
+            &hidden,
+            answered,
+            usize::MAX,
+        )
+    };
+    // When it is due goes by the newest op of each subject, a give-up's skip among them; what the
+    // call is shown as the story so far, by the newest answered one (#733).
+    let all = ops(false)?;
     let last = all.iter().map(|k| k.op.ts).max();
     let mut chapters = BTreeMap::new();
-    let mut recap = None;
     for k in all {
-        if k.op.about == RECAP {
-            recap.get_or_insert(k);
-        } else if !chapters.contains_key(&k.op.about) {
-            chapters.insert(k.op.about.clone(), k);
+        if k.op.about != RECAP {
+            chapters.entry(k.op.about.clone()).or_insert(k);
         }
     }
+    let (mut said, mut recap) = (BTreeMap::new(), None);
+    for k in ops(true)? {
+        if k.op.about == RECAP {
+            recap.get_or_insert(k);
+        } else {
+            said.entry(k.op.about.clone()).or_insert(k);
+        }
+    }
+    // Every batch rewrites the recap: while it is held, no batch is due.
+    let held = |about: &str| s.held.contains(&(NAME.to_owned(), about.to_owned()));
     let mut changed: Vec<String> = (weeks.iter())
+        .filter(|_| !held(RECAP))
+        .filter(|(monday, _)| !held(monday))
         .filter(|(monday, week)| match chapters.get(*monday) {
             None => true,
             Some(c) if c.op.forgotten.is_some() => true,
@@ -203,7 +234,7 @@ fn round(s: &Stores, tz: &impl TimeZone) -> Result<Round> {
         weeks,
         summaries,
         changed,
-        chapters,
+        said,
         recap,
         last,
     })
@@ -245,12 +276,16 @@ impl Job for Story {
         };
         let weeks: Vec<String> = round.changed[at..].iter().take(WEEKS).cloned().collect();
         let shown = Shown::fill(s, &round, &weeks, now);
-        let ids: Vec<String> = weeks.clone();
-        let digests: BTreeMap<String, i64> = (weeks.iter())
+        // #733: a call asks only for the weeks it could show.
+        if shown.weeks.is_empty() {
+            return Ok(None);
+        }
+        let ids: Vec<String> = shown.weeks.clone();
+        let digests: BTreeMap<String, i64> = (ids.iter())
             .map(|w| (w.clone(), digest(&round.weeks[w].facts)))
             .collect();
         let rules = s.rules.clone();
-        let mut subjects = weeks;
+        let mut subjects = ids.clone();
         subjects.push(RECAP.to_owned());
         Ok(Some(Ask {
             prompt: prompt(&s.summary.language, &shown.data),
@@ -267,10 +302,11 @@ impl Job for Story {
     }
 }
 
-/// One call's data (A4) and what it was shown (S2), by op seq.
+/// One call's data (A4), the weeks whose heading it shows, and what it was shown (S2), by op seq.
 struct Shown {
     data: String,
     left: u32,
+    weeks: Vec<String>,
     ops: BTreeSet<i64>,
 }
 
@@ -285,6 +321,7 @@ impl Shown {
         let mut shown = Shown {
             data: format!("Today: {}\n", &crate::db::utc(now)[..10]),
             left: s.summary.window_tokens,
+            weeks: Vec::new(),
             ops: BTreeSet::new(),
         };
         let recap =
@@ -313,9 +350,11 @@ impl Shown {
                         .to_string()
                 })
                 .unwrap_or_default();
-            shown.push(&format!("## The week {monday} to {sunday}\n"));
-            let chapter = (round.chapters.get(monday))
-                .filter(|c| c.op.forgotten.is_none())
+            if !shown.push(&format!("## The week {monday} to {sunday}\n")) {
+                continue;
+            }
+            shown.weeks.push(monday.clone());
+            let chapter = (round.said.get(monday))
                 .and_then(|c| Some((c, c.op.fields.get("text")?.as_str()?)));
             if let Some((c, text)) = chapter {
                 shown.push(&format!(
@@ -366,13 +405,15 @@ impl Shown {
         shown
     }
 
-    /// A line when it fits; one that does not is passed over (A4).
-    fn push(&mut self, line: &str) {
+    /// A line when it fits; one that does not is passed over (A4). Whether it fit.
+    fn push(&mut self, line: &str) -> bool {
         let cost = crate::budget::estimate(line);
-        if cost <= self.left {
+        let fits = cost <= self.left;
+        if fits {
             self.left -= cost;
             self.data.push_str(line);
         }
+        fits
     }
 }
 
@@ -478,6 +519,8 @@ pub(crate) fn page(
     rules: &Rules,
 ) -> Result<Value> {
     let all = crate::my_work_ops::shown(k, (NAME, None), Some(device), hidden, true, usize::MAX)?;
+    // #733: a week whose facts are gone has no chapter.
+    let (current, _) = facts_by_week(k, device, hidden, &chrono::Local)?;
     let gate = |text: &str| crate::redact::outbound_with(text, rules);
     let text = |k: &Kept| k.op.fields.get("text").and_then(Value::as_str).map(gate);
     let (mut recap, mut weeks) = (None, BTreeMap::new());
@@ -486,7 +529,7 @@ pub(crate) fn page(
             if recap.is_none() {
                 recap = Some(text(kept));
             }
-        } else if !weeks.contains_key(&kept.op.about) {
+        } else if current.contains_key(&kept.op.about) && !weeks.contains_key(&kept.op.about) {
             weeks.insert(kept.op.about.clone(), text(kept));
         }
     }
@@ -558,18 +601,26 @@ mod tests {
         }
 
         fn with<T>(&self, f: impl FnOnce(&Stores) -> T) -> T {
+            self.with_as(&Summary::default(), &crate::my_work_run::NOT_HELD, f)
+        }
+
+        fn with_as<T>(
+            &self,
+            summary: &Summary,
+            held: &BTreeSet<(String, String)>,
+            f: impl FnOnce(&Stores) -> T,
+        ) -> T {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let rules = Rules::load(self.s.home.path()).unwrap();
-            let summary = Summary::default();
             let reading = Reading::now(&self.s.raw, Reads::Live).unwrap();
             f(&Stores {
                 raw: &self.s.raw,
                 k: &k,
                 rules: &rules,
-                summary: &summary,
+                summary,
                 reading: &reading,
-                held: &crate::my_work_run::NOT_HELD,
+                held,
             })
         }
 
@@ -845,5 +896,139 @@ mod tests {
         // This week's, of the review's state, first; then the milestones' weeks.
         assert_eq!(weeks.len(), 3, "{story}");
         assert_eq!(weeks[1..], ["2026-09-07", "2026-08-31"], "{story}");
+    }
+
+    /// This device's local date today, `YYYY-MM-DD`.
+    fn today() -> String {
+        local_date(crate::db::now_ms(), &chrono::Local)
+    }
+
+    /// #733: a call asks for the chapters of the weeks it shows, whatever the window leaves out,
+    /// and an answer writing each of them passes the check.
+    #[test]
+    fn a_call_asks_only_for_the_weeks_it_shows() {
+        let mut h = Home::new();
+        let long = "x".repeat(150);
+        let mut milestones: Vec<(String, String)> =
+            (0..30).map(|_| (today(), long.clone())).collect();
+        milestones.push(("2026-09-02".into(), "It reads a line.".into()));
+        let m: Vec<(&str, &str)> = milestones
+            .iter()
+            .map(|(d, t)| (d.as_str(), t.as_str()))
+            .collect();
+        h.reviewed("g:1", &m);
+        let about = h.due()[0].about.clone();
+        let mut fewer = false;
+        for window in (60..2_400).step_by(37) {
+            let summary = Summary {
+                window_tokens: window,
+                ..Summary::default()
+            };
+            let none = &crate::my_work_run::NOT_HELD;
+            let ask = h.with_as(&summary, none, |s| {
+                Story::default()
+                    .ask(s, &about, crate::db::now_ms())
+                    .unwrap()
+            });
+            let Some(ask) = ask else { continue };
+            let mut shown = weeks_of(&ask.prompt);
+            fewer |= shown.len() < 2;
+            shown.push(RECAP.to_owned());
+            assert_eq!(ask.subjects, shown, "window {window}");
+            assert_eq!((ask.check)(&written(&ask.prompt)), None, "window {window}");
+        }
+        assert!(fewer, "a window leaves the second week out");
+    }
+
+    /// #730, #733: a chapter a failed batch holds is in no batch until its wait ends; while the
+    /// recap is held, which every batch rewrites, none is due.
+    #[test]
+    fn a_held_chapter_waits_out_its_hold() {
+        let mut h = Home::new();
+        h.reviewed("g:1", &[("2026-09-02", "It reads a line.")]);
+        let due = |held: &[&str]| {
+            let held: BTreeSet<(String, String)> = held
+                .iter()
+                .map(|a| (NAME.to_owned(), (*a).to_owned()))
+                .collect();
+            let summary = Summary::default();
+            h.with_as(&summary, &held, |s| {
+                (Story::default()
+                    .due(s, crate::db::now_ms())
+                    .unwrap()
+                    .into_iter())
+                .map(|d| d.about)
+                .collect::<Vec<_>>()
+            })
+        };
+        let this = monday(&today()).unwrap();
+        assert_eq!(due(&[]), std::slice::from_ref(&this));
+        assert_eq!(due(&[&this]), ["2026-08-31"], "the held week waits");
+        assert_eq!(
+            due(&[RECAP]),
+            Vec::<String>::new(),
+            "no batch while the recap waits"
+        );
+    }
+
+    /// #733: a week whose facts a newer review took away loses its chapter on the page.
+    #[test]
+    fn a_week_whose_facts_are_gone_shows_no_chapter() {
+        let mut h = Home::new();
+        h.reviewed("g:1", &[("2026-09-02", "It reads a line.")]);
+        h.pass();
+        let story = |h: &Home| {
+            h.s.run();
+            let now = crate::db::now_ms();
+            let v = crate::my_work::read(h.s.home.path(), crate::my_work::Range::All, now).unwrap();
+            (v["story"]["chapters"].as_array().unwrap().iter())
+                .map(|c| c["week"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(story(&h).contains(&"2026-08-31".to_owned()));
+        h.reviewed("g:1", &[("2026-09-09", "It reads a line.")]);
+        assert!(
+            !story(&h).contains(&"2026-08-31".to_owned()),
+            "{:?}",
+            story(&h)
+        );
+    }
+
+    /// #733: after a give-up's skips, the next call is shown the last answered recap and chapter
+    /// as the story so far.
+    #[test]
+    fn the_story_so_far_is_the_last_answered_text() {
+        let mut h = Home::new();
+        h.reviewed("g:1", &[("2026-09-02", "It reads a line.")]);
+        let this = monday(&today()).unwrap();
+        h.op(NAME, RECAP, 30, json!({"text": "Recap A."}));
+        h.op(NAME, &this, 30, json!({"text": "Chapter A.", "digest": 0}));
+        for about in [RECAP, this.as_str()] {
+            let skip = MyWorkOp {
+                job: NAME.into(),
+                about: about.into(),
+                entry: String::new(),
+                ts: crate::db::now_ms() - 20 * MINUTE,
+                read: Read::default(),
+                removed: vec![],
+                fields: BTreeMap::new(),
+                skipped: true,
+                forgotten: None,
+            };
+            let op = serde_json::to_value(skip).unwrap();
+            h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        }
+        h.reviewed("g:2", &[("2026-09-03", "It fails fast.")]);
+        h.age(4 * 60);
+        let (_, sent) = h.pass();
+        let prompt = sent.first().expect("a call");
+        assert!(
+            prompt.contains("## The recap so far\nRecap A.\n"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The chapter so far:\nChapter A.\n"),
+            "{prompt}"
+        );
     }
 }

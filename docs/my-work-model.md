@@ -1381,6 +1381,18 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   ship day both in UTC, as the ship day is recorded. A request opened from My Goals drops a read
   of its work product still out, and opens at its top with the focus on its heading. A card's goal
   opens "more" by the goal's rank in the answer My Goals draws, not the card's.
+- **#733** (the final round of reviews of #732):
+  - A story call asks only for the weeks whose heading it shows, so an answer that writes each
+    week shown passes the check; with none shown, there is no call.
+  - The story job keeps the holds of a failed batch, as the links job does: a held chapter is in no
+    batch until its wait ends, and while the recap is held, which every batch rewrites, none is due.
+  - A week whose facts a newer review took away has no chapter on the page.
+  - The story so far that a call is shown is the newest answered recap and chapter. A give-up's
+    skips still decide when the story is due.
+  - A give-up that leaves another subject of the job held keeps the status line's row on the
+    earliest of them.
+  - The keyboard on the build story's disclosure counts as reading, so a changed read waits behind
+    "Show updates".
 - **Then**: slice 7b, the rule suggestions.
 
 ## Not built

@@ -2576,6 +2576,11 @@ assert(story.startsWith('Build story It ships weekly. Week by week · 2'),story)
 assert(story.includes('Oct 19 to Oct 25 The parser shipped. Its tests came next. Oct 12 to Oct 18 The parser began.'),story);
 run('lang="ja"');
 assert(text(run('myWorkBuildStory()')).includes('作業の経緯')&&text(run('myWorkBuildStory()')).includes('週ごと · 2'),'in Japanese');
+// #733: the keyboard on its disclosure is reading, so a changed read waits behind "Show updates".
+const section=run('myWorkBuildStory()');
+section.querySelectorAll('summary')[0].focus();
+run('mw.request=null');
+assert.equal(run('myWorkReading()'),true,'reading the build story');
 run('lang="en";mw.story=null');
 // #731: asked again compares UTC days, as the ship day is recorded: in Tokyo an ask at 22:00 UTC
 // is the next local day, and a ship an hour later is not before it.
@@ -2590,14 +2595,22 @@ run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__
 draw(six,[req('r','R','working',[g('g6')])]);
 assert.equal(run('mg.more'),true,'by the rank drawn');
 assert.equal(document.activeElement?.dataset.focus,'goal:g6');
-// #731: a request opened from My Goals drops a work product read still out, and opens at its top
-// with the focus on its heading.
+// #731, #733: a request opened from My Goals drops a work product read still out, and its page is
+// drawn, at its top, with the focus on its heading.
 draw([goal('g1','priority',1,'Fail fast')],[req('r8','R8','working',[g('g1')])]);
-run('mw.productsAsk=4');
-run('globalThis.__show=show;show=async()=>{}');
+run('mw.productsAsk=4;reposLoaded=true');
+const r8=req('r8','R8','working',[g('g1')]);
+ctx.fetch=url=>{
+  const u=String(url);
+  if(u.includes('/api/my-work/status'))return Promise.resolve(response({state:'none'}));
+  if(u.includes('/api/my-work/product'))return Promise.resolve(response({products:[]}));
+  if(u.includes('/api/my-work'))return Promise.resolve(response({requests:[r8],range:'all',goals:1}));
+  return new Promise(()=>{});
+};
 await panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r8').listeners.click[0]();
-run('show=globalThis.__show');
-assert.equal(run('mw.productsAsk'),5,'a read still out is dropped');
+assert(run('mw.productsAsk')>4,'a read still out is dropped');
+assert.equal(run('view'),'my_work');
+assert(text(document.getElementById('heading')).includes('R8'),'the request\'s page is drawn');
 assert.equal(document.activeElement,document.getElementById('heading'),'the focus on its heading');
 run('ui.setView("my_goals");mw.goals=0');
 console.log('PASS: My Goals 6b: status words by My Work\'s states, full-date asked again, the rollup, the lead, the open asks split, No goal, requests opening on My Work, JA, the goal chip');
