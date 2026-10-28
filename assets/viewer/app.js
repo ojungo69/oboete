@@ -2543,6 +2543,9 @@ const TEXT = {
   my_goals_no_goal: ['No goal · {n}', '目標なし · {n}'],
   my_goals_no_goal_note: ['Requests that serve none of your priorities: work happening outside what you said you want.', 'どの目標にも向いていない依頼です。あなたが望むと言ったこと以外で進んでいる作業です。'],
   my_work_goal: ['Goal', '目標'],
+  my_work_build_story: ['Build story', '作業の経緯'],
+  my_work_story_chapters: ['Week by week · {n}', '週ごと · {n}'],
+  my_work_story_week: ['{start} to {end}', '{start}〜{end}'],
   my_work_goal_none: ['No goal', '目標なし'],
   my_work_goal_unlinked: ['Goal not linked yet', 'まだ目標と結びついていません'],
   my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
@@ -6590,7 +6593,7 @@ const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: tru
 // The answer and the page's place in it. The filters live in the page, as claude-mem's live in
 // its address; the layout is remembered.
 const mw = {
-  rows: null, unlinked: 0, goals: 0, signature: '', fetched: 0, pending: null, slot: null, results: null,
+  rows: null, unlinked: 0, goals: 0, story: null, storyOpen: false, signature: '', fetched: 0, pending: null, slot: null, results: null,
   layout: MY_WORK_LAYOUTS.includes(recall('oboete-my-work-layout', 'cards')) ? recall('oboete-my-work-layout', 'cards') : 'cards',
   filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
   agent: null, request: null, work: null, back: null,
@@ -6764,13 +6767,34 @@ function myWorkGoalChip(row) {
   button.addEventListener('click', (event) => {
     event?.stopPropagation?.();
     Object.assign(mg, { tab: 'now', jump: goal.id });
-    // A priority past the top five is behind "more" (Codex and CodeRabbit on #729).
-    if (goal.kind === 'priority' && goal.rank > MY_GOALS_TOP) mg.more = true;
     mg.goals.add(goal.id);
     setView('my_goals');
     void show();
   });
   return button;
+}
+
+// P6, V4: the build story at My Work's top, as claude-mem's recap: the recap, then the chapters,
+// the newest week first, behind one disclosure; nothing while none was written.
+function myWorkBuildStory() {
+  const s = mw.story;
+  if (!s || (!s.recap && !s.chapters?.length)) return null;
+  const end = (week) => {
+    const d = new Date(`${week}T00:00:00`);
+    d.setDate(d.getDate() + 6);
+    return myGoalsIsoDay(d.getTime());
+  };
+  const chapters = (s.chapters || []).map((c) => el('section', 'my-work-chapter',
+    el('h4', null, t('my_work_story_week', { start: myWorkDay(c.week), end: myWorkDay(end(c.week)) })),
+    ...String(c.text ?? '').split(/\n\s*\n/).map((p) => el('p', 'text', p))));
+  let details = null;
+  if (chapters.length) {
+    details = el('details', 'my-work-chapters', word('summary', null, 'my_work_story_chapters', { n: chapters.length }), ...chapters);
+    details.open = mw.storyOpen;
+    details.addEventListener('toggle', () => { mw.storyOpen = details.open; });
+  }
+  return el('section', 'my-work-build-story', word('h3', null, 'my_work_build_story'),
+    s.recap ? el('p', 'my-work-recap', s.recap) : null, details);
 }
 
 // `request-views.js` `requestCards`: the title opens the request, and the whole card with it.
@@ -7015,7 +7039,7 @@ function myWorkDraw(focus = null) {
   myWorkResults();
   draw(word('span', null, 'my_work'), [], [
     el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot()),
-    switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
+    myWorkBuildStory(), switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
   ]);
   mw.changed.clear();
   setStatus('');
@@ -7380,7 +7404,7 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 function myWorkAccept(answer) {
-  mw.signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals]);
+  mw.signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story]);
   // claude-mem 15's `normalizeRequestStatus`: a checked result ready to check is Checked on the
   // page; a shipped one stays Shipped.
   for (const row of answer.requests) if (row.checked && row.status === 'ready') row.status = 'checked';
@@ -7399,6 +7423,7 @@ function myWorkAccept(answer) {
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
   mw.goals = answer.goals ?? 0;
+  mw.story = answer.story ?? null;
   mw.fetched = Date.now();
   mw.pending = null;
 }
@@ -7425,7 +7450,7 @@ async function myWorkLive() {
   // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on #597).
   mw.taken = read;
   mw.fetched = Date.now();
-  const signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals]);
+  const signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story]);
   if (signature === mw.signature) return true;
   if (myWorkReading()) {
     // The last answer received, as claude-mem's `accept` keeps it: the same answer again stays
@@ -7561,10 +7586,11 @@ function myGoalsIsoDay(ms) {
 }
 
 // The last ship among `requests`, its recorded day, when the goal was asked again on a later
-// day, by full dates (V2: claude-mem compares the month and day alone).
+// day, by full dates (V2: claude-mem compares the month and day alone), both in UTC, as the ship
+// day is recorded (#731).
 function myGoalsAskedAgain(goal, requests) {
   const shipped = requests.map((row) => row.progress?.completed).filter(Boolean).sort().at(-1);
-  return shipped && myGoalsIsoDay(goal.last) > shipped ? shipped : null;
+  return shipped && new Date(goal.last).toISOString().slice(0, 10) > shipped ? shipped : null;
 }
 
 // claude-mem's `statusOf`: where a goal stands, from the requests serving it.
@@ -7603,13 +7629,17 @@ function myGoalsRequest(row) {
   const button = el('button', 'my-goals-request', el('span', 'my-goals-title', row.title), myWorkBadge(row.status), myWorkProgress(row));
   button.type = 'button';
   button.dataset.focus = `request:${row.id}`;
-  button.addEventListener('click', () => {
+  button.addEventListener('click', async () => {
     setView('my_work');
-    // As `myWorkOpen`: its work product is read again (Codex on #729, on #650).
+    // As `myWorkOpen`: its work product is read again, a read still out dropped (Codex and
+    // CodeRabbit on #729, on #650); it opens at its top, the focus on its heading (#731).
     mw.products = null;
+    mw.productsAsk += 1;
     mw.unread.delete(row.id);
     mw.request = row.id;
-    void show();
+    window.scrollTo?.(0, 0);
+    await show();
+    if (view === 'my_work' && mw.request === row.id) myWorkFocus('heading');
   });
   return button;
 }
@@ -7778,6 +7808,10 @@ function myGoalsDraw() {
   // back to the one with the same key when it is drawn again (#722, #724).
   const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
   const a = mg.answer ?? {};
+  // A priority a card opened past the top five, by its rank in this answer, is behind "more"
+  // (Codex and CodeRabbit on #729, #731).
+  const target = mg.jump && (a.current?.items ?? []).find((i) => i.id === mg.jump);
+  if (target?.kind === 'priority' && target.rank > MY_GOALS_TOP) mg.more = true;
   const end = myGoalsDay(Date.now());
   const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
     const button = el('button', mg.tab === key ? 'tab my-goals-tab-on' : 'tab', label);

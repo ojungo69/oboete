@@ -1345,6 +1345,44 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   My Work with its goal, the cards' goals and a card's goal opening My Goals.
 - **Then**: slice 7, the story and the rule suggestions.
 
+### Slice 7a: the build story (2026-10-28)
+
+- **The facts** (P6): each request's newest answered review this device shows, one only, as the
+  card's. Each milestone goes in the local week (Monday to Sunday) of its date, the start and ship
+  days in theirs, the state and percent in the week of the review. A week with no facts has no
+  chapter.
+- **The ops** (S1, S2): one a chapter, its subject the week's Monday (`YYYY-MM-DD`), and one the
+  recap (`recap`), written together from one answer (`Ask::subjects`). A chapter keeps its text
+  and the facts it was told from as a number, a digest that a later redaction rule cannot change,
+  as a review's marks.
+- **Due** (P7): a week with facts and no chapter, a chapter forgotten, or a digest that differs
+  from its week's facts now; a skip waits for a newer review. The newest such week is the subject,
+  the next one rides along. Due at once with none written, or while weeks are left from the last
+  run; else three hours after the last run once a fact changed after it, where claude-mem's stale
+  story starts no run.
+- **The call** (A4): the recap so far, then each week's chapter so far and its facts, the newest
+  first, then each request's review summary (labelled `R<n>`) and the other weeks' counts, as far
+  as `[summary] window_tokens` go. What does not fit is lost, as a review's input.
+- **The answer** gives each week shown its text and the recap. The check refuses a week missed,
+  named twice or not shown (`shape`), an empty text (`empty`), a chapter over 1,600 characters
+  and a recap over 500 (`over_cap`): the text is the op, so dropping it would keep nothing.
+- **The page** (V4): My Work's answer carries `story`, the recap and the chapters, the newest week
+  first, as far as 12,000 characters go, each gated as it is read; none before one is written.
+  My Work's top shows it: the recap, then the chapters behind one disclosure.
+- **#730** (CodeRabbit on #729): a batch's subjects each wait as their batch does. When every
+  entry fails a call of a batch (`Ask::subjects`), providers.db's `my_work_held` keeps each subject
+  with the batch's hold and next attempt; the links job leaves a held request out of every batch,
+  as a lead or a member, until its wait ends, so batches cut again cannot ask it early. The runner
+  reads the holds at each pass: a job with a subject held keeps its status line's row on the
+  earliest, a success of another batch included, and waits for it. A success or a give-up of the
+  batch clears its subjects; `oboete resume` and a saved key wake them as they wake
+  `my_work_pending`.
+- **#731** (Codex and CodeRabbit on #729): "Asked again after ship" compares the ask's day and the
+  ship day both in UTC, as the ship day is recorded. A request opened from My Goals drops a read
+  of its work product still out, and opens at its top with the focus on its heading. A card's goal
+  opens "more" by the goal's rank in the answer My Goals draws, not the card's.
+- **Then**: slice 7b, the rule suggestions.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

@@ -835,6 +835,7 @@ mod tests {
                 rules: &rules,
                 summary: &self.summary,
                 reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
             })
         }
 

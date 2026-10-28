@@ -825,6 +825,7 @@ mod tests {
                 rules: &rules,
                 summary: &summary,
                 reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
             })
         }
 
@@ -1686,6 +1687,7 @@ mod tests {
             rules: &rules,
             summary: &summary,
             reading: &reading,
+            held: &crate::my_work_run::NOT_HELD,
         };
         let started = std::time::Instant::now();
         let inputs = crate::my_work::review_inputs(&raw, &k, &rules, &reading, now - ACTIVE_MS);

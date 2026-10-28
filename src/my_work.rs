@@ -896,10 +896,10 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     let (answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
     let goals = goals.len();
-    Ok((
-        json!({"requests": answers, "unlinked": unlinked, "goals": goals}),
-        held,
-    ))
+    // P6, V4: the build story beside the requests.
+    let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
+    let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story});
+    Ok((answer, held))
 }
 
 /// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any

@@ -44,6 +44,7 @@ mod my_work_links;
 mod my_work_ops;
 mod my_work_progress;
 mod my_work_run;
+mod my_work_story;
 mod provenance;
 mod provider;
 mod providers_db;
