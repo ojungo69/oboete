@@ -66,7 +66,7 @@ struct Round {
     suggestions: Vec<Suggestion>,
     next_id: u64,
     latest: Option<i64>,
-    decided: BTreeMap<String, (i64, String)>,
+    decided: BTreeMap<String, Decision>,
     new: Vec<Preference>,
 }
 
@@ -77,13 +77,21 @@ pub(crate) fn suggestions(k: &Kept) -> Vec<Suggestion> {
         .unwrap_or_default()
 }
 
-/// R3: the owner's decision on each suggestion, the newest `rule` op of its id: approved or
-/// rejected, with that op's seq; none once undone.
+/// The owner's decision on a suggestion (R3): its `rule` op's seq, approved or rejected, and the
+/// uid of the preference an approve made.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Decision {
+    pub seq: i64,
+    pub state: &'static str,
+    pub claim: Option<String>,
+}
+
+/// R3: the owner's decision on each suggestion, the newest `rule` op of its id; none once undone.
 pub(crate) fn decided(
     k: &rusqlite::Connection,
     device: &str,
     hidden: &Hidden,
-) -> Result<BTreeMap<String, (i64, String)>> {
+) -> Result<BTreeMap<String, Decision>> {
     let mut out = BTreeMap::new();
     let mut seen = HashSet::new();
     for op in crate::my_work_ops::shown(k, (RULE, None), Some(device), hidden, true, usize::MAX)? {
@@ -96,9 +104,142 @@ pub(crate) fn decided(
             Some("reject") => "rejected",
             _ => continue,
         };
-        out.insert(op.op.about.clone(), (op.op_seq, state.to_owned()));
+        let claim = op.op.fields.get("claim").and_then(Value::as_str);
+        out.insert(
+            op.op.about.clone(),
+            Decision {
+                seq: op.op_seq,
+                state,
+                claim: claim.map(str::to_owned),
+            },
+        );
     }
     Ok(out)
+}
+
+/// What My Rules reads (V3): this device's newest answered rules op's suggestions, and the
+/// owner's decisions on them.
+pub(crate) struct Shown {
+    pub suggestions: Vec<Suggestion>,
+    pub decided: BTreeMap<String, Decision>,
+}
+
+pub(crate) fn shown(raw: &crate::raw::Raw, k: &rusqlite::Connection) -> Result<Shown> {
+    let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+    let hidden = crate::my_work_ops::hidden(raw, k, &reading)?;
+    let device = raw.device().to_owned();
+    let last = crate::my_work_ops::shown(k, (NAME, None), Some(&device), &hidden, true, 1)?.pop();
+    Ok(Shown {
+        suggestions: last.as_ref().map(suggestions).unwrap_or_default(),
+        decided: decided(k, &device, &hidden)?,
+    })
+}
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// claude-mem's strength of a rule (V3): the requests that saw it over one plus the weeks since
+/// its newest quote, in whole days.
+fn strength(sg: &Suggestion, now: i64) -> f64 {
+    let newest = sg.quotes.iter().map(|q| q.at).max().unwrap_or(0);
+    let days = ((now - newest).max(0) / DAY_MS) as f64;
+    sg.requests.len() as f64 / (1.0 + days / 7.0)
+}
+
+/// V3: what the My Rules page shows, read with no call: the suggestions waiting, strongest first;
+/// the rejected ones, the newest decision first; and the owner's rules by scope (global ones only
+/// so far), on ones first, then the newest, an approved one with its suggestion's quotes. Every
+/// text through the gate (S6).
+pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
+    let rules = Rules::load(home)?;
+    let gate = |t: &str| crate::redact::outbound_with(t, &rules);
+    let (shown, mut yours) = match crate::search::b::stores(home)? {
+        None => (None, Vec::new()),
+        Some((raw, k)) => {
+            let s = shown(&raw, &k)?;
+            let mut yours = Vec::new();
+            for c in crate::claims::global(&k)? {
+                let on = !crate::claims::muted(&k, &c.uid)?;
+                yours.push((c, on));
+            }
+            (Some(s), yours)
+        }
+    };
+    let Shown {
+        suggestions,
+        decided,
+    } = shown.unwrap_or(Shown {
+        suggestions: Vec::new(),
+        decided: BTreeMap::new(),
+    });
+    let quotes = |sg: &Suggestion| -> Vec<Value> {
+        (sg.quotes.iter())
+            .map(|q| json!({"text": gate(&q.text), "at": q.at}))
+            .collect()
+    };
+    let card = |sg: &Suggestion| {
+        json!({"id": sg.id, "statement": gate(&sg.statement), "seen": sg.requests.len(),
+            "strength": strength(sg, now), "quotes": quotes(sg)})
+    };
+    let mut waiting: Vec<&Suggestion> = (suggestions.iter())
+        .filter(|sg| !decided.contains_key(&sg.id))
+        .collect();
+    waiting.sort_by(|a, b| strength(b, now).total_cmp(&strength(a, now)));
+    let mut rejected: Vec<(&Suggestion, i64)> = (suggestions.iter())
+        .filter_map(|sg| {
+            let d = decided.get(&sg.id).filter(|d| d.state == "rejected")?;
+            Some((sg, d.seq))
+        })
+        .collect();
+    rejected.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
+    // An approved rule's suggestion, by the uid of the preference its approve made.
+    let from: std::collections::HashMap<&str, &Suggestion> = (suggestions.iter())
+        .filter_map(|sg| Some((decided.get(&sg.id)?.claim.as_deref()?, sg)))
+        .collect();
+    yours.sort_by_key(|(c, on)| (!on, std::cmp::Reverse(c.valid_from)));
+    let yours: Vec<Value> = (yours.iter())
+        .map(|(c, on)| {
+            let sg = from.get(c.uid.as_str());
+            json!({"uid": c.uid, "text": gate(&c.body), "on": on, "since": c.valid_from,
+                "suggestion": sg.map(|sg| &sg.id), "seen": sg.map(|sg| sg.requests.len()),
+                "quotes": sg.map(|sg| quotes(sg)).unwrap_or_default()})
+        })
+        .collect();
+    Ok(json!({
+        "waiting": waiting.into_iter().map(card).collect::<Vec<_>>(),
+        "rejected": rejected.into_iter().map(|(sg, _)| card(sg)).collect::<Vec<_>>(),
+        "yours": [{"scope": "global", "rules": yours}],
+    }))
+}
+
+/// R3: the owner's action on suggestion `id`, a `rule` op holding `fields` (no text: the action and
+/// an approve's preference uid). Whether the my_work consumer applied it within 10 seconds; an
+/// error when nothing was recorded.
+pub(crate) fn record(home: &std::path::Path, id: &str, fields: Value) -> Result<bool> {
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let mut raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    let op = crate::my_work_ops::MyWorkOp {
+        job: RULE.to_owned(),
+        about: id.to_owned(),
+        entry: String::new(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: Vec::new(),
+        fields: fields
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    raw.gates_with(&rules);
+    let op = (crate::raw::OpKind::MyWork, serde_json::to_value(op)?);
+    let seqs = raw.append_ops(&[op])?;
+    let device = raw.device().to_owned();
+    drop(raw);
+    Ok(crate::claims::applied(home, &k, &device, &seqs, ("rule", "my_work")).is_ok())
 }
 
 /// R1, S6: the rules ops and the owner's decisions this device shows, and the preferences of each
@@ -239,10 +380,10 @@ impl Job for Suggestions {
         }
         for sg in &round.suggestions {
             let decision = round.decided.get(&sg.id);
-            if let Some((seq, _)) = decision {
-                ops.insert(*seq);
+            if let Some(d) = decision {
+                ops.insert(d.seq);
             }
-            let state = decision.map_or("not decided", |(_, d)| d.as_str());
+            let state = decision.map_or("not decided", |d| d.state);
             let n = sg.requests.len();
             data.push_str(&format!(
                 "- {} (seen in {n} request{}, {state}): {}\n",
@@ -444,12 +585,16 @@ mod tests {
         }
 
         fn op(&mut self, job: &str, about: &str, fields: Value) -> i64 {
+            self.op_reading(job, about, fields, Read::default())
+        }
+
+        fn op_reading(&mut self, job: &str, about: &str, fields: Value, read: Read) -> i64 {
             let op = MyWorkOp {
                 job: job.into(),
                 about: about.into(),
                 entry: "fake".into(),
                 ts: crate::db::now_ms(),
-                read: Read::default(),
+                read,
                 removed: vec![],
                 fields: fields.as_object().unwrap().clone().into_iter().collect(),
                 skipped: false,
@@ -463,12 +608,69 @@ mod tests {
 
         /// A review of `request` keeping `preferences` (statement, quote).
         fn reviewed(&mut self, request: &str, preferences: &[(&str, &str)]) -> i64 {
+            self.reviewed_reading(request, preferences, Read::default())
+        }
+
+        fn reviewed_reading(
+            &mut self,
+            request: &str,
+            preferences: &[(&str, &str)],
+            read: Read,
+        ) -> i64 {
             let preferences: Vec<Value> = (preferences.iter())
                 .map(|(statement, quote)| json!({"statement": statement, "quote": quote}))
                 .collect();
             let fields = json!({"state": "in-progress", "percent": 40, "summary": "S.",
                 "milestones": [], "preferences": preferences});
-            self.op(crate::my_work_progress::NAME, request, fields)
+            self.op_reading(crate::my_work_progress::NAME, request, fields, read)
+        }
+
+        /// Slice 8: the owner's action on a suggestion, as the page posts it.
+        fn act(&self, body: Value) -> std::result::Result<Value, crate::settings::Refusal> {
+            let body = serde_json::to_vec(&body).unwrap();
+            crate::settings::claims::rule(self.s.home.path(), &std::sync::Mutex::new(()), &body)
+        }
+
+        fn page(&self) -> Value {
+            page(self.s.home.path(), crate::db::now_ms()).unwrap()
+        }
+
+        /// `f` with raw.db closed, as a rebuild and a purge need it.
+        fn closed(self, f: impl FnOnce(&std::path::Path)) -> Self {
+            let Store { home, raw } = self.s;
+            drop(raw);
+            f(home.path());
+            let raw = crate::raw::open(home.path()).unwrap();
+            Self {
+                s: Store { home, raw },
+            }
+        }
+
+        /// The texts of the owner's rules My Rules shows, each with whether it is on.
+        fn yours(&self) -> Vec<(String, bool)> {
+            let page = self.page();
+            let rules = page["yours"][0]["rules"].as_array().unwrap().clone();
+            (rules.iter())
+                .map(|r| (r["text"].as_str().unwrap().to_owned(), r["on"] == true))
+                .collect()
+        }
+
+        fn waiting(&self) -> Vec<String> {
+            let page = self.page();
+            (page["waiting"].as_array().unwrap().iter())
+                .map(|w| w["id"].as_str().unwrap().to_owned())
+                .collect()
+        }
+
+        /// Whether each of the three agents is given `text` at the start of a session.
+        fn started_with(&self, text: &str) -> [bool; 3] {
+            let cwd = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+            std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            ["claude", "codex", "grok"].map(|agent| {
+                let session = format!("start-{agent}-{}", crate::db::now_ms());
+                crate::hook::started(self.s.home.path(), agent, &session, cwd.path()).contains(text)
+            })
         }
 
         fn with<T>(&self, f: impl FnOnce(&Stores) -> T) -> T {
@@ -631,7 +833,7 @@ mod tests {
         );
         assert_eq!(h.suggestions().len(), 1);
         let state = h.with(|s| decided(s.k, s.raw.device(), &HashSet::new()).unwrap());
-        assert_eq!(state["s1"].1, "rejected");
+        assert_eq!(state["s1"].state, "rejected");
         h.op(RULE, "s1", json!({"action": "undo"}));
         let state = h.with(|s| decided(s.k, s.raw.device(), &HashSet::new()).unwrap());
         assert!(!state.contains_key("s1"), "undone");
@@ -789,5 +991,304 @@ mod tests {
             .map(|q| q.text.clone())
             .collect();
         assert_eq!(quotes, ["third quote", "second quote", "first quote"]);
+    }
+
+    /// Slice 8: one suggestion, `s1`, merged from a review of `g:1`.
+    fn suggested(h: &mut Home) {
+        h.reviewed("g:1", &[("Tests come first.", "write the tests first")]);
+        h.pass(&|_| answer(&[("", "Write the tests before the code.")]));
+    }
+
+    const RULE_TEXT: &str = "Write the tests before the code.";
+
+    /// R3, R4 (decision 60): an approved suggestion is the owner's global preference, given to
+    /// Claude Code, Codex and Grok at the start of every session; My Rules lists it under the owner's
+    /// rules with its suggestion, and no longer as waiting.
+    #[test]
+    fn an_approved_rule_is_a_decided_preference_in_every_agents_session_start() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        assert_eq!(h.started_with(RULE_TEXT), [false; 3]);
+        assert_eq!(h.waiting(), ["s1"]);
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        assert_eq!(got["state"], "applied", "{got}");
+        assert_eq!(h.started_with(RULE_TEXT), [true; 3]);
+        let claim = crate::search::b::claim(h.s.home.path(), got["uid"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (claim.scope.as_str(), claim.text.as_str()),
+            ("global", RULE_TEXT)
+        );
+        let page = h.page();
+        assert_eq!(page["waiting"], json!([]));
+        let rule = &page["yours"][0]["rules"][0];
+        assert_eq!(page["yours"][0]["scope"], "global");
+        assert_eq!(
+            (
+                &rule["text"],
+                &rule["on"],
+                &rule["suggestion"],
+                &rule["seen"]
+            ),
+            (&json!(RULE_TEXT), &json!(true), &json!("s1"), &json!(1))
+        );
+        assert_eq!(rule["quotes"][0]["text"], "write the tests first");
+    }
+
+    /// R3: edited, approved, then turned off; another rejected, then undone: all ops, so a rebuild
+    /// keeps every one of them.
+    #[test]
+    fn edit_turn_off_and_undo_survive_a_rebuild() {
+        let mut h = Home::new();
+        h.reviewed("g:1", &[("Tests come first.", "write the tests first")]);
+        h.reviewed("g:2", &[("Tabs.", "tabs please")]);
+        h.pass(&|_| answer(&[("", RULE_TEXT), ("", "Indent with tabs.")]));
+        let edited = "Write the tests first, then the code.";
+        let got = h
+            .act(
+                json!({"suggestion": "s1", "action": "approve", "scope": "global",
+                "statement": edited}),
+            )
+            .unwrap();
+        let uid = got["uid"].as_str().unwrap().to_owned();
+        crate::claims::correct(h.s.home.path(), &uid, None, Some("Tests first, always.")).unwrap();
+        crate::claims::mute(h.s.home.path(), &uid, true).unwrap();
+        h.act(json!({"suggestion": "s2", "action": "reject"}))
+            .unwrap();
+        assert_eq!(h.page()["rejected"][0]["id"], "s2");
+        h.act(json!({"suggestion": "s2", "action": "undo"}))
+            .unwrap();
+        let before = (h.yours(), h.waiting());
+        assert_eq!(
+            before,
+            (
+                vec![("Tests first, always.".to_owned(), false)],
+                vec!["s2".to_owned()]
+            )
+        );
+        let h = h.closed(|home| crate::worker::rebuild(home).unwrap());
+        assert_eq!((h.yours(), h.waiting()), before);
+        assert_eq!(h.page()["rejected"], json!([]));
+        assert_eq!(h.started_with("Tests first"), [false; 3], "turned off");
+    }
+
+    /// R3: an approve is undone from a page opened later, as from the one that made it: the
+    /// suggestion waits again, its preference is retracted, and no agent is given it; approved
+    /// again, it is one new preference.
+    #[test]
+    fn undo_works_after_a_reload() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        h.act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        let reloaded = Home { s: h.s };
+        assert_eq!(reloaded.waiting(), Vec::<String>::new());
+        let got = reloaded
+            .act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        assert_eq!(got["state"], "applied");
+        assert_eq!(reloaded.waiting(), ["s1"]);
+        assert_eq!(reloaded.yours(), Vec::<(String, bool)>::new());
+        assert_eq!(reloaded.started_with(RULE_TEXT), [false; 3]);
+        reloaded
+            .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        assert_eq!(reloaded.yours(), [(RULE_TEXT.to_owned(), true)]);
+        assert_eq!(reloaded.started_with(RULE_TEXT), [true; 3]);
+    }
+
+    /// R5: forgetting the prompt a suggestion was learned from takes the suggestion (S5), not the
+    /// rule the owner approved from it.
+    #[test]
+    fn a_forget_of_a_suggestions_source_leaves_the_approved_rule() {
+        let mut h = Home::new();
+        let x =
+            h.s.said("s1", "repo", 1_000, "write the tests first, always");
+        let read = Read {
+            spans: vec![(x, x)],
+            ops: vec![],
+        };
+        h.reviewed_reading(
+            "g:1",
+            &[("Tests come first.", "write the tests first")],
+            read,
+        );
+        h.pass(&|_| answer(&[("", RULE_TEXT)]));
+        h.act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        let device = h.s.raw.device().to_owned();
+        let h = h.closed(|home| {
+            let target = crate::forget::Target::Record { device, seq: x };
+            crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+            crate::forget::purge(home).unwrap();
+        });
+        let page = h.page();
+        assert_eq!(
+            (&page["waiting"], &page["rejected"]),
+            (&json!([]), &json!([])),
+            "{page}"
+        );
+        assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+        assert_eq!(page["yours"][0]["rules"][0]["suggestion"], Value::Null);
+        assert_eq!(h.started_with(RULE_TEXT), [true; 3]);
+    }
+
+    /// V3, V6: what the route refuses before anything is written.
+    #[test]
+    fn a_rule_action_is_refused_before_it_writes() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let code = |body: Value| h.act(body).map(|_| ()).map_err(|r| (r.status, r.code));
+        assert_eq!(
+            code(json!({"suggestion": "s9", "action": "reject"})),
+            Err((404, "rule_not_found"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "x1", "action": "reject"})),
+            Err((400, "bad_request"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "keep"})),
+            Err((400, "bad_request"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "reject", "statement": "Other."})),
+            Err((400, "bad_request"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "approve"})),
+            Err((422, "rule_scope"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "approve", "scope": "repo"})),
+            Err((422, "rule_scope"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "undo"})),
+            Err((409, "rule_not_decided"))
+        );
+        assert_eq!(
+            code(
+                json!({"suggestion": "s1", "action": "approve", "scope": "global",
+                "statement": "  "})
+            ),
+            Err((422, "preference_empty"))
+        );
+        assert_eq!(h.waiting(), ["s1"], "nothing decided");
+        h.act(json!({"suggestion": "s1", "action": "reject"}))
+            .unwrap();
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "reject"})),
+            Err((409, "rule_decided"))
+        );
+        assert_eq!(
+            code(json!({"suggestion": "s1", "action": "approve", "scope": "global"})),
+            Err((409, "rule_decided"))
+        );
+        assert_eq!(h.yours(), Vec::<(String, bool)>::new());
+    }
+
+    /// V3: the waiting suggestions strongest first, claude-mem's strength: the requests that saw
+    /// it over one plus the weeks since its newest quote.
+    #[test]
+    fn the_waiting_suggestions_go_strongest_first() {
+        let now = 100 * DAY_MS;
+        let sg = |id: &str, requests: usize, days_ago: i64| Suggestion {
+            id: id.into(),
+            statement: id.into(),
+            requests: (0..requests).map(|n| format!("g:{n}")).collect(),
+            quotes: vec![Quote {
+                text: "q".into(),
+                request: "g:0".into(),
+                at: now - days_ago * DAY_MS,
+            }],
+        };
+        assert_eq!(strength(&sg("a", 2, 0), now), 2.0);
+        assert_eq!(strength(&sg("b", 2, 7), now), 1.0);
+        assert_eq!(strength(&sg("c", 3, 14), now), 1.0);
+        assert!(strength(&sg("d", 1, 0), now) > strength(&sg("e", 3, 30), now));
+    }
+
+    /// V3: each list in its order: the suggestions waiting strongest first, the rejected ones
+    /// the newest decision first, and the owner's rules on ones first, then the newest.
+    #[test]
+    fn my_rules_orders_each_list() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        let sg = |id: &str, requests: usize, days_ago: i64| {
+            json!({"id": id, "statement": format!("Rule {id}."),
+                "requests": (0..requests).map(|n| format!("g:{id}{n}")).collect::<Vec<_>>(),
+                "quotes": [{"text": "q", "request": "g:0", "at": now - days_ago * DAY_MS}]})
+        };
+        let all = [
+            sg("s1", 1, 30),
+            sg("s3", 1, 0),
+            sg("s2", 2, 0),
+            sg("s4", 1, 0),
+            sg("s5", 1, 0),
+        ];
+        h.op(
+            NAME,
+            "2026-10-28",
+            json!({"suggestions": all, "next_id": 6, "through": 0}),
+        );
+        for id in ["s4", "s5"] {
+            h.act(json!({"suggestion": id, "action": "reject"}))
+                .unwrap();
+        }
+        let mut uids = Vec::new();
+        for text in ["Rule A.", "Rule B.", "Rule C."] {
+            uids.push(crate::claims::pref_add(h.s.home.path(), text).unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        crate::claims::mute(h.s.home.path(), &uids[1], true).unwrap();
+        let page = h.page();
+        let ids = |list: &Value| -> Vec<String> {
+            (list.as_array().unwrap().iter())
+                .map(|v| v["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(&page["waiting"]), ["s2", "s3", "s1"], "strongest first");
+        assert_eq!(
+            ids(&page["rejected"]),
+            ["s5", "s4"],
+            "the newest decision first"
+        );
+        let yours: Vec<(String, bool)> = h.yours();
+        assert_eq!(
+            yours,
+            [
+                ("Rule C.".to_owned(), true),
+                ("Rule A.".to_owned(), true),
+                ("Rule B.".to_owned(), false)
+            ],
+            "on first, then the newest"
+        );
+    }
+
+    /// R3: an approve whose preference was forgotten since is still undone: there is nothing left
+    /// to retract, and the suggestion waits again.
+    #[test]
+    fn an_approve_whose_rule_was_forgotten_is_still_undone() {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        let uid = got["uid"].as_str().unwrap().to_owned();
+        let h = h.closed(|home| {
+            let target = crate::forget::Target::Uid { uid };
+            crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+            crate::forget::purge(home).unwrap();
+        });
+        assert_eq!(h.yours(), Vec::<(String, bool)>::new());
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        assert_eq!(got["state"], "applied");
+        assert_eq!(h.waiting(), ["s1"]);
     }
 }

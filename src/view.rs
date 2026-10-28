@@ -1210,6 +1210,7 @@ impl Viewer {
             ("POST", "/api/hide") => (MAX_BODY, |v, b, _| v.hide(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
+            ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
             ("POST", "/api/setup/preview") => (MAX_BODY, |v, b, _| v.agent_preview(b)),
             ("POST", "/api/setup/start") => (MAX_BODY, |v, b, _| v.agent_start(b)),
@@ -1670,6 +1671,15 @@ impl Viewer {
         ))
     }
 
+    /// V3, R3: an approve, reject or undo of a rule suggestion.
+    fn my_rules(&self, body: &[u8]) -> Response {
+        saved(crate::settings::claims::rule(
+            &self.home,
+            &self.saving,
+            body,
+        ))
+    }
+
     /// Parity row 3: what forgetting an item the page shows takes, and the key its start brings.
     fn forget_preview(&self, body: &[u8]) -> Response {
         saved(crate::settings::forget::preview(&self.home, body))
@@ -2034,7 +2044,9 @@ impl Viewer {
             "my-work/status" => {
                 let jobs: Vec<&str> = (crate::my_work_run::jobs().iter())
                     .map(|j| j.name())
-                    .filter(|&n| n != crate::my_work_goals::NAME)
+                    .filter(|&n| {
+                        ![crate::my_work_goals::NAME, crate::my_work_rules::NAME].contains(&n)
+                    })
                     .collect();
                 crate::my_work_run::status(&self.home, &jobs, crate::db::now_ms())?
             }
@@ -2045,6 +2057,14 @@ impl Viewer {
                 let mut answer = crate::my_work_goals::page(&self.home, now)?;
                 let goals = [crate::my_work_goals::NAME];
                 answer["status"] = crate::my_work_run::status(&self.home, &goals, now)?;
+                answer
+            }
+            // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
+            "my-rules" => {
+                let now = crate::db::now_ms();
+                let mut answer = crate::my_work_rules::page(&self.home, now)?;
+                let rules = [crate::my_work_rules::NAME];
+                answer["status"] = crate::my_work_run::status(&self.home, &rules, now)?;
                 answer
             }
             // Slice 4 (docs/my-work.md): what one request produced, read when its page opens, by
@@ -4622,6 +4642,37 @@ curate = false
         assert_eq!(goals["window"], json!({"days": 31, "prompts": 0}));
         assert_eq!(goals["status"], json!({"state": "off"}));
         assert_eq!(get(&v, "/api/my-work/status"), json!({"state": "off"}));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// V3: the My Rules route and its action take the token; over an empty home the page answers
+    /// nothing waiting and no rules, the action no such suggestion.
+    #[test]
+    fn the_my_rules_routes_take_the_token() {
+        let (dir, v) = viewer("my-rules");
+        assert_eq!(v.route("GET", "/api/my-rules", &[HOST]).status, 401);
+        let rules = get(&v, "/api/my-rules");
+        assert_eq!(
+            (&rules["waiting"], &rules["rejected"]),
+            (&json!([]), &json!([]))
+        );
+        assert_eq!(rules["yours"], json!([{"scope": "global", "rules": []}]));
+        assert_eq!(rules["status"], json!({"state": "off"}));
+        let body = br#"{"suggestion":"s1","action":"reject"}"#;
+        let length = body.len().to_string();
+        let mut headers = vec![
+            HOST,
+            ("Origin", "http://127.0.0.1:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", length.as_str()),
+        ];
+        assert_eq!(
+            request(&v, "POST", "/api/my-rules", &headers, body).status,
+            401
+        );
+        headers.push(TOKEN);
+        let answer = request(&v, "POST", "/api/my-rules", &headers, body);
+        assert_eq!(answer.status, 404);
         std::fs::remove_dir_all(&dir).ok();
     }
 

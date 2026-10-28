@@ -305,7 +305,7 @@ function timelineEntry(item, all) {
 // --- Views ----------------------------------------------------------------------------------
 
 const LIMIT = 100;
-const VIEWS = ['my_work', 'my_goals', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
+const VIEWS = ['my_work', 'my_goals', 'my_rules', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
 // My Work opens first once (decision 55), whatever view was stored before it existed; from then
 // on the page opens on the view last used.
 const firstMyWork = recall('oboete-tab', '') !== 'my_work';
@@ -319,10 +319,10 @@ function setView(name) {
   view = name;
   remember('oboete-view', name);
   document.querySelector('main').classList.toggle('timeline-view', name === 'timeline');
-  document.querySelector('main').classList.toggle('my-work-view', name === 'my_work' || name === 'my_goals');
+  document.querySelector('main').classList.toggle('my-work-view', ['my_work', 'my_goals', 'my_rules'].includes(name));
   // My Work has its own search and filters, and its tab opens on the requests, not on one; My
   // Goals reads no repository.
-  $('controls').hidden = name === 'settings' || name === 'my_work' || name === 'my_goals';
+  $('controls').hidden = ['settings', 'my_work', 'my_goals', 'my_rules'].includes(name);
   if (name === 'my_work') Object.assign(mw, { request: null, work: null, back: null });
   // The tab opens on the list, not on a session (docs/page.md S1).
   if (name === 'sessions') Object.assign(ses, { open: null, back: null });
@@ -2548,6 +2548,52 @@ const TEXT = {
   my_work_story_week: ['{start} to {end}', '{start}〜{end}'],
   my_work_goal_none: ['No goal', '目標なし'],
   my_work_goal_unlinked: ['Goal not linked yet', 'まだ目標と結びついていません'],
+  my_rules: ['My Rules', '規則'],
+  my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],
+  my_rules_where: ['Rules you approve or add reach Claude Code, Codex and Grok at the start of every session, as your preferences.', '承認した規則と追加した規則は、あなたの好みとして、Claude Code・Codex・Grok の毎回のセッションの始めに渡ります。'],
+  my_rules_decide: ['Needs your decision', 'あなたの判断を待っています'],
+  my_rules_decide_note: ['Suggested · learned from your requests, not yours until you approve', '提案 · 依頼から学んだもので、承認するまではあなたの規則ではありません'],
+  my_rules_nothing_waiting: ['Nothing waiting. New suggestions show up here after the next learning run.', '判断を待つものはありません。次に学ぶと、新しい提案がここに出ます。'],
+  my_rules_yours: ['Your rules', 'あなたの規則'],
+  my_rules_none: ['No rules yet', 'まだ規則はありません'],
+  my_rules_rejected: ['Rejected', '却下したもの'],
+  my_rules_rejected_note: ['A rejected suggestion stays rejected, even when your requests say it again.', '却下した提案は、依頼でまた同じことを言っても却下のままです。'],
+  my_rules_seen_one: ['Seen in 1 request', '依頼 1 件で見ました'],
+  my_rules_seen_n: ['Seen in {n} requests', '依頼 {n} 件で見ました'],
+  my_rules_strength_1: ['Light', '弱い'],
+  my_rules_strength_2: ['Steady', '普通'],
+  my_rules_strength_3: ['Strong', '強い'],
+  my_rules_why_one: ['Why · 1 quote', '理由 · 引用 1 件'],
+  my_rules_why_n: ['Why · {n} quotes', '理由 · 引用 {n} 件'],
+  my_rules_approve: ['Approve', '承認'],
+  my_rules_edit_approve: ['Edit, then approve', '直してから承認'],
+  my_rules_save_approve: ['Save and approve', '保存して承認'],
+  my_rules_reject: ['Reject', '却下'],
+  my_rules_cancel: ['Cancel', 'やめる'],
+  my_rules_undo: ['Undo', '元に戻す'],
+  my_rules_undo_approve: ['Undo approval', '承認を取り消す'],
+  my_rules_edit: ['Edit rule', '規則を直す'],
+  my_rules_save: ['Save rule', '規則を保存'],
+  my_rules_off: ['Turn rule off', '規則をオフにする'],
+  my_rules_on: ['Turn rule on', '規則をオンにする'],
+  my_rules_is_off: ['Off', 'オフ'],
+  my_rules_set_by_you: ['Set by you', 'あなたが決めた規則'],
+  my_rules_approved_by_you: ['Learned, approved by you', '学んだもので、あなたが承認'],
+  my_rules_no_quotes: ['You wrote this rule, so there are no quotes behind it.', 'あなたが書いた規則なので、元になった引用はありません。'],
+  my_rules_add: ['Add rule', '規則を追加'],
+  my_rules_add_h: ['Add a rule', '規則を追加する'],
+  my_rules_text: ['Rule', '規則'],
+  my_rules_approved: ['Approved. It is now one of your rules.', '承認しました。あなたの規則になりました。'],
+  my_rules_rejected_now: ['Rejected. It stays rejected, even when it comes up again.', '却下しました。また出てきても却下のままです。'],
+  my_rules_undone: ['Undone. The suggestion waits for your decision again.', '元に戻しました。提案はまたあなたの判断を待っています。'],
+  my_rules_saved: ['Saved.', '保存しました。'],
+  my_rules_pending: ['Recorded. The worker applies it shortly.', '記録しました。まもなく反映されます。'],
+  rule_not_found: ['That suggestion is no longer there. The page reads again.', 'その提案はもうありません。ページを読み直します。'],
+  rule_decided: ['That suggestion is already decided. The page reads again.', 'その提案はもう判断済みです。ページを読み直します。'],
+  rule_not_decided: ['That suggestion has no decision to undo. The page reads again.', 'その提案には元に戻す判断がありません。ページを読み直します。'],
+  rule_scope: ['A rule is saved for every repository.', '規則はすべてのリポジトリに保存します。'],
+  rule_partly_recorded: ['The rule is saved, but the suggestion still shows as waiting. Reject it, or leave it: approving it again adds the rule twice.', '規則は保存しましたが、提案は判断待ちのまま表示されます。却下するか、そのままにしてください。もう一度承認すると規則が 2 つになります。'],
+  rule_unavailable: ['My Rules could not save now. Try again shortly.', 'いまは保存できませんでした。少ししてからもう一度お試しください。'],
   my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
   my_work_stands: ['Where it stands', '現在の状況'],
   my_work_original: ['Original request', '元の依頼'],
@@ -2665,6 +2711,7 @@ function applyLanguage() {
   // My Work's heading before its first read, which the page opens on.
   if (view === 'my_work' && mw.rows === null) $('heading').textContent = t('my_work');
   if (view === 'my_goals' && mg.answer) myGoalsDraw();
+  if (view === 'my_rules' && mr.answer) myRulesDraw();
 }
 
 function labelRepo(option) {
@@ -7843,8 +7890,193 @@ function myGoalsDraw() {
   setStatus('');
 }
 
+// --- My Rules (docs/my-work-model.md V3): the rules learned from your requests, and yours ---
+
+// What a redraw keeps: the answer drawn, the suggestion or rule being edited and its draft, the
+// rule being added, and the last approve or reject, which "Undo" takes back.
+const mr = { answer: null, signature: null, editing: null, draft: '', adding: null, last: null, busy: false, open: new Set() };
+
+async function showMyRules() {
+  const answer = await api('my-rules');
+  return () => {
+    const signature = JSON.stringify(answer);
+    if (signature === mr.signature && $('panel').querySelector('.my-rules')) return setStatus('');
+    mr.signature = signature;
+    mr.answer = answer;
+    myRulesDraw();
+  };
+}
+
+// claude-mem's strength bands: Strong at 4 and over, Steady at 1.5, else Light.
+const myRulesBand = (strength) => (strength >= 4 ? 3 : strength >= 1.5 ? 2 : 1);
+
+function myRulesButton(key, focus, onClick, cls = 'quiet small') {
+  const button = word('button', cls, key);
+  button.type = 'button';
+  button.dataset.focus = focus;
+  button.disabled = mr.busy;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+// One write of the page, then a read again: a refusal's words, else the receipt's.
+async function myRulesWrite(path, body, done) {
+  if (mr.busy) return;
+  mr.busy = true;
+  myRulesDraw();
+  let message = null;
+  let failed = false;
+  try {
+    const { res, answer } = await memoryWrite(path, body);
+    if (!res.ok) {
+      failed = true;
+      message = memoryFailure(res, answer);
+    } else {
+      message = answer.state === 'applied' ? t(done) : t(answer.code === 'rule_partly_recorded' ? answer.code : 'my_rules_pending');
+      failed = answer.state !== 'applied';
+    }
+    return res.ok;
+  } catch {
+    failed = true;
+    message = t('memory_result_unknown');
+    return false;
+  } finally {
+    mr.busy = false;
+    mr.signature = null;
+    await show();
+    // Held through the redraw that follows a done action (Undo's line, a closed editor).
+    if (message) setStatus(message, failed, lang, 8000);
+  }
+}
+
+function myRulesWhy(item) {
+  const n = item.quotes?.length ?? 0;
+  if (!n) return null;
+  const summary = el('summary', null, t(n === 1 ? 'my_rules_why_one' : 'my_rules_why_n', { n }));
+  const key = `why:${item.id ?? item.uid}`;
+  summary.dataset.focus = key;
+  const why = el('details', 'my-goals-why', summary,
+    el('ul', 'my-goals-quotes', ...item.quotes.map((q) => el('li', null, el('q', null, q.text), ' ', q.at ? myGoalsAt(q.at) : null))));
+  // Kept open through the redraws an action brings, as My Goals keeps its own.
+  why.open = mr.open.has(key);
+  why.addEventListener('toggle', () => (why.open ? mr.open.add(key) : mr.open.delete(key)));
+  return why;
+}
+
+function myRulesEditor(focus, label) {
+  const field = input('textarea', mr.draft, '', focus, (v) => { mr.draft = v; });
+  field.dataset.focus = focus;
+  field.disabled = mr.busy;
+  return el('label', 'field my-rules-editor', el('span', null, t(label)), field);
+}
+
+// A suggestion waiting: approve it as it is, edit then approve it, or reject it (R3).
+function myRulesSuggestion(sg) {
+  const meta = [t(sg.seen === 1 ? 'my_rules_seen_one' : 'my_rules_seen_n', { n: sg.seen }), t(`my_rules_strength_${myRulesBand(sg.strength)}`)];
+  const approve = (statement) => myRulesWrite('my-rules', { suggestion: sg.id, action: 'approve', scope: 'global', ...(statement === undefined ? {} : { statement }) }, 'my_rules_approved')
+    .then((ok) => { if (ok) { mr.editing = null; mr.last = { id: sg.id, action: 'approve' }; myRulesDraw(); } });
+  let actions;
+  if (mr.editing === `suggestion:${sg.id}`) {
+    actions = [myRulesEditor(`draft:${sg.id}`, 'my_rules_text'), el('div', 'my-rules-actions',
+      myRulesButton('my_rules_save_approve', `save:${sg.id}`, () => void approve(mr.draft), 'small'),
+      myRulesButton('my_rules_cancel', `cancel:${sg.id}`, () => { mr.editing = null; myRulesDraw(); }))];
+  } else {
+    actions = [el('div', 'my-rules-actions',
+      myRulesButton('my_rules_approve', `approve:${sg.id}`, () => void approve(undefined), 'small'),
+      myRulesButton('my_rules_edit_approve', `edit:${sg.id}`, () => { mr.editing = `suggestion:${sg.id}`; mr.draft = sg.statement; myRulesDraw(); }),
+      myRulesButton('my_rules_reject', `reject:${sg.id}`, () => void myRulesWrite('my-rules', { suggestion: sg.id, action: 'reject' }, 'my_rules_rejected_now')
+        .then((ok) => { if (ok) { mr.last = { id: sg.id, action: 'reject' }; myRulesDraw(); } })))];
+  }
+  return el('li', 'my-goals-item my-rules-item', el('p', 'my-rules-statement', sg.statement),
+    el('p', 'my-goals-meta', meta.join(' · ')), myRulesWhy(sg), ...actions);
+}
+
+// One of your rules: edit it, turn it off or on, and for one approved from a suggestion, undo the
+// approval (R3).
+function myRulesRule(rule) {
+  const key = `rule:${rule.uid}`;
+  const meta = [t(rule.suggestion ? 'my_rules_approved_by_you' : 'my_rules_set_by_you')];
+  if (!rule.on) meta.push(t('my_rules_is_off'));
+  if (rule.seen) meta.push(t(rule.seen === 1 ? 'my_rules_seen_one' : 'my_rules_seen_n', { n: rule.seen }));
+  let body;
+  if (mr.editing === key) {
+    body = [myRulesEditor(`draft:${rule.uid}`, 'my_rules_text'), el('div', 'my-rules-actions',
+      myRulesButton('my_rules_save', `save:${rule.uid}`, () => void myRulesWrite('claims/correct', { uid: rule.uid, body: mr.draft }, 'my_rules_saved')
+        .then((ok) => { if (ok) { mr.editing = null; myRulesDraw(); } }), 'small'),
+      myRulesButton('my_rules_cancel', `cancel:${rule.uid}`, () => { mr.editing = null; myRulesDraw(); }))];
+  } else {
+    const toggle = myRulesButton(rule.on ? 'my_rules_off' : 'my_rules_on', `toggle:${rule.uid}`,
+      () => void myRulesWrite('claims/mute', { uid: rule.uid, muted: rule.on }, 'my_rules_saved'));
+    toggle.setAttribute('aria-pressed', String(rule.on));
+    body = [el('div', 'my-rules-actions', toggle,
+      myRulesButton('my_rules_edit', `edit:${rule.uid}`, () => { mr.editing = key; mr.draft = rule.text; myRulesDraw(); }),
+      rule.suggestion ? myRulesButton('my_rules_undo_approve', `undo:${rule.suggestion}`,
+        () => void myRulesWrite('my-rules', { suggestion: rule.suggestion, action: 'undo' }, 'my_rules_undone')) : null)];
+  }
+  const why = rule.quotes?.length ? myRulesWhy({ ...rule, id: rule.uid }) : el('p', 'my-goals-note', t('my_rules_no_quotes'));
+  return el('li', rule.on ? 'my-goals-item my-rules-item' : 'my-goals-item my-rules-item my-rules-off',
+    el('p', 'my-rules-statement', rule.text), el('p', 'my-goals-meta', meta.join(' · ')), why, ...body);
+}
+
+// Add rule: a preference of every repository, as the settings page's preference adds one.
+function myRulesAdd() {
+  if (mr.adding === null) {
+    return el('div', 'my-rules-actions', myRulesButton('my_rules_add', 'add', () => { mr.adding = ''; myRulesDraw(); }));
+  }
+  const field = input('textarea', mr.adding, '', 'add:text', (v) => { mr.adding = v; });
+  field.dataset.focus = 'add:text';
+  field.disabled = mr.busy;
+  return el('div', 'my-rules-add', word('h4', null, 'my_rules_add_h'),
+    el('label', 'field my-rules-editor', el('span', null, t('my_rules_text')), field),
+    el('div', 'my-rules-actions',
+      myRulesButton('my_rules_save', 'add:save', () => void myRulesWrite('preferences', { text: mr.adding, apply_to_all_repos: true }, 'my_rules_saved')
+        .then((ok) => { if (ok) { mr.adding = null; myRulesDraw(); } }), 'small'),
+      myRulesButton('my_rules_cancel', 'add:cancel', () => { mr.adding = null; myRulesDraw(); })));
+}
+
+// After an approve or a reject on this page: what it did, with Undo (an op, so the rule's own
+// Undo and the Rejected list undo it after a reload too).
+function myRulesLast() {
+  if (!mr.last) return null;
+  const undo = myRulesButton('my_rules_undo', 'last:undo', () => {
+    const { id } = mr.last;
+    void myRulesWrite('my-rules', { suggestion: id, action: 'undo' }, 'my_rules_undone').then((ok) => { if (ok) { mr.last = null; myRulesDraw(); } });
+  });
+  const node = el('p', 'my-rules-last', word('span', null, mr.last.action === 'approve' ? 'my_rules_approved' : 'my_rules_rejected_now'), ' ', undo);
+  node.setAttribute('aria-live', 'polite');
+  return node;
+}
+
+function myRulesDraw() {
+  const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
+  const a = mr.answer ?? {};
+  const waiting = a.waiting ?? [];
+  const rejected = a.rejected ?? [];
+  const rules = (a.yours ?? []).flatMap((scope) => scope.rules ?? []);
+  // A suggestion decided since, or a rule gone, is no longer edited.
+  if (mr.editing && ![...waiting.map((sg) => `suggestion:${sg.id}`), ...rules.map((r) => `rule:${r.uid}`)].includes(mr.editing)) mr.editing = null;
+  const decide = [word('h3', null, 'my_rules_decide'), word('p', 'my-goals-note', 'my_rules_decide_note'),
+    waiting.length ? el('ul', 'my-goals-list', ...waiting.map(myRulesSuggestion)) : word('p', 'my-goals-note', 'my_rules_nothing_waiting')];
+  const yours = [word('h3', null, 'my_rules_yours'),
+    rules.length ? el('ul', 'my-goals-list', ...rules.map(myRulesRule)) : word('p', 'my-goals-note', 'my_rules_none'), myRulesAdd()];
+  const sections = [el('section', 'my-rules-decide', ...decide), el('section', 'my-rules-yours', ...yours)];
+  if (rejected.length) {
+    sections.push(el('section', 'my-rules-rejected', word('h3', null, 'my_rules_rejected'), word('p', 'my-goals-note', 'my_rules_rejected_note'),
+      el('ul', 'my-goals-list', ...rejected.map((sg) => el('li', 'my-goals-item my-rules-item', el('p', 'my-rules-statement', sg.statement),
+        el('div', 'my-rules-actions', myRulesButton('my_rules_undo', `undo:${sg.id}`,
+          () => void myRulesWrite('my-rules', { suggestion: sg.id, action: 'undo' }, 'my_rules_undone'))))))));
+  }
+  draw(word('span', null, 'my_rules'), [], [
+    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_rules_eyebrow'), myWorkStatusLine(a.status)),
+    word('p', 'my-goals-note', 'my_rules_where'), myRulesLast(),
+    el('div', 'my-goals my-rules', ...sections),
+  ]);
+  if (focus) [...$('panel').querySelectorAll('button, summary, textarea')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
+  setStatus('');
+}
+
 const LOADERS = new Map([
-  ['my_work', showMyWork], ['my_goals', showMyGoals], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
+  ['my_work', showMyWork], ['my_goals', showMyGoals], ['my_rules', showMyRules], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
@@ -7869,7 +8101,7 @@ async function show() {
   }
   setStatus(t('loading'));
   try {
-    const search = q && !['settings', 'my_work', 'my_goals'].includes(view);
+    const search = q && !['settings', 'my_work', 'my_goals', 'my_rules'].includes(view);
     const render = search ? await showSearch(repo, q) : await LOADERS.get(view)(repo);
     if (mine !== generation) return false;
     render();
@@ -7941,7 +8173,7 @@ async function poll() {
   if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
-    if ((view === 'my_work' && mw.rows) || view === 'my_goals') myWorkTimes();
+    if ((view === 'my_work' && mw.rows) || view === 'my_goals' || view === 'my_rules') myWorkTimes();
     await pollMaintenance();
     const { v } = await api('version');
     $('live').classList.remove('off');

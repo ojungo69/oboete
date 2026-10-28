@@ -2615,3 +2615,121 @@ assert.equal(document.activeElement,document.getElementById('heading'),'the focu
 run('ui.setView("my_goals");mw.goals=0');
 console.log('PASS: My Goals 6b: status words by My Work\'s states, full-date asked again, the rollup, the lead, the open asks split, No goal, requests opening on My Work, JA, the goal chip');
 }
+
+// Decision 57 slice 8a (docs/my-work-model.md V3, R3, R4): My Rules: the suggestions waiting with
+// approve, edit then approve and reject; your rules with on/off, edit and undo of an approval; the
+// rejected ones; add rule; Undo after an approve or a reject; refusals named; JA/EN.
+{
+const run=code=>vm.runInContext(code,ctx);
+const panel=document.getElementById('panel');
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const settle=async()=>{for(let i=0;i<6;i++)await new Promise(resolve=>setImmediate(resolve));};
+const day=Date.UTC(2026,9,27,12,0);
+for(const [key,[en,ja]] of Object.entries(run('TEXT')).filter(([key])=>key.startsWith('my_rules')||key.startsWith('rule_'))){
+  assert(en&&ja&&en!==ja,`${key} has its English and Japanese`);
+}
+const answer={waiting:[{id:'s1',statement:'Write the tests first.',seen:3,strength:4.5,quotes:[{text:'tests first please',at:day}]},
+  {id:'s4',statement:'Keep logs in UTC.',seen:1,strength:0.5,quotes:[]}],
+  rejected:[{id:'s2',statement:'Indent with tabs.',seen:1,strength:1,quotes:[]}],
+  yours:[{scope:'global',rules:[{uid:'u'.repeat(64),text:'Ship small PRs.',on:true,since:day,suggestion:'s3',seen:2,quotes:[{text:'small PRs',at:day}]},
+    {uid:'v'.repeat(64),text:'Answer in Japanese.',on:false,since:day-1,suggestion:null,seen:null,quotes:[]}]}],status:{state:'written',at:day}};
+const draw=a=>{ctx.__rules=a;run('mr.answer=globalThis.__rules;mr.editing=null;mr.adding=null;mr.last=null;myRulesDraw()');return text(panel);};
+const button=focus=>panel.querySelectorAll('button').find(b=>b.dataset.focus===focus);
+const type=(node,value)=>{node.value=value;for(const cb of node.listeners.input||[])cb({target:node});};
+const posted=[];let answers=[];
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'){posted.push({url,body:JSON.parse(options.body)});return Promise.resolve(answers.shift());}
+  return new Promise(()=>{});
+};
+run('globalThis.__show=show;show=async()=>{};lang="en"');
+let shown=draw(answer);
+assert(shown.includes('Needs your decision')&&shown.includes('Suggested · learned from your requests, not yours until you approve'),'the suggestions');
+assert(shown.includes('Seen in 3 requests · Strong')&&shown.includes('Seen in 1 request · Light'),'how often seen, and how strong');
+assert(shown.includes('Why · 1 quote')&&shown.includes('tests first please'),'its quotes behind a disclosure');
+assert(shown.indexOf('Write the tests first.')<shown.indexOf('Keep logs in UTC.'),'in the answer\'s order, strongest first');
+assert(shown.includes('Your rules')&&shown.includes('Learned, approved by you · Seen in 2 requests'),'an approved rule');
+assert(shown.includes('Set by you · Off')&&shown.includes('You wrote this rule, so there are no quotes behind it.'),'one set by the owner, off');
+assert(shown.includes('Rejected')&&shown.includes('Indent with tabs.'),'the rejected ones');
+assert(shown.includes('reach Claude Code, Codex and Grok at the start of every session'),'where rules go (R4)');
+assert(shown.includes('Written'),'the rules job\'s status line');
+// Approve, then Undo it from the line it leaves.
+answers=[json({state:'applied',uid:'w'.repeat(64)})];
+button('approve:s1').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s1',action:'approve',scope:'global'}});
+assert(text(panel).includes('Approved. It is now one of your rules.'),'what it did');
+assert.equal(run('$("status").textContent'),'Approved. It is now one of your rules.','the message stays through the redraw');
+answers=[json({state:'applied'})];
+button('last:undo').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s1',action:'undo'}});
+assert(!button('last:undo'),'undone');
+// Edit, then approve: the edited words are posted.
+draw(answer);
+button('edit:s1').click();
+const draft=panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='draft:s1');
+assert.equal(draft.value,'Write the tests first.','the draft starts from the suggestion');
+type(draft,'Write the tests before the code.');
+answers=[json({state:'applied',uid:'w'.repeat(64)})];
+button('save:s1').click();await settle();
+assert.deepEqual(posted.at(-1).body,{suggestion:'s1',action:'approve',scope:'global',statement:'Write the tests before the code.'});
+// Reject, with Undo too.
+draw(answer);
+answers=[json({state:'applied'})];
+button('reject:s4').click();await settle();
+assert.deepEqual(posted.at(-1).body,{suggestion:'s4',action:'reject'});
+assert(text(panel).includes('Rejected. It stays rejected, even when it comes up again.'));
+// Your rules: off and on, edit, undo of an approval; a rejected one undone.
+draw(answer);
+answers=[json({state:'applied',uid:'u'.repeat(64)})];
+button('toggle:'+'u'.repeat(64)).click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/claims/mute',body:{uid:'u'.repeat(64),muted:true}});
+assert.equal(button('toggle:'+'v'.repeat(64)).textContent??text(button('toggle:'+'v'.repeat(64))),'Turn rule on');
+answers=[json({state:'applied',uid:'v'.repeat(64)})];
+button('toggle:'+'v'.repeat(64)).click();await settle();
+assert.deepEqual(posted.at(-1).body,{uid:'v'.repeat(64),muted:false});
+button('edit:'+'u'.repeat(64)).click();
+type(panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='draft:'+'u'.repeat(64)),'Ship small pull requests.');
+answers=[json({state:'applied',uid:'u'.repeat(64)})];
+button('save:'+'u'.repeat(64)).click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/claims/correct',body:{uid:'u'.repeat(64),body:'Ship small pull requests.'}});
+answers=[json({state:'applied'})];
+button('undo:s3').click();await settle();
+assert.deepEqual(posted.at(-1).body,{suggestion:'s3',action:'undo'});
+answers=[json({state:'applied'})];
+button('undo:s2').click();await settle();
+assert.deepEqual(posted.at(-1).body,{suggestion:'s2',action:'undo'});
+// Add rule: a preference of every repository.
+button('add').click();
+type(panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'Never use /tmp.');
+answers=[json({state:'applied',uid:'x'.repeat(64)})];
+button('add:save').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/preferences',body:{text:'Never use /tmp.',apply_to_all_repos:true}});
+assert(!panel.querySelectorAll('textarea').find(n=>n.dataset.focus==='add:text'),'the form closes once added');
+// A refusal is named, and nothing is left as done.
+draw(answer);
+answers=[json({code:'rule_decided',field:'suggestion'},409)];
+button('approve:s1').click();await settle();
+assert.equal(run('$("status").textContent'),'That suggestion is already decided. The page reads again.');
+assert(!button('last:undo'),'no Undo for a refused approve');
+// A rule saved whose decision was not: said, so it is not approved twice.
+draw(answer);
+answers=[json({state:'pending',uid:'w'.repeat(64),code:'rule_partly_recorded'})];
+button('approve:s1').click();await settle();
+assert(run('$("status").textContent').startsWith('The rule is saved, but the suggestion still shows as waiting.'));
+// Opened quotes stay open through the redraw an action brings.
+draw(answer);
+const why=panel.querySelectorAll('details').find(d=>d.children[0]?.dataset?.focus==='why:s1');
+why.open=true;for(const cb of why.listeners.toggle||[])cb({target:why});
+run('myRulesDraw()');
+assert.equal(panel.querySelectorAll('details').find(d=>d.children[0]?.dataset?.focus==='why:s1').open,true,'kept open');
+// None yet.
+shown=draw({waiting:[],rejected:[],yours:[{scope:'global',rules:[]}],status:{state:'off'}});
+assert(shown.includes('Nothing waiting. New suggestions show up here after the next learning run.')&&shown.includes('No rules yet'),'none yet');
+assert(shown.includes('Off: My Work is not written with AI.'),'and why');
+// Japanese.
+run('lang="ja"');
+shown=draw(answer);
+assert(shown.includes('あなたの判断を待っています')&&shown.includes('依頼 3 件で見ました · 強い')&&shown.includes('あなたの規則'),'JA');
+run('lang="en";show=globalThis.__show');
+console.log('PASS: My Rules 8a: suggestions with approve, edit then approve and reject; your rules with off/on, edit and undo; rejected undone; add rule; Undo; refusals; JA/EN');
+}

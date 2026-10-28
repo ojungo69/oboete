@@ -1423,6 +1423,35 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   whose id is a hash of its wording, comes back reworded.
 - **Then**: slice 8, My Rules.
 
+### Slice 8a: My Rules, rules of every repository (2026-10-28)
+
+- **The page** (V3): a My Rules tab after My Goals, read from `/api/my-rules` with no call
+  (`my_work_rules::page`): the rules job's status line (V1); the suggestions waiting, strongest
+  first by claude-mem's strength (the requests that saw it over one plus the weeks since its
+  newest quote, in whole days; Light, Steady and Strong at 1.5 and 4), each with how often it was
+  seen, its quotes with their times, and Approve, Edit then approve, and Reject; the owner's rules
+  for every repository (`claims::global`), on ones first, then the newest, each with Edit, an on/off
+  switch, its quotes and, for one approved from a suggestion, Undo approval; the rejected
+  suggestions, each with Undo; Add rule; and one line on where rules go (R4). Every text through
+  the gate as it is read (S6). The answer keeps rules by scope (`yours: [{scope, rules}]`), so
+  slice 8b adds one.
+- **The actions** (R3), `POST /api/my-rules` through `save_gate` (`settings::claims::rule`):
+  approve, with the suggestion's words or edited ones, and `scope` `global` (it stands for
+  `/api/preferences`' confirmation, spec 3.3); reject; undo. An approve records the preference as
+  `pref add` does (`claims::pref_add_recorded`, its caps and refusals), then the `rule` op naming
+  its uid; when that op cannot be written after the preference was, the answer says so
+  (`rule_partly_recorded`), so the owner does not approve it twice. An undo of an approve retracts that preference (`correct` with status `retracted`;
+  one forgotten since has nothing left to retract), then writes the undo op; the suggestion waits
+  again, and a second approve makes a new preference. A decided suggestion is refused another
+  approve or reject (409), an undecided one an undo. Edit, on/off and add are the existing
+  `/api/claims/correct`, `/api/claims/mute` and `/api/preferences`. After an approve or a reject
+  the page shows what it did with Undo, and the rule's Undo approval and the Rejected list undo it
+  after a reload too.
+- **Delivery** (R4, decision 60): none of its own. An approved rule is a decided global
+  preference, in the "Global preferences" block of every agent's session start.
+- **My Work's status line** leaves the rules job out, as it leaves the goals job.
+- **Then**: slice 8b, a rule for one repository.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's
