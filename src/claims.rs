@@ -765,8 +765,8 @@ pub(crate) fn pref_add_recorded(
 
 /// Slice 8b: why a preference of repository `given`, labelled `label` by the gate, is refused before
 /// anything is appended: it is one the owner stopped recording, as every writer asks it
-/// (`CaptureExclusions::refuses`), or no record names it (a key mistyped, or a repository
-/// forgotten).
+/// (`CaptureExclusions::refuses`), or no record and no rule of the owner's (`owned_repos`, #748)
+/// names it (a key mistyped, or a repository forgotten).
 fn repo_refusal(
     raw: &crate::raw::Raw,
     k: &Connection,
@@ -794,7 +794,11 @@ fn repo_refusal(
             [label],
             |r| r.get::<_, bool>(0),
         )
-        .map_err(OwnerRefusal::unavailable)?;
+        .map_err(OwnerRefusal::unavailable)?
+        || owned_repos(k)
+            .map_err(OwnerRefusal::unavailable)?
+            .iter()
+            .any(|repo| repo == label);
     if !known {
         return refusal(
             OwnerRefusalCode::PreferenceRepoUnknown,
