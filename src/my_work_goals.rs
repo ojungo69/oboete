@@ -630,28 +630,118 @@ fn keep(answer: &Value, c: &Context) -> BTreeMap<String, Value> {
     ])
 }
 
-/// M5: the goals of each finished calendar month (local), the last goals op written in it that S6
-/// leaves shown, no forget took and kept items; no call. The oldest month first.
-// The page (slice 5b) reads it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn months(
-    k: &rusqlite::Connection,
-    device: &str,
-    hidden: &HashSet<(String, i64)>,
-    now: i64,
-    tz: &impl TimeZone,
-) -> Result<Vec<(String, Kept)>> {
+/// M5: the goals of each finished calendar month (local) among `ops`, this device's answered goals
+/// ops S6 leaves shown, the newest first: the last one written in each month; no call. The oldest
+/// month first.
+pub(crate) fn months<'a>(ops: &'a [Kept], now: i64, tz: &impl TimeZone) -> Vec<(String, &'a Kept)> {
     let this = local(now, tz, "%Y-%m");
-    let all = crate::my_work_ops::shown(k, (NAME, None), Some(device), hidden, true, usize::MAX)?;
-    let mut out: BTreeMap<String, Kept> = BTreeMap::new();
-    for op in all {
+    let mut out: BTreeMap<String, &Kept> = BTreeMap::new();
+    for op in ops {
         let month = local(op.op.ts, tz, "%Y-%m");
         if month < this {
             // The newest first: the first of a month is its last.
             out.entry(month).or_insert(op);
         }
     }
-    Ok(out.into_iter().collect())
+    out.into_iter().collect()
+}
+
+/// V2 (slice 5b): what the My Goals page shows, read with no call (`page_at` in local time).
+pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
+    page_at(home, now, &chrono::Local)
+}
+
+/// The current goals are this device's newest answered goals op's, each item with its quotes of
+/// the last 31 days and their times, the newest first: an item with none left is not shown, and
+/// the ranks are counted again within each kind, as the op can be older than the window (M5).
+/// With them, how many prompts the goals read in the window and in this month, and each finished
+/// month's goals (M5) with the prompts read in it, the newest first. Every text through the gate
+/// (S6).
+fn page_at(home: &std::path::Path, now: i64, tz: &impl TimeZone) -> Result<Value> {
+    let days = WINDOW_MS / DAY_MS;
+    let this = local(now, tz, "%Y-%m");
+    let rules = Rules::load(home)?;
+    let gate = |t: &str| crate::redact::outbound_with(t, &rules);
+    // No store yet: no goals, and the page's answer as it is for none.
+    let (ops, times) = match crate::search::b::stores(home)? {
+        None => (Vec::new(), Vec::new()),
+        Some((raw, k)) => {
+            let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+            let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
+            let device = raw.device().to_owned();
+            let goals = (NAME, None);
+            let ops =
+                crate::my_work_ops::shown(&k, goals, Some(&device), &hidden, true, usize::MAX)?;
+            let read: BTreeSet<i64> = (ops.iter())
+                .flat_map(|o| o.op.read.spans.iter().flat_map(|&(a, b)| a..=b))
+                .collect();
+            let times = raw.prompt_times_of(&device, &read.into_iter().collect::<Vec<_>>())?;
+            (ops, times)
+        }
+    };
+    let since = now - WINDOW_MS;
+    let in_month = |m: &str| {
+        (times.iter())
+            .filter(|(_, ts)| local(*ts, tz, "%Y-%m") == m)
+            .count()
+    };
+    let current = ops
+        .first()
+        .map(|op| json!({"written": op.op.ts, "items": current_items(&items(op), since, &gate)}));
+    let months: Vec<Value> = (months(&ops, now, tz).into_iter().rev())
+        .map(|(month, op)| {
+            let priorities: Vec<Value> = (items(op).into_iter())
+                .filter(|i| i.kind == KINDS[0])
+                .map(|i| {
+                    let quote =
+                        (i.quotes.first()).map(|q| json!({"text": gate(&q.text), "ts": q.ts}));
+                    json!({"title": gate(&i.title), "product": gate(&i.product),
+                        "asked": i.asked, "quote": quote})
+                })
+                .collect();
+            let summary = op
+                .op
+                .fields
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(gate);
+            json!({"month": month, "summary": summary, "prompts": in_month(&month),
+                "priorities": priorities})
+        })
+        .collect();
+    let in_window = times.iter().filter(|(_, ts)| *ts >= since).count();
+    Ok(json!({
+        "current": current,
+        "window": {"days": days, "prompts": in_window},
+        "month": {"month": this, "prompts": in_month(&this)},
+        "months": months,
+    }))
+}
+
+/// The current goals as the page shows them (M5): each item's quotes since `since`, the newest
+/// first; an item with none left out; ranks counted again within each kind.
+fn current_items(items: &[Item], since: i64, gate: &impl Fn(&str) -> String) -> Vec<Value> {
+    let mut out = Vec::new();
+    for kind in KINDS {
+        let mut of: Vec<&Item> = items.iter().filter(|i| i.kind == kind).collect();
+        of.sort_by_key(|i| i.rank);
+        for i in of {
+            let mut quotes: Vec<&Quote> = i.quotes.iter().filter(|q| q.ts >= since).collect();
+            quotes.sort_by_key(|q| std::cmp::Reverse(q.ts));
+            let Some(last) = quotes.first().map(|q| q.ts) else {
+                continue;
+            };
+            let rank = out.iter().filter(|v: &&Value| v["kind"] == kind).count() + 1;
+            let quotes: Vec<Value> = (quotes.into_iter())
+                .map(|q| json!({"text": gate(&q.text), "ts": q.ts}))
+                .collect();
+            out.push(
+                json!({"id": i.id, "kind": i.kind, "rank": rank, "title": gate(&i.title),
+                "product": gate(&i.product), "asked": i.asked, "last": last, "quotes": quotes}),
+            );
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -919,6 +1009,197 @@ mod tests {
         assert_eq!(due[0].1, written + DAY_MS);
     }
 
+    /// A goals op written at `ts` that read the prompts `spans`, keeping `items` as stored.
+    fn stored(h: &mut Home, ts: i64, spans: &[i64], items: Value) {
+        let op = MyWorkOp {
+            job: NAME.into(),
+            about: day(ts, &chrono::Utc),
+            entry: "fake".into(),
+            ts,
+            read: Read {
+                spans: spans.iter().map(|&s| (s, s)).collect(),
+                ops: vec![],
+            },
+            removed: vec![],
+            fields: BTreeMap::from([
+                ("items".to_owned(), items),
+                ("summary".to_owned(), json!("Worked on the parser.")),
+            ]),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.s.run();
+    }
+
+    /// A goal as an op keeps it, its quotes (seq, time, text) the newest first.
+    fn goal(id: &str, kind: &str, rank: u32, title: &str, quotes: &[(i64, i64, &str)]) -> Value {
+        let quotes: Vec<Value> = (quotes.iter())
+            .map(|(seq, ts, text)| json!({"seq": seq, "ts": ts, "text": text}))
+            .collect();
+        json!({"id": id, "kind": kind, "rank": rank, "title": title, "product": "",
+            "asked": quotes.len(), "quotes": quotes})
+    }
+
+    /// V2, M5: the page shows each goal's quotes of the last 31 days, leaves out one with none
+    /// left, counts the ranks again within each kind, and counts the prompts read in the window.
+    #[test]
+    fn the_page_shows_the_quotes_of_31_days_and_counts_the_ranks_again() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        let (then, lately) = (now - 40 * DAY_MS, now - DAY_MS);
+        let old = h.s.said("s1", R, then, "Rename the lexer.");
+        let new = h.s.said("s2", R, lately, "Make the parser fail fast.");
+        let items = json!([
+            goal(
+                "g1",
+                "priority",
+                1,
+                "Rename the lexer",
+                &[(old, then, "the lexer")]
+            ),
+            goal(
+                "g2",
+                "priority",
+                2,
+                "Fail fast",
+                &[(new, lately, "fail fast"), (old, then, "lexer")]
+            ),
+            goal(
+                "g3",
+                "ask",
+                1,
+                "A header test",
+                &[(new, lately, "the parser")]
+            ),
+        ]);
+        stored(&mut h, lately + 1, &[old, new], items);
+        let page = page_at(h.s.home.path(), now, &chrono::Utc).unwrap();
+        let shown: Vec<(&str, &str, u64, usize)> = (page["current"]["items"].as_array().unwrap())
+            .iter()
+            .map(|i| {
+                let quotes = i["quotes"].as_array().unwrap().len();
+                let (id, kind) = (i["id"].as_str().unwrap(), i["kind"].as_str().unwrap());
+                (id, kind, i["rank"].as_u64().unwrap(), quotes)
+            })
+            .collect();
+        assert_eq!(shown, [("g2", "priority", 1, 1), ("g3", "ask", 1, 1)]);
+        assert_eq!(page["current"]["items"][0]["last"], lately);
+        assert_eq!(
+            page["current"]["items"][0]["quotes"][0]["text"],
+            "fail fast"
+        );
+        assert_eq!(page["window"], json!({"days": 31, "prompts": 1}));
+    }
+
+    /// V2, M5: each finished month's goals, the newest month first, with the prompts the goals
+    /// read in it; this month's count; the current goals.
+    #[test]
+    fn the_page_lists_each_finished_month_with_the_prompts_read_in_it() {
+        use chrono::TimeZone;
+        let mut h = Home::new();
+        let at = |m: u32, d: u32| {
+            (chrono::Utc.with_ymd_and_hms(2026, m, d, 12, 0, 0))
+                .unwrap()
+                .timestamp_millis()
+        };
+        let mut said = |session: &str, ts: i64| h.s.said(session, R, ts, "Work on the parser.");
+        let (aug, sep1, sep2, oct) = (
+            said("s1", at(8, 20)),
+            said("s2", at(9, 3)),
+            said("s3", at(9, 28)),
+            said("s4", at(10, 2)),
+        );
+        for (written, seq, ts, title) in [
+            (at(8, 21), aug, at(8, 20), "Export plan"),
+            (at(9, 4), sep1, at(9, 3), "Lexer"),
+            (at(9, 29), sep2, at(9, 28), "Export"),
+            (at(10, 3), oct, at(10, 2), "Fail fast"),
+        ] {
+            let items = json!([goal("g1", "priority", 1, title, &[(seq, ts, "the parser")])]);
+            stored(&mut h, written, &[seq], items);
+        }
+        let page = page_at(h.s.home.path(), at(10, 15), &chrono::Utc).unwrap();
+        let rows: Vec<(&str, u64, &str)> = (page["months"].as_array().unwrap().iter())
+            .map(|m| {
+                let top = m["priorities"][0]["title"].as_str().unwrap();
+                (
+                    m["month"].as_str().unwrap(),
+                    m["prompts"].as_u64().unwrap(),
+                    top,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [("2026-09", 2, "Export"), ("2026-08", 1, "Export plan")]
+        );
+        assert_eq!(
+            page["months"][0]["priorities"][0]["quote"]["text"],
+            "the parser"
+        );
+        assert_eq!(page["months"][0]["summary"], "Worked on the parser.");
+        assert_eq!(page["month"], json!({"month": "2026-10", "prompts": 1}));
+        assert_eq!(page["current"]["items"][0]["title"], "Fail fast");
+    }
+
+    /// S6: goals that read an excluded repository's prompt are not on the page.
+    #[test]
+    fn goals_that_read_an_excluded_repository_are_not_on_the_page() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        let seq = h.s.said("s1", B, now - DAY_MS, "Ship the billing export.");
+        let items = json!([goal(
+            "g1",
+            "priority",
+            1,
+            "Billing export",
+            &[(seq, now - DAY_MS, "billing")]
+        )]);
+        stored(&mut h, now - DAY_MS + 1, &[seq], items);
+        let page = page_at(h.s.home.path(), now, &chrono::Utc).unwrap();
+        assert_eq!(page["current"]["items"][0]["title"], "Billing export");
+        h.s.exclude(B);
+        h.s.run();
+        let page = page_at(h.s.home.path(), now, &chrono::Utc).unwrap();
+        assert!(page["current"].is_null(), "{page}");
+        assert_eq!(page["window"]["prompts"], 0);
+    }
+
+    /// S6: a rule added after the goals were written masks their text on the page.
+    #[test]
+    fn a_rule_added_later_masks_the_goals_on_the_page() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        let seq =
+            h.s.said("s1", R, now - DAY_MS, "Sign in with code=123456 first.");
+        let quote = [(seq, now - DAY_MS, "code=123456 first")];
+        let items = json!([goal(
+            "g1",
+            "priority",
+            1,
+            "Sign in with code=123456",
+            &quote
+        )]);
+        stored(&mut h, now - DAY_MS + 1, &[seq], items);
+        assert!(
+            page_at(h.s.home.path(), now, &chrono::Utc)
+                .unwrap()
+                .to_string()
+                .contains("123456")
+        );
+        let rule = "[redaction]\nextra_rules = [{ id = \"r\", regex = 'code=([0-9]{6})', secret_group = 1 }]\n";
+        std::fs::write(h.s.home.path().join("config.toml"), rule).unwrap();
+        let page = page_at(h.s.home.path(), now, &chrono::Utc)
+            .unwrap()
+            .to_string();
+        assert!(
+            page.contains("Sign in") && !page.contains("123456"),
+            "{page}"
+        );
+    }
+
     /// M4: a quote must be found in the prompt it names, else it goes; an item with none goes.
     #[test]
     fn a_quote_must_be_found_in_the_prompt_it_names() {
@@ -1111,7 +1392,10 @@ mod tests {
         s.run();
         let k = crate::knowledge::open(s.home.path()).unwrap();
         let none = HashSet::new();
-        let months = months(&k, raw.device(), &none, at(2026, 10, 15), &chrono::Utc).unwrap();
+        let goals = (NAME, None);
+        let ops =
+            crate::my_work_ops::shown(&k, goals, Some(raw.device()), &none, true, 64).unwrap();
+        let months = months(&ops, at(2026, 10, 15), &chrono::Utc);
         let got: Vec<(String, Vec<String>)> = (months.iter())
             .map(|(m, k)| (m.clone(), titles(k)))
             .collect();

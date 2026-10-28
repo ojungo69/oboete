@@ -1190,8 +1190,9 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   oldest first, each headed `P<n> <local time> <agent> <repository>`. The text tests (O3) run in
   the call, not in the due check, since they read agent text.
 - **When** (M2): a typed prompt the last goals op did not read is due at once when that op stopped
-  at the budget with prompts left (a first run's next chunk; the op says so in `more`), else a day
-  after the op, a prompt typed while the call was out too (#716).
+  at the budget with prompts left (a first run's next chunk; the op says so in `more`, which a skip
+  kept in its place over the op cap keeps too, #719), else a day after the op, a prompt typed while
+  the call was out too (#716).
   A first run reads in chunks within `[summary] window_tokens`; a first prompt that does not fit is
   cut to the room left, to at most 40 characters when the current goals take it all, so each call
   reads at least one. A call whose prompts the text tests all flag sends nothing: what it read is
@@ -1218,6 +1219,29 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   about 16,900 estimated tokens, so the first read takes about 5 calls. No model call: `[my_work]
   curate` is off here.
 - **Then**: slice 5b, the My Goals page (V2) and its months view.
+
+### Slice 5b, the reads (2026-10-28)
+
+- **`/api/my-goals`** (V2, `my_work_goals::page`), no call: the current goals are this device's
+  newest answered goals op's, each item with its quotes of the last 31 days and their times, the
+  newest first. An item with no quote left is not shown, and the ranks are counted again within
+  each kind, since the op can be older than the window (M5: the job runs only while `[my_work]
+  curate` is on). With them: the prompts the goals read in the window and in this local month,
+  and each finished month's goals (`months`), the newest month first, with its summary, its
+  priorities and each one's newest quote, and the prompts read in that month. The prompts are
+  counted from the read spans of the answered goals ops S6 shows, by one query that reads no
+  body (`raw::prompt_times_of`): a prompt a forget took is not counted, one retention expired
+  is. Every text goes through the gate as it is read, so a rule added later masks it (S6).
+- **The status line** (V1, `my_work_run::status`), no call, from config.toml, providers.db and
+  knowledge.db: `off`; `summaries_off` (on, `[summary] curate` off); `waiting` at the daily bound
+  (A7, with the bound and when the oldest call counted leaves the day) or for a held request of
+  the page's own jobs (A8), `budget`, `resting` or `owner` by its hold, until its next attempt;
+  else `written` at the newest answered op of those jobs this device wrote, or `none`. A ledger
+  older than My Work holds nothing it waits on (#680). `/api/my-goals` carries it for the goals
+  job, and `/api/my-work/status` for My Work's other jobs, a route of its own so that the
+  requests' answer stays as the page's held updates compare it. V1 was in slice 2's tests but not
+  built then.
+- **Then**: the page itself (V2's tabs and panels), and V1's line on My Work.
 
 ## Not built
 

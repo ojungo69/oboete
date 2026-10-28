@@ -4836,6 +4836,25 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// docs/my-work-model.md V2: the time of each of `device`'s prompts among `seqs` that no
+    /// forget took (a whole-record tombstone, as `hide` reads one; a range one only masks text),
+    /// in seq order, no body read. An expired prompt was typed and read, so it is listed.
+    pub(crate) fn prompt_times_of(&self, device: &str, seqs: &[i64]) -> Result<Vec<(i64, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT r.seq, r.ts FROM records r
+             WHERE r.device = ?1 AND r.type = 'event' AND r.kind = 'prompt'
+               AND r.seq IN (SELECT value FROM json_each(?2))
+               AND NOT EXISTS (SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                 AND t.target_device = r.device AND t.target_seq = r.seq
+                 AND t.target_offset IS NULL)
+             ORDER BY r.seq",
+        )?;
+        let rows = st.query_map(params![device, serde_json::to_string(seqs)?], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// docs/my-work-model.md M1: this device's live prompts recorded since `since`, unix ms, by the
     /// prompts index: each one's seq, in seq order as `at` reads them. `at` reads them as a forget
     /// leaves them.
@@ -9552,6 +9571,44 @@ mod tests {
             .map(|o| o.op_seq)
             .collect();
         assert_eq!(seqs, [2, 3, 4]);
+    }
+
+    /// docs/my-work-model.md V2: the times of the prompts among the seqs named that no forget
+    /// took; a range forget only masks text, and a tool record or another device's is no prompt.
+    #[test]
+    fn prompt_times_of_lists_the_named_prompts_no_forget_took() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let body = serde_json::json!({"prompt": "Fix the parser."}).to_string();
+        let prompt = |ts: i64| Event {
+            ts,
+            ..test_event(&body)
+        };
+        let a = raw.append(&prompt(10)).unwrap();
+        let b = raw.append(&prompt(20)).unwrap();
+        let c = raw.append(&prompt(30)).unwrap();
+        let tool = Event {
+            kind: "tool".into(),
+            ts: 40,
+            ..test_event("{}")
+        };
+        let tool = raw.append(&tool).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: b,
+            offset: 0,
+            length: 3,
+        })
+        .unwrap();
+        raw.append_tombstone(Target::Record {
+            device: device.clone(),
+            seq: c,
+        })
+        .unwrap();
+        let times = raw.prompt_times_of(&device, &[c, tool, b, a, 99]).unwrap();
+        assert_eq!(times, [(a, 10), (b, 20)]);
+        assert!(raw.prompt_times_of("other", &[a]).unwrap().is_empty());
     }
 
     #[test]
