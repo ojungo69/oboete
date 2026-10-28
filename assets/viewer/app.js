@@ -6767,8 +6767,6 @@ function myWorkGoalChip(row) {
   button.addEventListener('click', (event) => {
     event?.stopPropagation?.();
     Object.assign(mg, { tab: 'now', jump: goal.id });
-    // A priority past the top five is behind "more" (Codex and CodeRabbit on #729).
-    if (goal.kind === 'priority' && goal.rank > MY_GOALS_TOP) mg.more = true;
     mg.goals.add(goal.id);
     setView('my_goals');
     void show();
@@ -7588,10 +7586,11 @@ function myGoalsIsoDay(ms) {
 }
 
 // The last ship among `requests`, its recorded day, when the goal was asked again on a later
-// day, by full dates (V2: claude-mem compares the month and day alone).
+// day, by full dates (V2: claude-mem compares the month and day alone), both in UTC, as the ship
+// day is recorded (#731).
 function myGoalsAskedAgain(goal, requests) {
   const shipped = requests.map((row) => row.progress?.completed).filter(Boolean).sort().at(-1);
-  return shipped && myGoalsIsoDay(goal.last) > shipped ? shipped : null;
+  return shipped && new Date(goal.last).toISOString().slice(0, 10) > shipped ? shipped : null;
 }
 
 // claude-mem's `statusOf`: where a goal stands, from the requests serving it.
@@ -7630,13 +7629,17 @@ function myGoalsRequest(row) {
   const button = el('button', 'my-goals-request', el('span', 'my-goals-title', row.title), myWorkBadge(row.status), myWorkProgress(row));
   button.type = 'button';
   button.dataset.focus = `request:${row.id}`;
-  button.addEventListener('click', () => {
+  button.addEventListener('click', async () => {
     setView('my_work');
-    // As `myWorkOpen`: its work product is read again (Codex on #729, on #650).
+    // As `myWorkOpen`: its work product is read again, a read still out dropped (Codex and
+    // CodeRabbit on #729, on #650); it opens at its top, the focus on its heading (#731).
     mw.products = null;
+    mw.productsAsk += 1;
     mw.unread.delete(row.id);
     mw.request = row.id;
-    void show();
+    window.scrollTo?.(0, 0);
+    await show();
+    if (view === 'my_work' && mw.request === row.id) myWorkFocus('heading');
   });
   return button;
 }
@@ -7805,6 +7808,10 @@ function myGoalsDraw() {
   // back to the one with the same key when it is drawn again (#722, #724).
   const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
   const a = mg.answer ?? {};
+  // A priority a card opened past the top five, by its rank in this answer, is behind "more"
+  // (Codex and CodeRabbit on #729, #731).
+  const target = mg.jump && (a.current?.items ?? []).find((i) => i.id === mg.jump);
+  if (target?.kind === 'priority' && target.rank > MY_GOALS_TOP) mg.more = true;
   const end = myGoalsDay(Date.now());
   const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
     const button = el('button', mg.tab === key ? 'tab my-goals-tab-on' : 'tab', label);

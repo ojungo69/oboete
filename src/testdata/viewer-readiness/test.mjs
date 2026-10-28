@@ -2543,8 +2543,8 @@ const six=Array.from({length:6},(_,i)=>goal(`g${i+1}`,'priority',i+1,`P${i+1}`))
 ctx.__row=req('r','R','working',[{id:'g6',kind:'priority',rank:6,title:'P6'}]);run('mw.goals=6;mg.more=false');
 let target=run('myWorkGoalChip(globalThis.__row)');
 run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
-assert.equal(run('mg.more'),true,'"more" opened');
 draw(six,[req('r','R','working',[g('g6')])]);
+assert.equal(run('mg.more'),true,'"more" opened');
 assert.equal(document.activeElement?.dataset.focus,'goal:g6');
 ctx.__row=req('r','R','working',[{id:'g7',kind:'ask',rank:1,title:'Docs'}]);
 target=run('myWorkGoalChip(globalThis.__row)');
@@ -2577,5 +2577,28 @@ assert(story.includes('Oct 19 to Oct 25 The parser shipped. Its tests came next.
 run('lang="ja"');
 assert(text(run('myWorkBuildStory()')).includes('作業の経緯')&&text(run('myWorkBuildStory()')).includes('週ごと · 2'),'in Japanese');
 run('lang="en";mw.story=null');
+// #731: asked again compares UTC days, as the ship day is recorded: in Tokyo an ask at 22:00 UTC
+// is the next local day, and a ship an hour later is not before it.
+const tz=process.env.TZ;process.env.TZ='Asia/Tokyo';
+assert.equal(status([shipped('2026-10-20')],Date.UTC(2026,9,20,22,0)),'shipped','one time zone');
+if(tz===undefined)delete process.env.TZ;else process.env.TZ=tz;
+// #731: a priority whose rank moved past the top five since the card was drawn opens "more" by the
+// rank in the answer drawn.
+ctx.__row=req('r','R','working',[{id:'g6',kind:'priority',rank:2,title:'P6'}]);run('mw.goals=6;mg.more=false');
+target=run('myWorkGoalChip(globalThis.__row)');
+run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
+draw(six,[req('r','R','working',[g('g6')])]);
+assert.equal(run('mg.more'),true,'by the rank drawn');
+assert.equal(document.activeElement?.dataset.focus,'goal:g6');
+// #731: a request opened from My Goals drops a work product read still out, and opens at its top
+// with the focus on its heading.
+draw([goal('g1','priority',1,'Fail fast')],[req('r8','R8','working',[g('g1')])]);
+run('mw.productsAsk=4');
+run('globalThis.__show=show;show=async()=>{}');
+await panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r8').listeners.click[0]();
+run('show=globalThis.__show');
+assert.equal(run('mw.productsAsk'),5,'a read still out is dropped');
+assert.equal(document.activeElement,document.getElementById('heading'),'the focus on its heading');
+run('ui.setView("my_goals");mw.goals=0');
 console.log('PASS: My Goals 6b: status words by My Work\'s states, full-date asked again, the rollup, the lead, the open asks split, No goal, requests opening on My Work, JA, the goal chip');
 }

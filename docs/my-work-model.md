@@ -1377,6 +1377,10 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   earliest, a success of another batch included, and waits for it. A success or a give-up of the
   batch clears its subjects; `oboete resume` and a saved key wake them as they wake
   `my_work_pending`.
+- **#731** (Codex and CodeRabbit on #729): "Asked again after ship" compares the ask's day and the
+  ship day both in UTC, as the ship day is recorded. A request opened from My Goals drops a read
+  of its work product still out, and opens at its top with the focus on its heading. A card's goal
+  opens "more" by the goal's rank in the answer My Goals draws, not the card's.
 - **Then**: slice 7b, the rule suggestions.
 
 ## Not built
