@@ -8884,7 +8884,10 @@ pub(crate) fn masked_op_text(
                 // Any depth: see `OP_NAMES` before naming a new op field.
                 let name = OP_NAMES.contains(&key.as_str())
                     || key == "reason" && item.as_str().is_some_and(crate::curate::set_aside);
-                if names && name {
+                // #747: the area a placement or a merge names, masked, would name none.
+                let area = matches!(key.as_str(), "area" | "merged_into")
+                    && crate::my_work_focus::is_id(item);
+                if names && name || area {
                     changed
                 } else {
                     walk(item, rules, names && key != "fields") | changed

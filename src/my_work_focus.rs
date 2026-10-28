@@ -836,6 +836,62 @@ mod tests {
         );
     }
 
+    /// #747: a rule added later masks an area's name in the stored ops when the rescan runs, while
+    /// a placement and a merge keep naming their areas.
+    #[test]
+    fn the_op_rescan_keeps_my_focus_ids() {
+        let mut h = Home::new();
+        let now = crate::db::now_ms();
+        h.s.said("s1", "github.com/o/r", now - 60_000, "Fix the save button.");
+        h.s.run();
+        let (a, b) = ("fa_0123456789ab", "fa_ba9876543210");
+        h.suggested(a, "Viewer 0123456789ab");
+        h.suggested(b, "Search");
+        let request = h.page().0[0].0.clone();
+        for body in [
+            json!({"action": "keep", "area": a}),
+            json!({"action": "keep", "area": b}),
+            json!({"action": "move-request", "request": request, "area": a}),
+            json!({"action": "merge", "area": a, "into": b}),
+        ] {
+            h.act(body).unwrap();
+        }
+        std::fs::write(
+            h.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"hex\", regex = '[0-9a-f]{12}' }]\n",
+        )
+        .unwrap();
+        h.s.run();
+        let Store { home, raw } = h.s;
+        drop(raw);
+        assert!(crate::forget::purge(home.path()).unwrap().is_some());
+        let stored = |text: &str| -> i64 {
+            let raw = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+            raw.query_row(
+                "SELECT COUNT(*) FROM ops WHERE instr(body, ?1) > 0",
+                [text],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            (stored("Viewer 0123456789ab"), stored("Viewer ****")),
+            (0, 1)
+        );
+        let raw = crate::raw::open(home.path()).unwrap();
+        let h = Home {
+            s: Store { home, raw },
+            saving: Mutex::new(()),
+        };
+        assert_eq!(h.focus().resolve(a), Some(b));
+        assert_eq!(h.page().0[0].1, json!(b));
+        // Text under those names is masked all the same.
+        let rules = crate::redact::Rules::load(h.s.home.path()).unwrap();
+        let text = json!({"about": a, "fields": {"area": "Viewer 0123456789ab"}}).to_string();
+        let masked = crate::raw::masked_op_text(crate::raw::OpKind::MyWork, &text, &rules);
+        assert!(masked.is_some_and(|m| m.contains("Viewer ****") && m.contains(a)));
+    }
+
     /// F8: the areas and placements are ops, so a rebuild keeps them.
     #[test]
     fn a_rebuild_keeps_my_focus() {

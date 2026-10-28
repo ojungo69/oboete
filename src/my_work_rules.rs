@@ -1362,6 +1362,19 @@ mod tests {
             (0, 0)
         );
         assert!(h.started_in(a.path(), "changelog")[0], "still delivered");
+        // #748: its claim is found by its words, as every rule's is.
+        let found = h.s.query(&crate::search::b::Query {
+            text: "changelog".into(),
+            caller: Some(in_a.clone()),
+            limit: 20,
+            ..Default::default()
+        });
+        let uid = &crate::claims::owned(&k, &in_a).unwrap()[0].uid;
+        assert!(
+            found.hits.iter().any(|hit| &hit.key == uid),
+            "{:?}",
+            found.hits
+        );
         // Item 6: excluding another repository with a rule leaves this one's rule, and a global
         // one, of no excluded session.
         let (_b, in_b) = h.known();
@@ -1411,6 +1424,37 @@ mod tests {
         .unwrap_err();
         assert_eq!(refused.code, "preference_repo_masked");
         std::fs::remove_file(home.join("config.toml")).unwrap();
+    }
+
+    /// #748: a repository whose last ordinary record is forgotten, while its owner rule stays, still
+    /// takes a rule.
+    #[test]
+    fn a_repository_known_by_its_rules_takes_another() {
+        let mut h = Home::new();
+        let cwd = checkout();
+        let repo = crate::repo::key(cwd.path());
+        let x = h.s.said("s1", &repo, crate::db::now_ms(), "Hello.");
+        h.s.run();
+        crate::claims::pref_add_in(h.s.home.path(), "Keep the changelog short.", Some(&repo))
+            .unwrap();
+        let device = h.s.raw.device().to_owned();
+        let h = h.closed(|home| {
+            let target = crate::forget::Target::Record { device, seq: x };
+            crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+            crate::forget::purge(home).unwrap();
+        });
+        let home = h.s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        let named: bool = k
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM raw_docs WHERE repo = ?1)",
+                [&repo],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!named, "no ordinary record names it");
+        crate::claims::pref_add_in(home, "Tag every release.", Some(&repo)).unwrap();
+        assert_eq!(crate::claims::owned(&k, &repo).unwrap().len(), 2);
     }
 
     /// Slice 8b (ponytail-review of 8a): an approved suggestion whose rule is gone, retracted with
