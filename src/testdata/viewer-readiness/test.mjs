@@ -2450,5 +2450,23 @@ const monthsTab=panel.querySelectorAll('.tab').find(b=>text(b)==='Month by month
 monthsTab.focus();monthsTab.click();
 assert.equal(text(document.activeElement),'Month by month','the focus is on the tab chosen');
 assert(document.activeElement.className.includes('my-goals-tab-on'),'in the new drawing');
+// #724: a drawing for a new answer or a new day gives the keyboard's focus back to the same
+// control, when it is drawn again.
+const keyed=(tag,key)=>panel.querySelectorAll(tag).find(node=>node.dataset.focus===key);
+draw(answer({state:'none'}));
+let before=keyed('summary','why:g2');
+before.focus();
+draw(answer({state:'written',at:day}));
+assert(keyed('summary','why:g2')!==before&&document.activeElement===keyed('summary','why:g2'),'the same quotes keep the focus');
+draw(answer({state:'none'}),'months');
+before=keyed('summary','month:2026-09');
+before.focus();
+draw(answer({state:'written',at:day}),'months');
+assert(keyed('summary','month:2026-09')!==before&&document.activeElement===keyed('summary','month:2026-09'),'the same month keeps it');
+draw(answer({state:'off'}));
+before=keyed('button','settings');
+before.focus();
+draw(answer({state:'summaries_off'}));
+assert(keyed('button','settings')!==before&&document.activeElement===keyed('button','settings'),'the status line\'s button keeps it');
 console.log('PASS: My Goals: top 5 and the rest, quotes with their times, open asks, the months, the status line, JA/EN, a reread each minute, the latest line, the focus kept');
 }

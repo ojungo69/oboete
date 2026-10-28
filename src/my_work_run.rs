@@ -166,12 +166,21 @@ impl<'a> Runner<'a> {
                 due.push((d.since, i, d.about));
             }
         }
-        // V1 (#720): a job this round finds nothing due for waits on nothing the pages should say.
+        // V1 (#720, #724): a job's row says what it waits on. Its subjects due now, those an
+        // overdue pass leaves too, are counted down as the loop passes them: a job none of whose
+        // subjects is due now waits on nothing, nor does one whose last ends with no call while
+        // none was held.
+        let mut left = vec![0usize; self.jobs.len()];
+        for d in due.iter().filter(|d| d.0 <= now) {
+            left[d.1] += 1;
+        }
         for (i, job) in self.jobs.iter().enumerate() {
-            if !due.iter().any(|d| d.1 == i) {
+            if left[i] == 0 {
                 crate::providers_db::clear_my_work_round(db, job.name())?;
             }
         }
+        // Each job's earliest hold this pass, the one `turns::sooner` waits for.
+        let mut held: Vec<Option<i64>> = vec![None; self.jobs.len()];
         // A subject due later (a repository asked about minutes ago) is waited for, the worker
         // staying up for it as for a window (D10).
         let mut wait = Phase::Idle;
@@ -201,6 +210,14 @@ impl<'a> Runner<'a> {
         due.sort();
         for (_, i, about) in due {
             let name = self.jobs[i].name();
+            left[i] -= 1;
+            let last = left[i] == 0 && held[i].is_none();
+            let passed_over = || -> Result<()> {
+                if last {
+                    crate::providers_db::clear_my_work_round(db, name)?;
+                }
+                Ok(())
+            };
             let stores = Stores {
                 raw,
                 k,
@@ -209,6 +226,7 @@ impl<'a> Runner<'a> {
                 reading: &reading,
             };
             let Some(ask) = self.jobs[i].ask(&stores, &about, now)? else {
+                passed_over()?;
                 continue;
             };
             let span = format!("{name} {about}");
@@ -226,12 +244,14 @@ impl<'a> Runner<'a> {
             // What is kept of an answer at the least, a skip: a job whose labels pass the op cap
             // even so is not asked, as nothing paid for could be kept (S2).
             let Some(skip) = fitted(skip)? else {
+                passed_over()?;
                 continue;
             };
             // Nothing to send (each prompt the goals would show was an agent's): what it read is
             // kept as a skip with no call, so the job is not due again for it (M2).
             if ask.prompt.is_empty() {
                 raw.append_ops_fenced(&[(OpKind::MyWork, skip)], reading.fence)?;
+                passed_over()?;
                 continue;
             }
             let sent = crate::curate::sha256_hex(&format!("{}\n{}", self.chain, ask.prompt));
@@ -242,7 +262,15 @@ impl<'a> Runner<'a> {
                     return given_up(raw, db, (name, &span), skip);
                 }
                 if p.next_attempt_at > now {
-                    crate::providers_db::set_my_work_round(db, name, &p.hold, p.next_attempt_at)?;
+                    if held[i].is_none_or(|until| p.next_attempt_at < until) {
+                        crate::providers_db::set_my_work_round(
+                            db,
+                            name,
+                            &p.hold,
+                            p.next_attempt_at,
+                        )?;
+                        held[i] = Some(p.next_attempt_at);
+                    }
                     wait = crate::turns::sooner(
                         wait,
                         crate::turns::held(&p.hold, p.next_attempt_at, now),
@@ -316,8 +344,12 @@ impl<'a> Runner<'a> {
                 return given_up(raw, db, (name, &span), skip).map(|phase| self.called(phase));
             }
             crate::providers_db::set_my_work_pending(db, &p)?;
-            crate::providers_db::set_my_work_round(db, name, hold, next)?;
-            return Ok(self.called(crate::turns::held(hold, next, after)));
+            if held[i].is_none_or(|until| next < until) {
+                crate::providers_db::set_my_work_round(db, name, hold, next)?;
+            }
+            // The runner wakes for the earliest of its waits, as the row names it.
+            let held_now = crate::turns::held(hold, next, after);
+            return Ok(self.called(crate::turns::sooner(wait, held_now)));
         }
         Ok(wait)
     }
@@ -601,9 +633,18 @@ mod tests {
             Ok(due)
         }
 
+        /// A subject named `quiet…` has nothing to send, and one named `blank…` an empty prompt,
+        /// as the goals job's when the text tests flag each prompt.
         fn ask(&self, _: &Stores, about: &str, _: i64) -> Result<Option<Ask>> {
+            if about.starts_with("quiet") {
+                return Ok(None);
+            }
             Ok(Some(Ask {
-                prompt: format!("Tell me about {about}."),
+                prompt: if about.starts_with("blank") {
+                    String::new()
+                } else {
+                    format!("Tell me about {about}.")
+                },
                 schema: json!({"type": "object"}),
                 read: Read {
                     spans: vec![(self.seq, self.seq)],
@@ -1359,5 +1400,105 @@ mod tests {
             "removed": [], "fields": {}, "skipped": true, "forgotten": null});
         given_up(&mut s.raw, &db, ("group", "group r1"), skip).unwrap();
         assert!(crate::providers_db::my_work_rounds(&db).unwrap().is_empty());
+    }
+
+    /// A store whose `[my_work]` and `[summary]` curate, with record `seq` said.
+    fn curating() -> (Store, i64) {
+        let mut s = Store::new();
+        let seq = s.said("s1", "r", 1_000, "Build the parser.");
+        let config = "[summary]\ncurate = true\n[my_work]\ncurate = true\n";
+        std::fs::write(s.home.path().join("config.toml"), config).unwrap();
+        (s, seq)
+    }
+
+    /// #724: two subjects of one job held until different times, the later passed last, leave
+    /// the line on the earlier, the one the runner waits for.
+    #[test]
+    fn the_line_names_a_jobs_earliest_hold() {
+        let (mut s, seq) = curating();
+        let now = crate::db::now_ms();
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        for (about, next) in [("r1", now + 10 * MINUTE), ("r2", now + 30 * MINUTE)] {
+            let prompt = crate::curate::sha256_hex(&format!("chain\nTell me about {about}."));
+            let p = crate::providers_db::MyWorkPending {
+                key: format!("group {about}"),
+                prompt,
+                reason: "the monthly cap".into(),
+                hold: "budget".into(),
+                attempts: 1,
+                next_attempt_at: next,
+            };
+            crate::providers_db::set_my_work_pending(&db, &p).unwrap();
+        }
+        let asked = RefCell::new(Vec::new());
+        let job = Echo {
+            subjects: vec![("r1", 0), ("r2", 1)],
+            seq,
+        };
+        pass(&mut s, job, (true, 100), false, &grouped, &asked);
+        assert!(asked.borrow().is_empty());
+        let line = status(s.home.path(), &["group"], crate::db::now_ms()).unwrap();
+        assert_eq!(
+            line,
+            json!({"state": "waiting", "why": "budget", "until": now + 10 * MINUTE})
+        );
+        // A later subject asked and failing, its wait longer, leaves the earlier hold too.
+        let (mut s, seq) = curating();
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        let prompt = crate::curate::sha256_hex("chain\nTell me about r1.");
+        let p = crate::providers_db::MyWorkPending {
+            key: "group r1".into(),
+            prompt,
+            reason: "the monthly cap".into(),
+            hold: "budget".into(),
+            attempts: 1,
+            next_attempt_at: now + MINUTE,
+        };
+        crate::providers_db::set_my_work_pending(&db, &p).unwrap();
+        let job = Echo {
+            subjects: vec![("r1", 0), ("r2", 1)],
+            seq,
+        };
+        let phase = pass(&mut s, job, (true, 100), false, &failed, &asked);
+        assert_eq!(asked.borrow().clone(), vec!["group r2".to_owned()]);
+        assert!(
+            matches!(phase, Phase::Waiting { until, .. } if until == now + MINUTE),
+            "the runner wakes for it: {phase:?}"
+        );
+        let line = status(s.home.path(), &["group"], crate::db::now_ms()).unwrap();
+        assert_eq!(
+            line,
+            json!({"state": "waiting", "why": "budget", "until": now + MINUTE})
+        );
+    }
+
+    /// #724: a job whose subjects are all due later, or all end with no call, waits on nothing,
+    /// whatever row an earlier pass left; one with a subject due now that an overdue pass did not
+    /// reach keeps its row.
+    #[test]
+    fn a_job_that_holds_nothing_now_leaves_no_row() {
+        let (mut s, seq) = curating();
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        let asked = RefCell::new(Vec::new());
+        let rows = || crate::providers_db::my_work_rounds(&db).unwrap().len();
+        let mut case = |subjects: Vec<(&'static str, i64)>, overdue: bool| {
+            let now = crate::db::now_ms();
+            crate::providers_db::set_my_work_round(&db, "group", "budget", now + 60 * MINUTE)
+                .unwrap();
+            let job = Echo { subjects, seq };
+            pass(&mut s, job, (true, 100), overdue, &grouped, &asked);
+            rows()
+        };
+        let later = crate::db::now_ms() + 30 * MINUTE;
+        assert_eq!(case(vec![("r1", later)], false), 0, "due later");
+        assert_eq!(case(vec![("quiet1", 0)], false), 0, "nothing to send");
+        assert_eq!(case(vec![("blank1", 0)], false), 0, "an empty prompt");
+        let fresh = crate::db::now_ms() - MINUTE;
+        assert_eq!(
+            case(vec![("quiet2", 0), ("r9", fresh)], true),
+            1,
+            "a subject due now the overdue pass did not reach"
+        );
+        assert!(asked.borrow().is_empty());
     }
 }

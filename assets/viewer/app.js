@@ -7424,6 +7424,7 @@ function myWorkStatusLine(status) {
   if (status.state === 'off' || status.state === 'summaries_off') {
     const open = word('button', 'small', 'my_work_line_settings');
     open.type = 'button';
+    open.dataset.focus = 'settings';
     open.addEventListener('click', () => {
       setView('settings');
       void show();
@@ -7494,7 +7495,9 @@ function myGoalsMeta(facts, product) {
 // "Why it's here": every quote behind one disclosure, each with the time it was typed.
 function myGoalsWhy(goal) {
   const n = goal.quotes.length;
-  const why = el('details', 'my-goals-why', el('summary', null, t(n === 1 ? 'my_goals_why_one' : 'my_goals_why_n', { n })),
+  const summary = el('summary', null, t(n === 1 ? 'my_goals_why_one' : 'my_goals_why_n', { n }));
+  summary.dataset.focus = `why:${goal.id}`;
+  const why = el('details', 'my-goals-why', summary,
     el('ul', 'my-goals-quotes', ...goal.quotes.map((q) => el('li', null, el('q', null, q.text), ' ', myGoalsAt(q.ts)))));
   why.open = mg.open.has(goal.id);
   why.addEventListener('toggle', () => (why.open ? mg.open.add(goal.id) : mg.open.delete(goal.id)));
@@ -7531,8 +7534,9 @@ function myGoalsNow(a) {
       el('ul', 'my-goals-list', ...priorities.slice(0, MY_GOALS_TOP).map(myGoalsPriority)));
     const rest = priorities.slice(MY_GOALS_TOP);
     if (rest.length) {
-      const more = el('details', 'my-goals-more', el('summary', null, t('my_goals_more', { n: rest.length })),
-        el('ul', 'my-goals-list', ...rest.map(myGoalsPriority)));
+      const summary = el('summary', null, t('my_goals_more', { n: rest.length }));
+      summary.dataset.focus = 'more';
+      const more = el('details', 'my-goals-more', summary, el('ul', 'my-goals-list', ...rest.map(myGoalsPriority)));
       more.open = mg.more;
       more.addEventListener('toggle', () => { mg.more = more.open; });
       section.append(more);
@@ -7553,8 +7557,9 @@ function myGoalsMonths(a) {
     myGoalsMeta([t('my_goals_prompts', { n: prompts })])];
   const rows = [el('li', 'my-goals-month-row', el('div', 'my-goals-row', ...row(a.month?.month, 'my_goals_current', top?.title, a.month?.prompts ?? 0)))];
   for (const m of a.months ?? []) {
-    const details = el('details', 'my-goals-month-detail',
-      el('summary', 'my-goals-row', ...row(m.month, 'my_goals_archived', m.priorities[0]?.title, m.prompts)),
+    const summary = el('summary', 'my-goals-row', ...row(m.month, 'my_goals_archived', m.priorities[0]?.title, m.prompts));
+    summary.dataset.focus = `month:${m.month}`;
+    const details = el('details', 'my-goals-month-detail', summary,
       m.summary ? el('p', null, m.summary) : null,
       el('ul', 'my-goals-list', ...m.priorities.map((p) => el('li', 'my-goals-item',
         el('div', 'my-goals-row', el('span', 'my-goals-title', p.title), myGoalsMeta([myGoalsAsked(p.asked)], p.product)),
@@ -7568,18 +7573,19 @@ function myGoalsMonths(a) {
 }
 
 function myGoalsDraw() {
+  // A drawing replaces every control, a reread's and a new day's too: the keyboard's focus goes
+  // back to the one with the same key when it is drawn again (#722, #724).
+  const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
   const a = mg.answer ?? {};
   const end = myGoalsDay(Date.now());
   const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
     const button = el('button', mg.tab === key ? 'tab my-goals-tab-on' : 'tab', label);
     button.type = 'button';
+    button.dataset.focus = `tab:${key}`;
     button.setAttribute('aria-pressed', String(mg.tab === key));
     button.addEventListener('click', () => {
-      // The drawing replaces the tabs: the keyboard's focus goes to the one chosen (#722).
-      const focused = document.activeElement === button;
       mg.tab = key;
       myGoalsDraw();
-      if (focused) $('panel').querySelector('.my-goals-tab-on')?.focus({ preventScroll: true });
     });
     return button;
   }));
@@ -7588,6 +7594,7 @@ function myGoalsDraw() {
     el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_goals_eyebrow'), myWorkStatusLine(a.status)),
     tabs, el('div', 'my-goals', ...(mg.tab === 'months' ? myGoalsMonths(a) : myGoalsNow(a))),
   ]);
+  if (focus) [...$('panel').querySelectorAll('button, summary')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
   setStatus('');
 }
 
