@@ -60,6 +60,10 @@ pub(crate) struct Ask {
     pub check: Box<AnswerCheck<'static>>,
     /// The fields kept of an answer that passed, each gated again, one over its cap dropped (A5).
     pub keep: Box<Keep>,
+    /// The subjects one answer is kept for, `about` among them (L1's batch): each gets an op of
+    /// its own with the call's whole `read`, its fields what `keep` gives under its name. Empty:
+    /// `about` alone, its fields all `keep` gives.
+    pub subjects: Vec<String>,
 }
 
 /// One of My Work's jobs (S1).
@@ -90,6 +94,7 @@ pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
     vec![
         Box::new(crate::my_work_group::Grouping::default()),
         Box::new(crate::my_work_progress::Progress::default()),
+        Box::new(crate::my_work_links::Links::default()),
         Box::new(crate::my_work_goals::OwnerGoals::default()),
     ]
 }
@@ -230,27 +235,38 @@ impl<'a> Runner<'a> {
                 continue;
             };
             let span = format!("{name} {about}");
-            let skip = MyWorkOp {
+            let subjects = if ask.subjects.is_empty() {
+                vec![about.clone()]
+            } else {
+                ask.subjects.clone()
+            };
+            let op = |about: &str, fields, entry, ts, skipped| MyWorkOp {
                 job: name.into(),
-                about: about.clone(),
-                entry: String::new(),
-                ts: now,
+                about: about.to_owned(),
+                entry,
+                ts,
                 read: ask.read.clone(),
                 removed: ask.removed.clone(),
-                fields: BTreeMap::new(),
-                skipped: true,
+                fields,
+                skipped,
                 forgotten: None,
             };
-            // What is kept of an answer at the least, a skip: a job whose labels pass the op cap
-            // even so is not asked, as nothing paid for could be kept (S2).
-            let Some(skip) = fitted(skip)? else {
+            // What is kept of an answer at the least, a skip of each subject: a job whose labels
+            // pass the op cap even so is not asked, as nothing paid for could be kept (S2).
+            let skips: Option<Vec<(OpKind, Value)>> = (subjects.iter())
+                .map(|s| {
+                    let skip = fitted(op(s, BTreeMap::new(), String::new(), now, true))?;
+                    Ok(skip.map(|v| (OpKind::MyWork, v)))
+                })
+                .collect::<Result<_>>()?;
+            let Some(skips) = skips else {
                 passed_over()?;
                 continue;
             };
             // Nothing to send (each prompt the goals would show was an agent's): what it read is
             // kept as a skip with no call, so the job is not due again for it (M2).
             if ask.prompt.is_empty() {
-                raw.append_ops_fenced(&[(OpKind::MyWork, skip)], reading.fence)?;
+                raw.append_ops_fenced(&skips, reading.fence)?;
                 passed_over()?;
                 continue;
             }
@@ -259,7 +275,7 @@ impl<'a> Runner<'a> {
                 crate::providers_db::my_work_pending_of(db, &span)?.filter(|p| p.prompt == sent);
             if let Some(p) = &pending {
                 if p.attempts >= crate::curate::ATTEMPTS {
-                    return given_up(raw, db, (name, &span), skip);
+                    return given_up(raw, db, (name, &span), &skips);
                 }
                 if p.next_attempt_at > now {
                     if held[i].is_none_or(|until| p.next_attempt_at < until) {
@@ -293,20 +309,24 @@ impl<'a> Runner<'a> {
                 Ok(Some(dispatch))
             })
             .and_then(|res| {
-                let op = MyWorkOp {
-                    job: name.into(),
-                    about: about.clone(),
-                    entry: res.provider,
-                    ts: crate::db::now_ms(),
-                    read: ask.read.clone(),
-                    removed: ask.removed.clone(),
-                    fields: (ask.keep)(&res.output),
-                    skipped: false,
-                    forgotten: None,
-                };
-                let op = fitted(op)?.unwrap_or_else(|| skip.clone());
-                // A forget after the job read its records keeps none of the answer.
-                raw.append_ops_fenced(&[(OpKind::MyWork, op)], reading.fence)?;
+                let kept = (ask.keep)(&res.output);
+                let ts = crate::db::now_ms();
+                let mut ops = Vec::new();
+                for (subject, skip) in subjects.iter().zip(&skips) {
+                    let fields = if ask.subjects.is_empty() {
+                        kept.clone()
+                    } else {
+                        (kept.get(subject).and_then(Value::as_object).cloned())
+                            .map(|o| o.into_iter().collect())
+                            .unwrap_or_default()
+                    };
+                    let answered = op(subject, fields, res.provider.clone(), ts, false);
+                    let answered = fitted(answered)?.map(|v| (OpKind::MyWork, v));
+                    ops.push(answered.unwrap_or_else(|| skip.clone()));
+                }
+                // A forget after the job read its records keeps none of the answer; the batch's
+                // ops go in one append, all or none.
+                raw.append_ops_fenced(&ops, reading.fence)?;
                 Ok(())
             });
             let failed = match answer {
@@ -341,7 +361,7 @@ impl<'a> Runner<'a> {
                 next_attempt_at: next,
             };
             if p.attempts >= crate::curate::ATTEMPTS {
-                return given_up(raw, db, (name, &span), skip).map(|phase| self.called(phase));
+                return given_up(raw, db, (name, &span), &skips).map(|phase| self.called(phase));
             }
             crate::providers_db::set_my_work_pending(db, &p)?;
             if held[i].is_none_or(|until| next < until) {
@@ -584,15 +604,15 @@ pub(crate) fn status(home: &std::path::Path, jobs: &[&str], now: i64) -> Result<
     })
 }
 
-/// A job every entry failed `ATTEMPTS` times is kept as a skip of what it read, and not asked
-/// again until what it would read changes (A8).
+/// A job every entry failed `ATTEMPTS` times is kept as a skip of what it read, one a subject, and
+/// not asked again until what it would read changes (A8).
 fn given_up(
     raw: &mut Raw,
     db: &Connection,
     (job, span): (&str, &str),
-    skip: Value,
+    skips: &[(OpKind, Value)],
 ) -> Result<Phase> {
-    raw.append_ops(&[(OpKind::MyWork, skip)])?;
+    raw.append_ops(skips)?;
     crate::providers_db::clear_my_work_pending(db, span)?;
     crate::providers_db::clear_my_work_round(db, job)?;
     Ok(Phase::Covered)
@@ -652,6 +672,7 @@ mod tests {
                 },
                 removed: vec![],
                 check: Box::new(|v: &Value| (!v["text"].is_string()).then_some("shape")),
+                subjects: Vec::new(),
                 keep: Box::new(|v: &Value| {
                     BTreeMap::from([("text".to_owned(), v["text"].clone())])
                 }),
@@ -1398,7 +1419,13 @@ mod tests {
         // Given up, a request holds the job no longer.
         let skip = json!({"job": "group", "about": "r1", "entry": "", "ts": 0, "read": {},
             "removed": [], "fields": {}, "skipped": true, "forgotten": null});
-        given_up(&mut s.raw, &db, ("group", "group r1"), skip).unwrap();
+        given_up(
+            &mut s.raw,
+            &db,
+            ("group", "group r1"),
+            &[(OpKind::MyWork, skip)],
+        )
+        .unwrap();
         assert!(crate::providers_db::my_work_rounds(&db).unwrap().is_empty());
     }
 

@@ -15,7 +15,7 @@ use crate::my_work_ops::{Kept, Read};
 use crate::my_work_run::{Ask, Due, Job, Stores};
 use crate::redact::Rules;
 
-const NAME: &str = "review";
+pub(crate) const NAME: &str = "review";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// A request with activity this recent is reviewed (P1, claude-mem's).
 const ACTIVE_MS: i64 = 14 * DAY_MS;
@@ -221,6 +221,7 @@ impl Job for Progress {
             read,
             removed,
             check: Box::new(check),
+            subjects: Vec::new(),
             keep: Box::new(move |answer: &Value| keep(answer, &rules, &typed, &marks)),
         }))
     }
@@ -1044,6 +1045,7 @@ mod tests {
             cards: vec![(9, 20_000, "The parser".into())],
             work: vec![("parser".into(), None, "doing".into(), 50_000)],
             sources: crate::my_work::Sources::default(),
+            title: None,
         }
     }
 

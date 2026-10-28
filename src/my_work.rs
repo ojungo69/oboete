@@ -659,8 +659,9 @@ struct Request {
     id: Id,
     original: Original,
     explicit_text: Option<String>,
-    /// A group's title, the newest grouping gave it (C6).
+    /// A group's title, the newest grouping gave it (C6), and the grouping ops behind the group.
     title: Option<String>,
+    group_ops: Vec<(String, i64)>,
     owns: Vec<(Key, Owns)>,
     work: Vec<usize>,
 }
@@ -672,6 +673,7 @@ impl Request {
             original,
             explicit_text: None,
             title: None,
+            group_ops: Vec::new(),
             owns: Vec::new(),
             work: Vec::new(),
         }
@@ -912,6 +914,9 @@ pub(crate) struct ReviewInput {
     /// Its work items, the newest first: list, task, status and the time of the last write.
     pub work: Vec<(String, Option<String>, String, i64)>,
     pub sources: Sources,
+    /// Its group's title with the op seqs of the grouping ops behind it (L2), when each of them is
+    /// this device's.
+    pub title: Option<(String, Vec<i64>)>,
 }
 
 /// Where a request's original ask was read from (S5): a prompt record, a summary's turn op, both by
@@ -1001,6 +1006,10 @@ pub(crate) fn review_inputs(
             .map(|w| (w.list.clone(), w.task.clone(), w.status(), w.updated))
             .collect();
         let sources = sources(r, &p.items, &p.cards);
+        let ours = r.group_ops.iter().all(|(d, _)| d == device);
+        let title = (r.title.clone())
+            .filter(|_| ours)
+            .map(|title| (title, r.group_ops.iter().map(|(_, seq)| *seq).collect()));
         out.push(ReviewInput {
             id: r.id.held(),
             conversations,
@@ -1012,6 +1021,7 @@ pub(crate) fn review_inputs(
             cards,
             work,
             sources,
+            title,
         });
     }
     Ok(out)
@@ -1166,7 +1176,11 @@ fn build(
 
     for r in &mut requests {
         if let Id::Group(anchor) = &r.id {
-            r.title = grouped.groups.get(anchor).and_then(|g| g.title.clone());
+            let group = grouped.groups.get(anchor);
+            r.title = group.and_then(|g| g.title.clone());
+            r.group_ops = group
+                .map(|g| g.ops.iter().cloned().collect())
+                .unwrap_or_default();
         }
     }
     Ok(Built {

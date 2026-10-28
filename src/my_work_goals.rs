@@ -233,6 +233,7 @@ impl Job for OwnerGoals {
                 read,
                 removed: Vec::new(),
                 check: Box::new(check),
+                subjects: Vec::new(),
                 keep: Box::new(|_| BTreeMap::new()),
             }));
         }
@@ -259,6 +260,7 @@ impl Job for OwnerGoals {
             read,
             removed,
             check: Box::new(check),
+            subjects: Vec::new(),
             keep: Box::new(move |answer: &Value| keep(answer, &context)),
         }))
     }

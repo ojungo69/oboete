@@ -244,8 +244,8 @@ subagent threads and Claude Code's Codex plugin.
 A1. **The curator chain writes everything.** One new role, `my_work`, built as `summary` is: the
 same entry list in its order, its cooldowns, the shared monthly USD cap, the caller's check and
 gate (`Chain::new(&cfg.providers, db).paid_cap(..).check(..).gate(..)`). No provider of its own.
-The ledger's span names the job (`group <root>`, `review <request>`, `links`, `story <week>`,
-`rules`, `goals <day>`). The jobs run only while `[summary] curate` is on.
+The ledger's span names the job (`group <root>`, `review <request>`, `links <request>`, the first
+of its batch, `story <week>`, `rules`, `goals <day>`). The jobs run only while `[summary] curate` is on.
 
 A2. **Never on a hook's path.** Only the resident worker calls. Hooks, MCP and the viewer read
 what the worker kept. There is no refresh button: the viewer is a separate process, and claude-mem
@@ -1279,6 +1279,37 @@ After slice 8, the side by side with claude-mem that decision 50 asks for.
   control it was on when that control is drawn again (#722, #724): an inner tab, a goal's or a
   month's disclosure, "more", the status line's button.
 - **Then**: slice 6.
+
+### Slice 6a: the links job (2026-10-28)
+
+- **The job** (L1, S1): `my_work_links::Links`, op job `links`, its subject the request (S2's
+  key), as the review job's. Its units are the requests the review job reads (P1: activity in 14
+  days, none of an excluded session's, S6) that have a review this device shows; a request never
+  reviewed stays "Goal not linked yet". The current goals are the newest goals op with items this
+  device shows (M5); with none, nothing is due, as in claude-mem (`request-groups.mjs:459-466`).
+- **Due** (L1): never linked, since its review; its links forgotten (S5), at once; reviewed since
+  its last links op, since that review; a goal added, or a goal it links gone, since the goals op.
+  Each links op keeps two numbers for this, as a review keeps its marks: the review op it read and
+  the highest goal number (`g<n>`) it was shown, since ids are given from a counter (M4). A goal
+  retitled or re-ranked keeps its id and makes no request due (L3); claude-mem keys a goal by its
+  title, so a retitle is a new goal there. A skip (A8) waits for a new review or new goals.
+- **The call** (L2): the goals by id, kind, rank, title and product, without quotes, whatever they
+  cost; then the request the runner chose and up to four more due, the oldest first, as far as
+  they fit `[summary] window_tokens`, each labelled `R<n>` with its group's title (when every
+  grouping op behind it is this device's), its first ask cut at 200 characters, its review's state,
+  percent and summary. claude-mem also shows each request's previous links; L2 leaves them out.
+- **One answer, an op for each request**: the runner keeps a batch's answer as one op per subject
+  (`Ask::subjects`), in one append, each listing everything the call was shown (S2): the goals op,
+  each request's review op, first ask and grouping ops. So a forget or an exclusion of one
+  request's record makes the batch's requests due again (S5, S6). A give-up keeps a skip for each.
+  The ledger's span is `links <request>`, the request the runner chose (A1 said `links`); the
+  prompt's digest covers the rest, so a batch that changes is a new input (A8).
+- **The answer** gives each request's goals, at most three, each an id and evidence. The check
+  refuses a request missed, named twice or not shown (`shape`), more than three goals
+  (`over_cap`), and a goal not shown or named twice (`unanchored`). The keep gates each evidence
+  again and drops one empty or over 160 characters, keeping its link (A5).
+- **Then**: slice 6b, the reads (each goal's requests and status word, the rollup, the lead, "No
+  goal", the card's chip), and 6c, the page.
 
 ## Not built
 
