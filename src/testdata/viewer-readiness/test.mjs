@@ -1653,7 +1653,13 @@ card('f5').querySelector('.my-focus-chip').click();
 assert.deepEqual(chips().map(n=>[n.dataset.myWork,n.attrs['aria-pressed']]),[[`chip:${P}`,'false'],[`chip:${D}`,'false'],[`chip:${L}`,'true'],['chip:other','false']],'a suggested area a card opened stands pressed');
 chips()[2].click();
 assert.deepEqual(ids(),['f1','f5'],'pressed again, all of My Work');
+assert.equal(document.activeElement.className,'my-work-heading','the chip gone, the focus on the heading');
 set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
+// A chip with the focus holds a changed poll, as the tabs do (Codex on #755).
+ctx.fetch=()=>Promise.resolve(response({requests:[req('f1',{focus:P,status:'needs',title:'Changed title'})],unlinked:0,areas}));
+document.activeElement=chips()[0];await run('myWorkLive()');
+assert(!text(panel).includes('Changed title')&&text(panel).includes('New work updates are ready.'),'held while a chip has the focus');
+document.activeElement=null;run('mw.pending=null');
 // Move to… on a request's page: the areas that take requests but its own, then Other.
 run('mw.area=null;myWorkDraw()');
 let moves=[],at=P;
@@ -1686,6 +1692,13 @@ at=null;set([req('f1',{status:'needs'})]);
 card('f1').querySelector('button').click();
 pick('other');await ticks();
 assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'));
+// Nor back into a done area, which takes no requests (Codex on #755).
+const O='fa_000000000004',withDone=[...areas,{id:O,name:'Old',status:'done'}];
+ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(200,{state:'applied'})):Promise.resolve(response({requests:[req('f1',{focus:P})],unlinked:0,areas:withDone}));
+set([req('f1',{focus:O})],withDone);
+card('f1').querySelector('button').click();
+pick(P);await ticks();
+assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'),'no Undo into a done area');
 // A refusal's words.
 ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(409,{code:'focus_move_target'})):Promise.resolve(response({requests:[req('f1',{focus:'other'})],unlinked:0,areas}));
 pick(D);await ticks();

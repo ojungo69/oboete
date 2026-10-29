@@ -6878,8 +6878,10 @@ function myFocusChips() {
   if (!myFocusInUse()) return null;
   const chosen = myFocusSelected();
   const entries = [...mw.areas.filter((a) => a.status === 'kept').map((a) => a.id), 'other'];
-  // A suggested or done area a card opened stands with them while chosen, pressed, to be cleared.
-  if (chosen && !entries.includes(chosen)) entries.splice(-1, 0, chosen);
+  // A suggested or done area a card opened stands with them while chosen, pressed, to be cleared;
+  // cleared, it is gone, and the focus goes to the requests' heading (CodeRabbit on #755).
+  const temporary = chosen && !entries.includes(chosen) ? chosen : null;
+  if (temporary) entries.splice(-1, 0, temporary);
   const nav = el('nav', 'my-focus-chips', ...entries.map((id) => {
     const need = (mw.rows || []).filter((row) => row.focus === id && myFocusNeedsYou(row)).length;
     // The count is seen; what it counts is read (claude-mem's " need you").
@@ -6890,7 +6892,7 @@ function myFocusChips() {
     button.type = 'button';
     button.setAttribute('aria-pressed', String(chosen === id));
     button.dataset.myWork = `chip:${id}`;
-    button.addEventListener('click', () => myFocusChoose(chosen === id ? null : id, `chip:${id}`));
+    button.addEventListener('click', () => myFocusChoose(chosen === id ? null : id, id === temporary ? 'current' : `chip:${id}`));
     return button;
   }));
   nav.setAttribute('aria-label', t('my_focus_label'));
@@ -6949,12 +6951,15 @@ function myFocusChangeBar() {
   return bar;
 }
 
+// F6: an area a request can be moved into (claude-mem's `isPlaceableFocusArea`).
+const myFocusPlaceable = (a) => a.status === 'kept' || a.status === 'suggested';
+
 // F6, F7: Move to… on a request's page: the areas that take requests but its own, then Other
 // unless it is there; none when there is nowhere to move it. Undo moves it back, none from
-// "Sorting…". A disclosure of buttons, as claude-mem's popover: a closed select would move the
+// "Sorting…" or from an area that takes no requests (Codex on #755). A disclosure of buttons, as claude-mem's popover: a closed select would move the
 // request as a person browses it with the arrow keys.
 function myFocusMove(row) {
-  const targets = mw.areas.filter((a) => (a.status === 'kept' || a.status === 'suggested') && a.id !== row.focus)
+  const targets = mw.areas.filter((a) => myFocusPlaceable(a) && a.id !== row.focus)
     .map((a) => [a.id, a.status === 'suggested' ? `${a.name}${t('my_focus_suggested_suffix')}` : a.name]);
   if (row.focus !== 'other') targets.push(['other', t('my_focus_other')]);
   if (!targets.length) return null;
@@ -6969,7 +6974,8 @@ function myFocusMove(row) {
     button.addEventListener('click', () => {
       const from = row.focus;
       const text = t('my_focus_moved', { title: row.title, area: myFocusName(to) });
-      const undo = from ? { body: { action: 'move-request', request: row.id, area: from },
+      const back = from === 'other' || mw.areas.some((a) => a.id === from && myFocusPlaceable(a));
+      const undo = back ? { body: { action: 'move-request', request: row.id, area: from },
         text: t('my_focus_moved', { title: row.title, area: myFocusName(from) }) } : null;
       // Not over another page opened while it saved (Codex on #755).
       void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo)
@@ -7648,7 +7654,8 @@ function myWorkReading() {
   if (mw.request !== null || (window.scrollY || 0) > 220) return true;
   const active = document.activeElement;
   // The build story's disclosure too, at the page's top (#733).
-  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story']
+  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story',
+    '.my-focus-chips', '.my-focus-change']
     .some((selector) => active?.closest?.(selector));
 }
 

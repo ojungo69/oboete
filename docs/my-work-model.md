@@ -1805,7 +1805,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   and after Undo on the request's page.
 - **The change bar** (claude-mem's FocusChangeBar): the change, that it is saved on this computer
   and that a round of sorting never overrides it (no sync claim: oboete's ops sync with milestone
-  6), and Undo, which moves the request back; none from "Sorting…". A refusal's words otherwise.
+  6), and Undo, which moves the request back; none from "Sorting…" or from an area that takes no
+  requests (a done one). A refusal's words otherwise.
   The page's status line says the change too, as the bar is drawn anew with each redraw and a
   screen reader would not read it.
 - **Page words**: the section's Japanese names (マイフォーカス, その他) join the names an area may
