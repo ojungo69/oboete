@@ -1886,6 +1886,7 @@ assert(text(pg()).includes('1 of 2 decided'));
 btn(`card:undo:${L}`).click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'restore-suggestion',area:L});
 assert(btn(`card:keep:${L}`),'undecided again');
+assert.equal(document.getElementById('status').textContent,'Put “Lexer” back in Suggested.');
 // Dismiss.
 btn('card:dismiss:fa_000000000006').click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'dismiss',area:'fa_000000000006'});

@@ -2603,6 +2603,7 @@ const TEXT = {
   my_focus_reordered: ['Changed the order of your focus areas.', '分野の並び順を変えました。'],
   my_focus_undone: ['Undone: {text}', '元に戻しました: {text}'],
   my_focus_n_suggested: ['{n} suggested', '提案 {n} 件'],
+  my_focus_restored: ['Put “{name}” back in Suggested.', '「{name}」を提案に戻しました。'],
   my_focus_past: ['Past focus', '過去のフォーカス'],
   my_focus_past_about: ['Areas you finished, and what you asked for in earlier months.', '完了した分野と、これまでの月に頼んだことです。'],
   my_focus_done_areas: ['Done areas', '完了した分野'],
@@ -7309,7 +7310,7 @@ function myFocusDecide(area, body, decision) {
 }
 
 function myFocusUndecide(area) {
-  void myFocusWrite([{ action: 'restore-suggestion', area: area.id }], t('my_focus_undone', { text: area.name }), null, false).then((ok) => {
+  void myFocusWrite([{ action: 'restore-suggestion', area: area.id }], t('my_focus_restored', { name: area.name }), null, false).then((ok) => {
     if (ok === true) mw.decided.delete(area.id);
     if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(`card:keep:${area.id}`);
   });
