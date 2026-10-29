@@ -1798,10 +1798,15 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **Move to…** on a request's page, beside its area: the kept and suggested areas but its own
   (`· suggested`), then Other unless it is there; through `POST /api/my-focus` (`move-request`), one
   save at a time, My Work read again after it. claude-mem hides it for a request with no anchor
-  conversation; every request here has a held id `act` places, so it is always there.
+  conversation; every request here has a held id `act` places, so it is always there. It opens a
+  row of buttons, one per area, as claude-mem's popover lists them: a closed select would move the
+  request as a person browses it with the arrow keys. The focus comes back to Move to… after a move
+  and after Undo on the request's page.
 - **The change bar** (claude-mem's FocusChangeBar): the change, that it is saved on this computer
   and that a round of sorting never overrides it (no sync claim: oboete's ops sync with milestone
   6), and Undo, which moves the request back; none from "Sorting…". A refusal's words otherwise.
+  The page's status line says the change too, as the bar is drawn anew with each redraw and a
+  screen reader would not read it.
 - **Page words**: the section's Japanese names (マイフォーカス, その他) join the names an area may
   not have.
 - **Then**: slice 10c-2, the area's header and its menu.

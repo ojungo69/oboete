@@ -6832,9 +6832,6 @@ function myWorkStory(row) {
       el('li', null, el('span', 'my-work-milestone-date', myWorkDay(m.date)), ' ', m.text))) : null);
 }
 
-// L3, V4 (claude-mem's `GoalChip`): the goal a request serves, its priority first, which opens on
-// My Goals; "No goal" when the links job linked it to none; "Goal not linked yet" before, while
-// there are goals to link to. Nothing while there are none.
 // F7 (claude-mem's `needsYou`): a request waiting on the owner, to act on it or to check it.
 const myFocusNeedsYou = (row) => row.status === 'needs' || row.status === 'ready';
 
@@ -6869,7 +6866,8 @@ function myFocusChip(row) {
   if (!row.focus) return word('span', 'my-focus-chip sorting', 'my_focus_sorting');
   const button = el('button', 'my-focus-chip', myFocusName(row.focus));
   button.type = 'button';
-  button.dataset.focus = `area:${row.focus}`;
+  // On a card nothing else says what the name is.
+  button.setAttribute('aria-label', `${t('my_focus_area')}: ${myFocusName(row.focus)}`);
   button.addEventListener('click', (event) => {
     event?.stopPropagation?.();
     myFocusChoose(row.focus);
@@ -6915,6 +6913,7 @@ async function myFocusWrite(body, text, undo) {
     }
     const applied = answer.state === 'applied';
     mw.saved = { text, undo: applied ? undo : null, applied };
+    message = text;
     return true;
   } catch {
     message = t('memory_result_unknown');
@@ -6923,7 +6922,9 @@ async function myFocusWrite(body, text, undo) {
     mw.moving = false;
     mw.signature = '';
     if (view === 'my_work') await show();
-    if (message && view === 'my_work') setStatus(message, true, lang, 8000);
+    // The page's live region says it: the change bar is drawn anew with each redraw, too late to
+    // be read out. Held, it outlasts the redraw that clears the status.
+    if (message && view === 'my_work') setStatus(message, message !== text, lang, 8000);
   }
 }
 
@@ -6935,50 +6936,46 @@ function myFocusChangeBar() {
   if (undo) {
     action = word('button', 'quiet small', 'my_focus_undo');
     action.type = 'button';
-    action.dataset.focus = 'focus:undo';
+    action.dataset.myWork = 'focus:undo';
     action.disabled = mw.moving;
     action.addEventListener('click', () => {
       void myFocusWrite(undo.body, undo.text, null).then((ok) => {
         if (ok) mw.saved = null;
-        myWorkDraw('heading');
+        myWorkDraw(mw.request !== null ? 'focus:move' : 'heading');
       });
     });
   }
   const bar = el('div', 'my-focus-change', el('p', null, el('strong', null, text), ' ',
     word('span', null, applied ? 'my_focus_saved' : 'my_focus_pending')), applied ? action : null);
-  bar.setAttribute('aria-live', 'polite');
   return bar;
 }
 
 // F6, F7: Move to… on a request's page: the areas that take requests but its own, then Other
 // unless it is there; none when there is nowhere to move it. Undo moves it back, none from
-// "Sorting…".
+// "Sorting…". A disclosure of buttons, as claude-mem's popover: a closed select would move the
+// request as a person browses it with the arrow keys.
 function myFocusMove(row) {
   const targets = mw.areas.filter((a) => (a.status === 'kept' || a.status === 'suggested') && a.id !== row.focus)
     .map((a) => [a.id, a.status === 'suggested' ? `${a.name}${t('my_focus_suggested_suffix')}` : a.name]);
   if (row.focus !== 'other') targets.push(['other', t('my_focus_other')]);
   if (!targets.length) return null;
-  const placeholder = el('option', null, t(mw.moving ? 'my_focus_moving' : 'my_focus_move'));
-  placeholder.value = '';
-  const select = el('select', 'my-focus-move', placeholder, ...targets.map(([id, name]) => {
-    const option = el('option', null, name);
-    option.value = id;
-    return option;
-  }));
-  select.value = '';
-  select.disabled = mw.moving;
-  select.setAttribute('aria-label', t('my_focus_move_label'));
-  select.dataset.focus = 'focus:move';
-  select.addEventListener('change', () => {
-    const to = select.value;
-    if (!to) return;
-    const from = row.focus;
-    const text = t('my_focus_moved', { title: row.title, area: myFocusName(to) });
-    const undo = from ? { body: { action: 'move-request', request: row.id, area: from },
-      text: t('my_focus_moved', { title: row.title, area: myFocusName(from) }) } : null;
-    void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo).then(() => myWorkDraw('current'));
-  });
-  return select;
+  const summary = word('summary', null, mw.moving ? 'my_focus_moving' : 'my_focus_move');
+  summary.setAttribute('aria-label', t('my_focus_move_label'));
+  summary.dataset.myWork = 'focus:move';
+  return el('details', 'my-focus-move', summary, el('div', null, ...targets.map(([to, name]) => {
+    const button = el('button', 'quiet small', name);
+    button.type = 'button';
+    button.disabled = mw.moving;
+    button.dataset.myWork = `move:${to}`;
+    button.addEventListener('click', () => {
+      const from = row.focus;
+      const text = t('my_focus_moved', { title: row.title, area: myFocusName(to) });
+      const undo = from ? { body: { action: 'move-request', request: row.id, area: from },
+        text: t('my_focus_moved', { title: row.title, area: myFocusName(from) }) } : null;
+      void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo).then(() => myWorkDraw('focus:move'));
+    });
+    return button;
+  })));
 }
 
 // P6, V4: the build story at My Work's top, as claude-mem's recap: the recap, then the chapters,
@@ -7299,7 +7296,7 @@ function myWorkFocus(focus) {
     $('heading').focus({ preventScroll: true });
     return;
   }
-  const nodes = [...panel.querySelectorAll('input, select, button, h3')];
+  const nodes = [...panel.querySelectorAll('input, select, button, summary, h3')];
   const found = focus === 'current' || focus === 'agents' ? nodes.find((node) => node.className === 'my-work-heading')
     : nodes.find((node) => node.dataset.myWork === focus);
   if (!found) return;
@@ -7438,7 +7435,7 @@ function myWorkDrawRequest() {
     el('dl', 'my-work-facts', myWorkFact('my_work_contributors', myWorkContributors(row)),
       myWorkFact('my_work_started', row.started > 0 ? localTime(row.started, lang) : t('my_work_not_recorded')),
       myWorkFact('my_work_elapsed', elapsed),
-      myFocusInUse() ? myWorkFact('my_focus_area', myFocusChip(row), myFocusMove(row)) : null),
+      myFocusInUse() ? myWorkFact('my_focus_area', el('span', 'my-focus-fact', myFocusChip(row), myFocusMove(row))) : null),
     myFocusChangeBar(),
     el('section', 'my-work-stands', word('h3', null, 'my_work_stands'), el('p', null, myWorkActivity(row)),
       row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,

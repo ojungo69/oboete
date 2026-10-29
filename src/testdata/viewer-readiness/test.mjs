@@ -1627,6 +1627,7 @@ assert.equal(chips()[0].querySelector('.my-work-count').attrs['aria-hidden'],'tr
 assert.equal(text(chips()[1]),'Docs','none at 0');
 assert.equal(text(chips()[2]),'Other 1 1 need you','one ready to check needs you too');
 assert(text(card('f4')).includes('Sorting…')&&text(card('f1')).includes('Parser'),'each card names its area, or Sorting…');
+assert.equal(card('f1').querySelector('.my-focus-chip').attrs['aria-label'],'Focus area: Parser','the card chip says what it names');
 chips()[0].click();
 assert.deepEqual(ids(),['f1','f2'],'an area filters My Work');
 assert.equal(chips()[0].attrs['aria-pressed'],'true');
@@ -1649,23 +1650,33 @@ ctx.fetch=(url,options)=>{
   return Promise.resolve(response({requests:[req('f1',{focus:at,status:'needs'})],unlinked:0,areas}));
 };
 card('f1').querySelector('button').click();
-const move=()=>panel.querySelectorAll('select').find(n=>n.dataset.focus==='focus:move');
-assert.deepEqual(move().options.map(o=>[o.value,text(o)]),[['','Move to…'],[D,'Docs'],[L,'Lexer · suggested'],['other','Other']]);
-move().value=D;for(const cb of move().listeners.change)cb({target:move()});await ticks();
+const move=()=>panel.querySelector('.my-focus-move');
+const pick=to=>move().querySelectorAll('button').find(n=>n.dataset.myWork===`move:${to}`).click();
+assert.equal(move().tagName.toLowerCase(),'details','a disclosure, not a select its arrow keys would commit');
+assert.equal(text(move().querySelector('summary')),'Move to…');
+assert.deepEqual(move().querySelectorAll('button').map(n=>[n.dataset.myWork,text(n)]),[[`move:${D}`,'Docs'],[`move:${L}`,'Lexer · suggested'],['move:other','Other']]);
+move().querySelector('summary').click();await ticks();
+assert.equal(moves.length,0,'opening it moves nothing');
+pick(D);await ticks();
 assert.deepEqual(moves,[['/api/my-focus',{action:'move-request',request:'f1',area:D}]],'the move names the request and the area');
 let bar=text(panel.querySelector('.my-focus-change'));
 assert(bar.includes('Moved “Request f1” to Docs.')&&bar.includes('Saved on this computer.')&&bar.includes('Undo'),bar);
-panel.querySelectorAll('button').find(n=>n.dataset.focus==='focus:undo').click();await ticks();
+assert.equal(document.getElementById('status').textContent,'Moved “Request f1” to Docs.','the page live region reads it out');
+assert.equal(panel.querySelector('.my-focus-change').attrs['aria-live'],undefined,'the bar, drawn anew, is not a live region');
+assert.equal(document.activeElement.dataset.myWork,'focus:move','the focus is back on Move to…');
+panel.querySelectorAll('button').find(n=>n.dataset.myWork==='focus:undo').click();await ticks();
 assert.deepEqual(moves[1],['/api/my-focus',{action:'move-request',request:'f1',area:P}],'Undo moves it back');
 assert.equal(panel.querySelectorAll('.my-focus-change').length,0,'undone, the bar is gone');
+assert.equal(document.getElementById('status').textContent,'Moved “Request f1” to Parser.');
+assert.equal(document.activeElement.dataset.myWork,'focus:move');
 // From Sorting… there is nothing to move it back to.
 at=null;set([req('f1',{status:'needs'})]);
 card('f1').querySelector('button').click();
-move().value='other';for(const cb of move().listeners.change)cb({target:move()});await ticks();
+pick('other');await ticks();
 assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'));
 // A refusal's words.
 ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(409,{code:'focus_move_target'})):Promise.resolve(response({requests:[req('f1',{focus:'other'})],unlinked:0,areas}));
-move().value=D;for(const cb of move().listeners.change)cb({target:move()});await ticks();
+pick(D);await ticks();
 assert.equal(document.getElementById('status').textContent,'That area takes no requests now.');
 // Japanese.
 ctx.ui.setLang('ja');set([req('f1',{focus:P,status:'needs'}),req('f4')]);
