@@ -1845,10 +1845,11 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   over the page, and Escape closes it, the focus back on it.
 - **The editors** (claude-mem's AreaEditDialog) open in the header, as My Rules edits, where
   claude-mem opens a dialog: the viewer has none. A name of at most 80 characters, a goal of at
-  most 300, or the area to merge into (the areas that take requests but itself, `· suggested`);
+  most 300, counted as the server counts them (the field's own length counts UTF-16 units), or the area to merge into (the areas that take requests but itself, `· suggested`);
   Save held while the field is blank, no area is chosen, or the name reuses a page word, which
   the editor says as it is typed, by the answer's `page_words` and `my_work_focus::page_word`'s
-  rule. A refusal's words in the status line, the editor and its draft kept. A goal not written yet
+  rule, and one too long says its bound. A refusal's words in the status line, the editor, its
+  draft and the focus kept on it. A goal not written yet
   shows the prompt that names Edit goal.
 - **A suggested area's Keep and Dismiss** under its header.
 - **Each change in the change bar** (claude-mem's `describeFocusChange`), read out by the status line,

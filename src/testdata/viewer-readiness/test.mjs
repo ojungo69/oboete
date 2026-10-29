@@ -1740,7 +1740,10 @@ assert.equal(open.open,false);assert.equal(document.activeElement.dataset.myWork
 // Rename: a page word holds Save and says so, a Japanese page name too; another name saves, Undo renames it back.
 pick('menu:rename').click();
 let field=hdr().querySelector('input');
-assert.deepEqual([field.value,document.activeElement.dataset.myWork,field.maxLength],['Parser','edit:rename',80]);
+assert.deepEqual([field.value,document.activeElement.dataset.myWork],['Parser','edit:rename']);
+// Bounded in characters as the server counts them: 80 emoji fit, 81 do not, and it says why (CodeRabbit on #757).
+type(field,'😀'.repeat(80));assert.equal(pick('edit:save').disabled,false);
+type(field,'😀'.repeat(81));assert.equal(pick('edit:save').disabled,true);assert(text(hdr()).includes('At most 80 characters.'));
 type(field,'My Work parser');
 assert.equal(pick('edit:save').disabled,true);
 assert(text(hdr()).includes('“My Work parser” reuses the page name “my work”. Pick a name that means only this area.'),text(hdr()));
@@ -1770,6 +1773,7 @@ pick('menu:rename').click();field=hdr().querySelector('input');type(field,'Parse
 pick('edit:save').click();await ticks();
 assert.equal(status(),'That name reuses a page name. Pick a name that means only this area.');
 assert.equal(hdr().querySelector('input').value,'Parsers','the draft kept');
+assert.equal(document.activeElement.dataset.myWork,'edit:rename','the focus back on the editor');
 pick('edit:cancel').click();
 assert.equal(hdr().querySelectorAll('input').length,0);assert.equal(document.activeElement.dataset.myWork,'focus:menu');
 reply=()=>posted(200,{state:'applied'});
@@ -1777,7 +1781,7 @@ reply=()=>posted(200,{state:'applied'});
 run(`myFocusChoose('${D}')`);
 assert(text(hdr()).includes('Write one sentence saying what this area is for (Edit goal).'));
 pick('menu:edit-goal').click();field=hdr().querySelector('input');
-assert.deepEqual([field.value,pick('edit:save').disabled,field.maxLength],['',true,300]);
+assert.deepEqual([field.value,pick('edit:save').disabled],['',true]);
 type(field,'Docs for the users.');pick('edit:save').click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'edit-goal',area:D,goal:'Docs for the users.'});
 assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'));

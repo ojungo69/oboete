@@ -2603,6 +2603,7 @@ const TEXT = {
   my_focus_reordered: ['Changed the order of your focus areas.', '分野の並び順を変えました。'],
   my_focus_undone: ['Undone: {text}', '元に戻しました: {text}'],
   my_focus_renamed_pending: ['Renamed “{name}”.', '「{name}」の名前を変えました。'],
+  my_focus_too_long: ['At most {n} characters.', '{n} 文字までです。'],
   my_focus_held_steps: ['Saved the first step. Press Undo again once My Work has read it.', '最初の手順を保存しました。My Work が読み込んだら、もう一度「元に戻す」を押してください。'],
   my_focus_other_about: ['Requests that fit none of your focus areas. A refresh suggests a new area when several of these turn out to be steps of something larger.', 'どの分野にも当てはまらない依頼です。そのいくつかが大きな作業の一部だとわかると、更新のときに新しい分野が提案されます。'],
   focus_move_target: ['That area takes no requests now.', 'その分野は、今は依頼を受け付けていません。'],
@@ -7129,7 +7130,8 @@ function myFocusChange(body, area) {
       // Not over a choice made while it saved (Codex on #757).
       if (body.action === 'merge' && mw.area === from) mw.area = body.into;
     }
-    if (view === 'my_work') myWorkDraw(myFocusHasMenu() ? 'focus:menu' : 'current');
+    // Refused, back on the editor kept open (CodeRabbit on #757).
+    if (view === 'my_work') myWorkDraw(ok !== true && mw.editing ? `edit:${mw.editing.kind}` : myFocusHasMenu() ? 'focus:menu' : 'current');
   });
 }
 
@@ -7205,10 +7207,15 @@ function myFocusEditor(area) {
   });
   const warning = el('p', 'my-focus-warning');
   warning.setAttribute('aria-live', 'polite');
+  // The server's bounds, in characters as it counts them, not the field's UTF-16 units (CodeRabbit
+  // on #757).
+  const most = kind === 'rename' ? 80 : 300;
   const check = () => {
     const reused = kind === 'rename' ? myFocusPageWord(mw.draft) : null;
-    warning.replaceChildren(...(reused ? [t('my_focus_page_word_typed', { name: mw.draft.trim(), word: reused })] : []));
-    save.disabled = mw.moving || !mw.draft.trim() || Boolean(reused);
+    const long = kind !== 'merge' && [...mw.draft.trim()].length > most;
+    warning.replaceChildren(...(reused ? [t('my_focus_page_word_typed', { name: mw.draft.trim(), word: reused })]
+      : long ? [t('my_focus_too_long', { n: most })] : []));
+    save.disabled = mw.moving || !mw.draft.trim() || Boolean(reused) || long;
   };
   let field;
   if (kind === 'merge') {
@@ -7223,7 +7230,6 @@ function myFocusEditor(area) {
     field.addEventListener('change', () => { mw.draft = field.value; check(); });
   } else {
     field = input('text', mw.draft, '', `focus-${kind}`, (v) => { mw.draft = v; check(); });
-    field.maxLength = kind === 'rename' ? 80 : 300;
   }
   field.dataset.myWork = `edit:${kind}`;
   field.disabled = mw.moving;
