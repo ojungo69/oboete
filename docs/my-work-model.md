@@ -1837,6 +1837,34 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   in focus), the suggested area's Keep and Dismiss, and the italic prompt to write a goal, which
   names Edit goal: 10c-2b.
 
+### Slice 10c-2b: the area's menu, its editors, Keep and Dismiss, each change's Undo (2026-10-29)
+
+- **The menu** (claude-mem's AreaMenu), "…" beside the area's name, "Change <name>" read out: Rename,
+  Edit goal, Merge into…; Move up and Move down, which send the whole order of the kept areas, the
+  first one's Up and the last one's Down held; then Done, or Back in focus for a done area. It opens
+  over the page, and Escape closes it, the focus back on it.
+- **The editors** (claude-mem's AreaEditDialog) open in the header, as My Rules edits, where
+  claude-mem opens a dialog: the viewer has none. A name of at most 80 characters, a goal of at
+  most 300, counted as the server counts them (the field's own length counts UTF-16 units), or the area to merge into (the areas that take requests but itself, `· suggested`);
+  Save held while the field is blank, no area is chosen, or the name reuses a page word, which
+  the editor says as it is typed, by the answer's `page_words` and `my_work_focus::page_word`'s
+  rule, and one too long says its bound. A refusal's words in the status line, the editor, its
+  draft and the focus kept on it. A goal not written yet
+  shows the prompt that names Edit goal.
+- **A suggested area's Keep and Dismiss** under its header.
+- **Each change in the change bar** (claude-mem's `describeFocusChange`), read out by the status line,
+  with its Undo, read from the area as it was: Keep, Dismiss and Done give the status back
+  (`restore-suggestion` for a suggestion); a rename the old name, none back to a name that reuses a
+  page word, which the server refuses; a goal the old one, none where there was none; a merge
+  `restore-suggestion` and then the status it had, none for an area the owner wrote; an order the
+  order before. A rename's receipt names the new name as the page reads it again, as the gate kept
+  it, not as it was typed. The steps go in order, the rest not sent after a refusal; a step saved
+  but not read yet holds back the ones after it, which act on what it changed, and the same Undo
+  sends them. A merge moves the choice to the area merged into, unless another was chosen while
+  it saved; after a change the focus is on the menu, or on the heading when the chosen area has
+  none (Other) or left the choice. The refusals of `act()` each have words.
+- **Then**: slice 10c-3, Suggested, Past focus, and My Goals and the links job removed.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

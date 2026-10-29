@@ -937,8 +937,8 @@ span.my-focus-chip { font-style: italic; text-decoration: none; cursor: default;
 .my-focus-change p { margin: 0; }
 /* The name lines up with Move to…, open or closed (its first line). */
 .my-focus-fact { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
-.my-focus-move > summary { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); font-size: 13px; cursor: pointer; }
-.my-focus-move > summary:hover { background: var(--surface-2); border-color: var(--line-strong); }
+.my-focus-menu > summary, .my-focus-move > summary { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); font-size: 13px; cursor: pointer; }
+.my-focus-menu > summary:hover, .my-focus-move > summary:hover { background: var(--surface-2); border-color: var(--line-strong); }
 .my-focus-move > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .my-focus-header { display: grid; gap: 8px; margin: 0 0 14px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .my-focus-header > * { margin: 0; }
@@ -949,6 +949,16 @@ span.my-focus-chip { font-style: italic; text-decoration: none; cursor: default;
 .my-focus-warning { color: var(--yellow); font-size: 12.5px; }
 .my-focus-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .my-focus-asks h4 { margin: 4px 0; font-size: 13px; color: var(--muted); }
+.my-focus-menu { position: relative; margin-left: auto; }
+.my-focus-menu > summary { list-style: none; }
+.my-focus-menu > summary::-webkit-details-marker { display: none; }
+.my-focus-menu > div { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; display: grid; gap: 4px; min-width: 12rem; max-width: calc(100vw - 48px); padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); box-shadow: 0 6px 18px rgb(0 0 0 / 0.14); }
+.my-focus-menu > div button { justify-content: flex-start; text-align: left; }
+.my-focus-prompt { color: var(--muted); font-style: italic; }
+.my-focus-editor { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-m); }
+.my-focus-editor > * { margin: 0; }
+.my-focus-editor input, .my-focus-editor select { width: 100%; }
+.my-focus-warning:empty { display: none; }
 .my-focus-move button { max-width: 100%; overflow-wrap: anywhere; }
 .my-work-build-story { margin: 0 0 18px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .my-work-build-story h3 { margin: 0 0 6px; font-size: 15px; }
