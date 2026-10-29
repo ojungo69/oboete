@@ -868,6 +868,23 @@ fn current_items(items: &[Item], since: i64, gate: &impl Fn(&str) -> String) -> 
         .collect()
 }
 
+/// The current goals as My Goals shows them (M5, #728): the newest goals op with items `device`
+/// shows, `hidden` passed over (S6), and its items with a quote in the window, ranked again within
+/// each kind; none while none is left.
+pub(crate) fn newest(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &HashSet<(String, i64)>,
+    now: i64,
+) -> Result<Option<(Kept, Vec<Item>)>> {
+    let goals = (NAME, None);
+    let Some(op) = crate::my_work_ops::shown(k, goals, Some(device), hidden, true, 1)?.pop() else {
+        return Ok(None);
+    };
+    let items = current(&items(&op), now - WINDOW_MS);
+    Ok((!items.is_empty()).then_some((op, items)))
+}
+
 /// M5: the current goals, as the page, the links job and My Work's cards all take them (#728,
 /// CodeRabbit on #729): each item with a quote since `since`, its quotes those alone, the newest
 /// first, ranked again within each kind, the priorities first.

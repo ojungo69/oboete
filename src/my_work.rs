@@ -879,7 +879,7 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let reviews = reviews(home);
     let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
     // V4: the current goals once, for each card's goal (L3).
-    let goals = (crate::my_work_links::current(&k, raw.device(), &hidden, now)?)
+    let goals = (crate::my_work_goals::newest(&k, raw.device(), &hidden, now)?)
         .map(|(_, items)| items)
         .unwrap_or_default();
     for r in &requests {
@@ -900,12 +900,13 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     for (a, h) in answers.iter_mut().zip(&held) {
         a["focus"] = json!(focus.of(&crate::my_work_focus::subject(h.id())));
     }
-    let areas = crate::my_work_focus::areas(&focus, &rules);
+    let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
+    let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     let goals = goals.len();
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
     let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story,
-        "areas": areas});
+        "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words()});
     Ok((answer, held))
 }
 

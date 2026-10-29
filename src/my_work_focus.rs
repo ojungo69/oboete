@@ -13,6 +13,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::my_work_goals::{Item, Quote};
 use crate::settings::{Refusal, refused};
 
 /// The job of the focus ops (S1).
@@ -317,20 +318,75 @@ pub(crate) fn subject(held: &str) -> String {
 }
 
 /// F7: the areas as the page reads them, every text through the gate (S6).
-pub(crate) fn areas(focus: &Focus, rules: &crate::redact::Rules) -> Vec<Value> {
+pub(crate) fn areas(focus: &Focus, goals: &[Item], rules: &crate::redact::Rules) -> Vec<Value> {
     let gate = |v: Option<&Value>| {
         v.and_then(Value::as_str)
             .map(|t| crate::redact::outbound_with(t, rules))
     };
     (focus.listed().into_iter())
         .map(|a| {
+            let of: Vec<&Item> = (goals.iter())
+                .filter(|i| under(focus, i) == Some(a.id.as_str()))
+                .collect();
+            let priorities: Vec<&Item> = of.iter().copied().filter(|i| i.kind == PRIORITY).collect();
+            // Each quote once, by its time and words, the newest first (claude-mem's `toFocusModel`).
+            let mut quotes: Vec<&Quote> = priorities.iter().flat_map(|i| &i.quotes).collect();
+            quotes.sort_by(|x, y| (y.ts, &y.text).cmp(&(x.ts, &x.text)));
+            quotes.dedup_by(|x, y| (x.ts, &x.text) == (y.ts, &y.text));
+            let asked = (!priorities.is_empty()).then(|| priorities.iter().map(|i| i.asked).sum::<u32>());
+            let asks: Vec<Value> = (of.iter())
+                .filter(|i| i.kind != PRIORITY)
+                .map(|i| ask(i, rules))
+                .collect();
             json!({"id": a.id, "name": gate(a.fields.get("name")), "goal": gate(a.fields.get("goal")),
                 "about": gate(a.fields.get("about")), "status": a.status(),
                 "source": a.fields.get("source"), "evidence": gate(a.fields.get("evidence")),
                 "owner_rank": a.fields.get("owner_rank"), "priority_rank": a.fields.get("priority_rank"),
-                "decided_by": a.fields.get("decided_by")})
+                "decided_by": a.fields.get("decided_by"), "page_word": page_word(a.name()),
+                "asked": asked, "latest": quotes.first().map(|q| q.ts),
+                "quotes": quoted(quotes.into_iter(), rules), "asks": asks})
         })
         .collect()
+}
+
+/// F7: the open asks under no live area, Other's (claude-mem's `otherAsks`).
+pub(crate) fn other_asks(
+    focus: &Focus,
+    goals: &[Item],
+    rules: &crate::redact::Rules,
+) -> Vec<Value> {
+    (goals.iter())
+        .filter(|i| i.kind != PRIORITY && under(focus, i).is_none())
+        .map(|i| ask(i, rules))
+        .collect()
+}
+
+/// The words an area's name may not reuse, as `page_word` reads them, for the page to warn as a
+/// person types one.
+pub(crate) fn page_words() -> Vec<&'static str> {
+    PAGE_WORDS.iter().chain(PAGE_NAMES).copied().collect()
+}
+
+const PRIORITY: &str = "priority";
+
+/// The live area goal item `i` sits under, through merges; none under Other, or a dismissed or
+/// unknown one (claude-mem's `liveArea`).
+fn under<'a>(focus: &'a Focus, i: &'a Item) -> Option<&'a str> {
+    (i.area.as_deref())
+        .and_then(|a| focus.resolve(a))
+        .filter(|a| *a != OTHER)
+}
+
+fn quoted<'a>(quotes: impl Iterator<Item = &'a Quote>, rules: &crate::redact::Rules) -> Vec<Value> {
+    quotes
+        .map(|q| json!({"text": crate::redact::outbound_with(&q.text, rules), "ts": q.ts}))
+        .collect()
+}
+
+/// An open ask as the header lists it: "Not started", with how often and when it was asked last.
+fn ask(i: &Item, rules: &crate::redact::Rules) -> Value {
+    json!({"id": i.id, "title": crate::redact::outbound_with(&i.title, rules), "asked": i.asked,
+        "latest": i.quotes.first().map(|q| q.ts), "quotes": quoted(i.quotes.iter(), rules)})
 }
 
 /// claude-mem's `navWordIn`: the page word a name reuses, as whole words of its ASCII letters and
@@ -526,6 +582,93 @@ mod tests {
     fn placement(area: Option<&str>, by: &str) -> Map<String, Value> {
         let v = json!({"kind": "placement", "area": area, "by": by});
         v.as_object().unwrap().clone()
+    }
+
+    /// F7, claude-mem's `toFocusModel`: a priority lands on its area through a merge, its quotes
+    /// with the area's own priority's, each once, the newest first, the asked counts summed; an
+    /// ask under a dismissed area, under none or under Other is Other's; every text through the
+    /// gate, and a name that reuses a page word says which.
+    #[test]
+    fn each_area_carries_the_goals_behind_it() {
+        let mut f = Focus::default();
+        f.apply("fa_1", area("Viewer", "kept", "owner"));
+        let mut merged = area("Old viewer", "kept", "owner");
+        f.apply("fa_2", merged.clone());
+        merged.insert("merged_into".into(), json!("fa_1"));
+        f.apply("fa_2", merged);
+        f.apply("fa_3", area("Gone", "dismissed", "owner"));
+        f.apply("fa_4", area("The My Work page", "suggested", "system"));
+        let q = |ts: i64, text: &str| Quote {
+            seq: ts,
+            ts,
+            text: text.into(),
+        };
+        let item = |id: &str, kind: &str, area: Option<&str>, asked, quotes| Item {
+            id: id.into(),
+            kind: kind.into(),
+            rank: 1,
+            title: format!("Title {id} codename-x"),
+            product: String::new(),
+            asked,
+            quotes,
+            area: area.map(str::to_owned),
+        };
+        let goals = vec![
+            item(
+                "g1",
+                "priority",
+                Some("fa_1"),
+                2,
+                vec![q(30, "show it"), q(10, "a page")],
+            ),
+            item(
+                "g2",
+                "priority",
+                Some("fa_2"),
+                3,
+                vec![q(30, "show it"), q(20, "codename-y")],
+            ),
+            item("g3", "ask", Some("fa_2"), 1, vec![q(25, "fix the chip")]),
+            item("g4", "ask", Some("fa_3"), 1, vec![q(5, "gone")]),
+            item("g5", "ask", None, 2, vec![q(6, "anything")]),
+            item("g6", "ask", Some(OTHER), 1, vec![q(7, "other")]),
+        ];
+        let toml =
+            "[redaction]\nextra_rules = [{ id = \"codename\", regex = \"codename-[a-z]+\" }]\n";
+        let rules =
+            crate::redact::Rules::new(&crate::config::parse_capture(Some(toml)).unwrap().redaction)
+                .unwrap();
+        let shown = areas(&f, &goals, &rules);
+        let of = |id: &str| shown.iter().find(|a| a["id"] == id).unwrap().clone();
+        let viewer = of("fa_1");
+        assert_eq!(
+            (&viewer["asked"], &viewer["latest"]),
+            (&json!(5), &json!(30))
+        );
+        let texts: Vec<&str> = (viewer["quotes"].as_array().unwrap().iter())
+            .map(|q| q["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!((texts[0], texts[2]), ("show it", "a page"));
+        assert!(!texts[1].contains("codename-y"), "{texts:?}");
+        let asks = viewer["asks"].as_array().unwrap();
+        assert_eq!(
+            (asks.len(), &asks[0]["id"], &asks[0]["latest"]),
+            (1, &json!("g3"), &json!(25))
+        );
+        assert!(!asks[0]["title"].as_str().unwrap().contains("codename-x"));
+        assert_eq!(viewer["page_word"], Value::Null);
+        let gone = of("fa_3");
+        assert_eq!(
+            (&gone["asked"], &gone["latest"], &gone["asks"]),
+            (&Value::Null, &Value::Null, &json!([]))
+        );
+        assert_eq!(of("fa_4")["page_word"], "my work");
+        let other: Vec<String> = (other_asks(&f, &goals, &rules).iter())
+            .map(|a| a["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(other, ["g4", "g5", "g6"]);
+        assert!(page_words().contains(&"my work") && page_words().contains(&"その他"));
     }
 
     /// F2, F8: claude-mem's two rules. An owner row holds against later system rows until Undo's
