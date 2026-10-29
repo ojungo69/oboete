@@ -1899,6 +1899,30 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   and an exclusion still reach them; nothing reads them.
 - **Then**: slice 11, the Jev focus judge's hint (J5).
 
+### Slice 11a-1: the judge's client (2026-10-30)
+
+- **`[judge]`** (J1): `key_file` (the token on line 2, read at each call), `enabled` (on when the
+  table is there), `model` (`jev-latest`), `timeout_s` (15), `daily_budget` (300 calls in any 24
+  hours). Absent, the judge is off. The endpoint is fixed in code; the table refuses any other key
+  (`base_url`, `headers`, `extra`), so no value of it sends the owner's text elsewhere.
+- **One call** (`judge::ask`): off or no key, nothing is reserved; a repository the owner excluded
+  (`Raw::exclusions_now`: kept from being sent, or never recorded) is never sent, looked at again
+  under the egress gate's admission; every string of the state and the questions goes through the
+  outbound gate, and keys (ids, question names), which a choice answers with, go as they are or,
+  when the gate would change one, nothing goes; the budget reserves it as the entry `judge:jev`, its input at USD 0.042 a million and its
+  answer free, inside `paid_usd_per_month` with every paid entry; the caller's egress gate is asked
+  right before the request (as the chain's, its error cancels the reservation and is returned);
+  one POST, no redirect, no retry; the answer kept only when each question has one of its type (a
+  choice among its criteria with its own probability, probabilities and a `noul` within 0 to 1)
+  and both token counts are there, else `shape`; the reserved row settled with the outcome, the
+  reported tokens and the cost (unknown, the reservation's). No error body is kept.
+- **`judge:` names**: no chain entry is created or renamed so on the settings page, tested by its
+  connection test, put in the chain, or counted as the chain in use when a save turns the others
+  off; one written by hand stays in the file, with a warning for doctor, so the judge's ledger
+  rows, daily count and state are its own.
+- **The hooks read past `[judge]`** (`CaptureConfig`), as every table `Config` reads.
+- **Then**: 11a-2, the key and the switch on the settings page, and doctor's line and probe.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's
