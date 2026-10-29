@@ -15,7 +15,7 @@ use crate::raw::Removal;
 /// The jobs (S1): the curators' six, `rule`, the owner's action on a suggested rule, which holds
 /// no model text, and `focus`, My Focus's areas and placements (F8).
 pub(crate) const JOBS: &[&str] = &[
-    "group", "review", "links", "story", "rules", "goals", "rule", "focus",
+    "group", "review", "links", "story", "rules", "goals", "rule", "focus", "place",
 ];
 
 /// What a job was shown (S2): the spans of this device's records, and the op seqs of the turn,

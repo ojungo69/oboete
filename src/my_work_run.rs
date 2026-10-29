@@ -118,6 +118,7 @@ pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
         Box::new(crate::my_work_group::Grouping::default()),
         Box::new(crate::my_work_progress::Progress::default()),
         Box::new(crate::my_work_links::Links::default()),
+        Box::new(crate::my_work_place::Place::default()),
         Box::new(crate::my_work_story::Story::default()),
         Box::new(crate::my_work_rules::Suggestions::default()),
         Box::new(crate::my_work_goals::OwnerGoals::default()),
@@ -459,10 +460,11 @@ impl<'a> Runner<'a> {
 
 /// Each job's call as the design's cost table counts it ("Cost on this PC's volume"): its
 /// estimated tokens in and out.
-const SIZES: [(&str, u32, u32); 6] = [
+const SIZES: [(&str, u32, u32); 7] = [
     ("group", 6_500, 300),
     ("review", 4_000, 1_000),
     ("links", 4_000, 300),
+    ("place", 4_000, 300),
     ("story", 4_000, 1_700),
     ("rules", 2_000, 300),
     ("goals", 4_000, 2_000),
@@ -489,8 +491,9 @@ pub(crate) struct Estimate {
 
 /// A6's estimate. Typical: each job's calls a day from the week's volumes (a repository's new
 /// conversations of one half hour, one grouping call; a conversation's hours with prompts, one
-/// review each, its links, story and rules as the cost table derives them from the reviews; a day
-/// with prompts, one goals update), at most the bound, priced as the cost table sizes each job's
+/// review each, its links, placements, story and rules as the cost table derives them from the
+/// reviews, the placements' Other pass once a day with prompts; a day with prompts, one goals
+/// update), at most the bound, priced as the cost table sizes each job's
 /// call. At most: the bound, each call the largest request A4 lets a job send (its instructions
 /// and a window of data, `window_tokens`) and the entry's largest answer. Both count a call's input
 /// as admission does, at the entry's learned `factor` (Codex on #671).
@@ -516,13 +519,15 @@ pub(crate) fn estimate(
     let week = |n: usize| n as f64 / 7.0;
     let reviews = week(hours.len());
     let story = (reviews / 5.0).min(8.0);
+    let days = week(days.len()).min(1.0);
     let per_job = [
         week(halves.len()),
         reviews,
         reviews / 5.0,
+        reviews / 5.0 + days,
         story,
         story / 2.0,
-        week(days.len()).min(1.0),
+        days,
     ];
     let typical: f64 = per_job.iter().sum();
     // Over the bound, every job waits alike (A7).
@@ -1220,16 +1225,18 @@ mod tests {
             entry("free", crate::config::Limits::default()),
             entry("paid", paid),
         ];
-        // A day: 2 groupings, 5 reviews, 1 links, 1 story, 0.5 rules, 1 goals.
+        // A day: 2 groupings, 5 reviews, 1 links, 2 placements (one an Other pass), 1 story, 0.5
+        // rules, 1 goals.
         let flat = |_: &str| -> Result<f64> { Ok(1.0) };
         let e = estimate(&s.raw, &chain, 100, (5_000, &flat), now).unwrap();
-        assert_eq!(e.calls, (11, 100));
+        assert_eq!(e.calls, (13, 100));
         assert_eq!(e.priced, Some(("paid".to_owned(), "m".to_owned())));
         let (typical, most) = e.usd.unwrap();
         let usd = |calls: f64, input: f64, output: f64| calls * (input + 5.0 * output) / 1e6;
         let expected = usd(2.0, 6_500.0, 300.0)
             + usd(5.0, 4_000.0, 1_000.0)
             + usd(1.0, 4_000.0, 300.0)
+            + usd(2.0, 4_000.0, 300.0)
             + usd(1.0, 4_000.0, 1_700.0)
             + usd(0.5, 2_000.0, 300.0)
             + usd(1.0, 4_000.0, 2_000.0);
@@ -1244,6 +1251,7 @@ mod tests {
         let doubled = usd(2.0, 13_000.0, 300.0)
             + usd(5.0, 8_000.0, 1_000.0)
             + usd(1.0, 8_000.0, 300.0)
+            + usd(2.0, 8_000.0, 300.0)
             + usd(1.0, 8_000.0, 1_700.0)
             + usd(0.5, 4_000.0, 300.0)
             + usd(1.0, 8_000.0, 2_000.0);
@@ -1256,9 +1264,9 @@ mod tests {
         let bound = estimate(&s.raw, &chain, 5, (5_000, &flat), now).unwrap();
         assert_eq!(bound.calls, (5, 5));
         let (typical, _) = bound.usd.unwrap();
-        assert!((typical - expected * 5.0 / 10.5).abs() < 1e-9, "{typical}");
+        assert!((typical - expected * 5.0 / 12.5).abs() < 1e-9, "{typical}");
         let free = estimate(&s.raw, &chain[..1], 100, (5_000, &flat), now).unwrap();
-        assert_eq!((free.calls, free.usd, free.priced), ((11, 100), None, None));
+        assert_eq!((free.calls, free.usd, free.priced), ((13, 100), None, None));
     }
 
     /// A6: doctor names the switch and what turning it on would cost.
