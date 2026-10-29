@@ -1790,8 +1790,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   request placed, so a home that does not use it sees My Work as before.
 - **The filter**: a chip chosen shows the requests whose `focus` is that area, for this visit only;
   pressed again, all of My Work. The status tabs and counts are of the chosen area. A choice the
-  answer no longer lists (dismissed, or merged away) shows all. A request not sorted yet shows only
-  unfiltered. An area with none says "No requests in this area yet".
+  answer no longer lists (dismissed, or merged away) shows all. A suggested or done area a card
+  opened stands with the chips while it is chosen, pressed, so pressing it clears the choice; in
+  claude-mem no chip is pressed then. A request not sorted yet shows only unfiltered. An area with none says "No requests in this area yet".
 - **The card's area**, in place of the goal chip (claude-mem 15.4's FocusAreaChip): its area's
   name or Other, a button that opens it, or "Sorting…" while it has no placement. My Goals' jump
   from the card is gone with it.

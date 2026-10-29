@@ -1647,6 +1647,13 @@ card('f3').querySelector('.my-focus-chip').click();
 assert.deepEqual(ids(),['f3'],'a card opens its area');
 run(`mw.area='fa_00000000000f';myWorkDraw()`);
 assert.equal(ids().length,4,'a choice no longer listed shows all');
+// A suggested area a card opened stands with the chips while chosen (CodeRabbit on #755).
+set([req('f1',{focus:P}),req('f5',{focus:L})]);
+card('f5').querySelector('.my-focus-chip').click();
+assert.deepEqual(chips().map(n=>[n.dataset.myWork,n.attrs['aria-pressed']]),[[`chip:${P}`,'false'],[`chip:${D}`,'false'],[`chip:${L}`,'true'],['chip:other','false']],'a suggested area a card opened stands pressed');
+chips()[2].click();
+assert.deepEqual(ids(),['f1','f5'],'pressed again, all of My Work');
+set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
 // Move to… on a request's page: the areas that take requests but its own, then Other.
 run('mw.area=null;myWorkDraw()');
 let moves=[],at=P;
@@ -1683,6 +1690,14 @@ assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t 
 ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(409,{code:'focus_move_target'})):Promise.resolve(response({requests:[req('f1',{focus:'other'})],unlinked:0,areas}));
 pick(D);await ticks();
 assert.equal(document.getElementById('status').textContent,'That area takes no requests now.');
+// A page opened while a move saves is not drawn over (Codex on #755).
+let release;
+ctx.fetch=(url,options)=>options?.method==='POST'?new Promise(r=>{release=()=>r(posted(200,{state:'applied'}));}):Promise.resolve(response({requests:[req('f1',{focus:P})],unlinked:0,areas}));
+pick(P);await ticks();
+run("view='settings';document.getElementById('panel').replaceChildren(document.createElement('section'))");
+release();await ticks();
+assert.equal(panel.querySelectorAll('.my-focus-move').length,0,'the page opened stays');
+run("view='my_work'");
 // Japanese.
 ctx.ui.setLang('ja');set([req('f1',{focus:P,status:'needs'}),req('f4')]);
 assert(text(card('f4')).includes('振り分け中…')&&chips().some(n=>text(n).startsWith('その他')),'the chips and the card in Japanese');

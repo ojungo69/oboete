@@ -6878,6 +6878,8 @@ function myFocusChips() {
   if (!myFocusInUse()) return null;
   const chosen = myFocusSelected();
   const entries = [...mw.areas.filter((a) => a.status === 'kept').map((a) => a.id), 'other'];
+  // A suggested or done area a card opened stands with them while chosen, pressed, to be cleared.
+  if (chosen && !entries.includes(chosen)) entries.splice(-1, 0, chosen);
   const nav = el('nav', 'my-focus-chips', ...entries.map((id) => {
     const need = (mw.rows || []).filter((row) => row.focus === id && myFocusNeedsYou(row)).length;
     // The count is seen; what it counts is read (claude-mem's " need you").
@@ -6938,7 +6940,7 @@ function myFocusChangeBar() {
     action.addEventListener('click', () => {
       void myFocusWrite(undo.body, undo.text, null).then((ok) => {
         if (ok) mw.saved = null;
-        myWorkDraw(mw.request !== null ? 'focus:move' : 'heading');
+        if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : 'heading');
       });
     });
   }
@@ -6969,7 +6971,9 @@ function myFocusMove(row) {
       const text = t('my_focus_moved', { title: row.title, area: myFocusName(to) });
       const undo = from ? { body: { action: 'move-request', request: row.id, area: from },
         text: t('my_focus_moved', { title: row.title, area: myFocusName(from) }) } : null;
-      void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo).then(() => myWorkDraw('focus:move'));
+      // Not over another page opened while it saved (Codex on #755).
+      void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo)
+        .then(() => view === 'my_work' && myWorkDraw('focus:move'));
     });
     return button;
   })));
