@@ -2569,9 +2569,48 @@ const TEXT = {
   my_focus_not_started: ['Not started · {n}', 'まだ始まっていない · {n}'],
   my_focus_not_started_badge: ['Not started', '未着手'],
   my_focus_evidence: ['Why it’s here: {evidence}', 'ここにある理由: {evidence}'],
+  my_focus_change: ['Change {name}', '「{name}」を変更'],
+  my_focus_rename: ['Rename', '名前を変更'],
+  my_focus_edit_goal: ['Edit goal', '目的を編集'],
+  my_focus_merge: ['Merge into…', '別の分野に合併…'],
+  my_focus_up: ['Move up', '上へ'],
+  my_focus_down: ['Move down', '下へ'],
+  my_focus_mark_done: ['Done', '完了にする'],
+  my_focus_back_in_focus: ['Back in focus', 'フォーカスに戻す'],
+  my_focus_keep: ['Keep', '残す'],
+  my_focus_dismiss: ['Dismiss', '見送る'],
+  my_focus_goal_prompt: ['Write one sentence saying what this area is for (Edit goal).', 'この分野が何のためのものか、1 文で書いてください (目的を編集)。'],
+  my_focus_rename_title: ['Rename “{name}”', '「{name}」の名前を変更'],
+  my_focus_goal_title: ['Goal for “{name}”', '「{name}」の目的'],
+  my_focus_merge_title: ['Merge “{name}” into…', '「{name}」を合併する先'],
+  my_focus_rename_about: ['A short name you would ask for things inside of. It can’t reuse a page name.', 'この中の作業を頼むときに使う、短い名前です。ページの名前は使えません。'],
+  my_focus_goal_about: ['One sentence saying what this area is for.', 'この分野が何のためのものかを 1 文で。'],
+  my_focus_merge_about: ['Its requests and asks show under the area you choose. Undo right after brings “{name}” back as it was.', 'この分野の依頼と頼みごとは、選んだ分野の下に表示されます。直後に「元に戻す」を押すと、「{name}」は元のとおりに戻ります。'],
+  my_focus_name: ['Name', '名前'],
+  my_focus_goal: ['Goal', '目的'],
+  my_focus_merge_into: ['Merge into', '合併する先'],
+  my_focus_choose_area: ['Choose an area', '分野を選ぶ'],
+  my_focus_page_word_typed: ['“{name}” reuses the page name “{word}”. Pick a name that means only this area.', '「{name}」はページの名前「{word}」と同じ言葉を使っています。この分野だけを指す名前にしてください。'],
+  my_focus_save: ['Save', '保存'],
+  my_focus_saving: ['Saving…', '保存しています…'],
+  my_focus_cancel: ['Cancel', 'キャンセル'],
+  my_focus_kept: ['Kept “{name}”.', '「{name}」を残しました。'],
+  my_focus_dismissed: ['Dismissed “{name}”.', '「{name}」を見送りました。'],
+  my_focus_marked_done: ['Marked “{name}” done.', '「{name}」を完了にしました。'],
+  my_focus_renamed: ['Renamed “{name}” to “{to}”.', '「{name}」の名前を「{to}」に変えました。'],
+  my_focus_goal_changed: ['Changed the goal of “{name}”.', '「{name}」の目的を変えました。'],
+  my_focus_merged: ['Merged “{name}” into “{into}”.', '「{name}」を「{into}」に合併しました。'],
+  my_focus_reordered: ['Changed the order of your focus areas.', '分野の並び順を変えました。'],
+  my_focus_undone: ['Undone: {text}', '元に戻しました: {text}'],
   my_focus_other_about: ['Requests that fit none of your focus areas. A refresh suggests a new area when several of these turn out to be steps of something larger.', 'どの分野にも当てはまらない依頼です。そのいくつかが大きな作業の一部だとわかると、更新のときに新しい分野が提案されます。'],
   focus_move_target: ['That area takes no requests now.', 'その分野は、今は依頼を受け付けていません。'],
   focus_not_found: ['That area or request is no longer there. The page has been read again.', 'その分野か依頼は、もうありません。ページを読み直しました。'],
+  focus_order: ['That order no longer matches your focus areas. The page has been read again.', 'その並び順は、今の分野と合いません。ページを読み直しました。'],
+  focus_merged: ['That area was merged into another. The page has been read again.', 'その分野は別の分野に合併されています。ページを読み直しました。'],
+  focus_page_word: ['That name reuses a page name. Pick a name that means only this area.', 'その名前はページの名前と同じ言葉を使っています。この分野だけを指す名前にしてください。'],
+  focus_merge_self: ['An area can’t be merged into itself.', '分野を、その分野自身に合併することはできません。'],
+  focus_merge_target: ['That area can’t take a merge now.', 'その分野には、今は合併できません。'],
+  focus_restore: ['An area you wrote can’t be put back in Suggested.', 'あなたが作った分野は、提案に戻せません。'],
   focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   my_rules: ['My Rules', '規則'],
   my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],
@@ -6683,6 +6722,8 @@ const mw = {
   // a save in progress, and the last change with its Undo; the asks under no area, and the
   // header's quotes opened.
   area: null, areas: [], moving: false, saved: null, otherAsks: [], why: new Set(),
+  // F7: the words an area's name may not reuse; the area being edited, how, and the draft.
+  pageWords: [], editing: null, draft: '',
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
@@ -6862,6 +6903,7 @@ const myFocusName = (id) => (id === 'other' ? t('my_focus_other') : mw.areas.fin
 // after the redraw.
 function myFocusChoose(id, focus = 'heading') {
   mw.area = id;
+  mw.editing = null;
   mw.request = null;
   mw.work = null;
   myWorkDraw(focus);
@@ -6909,20 +6951,24 @@ function myFocusChips() {
   return nav;
 }
 
-// F6, F7: one action on My Focus at a time, then My Work read again (My Rules' write): the change
-// with its Undo when it was applied; a refusal's words otherwise.
-async function myFocusWrite(body, text, undo) {
+// F6, F7: one change on My Focus at a time, its steps in order (claude-mem's Undo of a merge takes
+// two), then My Work read again (My Rules' write): the change with its Undo when every step was
+// applied; a refusal's words otherwise, the steps after it not sent.
+async function myFocusWrite(bodies, text, undo) {
   if (mw.moving) return false;
   mw.moving = true;
   myWorkDraw();
   let message = null;
   try {
-    const { res, answer } = await memoryWrite('my-focus', body);
-    if (!res.ok) {
-      message = memoryFailure(res, answer);
-      return false;
+    let applied = true;
+    for (const body of bodies) {
+      const { res, answer } = await memoryWrite('my-focus', body);
+      if (!res.ok) {
+        message = memoryFailure(res, answer);
+        return false;
+      }
+      applied &&= answer.state === 'applied';
     }
-    const applied = answer.state === 'applied';
     mw.saved = { text, undo: applied ? undo : null, applied };
     message = text;
     return true;
@@ -6950,9 +6996,9 @@ function myFocusChangeBar() {
     action.dataset.myWork = 'focus:undo';
     action.disabled = mw.moving;
     action.addEventListener('click', () => {
-      void myFocusWrite(undo.body, undo.text, null).then((ok) => {
+      void myFocusWrite(undo.bodies, undo.text, null).then((ok) => {
         if (ok) mw.saved = null;
-        if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : 'heading');
+        if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : myFocusSelected() ? 'focus:menu' : 'heading');
       });
     });
   }
@@ -6985,10 +7031,10 @@ function myFocusMove(row) {
       const from = row.focus;
       const text = t('my_focus_moved', { title: row.title, area: myFocusName(to) });
       const back = from === 'other' || mw.areas.some((a) => a.id === from && myFocusPlaceable(a));
-      const undo = back ? { body: { action: 'move-request', request: row.id, area: from },
+      const undo = back ? { bodies: [{ action: 'move-request', request: row.id, area: from }],
         text: t('my_focus_moved', { title: row.title, area: myFocusName(from) }) } : null;
       // Not over another page opened while it saved (Codex on #755).
-      void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo)
+      void myFocusWrite([{ action: 'move-request', request: row.id, area: to }], text, undo)
         .then(() => view === 'my_work' && myWorkDraw('focus:move'));
     });
     return button;
@@ -7017,11 +7063,156 @@ function myFocusAsks(asks) {
       ask.quotes.length ? myFocusWhy(`ask:${ask.id}`, ask.quotes) : null))));
 }
 
+// claude-mem's `backTo`: the change that gives an area back the status it had; none for a
+// suggestion the owner wrote, which nothing puts back in Suggested.
+function myFocusBack(area) {
+  if (area.status === 'suggested') return area.source === 'owner' ? null : [{ action: 'restore-suggestion', area: area.id }];
+  return [{ action: { kept: 'keep', done: 'done', dismissed: 'dismiss' }[area.status], area: area.id }];
+}
+
+// claude-mem's `describeFocusChange`: what a change on `area` says, and its Undo, read from the
+// area as it was before it: none for a goal written where there was none, nor for a merge of an
+// area the owner wrote, whose Undo would have to put it back in Suggested.
+function myFocusDescribe(body, area) {
+  const name = area.name;
+  const undo = (bodies, text) => (bodies ? { bodies, text: t('my_focus_undone', { text }) } : null);
+  const said = (key, vars, bodies) => {
+    const text = t(key, { name, ...vars });
+    return { text, undo: undo(bodies, text) };
+  };
+  switch (body.action) {
+    case 'keep': return said('my_focus_kept', {}, myFocusBack(area));
+    case 'dismiss': return said('my_focus_dismissed', {}, myFocusBack(area));
+    case 'done': return said('my_focus_marked_done', {}, myFocusBack(area));
+    case 'rename': return said('my_focus_renamed', { to: body.name.trim() }, [{ action: 'rename', area: area.id, name }]);
+    case 'edit-goal': return said('my_focus_goal_changed', {}, area.goal ? [{ action: 'edit-goal', area: area.id, goal: area.goal }] : null);
+    case 'merge': return said('my_focus_merged', { into: myFocusName(body.into) }, area.source === 'owner' ? null
+      : [{ action: 'restore-suggestion', area: area.id }, ...(area.status === 'suggested' ? [] : myFocusBack(area))]);
+    default: return said('my_focus_reordered', {}, [{ action: 'reorder', order: mw.areas.filter((a) => a.status === 'kept').map((a) => a.id) }]);
+  }
+}
+
+// One change on `area` from its header, its menu or its editor: the editor closed once saved, a
+// merge's choice moved to the area merged into; the focus back on the menu, or on the heading
+// when the area is gone from the choice.
+function myFocusChange(body, area) {
+  const { text, undo } = myFocusDescribe(body, area);
+  void myFocusWrite([body], text, undo).then((ok) => {
+    if (ok) {
+      mw.editing = null;
+      if (body.action === 'merge') mw.area = body.into;
+    }
+    if (view === 'my_work') myWorkDraw(myFocusSelected() ? 'focus:menu' : 'current');
+  });
+}
+
+// `my_work_focus::page_word`: the page word a name reuses as whole words of its ASCII letters and
+// digits, or the page's Japanese name it is.
+function myFocusPageWord(name) {
+  const words = ` ${String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join(' ')} `;
+  return mw.pageWords.find((w) => (/^[a-z0-9 ]+$/.test(w) ? words.includes(` ${w} `) : String(name).trim() === w)) ?? null;
+}
+
+function myFocusButton(key, focus, onClick, cls = 'quiet small') {
+  const button = word('button', cls, key);
+  button.type = 'button';
+  button.dataset.myWork = focus;
+  button.disabled = mw.moving;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+// F7 (claude-mem's AreaMenu): Rename, Edit goal, Merge into…; Move up and Move down in the owner's
+// order of the kept areas, the whole order sent; then Done, or Back in focus. A disclosure of
+// buttons, as Move to….
+function myFocusMenu(area) {
+  const order = mw.areas.filter((a) => a.status === 'kept').map((a) => a.id);
+  const at = order.indexOf(area.id);
+  const swap = (other) => {
+    const next = [...order];
+    [next[at], next[other]] = [next[other], next[at]];
+    myFocusChange({ action: 'reorder', order: next }, area);
+  };
+  const edit = (kind) => () => {
+    mw.editing = { kind, area: area.id };
+    mw.draft = kind === 'rename' ? area.name : kind === 'edit-goal' ? area.goal ?? '' : '';
+    myWorkDraw(`edit:${kind}`);
+  };
+  const moves = at < 0 ? [] : [
+    myFocusButton('my_focus_up', 'menu:up', () => swap(at - 1)),
+    myFocusButton('my_focus_down', 'menu:down', () => swap(at + 1)),
+  ];
+  if (moves.length) {
+    moves[0].disabled ||= at === 0;
+    moves[1].disabled ||= at === order.length - 1;
+  }
+  const summary = el('summary', null, '…');
+  summary.setAttribute('aria-label', t('my_focus_change', { name: area.name }));
+  summary.dataset.myWork = 'focus:menu';
+  const menu = el('details', 'my-focus-menu', summary, el('div', null,
+    myFocusButton('my_focus_rename', 'menu:rename', edit('rename')),
+    myFocusButton('my_focus_edit_goal', 'menu:edit-goal', edit('edit-goal')),
+    myFocusButton('my_focus_merge', 'menu:merge', edit('merge')), ...moves,
+    area.status === 'done' ? myFocusButton('my_focus_back_in_focus', 'menu:keep', () => myFocusChange({ action: 'keep', area: area.id }, area))
+      : myFocusButton('my_focus_mark_done', 'menu:done', () => myFocusChange({ action: 'done', area: area.id }, area))));
+  // It opens over the page, so Escape closes it, the focus back on it.
+  menu.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !menu.open) return;
+    menu.open = false;
+    summary.focus();
+  });
+  return menu;
+}
+
+// F7 (claude-mem's AreaEditDialog), inline as My Rules edits: a name, a goal or the area to merge
+// into; Save held while the field is empty, the name reuses a page word or no area is chosen. The
+// server refuses what it cannot save.
+function myFocusEditor(area) {
+  const { kind } = mw.editing;
+  const save = myFocusButton(mw.moving ? 'my_focus_saving' : 'my_focus_save', 'edit:save', () => myFocusChange(
+    kind === 'merge' ? { action: 'merge', area: area.id, into: mw.draft }
+      : kind === 'rename' ? { action: 'rename', area: area.id, name: mw.draft } : { action: 'edit-goal', area: area.id, goal: mw.draft }, area), 'small');
+  const cancel = myFocusButton('my_focus_cancel', 'edit:cancel', () => {
+    mw.editing = null;
+    myWorkDraw('focus:menu');
+  });
+  const warning = el('p', 'my-focus-warning');
+  warning.setAttribute('aria-live', 'polite');
+  const check = () => {
+    const reused = kind === 'rename' ? myFocusPageWord(mw.draft) : null;
+    warning.replaceChildren(...(reused ? [t('my_focus_page_word_typed', { name: mw.draft.trim(), word: reused })] : []));
+    save.disabled = mw.moving || !mw.draft.trim() || Boolean(reused);
+  };
+  let field;
+  if (kind === 'merge') {
+    const targets = mw.areas.filter((a) => myFocusPlaceable(a) && a.id !== area.id);
+    field = el('select', null, el('option', null, t('my_focus_choose_area')), ...targets.map((a) => {
+      const option = el('option', null, a.status === 'suggested' ? `${a.name}${t('my_focus_suggested_suffix')}` : a.name);
+      option.value = a.id;
+      return option;
+    }));
+    field.options[0].value = '';
+    field.value = mw.draft;
+    field.addEventListener('change', () => { mw.draft = field.value; check(); });
+  } else {
+    field = input('text', mw.draft, '', `focus-${kind}`, (v) => { mw.draft = v; check(); });
+    field.maxLength = kind === 'rename' ? 80 : 300;
+  }
+  field.dataset.myWork = `edit:${kind}`;
+  field.disabled = mw.moving;
+  check();
+  const label = { rename: 'my_focus_name', 'edit-goal': 'my_focus_goal', merge: 'my_focus_merge_into' }[kind];
+  const title = { rename: 'my_focus_rename_title', 'edit-goal': 'my_focus_goal_title', merge: 'my_focus_merge_title' }[kind];
+  const about = { rename: 'my_focus_rename_about', 'edit-goal': 'my_focus_goal_about', merge: 'my_focus_merge_about' }[kind];
+  return el('section', 'my-focus-editor', word('h4', null, title, { name: area.name }), word('p', 'my-goals-note', about, { name: area.name }),
+    el('label', 'field', el('span', null, t(label)), field), warning, el('div', 'my-rules-actions', save, cancel));
+}
+
 // F7, claude-mem's FocusHeader and OtherHeader, above the chosen area's requests: its name, a
 // Suggested or Done badge, its goal, the page word its name reuses; the progress of all its
 // requests, closed ones too, where it stands, how many shipped, how often it was asked and when
-// last, an ask after the last ship; the asks not started, and why it is here. Its menu comes
-// with slice 10c-2b.
+// last, an ask after the last ship; the asks not started, and why it is here; its menu, an
+// editor open, and a suggested area's Keep and Dismiss.
 function myFocusHeader(id) {
   const requests = (mw.rows || []).filter((row) => row.focus === id);
   const shipped = word('span', null, 'my_focus_shipped', { n: requests.filter((row) => row.status === 'shipped').length });
@@ -7037,15 +7228,19 @@ function myFocusHeader(id) {
   const facts = [myGoalsStatusWord(status), shipped];
   if (area.asked !== null && area.latest) facts.push(word('span', null, 'my_focus_asked', { asked: myGoalsAsked(area.asked), last: t('my_goals_last', { day: myGoalsDay(area.latest) }) }));
   const badge = area.status === 'suggested' || area.status === 'done' ? word('span', 'my-focus-badge', `my_focus_${area.status}`) : null;
+  const editing = mw.editing?.area === area.id ? myFocusEditor(area) : null;
   return el('section', 'my-focus-header',
-    el('div', 'my-focus-header-name', el('h3', null, area.name), badge),
-    area.goal ? el('p', 'my-focus-goal', area.goal) : null,
+    el('div', 'my-focus-header-name', el('h3', null, area.name), badge, myFocusMenu(area)),
+    area.goal ? el('p', 'my-focus-goal', area.goal) : word('p', 'my-focus-goal my-focus-prompt', 'my_focus_goal_prompt'), editing,
     area.page_word ? el('p', 'my-focus-warning', t('my_focus_page_word', { name: area.name, word: area.page_word })) : null,
     myGoalsRollup(requests), el('p', 'my-goals-meta my-focus-facts', ...facts),
     again ? el('p', 'my-goals-again', t('my_goals_again', { asked: myWorkDay(area.latest), shipped: myWorkDay(again) })) : null,
     myFocusAsks(area.asks || []),
     area.quotes?.length ? myFocusWhy(`area:${area.id}`, area.quotes)
-      : area.evidence ? el('p', 'my-goals-note', t('my_focus_evidence', { evidence: area.evidence })) : null);
+      : area.evidence ? el('p', 'my-goals-note', t('my_focus_evidence', { evidence: area.evidence })) : null,
+    area.status === 'suggested' ? el('div', 'my-rules-actions my-focus-decide',
+      myFocusButton('my_focus_keep', 'decide:keep', () => myFocusChange({ action: 'keep', area: area.id }, area), 'small'),
+      myFocusButton('my_focus_dismiss', 'decide:dismiss', () => myFocusChange({ action: 'dismiss', area: area.id }, area))) : null);
 }
 
 // P6, V4: the build story at My Work's top, as claude-mem's recap: the recap, then the chapters,
@@ -7710,6 +7905,7 @@ function myWorkAccept(answer) {
   mw.story = answer.story ?? null;
   mw.areas = answer.areas ?? [];
   mw.otherAsks = answer.other_asks ?? [];
+  mw.pageWords = answer.page_words ?? [];
   mw.fetched = Date.now();
   mw.pending = null;
 }

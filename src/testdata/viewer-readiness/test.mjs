@@ -1700,6 +1700,108 @@ document.activeElement=null;run('mw.pending=null');
 ctx.ui.setLang('ja');run('myWorkDraw()');
 assert(text(panel.querySelector('.my-focus-header')).includes('まだ始まっていない · 1')&&text(panel.querySelector('.my-focus-header')).includes('3 回頼みました、最後は'));
 ctx.ui.setLang('en');
+// Slice 10c-2b: the area's menu, its editors, a suggested area's Keep and Dismiss, each change's Undo.
+{
+const M='fa_000000000005',blank={asked:null,latest:null,quotes:[],asks:[],page_word:null};
+const B=[{...blank,id:P,name:'Parser',status:'kept',source:'owner-goals',goal:'Parse every file.'},
+  {...blank,id:D,name:'Docs',status:'kept',source:'owner',goal:null},
+  {...blank,id:L,name:'Lexer',status:'suggested',source:'clustering',goal:null},
+  {...blank,id:M,name:'Mine',status:'suggested',source:'owner',goal:null}];
+const words=['my focus','my work','other','その他'];
+const page={requests:[req('f1',{focus:P})],unlinked:0,areas:B,other_asks:[],page_words:words};
+let posts=[],reply=()=>posted(200,{state:'applied'});
+ctx.fetch=(url,options)=>{if(options?.method==='POST'){posts.push(JSON.parse(options.body));return Promise.resolve(reply());}return Promise.resolve(response(page));};
+ctx.__rows=page;
+run('Object.assign(mw,{rows:null,range:"all",area:null,saved:null,editing:null});myWorkAccept(globalThis.__rows);myWorkDraw()');
+const hdr=()=>panel.querySelector('.my-focus-header');
+const pick=key=>hdr().querySelectorAll('button').find(n=>n.dataset.myWork===key);
+const status=()=>document.getElementById('status').textContent;
+const undo=()=>panel.querySelectorAll('button').find(n=>n.dataset.myWork==='focus:undo');
+const type=(field,value)=>{field.value=value;for(const cb of field.listeners.input)cb();};
+run(`myFocusChoose('${P}')`);
+const menu=hdr().querySelector('.my-focus-menu');
+assert.equal(menu.querySelector('summary').attrs['aria-label'],'Change Parser');
+assert.deepEqual([pick('menu:up').disabled,pick('menu:down').disabled],[true,false],'the first kept area moves only down');
+// Move down sends the whole kept order; Undo sends the order before.
+pick('menu:down').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'reorder',order:[D,P]});
+assert.equal(status(),'Changed the order of your focus areas.');
+assert.equal(document.activeElement.dataset.myWork,'focus:menu','the focus back on the menu');
+undo().click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'reorder',order:[P,D]});
+assert.equal(status(),'Undone: Changed the order of your focus areas.');
+// Escape closes the menu, the focus on it.
+const open=hdr().querySelector('.my-focus-menu');open.open=true;
+document.activeElement=pick('menu:rename');
+for(const cb of open.listeners.keydown)cb({key:'Escape'});
+assert.equal(open.open,false);assert.equal(document.activeElement.dataset.myWork,'focus:menu');
+// Rename: a page word holds Save and says so, a Japanese page name too; another name saves, Undo renames it back.
+pick('menu:rename').click();
+let field=hdr().querySelector('input');
+assert.deepEqual([field.value,document.activeElement.dataset.myWork,field.maxLength],['Parser','edit:rename',80]);
+type(field,'My Work parser');
+assert.equal(pick('edit:save').disabled,true);
+assert(text(hdr()).includes('“My Work parser” reuses the page name “my work”. Pick a name that means only this area.'),text(hdr()));
+type(field,'その他');assert.equal(pick('edit:save').disabled,true,'a Japanese page name');
+type(field,'  ');assert.equal(pick('edit:save').disabled,true,'a blank name');
+type(field,'Parsing');assert.equal(pick('edit:save').disabled,false);
+assert(!text(hdr()).includes('reuses the page name “my work”. Pick'));
+pick('edit:save').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'rename',area:P,name:'Parsing'});
+assert.equal(hdr().querySelectorAll('input').length,0,'saved, the editor closes');
+assert.equal(status(),'Renamed “Parser” to “Parsing”.');
+undo().click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'rename',area:P,name:'Parser'});
+// A refusal keeps the editor and its draft, and says why.
+reply=()=>posted(422,{code:'focus_page_word'});
+pick('menu:rename').click();field=hdr().querySelector('input');type(field,'Parsers');
+pick('edit:save').click();await ticks();
+assert.equal(status(),'That name reuses a page name. Pick a name that means only this area.');
+assert.equal(hdr().querySelector('input').value,'Parsers','the draft kept');
+pick('edit:cancel').click();
+assert.equal(hdr().querySelectorAll('input').length,0);assert.equal(document.activeElement.dataset.myWork,'focus:menu');
+reply=()=>posted(200,{state:'applied'});
+// A goal written where there was none has no Undo; the prompt names Edit goal.
+run(`myFocusChoose('${D}')`);
+assert(text(hdr()).includes('Write one sentence saying what this area is for (Edit goal).'));
+pick('menu:edit-goal').click();field=hdr().querySelector('input');
+assert.deepEqual([field.value,pick('edit:save').disabled,field.maxLength],['',true,300]);
+type(field,'Docs for the users.');pick('edit:save').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'edit-goal',area:D,goal:'Docs for the users.'});
+assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'));
+// Merge a kept area: the choice moves to the area merged into; Undo puts it back in two steps.
+run(`myFocusChoose('${P}')`);pick('menu:merge').click();
+const into=hdr().querySelector('select');
+assert.deepEqual(into.options.map(o=>[o.value,text(o)]),[['','Choose an area'],[D,'Docs'],[L,'Lexer · suggested'],[M,'Mine · suggested']]);
+assert.equal(pick('edit:save').disabled,true,'no area chosen');
+into.value=D;for(const cb of into.listeners.change)cb();
+pick('edit:save').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'merge',area:P,into:D});
+assert.equal(text(hdr().querySelector('h3')),'Docs','the choice on the area merged into');
+const before=posts.length;undo().click();await ticks();
+assert.deepEqual(posts.slice(before),[{action:'restore-suggestion',area:P},{action:'keep',area:P}]);
+// A suggested area: Keep and Dismiss; a suggestion's Undo puts it back in Suggested, none for one you wrote.
+run(`myFocusChoose('${L}')`);
+assert(text(hdr()).includes('Suggested'));
+pick('decide:keep').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'keep',area:L});
+undo().click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'restore-suggestion',area:L});
+pick('decide:dismiss').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'dismiss',area:L});assert.equal(status(),'Dismissed “Lexer”.');
+run(`myFocusChoose('${M}')`);pick('decide:keep').click();await ticks();
+assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'),'no Undo for a suggestion you wrote');
+// Done, then its Undo gives the status back; a done area's menu offers Back in focus.
+run(`myFocusChoose('${P}')`);pick('menu:done').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'done',area:P});assert.equal(status(),'Marked “Parser” done.');
+undo().click();await ticks();assert.deepEqual(posts.at(-1),{action:'keep',area:P});
+page.areas=B.map(a=>a.id===P?{...a,status:'done'}:a);run('myWorkAccept(globalThis.__rows);myWorkDraw()');
+run(`myFocusChoose('${P}')`);
+assert(pick('menu:keep')&&!pick('menu:done')&&!pick('menu:up'),'Back in focus, and no place in the kept order');
+ctx.ui.setLang('ja');run('myWorkDraw()');
+assert(text(hdr()).includes('フォーカスに戻す'));
+ctx.ui.setLang('en');
+}
 set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
 // Move to… on a request's page: the areas that take requests but its own, then Other.
 run('mw.area=null;myWorkDraw()');
@@ -1757,7 +1859,7 @@ ctx.ui.setLang('ja');set([req('f1',{focus:P,status:'needs'}),req('f4')]);
 assert(text(card('f4')).includes('振り分け中…')&&chips().some(n=>text(n).startsWith('その他')),'the chips and the card in Japanese');
 assert.equal(panel.querySelector('.my-focus-chips').attrs['aria-label'],'マイフォーカス');
 ctx.ui.setLang('en');
-console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, the area and Other headers, Move to… with its bar and Undo, a refusal, JA/EN');
+console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, the area and Other headers, the menu, editors, Keep and Dismiss with each Undo, Move to… with its bar and Undo, a refusal, JA/EN');
 }
 
 // Parity row X9: a long prompt is clamped behind Show more, as claude-mem's PromptCard does; a short one has no button.
