@@ -3525,7 +3525,7 @@ fn codex_searched(stdout: &str) -> bool {
 /// `structuredOutput` (grok), or the answer text itself when the envelope is the answer (codex).
 /// Most a provider may send (HTTP body or CLI output) before its answer is dropped: a broken or
 /// hijacked provider must not fill memory (the summaries it returns are capped much lower anyway).
-const MAX_RESPONSE_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_RESPONSE_BYTES: u64 = 1 << 20;
 
 /// Parity row 2 (docs/resident.md R14): the process groups of the runs out now, so that a worker
 /// that leaves because its loop is stuck ends them before it goes.
@@ -3870,7 +3870,7 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -5252,7 +5252,7 @@ child.wait()
     }
 
     /// `serve` for one request after another, each answered in turn.
-    fn serve_each(
+    pub(crate) fn serve_each(
         answers: Vec<(&'static str, Vec<u8>)>,
         extra_headers: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
@@ -5296,7 +5296,7 @@ child.wait()
     }
 
     /// The JSON body of a request a test server received.
-    fn request_body(request: &str) -> Value {
+    pub(crate) fn request_body(request: &str) -> Value {
         serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
     }
 

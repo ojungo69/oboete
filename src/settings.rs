@@ -1213,8 +1213,10 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
     }
     // Turning off the last entry in use. A chain with none in use already (all off by hand, or no
     // entries) is not this save's doing, so the rest of the settings still save (cubic on #94).
-    let in_use = |p: &Provider| p.enabled() && !now.chain.turns_off(p.name());
-    if posted.chain.iter().all(|e| !e.on) && now.providers.iter().any(in_use) {
+    // A `judge:` entry written by hand is never in the chain (`config::load_chain`).
+    let judge = |name: &str| name.starts_with(crate::config::JUDGE_PREFIX);
+    let in_use = |p: &Provider| p.enabled() && !now.chain.turns_off(p.name()) && !judge(p.name());
+    if posted.chain.iter().all(|e| !e.on || judge(&e.name)) && now.providers.iter().any(in_use) {
         return Err(refused(422, "chain_empty", "chain"));
     }
     let mut chain = Chain {
@@ -3092,6 +3094,29 @@ mod tests {
     }
 
     /// Each refusal leaves the file's bytes as they were.
+    /// A hand-written `judge:` entry left on does not count as the chain in use (`load_chain`
+    /// leaves it out): turning off the last other entry is refused.
+    #[test]
+    fn a_judge_name_left_on_does_not_keep_the_chain_in_use() {
+        let text = "[[providers]]\nkind = \"openai\"\nname = \"judge:jev\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\n\
+                    [[providers]]\nkind = \"openai\"\nname = \"open\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let r = save_to(
+            &home,
+            &posted(&shown, |v| {
+                for e in v["chain"].as_array_mut().unwrap() {
+                    if e["name"] == "open" {
+                        e["on"] = json!(false);
+                    }
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!((r.status, r.code), (422, "chain_empty"));
+        assert_eq!(file(&home).as_deref(), Some(text));
+    }
+
     #[test]
     fn a_refused_save_leaves_the_file() {
         let text = "[summary]\ncurate = false\n";

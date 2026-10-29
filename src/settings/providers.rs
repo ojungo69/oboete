@@ -115,7 +115,10 @@ impl Draft {
                 ..
             } => (name, *timeout_s, limits),
         };
-        if name.trim().is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control)
+        if name.trim().is_empty()
+            || name.chars().count() > 64
+            || name.chars().any(char::is_control)
+            || name.starts_with(crate::config::JUDGE_PREFIX)
         {
             return Err(refused(422, "bad_entry", "providers.name"));
         }
@@ -747,6 +750,10 @@ fn read_selection(home: &Path, expected: &str, selector: Selector) -> Result<Sel
         .nth(occurrence)
         .cloned()
         .ok_or_else(|| refused(404, "no_entry", "providers"))?;
+    // A `judge:` name, written by hand, would test under the judge's ledger rows and state.
+    if provider.name().starts_with(config::JUDGE_PREFIX) {
+        return Err(refused(422, "bad_entry", "providers.name"));
+    }
     if cfg.chain.turns_off(provider.name()) {
         let (Provider::Openai { enabled, .. } | Provider::Cli { enabled, .. }) = &mut provider;
         *enabled = false;
@@ -1097,6 +1104,46 @@ mod tests {
             );
             assert_eq!(bytes(home.path()).unwrap(), before);
         }
+        assert!(!home.path().join("providers.db").exists());
+    }
+
+    /// The judge's ledger rows are under `judge:` names: no chain entry is created or renamed so.
+    #[test]
+    fn a_chain_entry_cannot_take_a_judge_name() {
+        let home = home("providers = [] # still usable\n");
+        let before = bytes(home.path()).unwrap();
+        for name in ["judge:jev", "judge:"] {
+            let entry = http(name, "https://example.invalid/v1");
+            assert_eq!(
+                send(home.path(), json!({"op": "create", "entry": entry}))
+                    .unwrap_err()
+                    .code,
+                "bad_entry",
+                "{name}"
+            );
+            assert_eq!(bytes(home.path()).unwrap(), before);
+        }
+    }
+
+    /// A `judge:` entry written by hand is never tested: no request, no row of the judge's.
+    #[test]
+    fn a_hand_written_judge_name_is_never_tested() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let home = home(&format!(
+            "[[providers]]\nkind = \"openai\"\nname = \"judge:jev\"\n\
+            base_url = {endpoint:?}\nmodel = \"synthetic\"\n"
+        ));
+        let shown = show(home.path());
+        let mut body =
+            json!({"version": shown["version"], "selector": shown["providers"][0]["selector"]});
+        let refusal = preview(home.path(), &serde_json::to_vec(&body).unwrap()).unwrap_err();
+        assert_eq!((refusal.status, refusal.code), (422, "bad_entry"));
+        body["confirmed"] = json!(true);
+        let refusal = test(home.path(), &serde_json::to_vec(&body).unwrap()).unwrap_err();
+        assert_eq!((refusal.status, refusal.code), (422, "bad_entry"));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
         assert!(!home.path().join("providers.db").exists());
     }
 

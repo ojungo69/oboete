@@ -17,6 +17,11 @@ pub struct Config {
     pub my_work: MyWork,
     #[serde(default)]
     pub embedding: Embedding,
+    /// `[judge]`: Jev, outside the curator chain (docs/my-work-model.md J1); absent, it is off.
+    /// Read by its callers from slice 11b.
+    #[serde(default)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub judge: Option<Judge>,
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
     #[serde(default)]
     pub gemini: Option<GeminiPlace>,
@@ -218,6 +223,37 @@ fn default_my_work_calls() -> u32 {
 }
 fn default_idle_minutes() -> u32 {
     10
+}
+
+/// `[judge]` (docs/my-work-model.md J1): Typesafe's Jev, asked at its own fixed endpoint
+/// (`judge::ENDPOINT`): no value of the table sends the owner's text anywhere else.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Judge {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The key file, the token on line 2 (`read_key`), read at each call.
+    pub key_file: PathBuf,
+    #[serde(default = "default_judge_model")]
+    pub model: String,
+    #[serde(default = "default_judge_timeout")]
+    pub timeout_s: u64,
+    /// Calls in any 24 hours, at most.
+    #[serde(default = "default_judge_calls")]
+    pub daily_budget: u32,
+}
+
+/// What no chain entry's name starts with: the judge's own names in the provider ledger.
+pub(crate) const JUDGE_PREFIX: &str = "judge:";
+
+fn default_judge_model() -> String {
+    "jev-latest".into()
+}
+fn default_judge_timeout() -> u64 {
+    15
+}
+fn default_judge_calls() -> u32 {
+    300
 }
 
 /// Which API an HTTP entry speaks: OpenAI-compatible chat completions, or Anthropic's Messages API
@@ -779,6 +815,7 @@ pub fn load(home: &Path) -> Result<Config> {
             summary: Summary::default(),
             my_work: MyWork::default(),
             embedding: Embedding::default(),
+            judge: None,
             gemini: None,
             paid_usd_per_month: default_paid_usd_per_month(),
             chain: ChainOverlay::default(),
@@ -808,6 +845,17 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
             GeminiPlace::AfterSubscriptions => cfg.providers.len(),
         };
         cfg.providers.insert(at, gemini());
+    }
+    // The judge's ledger rows and daily count are kept under `judge:` names (`judge::NAME`): an
+    // entry so named would share them, so `load_chain` leaves it out. It stays here, where the
+    // settings page finds each entry by its place in the file.
+    for p in &cfg.providers {
+        if p.name().starts_with(JUDGE_PREFIX) {
+            cfg.warnings.push(format!(
+                "chain entry \"{}\" is never called: names starting \"{JUDGE_PREFIX}\" are the judge's",
+                p.name()
+            ));
+        }
     }
     overlay(&mut cfg);
     // A CLI's subscription pays for it, and its answer has no cap to price; prices are for HTTP.
@@ -864,7 +912,9 @@ pub fn load_chain(home: &Path) -> Result<Config> {
     let Config {
         providers, chain, ..
     } = &mut cfg;
-    providers.retain(|p| p.enabled() && !chain.turns_off(p.name()));
+    providers.retain(|p| {
+        p.enabled() && !chain.turns_off(p.name()) && !p.name().starts_with(JUDGE_PREFIX)
+    });
     Ok(cfg)
 }
 
@@ -1396,6 +1446,8 @@ pub struct CaptureConfig {
     _my_work: serde::de::IgnoredAny,
     #[serde(default, rename = "embedding")]
     _embedding: serde::de::IgnoredAny,
+    #[serde(default, rename = "judge")]
+    _judge: serde::de::IgnoredAny,
     #[serde(default, rename = "backup")]
     _backup: serde::de::IgnoredAny,
     // `Config`'s top-level keys: each one a user sets must not stop recording.
@@ -1529,6 +1581,9 @@ port = 17374
 days = 90
 [my_work]
 curate = true
+[judge]
+key_file = "/k/TYPESAFE_KEY.md"
+enabled = false
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
@@ -1777,6 +1832,49 @@ model = "haiku"
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), text).unwrap();
         load(dir.path()).unwrap()
+    }
+
+    /// J1: `[judge]` absent is off; present, its defaults; a destination of its own is refused,
+    /// and a chain entry named as the judge's ledger rows is never in the chain, with a warning.
+    #[test]
+    fn the_judge_table_has_its_defaults_no_destination_and_no_chain_namesake() {
+        assert_eq!(load_text("").judge, None);
+        let cfg = load_text("[judge]\nkey_file = \"/k/TYPESAFE_KEY.md\"\n");
+        assert_eq!(
+            cfg.judge,
+            Some(Judge {
+                enabled: true,
+                key_file: "/k/TYPESAFE_KEY.md".into(),
+                model: "jev-latest".into(),
+                timeout_s: 15,
+                daily_budget: 300,
+            })
+        );
+        for field in [
+            "base_url = \"https://example.invalid\"",
+            "headers = {}",
+            "extra = {}",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let text = format!("[judge]\nkey_file = \"/k\"\n{field}\n");
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            assert!(load(dir.path()).is_err(), "{field}");
+        }
+        let cfg = load_text(
+            "[[providers]]\nkind = \"openai\"\nname = \"judge:jev\"\nbase_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n\
+             [[providers]]\nkind = \"openai\"\nname = \"local\"\nbase_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n",
+        );
+        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].contains("judge:jev"), "{:?}", cfg.warnings);
+        // Kept in the file's order for the settings page, never in the chain.
+        let names = |cfg: &Config| -> Vec<String> {
+            cfg.providers.iter().map(|p| p.name().to_owned()).collect()
+        };
+        assert_eq!(names(&cfg), ["judge:jev", "local"]);
+        let dir = tempfile::tempdir().unwrap();
+        let text = "[[providers]]\nkind = \"openai\"\nname = \"judge:jev\"\nbase_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n";
+        std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        assert!(names(&load_chain(dir.path()).unwrap()).is_empty());
     }
 
     fn find<'a>(cfg: &'a Config, name: &str) -> &'a Provider {
