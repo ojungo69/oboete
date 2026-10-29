@@ -1811,7 +1811,31 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   screen reader would not read it.
 - **Page words**: the section's Japanese names (マイフォーカス, その他) join the names an area may
   not have.
-- **Then**: slice 10c-2, the area's header and its menu.
+- **Then**: slice 10c-2a, the area's header; 10c-2b, its menu.
+
+### Slice 10c-2a: the area's header and Other's (2026-10-29)
+
+- **The data** (claude-mem 15.4's `toFocusModel`, there built in the page from the goals): My
+  Work's answer gives each listed area the current goals behind it: `asked`, the sum over the
+  priorities whose area resolves to it through merges; `latest`, their newest quote's time;
+  `quotes`, all of theirs, each once by time and words, the newest first; `asks`, the open asks
+  that resolve to it (id, title, how often, when last, quotes); and `page_word`, the page word
+  its name reuses. `other_asks` are the asks under no live area (none, Other, a dismissed or an
+  unknown one), and `page_words` the list a name may not reuse, for 10c-2b's editor. Every text
+  through the gate. The read of the current goals moves from the links job's module to the goals
+  job's (`my_work_goals::newest`), as 10c-3 removes the links job.
+- **The header** above the chosen area's requests (claude-mem's FocusHeader): its name, a
+  Suggested or Done badge, its goal, the page-word warning; the progress of all its requests,
+  closed ones too and whatever the range or the status tab (claude-mem's page has no range); where
+  it stands (claude-mem's `statusOf`, as My Goals' status words), how many shipped, `asked N×,
+  last <day>`; "You asked again on …" after the last ship; "Not started · n" with each ask, how
+  often and when last, and its quotes; then "Why it's here" with the area's quotes, or its
+  evidence when it has none. Other's (claude-mem's OtherHeader): its sentence, the progress, how
+  many shipped and the asks under no area. A quotes disclosure stays open through redraws, and a
+  changed poll waits behind "Show updates" while the header has the focus.
+- **Not yet**: the area's menu (Rename, Edit goal, Merge into…, Move up, Move down, Done or Back
+  in focus), the suggested area's Keep and Dismiss, and the italic prompt to write a goal, which
+  names Edit goal: 10c-2b.
 
 ## Not built
 

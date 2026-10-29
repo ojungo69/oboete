@@ -2561,6 +2561,15 @@ const TEXT = {
   my_focus_pending: ['Saved. It shows here once My Work has read it.', '保存しました。My Work が読み込むと、ここに反映されます。'],
   my_focus_undo: ['Undo', '元に戻す'],
   my_focus_no_undo: ['This one can’t be undone from here.', 'この変更は、ここからは元に戻せません。'],
+  my_focus_suggested: ['Suggested', '提案'],
+  my_focus_done: ['Done', '完了'],
+  my_focus_page_word: ['“{name}” reuses the page name “{word}”. Rename it so each word means one thing.', '「{name}」はページの名前「{word}」と同じ言葉を使っています。言葉ごとに意味が 1 つになるよう、名前を変えてください。'],
+  my_focus_shipped: ['{n} shipped', '完了 {n} 件'],
+  my_focus_asked: ['{asked}, {last}', '{asked}、{last}'],
+  my_focus_not_started: ['Not started · {n}', 'まだ始まっていない · {n}'],
+  my_focus_not_started_badge: ['Not started', '未着手'],
+  my_focus_evidence: ['Why it’s here: {evidence}', 'ここにある理由: {evidence}'],
+  my_focus_other_about: ['Requests that fit none of your focus areas. A refresh suggests a new area when several of these turn out to be steps of something larger.', 'どの分野にも当てはまらない依頼です。そのいくつかが大きな作業の一部だとわかると、更新のときに新しい分野が提案されます。'],
   focus_move_target: ['That area takes no requests now.', 'その分野は、今は依頼を受け付けていません。'],
   focus_not_found: ['That area or request is no longer there. The page has been read again.', 'その分野か依頼は、もうありません。ページを読み直しました。'],
   focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
@@ -6671,8 +6680,9 @@ const mw = {
   filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
   agent: null, request: null, work: null, back: null,
   // F7: the focus area chosen (an id or `other`), for this visit only, as claude-mem's; the areas;
-  // a save in progress, and the last change with its Undo.
-  area: null, areas: [], moving: false, saved: null,
+  // a save in progress, and the last change with its Undo; the asks under no area, and the
+  // header's quotes opened.
+  area: null, areas: [], moving: false, saved: null, otherAsks: [], why: new Set(),
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
@@ -6985,6 +6995,59 @@ function myFocusMove(row) {
   })));
 }
 
+// F7: an item's quotes behind one disclosure (claude-mem's WhyItsHere), kept open through redraws.
+function myFocusWhy(key, quotes) {
+  const n = quotes.length;
+  const summary = el('summary', null, t(n === 1 ? 'my_goals_why_one' : 'my_goals_why_n', { n }));
+  summary.dataset.myWork = `why:${key}`;
+  const why = el('details', 'my-goals-why', summary,
+    el('ul', 'my-goals-quotes', ...quotes.map((q) => el('li', null, el('q', null, q.text), ' ', myGoalsAt(q.ts)))));
+  why.open = mw.why.has(key);
+  why.addEventListener('toggle', () => (why.open ? mw.why.add(key) : mw.why.delete(key)));
+  return why;
+}
+
+// F7 (claude-mem's NotStartedAsks): the open asks the goals found, none linked to a request.
+function myFocusAsks(asks) {
+  if (!asks.length) return null;
+  return el('section', 'my-focus-asks', word('h4', null, 'my_focus_not_started', { n: asks.length }),
+    el('ul', 'my-goals-list', ...asks.map((ask) => el('li', 'my-goals-item',
+      el('div', 'my-goals-row', word('span', 'my-focus-badge', 'my_focus_not_started_badge'), el('span', 'my-goals-title', ask.title)),
+      el('p', 'my-goals-meta', t('my_goals_ask_meta', { n: ask.asked, day: myGoalsDay(ask.latest) })),
+      ask.quotes.length ? myFocusWhy(`ask:${ask.id}`, ask.quotes) : null))));
+}
+
+// F7, claude-mem's FocusHeader and OtherHeader, above the chosen area's requests: its name, a
+// Suggested or Done badge, its goal, the page word its name reuses; the progress of all its
+// requests, closed ones too, where it stands, how many shipped, how often it was asked and when
+// last, an ask after the last ship; the asks not started, and why it is here. Its menu comes
+// with slice 10c-2b.
+function myFocusHeader(id) {
+  const requests = (mw.rows || []).filter((row) => row.focus === id);
+  const shipped = word('span', null, 'my_focus_shipped', { n: requests.filter((row) => row.status === 'shipped').length });
+  if (id === 'other') {
+    return el('section', 'my-focus-header', el('h3', null, t('my_focus_other')), word('p', 'my-goals-note', 'my_focus_other_about'),
+      myGoalsRollup(requests), el('p', 'my-goals-meta', shipped), myFocusAsks(mw.otherAsks));
+  }
+  const area = mw.areas.find((a) => a.id === id);
+  if (!area) return null;
+  const goal = { last: area.latest };
+  const status = myGoalsStatus(goal, requests);
+  const again = area.latest ? myGoalsAskedAgain(goal, requests) : null;
+  const facts = [myGoalsStatusWord(status), shipped];
+  if (area.asked !== null && area.latest) facts.push(word('span', null, 'my_focus_asked', { asked: myGoalsAsked(area.asked), last: t('my_goals_last', { day: myGoalsDay(area.latest) }) }));
+  const badge = area.status === 'suggested' || area.status === 'done' ? word('span', 'my-focus-badge', `my_focus_${area.status}`) : null;
+  return el('section', 'my-focus-header',
+    el('div', 'my-focus-header-name', el('h3', null, area.name), badge),
+    area.goal ? el('p', 'my-focus-goal', area.goal) : null,
+    area.page_word ? el('p', 'my-focus-warning', t('my_focus_page_word', { name: area.name, word: area.page_word })) : null,
+    myGoalsRollup(requests), el('p', 'my-goals-meta my-focus-facts', ...facts),
+    again ? el('p', 'my-goals-again', t('my_goals_again', { asked: myWorkDay(area.latest), shipped: myWorkDay(again) })) : null,
+    myFocusAsks(area.asks || []),
+    area.quotes?.length ? myFocusWhy(`area:${area.id}`, area.quotes)
+      : area.evidence ? el('p', 'my-goals-note', t('my_focus_evidence', { evidence: area.evidence })) : null);
+}
+
 // P6, V4: the build story at My Work's top, as claude-mem's recap: the recap, then the chapters,
 // the newest week first, behind one disclosure; nothing while none was written.
 function myWorkBuildStory() {
@@ -7252,7 +7315,8 @@ function myWorkDraw(focus = null) {
   myWorkResults();
   draw(word('span', null, 'my_work'), [], present([
     el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot()),
-    myWorkBuildStory(), myFocusChips(), myFocusChangeBar(), switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
+    myWorkBuildStory(), myFocusChips(), myFocusChangeBar(), myFocusSelected() ? myFocusHeader(myFocusSelected()) : null,
+    switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
   ]));
   mw.changed.clear();
   setStatus('');
@@ -7622,7 +7686,7 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 // What tells two answers of My Work apart: a change of any is drawn, or held while a person reads.
-const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story, answer.areas]);
+const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story, answer.areas, answer.other_asks]);
 
 function myWorkAccept(answer) {
   mw.signature = myWorkAnswerSignature(answer);
@@ -7645,6 +7709,7 @@ function myWorkAccept(answer) {
   mw.unlinked = answer.unlinked;
   mw.story = answer.story ?? null;
   mw.areas = answer.areas ?? [];
+  mw.otherAsks = answer.other_asks ?? [];
   mw.fetched = Date.now();
   mw.pending = null;
 }
@@ -7655,7 +7720,7 @@ function myWorkReading() {
   const active = document.activeElement;
   // The build story's disclosure too, at the page's top (#733).
   return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story',
-    '.my-focus-chips', '.my-focus-change']
+    '.my-focus-chips', '.my-focus-change', '.my-focus-header']
     .some((selector) => active?.closest?.(selector));
 }
 

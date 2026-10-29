@@ -1660,6 +1660,47 @@ ctx.fetch=()=>Promise.resolve(response({requests:[req('f1',{focus:P,status:'need
 document.activeElement=chips()[0];await run('myWorkLive()');
 assert(!text(panel).includes('Changed title')&&text(panel).includes('New work updates are ready.'),'held while a chip has the focus');
 document.activeElement=null;run('mw.pending=null');
+// Slice 10c-2a: the chosen area's header, Other's, a suggested and a done one's.
+const withGoals=[{id:P,name:'Parser',status:'kept',goal:'Parse every file.',asked:3,latest:now-2*H,quotes:[{text:'parse it all',ts:now-2*H}],
+    asks:[{id:'a1',title:'Speed it up',asked:2,latest:now-3*H,quotes:[{text:'faster please',ts:now-3*H}]}],page_word:null},
+  {id:D,name:'The My Work docs',status:'suggested',goal:null,asked:null,latest:null,quotes:[],asks:[],page_word:'my work',evidence:'one request held several asks'},
+  {id:L,name:'Lexer',status:'done',goal:null,asked:null,latest:null,quotes:[],asks:[],page_word:null}];
+ctx.__rows={requests:[req('f1',{focus:P,status:'needs'}),req('f2',{focus:P,status:'shipped'}),req('f3',{focus:'other'})],unlinked:0,areas:withGoals,
+  other_asks:[{id:'a9',title:'Tidy the README',asked:1,latest:now-H,quotes:[]}]};
+run('Object.assign(mw,{rows:null,range:"day",area:null,saved:null});myWorkAccept(globalThis.__rows);myWorkDraw()');
+assert.equal(panel.querySelectorAll('.my-focus-header').length,0,'no header for all of My Work');
+chips()[0].click();
+let head=text(panel.querySelector('.my-focus-header'));
+for(const said of ['Parser','Parse every file.','Waiting on you','1 shipped','asked 3×','Not reviewed yet · 0 of 2 requests','Not started · 1','Speed it up','Asked 2×','Why it’s here · 1 quote'])
+  assert(head.includes(said),`${said}: ${head}`);
+assert(!head.includes('Suggested')&&!head.includes('reuses'),head);
+run(`mw.rows.find(r=>r.id==='f2').updated=${now}-9*86400000;myWorkDraw()`);
+assert(text(panel.querySelector('.my-focus-header')).includes('of 2 requests'),'all its requests, the range left aside');
+run(`myFocusChoose('${D}')`);
+head=text(panel.querySelector('.my-focus-header'));
+for(const said of ['The My Work docs','Suggested','“The My Work docs” reuses the page name “my work”.','Nothing on it','0 shipped','No requests, so no progress to measure','Why it’s here: one request held several asks'])
+  assert(head.includes(said),`${said}: ${head}`);
+assert(!head.includes('asked')&&!head.includes('Not started'),head);
+run(`myFocusChoose('${L}')`);
+assert(text(panel.querySelector('.my-focus-header')).includes('Done'));
+run("myFocusChoose('other')");
+head=text(panel.querySelector('.my-focus-header'));
+for(const said of ['Other','Requests that fit none of your focus areas.','0 shipped','Not started · 1','Tidy the README'])
+  assert(head.includes(said),`${said}: ${head}`);
+// A quotes disclosure stays open through a redraw, and with the focus in the header a changed poll waits.
+run(`myFocusChoose('${P}')`);
+const why=()=>panel.querySelector('.my-focus-header').querySelectorAll('details').find(n=>n.querySelector('summary').dataset.myWork===`why:area:${P}`);
+why().open=true;for(const cb of why().listeners.toggle)cb();
+run('myWorkDraw()');
+assert.equal(why().open,true,'kept open');
+ctx.fetch=()=>Promise.resolve(response({...ctx.__rows,requests:[req('f1',{focus:P,status:'needs',title:'Changed title'})]}));
+document.activeElement=why().querySelector('summary');await run('myWorkLive()');
+assert(!text(panel).includes('Changed title'),'held while the header has the focus');
+document.activeElement=null;run('mw.pending=null');
+ctx.ui.setLang('ja');run('myWorkDraw()');
+assert(text(panel.querySelector('.my-focus-header')).includes('まだ始まっていない · 1')&&text(panel.querySelector('.my-focus-header')).includes('3 回頼みました、最後は'));
+ctx.ui.setLang('en');
+set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
 // Move to… on a request's page: the areas that take requests but its own, then Other.
 run('mw.area=null;myWorkDraw()');
 let moves=[],at=P;
@@ -1716,7 +1757,7 @@ ctx.ui.setLang('ja');set([req('f1',{focus:P,status:'needs'}),req('f4')]);
 assert(text(card('f4')).includes('振り分け中…')&&chips().some(n=>text(n).startsWith('その他')),'the chips and the card in Japanese');
 assert.equal(panel.querySelector('.my-focus-chips').attrs['aria-label'],'マイフォーカス');
 ctx.ui.setLang('en');
-console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, Move to… with its bar and Undo, a refusal, JA/EN');
+console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, the area and Other headers, Move to… with its bar and Undo, a refusal, JA/EN');
 }
 
 // Parity row X9: a long prompt is clamped behind Show more, as claude-mem's PromptCard does; a short one has no button.

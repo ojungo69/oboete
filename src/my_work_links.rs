@@ -89,7 +89,7 @@ fn linked(fields: &BTreeMap<String, Value>) -> Vec<String> {
 fn round(s: &Stores, now: i64) -> Result<Round> {
     let hidden = crate::my_work_ops::hidden(s.raw, s.k, s.reading)?;
     let device = s.raw.device().to_owned();
-    let goals = current(s.k, &device, &hidden, now)?.map(|(op, items)| {
+    let goals = crate::my_work_goals::newest(s.k, &device, &hidden, now)?.map(|(op, items)| {
         let top = items.iter().map(|i| number(&i.id)).max().unwrap_or(0);
         Goals { op, items, top }
     });
@@ -125,24 +125,6 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
         goals,
         batches,
     })
-}
-
-/// The current goals as My Goals shows them (M5, #728): the newest goals op with items `device`
-/// shows, `hidden` passed over (S6), and its items with a quote in the window, ranked again within
-/// each kind; none while none is left.
-pub(crate) fn current(
-    k: &rusqlite::Connection,
-    device: &str,
-    hidden: &HashSet<(String, i64)>,
-    now: i64,
-) -> Result<Option<(Kept, Vec<Item>)>> {
-    let goals = (crate::my_work_goals::NAME, None);
-    let Some(op) = crate::my_work_ops::shown(k, goals, Some(device), hidden, true, 1)?.pop() else {
-        return Ok(None);
-    };
-    let since = now - crate::my_work_goals::WINDOW_MS;
-    let items = crate::my_work_goals::current(&crate::my_work_goals::items(&op), since);
-    Ok((!items.is_empty()).then_some((op, items)))
 }
 
 /// L3, V4: the current goals `request`'s newest links op names, each its id, kind, rank and

@@ -940,6 +940,15 @@ span.my-focus-chip { font-style: italic; text-decoration: none; cursor: default;
 .my-focus-move > summary { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); font-size: 13px; cursor: pointer; }
 .my-focus-move > summary:hover { background: var(--surface-2); border-color: var(--line-strong); }
 .my-focus-move > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.my-focus-header { display: grid; gap: 8px; margin: 0 0 14px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
+.my-focus-header > * { margin: 0; }
+.my-focus-header-name { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.my-focus-header-name h3 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.my-focus-badge { padding: 1px 8px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.my-focus-goal { overflow-wrap: anywhere; }
+.my-focus-warning { color: var(--yellow); font-size: 12.5px; }
+.my-focus-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.my-focus-asks h4 { margin: 4px 0; font-size: 13px; color: var(--muted); }
 .my-focus-move button { max-width: 100%; overflow-wrap: anywhere; }
 .my-work-build-story { margin: 0 0 18px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .my-work-build-story h3 { margin: 0 0 6px; font-size: 15px; }
