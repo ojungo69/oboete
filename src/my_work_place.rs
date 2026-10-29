@@ -572,7 +572,7 @@ fn check(
 }
 
 /// A new area's id, as claude-mem makes one: `fa_` and 6 random bytes in hex.
-fn fresh_id() -> Option<String> {
+pub(crate) fn fresh_id() -> Option<String> {
     let mut bytes = [0u8; 6];
     getrandom::fill(&mut bytes).ok()?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();

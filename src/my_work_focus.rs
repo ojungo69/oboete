@@ -104,25 +104,31 @@ impl Focus {
         }
         let hidden = crate::my_work_ops::hidden(raw, k, reading)?;
         let mut st = k.prepare(
-            "SELECT device, op_seq, about, fields FROM my_work
-             WHERE job IN (?1, ?2) AND skipped = 0 AND forgotten IS NULL
+            "SELECT device, op_seq, job, about, fields FROM my_work
+             WHERE job IN (?1, ?2, ?3) AND skipped = 0 AND forgotten IS NULL
              ORDER BY ts, device, op_seq",
         )?;
-        let rows = st.query_map([NAME, crate::my_work_place::NAME], |r| {
+        let jobs = [NAME, crate::my_work_place::NAME, crate::my_work_goals::NAME];
+        let rows = st.query_map(jobs, |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
-            let (device, op_seq, about, fields) = row?;
+            let (device, op_seq, job, about, fields) = row?;
             let op = (device, op_seq);
             if hidden.contains(&op) {
                 continue;
             }
             let fields: Map<String, Value> = serde_json::from_str(&fields)?;
+            if job == crate::my_work_goals::NAME {
+                out.mined(op, &fields);
+                continue;
+            }
             if fields.get("kind").and_then(Value::as_str) == Some("area") {
                 let ops = out.sources.entry(about.clone()).or_default();
                 ops.push(op);
@@ -130,6 +136,48 @@ impl Focus {
             out.apply(&about, fields);
         }
         Ok(out)
+    }
+
+    /// F5, claude-mem's `ownerGoalsAreaRows`: each priority of a goals op `op` is a system row of the
+    /// area its `area` names: a new suggested area (source owner-goals, its title as the name, its
+    /// product as the goal, its rank), or, for a suggested area no owner decided, its rank and an
+    /// empty goal filled; nothing else of an area is changed.
+    fn mined(&mut self, op: (String, i64), fields: &Map<String, Value>) {
+        let items = fields.get("items").and_then(Value::as_array);
+        for item in items.into_iter().flatten() {
+            let area = item.get("area").filter(|a| is_id(a) && *a != OTHER);
+            let (Some(Value::String(area)), Some("priority")) = (area, item["kind"].as_str())
+            else {
+                continue;
+            };
+            let (title, product) = (item["title"].as_str(), item["product"].as_str());
+            let product = product.filter(|p| !p.trim().is_empty());
+            let mut patch = json!({"kind": "area", "priority_rank": item["rank"],
+                "decided_by": "system"});
+            match self.areas.get(area) {
+                None => {
+                    let Some(name) = title.filter(|t| page_word(t).is_none()) else {
+                        continue;
+                    };
+                    patch["name"] = json!(name);
+                    patch["goal"] = json!(product);
+                    patch["status"] = json!("suggested");
+                    patch["source"] = json!("owner-goals");
+                }
+                Some(a) if a.status() == "suggested" && !a.owner_decided => {
+                    if a.text("goal").is_none_or(|g| g.trim().is_empty()) && product.is_some() {
+                        patch["goal"] = json!(product);
+                    }
+                }
+                Some(_) => continue,
+            }
+            self.sources
+                .entry(area.clone())
+                .or_default()
+                .push(op.clone());
+            let patch = patch.as_object().cloned().unwrap_or_default();
+            self.apply(area, patch);
+        }
     }
 
     /// One op's patch: a null field removes it, any other value sets it.
