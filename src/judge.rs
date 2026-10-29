@@ -44,8 +44,8 @@ pub(crate) struct Ask<'a> {
 pub(crate) enum Asked {
     /// Each question's answer by its name, checked against its question.
     Answered(Map<String, Value>),
-    /// Why nothing was answered: `off`, `key`, `excluded`, a budget refusal's outcome, or a sent
-    /// call's (`error`, `shape`).
+    /// Why nothing was answered: `off`, `key`, `excluded`, `masked` (a key the gate would change),
+    /// a budget refusal's outcome, or a sent call's (`error`, `shape`).
     Skipped(&'static str),
 }
 
@@ -90,12 +90,12 @@ pub(crate) fn ask(
     let Ok(key) = config::read_key(&j.key_file) else {
         return Ok(Asked::Skipped("key"));
     };
-    let excluded = raw.exclusions_now()?;
-    if ask.repos.iter().any(|r| excluded.contains(r)) {
+    if excluded(raw, ask.repos)? {
         return Ok(Asked::Skipped("excluded"));
     }
-    gated(&mut ask.state, rules);
-    gated(&mut ask.questions, rules);
+    if !(gated(&mut ask.state, rules) && gated(&mut ask.questions, rules)) {
+        return Ok(Asked::Skipped("masked"));
+    }
     let body = json!({"model": j.model, "state": ask.state, "questions": ask.questions});
     let text = body.to_string();
     let est = crate::budget::estimate(&text);
@@ -132,6 +132,12 @@ pub(crate) fn ask(
             return Err(e);
         }
     };
+    // Again under the gate's admission: an exclusion written since the first look still holds.
+    if excluded(raw, ask.repos)? {
+        drop(admission);
+        reservation.cancel(db)?;
+        return Ok(Asked::Skipped("excluded"));
+    }
     let start = Instant::now();
     let sent = post(j, &key, &body, admission);
     let ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -177,13 +183,25 @@ pub(crate) fn ask(
     Ok(answers.map_or(Asked::Skipped(outcome), Asked::Answered))
 }
 
-/// Every string of `v` through the outbound gate; keys are ids and names, kept as they are.
-fn gated(v: &mut Value, rules: &Rules) {
+/// Whether a repository of `repos` is kept from being sent, or never recorded, now (spec 5.5).
+fn excluded(raw: &Raw, repos: &[String]) -> Result<bool> {
+    let excluded = raw.exclusions_now()?;
+    Ok(repos.iter().any(|r| excluded.contains(r)))
+}
+
+/// Every string of `v` through the outbound gate. Keys are ids and names, which a choice answers
+/// with, so they cannot be masked: false when the gate would change one, and nothing is sent.
+fn gated(v: &mut Value, rules: &Rules) -> bool {
     match v {
-        Value::String(s) => *s = crate::redact::outbound_with(s, rules),
-        Value::Array(a) => a.iter_mut().for_each(|v| gated(v, rules)),
-        Value::Object(o) => o.values_mut().for_each(|v| gated(v, rules)),
-        _ => {}
+        Value::String(s) => {
+            *s = crate::redact::outbound_with(s, rules);
+            true
+        }
+        Value::Array(a) => a.iter_mut().all(|v| gated(v, rules)),
+        Value::Object(o) => o
+            .iter_mut()
+            .all(|(k, v)| crate::redact::outbound_with(k, rules) == *k && gated(v, rules)),
+        _ => true,
     }
 }
 
@@ -362,16 +380,15 @@ mod tests {
         .collect()
     }
 
-    /// J1: one request to the endpoint with the key, every recorded string gated (the ids are keys
-    /// and survive a rule that matches them), the answer checked, its input priced at USD 0.042 a
-    /// million, and one settled row in the ledger.
+    /// J1: one request to the endpoint with the key, every recorded string gated (the ids are keys,
+    /// kept as they are), the answer checked, its input priced at USD 0.042 a million, and one
+    /// settled row in the ledger.
     #[test]
     fn an_answer_is_gated_sent_once_priced_and_recorded() {
         let h = home();
         let rx = stub(vec![("200 OK", picked("g7"))], "");
         let rules = rules(
-            "[redaction]\nextra_rules = [{ id = \"codename\", regex = \"codename-[a-z]+\" }, \
-             { id = \"ids\", regex = \"g7\" }]\n",
+            "[redaction]\nextra_rules = [{ id = \"codename\", regex = \"codename-[a-z]+\" }]\n",
         );
         let answered = run(&h, &rules, 5.0, asked(&[])).unwrap();
         let Asked::Answered(answers) = answered else {
@@ -417,6 +434,52 @@ mod tests {
             assert_eq!(requests(&rx), 0, "capture {capture}");
             assert!(ledger(&h.db).is_empty(), "capture {capture}");
         }
+    }
+
+    /// A key the gate would change (a rule that matches an id, a question's name or a criterion)
+    /// is never sent: no request, no row.
+    #[test]
+    fn a_key_the_gate_would_mask_is_never_sent() {
+        for rule in ["g7", "pick", "none"] {
+            let h = home();
+            let rx = stub(vec![("200 OK", picked("g7"))], "");
+            let rules = rules(&format!(
+                "[redaction]\nextra_rules = [{{ id = \"ids\", regex = \"^{rule}$\" }}]\n"
+            ));
+            assert_eq!(
+                run(&h, &rules, 5.0, asked(&[])).unwrap(),
+                Asked::Skipped("masked"),
+                "{rule}"
+            );
+            assert_eq!(requests(&rx), 0, "{rule}");
+            assert!(ledger(&h.db).is_empty(), "{rule}");
+        }
+    }
+
+    /// An exclusion written after the first look, before the request, still holds: the second look
+    /// is under the gate's admission. Nothing is sent and the reservation is gone.
+    #[test]
+    fn an_exclusion_written_while_the_call_waits_holds() {
+        let h = home();
+        let rx = stub(vec![("200 OK", picked("g7"))], "");
+        let gate = || {
+            let mut raw = crate::raw::open(h.dir.path())?;
+            raw.exclude("github.com/o/r", false)?;
+            Ok(None)
+        };
+        let repos = ["github.com/o/r".to_owned()];
+        let answered = ask(
+            &h.db,
+            &h.raw,
+            &rules(""),
+            (&h.judge, 5.0),
+            asked(&repos),
+            &gate,
+        )
+        .unwrap();
+        assert_eq!(answered, Asked::Skipped("excluded"));
+        assert_eq!(requests(&rx), 0);
+        assert!(ledger(&h.db).is_empty());
     }
 
     /// The daily calls and the month's paid cap refuse before anything is sent, each with a row.

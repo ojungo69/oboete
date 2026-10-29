@@ -1906,9 +1906,10 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   hours). Absent, the judge is off. The endpoint is fixed in code; the table refuses any other key
   (`base_url`, `headers`, `extra`), so no value of it sends the owner's text elsewhere.
 - **One call** (`judge::ask`): off or no key, nothing is reserved; a repository the owner excluded
-  (`Raw::exclusions_now`: kept from being sent, or never recorded) is never sent; every string of
-  the state and the questions goes through the outbound gate, keys (ids, question names) as they
-  are; the budget reserves it as the entry `judge:jev`, its input at USD 0.042 a million and its
+  (`Raw::exclusions_now`: kept from being sent, or never recorded) is never sent, looked at again
+  under the egress gate's admission; every string of the state and the questions goes through the
+  outbound gate, and keys (ids, question names), which a choice answers with, go as they are or,
+  when the gate would change one, nothing goes; the budget reserves it as the entry `judge:jev`, its input at USD 0.042 a million and its
   answer free, inside `paid_usd_per_month` with every paid entry; the caller's egress gate is asked
   right before the request (as the chain's, its error cancels the reservation and is returned);
   one POST, no redirect, no retry; the answer kept only when each question has one of its type (a
