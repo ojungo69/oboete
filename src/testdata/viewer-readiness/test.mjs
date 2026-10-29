@@ -1621,7 +1621,8 @@ set([req('n1')],[]);
 assert.equal(chips().length,0,'no chips while My Focus is not in use');
 assert(!text(panel).includes('Sorting…'),'no card says Sorting…');
 set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
-assert.deepEqual(chips().map(n=>n.dataset.myWork),[`chip:${P}`,`chip:${D}`,'chip:other'],'the kept areas in order, then Other');
+assert.deepEqual(chips().map(n=>n.dataset.myWork),[`chip:${P}`,`chip:${D}`,'chip:other','chip:suggested','chip:past-focus'],'the kept areas in order, then Other, the suggestions and Past focus');
+assert.deepEqual(chips().slice(3).map(n=>text(n)),['1 suggested','Past focus']);
 assert.equal(text(chips()[0]),'Parser 1 1 need you','with how many need you, said in words');
 assert.equal(chips()[0].querySelector('.my-work-count').attrs['aria-hidden'],'true','the number alone is not read');
 assert.equal(text(chips()[1]),'Docs','none at 0');
@@ -1650,7 +1651,7 @@ assert.equal(ids().length,4,'a choice no longer listed shows all');
 // A suggested area a card opened stands with the chips while chosen (CodeRabbit on #755).
 set([req('f1',{focus:P}),req('f5',{focus:L})]);
 card('f5').querySelector('.my-focus-chip').click();
-assert.deepEqual(chips().map(n=>[n.dataset.myWork,n.attrs['aria-pressed']]),[[`chip:${P}`,'false'],[`chip:${D}`,'false'],[`chip:${L}`,'true'],['chip:other','false']],'a suggested area a card opened stands pressed');
+assert.deepEqual(chips().map(n=>[n.dataset.myWork,n.attrs['aria-pressed']]),[[`chip:${P}`,'false'],[`chip:${D}`,'false'],[`chip:${L}`,'true'],['chip:other','false'],['chip:suggested','false'],['chip:past-focus','false']],'a suggested area a card opened stands pressed');
 chips()[2].click();
 assert.deepEqual(ids(),['f1','f5'],'pressed again, all of My Work');
 assert.equal(document.activeElement.className,'my-work-heading','the chip gone, the focus on the heading');
@@ -1845,6 +1846,100 @@ ctx.ui.setLang('ja');run('myWorkDraw()');
 assert(text(hdr()).includes('フォーカスに戻す'));
 ctx.ui.setLang('en');
 }
+// Slice 10c-3a: the Suggested page and Past focus.
+{
+const blank={asked:null,latest:null,quotes:[],asks:[],page_word:null,goal:null};
+const qs=[0,1,2].map(i=>({text:`quote ${i}`,ts:now-(i+1)*H}));
+const S=[{...blank,id:P,name:'Parser',status:'kept',source:'owner-goals'},
+  {...blank,id:D,name:'Docs',status:'done',source:'owner',goal:'Docs for the users.'},
+  {...blank,id:L,name:'Lexer',status:'suggested',source:'clustering',quotes:qs,asks:[{id:'a1',title:'Speed',asked:1,latest:now,quotes:[]}]},
+  {...blank,id:'fa_000000000006',name:'Mine',status:'suggested',source:'owner'}];
+const page={requests:[req('f1',{focus:L}),req('f2',{focus:P})],unlinked:0,areas:S,other_asks:[],page_words:[]};
+const goals={current:{written:now,items:[]},window:{days:31,prompts:20},month:{month:'2026-10',prompts:12},
+  months:[{month:'2026-09',summary:'Shipped the parser.',prompts:40,priorities:[{title:'Parse it all',product:'',asked:3,quote:{text:'parse it',ts:now-40*86400000}}]}]};
+let posts=[],asked=0;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'){posts.push(JSON.parse(options.body));return Promise.resolve(posted(200,{state:'applied'}));}
+  if(url.startsWith('/api/my-goals')){asked++;return Promise.resolve(response(goals));}
+  return Promise.resolve(response(page));
+};
+ctx.__rows=page;
+run('Object.assign(mw,{rows:null,range:"all",area:null,saved:null,editing:null,past:null});mw.decided.clear();myWorkAccept(globalThis.__rows);myWorkDraw()');
+const pg=()=>panel.querySelector('.my-focus-page');
+const btn=key=>panel.querySelectorAll('button').find(n=>n.dataset.myWork===key);
+const cardOf=name=>pg().querySelectorAll('li').find(n=>n.className.includes('my-focus-card')&&text(n).startsWith(name));
+assert.equal(text(chips().find(n=>n.dataset.myWork==='chip:suggested')),'2 suggested');
+btn('chip:suggested').click();
+assert.equal(btn('chip:suggested').attrs['aria-pressed'],'true');
+assert.equal(panel.querySelectorAll('.my-work-grid').length,0,'a page of its own, in place of the requests');
+let said=text(pg());
+for(const w of ['Suggested focus areas','Waiting on you','0 of 2 decided','1 request placed in it · 1 ask not started','No requests placed in it yet',
+  'Why it’s suggested: several Other requests read as steps of it.','quote 0','2 more quotes','Why it’s suggested: you wrote it.'])
+  assert(said.includes(w),`${w}: ${said}`);
+// Keep: the card says it with its own Undo, not the change bar; the decision stays until the page is left.
+btn(`card:keep:${L}`).click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'keep',area:L});
+assert(text(cardOf('Lexer')).includes('Kept. It’s in My focus now.')&&btn(`card:show:${L}`)&&btn(`card:undo:${L}`));
+assert.equal(panel.querySelectorAll('.my-focus-change').length,0,'not in the change bar');
+assert.equal(document.activeElement.dataset.myWork,`card:undo:${L}`);
+assert(text(pg()).includes('1 of 2 decided'));
+btn(`card:undo:${L}`).click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'restore-suggestion',area:L});
+assert(btn(`card:keep:${L}`),'undecided again');
+// Dismiss.
+btn('card:dismiss:fa_000000000006').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'dismiss',area:'fa_000000000006'});
+assert(text(cardOf('Mine')).includes('Dismissed. It won’t be suggested again'));
+assert(!btn('card:show:fa_000000000006'),'nothing to show');
+// Merge from the card: it reads Merged, the page stays; Show it opens the area merged into.
+btn(`card:merge:${L}`).click();
+const into=pg().querySelector('select');into.value=P;for(const cb of into.listeners.change)cb();
+btn('edit:save').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'merge',area:L,into:P});
+assert(text(cardOf('Lexer')).includes('Merged into Parser. Its requests show there now.'));
+assert.equal(run('mw.area'),'suggested','the page stays');
+// A rename leaves the card undecided and goes to the change bar.
+run('mw.decided.delete("'+L+'");myWorkDraw()');
+btn(`card:rename:${L}`).click();
+const name=pg().querySelector('input');name.value='Lexing';for(const cb of name.listeners.input)cb();
+btn('edit:save').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'rename',area:L,name:'Lexing'});
+assert(panel.querySelector('.my-focus-change')&&btn(`card:keep:${L}`),'the change bar, the card undecided');
+// Leaving the page ends the visit's decisions.
+btn('chip:suggested').click();btn('chip:suggested').click();
+assert(btn('card:keep:fa_000000000006'),'Mine undecided again');
+// With focus in the page, a changed poll waits.
+document.activeElement=btn(`card:keep:${L}`);
+ctx.__live=ctx.fetch;ctx.fetch=(url,options)=>url.startsWith('/api/my-work')?Promise.resolve(response({...page,requests:[req('f1',{focus:L,title:'Changed title'})]})):ctx.__live(url,options);
+await run('myWorkLive()');ctx.fetch=ctx.__live;
+assert(run('mw.pending')&&!run('mw.rows.some(r=>r.title==="Changed title")'),'held');
+document.activeElement=null;run('mw.pending=null');
+// Show it opens the area merged into.
+btn(`card:merge:${L}`).click();const into2=pg().querySelector('select');into2.value=P;for(const cb of into2.listeners.change)cb();
+btn('edit:save').click();await ticks();
+btn(`card:show:${L}`).click();
+assert.equal(text(panel.querySelector('.my-focus-header').querySelector('h3')),'Parser');
+// Past focus: the done areas, each opening on its requests; month by month, read when it opens.
+btn('chip:past-focus').click();await ticks();
+assert.equal(asked,1,'My Goals\' months read when it opens');
+said=text(pg());
+for(const w of ['Past focus','Areas you finished','Done areas','Docs','Docs for the users.','Month by month','Current','Parser · first in your focus today','12 prompts',
+  'Archived','Parse it all','40 prompts'])
+  assert(said.includes(w),`${w}: ${said}`);
+const month=pg().querySelectorAll('details').find(n=>n.querySelector('summary').dataset.myWork==='month:2026-09');
+assert(text(month).includes('Shipped the parser.')&&text(month).includes('asked 3×')&&text(month).includes('No request reviews cover this month'));
+btn(`done:${D}`).click();
+assert.equal(text(panel.querySelector('.my-focus-header').querySelector('h3')),'Docs','a done area opens on its requests');
+// Nothing to show: no done area and no months.
+page.areas=S.filter(a=>a.status!=='done');goals.current=null;goals.months=[];
+run('myWorkAccept(globalThis.__rows);mw.past=null;myWorkDraw()');
+btn('chip:past-focus').click();await ticks();
+assert(text(pg()).includes('Nothing here yet'),text(pg()));
+ctx.ui.setLang('ja');run('myWorkDraw()');
+assert(text(pg()).includes('過去のフォーカス'));
+ctx.ui.setLang('en');
+run('mw.area=null;mw.decided.clear()');
+}
 set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
 // Move to… on a request's page: the areas that take requests but its own, then Other.
 run('mw.area=null;myWorkDraw()');
@@ -1902,7 +1997,7 @@ ctx.ui.setLang('ja');set([req('f1',{focus:P,status:'needs'}),req('f4')]);
 assert(text(card('f4')).includes('振り分け中…')&&chips().some(n=>text(n).startsWith('その他')),'the chips and the card in Japanese');
 assert.equal(panel.querySelector('.my-focus-chips').attrs['aria-label'],'マイフォーカス');
 ctx.ui.setLang('en');
-console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, the area and Other headers, the menu, editors, Keep and Dismiss with each Undo, Move to… with its bar and Undo, a refusal, JA/EN');
+console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, the area and Other headers, the menu, editors, Keep and Dismiss with each Undo, the Suggested page and Past focus, Move to… with its bar and Undo, a refusal, JA/EN');
 }
 
 // Parity row X9: a long prompt is clamped behind Show more, as claude-mem's PromptCard does; a short one has no button.

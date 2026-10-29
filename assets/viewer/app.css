@@ -955,6 +955,16 @@ span.my-focus-chip { font-style: italic; text-decoration: none; cursor: default;
 .my-focus-menu > div { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; display: grid; gap: 4px; min-width: 12rem; max-width: calc(100vw - 48px); padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); box-shadow: 0 6px 18px rgb(0 0 0 / 0.14); }
 .my-focus-menu > div button { justify-content: flex-start; text-align: left; }
 .my-focus-prompt { color: var(--muted); font-style: italic; }
+.my-focus-entry.my-focus-muted:not([aria-pressed="true"]) { color: var(--muted); }
+.my-focus-page { display: grid; gap: 10px; margin: 0 0 14px; }
+.my-focus-page > * { margin: 0; }
+.my-focus-card { display: grid; gap: 6px; }
+.my-focus-card > * { margin: 0; }
+.my-focus-card-name { font-weight: 600; overflow-wrap: anywhere; }
+.my-focus-card-dismissed .my-focus-card-name, .my-focus-card-dismissed .my-focus-goal { text-decoration: line-through; opacity: 0.6; }
+.my-focus-decided { margin: 0; font-size: 13px; }
+.my-focus-done-open { display: grid; justify-items: start; gap: 2px; width: 100%; text-align: left; }
+.my-focus-done h4, .my-focus-months h4 { margin: 4px 0; }
 .my-focus-editor { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-m); }
 .my-focus-editor > * { margin: 0; }
 .my-focus-editor input, .my-focus-editor select { width: 100%; }

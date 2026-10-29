@@ -2602,6 +2602,36 @@ const TEXT = {
   my_focus_merged: ['Merged “{name}” into “{into}”.', '「{name}」を「{into}」に合併しました。'],
   my_focus_reordered: ['Changed the order of your focus areas.', '分野の並び順を変えました。'],
   my_focus_undone: ['Undone: {text}', '元に戻しました: {text}'],
+  my_focus_n_suggested: ['{n} suggested', '提案 {n} 件'],
+  my_focus_past: ['Past focus', '過去のフォーカス'],
+  my_focus_past_about: ['Areas you finished, and what you asked for in earlier months.', '完了した分野と、これまでの月に頼んだことです。'],
+  my_focus_done_areas: ['Done areas', '完了した分野'],
+  my_focus_first_today: ['{name} · first in your focus today', '{name} · 今いちばん上の分野'],
+  my_focus_none_kept: ['No area kept yet', 'まだ残した分野はありません'],
+  my_focus_no_areas_saved: ['No areas saved', '分野の記録はありません'],
+  my_focus_past_empty: ['Nothing here yet', 'まだ何もありません'],
+  my_focus_past_empty_body: ['oboete reads your recent prompts and fills this in while My Work is written with AI.', 'My Work を AI で書く設定のあいだ、oboete が最近のプロンプトを読んで、ここを埋めます。'],
+  my_focus_suggested_title: ['Suggested focus areas', '提案された分野'],
+  my_focus_suggested_about: ['oboete suggests areas from your prompts and your requests. Keep the ones you’d ask for things inside of. A refresh never changes an area you decided.', 'oboete があなたのプロンプトと依頼から分野を提案します。その中で作業を頼みたいものを残してください。あなたが決めた分野は、更新で変わることはありません。'],
+  my_focus_decided_count: ['{k} of {n} decided', '{n} 件のうち {k} 件を決定'],
+  my_focus_nothing_waiting: ['Nothing waiting. New suggestions show up here after the next refresh.', '待っている提案はありません。新しい提案は、次の更新のあとにここに出ます。'],
+  my_focus_placed_none: ['No requests placed in it yet', 'まだ依頼は入っていません'],
+  my_focus_placed_one: ['1 request placed in it', '依頼 1 件が入っています'],
+  my_focus_placed_n: ['{n} requests placed in it', '依頼 {n} 件が入っています'],
+  my_focus_asks_one: [' · 1 ask not started', ' · まだ始まっていない頼みごと 1 件'],
+  my_focus_asks_n: [' · {n} asks not started', ' · まだ始まっていない頼みごと {n} 件'],
+  my_focus_merge_short: ['Merge', '合併'],
+  my_focus_show_it: ['Show it', '見る'],
+  my_focus_decided_kept: ['Kept. It’s in My focus now.', '残しました。マイフォーカスに入っています。'],
+  my_focus_decided_merged: ['Merged into {into}. Its requests show there now.', '「{into}」に合併しました。依頼はそちらに表示されます。'],
+  my_focus_decided_dismissed: ['Dismissed. It won’t be suggested again, and its requests are sorted again.', '見送りました。もう提案されず、依頼は振り分け直されます。'],
+  my_focus_why_suggested: ['Why it’s suggested: {why}', '提案の理由: {why}'],
+  my_focus_source_owner_goals: ['your goals found it in your prompts.', 'あなたのプロンプトから目標として見つかりました。'],
+  my_focus_source_clustering: ['several Other requests read as steps of it.', '「その他」のいくつかの依頼が、この一部に見えます。'],
+  my_focus_source_promotion: ['one request held several separate asks.', '1 つの依頼に、別々の頼みごとがいくつも入っていました。'],
+  my_focus_source_owner: ['you wrote it.', 'あなたが作りました。'],
+  my_focus_more_one: ['1 more quote', '引用をもう 1 件'],
+  my_focus_more_n: ['{n} more quotes', '引用をあと {n} 件'],
   my_focus_renamed_pending: ['Renamed “{name}”.', '「{name}」の名前を変えました。'],
   my_focus_too_long: ['At most {n} characters.', '{n} 文字までです。'],
   my_focus_held_steps: ['Saved the first step. Press Undo again once My Work has read it.', '最初の手順を保存しました。My Work が読み込んだら、もう一度「元に戻す」を押してください。'],
@@ -6727,6 +6757,9 @@ const mw = {
   area: null, areas: [], moving: false, saved: null, otherAsks: [], why: new Set(),
   // F7: the words an area's name may not reuse; the area being edited, how, and the draft.
   pageWords: [], editing: null, draft: '',
+  // F7: the Suggested page's decisions on this visit (claude-mem keeps them until the page is
+  // left), each with the area as it was; Past focus's months, once read.
+  decided: new Map(), past: null,
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
@@ -6902,11 +6935,18 @@ function myFocusSelected() {
 
 const myFocusName = (id) => (id === 'other' ? t('my_focus_other') : mw.areas.find((a) => a.id === id)?.name ?? id);
 
+// F7: the page of My Focus chosen instead of an area: Suggested, or Past focus.
+const myFocusPage = () => (mw.area === 'suggested' || mw.area === 'past-focus' ? mw.area : null);
+const myFocusSuggestions = () => mw.areas.filter((a) => a.status === 'suggested');
+
 // F7: open My Work on `id` (an area or `other`), or on all of it for none; `focus` takes the focus
 // after the redraw.
 function myFocusChoose(id, focus = 'heading') {
+  // Leaving Suggested ends its visit (claude-mem's decided cards).
+  if (mw.area === 'suggested' && id !== 'suggested') mw.decided = new Map();
   mw.area = id;
   mw.editing = null;
+  if (id === 'past-focus') void myFocusReadPast();
   mw.request = null;
   mw.work = null;
   myWorkDraw(focus);
@@ -6931,19 +6971,26 @@ function myFocusChip(row) {
 // requests need the owner; the chosen one pressed, and pressed again it shows all of My Work.
 function myFocusChips() {
   if (!myFocusInUse()) return null;
-  const chosen = myFocusSelected();
+  const area = myFocusSelected();
+  const chosen = area ?? myFocusPage();
+  const suggested = myFocusSuggestions().length;
+  // claude-mem's chip row: then "N suggested" while any wait (and while its page is open), and Past
+  // focus.
+  const pages = [...(suggested || mw.area === 'suggested' ? ['suggested'] : []), 'past-focus'];
   const entries = [...mw.areas.filter((a) => a.status === 'kept').map((a) => a.id), 'other'];
   // A suggested or done area a card opened stands with them while chosen, pressed, to be cleared;
   // cleared, it is gone, and the focus goes to the requests' heading (CodeRabbit on #755).
-  const temporary = chosen && !entries.includes(chosen) ? chosen : null;
+  const temporary = area && !entries.includes(area) ? area : null;
   if (temporary) entries.splice(-1, 0, temporary);
-  const nav = el('nav', 'my-focus-chips', ...entries.map((id) => {
-    const need = (mw.rows || []).filter((row) => row.focus === id && myFocusNeedsYou(row)).length;
+  const label = (id) => (id === 'suggested' ? t('my_focus_n_suggested', { n: suggested })
+    : id === 'past-focus' ? t('my_focus_past') : myFocusName(id));
+  const nav = el('nav', 'my-focus-chips', ...[...entries, ...pages].map((id) => {
+    const need = pages.includes(id) ? 0 : (mw.rows || []).filter((row) => row.focus === id && myFocusNeedsYou(row)).length;
     // The count is seen; what it counts is read (claude-mem's " need you").
     const count = need ? el('span', 'my-work-count', String(need)) : null;
     count?.setAttribute('aria-hidden', 'true');
     const said = need ? el('span', 'sr-only', t('my_focus_need_you', { n: need })) : null;
-    const button = el('button', 'quiet my-focus-entry', el('span', null, myFocusName(id)), count, said);
+    const button = el('button', pages.includes(id) ? 'quiet my-focus-entry my-focus-muted' : 'quiet my-focus-entry', el('span', null, label(id)), count, said);
     button.type = 'button';
     button.setAttribute('aria-pressed', String(chosen === id));
     button.dataset.myWork = `chip:${id}`;
@@ -6960,7 +7007,7 @@ function myFocusChips() {
 // gate kept (Codex on #757); a refusal's words otherwise, the steps after it not sent. A step saved
 // but not read yet holds back the ones after it, which act on what it changed (Codex on #757):
 // they are returned, for the same Undo to send.
-async function myFocusWrite(bodies, text, undo) {
+async function myFocusWrite(bodies, text, undo, record = true) {
   if (mw.moving) return false;
   mw.moving = true;
   myWorkDraw();
@@ -6995,8 +7042,11 @@ async function myFocusWrite(bodies, text, undo) {
     if (view === 'my_work') await show();
     if (saved) {
       const said = typeof text === 'function' ? text() : text;
-      mw.saved = { text: said, applied: saved.applied,
-        undo: saved.applied && undo ? { bodies: undo.bodies, text: undo.text ?? t('my_focus_undone', { text: said }) } : null };
+      // A Suggested card's Keep, Merge and Dismiss: the card shows it with its own Undo.
+      if (record) {
+        mw.saved = { text: said, applied: saved.applied,
+          undo: saved.applied && undo ? { bodies: undo.bodies, text: undo.text ?? t('my_focus_undone', { text: said }) } : null };
+      }
       message = said;
     }
     // The page's live region says it: the change bar is drawn anew with each redraw, too late to
@@ -7196,14 +7246,14 @@ function myFocusMenu(area) {
 // F7 (claude-mem's AreaEditDialog), inline as My Rules edits: a name, a goal or the area to merge
 // into; Save held while the field is empty, the name reuses a page word or no area is chosen. The
 // server refuses what it cannot save.
-function myFocusEditor(area) {
+function myFocusEditor(area, change = myFocusChange, back = 'focus:menu') {
   const { kind } = mw.editing;
-  const save = myFocusButton(mw.moving ? 'my_focus_saving' : 'my_focus_save', 'edit:save', () => myFocusChange(
+  const save = myFocusButton(mw.moving ? 'my_focus_saving' : 'my_focus_save', 'edit:save', () => change(
     kind === 'merge' ? { action: 'merge', area: area.id, into: mw.draft }
       : kind === 'rename' ? { action: 'rename', area: area.id, name: mw.draft } : { action: 'edit-goal', area: area.id, goal: mw.draft }, area), 'small');
   const cancel = myFocusButton('my_focus_cancel', 'edit:cancel', () => {
     mw.editing = null;
-    myWorkDraw('focus:menu');
+    myWorkDraw(back);
   });
   const warning = el('p', 'my-focus-warning');
   warning.setAttribute('aria-live', 'polite');
@@ -7239,6 +7289,144 @@ function myFocusEditor(area) {
   const about = { rename: 'my_focus_rename_about', 'edit-goal': 'my_focus_goal_about', merge: 'my_focus_merge_about' }[kind];
   return el('section', 'my-focus-editor', word('h4', null, title, { name: area.name }), word('p', 'my-goals-note', about, { name: area.name }),
     el('label', 'field', el('span', null, t(label)), field), warning, el('div', 'my-rules-actions', save, cancel));
+}
+
+// claude-mem's SOURCE_TEXT: why the system suggested an area that has no evidence of its own.
+const MY_FOCUS_SOURCES = ['owner-goals', 'clustering', 'promotion', 'owner'];
+
+// A Suggested card's Keep, Dismiss or Merge (claude-mem's `decide` and its merge, sent with
+// `record: false`): the card says it with its own Undo, `restore-suggestion`, until the page is left.
+function myFocusDecide(area, body, decision) {
+  const into = body.into ? myFocusName(body.into) : null;
+  const text = t(`my_focus_decided_${decision}`, { into });
+  void myFocusWrite([body], text, null, false).then((ok) => {
+    if (ok === true) {
+      mw.decided.set(area.id, { decision, area, into: body.into ?? null });
+      mw.editing = null;
+    }
+    if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(`card:undo:${area.id}`);
+  });
+}
+
+function myFocusUndecide(area) {
+  void myFocusWrite([{ action: 'restore-suggestion', area: area.id }], t('my_focus_undone', { text: area.name }), null, false).then((ok) => {
+    if (ok === true) mw.decided.delete(area.id);
+    if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(`card:keep:${area.id}`);
+  });
+}
+
+// F7, claude-mem's SuggestionCard: a suggested area, its name and goal, how many requests it holds
+// and asks not started; Keep, Rename, Merge and Dismiss, then why it is suggested; decided, what
+// was decided, Show it and Undo.
+function myFocusCard(area) {
+  const decided = mw.decided.get(area.id);
+  const placed = (mw.rows || []).filter((row) => row.focus === area.id).length;
+  const asks = area.asks?.length ?? 0;
+  const facts = t(placed === 1 ? 'my_focus_placed_one' : placed ? 'my_focus_placed_n' : 'my_focus_placed_none', { n: placed })
+    + (asks ? t(asks === 1 ? 'my_focus_asks_one' : 'my_focus_asks_n', { n: asks }) : '');
+  const head = [el('p', 'my-focus-card-name', area.name), area.goal ? el('p', 'my-focus-goal', area.goal) : null, el('p', 'my-goals-meta', facts)];
+  if (decided) {
+    const show = decided.decision === 'dismissed' ? null
+      : myFocusButton('my_focus_show_it', `card:show:${area.id}`, () => myFocusChoose(decided.into ?? area.id));
+    return el('li', `my-goals-item my-focus-card my-focus-card-${decided.decision}`, ...head,
+      el('div', 'my-rules-actions', el('p', 'my-focus-decided', t(`my_focus_decided_${decided.decision}`, { into: myFocusName(decided.into) })),
+        show, myFocusButton('my_focus_undo', `card:undo:${area.id}`, () => myFocusUndecide(area))));
+  }
+  const merge = (body, a) => (body.action === 'merge' ? myFocusDecide(a, body, 'merged') : myFocusChange(body, a));
+  const editing = mw.editing?.area === area.id ? myFocusEditor(area, merge, `card:${mw.editing.kind}:${area.id}`) : null;
+  const edit = (kind) => () => {
+    mw.editing = { kind, area: area.id };
+    mw.draft = kind === 'rename' ? area.name : '';
+    myWorkDraw(`edit:${kind}`);
+  };
+  const [first, ...more] = area.quotes ?? [];
+  const why = area.evidence && !first ? area.evidence
+    : t(MY_FOCUS_SOURCES.includes(area.source) ? `my_focus_source_${area.source.replace('-', '_')}` : 'my_focus_source_owner_goals');
+  return el('li', 'my-goals-item my-focus-card', ...head,
+    el('div', 'my-rules-actions',
+      myFocusButton('my_focus_keep', `card:keep:${area.id}`, () => myFocusDecide(area, { action: 'keep', area: area.id }, 'kept'), 'small'),
+      myFocusButton('my_focus_rename', `card:rename:${area.id}`, edit('rename')),
+      myFocusButton('my_focus_merge_short', `card:merge:${area.id}`, edit('merge')),
+      myFocusButton('my_focus_dismiss', `card:dismiss:${area.id}`, () => myFocusDecide(area, { action: 'dismiss', area: area.id }, 'dismissed'))),
+    editing,
+    el('p', 'my-goals-note', t('my_focus_why_suggested', { why })),
+    first ? el('p', 'my-goals-quote', el('q', null, first.text), ' ', myGoalsAt(first.ts)) : null,
+    more.length ? myFocusMore(`card:${area.id}`, more) : null);
+}
+
+// The quotes after the first, behind one disclosure (claude-mem's "n more quotes").
+function myFocusMore(key, quotes) {
+  const summary = el('summary', null, t(quotes.length === 1 ? 'my_focus_more_one' : 'my_focus_more_n', { n: quotes.length }));
+  summary.dataset.myWork = `why:${key}`;
+  const more = el('details', 'my-goals-why', summary,
+    el('ul', 'my-goals-quotes', ...quotes.map((q) => el('li', null, el('q', null, q.text), ' ', myGoalsAt(q.ts)))));
+  more.open = mw.why.has(key);
+  more.addEventListener('toggle', () => (more.open ? mw.why.add(key) : mw.why.delete(key)));
+  return more;
+}
+
+// F7, claude-mem's SuggestedAreas: the suggestions waiting, then those decided on this visit, which
+// stay until the page is left; how many are decided; the change bar for a rename.
+function myFocusSuggested() {
+  const decided = [...mw.decided.values()].map((d) => mw.areas.find((a) => a.id === d.area.id) ?? d.area);
+  const cards = [...myFocusSuggestions().filter((a) => !mw.decided.has(a.id)), ...decided];
+  const waiting = cards.length - decided.length;
+  return el('section', 'my-focus-page',
+    el('div', 'my-focus-header-name', word('h3', null, 'my_focus_suggested_title'),
+      waiting ? word('span', 'my-goals-status my-goals-status-your_move', 'my_goals_status_your_move') : null,
+      el('span', 'my-goals-meta', t('my_focus_decided_count', { k: decided.length, n: cards.length }))),
+    word('p', 'my-goals-note', 'my_focus_suggested_about'), myFocusChangeBar(),
+    cards.length ? el('ul', 'my-goals-list', ...cards.map(myFocusCard)) : word('p', 'my-goals-note', 'my_focus_nothing_waiting'));
+}
+
+// Past focus's months: My Goals' answer, read when the page opens.
+async function myFocusReadPast() {
+  try {
+    const answer = await api('my-goals');
+    mw.past = answer;
+    if (view === 'my_work' && mw.area === 'past-focus') myWorkDraw(document.activeElement?.dataset?.myWork ?? null);
+  } catch {
+    // The months stay as they were read last; the done areas need none.
+  }
+}
+
+// F7, claude-mem's PastFocus: the areas marked done, each opening on its requests; then month by
+// month, this month's row naming the first kept area today, and each month kept before with its
+// headline and its priorities.
+function myFocusPast() {
+  const done = mw.areas.filter((a) => a.status === 'done');
+  const doneList = done.length ? el('div', 'my-focus-done', word('h4', null, 'my_focus_done_areas'), el('ul', 'my-goals-list', ...done.map((a) => {
+    const open = el('button', 'quiet my-focus-done-open', el('span', 'my-goals-title', a.name), a.goal ? el('span', 'my-goals-meta', a.goal) : null);
+    open.type = 'button';
+    open.dataset.myWork = `done:${a.id}`;
+    open.addEventListener('click', () => myFocusChoose(a.id));
+    return el('li', null, open);
+  }))) : null;
+  const p = mw.past;
+  let months = null;
+  if (p?.current || p?.months?.length) {
+    const top = mw.areas.find((a) => a.status === 'kept');
+    const row = (month, badge, title, prompts) => [el('span', 'my-goals-month', myGoalsMonthName(month)),
+      word('span', 'my-goals-badge', badge), el('span', 'my-goals-title', title), myGoalsMeta([t('my_goals_prompts', { n: prompts })])];
+    const rows = [el('li', 'my-goals-month-row', el('div', 'my-goals-row', ...row(p.month?.month, 'my_goals_current',
+      top ? t('my_focus_first_today', { name: top.name }) : t('my_focus_none_kept'), p.month?.prompts ?? 0)))];
+    for (const m of p.months ?? []) {
+      const summary = el('summary', 'my-goals-row', ...row(m.month, 'my_goals_archived', m.priorities[0]?.title ?? t('my_focus_no_areas_saved'), m.prompts));
+      summary.dataset.myWork = `month:${m.month}`;
+      const details = el('details', 'my-goals-month-detail', summary,
+        m.summary ? el('p', null, m.summary) : null,
+        el('ol', 'my-goals-list', ...m.priorities.map((pr) => el('li', 'my-goals-item',
+          el('div', 'my-goals-row', el('span', 'my-goals-title', pr.title), myGoalsMeta([myGoalsAsked(pr.asked)], pr.product)),
+          pr.quote ? el('p', 'my-goals-quote', el('q', null, pr.quote.text), ' ', myGoalsAt(pr.quote.ts)) : null))),
+        word('p', 'my-goals-note', 'my_goals_no_reviews'));
+      details.open = mw.why.has(`month:${m.month}`);
+      details.addEventListener('toggle', () => (details.open ? mw.why.add(`month:${m.month}`) : mw.why.delete(`month:${m.month}`)));
+      rows.push(el('li', 'my-goals-month-row', details));
+    }
+    months = el('div', 'my-focus-months', word('h4', null, 'my_goals_tab_months'), word('p', 'my-goals-note', 'my_goals_history_note'), el('ul', 'my-goals-months', ...rows));
+  }
+  return el('section', 'my-focus-page', word('h3', null, 'my_focus_past'), word('p', 'my-goals-note', 'my_focus_past_about'),
+    doneList, months, !doneList && !months && mw.past ? myWorkEmpty('my_focus_past_empty', 'my_focus_past_empty_body') : null);
 }
 
 // F7, claude-mem's FocusHeader and OtherHeader, above the chosen area's requests: its name, a
@@ -7541,9 +7729,11 @@ function myWorkDraw(focus = null) {
   const [switches, toolbar] = myWorkControls();
   mw.results = el('div', 'my-work-results');
   myWorkResults();
-  draw(word('span', null, 'my_work'), [], present([
-    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot()),
-    myWorkBuildStory(), myFocusChips(), myFocusChangeBar(), myFocusSelected() ? myFocusHeader(myFocusSelected()) : null,
+  const page = myFocusPage();
+  const intro = el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot());
+  // F7: Suggested and Past focus are pages of their own, in place of the requests (claude-mem's).
+  draw(word('span', null, 'my_work'), [], present(page ? [intro, myFocusChips(), page === 'suggested' ? myFocusSuggested() : myFocusPast()] : [
+    intro, myWorkBuildStory(), myFocusChips(), myFocusChangeBar(), myFocusSelected() ? myFocusHeader(myFocusSelected()) : null,
     switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
   ]));
   mw.changed.clear();
@@ -7949,7 +8139,7 @@ function myWorkReading() {
   const active = document.activeElement;
   // The build story's disclosure too, at the page's top (#733).
   return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story',
-    '.my-focus-chips', '.my-focus-change', '.my-focus-header']
+    '.my-focus-chips', '.my-focus-change', '.my-focus-header', '.my-focus-page']
     .some((selector) => active?.closest?.(selector));
 }
 
