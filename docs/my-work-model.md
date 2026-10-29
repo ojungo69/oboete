@@ -1754,6 +1754,29 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   The links job stays until 10c removes My Goals with it.
 - **Then**: slice 10b-2, the goals job shown the areas.
 
+### Slice 10b-2: the goals job and the areas (2026-10-29)
+
+- **Shown** (F5): the goals call shows the focus areas (id, status, name, goal), the ones the system
+  withdrew left out (claude-mem's `isWithdrawnArea`: dismissed, not by the owner), and each current
+  goal's area.
+- **Each goal's area**: a new or changed goal names `area`, the id of the area it already is (a
+  priority) or belongs under (an ask), never by name, or an empty string (a changed one's empty
+  keeps it). An item keeps it (`Item::area`). A priority left with none gets a new id (`fa_` and 6
+  random bytes) when it is kept.
+- **Refused** (A10, claude-mem's `ownerGoalsAreaRows`): an area not shown (`unanchored`); two
+  priorities of one area, a dropped one freeing its area (`shape`); a new priority of no area named
+  with a page word (`page_word`).
+- **The areas come from the goals ops**: `my_work_focus::Focus` folds job `goals` with `focus` and
+  `place`, each goals op's priorities as system rows of their areas: a new suggested area (source
+  owner-goals, its title as the name, its product as the goal, its rank as `priority_rank`), or,
+  for a suggested area no owner decided, its rank and an empty goal filled; nothing else of an area
+  changes, and an area the owner decided takes none. claude-mem writes these as rows; here the goals
+  op is the row, so a forget or an exclusion that takes the op takes them (S5, S6), and the goals
+  job's own reads (its newest op, its months) see no area op of its job.
+- **Kinds stay** `priority` and `ask` until 10c replaces My Goals, whose page and the links job read
+  them.
+- **Then**: slice 10c, the page.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

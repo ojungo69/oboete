@@ -140,13 +140,12 @@ impl Focus {
 
     /// F5, claude-mem's `ownerGoalsAreaRows`: each priority of a goals op `op` is a system row of the
     /// area its `area` names: a new suggested area (source owner-goals, its title as the name, its
-    /// product as the goal, its rank), or, for a suggested area no owner decided, its rank and an
-    /// empty goal filled; nothing else of an area is changed.
+    /// product as the goal, its rank), or, for a suggested area, its rank and an empty goal filled;
+    /// nothing else of an area is changed, and `apply` skips the row of an area the owner decided.
     fn mined(&mut self, op: (String, i64), fields: &Map<String, Value>) {
         let items = fields.get("items").and_then(Value::as_array);
         for item in items.into_iter().flatten() {
-            let area = item.get("area").filter(|a| is_id(a) && *a != OTHER);
-            let (Some(Value::String(area)), Some("priority")) = (area, item["kind"].as_str())
+            let (Some(area), Some("priority")) = (item["area"].as_str(), item["kind"].as_str())
             else {
                 continue;
             };
@@ -164,7 +163,7 @@ impl Focus {
                     patch["status"] = json!("suggested");
                     patch["source"] = json!("owner-goals");
                 }
-                Some(a) if a.status() == "suggested" && !a.owner_decided => {
+                Some(a) if a.status() == "suggested" => {
                     if a.text("goal").is_none_or(|g| g.trim().is_empty()) && product.is_some() {
                         patch["goal"] = json!(product);
                     }
@@ -172,7 +171,7 @@ impl Focus {
                 Some(_) => continue,
             }
             self.sources
-                .entry(area.clone())
+                .entry(area.to_owned())
                 .or_default()
                 .push(op.clone());
             let patch = patch.as_object().cloned().unwrap_or_default();

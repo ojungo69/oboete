@@ -1417,6 +1417,8 @@ mod tests {
             json!({"kind": "area", "name": name, "status": status, "source": "clustering",
                 "decided_by": by})
         };
+        let mut docs = area("Docs", "suggested", "system");
+        docs["goal"] = json!("Keep the docs current");
         let ops = vec![
             (
                 "fa_00000000000a".to_owned(),
@@ -1427,18 +1429,30 @@ mod tests {
                 "fa_00000000000c".to_owned(),
                 area("Gone", "dismissed", "system"),
             ),
+            ("fa_00000000000d".to_owned(), docs),
+            (
+                "fa_00000000000e".to_owned(),
+                area("Release", "done", "system"),
+            ),
         ];
         crate::my_work_ops::record(h.s.home.path(), crate::my_work_focus::NAME, ops).unwrap();
-        h.later("s2", R, "Write a lexer, and test the parser.");
+        h.later("s2", R, "Write a lexer, test the parser, ship it.");
         h.age();
         let (_, sent) = h.pass(&|_| {
-            let mut lexer = item("priority", "Lexer", &[("P1", "Write a lexer")]);
-            lexer["product"] = json!("A lexer");
-            lexer["area"] = json!("fa_00000000000a");
-            let mut tests = item("priority", "Tests", &[("P1", "test the parser")]);
-            tests["product"] = json!("Its tests");
-            tests["area"] = json!("fa_00000000000b");
-            answer(json!([lexer, tests]), json!([]), json!(["g1"]))
+            let mut new = vec![];
+            for (title, quote, area) in [
+                ("Lexer", "Write a lexer", "fa_00000000000a"),
+                ("Tests", "test the parser", "fa_00000000000b"),
+                ("Release", "ship it", "fa_00000000000e"),
+            ] {
+                let mut n = item("priority", title, &[("P1", quote)]);
+                n["product"] = json!(format!("The {title}"));
+                n["area"] = json!(area);
+                new.push(n);
+            }
+            let moved = json!({"id": "g1", "title": "", "product": "Docs of the parser",
+                "asked": 1, "quote": {"prompt": "", "text": ""}, "area": "fa_00000000000d"});
+            answer(json!(new), json!([moved]), json!(["g1"]))
         });
         assert!(
             sent[0].contains(&format!("area {parser}"))
@@ -1447,23 +1461,35 @@ mod tests {
             "{}",
             sent[0]
         );
-        let focus = focus(&h);
-        let (lexer, tests) = (
-            &focus.areas["fa_00000000000a"],
-            &focus.areas["fa_00000000000b"],
-        );
         assert_eq!(
+            items(&h.goals()[0])[0].area.as_deref(),
+            Some("fa_00000000000d")
+        );
+        let now = focus(&h);
+        let rank_goal = |id: &str| {
+            let a = &now.areas[id];
             (
-                &lexer.fields["priority_rank"],
-                lexer.text("goal"),
-                lexer.name()
-            ),
-            (&json!(2), Some("A lexer"), "Lexer")
-        );
+                a.fields.get("priority_rank").cloned(),
+                a.text("goal").map(str::to_owned),
+            )
+        };
         assert_eq!(
-            (tests.fields.get("priority_rank"), tests.text("goal")),
-            (None, None)
+            rank_goal("fa_00000000000a"),
+            (Some(json!(2)), Some("The Lexer".into()))
         );
+        assert_eq!(rank_goal("fa_00000000000b"), (None, None), "the owner's");
+        assert_eq!(rank_goal("fa_00000000000e"), (None, None), "done");
+        assert_eq!(
+            rank_goal("fa_00000000000d"),
+            (Some(json!(1)), Some("Keep the docs current".into())),
+            "its goal kept"
+        );
+        // A priority named with a page word makes no area.
+        let goals = json!({"items": [{"id": "g9", "kind": "priority", "rank": 1, "title": "My Work",
+            "product": "", "asked": 1, "quotes": [], "area": "fa_00000000000f"}]});
+        let day = vec![("2026-10-29".to_owned(), goals)];
+        crate::my_work_ops::record(h.s.home.path(), NAME, day).unwrap();
+        assert!(!focus(&h).areas.contains_key("fa_00000000000f"));
     }
 
     /// F5's refusals: an area not shown, two priorities of one area (a dropped one frees its
