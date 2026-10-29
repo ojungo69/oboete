@@ -1592,6 +1592,89 @@ ctx.ui.setLang('en');
 console.log('PASS: My Work: first tab, cards, attention, tabs, search, list, one agent card a conversation, the request page, back focus, held updates, the order of reads, the marks of a change, the times, the work product, Copy handoff and Checked, in both languages');
 }
 
+// Decision 61 slice 10c-1 (docs/my-work-model.md F7): My Focus's chips, the area filter, the
+// card's area, and Move to… with its change bar and Undo, in both languages.
+{
+const run=code=>vm.runInContext(code,ctx);
+document.querySelector=()=>new Node('main');document.querySelectorAll=()=>[];
+ctx.ui.setLang('en');
+const now=Date.now(),H=3600000;
+const req=(id,over={})=>({id,title:`Request ${id}`,summary:`Summary ${id}`,next:null,copy:'recorded',updating:false,status:'working',
+  updated:now-H,started:now-5*H,agents:['claude'],sessions:[{agent:'claude',id:`c:claude:${id}`}],projects:['alpha'],
+  repos:['github.com/o/alpha'],ask:{id:'dev:1',ts:now-5*H,text:`Ask ${id}`,from:'prompt'},follow_ups:[],
+  updates:[{ts:now-H,text:`Summary ${id}`}],work:[],summaries:[],cards:[],focus:null,...over});
+const response=value=>({ok:true,status:200,json:async()=>value});
+const posted=(status,value={})=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const ticks=async()=>{for(let i=0;i<6;i++)await new Promise(r=>setTimeout(r,0));};
+const panel=document.getElementById('panel');
+const P='fa_000000000001',D='fa_000000000002',L='fa_000000000003';
+const areas=[{id:P,name:'Parser',status:'kept'},{id:D,name:'Docs',status:'kept'},{id:L,name:'Lexer',status:'suggested'}];
+run("setView('my_work')");
+const set=(rows,list=areas)=>{run('Object.assign(mw,{rows:null,filter:"all",query:"",project:"",range:"all",sort:"attention",agent:null,request:null,work:null,back:null,pending:null,area:null,saved:null});mw.changed.clear();mw.unread.clear()');
+  ctx.__rows={requests:rows,unlinked:0,areas:list};run('myWorkAccept(globalThis.__rows);myWorkDraw()');};
+const cards=()=>panel.querySelectorAll('article').filter(n=>n.className.startsWith('my-work-card '));
+const ids=()=>cards().map(n=>n.dataset.id).sort();
+const card=id=>cards().find(n=>n.dataset.id===id);
+const chips=()=>panel.querySelectorAll('button').filter(n=>n.dataset.myWork?.startsWith('chip:'));
+// Not in use (no area, no placement): nothing of it is drawn.
+set([req('n1')],[]);
+assert.equal(chips().length,0,'no chips while My Focus is not in use');
+assert(!text(panel).includes('Sorting…'),'no card says Sorting…');
+set([req('f1',{focus:P,status:'needs'}),req('f2',{focus:P}),req('f3',{focus:'other',status:'ready'}),req('f4')]);
+assert.deepEqual(chips().map(n=>n.dataset.myWork),[`chip:${P}`,`chip:${D}`,'chip:other'],'the kept areas in order, then Other');
+assert.equal(text(chips()[0]),'Parser 1 1 need you','with how many need you, said in words');
+assert.equal(chips()[0].querySelector('.my-work-count').attrs['aria-hidden'],'true','the number alone is not read');
+assert.equal(text(chips()[1]),'Docs','none at 0');
+assert.equal(text(chips()[2]),'Other 1 1 need you','one ready to check needs you too');
+assert(text(card('f4')).includes('Sorting…')&&text(card('f1')).includes('Parser'),'each card names its area, or Sorting…');
+chips()[0].click();
+assert.deepEqual(ids(),['f1','f2'],'an area filters My Work');
+assert.equal(chips()[0].attrs['aria-pressed'],'true');
+assert.equal(document.activeElement.dataset.myWork,`chip:${P}`,'the chip keeps the focus');
+assert.equal(text(panel.querySelector('.my-work-heading')),'Parser','its name heads the requests');
+chips()[0].click();
+assert.deepEqual(ids(),['f1','f2','f3','f4'],'pressed again, all of My Work');
+chips()[1].click();
+assert(text(panel).includes('No requests in this area yet'),'an empty area says so');
+chips()[1].click();
+card('f3').querySelector('.my-focus-chip').click();
+assert.deepEqual(ids(),['f3'],'a card opens its area');
+run(`mw.area='fa_00000000000f';myWorkDraw()`);
+assert.equal(ids().length,4,'a choice no longer listed shows all');
+// Move to… on a request's page: the areas that take requests but its own, then Other.
+run('mw.area=null;myWorkDraw()');
+let moves=[],at=P;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'){const body=JSON.parse(options.body);moves.push([url,body]);at=body.area;return Promise.resolve(posted(200,{state:'applied'}));}
+  return Promise.resolve(response({requests:[req('f1',{focus:at,status:'needs'})],unlinked:0,areas}));
+};
+card('f1').querySelector('button').click();
+const move=()=>panel.querySelectorAll('select').find(n=>n.dataset.focus==='focus:move');
+assert.deepEqual(move().options.map(o=>[o.value,text(o)]),[['','Move to…'],[D,'Docs'],[L,'Lexer · suggested'],['other','Other']]);
+move().value=D;for(const cb of move().listeners.change)cb({target:move()});await ticks();
+assert.deepEqual(moves,[['/api/my-focus',{action:'move-request',request:'f1',area:D}]],'the move names the request and the area');
+let bar=text(panel.querySelector('.my-focus-change'));
+assert(bar.includes('Moved “Request f1” to Docs.')&&bar.includes('Saved on this computer.')&&bar.includes('Undo'),bar);
+panel.querySelectorAll('button').find(n=>n.dataset.focus==='focus:undo').click();await ticks();
+assert.deepEqual(moves[1],['/api/my-focus',{action:'move-request',request:'f1',area:P}],'Undo moves it back');
+assert.equal(panel.querySelectorAll('.my-focus-change').length,0,'undone, the bar is gone');
+// From Sorting… there is nothing to move it back to.
+at=null;set([req('f1',{status:'needs'})]);
+card('f1').querySelector('button').click();
+move().value='other';for(const cb of move().listeners.change)cb({target:move()});await ticks();
+assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'));
+// A refusal's words.
+ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(409,{code:'focus_move_target'})):Promise.resolve(response({requests:[req('f1',{focus:'other'})],unlinked:0,areas}));
+move().value=D;for(const cb of move().listeners.change)cb({target:move()});await ticks();
+assert.equal(document.getElementById('status').textContent,'That area takes no requests now.');
+// Japanese.
+ctx.ui.setLang('ja');set([req('f1',{focus:P,status:'needs'}),req('f4')]);
+assert(text(card('f4')).includes('振り分け中…')&&chips().some(n=>text(n).startsWith('その他')),'the chips and the card in Japanese');
+assert.equal(panel.querySelector('.my-focus-chips').attrs['aria-label'],'マイフォーカス');
+ctx.ui.setLang('en');
+console.log('PASS: My Focus: chips with counts, the area filter, the card chip and Sorting…, Move to… with its bar and Undo, a refusal, JA/EN');
+}
+
 // Parity row X9: a long prompt is clamped behind Show more, as claude-mem's PromptCard does; a short one has no button.
 {
 const entry=vm.runInContext('feedEntry',ctx);
@@ -2525,32 +2608,6 @@ shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs')
 assert(shown.includes('上位 2 件の優先していることのうち、1 件が進んでいます。0 件はあなたの番で、1 件は何も進んでいません。'),shown);
 assert(shown.includes('進んでいる')&&shown.includes('手つかず')&&shown.includes('目標なし · 1')&&shown.includes('まだ何も進んでいないもの · 1'),'the words in Japanese');
 run('lang="en"');
-// My Work's chip: nothing while there are no goals; then not linked yet, none, or the goal.
-const chip=(row,goals)=>{ctx.__row=row;run(`mw.goals=${goals}`);const n=run('myWorkGoalChip(globalThis.__row)');return n?text(n):null;};
-assert.equal(chip(req('r','R','working',null),0),null);
-assert.equal(chip(req('r','R','working',null),2),'Goal not linked yet');
-assert.equal(chip(req('r','R','working',[]),2),'No goal');
-assert.equal(chip(req('r','R','working',[{id:'g1',kind:'priority',rank:1,title:'Fail fast'}]),2),'Fail fast');
-// The chip opens My Goals on its goal, open and with the focus on it.
-const button=run('myWorkGoalChip(globalThis.__row)');
-run('globalThis.__show=show;show=()=>{}');button.click();run('show=globalThis.__show');
-assert.equal(run('view'),'my_goals');
-draw([goal('g1','priority',1,'Fail fast',3)],[req('r','R','working',[g('g1')])]);
-assert.equal(document.activeElement?.dataset.focus,'goal:g1','the focus on the goal it opened');
-assert(panel.querySelectorAll('details').find(d=>d.className==='my-goals-priority').open,'open');
-// #729: a priority past the top five opens "more" first; an open ask is jumped to by its quotes.
-const six=Array.from({length:6},(_,i)=>goal(`g${i+1}`,'priority',i+1,`P${i+1}`));
-ctx.__row=req('r','R','working',[{id:'g6',kind:'priority',rank:6,title:'P6'}]);run('mw.goals=6;mg.more=false');
-let target=run('myWorkGoalChip(globalThis.__row)');
-run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
-draw(six,[req('r','R','working',[g('g6')])]);
-assert.equal(run('mg.more'),true,'"more" opened');
-assert.equal(document.activeElement?.dataset.focus,'goal:g6');
-ctx.__row=req('r','R','working',[{id:'g7',kind:'ask',rank:1,title:'Docs'}]);
-target=run('myWorkGoalChip(globalThis.__row)');
-run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
-draw([...six,goal('g7','ask',1,'Docs')],[req('r','R','working',[g('g7','ask')])]);
-assert.equal(document.activeElement?.dataset.focus,'why:g7','an open ask by its quotes');
 // #729: a request opened from My Goals reads its work product again.
 draw([goal('g1','priority',1,'Fail fast')],[req('r9','R9','working',[g('g1')])]);
 run('mw.products={id:"r9",items:[]};mw.unread.add("r9")');
@@ -2587,14 +2644,6 @@ run('lang="en";mw.story=null');
 const tz=process.env.TZ;process.env.TZ='Asia/Tokyo';
 assert.equal(status([shipped('2026-10-20')],Date.UTC(2026,9,20,22,0)),'shipped','one time zone');
 if(tz===undefined)delete process.env.TZ;else process.env.TZ=tz;
-// #731: a priority whose rank moved past the top five since the card was drawn opens "more" by the
-// rank in the answer drawn.
-ctx.__row=req('r','R','working',[{id:'g6',kind:'priority',rank:2,title:'P6'}]);run('mw.goals=6;mg.more=false');
-target=run('myWorkGoalChip(globalThis.__row)');
-run('globalThis.__show=show;show=()=>{}');target.click();run('show=globalThis.__show');
-draw(six,[req('r','R','working',[g('g6')])]);
-assert.equal(run('mg.more'),true,'by the rank drawn');
-assert.equal(document.activeElement?.dataset.focus,'goal:g6');
 // #731, #733: a request opened from My Goals drops a work product read still out, and its page is
 // drawn, at its top, with the focus on its heading.
 draw([goal('g1','priority',1,'Fail fast')],[req('r8','R8','working',[g('g1')])]);
