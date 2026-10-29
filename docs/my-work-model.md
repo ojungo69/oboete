@@ -1873,16 +1873,19 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **Suggested** (claude-mem's SuggestedAreas and SuggestionCard): the suggested areas, then those
   decided on this visit, which stay until the page is left; "Waiting on you" while one waits, how
   many are decided; each card its name, goal, how many requests it holds and asks not started;
-  Keep, Rename, Merge, Dismiss. Keep, Merge and Dismiss are said on the card, with Show it (but a
-  dismissal) and an Undo of their own (`restore-suggestion`), and not in the change bar, as
-  claude-mem sends them with `record: false`; a merge from a card keeps the page; a rename leaves
+  Keep, Rename, Merge, Dismiss. Keep, Merge and Dismiss are said on the card once read (saved but
+  not read yet, the card stays as it was and the status line says so), with Show it (but a
+  dismissal) and an Undo of their own (`restore-suggestion`; none for an area the owner wrote, which
+  the server never puts back), and not in the change bar, as claude-mem sends them with
+  `record: false`; a merge from a card keeps the page; a rename leaves
   the card undecided and goes to the change bar. "Why it's suggested": its evidence when it has
   no quotes, else its source's words; the first quote, then "n more quotes".
 - **Past focus** (claude-mem's PastFocus): the areas marked done, each opening on its requests; then
   month by month from My Goals' answer, read when the page opens: this month's row naming the first
   kept area today, and each month kept before with its headline and its priorities, as My Goals'
   months showed them. Nothing to show says so.
-- A changed poll waits behind "Show updates" while either page has the focus.
+- A changed poll waits behind "Show updates" while either page has the focus, the banner shown on
+  the page.
 
 ## Not built
 

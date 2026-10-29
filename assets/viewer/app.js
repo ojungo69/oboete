@@ -7032,7 +7032,7 @@ async function myFocusWrite(bodies, text, undo, record = true) {
       }
     }
     saved = { applied };
-    return true;
+    return applied || 'pending';
   } catch {
     failed = true;
     message = t('memory_result_unknown');
@@ -7043,12 +7043,13 @@ async function myFocusWrite(bodies, text, undo, record = true) {
     if (view === 'my_work') await show();
     if (saved) {
       const said = typeof text === 'function' ? text() : text;
-      // A Suggested card's Keep, Merge and Dismiss: the card shows it with its own Undo.
+      // A Suggested card's Keep, Merge and Dismiss: the card shows it with its own Undo, once it
+      // was read (Codex on #758).
       if (record) {
         mw.saved = { text: said, applied: saved.applied,
           undo: saved.applied && undo ? { bodies: undo.bodies, text: undo.text ?? t('my_focus_undone', { text: said }) } : null };
       }
-      message = said;
+      message = record || saved.applied ? said : t('my_focus_pending');
     }
     // The page's live region says it: the change bar is drawn anew with each redraw, too late to
     // be read out. Held, it outlasts the redraw that clears the status.
@@ -7071,7 +7072,7 @@ function myFocusChangeBar() {
     action.disabled = mw.moving;
     action.addEventListener('click', () => {
       void myFocusWrite(undo.bodies, undo.text, null).then((done) => {
-        if (done === true) mw.saved = null;
+        if (done === true || done === 'pending') mw.saved = null;
         else if (Array.isArray(done)) mw.saved.undo.bodies = done;
         if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : myFocusHasMenu() ? 'focus:menu' : 'heading');
       });
@@ -7176,7 +7177,7 @@ function myFocusChange(body, area) {
   const { text, undo } = myFocusDescribe(body, area);
   const from = mw.area;
   void myFocusWrite([body], text, undo).then((ok) => {
-    if (ok === true) {
+    if (ok === true || ok === 'pending') {
       mw.editing = null;
       // Not over a choice made while it saved (Codex on #757).
       if (body.action === 'merge' && mw.area === from) mw.area = body.into;
@@ -7301,18 +7302,22 @@ function myFocusDecide(area, body, decision) {
   const into = body.into ? myFocusName(body.into) : null;
   const text = t(`my_focus_decided_${decision}`, { into });
   void myFocusWrite([body], text, null, false).then((ok) => {
-    if (ok === true) {
-      mw.decided.set(area.id, { decision, area, into: body.into ?? null });
-      mw.editing = null;
-    }
-    if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(`card:undo:${area.id}`);
+    // Decided once read: saved but not read yet, the card stays as it was (Codex on #758).
+    if (ok === true) mw.decided.set(area.id, { decision, area, into: body.into ?? null });
+    if (ok === true || ok === 'pending') mw.editing = null;
+    if (view !== 'my_work' || mw.area !== 'suggested') return;
+    // The focus on what the card has now (CodeRabbit on #758): its Undo, or Show it for an area the
+    // owner wrote, which has none; refused, the editor still open or the action again.
+    const verb = { kept: 'keep', dismissed: 'dismiss', merged: 'merge' }[decision];
+    myWorkDraw(ok === true ? (area.source !== 'owner' ? `card:undo:${area.id}` : decision === 'dismissed' ? 'heading' : `card:show:${area.id}`)
+      : mw.editing?.area === area.id ? `edit:${mw.editing.kind}` : `card:${verb}:${area.id}`);
   });
 }
 
 function myFocusUndecide(area) {
   void myFocusWrite([{ action: 'restore-suggestion', area: area.id }], t('my_focus_restored', { name: area.name }), null, false).then((ok) => {
     if (ok === true) mw.decided.delete(area.id);
-    if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(`card:keep:${area.id}`);
+    if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(ok === true ? `card:keep:${area.id}` : `card:undo:${area.id}`);
   });
 }
 
@@ -7331,7 +7336,9 @@ function myFocusCard(area) {
       : myFocusButton('my_focus_show_it', `card:show:${area.id}`, () => myFocusChoose(decided.into ?? area.id));
     return el('li', `my-goals-item my-focus-card my-focus-card-${decided.decision}`, ...head,
       el('div', 'my-rules-actions', el('p', 'my-focus-decided', t(`my_focus_decided_${decided.decision}`, { into: myFocusName(decided.into) })),
-        show, myFocusButton('my_focus_undo', `card:undo:${area.id}`, () => myFocusUndecide(area))));
+        // No Undo for an area the owner wrote, which the server never puts back in Suggested (Codex
+        // and CodeRabbit on #758).
+        show, area.source === 'owner' ? null : myFocusButton('my_focus_undo', `card:undo:${area.id}`, () => myFocusUndecide(area))));
   }
   const merge = (body, a) => (body.action === 'merge' ? myFocusDecide(a, body, 'merged') : myFocusChange(body, a));
   const editing = mw.editing?.area === area.id ? myFocusEditor(area, merge, `card:${mw.editing.kind}:${area.id}`) : null;
@@ -7733,7 +7740,9 @@ function myWorkDraw(focus = null) {
   const page = myFocusPage();
   const intro = el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot());
   // F7: Suggested and Past focus are pages of their own, in place of the requests (claude-mem's).
-  draw(word('span', null, 'my_work'), [], present(page ? [intro, myFocusChips(), page === 'suggested' ? myFocusSuggested() : myFocusPast()] : [
+  // The held update's banner too, its Show updates the only way to take one in there (Codex and
+  // CodeRabbit on #758).
+  draw(word('span', null, 'my_work'), [], present(page ? [intro, myFocusChips(), myWorkSlot(), page === 'suggested' ? myFocusSuggested() : myFocusPast()] : [
     intro, myWorkBuildStory(), myFocusChips(), myFocusChangeBar(), myFocusSelected() ? myFocusHeader(myFocusSelected()) : null,
     switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
   ]));

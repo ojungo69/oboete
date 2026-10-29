@@ -1857,9 +1857,9 @@ const S=[{...blank,id:P,name:'Parser',status:'kept',source:'owner-goals'},
 const page={requests:[req('f1',{focus:L}),req('f2',{focus:P})],unlinked:0,areas:S,other_asks:[],page_words:[]};
 const goals={current:{written:now,items:[]},window:{days:31,prompts:20},month:{month:'2026-10',prompts:12},
   months:[{month:'2026-09',summary:'Shipped the parser.',prompts:40,priorities:[{title:'Parse it all',product:'',asked:3,quote:{text:'parse it',ts:now-40*86400000}}]}]};
-let posts=[],asked=0;
+let posts=[],asked=0,reply=()=>posted(200,{state:'applied'});
 ctx.fetch=(url,options)=>{
-  if(options?.method==='POST'){posts.push(JSON.parse(options.body));return Promise.resolve(posted(200,{state:'applied'}));}
+  if(options?.method==='POST'){posts.push(JSON.parse(options.body));return Promise.resolve(reply());}
   if(url.startsWith('/api/my-goals')){asked++;return Promise.resolve(response(goals));}
   return Promise.resolve(response(page));
 };
@@ -1887,11 +1887,29 @@ btn(`card:undo:${L}`).click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'restore-suggestion',area:L});
 assert(btn(`card:keep:${L}`),'undecided again');
 assert.equal(document.getElementById('status').textContent,'Put “Lexer” back in Suggested.');
-// Dismiss.
+// Saved but not read yet: the card stays undecided and says so (Codex on #758).
+reply=()=>posted(200,{state:'pending'});
+btn(`card:keep:${L}`).click();await ticks();
+assert(btn(`card:keep:${L}`)&&!btn(`card:undo:${L}`),'not decided yet');
+assert.equal(document.getElementById('status').textContent,'Saved. It shows here once My Work has read it.');
+// Refused: the focus on the action again; an Undo refused, on the Undo (CodeRabbit on #758).
+reply=()=>posted(409,{code:'focus_merged'});
+document.activeElement=null;btn(`card:keep:${L}`).click();await ticks();
+assert.equal(document.activeElement?.dataset.myWork,`card:keep:${L}`);
+reply=()=>posted(200,{state:'applied'});
+btn(`card:keep:${L}`).click();await ticks();
+reply=()=>posted(409,{code:'focus_merged'});
+document.activeElement=null;btn(`card:undo:${L}`).click();await ticks();
+assert.equal(document.activeElement?.dataset.myWork,`card:undo:${L}`);
+reply=()=>posted(200,{state:'applied'});
+btn(`card:undo:${L}`).click();await ticks();
+// Dismiss an area you wrote: no Undo, as the server never puts it back in Suggested (Codex and
+// CodeRabbit on #758).
 btn('card:dismiss:fa_000000000006').click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'dismiss',area:'fa_000000000006'});
 assert(text(cardOf('Mine')).includes('Dismissed. It won’t be suggested again'));
-assert(!btn('card:show:fa_000000000006'),'nothing to show');
+assert(!btn('card:show:fa_000000000006')&&!btn('card:undo:fa_000000000006'),'nothing to show, no Undo');
+assert.equal(document.activeElement,document.getElementById('heading'));
 // Merge from the card: it reads Merged, the page stays; Show it opens the area merged into.
 btn(`card:merge:${L}`).click();
 const into=pg().querySelector('select');into.value=P;for(const cb of into.listeners.change)cb();
@@ -1914,6 +1932,7 @@ document.activeElement=btn(`card:keep:${L}`);
 ctx.__live=ctx.fetch;ctx.fetch=(url,options)=>url.startsWith('/api/my-work')?Promise.resolve(response({...page,requests:[req('f1',{focus:L,title:'Changed title'})]})):ctx.__live(url,options);
 await run('myWorkLive()');ctx.fetch=ctx.__live;
 assert(run('mw.pending')&&!run('mw.rows.some(r=>r.title==="Changed title")'),'held');
+assert(text(panel).includes('New work updates are ready.')&&panel.querySelectorAll('button').some(n=>text(n)==='Show updates'),'and its banner shown on the page (Codex and CodeRabbit on #758)');
 document.activeElement=null;run('mw.pending=null');
 // Show it opens the area merged into.
 btn(`card:merge:${L}`).click();const into2=pg().querySelector('select');into2.value=P;for(const cb of into2.listeners.change)cb();
