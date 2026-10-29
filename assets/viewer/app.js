@@ -7269,9 +7269,11 @@ const MY_FOCUS_SOURCES = ['owner-goals', 'clustering', 'promotion', 'owner'];
 function myFocusDecide(area, body, decision) {
   const into = body.into ? myFocusName(body.into) : null;
   const text = t(`my_focus_decided_${decision}`, { into });
+  // The visit it was made in: one left while it saved records nothing in the next (#759).
+  const visit = mw.decided;
   void myFocusWrite([body], text, null, false).then((ok) => {
     // Decided once read: saved but not read yet, the card stays as it was (Codex on #758).
-    if (ok === true) mw.decided.set(area.id, { decision, area, into: body.into ?? null });
+    if (ok === true) visit.set(area.id, { decision, area, into: body.into ?? null });
     if (ok === true || ok === 'pending') mw.editing = null;
     if (view !== 'my_work' || mw.area !== 'suggested') return;
     // The focus on what the card has now (CodeRabbit on #758): its Undo, or Show it for an area the
@@ -7283,8 +7285,9 @@ function myFocusDecide(area, body, decision) {
 }
 
 function myFocusUndecide(area) {
+  const visit = mw.decided;
   void myFocusWrite([{ action: 'restore-suggestion', area: area.id }], t('my_focus_restored', { name: area.name }), null, false).then((ok) => {
-    if (ok === true) mw.decided.delete(area.id);
+    if (ok === true) visit.delete(area.id);
     if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(ok === true ? `card:keep:${area.id}` : `card:undo:${area.id}`);
   });
 }

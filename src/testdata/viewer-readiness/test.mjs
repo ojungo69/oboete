@@ -1927,6 +1927,13 @@ assert(panel.querySelector('.my-focus-change')&&btn(`card:keep:${L}`),'the chang
 // Leaving the page ends the visit's decisions.
 btn('chip:suggested').click();btn('chip:suggested').click();
 assert(btn('card:keep:fa_000000000006'),'Mine undecided again');
+// A Keep saving as the page is left records nothing in the next visit (#759).
+let free;const live=ctx.fetch;
+ctx.fetch=(url,options)=>options?.method==='POST'?new Promise(r=>{free=()=>r(posted(200,{state:'applied'}));}):live(url,options);
+btn('card:keep:fa_000000000006').click();await ticks();
+btn('chip:suggested').click();free();await ticks();ctx.fetch=live;
+btn('chip:suggested').click();
+assert(btn('card:keep:fa_000000000006'),'the next visit shows it as the server has it, undecided here');
 // With focus in the page, a changed poll waits.
 document.activeElement=btn(`card:keep:${L}`);
 ctx.__live=ctx.fetch;ctx.fetch=(url,options)=>url.startsWith('/api/my-work')?Promise.resolve(response({...page,requests:[req('f1',{focus:L,title:'Changed title'})]})):ctx.__live(url,options);
