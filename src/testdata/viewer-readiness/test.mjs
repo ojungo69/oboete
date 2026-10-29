@@ -1706,11 +1706,13 @@ const M='fa_000000000005',blank={asked:null,latest:null,quotes:[],asks:[],page_w
 const B=[{...blank,id:P,name:'Parser',status:'kept',source:'owner-goals',goal:'Parse every file.'},
   {...blank,id:D,name:'Docs',status:'kept',source:'owner',goal:null},
   {...blank,id:L,name:'Lexer',status:'suggested',source:'clustering',goal:null},
-  {...blank,id:M,name:'Mine',status:'suggested',source:'owner',goal:null}];
+  {...blank,id:M,name:'The My Work notes',status:'suggested',source:'owner',goal:null,page_word:'my work'}];
 const words=['my focus','my work','other','その他'];
 const page={requests:[req('f1',{focus:P})],unlinked:0,areas:B,other_asks:[],page_words:words};
 let posts=[],reply=()=>posted(200,{state:'applied'});
-ctx.fetch=(url,options)=>{if(options?.method==='POST'){posts.push(JSON.parse(options.body));return Promise.resolve(reply());}return Promise.resolve(response(page));};
+// The server as the page reads it again: a rename applied, a name of a rule's masked.
+const applyRename=(body,r)=>{if(body.action==='rename'&&r.ok&&r.state!=='pending')B.find(a=>a.id===body.area).name=body.name.replace(/codename-[a-z]+/g,'[codename]');};
+ctx.fetch=(url,options)=>{if(options?.method==='POST'){const body=JSON.parse(options.body);posts.push(body);const r=reply();return r.json().then(v=>{applyRename(body,{ok:r.ok,state:v.state});return r;});}return Promise.resolve(response(page));};
 ctx.__rows=page;
 run('Object.assign(mw,{rows:null,range:"all",area:null,saved:null,editing:null});myWorkAccept(globalThis.__rows);myWorkDraw()');
 const hdr=()=>panel.querySelector('.my-focus-header');
@@ -1752,6 +1754,16 @@ assert.equal(hdr().querySelectorAll('input').length,0,'saved, the editor closes'
 assert.equal(status(),'Renamed “Parser” to “Parsing”.');
 undo().click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'rename',area:P,name:'Parser'});
+// The receipt names the new name as the gate kept it, never as it was typed (Codex on #757).
+pick('menu:rename').click();type(hdr().querySelector('input'),'Parser codename-x');pick('edit:save').click();await ticks();
+assert.equal(status(),'Renamed “Parser” to “Parser [codename]”.');
+assert(!text(panel).includes('codename-x'),'nothing shows what was typed');
+undo().click();await ticks();assert(!status().includes('codename-x'));
+// A rename saved but not read yet names no new name.
+reply=()=>posted(200,{state:'pending'});
+pick('menu:rename').click();type(hdr().querySelector('input'),'Parsers');pick('edit:save').click();await ticks();
+assert.equal(status(),'Renamed “Parser”.');
+reply=()=>posted(200,{state:'applied'});
 // A refusal keeps the editor and its draft, and says why.
 reply=()=>posted(422,{code:'focus_page_word'});
 pick('menu:rename').click();field=hdr().querySelector('input');type(field,'Parsers');
@@ -1772,7 +1784,7 @@ assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t 
 // Merge a kept area: the choice moves to the area merged into; Undo puts it back in two steps.
 run(`myFocusChoose('${P}')`);pick('menu:merge').click();
 const into=hdr().querySelector('select');
-assert.deepEqual(into.options.map(o=>[o.value,text(o)]),[['','Choose an area'],[D,'Docs'],[L,'Lexer · suggested'],[M,'Mine · suggested']]);
+assert.deepEqual(into.options.map(o=>[o.value,text(o)]),[['','Choose an area'],[D,'Docs'],[L,'Lexer · suggested'],[M,'The My Work notes · suggested']]);
 assert.equal(pick('edit:save').disabled,true,'no area chosen');
 into.value=D;for(const cb of into.listeners.change)cb();
 pick('edit:save').click();await ticks();
@@ -1780,6 +1792,29 @@ assert.deepEqual(posts.at(-1),{action:'merge',area:P,into:D});
 assert.equal(text(hdr().querySelector('h3')),'Docs','the choice on the area merged into');
 const before=posts.length;undo().click();await ticks();
 assert.deepEqual(posts.slice(before),[{action:'restore-suggestion',area:P},{action:'keep',area:P}]);
+// A first step saved but not read yet holds the second back; the same Undo sends it (Codex on #757).
+run(`myFocusChoose('${P}')`);pick('menu:merge').click();
+let sel=hdr().querySelector('select');sel.value=D;for(const cb of sel.listeners.change)cb();
+pick('edit:save').click();await ticks();
+reply=()=>posted(200,{state:'pending'});
+let at0=posts.length;undo().click();await ticks();
+assert.deepEqual(posts.slice(at0),[{action:'restore-suggestion',area:P}]);
+assert.equal(status(),'Saved the first step. Press Undo again once My Work has read it.');
+reply=()=>posted(200,{state:'applied'});
+at0=posts.length;undo().click();await ticks();
+assert.deepEqual(posts.slice(at0),[{action:'keep',area:P}]);
+assert.equal(panel.querySelectorAll('.my-focus-change').length,0,'then it is undone');
+// A choice made while a merge saves stays (Codex on #757).
+let free;reply=()=>posted(200,{state:'applied'});
+run(`myFocusChoose('${P}')`);pick('menu:merge').click();
+sel=hdr().querySelector('select');sel.value=D;for(const cb of sel.listeners.change)cb();
+const held=ctx.fetch;ctx.fetch=(url,options)=>options?.method==='POST'?new Promise(r=>{free=()=>r(posted(200,{state:'applied'}));}):held(url,options);
+pick('edit:save').click();await ticks();
+run(`myFocusChoose('${L}')`);free();await ticks();ctx.fetch=held;
+assert.equal(text(hdr().querySelector('h3')),'Lexer','the newer choice kept');
+// Undo from Other, which has no menu, puts the focus on the heading.
+run("myFocusChoose('other')");document.activeElement=undo();undo().click();await ticks();
+assert.equal(document.activeElement,document.getElementById('heading'));
 // A suggested area: Keep and Dismiss; a suggestion's Undo puts it back in Suggested, none for one you wrote.
 run(`myFocusChoose('${L}')`);
 assert(text(hdr()).includes('Suggested'));
@@ -1791,6 +1826,10 @@ pick('decide:dismiss').click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'dismiss',area:L});assert.equal(status(),'Dismissed “Lexer”.');
 run(`myFocusChoose('${M}')`);pick('decide:keep').click();await ticks();
 assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'),'no Undo for a suggestion you wrote');
+// Renamed away from a page word, it has no Undo back to it (Codex and CodeRabbit on #757).
+pick('menu:rename').click();type(hdr().querySelector('input'),'Notes');pick('edit:save').click();await ticks();
+assert.deepEqual(posts.at(-1),{action:'rename',area:M,name:'Notes'});
+assert(text(panel.querySelector('.my-focus-change')).includes('This one can’t be undone from here.'),'no Undo back to a page word');
 // Done, then its Undo gives the status back; a done area's menu offers Back in focus.
 run(`myFocusChoose('${P}')`);pick('menu:done').click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'done',area:P});assert.equal(status(),'Marked “Parser” done.');

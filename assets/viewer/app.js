@@ -2602,6 +2602,8 @@ const TEXT = {
   my_focus_merged: ['Merged “{name}” into “{into}”.', '「{name}」を「{into}」に合併しました。'],
   my_focus_reordered: ['Changed the order of your focus areas.', '分野の並び順を変えました。'],
   my_focus_undone: ['Undone: {text}', '元に戻しました: {text}'],
+  my_focus_renamed_pending: ['Renamed “{name}”.', '「{name}」の名前を変えました。'],
+  my_focus_held_steps: ['Saved the first step. Press Undo again once My Work has read it.', '最初の手順を保存しました。My Work が読み込んだら、もう一度「元に戻す」を押してください。'],
   my_focus_other_about: ['Requests that fit none of your focus areas. A refresh suggests a new area when several of these turn out to be steps of something larger.', 'どの分野にも当てはまらない依頼です。そのいくつかが大きな作業の一部だとわかると、更新のときに新しい分野が提案されます。'],
   focus_move_target: ['That area takes no requests now.', 'その分野は、今は依頼を受け付けていません。'],
   focus_not_found: ['That area or request is no longer there. The page has been read again.', 'その分野か依頼は、もうありません。ページを読み直しました。'],
@@ -6953,37 +6955,57 @@ function myFocusChips() {
 
 // F6, F7: one change on My Focus at a time, its steps in order (claude-mem's Undo of a merge takes
 // two), then My Work read again (My Rules' write): the change with its Undo when every step was
-// applied; a refusal's words otherwise, the steps after it not sent.
+// applied, its words read after the reread when `text` is a function, so that they name what the
+// gate kept (Codex on #757); a refusal's words otherwise, the steps after it not sent. A step saved
+// but not read yet holds back the ones after it, which act on what it changed (Codex on #757):
+// they are returned, for the same Undo to send.
 async function myFocusWrite(bodies, text, undo) {
   if (mw.moving) return false;
   mw.moving = true;
   myWorkDraw();
   let message = null;
+  let failed = false;
+  let saved = null;
   try {
     let applied = true;
-    for (const body of bodies) {
+    for (const [i, body] of bodies.entries()) {
       const { res, answer } = await memoryWrite('my-focus', body);
       if (!res.ok) {
+        failed = true;
         message = memoryFailure(res, answer);
         return false;
       }
-      applied &&= answer.state === 'applied';
+      if (answer.state === 'applied') continue;
+      applied = false;
+      if (i < bodies.length - 1) {
+        message = t('my_focus_held_steps');
+        return bodies.slice(i + 1);
+      }
     }
-    mw.saved = { text, undo: applied ? undo : null, applied };
-    message = text;
+    saved = { applied };
     return true;
   } catch {
+    failed = true;
     message = t('memory_result_unknown');
     return false;
   } finally {
     mw.moving = false;
     mw.signature = '';
     if (view === 'my_work') await show();
+    if (saved) {
+      const said = typeof text === 'function' ? text() : text;
+      mw.saved = { text: said, applied: saved.applied,
+        undo: saved.applied && undo ? { bodies: undo.bodies, text: undo.text ?? t('my_focus_undone', { text: said }) } : null };
+      message = said;
+    }
     // The page's live region says it: the change bar is drawn anew with each redraw, too late to
     // be read out. Held, it outlasts the redraw that clears the status.
-    if (message && view === 'my_work') setStatus(message, message !== text, lang, 8000);
+    if (message && view === 'my_work') setStatus(message, failed, lang, 8000);
   }
 }
+
+// Whether the chosen area has a header with a menu: not Other's.
+const myFocusHasMenu = () => Boolean(myFocusSelected()) && myFocusSelected() !== 'other';
 
 // F7: the last change, what saving it means, and its Undo (claude-mem's FocusChangeBar).
 function myFocusChangeBar() {
@@ -6996,9 +7018,10 @@ function myFocusChangeBar() {
     action.dataset.myWork = 'focus:undo';
     action.disabled = mw.moving;
     action.addEventListener('click', () => {
-      void myFocusWrite(undo.bodies, undo.text, null).then((ok) => {
-        if (ok) mw.saved = null;
-        if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : myFocusSelected() ? 'focus:menu' : 'heading');
+      void myFocusWrite(undo.bodies, undo.text, null).then((done) => {
+        if (done === true) mw.saved = null;
+        else if (Array.isArray(done)) mw.saved.undo.bodies = done;
+        if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : myFocusHasMenu() ? 'focus:menu' : 'heading');
       });
     });
   }
@@ -7075,16 +7098,18 @@ function myFocusBack(area) {
 // area the owner wrote, whose Undo would have to put it back in Suggested.
 function myFocusDescribe(body, area) {
   const name = area.name;
-  const undo = (bodies, text) => (bodies ? { bodies, text: t('my_focus_undone', { text }) } : null);
-  const said = (key, vars, bodies) => {
-    const text = t(key, { name, ...vars });
-    return { text, undo: undo(bodies, text) };
-  };
+  const said = (key, vars, bodies) => ({ text: t(key, { name, ...vars }), undo: bodies ? { bodies } : null });
   switch (body.action) {
     case 'keep': return said('my_focus_kept', {}, myFocusBack(area));
     case 'dismiss': return said('my_focus_dismissed', {}, myFocusBack(area));
     case 'done': return said('my_focus_marked_done', {}, myFocusBack(area));
-    case 'rename': return said('my_focus_renamed', { to: body.name.trim() }, [{ action: 'rename', area: area.id, name }]);
+    // The new name as the gate kept it, read again, not as it was typed; none while it waits to
+    // be read. No Undo back to a name that reuses a page word, which the server refuses (Codex and
+    // CodeRabbit on #757).
+    case 'rename': return { undo: area.page_word ? null : { bodies: [{ action: 'rename', area: area.id, name }] }, text: () => {
+      const to = myFocusName(area.id);
+      return to === name ? t('my_focus_renamed_pending', { name }) : t('my_focus_renamed', { name, to });
+    } };
     case 'edit-goal': return said('my_focus_goal_changed', {}, area.goal ? [{ action: 'edit-goal', area: area.id, goal: area.goal }] : null);
     case 'merge': return said('my_focus_merged', { into: myFocusName(body.into) }, area.source === 'owner' ? null
       : [{ action: 'restore-suggestion', area: area.id }, ...(area.status === 'suggested' ? [] : myFocusBack(area))]);
@@ -7097,12 +7122,14 @@ function myFocusDescribe(body, area) {
 // when the area is gone from the choice.
 function myFocusChange(body, area) {
   const { text, undo } = myFocusDescribe(body, area);
+  const from = mw.area;
   void myFocusWrite([body], text, undo).then((ok) => {
-    if (ok) {
+    if (ok === true) {
       mw.editing = null;
-      if (body.action === 'merge') mw.area = body.into;
+      // Not over a choice made while it saved (Codex on #757).
+      if (body.action === 'merge' && mw.area === from) mw.area = body.into;
     }
-    if (view === 'my_work') myWorkDraw(myFocusSelected() ? 'focus:menu' : 'current');
+    if (view === 'my_work') myWorkDraw(myFocusHasMenu() ? 'focus:menu' : 'current');
   });
 }
 

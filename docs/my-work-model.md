@@ -1853,11 +1853,15 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **A suggested area's Keep and Dismiss** under its header.
 - **Each change in the change bar** (claude-mem's `describeFocusChange`), read out by the status line,
   with its Undo, read from the area as it was: Keep, Dismiss and Done give the status back
-  (`restore-suggestion` for a suggestion); a rename the old name; a goal the old one, none where
-  there was none; a merge `restore-suggestion` and then the status it had, none for an area the
-  owner wrote; an order the order before. The steps go in order, the rest not sent after a
-  refusal. A merge moves the choice to the area merged into; after a change the focus is on the
-  menu, or on the heading when the area left the choice. The refusals of `act()` each have words.
+  (`restore-suggestion` for a suggestion); a rename the old name, none back to a name that reuses a
+  page word, which the server refuses; a goal the old one, none where there was none; a merge
+  `restore-suggestion` and then the status it had, none for an area the owner wrote; an order the
+  order before. A rename's receipt names the new name as the page reads it again, as the gate kept
+  it, not as it was typed. The steps go in order, the rest not sent after a refusal; a step saved
+  but not read yet holds back the ones after it, which act on what it changed, and the same Undo
+  sends them. A merge moves the choice to the area merged into, unless another was chosen while
+  it saved; after a change the focus is on the menu, or on the heading when the chosen area has
+  none (Other) or left the choice. The refusals of `act()` each have words.
 - **Then**: slice 10c-3, Suggested, Past focus, and My Goals and the links job removed.
 
 ## Not built
