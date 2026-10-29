@@ -31,13 +31,6 @@ struct Start {
     confirmed: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeySave {
-    key: String,
-    version: String,
-}
-
 /// The page's Workers AI values in its settings save; `account_id` absent keeps the saved one,
 /// which the page cannot remove (a `workers-ai` choice needs it).
 #[derive(Deserialize)]
@@ -392,32 +385,14 @@ fn save_key_at(
     owner: &Path,
     data: Option<&Path>,
 ) -> Result<Value, Refusal> {
-    let posted: KeySave =
-        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
-    if !crate::keyfile::valid(&posted.key) {
-        return Err(refused(422, "bad_key", "embedding.key"));
-    }
-    let _held = saving.lock().unwrap_or_else(PoisonError::into_inner);
-    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
-    if !authorized() {
-        return Err(unauthorized());
-    }
-    let was = bytes(home).map_err(|_| invalid())?;
-    if version(was.as_deref()) != posted.version {
-        return Err(stale());
-    }
-    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
-    parsed(&home.join("config.toml"), text).ok_or_else(invalid)?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
-    let new_key = crate::keyfile::managed(&posted.key, home, owner, data)
-        .map_err(|r| refused(r.status(), r.code(), "embedding.key"))?;
-    let filename =
-        (new_key.path().to_str()).ok_or_else(|| refused(422, "not_utf8", "embedding.key"))?;
-    put(&mut doc, "embedding", "key_file", filename.into());
-    let mut answer = super::providers::commit(home, &posted.version, doc)?;
-    answer["key_saved"] = json!({"durable": new_key.durable});
-    new_key.retain();
-    Ok(answer)
+    super::managed_key(
+        home,
+        (saving, authorized),
+        body,
+        (owner, data),
+        "embedding",
+        |_| {},
+    )
 }
 
 #[cfg(test)]

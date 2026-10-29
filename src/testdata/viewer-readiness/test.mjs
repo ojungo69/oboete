@@ -1032,12 +1032,17 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
   assert(text(judged()).includes('Key found')&&text(judged()).includes('2 of 300 calls'),'its key and calls');
   change(switchOf(),false);
   assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:false},'the switch saves');
+  // After a test the judge's numbers are read again, and the switch as edited stays.
+  settingsAnswer=Promise.resolve(json(settings({judge:{...on,calls_today:3}})));
   for(const [outcome,words] of [['ok','the key works'],['error','Check the key'],['budget','used up'],['other','could not run']]){
     answers=[json({outcome})];
-    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
     assert.deepEqual(posted.at(-1),{url:'/api/judge/test',body:{confirmed:true}});
     assert(document.getElementById('status').textContent.includes(words),`the test's ${outcome}`);
+    assert(text(judged()).includes('3 of 300 calls'),`its calls read again after ${outcome}`);
+    assert.equal(switchOf().checked,false,'the switch as edited stays');
   }
+  settingsAnswer=null;
   answers=[json({code:'missing_key',field:'judge.test'},422)];
   judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
   assert(document.getElementById('status').textContent.includes('Paste the key first'),'a refusal in words');

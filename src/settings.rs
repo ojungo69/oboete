@@ -244,7 +244,7 @@ pub fn show(home: &Path) -> Value {
             crate::model_fetch::BGE_M3,
             crate::model_fetch::RUNTIME.as_ref(),
         ),
-        "judge": judge::section(cfg.judge.as_ref(), db),
+        "judge": judge::section(cfg.judge.as_ref(), &ledger),
         "chain": chain,
         "providers": providers,
         // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
@@ -658,6 +658,59 @@ struct KeySave {
     entry: String,
     key: String,
     version: String,
+}
+
+/// The body of a key typed for one table's own key file (`[embedding]`, `[judge]`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedKey {
+    key: String,
+    version: String,
+}
+
+/// A key typed on the page, written as a provider's is (`keyfile::managed`: a new owner-only file
+/// outside the store), and `[<table>] key_file` pointed at it with `then`'s other changes, against
+/// the version the page showed. The old file is left as it is. The answer is the settings with the
+/// key's state: the key is in no answer. `authorized` is the request's token checked again under
+/// config.lock, as for a choice.
+pub(super) fn managed_key(
+    home: &Path,
+    (saving, authorized): (&Mutex<()>, &dyn Fn() -> bool),
+    body: &[u8],
+    (owner, data): (&Path, Option<&Path>),
+    table: &str,
+    then: impl FnOnce(&mut toml_edit::DocumentMut),
+) -> Result<Value, Refusal> {
+    let field = format!("{table}.key");
+    let posted: ManagedKey =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    if !crate::keyfile::valid(&posted.key) {
+        return Err(refused(422, "bad_key", field));
+    }
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
+    if !authorized() {
+        return Err(refused(401, "unauthorized", ""));
+    }
+    let was = bytes(home).map_err(|_| invalid())?;
+    if version(was.as_deref()) != posted.version {
+        return Err(refused(409, "stale", ""));
+    }
+    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
+    parsed(&home.join("config.toml"), text).ok_or_else(invalid)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
+    let new_key = crate::keyfile::managed(&posted.key, home, owner, data)
+        .map_err(|r| refused(r.status(), r.code(), field.clone()))?;
+    let filename =
+        (new_key.path().to_str()).ok_or_else(|| refused(422, "not_utf8", field.clone()))?;
+    put(&mut doc, table, "key_file", filename.into());
+    then(&mut doc);
+    let mut answer = providers::commit(home, &posted.version, doc)?;
+    answer["key_saved"] = json!({"durable": new_key.durable});
+    new_key.retain();
+    Ok(answer)
 }
 
 #[derive(Deserialize)]

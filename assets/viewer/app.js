@@ -1332,8 +1332,8 @@ const TEXT = {
   my_work_estimate_free: ['Calls a day with it on: about {calls}, at most {most}. No paid AI is in the list, so nothing is charged; a subscription\'s allowance may be used.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。有料の AI が一覧にないため料金はかかりません(サブスクリプションの利用枠は使われることがあります)。'],
   my_work_estimate_none: ['An estimate appears here once something is recorded.', '記録がたまると、ここに見積もりが出ます。'],
   judge_h: ['Judge (Jev)', '判定役(Jev)'],
-  judge_desc: ['Jev, a model by Typesafe, answers questions with probabilities instead of text. My Work asks it whether a new conversation continues an open request, and which focus area a request belongs to. What it cannot decide is left to the AI for summaries, as before.', 'Jev(Typesafe 社のモデル)は、文章ではなく確率で質問に答えます。My Work は、新しい会話が開いている依頼の続きかどうかと、依頼がどの分野に入るかを Jev に尋ねます。Jev が決められないものは、これまでどおり要約に使う AI が決めます。'],
-  judge_sends: ['What is sent: for each conversation, its repository, when it started, its first 3 asks and its first 8 card titles, each masked as all text sent out is. Nothing from a repository you excluded is sent. Price: USD 0.042 for a million input tokens, counted in the monthly limit on paid calls. One judged conversation is about 10,000 to 16,000 tokens, under USD 0.001.', '送るもの: 会話ごとに、そのリポジトリ、始まった時刻、最初の 3 つの依頼、最初の 8 枚のカードの題です。どれも外へ送る文と同じく伏せ字を通します。除外したリポジトリのものは送りません。料金: 入力 100 万トークンで 0.042 ドルで、有料の呼び出しの月額上限に含まれます。1 つの会話の判定はおよそ 1 万〜1.6 万トークンで、0.001 ドル未満です。'],
+  judge_desc: ['Jev, a model by Typesafe, answers questions with probabilities instead of text. For now you can set its key and test the connection here; My Work does not ask it yet. Next, My Work will ask it whether a new conversation continues an open request, and which focus area a request belongs to. What it cannot decide will stay with the AI for summaries, as now.', 'Jev(Typesafe 社のモデル)は、文章ではなく確率で質問に答えます。いまはここでキーを入れて接続を試せるだけで、My Work はまだ Jev に尋ねません。次の更新から My Work は、新しい会話が開いている依頼の続きかどうかと、依頼がどの分野に入るかを Jev に尋ねます。Jev が決められないものは、いまと同じく要約に使う AI が決めます。'],
+  judge_sends: ['What it will be sent: for each conversation, its repository, when it started, its first 3 asks and its first 8 card titles, each masked as all text sent out is. Nothing from a repository you excluded is sent. Price: USD 0.042 for a million input tokens, counted in the monthly limit on paid calls. One judged conversation is about 10,000 to 16,000 tokens, under USD 0.001.', '送るもの(My Work が尋ねるようになってから): 会話ごとに、そのリポジトリ、始まった時刻、最初の 3 つの依頼、最初の 8 枚のカードの題です。どれも外へ送る文と同じく伏せ字を通します。除外したリポジトリのものは送りません。料金: 入力 100 万トークンで 0.042 ドルで、有料の呼び出しの月額上限に含まれます。1 つの会話の判定はおよそ 1 万〜1.6 万トークンで、0.001 ドル未満です。'],
   judge_on: ['Use the judge', '判定役を使う'],
   judge_no_key: ['Off: no key yet. Paste the key from Typesafe below to turn it on.', 'オフ: まだキーがありません。下に Typesafe のキーを貼り付けるとオンになります。'],
   judge_key_file: ['Key: {state} ({file})', 'キー: {state}（{file}）'],
@@ -4454,7 +4454,13 @@ function judgeTest() {
       if (!currentSettings(mine)) return;
       const outcome = res.ok ? answer.outcome : answer.code || PROVIDER_HTTP_ERRORS[res.status];
       const key = Object.hasOwn(TEXT, `judge_test_${outcome}`) ? `judge_test_${outcome}` : 'judge_test_failed';
-      setStatus(t(key), outcome !== 'ok', lang);
+      // The call is counted: the judge's numbers read again, with what is being edited kept.
+      const settings = res.ok ? await api('settings').catch(() => null) : null;
+      if (settings && !settings.error && currentSettings(mine)) {
+        form = mergeProviderSettings(settings, mine, { op: 'key' });
+        drawSettings();
+      }
+      if (currentSettings(form)) setStatus(t(key), outcome !== 'ok', lang);
     } catch {
       if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
     } finally {

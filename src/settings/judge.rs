@@ -2,21 +2,14 @@
 //! on the page, and one connection test of a made-up question. Answers carry codes, never the key.
 
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Refusal, bytes, config_lock, invalid, parsed, put, refused, utf8, version};
+use super::{Refusal, invalid, put, refused};
 use crate::judge::{Asked, NAME};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeySave {
-    key: String,
-    version: String,
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,15 +19,20 @@ struct Test {
 
 /// The judge as the page shows it: `set` when `[judge]` is there (a key was given), its switch,
 /// whether its key file has a key, and its calls in the last 24 hours and spend this month.
-pub(crate) fn section(judge: Option<&crate::config::Judge>, db: Option<&Connection>) -> Value {
-    let (calls, usd) = match db {
-        Some(db) => (
+/// A ledger that does not read gives no numbers (null), as the page's other totals.
+pub(crate) fn section(
+    judge: Option<&crate::config::Judge>,
+    ledger: &anyhow::Result<Option<Connection>>,
+) -> Value {
+    let (calls, usd) = match ledger {
+        Ok(Some(db)) => (
             crate::providers_db::calls_in_a_day(db, NAME)
                 .ok()
                 .map(|(calls, _)| calls),
             crate::providers_db::usd_this_month_of(db, NAME).ok(),
         ),
-        None => (Some(0), Some(0.0)),
+        Ok(None) => (Some(0), Some(0.0)),
+        Err(_) => (None, None),
     };
     let key = judge.is_some_and(|j| crate::config::read_key(&j.key_file).is_ok());
     json!({
@@ -71,34 +69,17 @@ fn save_key_at(
     owner: &Path,
     data: Option<&Path>,
 ) -> Result<Value, Refusal> {
-    let posted: KeySave =
-        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
-    if !crate::keyfile::valid(&posted.key) {
-        return Err(refused(422, "bad_key", "judge.key"));
-    }
-    let _held = saving.lock().unwrap_or_else(PoisonError::into_inner);
-    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
-    if !authorized() {
-        return Err(refused(401, "unauthorized", ""));
-    }
-    let was = bytes(home).map_err(|_| invalid())?;
-    if version(was.as_deref()) != posted.version {
-        return Err(refused(409, "stale", ""));
-    }
-    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
-    parsed(&home.join("config.toml"), text).ok_or_else(invalid)?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
-    let new_key = crate::keyfile::managed(&posted.key, home, owner, data)
-        .map_err(|r| refused(r.status(), r.code(), "judge.key"))?;
-    let filename =
-        (new_key.path().to_str()).ok_or_else(|| refused(422, "not_utf8", "judge.key"))?;
-    put(&mut doc, "judge", "key_file", filename.into());
     // J1: off until a key is set; setting one is the owner turning it on.
-    put(&mut doc, "judge", "enabled", true.into());
-    let mut answer = super::providers::commit(home, &posted.version, doc)?;
-    answer["key_saved"] = json!({"durable": new_key.durable});
-    new_key.retain();
-    Ok(answer)
+    super::managed_key(
+        home,
+        (saving, authorized),
+        body,
+        (owner, data),
+        "judge",
+        |doc| {
+            put(doc, "judge", "enabled", true.into());
+        },
+    )
 }
 
 /// `POST /api/judge/test {"confirmed": true}`: one made-up question with no recorded text, through
@@ -154,9 +135,10 @@ mod tests {
         std::fs::read_to_string(home.join("config.toml")).unwrap()
     }
 
-    /// J1: a key typed on the page goes into a managed file, `[judge]` points at it and the judge
+    /// J1: a key typed on the page goes into a managed file (Linux only: `keyfile::managed`), `[judge]` points at it and the judge
     /// is on; the answer shows the key's state and never the key. A stale version or a refused
     /// token writes nothing.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_key_saved_on_the_page_turns_the_judge_on_and_is_in_no_answer() {
         let home = home("providers = []\n");
@@ -303,7 +285,7 @@ mod tests {
             timeout_s: 15,
             daily_budget: 300,
         };
-        let shown = section(Some(&judge), Some(&db));
+        let shown = section(Some(&judge), &Ok(Some(db)));
         assert_eq!(
             (
                 &shown["calls_today"],
@@ -312,6 +294,17 @@ mod tests {
                 &shown["key"]
             ),
             (&json!(1), &json!(0.25), &json!(false), &json!("missing"))
+        );
+        let none = section(Some(&judge), &Ok(None));
+        assert_eq!(
+            (&none["calls_today"], &none["usd_this_month"]),
+            (&json!(0), &json!(0.0))
+        );
+        // A ledger that does not read is not an unused allowance.
+        let unread = section(Some(&judge), &Err(anyhow::anyhow!("unreadable")));
+        assert_eq!(
+            (&unread["calls_today"], &unread["usd_this_month"]),
+            (&Value::Null, &Value::Null)
         );
     }
 }
