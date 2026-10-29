@@ -2881,6 +2881,8 @@ pub fn doctor(home: &Path) -> Result<()> {
     // docs/my-work-model.md A6: My Work's switch, and what turning it on would cost.
     if let Ok(cfg) = config::load_chain(home) {
         println!("  {}", crate::my_work_run::doctor_line(home, &cfg));
+        // docs/my-work-model.md J1: the judge's switch, key file and calls.
+        println!("  {}", crate::judge::doctor_line(home, cfg.judge.as_ref()));
     }
     let exe_str = exe
         .canonicalize()

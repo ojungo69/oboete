@@ -1200,6 +1200,8 @@ impl Viewer {
             ("POST", "/api/embedding/preview") => (MAX_BODY, |v, b, _| v.embedding_preview(b)),
             ("POST", "/api/embedding") => (MAX_BODY, Self::embedding_start),
             ("POST", "/api/embedding/key") => (MAX_KEY_BODY, Self::save_embedding_key),
+            ("POST", "/api/judge/key") => (MAX_KEY_BODY, Self::save_judge_key),
+            ("POST", "/api/judge/test") => (MAX_BODY, |v, b, _| v.test_judge(b)),
             ("POST", "/api/resume") => (MAX_BODY, |v, b, _| v.resume(b)),
             ("POST", "/api/privacy/exclude") => (MAX_BODY, |v, b, _| v.exclude(b)),
             ("POST", "/api/privacy/capture") => (MAX_BODY, |v, b, _| v.capture(b)),
@@ -1634,6 +1636,21 @@ impl Viewer {
             &authorized,
             body,
         ))
+    }
+
+    /// The judge's key typed on the page (docs/my-work-model.md J1); the answer never holds it.
+    fn save_judge_key(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
+        saved(crate::settings::judge::save_key(
+            &self.home,
+            &self.saving,
+            &authorized,
+            body,
+        ))
+    }
+
+    fn test_judge(&self, body: &[u8]) -> Response {
+        saved(crate::settings::judge::test(&self.home, body))
     }
 
     fn resume(&self, body: &[u8]) -> Response {
@@ -7201,6 +7218,8 @@ curate = false
             ("/api/embedding/preview", MAX_BODY),
             ("/api/embedding", MAX_BODY),
             ("/api/embedding/key", MAX_KEY_BODY),
+            ("/api/judge/key", MAX_KEY_BODY),
+            ("/api/judge/test", MAX_BODY),
         ] {
             save_guards(&v, path, cap, &body);
         }
@@ -7221,6 +7240,8 @@ curate = false
             "/api/providers/test?x=1",
             "/api/embedding?x=1",
             "/api/embedding/key?x=1",
+            "/api/judge/key?x=1",
+            "/api/judge/test?x=1",
             "/api/doc?id=o1",
         ] {
             let r = request(&v, "POST", t, &[HOST, TOKEN, origin, json_type, cl], &body);

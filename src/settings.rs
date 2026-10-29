@@ -18,6 +18,7 @@ pub(crate) mod claims;
 pub(crate) mod embedding;
 pub(crate) mod forget;
 pub(crate) mod hide;
+pub(crate) mod judge;
 pub(crate) mod maintenance;
 pub(crate) mod privacy;
 mod providers;
@@ -243,6 +244,7 @@ pub fn show(home: &Path) -> Value {
             crate::model_fetch::BGE_M3,
             crate::model_fetch::RUNTIME.as_ref(),
         ),
+        "judge": judge::section(cfg.judge.as_ref(), db),
         "chain": chain,
         "providers": providers,
         // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
@@ -542,6 +544,8 @@ struct Save {
     embedding: Option<embedding::Values>,
     /// `[my_work]` (docs/my-work-model.md A6); older pages leave it alone.
     my_work: Option<MyWorkIn>,
+    /// `[judge] enabled` (docs/my-work-model.md J1); older pages leave it alone.
+    judge: Option<JudgeIn>,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
 }
@@ -586,6 +590,12 @@ struct ViewIn {
 struct MyWorkIn {
     curate: bool,
     calls_a_day: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgeIn {
+    enabled: bool,
 }
 
 /// `[my_work] calls_a_day` as the page takes it: one call a day at the least.
@@ -856,6 +866,17 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
                 "calls_a_day",
                 i64::from(m.calls_a_day).into(),
             );
+        }
+    }
+    if let Some(j) = &posted.judge {
+        // `[judge]` needs its key file: with none, a key is set first (`judge::save_key`).
+        match &now.judge {
+            Some(saved) if saved.enabled != j.enabled => {
+                put(&mut doc, "judge", "enabled", j.enabled.into());
+            }
+            Some(_) => {}
+            None if j.enabled => return Err(refused(422, "missing_key", "judge.enabled")),
+            None => {}
         }
     }
     if posted.paid_usd_per_month != now.paid_usd_per_month {
@@ -3094,6 +3115,51 @@ mod tests {
     }
 
     /// Each refusal leaves the file's bytes as they were.
+    /// J1: the judge's switch saves where `[judge]` is; with no table (no key yet) turning it on
+    /// is refused and nothing is written, and an older page that leaves it out changes nothing.
+    #[test]
+    fn the_judges_switch_saves_only_where_its_key_is() {
+        let text = "providers = []\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let r = save_to(
+            &home,
+            &posted(&shown, |v| v["judge"] = json!({"enabled": true})),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "missing_key", "judge.enabled")
+        );
+        assert_eq!(file(&home).as_deref(), Some(text));
+        save_to(
+            &home,
+            &posted(&shown, |v| v["judge"] = json!({"enabled": false})),
+        )
+        .unwrap();
+        assert_eq!(file(&home).as_deref(), Some(text));
+        let text = "providers = []\n[judge]\nkey_file = \"/k/TYPESAFE_KEY.md\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        assert_eq!(
+            (&shown["judge"]["set"], &shown["judge"]["enabled"]),
+            (&json!(true), &json!(true))
+        );
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| v["judge"] = json!({"enabled": false})),
+        )
+        .unwrap();
+        assert_eq!(saved["judge"]["enabled"], false);
+        assert!(!config::load(home.path()).unwrap().judge.unwrap().enabled);
+        let shown = show(home.path());
+        save_to(&home, &posted(&shown, |_| {})).unwrap();
+        assert!(
+            !config::load(home.path()).unwrap().judge.unwrap().enabled,
+            "left out, left alone"
+        );
+    }
+
     /// A hand-written `judge:` entry left on does not count as the chain in use (`load_chain`
     /// leaves it out): turning off the last other entry is refused.
     #[test]

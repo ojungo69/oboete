@@ -463,7 +463,7 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 
 .settings h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .settings h4 { font-size: 14px; font-weight: 600; margin: 16px 0 4px; }
-.settings .desc { color: var(--muted); font-size: 13.5px; margin: 0 0 10px; max-width: 72ch; }
+.settings .desc { color: var(--muted); font-size: 13.5px; margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .settings button + .desc, .settings .actions + .desc { margin-top: 12px; }
 .settings .check { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; font-size: 14.5px; }
 .settings .check input { margin-top: 2px; }
