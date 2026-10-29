@@ -935,6 +935,28 @@ mod tests {
         assert_eq!(h.due(), [subjects[0].clone()]);
     }
 
+    /// F3 (CodeRabbit on #753): a conversation's opening ask is its first ask, not an
+    /// acknowledgement, and the original's conversation shows none.
+    #[test]
+    fn an_opening_ask_is_an_ask_of_another_conversation() {
+        let mut h = Home::new();
+        h.said("s1a", 0, "ok");
+        h.said("s1a", 1, "Build part 1 of the parser.");
+        h.said("s1b", 30, "続けて");
+        h.said("s1b", 31, "Test part 1 of the parser.");
+        let groups = json!([{"conversations": [["claude", "s1a"], ["claude", "s1b"]],
+            "title": "Request 1", "links": []}]);
+        h.op("group", R, json!({"groups": groups, "ignored": []}));
+        let sent = h.pass(&|p| placed(p, &[OTHER]));
+        let openings = "Its other conversations' opening asks:\n- Test part 1 of the parser.\n";
+        assert!(sent[0].contains(openings), "{}", sent[0]);
+        assert!(
+            !sent[0].contains("- ok\n") && !sent[0].contains("続けて"),
+            "{}",
+            sent[0]
+        );
+    }
+
     /// F3: the refusals of claude-mem's validation, each its own outcome.
     #[test]
     fn the_answer_is_checked_as_claude_mem_checks_it() {

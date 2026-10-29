@@ -998,7 +998,8 @@ pub(crate) fn review_inputs(
         let (mut asks, mut openings) = (Vec::new(), Vec::new());
         for (key, own) in &r.owns {
             let Some(c) = convs.get(key) else { continue };
-            let mut opened = false;
+            // F3: the original's conversation is shown apart and opens none (CodeRabbit on #753).
+            let mut opened = (c.prompts.iter()).any(|p| original.id.as_ref() == Some(&p.id));
             for s in (c.prompts.iter()).filter(|s| s.device == device) {
                 let ours = match own {
                     Owns::All => true,
@@ -1011,12 +1012,10 @@ pub(crate) fn review_inputs(
                 if let Some(text) = (s.text.as_ref()).filter(|_| ours && later) {
                     asks.push((s.seq, s.ts, text.clone()));
                 }
-                // A conversation's first ask: the original's, which is shown apart, opens none.
-                if let Some(text) = (s.text.as_ref()).filter(|_| ours && !opened) {
+                // A conversation's first ask, as `Conversation::original` reads one.
+                if let Some(text) = (s.text.as_ref()).filter(|t| ours && !opened && self::asks(t)) {
                     opened = true;
-                    if original.id != Some(s.id.clone()) {
-                        openings.push((s.seq, text.clone()));
-                    }
+                    openings.push((s.seq, text.clone()));
                 }
             }
         }

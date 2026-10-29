@@ -553,7 +553,8 @@ holds none.
 F3. **The placement job** (job `place`, not `focus`: the runner reads a job's newest op about a
 subject for due, skip and hold, and the owner's placement op has the same subject;
 `my_work_focus::Focus` folds both jobs' ops in one time order), in place of the links job (L). A request is queued when it
-has no placement, when its router placement points to an area that takes no requests now, or when
+has no placement, when its router placement points to an area that holds no requests now
+(dismissed, a merge loop, or unknown; a done area keeps its requests, as claude-mem's), or when
 its version (C7) moved since this device's router placement. Up to 20 a call, in A4's room: the
 kept and suggested areas (id, name, goal, about), the dismissed ones as never to propose again, and
 each request's title, first ask (400 characters), state, summary, repository (a tag, never a
@@ -589,9 +590,10 @@ actions); Other's header; the Suggested page with Keep, Rename, Merge and Dismis
 Past focus (done areas, and the months from the goals ops, as V2's month by month); the card's
 chip naming its area or "Sorting…"; and Move to… on the request's page. Both languages.
 
-F8. **Kept** as ops of job `focus` (S1): an area op (subject its id, the area's fields), a placement
-op (subject the conversation's stored key) and the Other pass's op (its set's digest), each a patch
-(a null field removes it). The fold reads them oldest first with claude-mem's two rules. Not in
+F8. **Kept** as ops of S1's jobs `focus`, the owner's actions, and `place`, the placement job's (F3,
+F4): an area op (subject its id, the area's fields), a placement op (subject the conversation's
+stored key) and the Other pass's op (its set's digest, job `place`), each a patch (a null field
+removes it). The fold reads them oldest first with claude-mem's two rules. Not in
 session start, as in claude-mem.
 
 F9. **Not built**: claude-mem's seed from an earlier sorting and Cloud's areas at setup (row X22),
@@ -760,18 +762,20 @@ a character, 0.8 a CJK character), before any cache saving. Typical, from the vo
 | Grouping (C5) | 8 | 6,500 / 300 | 0.006 |
 | Reviews (P2) | 20 | 4,000 / 1,000 | 0.018 |
 | Goal links (L1) | 6 | 4,000 / 300 | 0.003 |
+| Placements and the Other pass (F3, F4) | 7 | 4,000 / 300 | 0.004 |
 | Story (P7) | 4 | 4,000 / 1,700 | 0.005 |
 | Rule suggestions (R1) | 2 | 2,000 / 300 | 0.001 |
 | Goals (M2) | 1 | 4,000 / 2,000 | 0.001 |
-| **Total** | **41** | | **0.035** |
+| **Total** | **48** | | **0.039** |
 
 At the bound, 100 calls each at its largest (6,500 in, 4,000 out): USD 0.27 a day, about USD 8 a
 month. The first goals read adds about 10 to 15 calls once, about USD 0.02. Decision 57 estimated
 about USD 0.20 and at most about 100 calls a day; the typical day is well under it. With a
 subscription CLI first in the chain the money is USD 0, and the calls use its allowance and wait
 while the owner works (decision 15). The real figures are the ledger's, by role, after a week.
-From slice 10 the placement job (F3) takes the goal links' row, at about the same size, and the
-Other pass (F4) adds a call when Other changes, about one a day. The judges (J) are Jev's, not
+Since slice 10b-1 the placement job (F3) runs beside the goal links, at about their size, and the
+Other pass (F4) adds a call when Other changes, about one a day (`my_work_run::estimate` counts
+both); slice 10c removes the links' row. The judges (J) are Jev's, not
 the chain's: at J6's sizes a judged conversation is about 10,500 to 15,800 input tokens, USD
 0.00044 to 0.00066, and a focus pick is less; at about 9 new conversations a day, under USD 0.01 a
 day. These jobs draw on the same monthly pool as windows and summaries. When the pool is spent, a paid
@@ -1717,14 +1721,16 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   job's digest is (`my_work_progress`), since a rule added later masks a string of a kept op's
   fields.
 - **Due** (F3, claude-mem's `focusDue`): never while the owner's placement is in a live area (Other
-  and done areas too); a request with no placement; one whose router placement's area takes no
-  requests now; one whose newest place op is this device's and of another basis (another device's
+  and done areas too); a request with no placement; one whose router placement's area holds no
+  requests now (dismissed, a merge loop, or unknown: claude-mem's `resolveFocusAreaId`, so a done
+  area keeps its requests); one whose newest place op is this device's and of another basis (another device's
   is not compared); after a refused call, once the request has newer activity. A request a failed
   batch holds waits (#730).
 - **The call** (F3), 20 requests at most within A4's room, the first whatever it costs: the areas
   that take requests (id, status, name, goal, about), the areas the owner dismissed by name, never
   to propose again, and each request's title, first ask (400), its other conversations' opening
-  asks (400 each, 8 at most), state and summary of its review, and repositories. Its read (S2): the
+  asks (400 each, 8 at most: each one's first ask as `Conversation::original` reads one, none of
+  the original's conversation), state and summary of its review, and repositories. Its read (S2): the
   asks' records, the titles' grouping ops, the reviews, and this device's ops of every area shown,
   so an exclusion of a repository hides the placements made on what it showed.
 - **The check** (A10), as claude-mem's validation: each request shown placed once (`shape`), in a
