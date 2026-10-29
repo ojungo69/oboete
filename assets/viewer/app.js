@@ -2542,12 +2542,9 @@ const TEXT = {
   my_goals_served: ['Being worked on · {n}', '進めているもの · {n}'],
   my_goals_no_goal: ['No goal · {n}', '目標なし · {n}'],
   my_goals_no_goal_note: ['Requests that serve none of your priorities: work happening outside what you said you want.', 'どの目標にも向いていない依頼です。あなたが望むと言ったこと以外で進んでいる作業です。'],
-  my_work_goal: ['Goal', '目標'],
   my_work_build_story: ['Build story', '作業の経緯'],
   my_work_story_chapters: ['Week by week · {n}', '週ごと · {n}'],
   my_work_story_week: ['{start} to {end}', '{start}〜{end}'],
-  my_work_goal_none: ['No goal', '目標なし'],
-  my_work_goal_unlinked: ['Goal not linked yet', 'まだ目標と結びついていません'],
   my_focus_label: ['My focus', 'マイフォーカス'],
   my_focus_other: ['Other', 'その他'],
   my_focus_sorting: ['Sorting…', '振り分け中…'],
@@ -7271,7 +7268,8 @@ function myWorkResults() {
   }
   const body = !rows.length
     ? (mw.query.trim() ? myWorkEmpty('my_work_no_match', 'my_work_no_match_body')
-      : myFocusSelected() ? myWorkEmpty('my_focus_area_empty', 'my_focus_area_empty_body')
+      // claude-mem's: only an area with no request at all; one the range hides is not empty.
+      : myFocusSelected() && !(mw.rows || []).some((row) => row.focus === myFocusSelected()) ? myWorkEmpty('my_focus_area_empty', 'my_focus_area_empty_body')
         : myWorkEmpty('my_work_empty', 'my_work_empty_body', true))
     : mw.layout === 'list' ? myWorkTable(rows)
       : mw.layout === 'agents' && !mw.agent ? myWorkAgents(rows)
@@ -7635,7 +7633,6 @@ function myWorkAccept(answer) {
   }
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
-  mw.goals = answer.goals ?? 0;
   mw.story = answer.story ?? null;
   mw.areas = answer.areas ?? [];
   mw.fetched = Date.now();
