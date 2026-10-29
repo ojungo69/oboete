@@ -485,7 +485,8 @@ shown, as in claude-mem.
 ### L. Goal links
 
 Replaced by F3 (decision 61): the placement job takes the links job's place, and no goal link is
-read once it is built.
+read once it is built. Retired in slice 10c-3b: the job, its module and each request's `goals` are
+gone; its ops stay known to S1 so that a forget and an exclusion still reach them.
 
 L1. **Due.** A request reviewed since its last link; every request once when a goal is added; a
 request whose linked goal is gone. Up to 5 due requests a call (claude-mem: all at once).
@@ -1886,6 +1887,17 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   months showed them. Nothing to show says so.
 - A changed poll waits behind "Show updates" while either page has the focus, the banner shown on
   the page.
+
+### Slice 10c-3b: My Goals and the goal links retired (2026-10-30)
+
+- **My Goals' tab and page** are gone, as claude-mem 15.4 removed its page: its priorities are the
+  areas' headers, its open asks their "Not started", "No goal" is Other, and its months are Past
+  focus's. The parts My Focus shows (the status words, the rollup, asked again by full dates, the
+  quotes' times and the months' names) stay, with their tests; `/api/my-goals` stays for Past focus.
+- **The links job** (L1 to L3) is removed from the jobs, with its module; My Work's answer has no
+  `goals` on a request and no count of the goals. The job's ops stay known (S1) so that a forget
+  and an exclusion still reach them; nothing reads them.
+- **Then**: slice 11, the Jev focus judge's hint (J5).
 
 ## Not built
 
