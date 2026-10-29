@@ -231,9 +231,18 @@ impl Job for OwnerGoals {
             now,
             &chrono::Local,
         );
+        // S2 (Codex on #754): the ops each area shown came from, so a forget or an exclusion of
+        // one's sources reaches the goals made on it.
+        let from = (areas.iter())
+            .flat_map(|a| focus.sources(&a.id))
+            .filter(|(d, _)| *d == device);
+        let mut ops: Vec<i64> = (round.current.iter()).map(|c| c.op_seq).collect();
+        ops.extend(from.map(|(_, seq)| *seq));
+        ops.sort_unstable();
+        ops.dedup();
         let mut read = Read {
             spans: filled.shown.iter().map(|p| (p.seq, p.seq)).collect(),
-            ops: (round.current.iter()).map(|c| c.op_seq).collect(),
+            ops,
         };
         if filled.shown.is_empty() {
             // Every prompt it saw was an agent's: kept as a skip of them, with no call (M2).
@@ -277,7 +286,7 @@ impl Job for OwnerGoals {
             schema: schema(),
             read,
             removed,
-            check: Box::new(move |answer: &Value| check(answer, &shown, &mine)),
+            check: Box::new(move |answer: &Value| check(answer, &shown, (&mine, now - WINDOW_MS))),
             subjects: Vec::new(),
             keep: Box::new(move |answer: &Value| keep(answer, &context)),
         }))
@@ -494,13 +503,18 @@ fn schema() -> Value {
 /// A10, checked by code: the shape and the lists' counts; F5, as claude-mem's `ownerGoalsAreaRows`
 /// refuses: an area that is not one of those `shown` (`unanchored`), two priorities of one area
 /// (`shape`), and a new priority of no area named with a page word (`page_word`). A missing area
-/// is an empty one. The outcome that refuses it, none when it passes.
-fn check(answer: &Value, shown: &HashSet<String>, current: &[Item]) -> Option<&'static str> {
+/// is an empty one. `current` is the goals shown, with the window's start: one `keep` will drop
+/// takes no area (CodeRabbit on #754). The outcome that refuses it, none when it passes.
+fn check(answer: &Value, shown: &HashSet<String>, current: (&[Item], i64)) -> Option<&'static str> {
     shape(answer).or_else(|| areas(answer, shown, current))
 }
 
 /// F5's part of the check.
-fn areas(answer: &Value, shown: &HashSet<String>, current: &[Item]) -> Option<&'static str> {
+fn areas(
+    answer: &Value,
+    shown: &HashSet<String>,
+    (current, since): (&[Item], i64),
+) -> Option<&'static str> {
     let area = |v: &Value| v["area"].as_str().unwrap_or("").trim().to_owned();
     let list = |key: &str| answer[key].as_array().map_or(&[][..], Vec::as_slice);
     let named = (list("new").iter().chain(list("changed"))).map(area);
@@ -508,8 +522,13 @@ fn areas(answer: &Value, shown: &HashSet<String>, current: &[Item]) -> Option<&'
         return Some("unanchored");
     }
     let dropped: HashSet<&str> = list("dropped").iter().filter_map(Value::as_str).collect();
+    let changed: HashSet<&str> = list("changed")
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    let live = |i: &Item| changed.contains(i.id.as_str()) || i.quotes.iter().any(|q| q.ts >= since);
     let mut of: HashMap<&str, String> = (current.iter())
-        .filter(|i| i.kind == "priority" && !dropped.contains(i.id.as_str()))
+        .filter(|i| i.kind == "priority" && !dropped.contains(i.id.as_str()) && live(i))
         .map(|i| (i.id.as_str(), i.area.clone().unwrap_or_default()))
         .collect();
     for c in list("changed") {
@@ -1434,9 +1453,13 @@ mod tests {
                 "fa_00000000000e".to_owned(),
                 area("Release", "done", "system"),
             ),
+            (
+                "fa_000000000010".to_owned(),
+                area("Owned", "suggested", "owner"),
+            ),
         ];
         crate::my_work_ops::record(h.s.home.path(), crate::my_work_focus::NAME, ops).unwrap();
-        h.later("s2", R, "Write a lexer, test the parser, ship it.");
+        h.later("s2", R, "Write a lexer, test the parser, ship it, own it.");
         h.age();
         let (_, sent) = h.pass(&|_| {
             let mut new = vec![];
@@ -1444,6 +1467,7 @@ mod tests {
                 ("Lexer", "Write a lexer", "fa_00000000000a"),
                 ("Tests", "test the parser", "fa_00000000000b"),
                 ("Release", "ship it", "fa_00000000000e"),
+                ("Owned", "own it", "fa_000000000010"),
             ] {
                 let mut n = item("priority", title, &[("P1", quote)]);
                 n["product"] = json!(format!("The {title}"));
@@ -1466,6 +1490,21 @@ mod tests {
             Some("fa_00000000000d")
         );
         let now = focus(&h);
+        // S2: it read the shown areas' ops; an area the owner decided got none of its rows.
+        let newest = &h.goals()[0];
+        let lexer = now.sources("fa_00000000000a");
+        let before: Vec<i64> = (lexer.iter())
+            .map(|(_, seq)| *seq)
+            .filter(|seq| *seq != newest.op_seq)
+            .collect();
+        assert!(
+            before.len() == 1 && before.iter().all(|seq| newest.op.read.ops.contains(seq)),
+            "{:?} {lexer:?}",
+            newest.op.read.ops
+        );
+        for owners in ["fa_00000000000b", "fa_000000000010"] {
+            assert_eq!(now.sources(owners).len(), 1, "only the owner's own op");
+        }
         let rank_goal = |id: &str| {
             let a = &now.areas[id];
             (
@@ -1497,6 +1536,12 @@ mod tests {
     #[test]
     fn an_area_unknown_or_taken_twice_refuses_the_answer() {
         let shown: HashSet<String> = ["fa_00000000000a".to_owned()].into();
+        let now = crate::db::now_ms();
+        let quote = |age: i64| Quote {
+            seq: 1,
+            ts: now - age,
+            text: "x".into(),
+        };
         let mut current = Item {
             id: "g1".into(),
             kind: "priority".into(),
@@ -1504,7 +1549,7 @@ mod tests {
             title: "Parser".into(),
             product: String::new(),
             asked: 1,
-            quotes: vec![],
+            quotes: vec![quote(DAY_MS)],
             area: Some("fa_00000000000a".into()),
         };
         let new = |title: &str, area: &str| {
@@ -1512,8 +1557,13 @@ mod tests {
             n["area"] = json!(area);
             n
         };
-        let run =
-            |answer: &Value, current: &Item| areas(answer, &shown, std::slice::from_ref(current));
+        let run = |answer: &Value, current: &Item| {
+            areas(
+                answer,
+                &shown,
+                (std::slice::from_ref(current), now - WINDOW_MS),
+            )
+        };
         let fine = answer(json!([new("Lexer", "")]), json!([]), json!([]));
         assert_eq!(run(&fine, &current), None);
         let unknown = answer(
@@ -1531,6 +1581,14 @@ mod tests {
         let mut freed = twice.clone();
         freed["dropped"] = json!(["g1"]);
         assert_eq!(run(&freed, &current), None);
+        // One whose quotes the window left goes, and takes no area; changed, it stays.
+        let mut expired = current.clone();
+        expired.quotes = vec![quote(WINDOW_MS + DAY_MS)];
+        assert_eq!(run(&twice, &expired), None);
+        let mut kept = twice.clone();
+        kept["changed"] = json!([{"id": "g1", "title": "", "product": "", "asked": 1,
+            "quote": {"prompt": "P1", "text": "x"}, "area": ""}]);
+        assert_eq!(run(&kept, &expired), Some("shape"));
         let word = answer(json!([new("My Work", "")]), json!([]), json!([]));
         assert_eq!(run(&word, &current), Some("page_word"));
         current.kind = "ask".into();

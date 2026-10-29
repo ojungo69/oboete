@@ -153,6 +153,10 @@ impl Focus {
             let product = product.filter(|p| !p.trim().is_empty());
             let mut patch = json!({"kind": "area", "priority_rank": item["rank"],
                 "decided_by": "system"});
+            // `apply` skips a system row of an area the owner decided: it is none of its sources.
+            if self.areas.get(area).is_some_and(|a| a.owner_decided) {
+                continue;
+            }
             match self.areas.get(area) {
                 None => {
                     let Some(name) = title.filter(|t| page_word(t).is_none()) else {
