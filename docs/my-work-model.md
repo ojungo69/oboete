@@ -1779,6 +1779,40 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   them.
 - **Then**: slice 10c, the page.
 
+### Slice 10c-1: My Focus's chips, the area filter, the card's area, Move to… (2026-10-29)
+
+- **The chips** (F7): above My Work's views, the kept areas in the answer's order (owner rank,
+  priority rank, name), then Other, each with how many of its requests need the owner (needs you,
+  or ready to check: claude-mem's `needsYou`), the count seen and said in words. claude-mem shows
+  them as a rail beside its page list on wide screens and as chips on narrow ones; oboete's page
+  list is a row of tabs at the top, so the chips stand at every width. The suggested areas and Past
+  focus come with their pages (10c-3). Nothing of My Focus is drawn while no area is listed and no
+  request placed, so a home that does not use it sees My Work as before.
+- **The filter**: a chip chosen shows the requests whose `focus` is that area, for this visit only;
+  pressed again, all of My Work. The status tabs and counts are of the chosen area. A choice the
+  answer no longer lists (dismissed, or merged away) shows all. A suggested or done area a card
+  opened stands with the chips while it is chosen, pressed, so pressing it clears the choice; in
+  claude-mem no chip is pressed then. A request not sorted yet shows only unfiltered. An area with none says "No requests in this area yet".
+- **The card's area**, in place of the goal chip (claude-mem 15.4's FocusAreaChip): its area's
+  name or Other, a button that opens it, or "Sorting…" while it has no placement. My Goals' jump
+  from the card is gone with it.
+- **Move to…** on a request's page, beside its area: the kept and suggested areas but its own
+  (`· suggested`), then Other unless it is there; through `POST /api/my-focus` (`move-request`), one
+  save at a time, My Work read again after it. claude-mem hides it for a request with no anchor
+  conversation; every request here has a held id `act` places, so it is always there. It opens a
+  row of buttons, one per area, as claude-mem's popover lists them: a closed select would move the
+  request as a person browses it with the arrow keys. The focus comes back to Move to… after a move
+  and after Undo on the request's page.
+- **The change bar** (claude-mem's FocusChangeBar): the change, that it is saved on this computer
+  and that a round of sorting never overrides it (no sync claim: oboete's ops sync with milestone
+  6), and Undo, which moves the request back; none from "Sorting…" or from an area that takes no
+  requests (a done one). A refusal's words otherwise.
+  The page's status line says the change too, as the bar is drawn anew with each redraw and a
+  screen reader would not read it.
+- **Page words**: the section's Japanese names (マイフォーカス, その他) join the names an area may
+  not have.
+- **Then**: slice 10c-2, the area's header and its menu.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

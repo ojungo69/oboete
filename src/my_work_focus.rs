@@ -33,8 +33,8 @@ const PAGE_WORDS: &[&str] = &[
     "monitor",
     "steer",
 ];
-/// The page's Japanese tab names, which a name may not be.
-const PAGE_NAMES: &[&str] = &["マイワーク", "目標", "規則"];
+/// The page's Japanese tab and section names, which a name may not be.
+const PAGE_NAMES: &[&str] = &["マイワーク", "目標", "規則", "マイフォーカス", "その他"];
 const STATUSES: &[&str] = &["suggested", "kept", "dismissed", "done"];
 const SOURCES: &[&str] = &["owner-goals", "clustering", "promotion", "owner"];
 const DECIDERS: &[&str] = &["owner", "system", "owner-restore"];
@@ -632,6 +632,8 @@ mod tests {
             "Ship the My Work viewer",
             "MY RULES",
             "規則",
+            "マイフォーカス",
+            "その他",
         ] {
             assert!(page_word(name).is_some(), "{name}");
         }

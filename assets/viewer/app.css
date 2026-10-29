@@ -924,10 +924,23 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-rules-last { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px; }
 .my-goals-lead { margin: 0 0 18px; }
 .my-goals-lead-line { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
-.my-work-goal { align-self: flex-start; min-height: 24px; padding: 0; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12.5px; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-span.my-work-goal { font-style: italic; text-decoration: none; cursor: default; }
-/* Above the card's stretched opener, so that a click on the goal opens My Goals (Codex on #729). */
-.my-work-card button.my-work-goal { position: relative; z-index: 1; }
+/* F7 (decision 61): My Focus's chips above My Work, as its status tabs; a card's area; the change bar. */
+.my-focus-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.my-focus-entry { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; border-radius: 999px; overflow-wrap: anywhere; }
+.my-focus-entry[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.my-focus-chip { align-self: flex-start; min-height: 24px; padding: 0; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12.5px; text-align: left; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; cursor: pointer; }
+button.my-focus-chip:hover:not(:disabled) { background: none; color: var(--text); }
+span.my-focus-chip { font-style: italic; text-decoration: none; cursor: default; }
+/* Above the card's stretched opener, so that a click on the area opens it (Codex on #729). */
+.my-work-card button.my-focus-chip { position: relative; z-index: 1; }
+.my-focus-change { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 0 0 14px; padding: 10px 14px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--radius-m); }
+.my-focus-change p { margin: 0; }
+/* The name lines up with Move to…, open or closed (its first line). */
+.my-focus-fact { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.my-focus-move > summary { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); font-size: 13px; cursor: pointer; }
+.my-focus-move > summary:hover { background: var(--surface-2); border-color: var(--line-strong); }
+.my-focus-move > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.my-focus-move button { max-width: 100%; overflow-wrap: anywhere; }
 .my-work-build-story { margin: 0 0 18px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .my-work-build-story h3 { margin: 0 0 6px; font-size: 15px; }
 .my-work-recap { margin: 0 0 8px; }

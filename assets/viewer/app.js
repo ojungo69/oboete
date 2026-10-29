@@ -2542,12 +2542,28 @@ const TEXT = {
   my_goals_served: ['Being worked on · {n}', '進めているもの · {n}'],
   my_goals_no_goal: ['No goal · {n}', '目標なし · {n}'],
   my_goals_no_goal_note: ['Requests that serve none of your priorities: work happening outside what you said you want.', 'どの目標にも向いていない依頼です。あなたが望むと言ったこと以外で進んでいる作業です。'],
-  my_work_goal: ['Goal', '目標'],
   my_work_build_story: ['Build story', '作業の経緯'],
   my_work_story_chapters: ['Week by week · {n}', '週ごと · {n}'],
   my_work_story_week: ['{start} to {end}', '{start}〜{end}'],
-  my_work_goal_none: ['No goal', '目標なし'],
-  my_work_goal_unlinked: ['Goal not linked yet', 'まだ目標と結びついていません'],
+  my_focus_label: ['My focus', 'マイフォーカス'],
+  my_focus_other: ['Other', 'その他'],
+  my_focus_sorting: ['Sorting…', '振り分け中…'],
+  my_focus_need_you: ['{n} need you', '{n} 件があなたの対応待ち'],
+  my_focus_area: ['Focus area', '分野'],
+  my_focus_area_empty: ['No requests in this area yet', 'この分野にはまだ依頼がありません'],
+  my_focus_area_empty_body: ['New requests come here as My Work sorts them, or you can move one here from its page.', 'My Work が依頼を振り分けると、ここに入ります。依頼のページから、ここへ移すこともできます。'],
+  my_focus_move: ['Move to…', '移す先…'],
+  my_focus_moving: ['Moving…', '移しています…'],
+  my_focus_move_label: ['Move to another focus area', '別の分野へ移す'],
+  my_focus_suggested_suffix: [' · suggested', '（提案）'],
+  my_focus_moved: ['Moved “{title}” to {area}.', '「{title}」を「{area}」へ移しました。'],
+  my_focus_saved: ['Saved on this computer. The next round of sorting never overrides it.', 'このコンピューターに保存しました。この後の自動の振り分けで変わることはありません。'],
+  my_focus_pending: ['Saved. It shows here once My Work has read it.', '保存しました。My Work が読み込むと、ここに反映されます。'],
+  my_focus_undo: ['Undo', '元に戻す'],
+  my_focus_no_undo: ['This one can’t be undone from here.', 'この変更は、ここからは元に戻せません。'],
+  focus_move_target: ['That area takes no requests now.', 'その分野は、今は依頼を受け付けていません。'],
+  focus_not_found: ['That area or request is no longer there. The page has been read again.', 'その分野か依頼は、もうありません。ページを読み直しました。'],
+  focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   my_rules: ['My Rules', '規則'],
   my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],
   my_rules_where: ['Rules you approve or add reach Claude Code, Codex and Grok at the start of every session, as your preferences. A rule of one repository reaches only the sessions in it.', '承認した規則と追加した規則は、あなたの好みとして、Claude Code・Codex・Grok の毎回のセッションの始めに渡ります。1 つのリポジトリの規則は、そのリポジトリのセッションにだけ渡ります。'],
@@ -6654,6 +6670,9 @@ const mw = {
   layout: MY_WORK_LAYOUTS.includes(recall('oboete-my-work-layout', 'cards')) ? recall('oboete-my-work-layout', 'cards') : 'cards',
   filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
   agent: null, request: null, work: null, back: null,
+  // F7: the focus area chosen (an id or `other`), for this visit only, as claude-mem's; the areas;
+  // a save in progress, and the last change with its Undo.
+  area: null, areas: [], moving: false, saved: null,
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
@@ -6810,25 +6829,160 @@ function myWorkStory(row) {
       el('li', null, el('span', 'my-work-milestone-date', myWorkDay(m.date)), ' ', m.text))) : null);
 }
 
-// L3, V4 (claude-mem's `GoalChip`): the goal a request serves, its priority first, which opens on
-// My Goals; "No goal" when the links job linked it to none; "Goal not linked yet" before, while
-// there are goals to link to. Nothing while there are none.
-function myWorkGoalChip(row) {
-  if (!mw.goals) return null;
-  if (!Array.isArray(row.goals)) return word('span', 'my-work-goal muted', 'my_work_goal_unlinked');
-  if (!row.goals.length) return word('span', 'my-work-goal muted', 'my_work_goal_none');
-  const goal = row.goals[0];
-  const button = el('button', 'my-work-goal', goal.title);
+// F7 (claude-mem's `needsYou`): a request waiting on the owner, to act on it or to check it.
+const myFocusNeedsYou = (row) => row.status === 'needs' || row.status === 'ready';
+
+// F7: whether My Focus is in use: an area listed, or a request placed. Until then neither the
+// chips nor a request's area is drawn, as no card would say more than "Sorting…".
+const myFocusInUse = () => mw.areas.length > 0 || (mw.rows || []).some((row) => row.focus);
+
+// F7: the area the choice stands for: Other, or a listed area that is not dismissed; none, all of
+// My Work. A merged area is not listed, so a choice of one falls back to all.
+// shortcut: a merged area's choice shows all, where claude-mem shows its target; 10c-2's merge sets
+// the choice to the target as it saves.
+function myFocusSelected() {
+  if (mw.area === 'other') return 'other';
+  const area = mw.areas.find((a) => a.id === mw.area);
+  return area && area.status !== 'dismissed' ? area.id : null;
+}
+
+const myFocusName = (id) => (id === 'other' ? t('my_focus_other') : mw.areas.find((a) => a.id === id)?.name ?? id);
+
+// F7: open My Work on `id` (an area or `other`), or on all of it for none; `focus` takes the focus
+// after the redraw.
+function myFocusChoose(id, focus = 'heading') {
+  mw.area = id;
+  mw.request = null;
+  mw.work = null;
+  myWorkDraw(focus);
+}
+
+// F7: the request's area, a button that opens it, or "Sorting…" while it has none.
+function myFocusChip(row) {
+  if (!myFocusInUse()) return null;
+  if (!row.focus) return word('span', 'my-focus-chip sorting', 'my_focus_sorting');
+  const button = el('button', 'my-focus-chip', myFocusName(row.focus));
   button.type = 'button';
-  button.dataset.goal = goal.id;
+  // On a card nothing else says what the name is.
+  button.setAttribute('aria-label', `${t('my_focus_area')}: ${myFocusName(row.focus)}`);
   button.addEventListener('click', (event) => {
     event?.stopPropagation?.();
-    Object.assign(mg, { tab: 'now', jump: goal.id });
-    mg.goals.add(goal.id);
-    setView('my_goals');
-    void show();
+    myFocusChoose(row.focus);
   });
   return button;
+}
+
+// F7, claude-mem's chip row: the kept areas in order, then Other, each with how many of its
+// requests need the owner; the chosen one pressed, and pressed again it shows all of My Work.
+function myFocusChips() {
+  if (!myFocusInUse()) return null;
+  const chosen = myFocusSelected();
+  const entries = [...mw.areas.filter((a) => a.status === 'kept').map((a) => a.id), 'other'];
+  // A suggested or done area a card opened stands with them while chosen, pressed, to be cleared;
+  // cleared, it is gone, and the focus goes to the requests' heading (CodeRabbit on #755).
+  const temporary = chosen && !entries.includes(chosen) ? chosen : null;
+  if (temporary) entries.splice(-1, 0, temporary);
+  const nav = el('nav', 'my-focus-chips', ...entries.map((id) => {
+    const need = (mw.rows || []).filter((row) => row.focus === id && myFocusNeedsYou(row)).length;
+    // The count is seen; what it counts is read (claude-mem's " need you").
+    const count = need ? el('span', 'my-work-count', String(need)) : null;
+    count?.setAttribute('aria-hidden', 'true');
+    const said = need ? el('span', 'sr-only', t('my_focus_need_you', { n: need })) : null;
+    const button = el('button', 'quiet my-focus-entry', el('span', null, myFocusName(id)), count, said);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(chosen === id));
+    button.dataset.myWork = `chip:${id}`;
+    button.addEventListener('click', () => myFocusChoose(chosen === id ? null : id, id === temporary ? 'current' : `chip:${id}`));
+    return button;
+  }));
+  nav.setAttribute('aria-label', t('my_focus_label'));
+  return nav;
+}
+
+// F6, F7: one action on My Focus at a time, then My Work read again (My Rules' write): the change
+// with its Undo when it was applied; a refusal's words otherwise.
+async function myFocusWrite(body, text, undo) {
+  if (mw.moving) return false;
+  mw.moving = true;
+  myWorkDraw();
+  let message = null;
+  try {
+    const { res, answer } = await memoryWrite('my-focus', body);
+    if (!res.ok) {
+      message = memoryFailure(res, answer);
+      return false;
+    }
+    const applied = answer.state === 'applied';
+    mw.saved = { text, undo: applied ? undo : null, applied };
+    message = text;
+    return true;
+  } catch {
+    message = t('memory_result_unknown');
+    return false;
+  } finally {
+    mw.moving = false;
+    mw.signature = '';
+    if (view === 'my_work') await show();
+    // The page's live region says it: the change bar is drawn anew with each redraw, too late to
+    // be read out. Held, it outlasts the redraw that clears the status.
+    if (message && view === 'my_work') setStatus(message, message !== text, lang, 8000);
+  }
+}
+
+// F7: the last change, what saving it means, and its Undo (claude-mem's FocusChangeBar).
+function myFocusChangeBar() {
+  if (!mw.saved) return null;
+  const { text, undo, applied } = mw.saved;
+  let action = word('span', 'muted', 'my_focus_no_undo');
+  if (undo) {
+    action = word('button', 'quiet small', 'my_focus_undo');
+    action.type = 'button';
+    action.dataset.myWork = 'focus:undo';
+    action.disabled = mw.moving;
+    action.addEventListener('click', () => {
+      void myFocusWrite(undo.body, undo.text, null).then((ok) => {
+        if (ok) mw.saved = null;
+        if (view === 'my_work') myWorkDraw(mw.request !== null ? 'focus:move' : 'heading');
+      });
+    });
+  }
+  const bar = el('div', 'my-focus-change', el('p', null, el('strong', null, text), ' ',
+    word('span', null, applied ? 'my_focus_saved' : 'my_focus_pending')), applied ? action : null);
+  return bar;
+}
+
+// F6: an area a request can be moved into (claude-mem's `isPlaceableFocusArea`).
+const myFocusPlaceable = (a) => a.status === 'kept' || a.status === 'suggested';
+
+// F6, F7: Move to… on a request's page: the areas that take requests but its own, then Other
+// unless it is there; none when there is nowhere to move it. Undo moves it back, none from
+// "Sorting…" or from an area that takes no requests (Codex on #755). A disclosure of buttons, as claude-mem's popover: a closed select would move the
+// request as a person browses it with the arrow keys.
+function myFocusMove(row) {
+  const targets = mw.areas.filter((a) => myFocusPlaceable(a) && a.id !== row.focus)
+    .map((a) => [a.id, a.status === 'suggested' ? `${a.name}${t('my_focus_suggested_suffix')}` : a.name]);
+  if (row.focus !== 'other') targets.push(['other', t('my_focus_other')]);
+  if (!targets.length) return null;
+  const summary = word('summary', null, mw.moving ? 'my_focus_moving' : 'my_focus_move');
+  summary.setAttribute('aria-label', t('my_focus_move_label'));
+  summary.dataset.myWork = 'focus:move';
+  return el('details', 'my-focus-move', summary, el('div', null, ...targets.map(([to, name]) => {
+    const button = el('button', 'quiet small', name);
+    button.type = 'button';
+    button.disabled = mw.moving;
+    button.dataset.myWork = `move:${to}`;
+    button.addEventListener('click', () => {
+      const from = row.focus;
+      const text = t('my_focus_moved', { title: row.title, area: myFocusName(to) });
+      const back = from === 'other' || mw.areas.some((a) => a.id === from && myFocusPlaceable(a));
+      const undo = back ? { body: { action: 'move-request', request: row.id, area: from },
+        text: t('my_focus_moved', { title: row.title, area: myFocusName(from) }) } : null;
+      // Not over another page opened while it saved (Codex on #755).
+      void myFocusWrite({ action: 'move-request', request: row.id, area: to }, text, undo)
+        .then(() => view === 'my_work' && myWorkDraw('focus:move'));
+    });
+    return button;
+  })));
 }
 
 // P6, V4: the build story at My Work's top, as claude-mem's recap: the recap, then the chapters,
@@ -6864,7 +7018,7 @@ function myWorkCard(row) {
     el('p', 'my-work-summary', myWorkActivity(row)),
     row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
     myWorkProgress(row),
-    myWorkGoalChip(row),
+    myFocusChip(row),
     el('div', 'my-work-context', myWorkContributors(row), el('span', 'my-work-project', myWorkProjects(row))),
     el('div', next ? 'my-work-footer' : 'my-work-footer no-next',
       next ? el('div', 'my-work-next', word('span', 'my-work-next-label', next.label), el('p', null, next.text)) : null,
@@ -6960,7 +7114,9 @@ const myWorkSearchText = (row) => [row.title, myWorkActivity(row), ...(row.sessi
 function myWorkScoped(now = Date.now()) {
   const since = mw.range === 'day' ? now - 86400000 : mw.range === 'week' ? now - 7 * 86400000 : 0;
   const query = mw.query.trim().toLowerCase();
+  const area = myFocusSelected();
   return (mw.rows || []).filter((row) => row.updated >= since
+    && (!area || row.focus === area)
     && (!mw.project || (row.projects || []).includes(mw.project))
     && (!query || myWorkSearchText(row).includes(query))
     && (!mw.agent || (row.sessions || []).some((s) => s.id === mw.agent)));
@@ -7094,10 +7250,10 @@ function myWorkDraw(focus = null) {
   const [switches, toolbar] = myWorkControls();
   mw.results = el('div', 'my-work-results');
   myWorkResults();
-  draw(word('span', null, 'my_work'), [], [
+  draw(word('span', null, 'my_work'), [], present([
     el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_work_eyebrow'), word('p', 'my-work-subtitle', 'my_work_subtitle'), myWorkLineSlot()),
-    myWorkBuildStory(), switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
-  ]);
+    myWorkBuildStory(), myFocusChips(), myFocusChangeBar(), switches, toolbar, mw.results, word('p', 'my-work-note', 'my_work_states_note'),
+  ]));
   mw.changed.clear();
   setStatus('');
   myWorkFocus(focus);
@@ -7121,11 +7277,15 @@ function myWorkResults() {
     trail = el('div', 'my-work-trail', back, el('span', null, session ? myWorkAgent(session.agent) : t('my_work_contributor')));
   }
   const body = !rows.length
-    ? (mw.query.trim() ? myWorkEmpty('my_work_no_match', 'my_work_no_match_body') : myWorkEmpty('my_work_empty', 'my_work_empty_body', true))
+    ? (mw.query.trim() ? myWorkEmpty('my_work_no_match', 'my_work_no_match_body')
+      // claude-mem's: only an area with no request at all; one the range hides is not empty.
+      : myFocusSelected() && !(mw.rows || []).some((row) => row.focus === myFocusSelected()) ? myWorkEmpty('my_focus_area_empty', 'my_focus_area_empty_body')
+        : myWorkEmpty('my_work_empty', 'my_work_empty_body', true))
     : mw.layout === 'list' ? myWorkTable(rows)
       : mw.layout === 'agents' && !mw.agent ? myWorkAgents(rows)
         : el('div', 'my-work-grid', ...rows.map(myWorkCard));
-  const heading = word('h3', 'my-work-heading', mw.filter === 'all' ? 'my_work_all_work' : `my_work_status_${mw.filter}`);
+  const heading = mw.filter === 'all' && myFocusSelected() ? el('h3', 'my-work-heading', myFocusName(myFocusSelected()))
+    : word('h3', 'my-work-heading', mw.filter === 'all' ? 'my_work_all_work' : `my_work_status_${mw.filter}`);
   heading.tabIndex = -1;
   const unlinked = mw.unlinked ? el('details', 'my-work-unlinked', word('summary', null, 'my_work_unlinked', { n: mw.unlinked }),
     el('div', null, word('p', null, 'my_work_unlinked_body'), myWorkTimeline('my_work_unlinked_link'))) : null;
@@ -7144,7 +7304,7 @@ function myWorkFocus(focus) {
     $('heading').focus({ preventScroll: true });
     return;
   }
-  const nodes = [...panel.querySelectorAll('input, select, button, h3')];
+  const nodes = [...panel.querySelectorAll('input, select, button, summary, h3')];
   const found = focus === 'current' || focus === 'agents' ? nodes.find((node) => node.className === 'my-work-heading')
     : nodes.find((node) => node.dataset.myWork === focus);
   if (!found) return;
@@ -7283,7 +7443,8 @@ function myWorkDrawRequest() {
     el('dl', 'my-work-facts', myWorkFact('my_work_contributors', myWorkContributors(row)),
       myWorkFact('my_work_started', row.started > 0 ? localTime(row.started, lang) : t('my_work_not_recorded')),
       myWorkFact('my_work_elapsed', elapsed),
-      mw.goals ? myWorkFact('my_work_goal', myWorkGoalChip(row)) : null),
+      myFocusInUse() ? myWorkFact('my_focus_area', el('span', 'my-focus-fact', myFocusChip(row), myFocusMove(row))) : null),
+    myFocusChangeBar(),
     el('section', 'my-work-stands', word('h3', null, 'my_work_stands'), el('p', null, myWorkActivity(row)),
       row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
       el('p', 'my-work-request-next', el('strong', null, `${t(next?.label || 'my_work_next_step')}:`), ' ', next?.text || myWorkNext(row)),
@@ -7460,8 +7621,11 @@ function myWorkHandoff(row) {
 const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work, row.updates, row.cards]);
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
+// What tells two answers of My Work apart: a change of any is drawn, or held while a person reads.
+const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story, answer.areas]);
+
 function myWorkAccept(answer) {
-  mw.signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story]);
+  mw.signature = myWorkAnswerSignature(answer);
   // claude-mem 15's `normalizeRequestStatus`: a checked result ready to check is Checked on the
   // page; a shipped one stays Shipped.
   for (const row of answer.requests) if (row.checked && row.status === 'ready') row.status = 'checked';
@@ -7479,8 +7643,8 @@ function myWorkAccept(answer) {
   }
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
-  mw.goals = answer.goals ?? 0;
   mw.story = answer.story ?? null;
+  mw.areas = answer.areas ?? [];
   mw.fetched = Date.now();
   mw.pending = null;
 }
@@ -7490,7 +7654,8 @@ function myWorkReading() {
   if (mw.request !== null || (window.scrollY || 0) > 220) return true;
   const active = document.activeElement;
   // The build story's disclosure too, at the page's top (#733).
-  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story']
+  return ['.my-work-toolbar', '.my-work-tabs', '.my-work-switch', '.my-work-grid', '.my-work-table', '.my-work-agents', '.my-work-build-story',
+    '.my-focus-chips', '.my-focus-change']
     .some((selector) => active?.closest?.(selector));
 }
 
@@ -7508,7 +7673,7 @@ async function myWorkLive() {
   // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on #597).
   mw.taken = read;
   mw.fetched = Date.now();
-  const signature = JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story]);
+  const signature = myWorkAnswerSignature(answer);
   if (signature === mw.signature) return true;
   if (myWorkReading()) {
     // The last answer received, as claude-mem's `accept` keeps it: the same answer again stays
@@ -7593,7 +7758,7 @@ function myWorkStatusLine(status) {
 const MY_GOALS_TOP = 5;
 // What a redraw keeps: the inner tab, the goals and months opened, "more"; and the answer drawn,
 // so that a poll that brings the same one draws nothing.
-const mg = { tab: 'now', open: new Set(), goals: new Set(), months: new Set(), more: false, signature: null, answer: null, requests: [], fetched: 0, jump: null };
+const mg = { tab: 'now', open: new Set(), goals: new Set(), months: new Set(), more: false, signature: null, answer: null, requests: [], fetched: 0 };
 
 async function showMyGoals() {
   // My Work's requests with them, as claude-mem's page reads its goals' requests from the work
@@ -7866,10 +8031,6 @@ function myGoalsDraw() {
   // back to the one with the same key when it is drawn again (#722, #724).
   const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
   const a = mg.answer ?? {};
-  // A priority a card opened past the top five, by its rank in this answer, is behind "more"
-  // (Codex and CodeRabbit on #729, #731).
-  const target = mg.jump && (a.current?.items ?? []).find((i) => i.id === mg.jump);
-  if (target?.kind === 'priority' && target.rank > MY_GOALS_TOP) mg.more = true;
   const end = myGoalsDay(Date.now());
   const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
     const button = el('button', mg.tab === key ? 'tab my-goals-tab-on' : 'tab', label);
@@ -7888,15 +8049,6 @@ function myGoalsDraw() {
     tabs, el('div', 'my-goals', ...(mg.tab === 'months' ? myGoalsMonths(a) : myGoalsNow(a))),
   ]);
   if (focus) [...$('panel').querySelectorAll('button, summary')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
-  // A goal a card opened (V4): in view, with the focus on it; an open ask by its quotes' disclosure.
-  const summaries = [...$('panel').querySelectorAll('summary')];
-  const jump = mg.jump && (summaries.find((node) => node.dataset.focus === `goal:${mg.jump}`)
-    ?? summaries.find((node) => node.dataset.focus === `why:${mg.jump}`));
-  mg.jump = null;
-  if (jump) {
-    jump.scrollIntoView?.({ block: 'start' });
-    jump.focus({ preventScroll: true });
-  }
   setStatus('');
 }
 
