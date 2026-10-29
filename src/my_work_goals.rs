@@ -32,6 +32,8 @@ const CHANGED: usize = 4;
 /// M3: code keeps an item's newest 3 quotes, and at most 10 priorities and 10 open asks.
 const QUOTES_KEPT: usize = 3;
 const EACH: usize = 10;
+/// F5: the areas a goals call shows take at most this share of its window, 1 in 4.
+const AREAS_SHARE: u32 = 4;
 const KINDS: [&str; 2] = ["priority", "ask"];
 
 /// One goal as code keeps it (M3, M4).
@@ -217,12 +219,14 @@ impl Job for OwnerGoals {
             .map(|p| (None, device.as_str(), p.seq, p.ts, p.text.as_str()))
             .collect();
         let (agent, _) = crate::my_work_group::agent_written(s.raw, &given)?;
-        // F5: the areas, the ones the system withdrew left out (claude-mem's `isWithdrawnArea`).
+        // F5: the areas, the ones the system withdrew left out (claude-mem's `isWithdrawnArea`),
+        // those that take requests first.
         let focus = crate::my_work_focus::Focus::read(s.raw, s.k, s.reading)?;
-        let areas: Vec<&crate::my_work_focus::Area> = (focus.areas.values())
-            .filter(|a| a.status() != "dismissed" || a.text("decided_by") == Some("owner"))
-            .collect();
-        let shown: HashSet<String> = areas.iter().map(|a| a.id.clone()).collect();
+        // A merged one too: a goal of it answers its own id (claude-mem's `ownerGoalsAreaRows`).
+        let mut areas = focus.listed();
+        areas.extend((focus.areas.values()).filter(|a| a.text("merged_into").is_some()));
+        areas.retain(|a| a.status() != "dismissed" || a.text("decided_by") == Some("owner"));
+        areas.sort_by_key(|a| !a.placeable());
         let filled = fill(
             s,
             (&current, &areas),
@@ -233,8 +237,9 @@ impl Job for OwnerGoals {
         );
         // S2 (Codex on #754): the ops each area shown came from, so a forget or an exclusion of
         // one's sources reaches the goals made on it.
-        let from = (areas.iter())
-            .flat_map(|a| focus.sources(&a.id))
+        let shown: HashSet<String> = filled.areas.iter().cloned().collect();
+        let from = (filled.areas.iter())
+            .flat_map(|id| focus.sources(id))
             .filter(|(d, _)| *d == device);
         let mut ops: Vec<i64> = (round.current.iter()).map(|c| c.op_seq).collect();
         ops.extend(from.map(|(_, seq)| *seq));
@@ -317,6 +322,8 @@ struct Filled {
     through: i64,
     /// Whether it stopped at the budget with prompts left (M2: the next chunk goes on at once).
     more: bool,
+    /// The areas it showed, by id.
+    areas: Vec<String>,
 }
 
 /// M1, M2 within `[summary] window_tokens` (A4): the current goals without their quotes (M3), then
@@ -352,17 +359,24 @@ fn fill(
             ));
         }
     }
-    if !areas.is_empty() {
-        data.push_str("## Focus areas\n");
-        for a in areas {
-            let goal = gate(a.text("goal").unwrap_or(""));
-            data.push_str(&format!(
-                "- {} {}: {} | {goal}\n",
-                a.id,
-                a.status(),
-                gate(a.name())
-            ));
+    // The areas while they fit a quarter of the window, so the prompts keep the rest (Codex on
+    // #754).
+    let (mut shown_areas, mut room) = (Vec::new(), s.summary.window_tokens / AREAS_SHARE);
+    let mut lines = String::new();
+    for a in areas {
+        let goal = gate(a.text("goal").unwrap_or(""));
+        let line = format!("- {} {}: {} | {goal}\n", a.id, a.status(), gate(a.name()));
+        let cost = crate::budget::estimate(&line);
+        if cost > room {
+            break;
         }
+        room -= cost;
+        lines.push_str(&line);
+        shown_areas.push(a.id.clone());
+    }
+    if !lines.is_empty() {
+        data.push_str("## Focus areas\n");
+        data.push_str(&lines);
     }
     data.push_str("## Prompts, the oldest first\n");
     let mut left = s
@@ -374,6 +388,7 @@ fn fill(
         shown: Vec::new(),
         through: 0,
         more: false,
+        areas: shown_areas,
     };
     for p in unread {
         if agent.contains(&p.seq) {
@@ -1529,6 +1544,37 @@ mod tests {
         let day = vec![("2026-10-29".to_owned(), goals)];
         crate::my_work_ops::record(h.s.home.path(), NAME, day).unwrap();
         assert!(!focus(&h).areas.contains_key("fa_00000000000f"));
+    }
+
+    /// F5 (Codex on #754): the areas a goals call shows fit a quarter of its window, those that
+    /// take requests first, and the prompts keep the rest.
+    #[test]
+    fn the_areas_shown_fit_a_quarter_of_the_window() {
+        let mut h = Home::new();
+        h.summary.window_tokens = 2_000;
+        let area = |name: String, status: &str| {
+            json!({"kind": "area", "name": name, "status": status, "source": "owner-goals",
+                "decided_by": "system"})
+        };
+        let mut ops: Vec<(String, Value)> = (0..30)
+            .map(|i| {
+                let name = format!("Area {i} {}", "x".repeat(200));
+                (format!("fa_{i:012x}"), area(name, "done"))
+            })
+            .collect();
+        ops.push(("fa_0000000000ff".into(), area("Parser".into(), "suggested")));
+        crate::my_work_ops::record(h.s.home.path(), crate::my_work_focus::NAME, ops).unwrap();
+        h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
+        let (_, sent) = h.pass(&|_| nothing());
+        let block = sent[0].split("## Focus areas\n").nth(1).unwrap();
+        let block = block.split("## Prompts").next().unwrap();
+        assert!(
+            block.starts_with("- fa_0000000000ff suggested: Parser"),
+            "{block}"
+        );
+        assert!(block.lines().count() < 31, "{}", block.lines().count());
+        assert!(crate::budget::estimate(block) <= 500, "{block}");
+        assert!(sent[0].contains("Make the parser fail fast on a bad header."));
     }
 
     /// F5's refusals: an area not shown, two priorities of one area (a dropped one frees its

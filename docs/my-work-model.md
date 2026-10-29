@@ -1757,8 +1757,10 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 ### Slice 10b-2: the goals job and the areas (2026-10-29)
 
 - **Shown** (F5): the goals call shows the focus areas (id, status, name, goal), the ones the system
-  withdrew left out (claude-mem's `isWithdrawnArea`: dismissed, not by the owner), and each current
-  goal's area.
+  withdrew left out (claude-mem's `isWithdrawnArea`: dismissed, not by the owner), merged ones too
+  (a goal of one answers its own id), and each current goal's area. The areas take at most a quarter
+  of the window, those that take requests first, so the prompts keep the rest (Codex on #754); an
+  area not shown is no area the answer may name, and the call reads only the ops of those shown.
 - **Each goal's area**: a new or changed goal names `area`, the id of the area it already is (a
   priority) or belongs under (an ask), never by name, or an empty string (a changed one's empty
   keeps it). An item keeps it (`Item::area`). A priority left with none gets a new id (`fa_` and 6
