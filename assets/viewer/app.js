@@ -305,7 +305,7 @@ function timelineEntry(item, all) {
 // --- Views ----------------------------------------------------------------------------------
 
 const LIMIT = 100;
-const VIEWS = ['my_work', 'my_goals', 'my_rules', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
+const VIEWS = ['my_work', 'my_rules', 'timeline', 'sessions', 'records', 'context', 'stats', 'settings'];
 // My Work opens first once (decision 55), whatever view was stored before it existed; from then
 // on the page opens on the view last used.
 const firstMyWork = recall('oboete-tab', '') !== 'my_work';
@@ -319,10 +319,10 @@ function setView(name) {
   view = name;
   remember('oboete-view', name);
   document.querySelector('main').classList.toggle('timeline-view', name === 'timeline');
-  document.querySelector('main').classList.toggle('my-work-view', ['my_work', 'my_goals', 'my_rules'].includes(name));
+  document.querySelector('main').classList.toggle('my-work-view', ['my_work', 'my_rules'].includes(name));
   // My Work has its own search and filters, and its tab opens on the requests, not on one; My
   // Goals reads no repository.
-  $('controls').hidden = ['settings', 'my_work', 'my_goals', 'my_rules'].includes(name);
+  $('controls').hidden = ['settings', 'my_work', 'my_rules'].includes(name);
   if (name === 'my_work') Object.assign(mw, { request: null, work: null, back: null });
   // The tab opens on the list, not on a session (docs/page.md S1).
   if (name === 'sessions') Object.assign(ses, { open: null, back: null });
@@ -2486,30 +2486,16 @@ const TEXT = {
   my_work_line_until: ['Next try:', '次に試すのは'],
   my_work_line_written: ['Written', '書いたのは'],
   my_work_line_none: ['Nothing written yet.', 'まだ何も書いていません。'],
-  my_goals: ['My Goals', '目標'],
-  my_goals_eyebrow: ['What you asked for most, from the prompts you typed', 'あなたが入力したプロンプトから、いちばん多く頼んだこと'],
-  my_goals_tabs_label: ['Goals view', '目標の表示'],
-  my_goals_tab_now: ['This month · 31 days to {end}', '今月 · {end} までの 31 日'],
   my_goals_tab_months: ['Month by month', '月ごと'],
-  my_goals_priorities: ['Top priorities', '優先していること'],
-  my_goals_ranked: ['ranked by how recent, how often and how strongly you asked', '頼んだ時期の新しさ、回数、強さの順'],
   my_goals_asked_once: ['asked once', '1 回頼みました'],
   my_goals_asked_n: ['asked {n}×', '{n} 回頼みました'],
   my_goals_last: ['last {day}', '最後は {day}'],
-  my_goals_more: ['{n} more priorities', 'ほかに {n} 件'],
   my_goals_why_one: ['Why it’s here · 1 quote', 'ここにある理由 · 引用 1 件'],
   my_goals_why_n: ['Why it’s here · {n} quotes', 'ここにある理由 · 引用 {n} 件'],
-  my_goals_asks: ['Open asks', 'まだ済んでいない頼みごと'],
-  my_goals_asks_note: ['{k} of {n} came up more than once. Repetition shows what keeps coming back, not what’s finished.', '{n} 件のうち {k} 件は 2 回以上頼んでいます。何度も出てくるのは気にかけていることの表れで、済んだという意味ではありません。'],
   my_goals_ask_meta: ['Asked {n}×, last {day}', '{n} 回、最後は {day}'],
-  my_goals_source: ['{n} prompts you typed in the last {days} days, read on this machine from what oboete recorded.', 'この {days} 日にあなたが入力したプロンプト {n} 件を、この PC で oboete が記録したものから読みました。'],
-  my_goals_empty: ['No goals yet', 'まだ目標はありません'],
-  my_goals_empty_body: ['Once My Work is written with AI, your goals are gathered here from the prompts you typed in the last 31 days.', 'My Work を AI で書くようにすると、この 31 日にあなたが入力したプロンプトから、ここに目標をまとめます。'],
-  my_goals_history: ['History', '履歴'],
   my_goals_history_note: ['What you asked for most, month by month, as the last update of each month kept it. A month closing archives its asks; it doesn’t mean they were done.', '月ごとに、いちばん多く頼んだことを、その月の最後の更新のとおりに残しています。月が終わると頼みごとは記録に移りますが、済んだという意味ではありません。'],
   my_goals_current: ['Current', '今月'],
   my_goals_archived: ['Archived', '記録'],
-  my_goals_no_top: ['No priority yet', 'まだ優先していることはありません'],
   my_goals_prompts: ['{n} prompts', 'プロンプト {n} 件'],
   my_goals_status_nothing: ['Nothing on it', '手つかず'],
   my_goals_status_your_move: ['Waiting on you', 'あなたの番'],
@@ -2524,24 +2510,7 @@ const TEXT = {
   my_goals_rollup_label: ['{p}% from {k} of {n} requests reviewed', '確認した依頼 {n} 件のうち {k} 件から {p}%'],
   my_goals_rollup_none: ['No requests, so no progress to measure', '依頼がないため、進み具合はありません'],
   my_goals_not_counted: ['Not counted: {titles}', '数えていない依頼: {titles}'],
-  my_goals_serving: ['Requests serving it · {n}', 'この目標に向けた依頼 · {n}'],
-  my_goals_start: ['Start a request for this. Nothing is working on it.', 'この目標のための依頼を始めてください。まだ何も進んでいません。'],
   my_goals_again: ['You asked again on {asked}, after the last ship on {shipped}. What shipped doesn’t cover it yet.', '{shipped} の完了のあと、{asked} にまた頼んでいます。完了したものでは、まだ足りていません。'],
-  my_goals_ask_again: ['Asked again after it shipped {shipped}.', '{shipped} の完了のあとに、また頼んでいます。'],
-  my_goals_lead: ['Your work is moving {m} of your top {n} priorities. {rest}', '上位 {n} 件の優先していることのうち、{m} 件が進んでいます。{rest}'],
-  my_goals_lead_rest_11: ['{y} is waiting on you, and {z} has nothing working on it.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
-  my_goals_lead_rest_1n: ['{y} is waiting on you, and {z} have nothing working on them.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
-  my_goals_lead_rest_n1: ['{y} are waiting on you, and {z} has nothing working on it.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
-  my_goals_lead_rest_nn: ['{y} are waiting on you, and {z} have nothing working on them.', '{y} 件はあなたの番で、{z} 件は何も進んでいません。'],
-  my_goals_lead_asks: ['{u} open asks have no request yet.{most}', 'まだ依頼のない頼みごとが {u} 件あります。{most}'],
-  my_goals_lead_asks_one: ['1 open ask has no request yet.{most}', 'まだ依頼のない頼みごとが 1 件あります。{most}'],
-  my_goals_lead_most: [' The one you’ve asked for most is “{title}”, {n} times.', 'いちばん多く頼んだのは「{title}」で、{n} 回です。'],
-  my_goals_lead_most_one: [' The one you’ve asked for most is “{title}”, once.', 'いちばん多く頼んだのは「{title}」で、1 回です。'],
-  my_goals_unserved: ['Nothing is working on these · {n}', 'まだ何も進んでいないもの · {n}'],
-  my_goals_unserved_note: ['Your move: start a request for each, or drop it.', 'あなたの番です: それぞれ依頼を始めるか、やめるかを決めてください。'],
-  my_goals_served: ['Being worked on · {n}', '進めているもの · {n}'],
-  my_goals_no_goal: ['No goal · {n}', '目標なし · {n}'],
-  my_goals_no_goal_note: ['Requests that serve none of your priorities: work happening outside what you said you want.', 'どの目標にも向いていない依頼です。あなたが望むと言ったこと以外で進んでいる作業です。'],
   my_work_build_story: ['Build story', '作業の経緯'],
   my_work_story_chapters: ['Week by week · {n}', '週ごと · {n}'],
   my_work_story_week: ['{start} to {end}', '{start}〜{end}'],
@@ -2818,7 +2787,6 @@ function applyLanguage() {
   }
   // My Work's heading before its first read, which the page opens on.
   if (view === 'my_work' && mw.rows === null) $('heading').textContent = t('my_work');
-  if (view === 'my_goals' && mg.answer) myGoalsDraw();
   if (view === 'my_rules' && mr.answer) myRulesDraw();
 }
 
@@ -7301,9 +7269,11 @@ const MY_FOCUS_SOURCES = ['owner-goals', 'clustering', 'promotion', 'owner'];
 function myFocusDecide(area, body, decision) {
   const into = body.into ? myFocusName(body.into) : null;
   const text = t(`my_focus_decided_${decision}`, { into });
+  // The visit it was made in: one left while it saved records nothing in the next (#759).
+  const visit = mw.decided;
   void myFocusWrite([body], text, null, false).then((ok) => {
     // Decided once read: saved but not read yet, the card stays as it was (Codex on #758).
-    if (ok === true) mw.decided.set(area.id, { decision, area, into: body.into ?? null });
+    if (ok === true) visit.set(area.id, { decision, area, into: body.into ?? null });
     if (ok === true || ok === 'pending') mw.editing = null;
     if (view !== 'my_work' || mw.area !== 'suggested') return;
     // The focus on what the card has now (CodeRabbit on #758): its Undo, or Show it for an area the
@@ -7315,8 +7285,9 @@ function myFocusDecide(area, body, decision) {
 }
 
 function myFocusUndecide(area) {
+  const visit = mw.decided;
   void myFocusWrite([{ action: 'restore-suggestion', area: area.id }], t('my_focus_restored', { name: area.name }), null, false).then((ok) => {
-    if (ok === true) mw.decided.delete(area.id);
+    if (ok === true) visit.delete(area.id);
     if (view === 'my_work' && mw.area === 'suggested') myWorkDraw(ok === true ? `card:keep:${area.id}` : `card:undo:${area.id}`);
   });
 }
@@ -8114,7 +8085,7 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 // What tells two answers of My Work apart: a change of any is drawn, or held while a person reads.
-const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.goals, answer.story, answer.areas, answer.other_asks]);
+const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.story, answer.areas, answer.other_asks]);
 
 function myWorkAccept(answer) {
   mw.signature = myWorkAnswerSignature(answer);
@@ -8246,36 +8217,11 @@ function myWorkStatusLine(status) {
   return node;
 }
 
-// --- My Goals (docs/my-work-model.md V2): the owner's goals, as claude-mem's page shows them ---
+// --- The goals' parts My Focus shows (docs/my-work-model.md V2, F7), from My Goals' page, which
+// claude-mem 15.4 and slice 10c-3b retired ---
 
-// claude-mem's `TOP_COUNT`: the priorities shown before "more".
-const MY_GOALS_TOP = 5;
-// What a redraw keeps: the inner tab, the goals and months opened, "more"; and the answer drawn,
-// so that a poll that brings the same one draws nothing.
-const mg = { tab: 'now', open: new Set(), goals: new Set(), months: new Set(), more: false, signature: null, answer: null, requests: [], fetched: 0 };
-
-async function showMyGoals() {
-  // My Work's requests with them, as claude-mem's page reads its goals' requests from the work
-  // model: a request's state here is always the one My Work shows (slice 6b).
-  // A failed read of My Work leaves the goals as slice 5b drew them, until the next poll (CodeRabbit
-  // on #729).
-  const [answer, work] = await Promise.all([api('my-goals'), api('my-work', { range: 'all' }).catch(() => null)]);
-  return () => {
-    mg.fetched = Date.now();
-    const requests = work?.requests ?? [];
-    for (const row of requests) if (row.checked && row.status === 'ready') row.status = 'checked';
-    // Today's date with it: the inner tab names the window's end (#722).
-    const signature = JSON.stringify([answer, requests, myGoalsDay(Date.now())]);
-    if (signature === mg.signature && $('panel').querySelector('.my-goals')) return setStatus('');
-    mg.signature = signature;
-    mg.answer = answer;
-    mg.requests = requests;
-    myGoalsDraw();
-  };
-}
-
-// claude-mem's `presentStatus` (status-normalization.ts): the state a request's status is on My
-// Goals, from which a goal's status word is read.
+// claude-mem's `presentStatus` (status-normalization.ts): the state a request's status is on its
+// area's header, from which the area's status word is read.
 function myGoalsState(row, now = Date.now()) {
   switch (row.status) {
     case 'needs': case 'blocked': case 'checked': return 'your-move';
@@ -8285,16 +8231,6 @@ function myGoalsState(row, now = Date.now()) {
     case 'working': case 'todo': return 'working';
     default: return now - (row.updated || 0) <= 6 * 3600000 ? 'working' : 'idle';
   }
-}
-
-// L3: the requests My Work shows that link `goal`; an id My Work lacks links to nothing.
-function myGoalsServing(goal) {
-  return mg.requests.filter((row) => row.goals?.some((g) => g.id === goal.id));
-}
-
-// Whether the links job has decided any request: before, no goal can say what serves it.
-function myGoalsLinked() {
-  return mg.requests.some((row) => Array.isArray(row.goals));
 }
 
 function myGoalsIsoDay(ms) {
@@ -8341,26 +8277,6 @@ function myGoalsRollup(requests) {
     unreviewed.length && reviewed.length ? el('p', 'my-goals-note', t('my_goals_not_counted', { titles: unreviewed.map((row) => row.title).join(', ') })) : null);
 }
 
-// A request serving a goal; it opens on My Work.
-function myGoalsRequest(row) {
-  const button = el('button', 'my-goals-request', el('span', 'my-goals-title', row.title), myWorkBadge(row.status), myWorkProgress(row));
-  button.type = 'button';
-  button.dataset.focus = `request:${row.id}`;
-  button.addEventListener('click', async () => {
-    setView('my_work');
-    // As `myWorkOpen`: its work product is read again, a read still out dropped (Codex and
-    // CodeRabbit on #729, on #650); it opens at its top, the focus on its heading (#731).
-    mw.products = null;
-    mw.productsAsk += 1;
-    mw.unread.delete(row.id);
-    mw.request = row.id;
-    window.scrollTo?.(0, 0);
-    await show();
-    if (view === 'my_work' && mw.request === row.id) myWorkFocus('heading');
-  });
-  return button;
-}
-
 // A quote's time, and when a wait ends: to the minute, in the page's language.
 function myGoalsAt(ms) {
   const at = new Date(ms);
@@ -8386,164 +8302,6 @@ function myGoalsAsked(n) {
 // A goal's or a month's line of facts, its product last when it has one.
 function myGoalsMeta(facts, product) {
   return el('span', 'my-goals-meta', [...facts, ...(product ? [product] : [])].join(' · '));
-}
-
-// "Why it's here": every quote behind one disclosure, each with the time it was typed.
-function myGoalsWhy(goal) {
-  const n = goal.quotes.length;
-  const summary = el('summary', null, t(n === 1 ? 'my_goals_why_one' : 'my_goals_why_n', { n }));
-  summary.dataset.focus = `why:${goal.id}`;
-  const why = el('details', 'my-goals-why', summary,
-    el('ul', 'my-goals-quotes', ...goal.quotes.map((q) => el('li', null, el('q', null, q.text), ' ', myGoalsAt(q.ts)))));
-  why.open = mg.open.has(goal.id);
-  why.addEventListener('toggle', () => (why.open ? mg.open.add(goal.id) : mg.open.delete(goal.id)));
-  return why;
-}
-
-function myGoalsPriority(goal) {
-  const rank = el('span', goal.rank === 1 ? 'my-goals-rank my-goals-first' : 'my-goals-rank', String(goal.rank));
-  const facts = [myGoalsAsked(goal.asked), t('my_goals_last', { day: myGoalsDay(goal.last) })];
-  if (!myGoalsLinked()) {
-    return el('li', 'my-goals-item', el('div', 'my-goals-row', rank, el('span', 'my-goals-title', goal.title),
-      myGoalsMeta(facts, goal.product)), myGoalsWhy(goal));
-  }
-  // claude-mem's `PriorityItem`: one summary row, then on open the requests serving it.
-  const requests = myGoalsServing(goal);
-  const status = myGoalsStatus(goal, requests);
-  const again = myGoalsAskedAgain(goal, requests);
-  const summary = el('summary', 'my-goals-row', rank, el('span', 'my-goals-title', goal.title),
-    myGoalsStatusWord(status), myGoalsMeta(facts, goal.product), myGoalsRollup(requests));
-  summary.dataset.focus = `goal:${goal.id}`;
-  const details = el('details', 'my-goals-priority', summary,
-    requests.length ? el('div', 'my-goals-serving', word('h4', null, 'my_goals_serving', { n: requests.length }), ...requests.map(myGoalsRequest))
-      : word('p', 'my-goals-next', 'my_goals_start'),
-    again ? el('p', 'my-goals-again', t('my_goals_again', { asked: myWorkDay(goal.last), shipped: myWorkDay(again) })) : null,
-    myGoalsWhy(goal));
-  details.open = mg.goals.has(goal.id);
-  details.addEventListener('toggle', () => (details.open ? mg.goals.add(goal.id) : mg.goals.delete(goal.id)));
-  return el('li', 'my-goals-item', details);
-}
-
-function myGoalsAsks(asks) {
-  const repeated = asks.filter((a) => a.asked > 1).length;
-  const row = (ask) => {
-    const facts = [t('my_goals_ask_meta', { n: ask.asked, day: myGoalsDay(ask.last) })];
-    const requests = myGoalsLinked() ? myGoalsServing(ask) : [];
-    const again = myGoalsAskedAgain(ask, requests);
-    return el('li', 'my-goals-item', el('div', 'my-goals-row', el('span', 'my-goals-title', ask.title),
-      myGoalsMeta(facts, ask.product)), ...requests.map(myGoalsRequest),
-      again ? el('p', 'my-goals-again', t('my_goals_ask_again', { shipped: myWorkDay(again) })) : null, myGoalsWhy(ask));
-  };
-  const head = [word('h3', null, 'my_goals_asks'), word('p', 'my-goals-note', 'my_goals_asks_note', { k: repeated, n: asks.length })];
-  if (!myGoalsLinked()) return el('section', 'my-goals-asks', ...head, el('ul', 'my-goals-list', ...asks.map(row)));
-  // claude-mem's `OpenAsks`: what nothing works on, then what something does.
-  const unserved = asks.filter((a) => !myGoalsServing(a).length);
-  const served = asks.filter((a) => myGoalsServing(a).length);
-  return el('section', 'my-goals-asks', ...head,
-    unserved.length ? el('div', 'my-goals-unserved', word('h4', null, 'my_goals_unserved', { n: unserved.length }),
-      word('p', 'my-goals-note', 'my_goals_unserved_note'), el('ul', 'my-goals-list', ...unserved.map(row))) : null,
-    served.length ? el('div', 'my-goals-served', word('h4', null, 'my_goals_served', { n: served.length }),
-      el('ul', 'my-goals-list', ...served.map(row))) : null);
-}
-
-// claude-mem's `Lead`: whether the work moves what you said you want, from the top priorities.
-function myGoalsLead(priorities, asks) {
-  const top = priorities.slice(0, MY_GOALS_TOP).map((goal) => myGoalsStatus(goal, myGoalsServing(goal)));
-  const count = (status) => top.filter((s) => s === status).length;
-  const [y, z] = [count('your_move'), count('nothing')];
-  const unserved = asks.filter((a) => !myGoalsServing(a).length);
-  const most = [...unserved].sort((a, b) => b.asked - a.asked)[0];
-  const rest = `my_goals_lead_rest_${y === 1 ? '1' : 'n'}${z === 1 ? '1' : 'n'}`;
-  return el('div', 'my-goals-lead',
-    el('p', 'my-goals-lead-line', t('my_goals_lead', { m: count('moving'), n: top.length, rest: t(rest, { y, z }) })),
-    asks.length ? el('p', 'my-goals-note', t(unserved.length === 1 ? 'my_goals_lead_asks_one' : 'my_goals_lead_asks',
-      { u: unserved.length, most: most ? t(most.asked === 1 ? 'my_goals_lead_most_one' : 'my_goals_lead_most', { title: most.title, n: most.asked }) : '' })) : null);
-}
-
-// claude-mem's `NoGoal`: the requests the links job linked to none.
-function myGoalsNoGoal() {
-  const rows = mg.requests.filter((row) => Array.isArray(row.goals) && !row.goals.length);
-  if (!rows.length) return null;
-  return el('section', 'my-goals-no-goal', word('h3', null, 'my_goals_no_goal', { n: rows.length }),
-    word('p', 'my-goals-note', 'my_goals_no_goal_note'), ...rows.map(myGoalsRequest));
-}
-
-function myGoalsNow(a) {
-  const items = a.current?.items ?? [];
-  if (!items.length) return [myWorkEmpty('my_goals_empty', 'my_goals_empty_body')];
-  const priorities = items.filter((i) => i.kind === 'priority');
-  const asks = items.filter((i) => i.kind === 'ask');
-  const out = [];
-  if (myGoalsLinked() && priorities.length) out.push(myGoalsLead(priorities, asks));
-  if (priorities.length) {
-    const section = el('section', 'my-goals-priorities',
-      el('div', 'my-goals-head', word('h3', null, 'my_goals_priorities'), word('span', 'my-goals-note', 'my_goals_ranked')),
-      el('ul', 'my-goals-list', ...priorities.slice(0, MY_GOALS_TOP).map(myGoalsPriority)));
-    const rest = priorities.slice(MY_GOALS_TOP);
-    if (rest.length) {
-      const summary = el('summary', null, t('my_goals_more', { n: rest.length }));
-      summary.dataset.focus = 'more';
-      const more = el('details', 'my-goals-more', summary, el('ul', 'my-goals-list', ...rest.map(myGoalsPriority)));
-      more.open = mg.more;
-      more.addEventListener('toggle', () => { mg.more = more.open; });
-      section.append(more);
-    }
-    out.push(section);
-  }
-  if (asks.length) out.push(myGoalsAsks(asks));
-  if (myGoalsLinked()) out.push(myGoalsNoGoal());
-  out.push(el('p', 'my-work-note', t('my_goals_source', { n: a.window?.prompts ?? 0, days: a.window?.days ?? 31 })));
-  return out;
-}
-
-// Month by month: this month's goals, then each finished month's as its last update kept them.
-// Archived is not done.
-function myGoalsMonths(a) {
-  const top = (a.current?.items ?? []).find((i) => i.kind === 'priority');
-  const row = (month, badge, title, prompts) => [el('span', 'my-goals-month', myGoalsMonthName(month)),
-    word('span', 'my-goals-badge', badge), el('span', 'my-goals-title', title ?? t('my_goals_no_top')),
-    myGoalsMeta([t('my_goals_prompts', { n: prompts })])];
-  const rows = [el('li', 'my-goals-month-row', el('div', 'my-goals-row', ...row(a.month?.month, 'my_goals_current', top?.title, a.month?.prompts ?? 0)))];
-  for (const m of a.months ?? []) {
-    const summary = el('summary', 'my-goals-row', ...row(m.month, 'my_goals_archived', m.priorities[0]?.title, m.prompts));
-    summary.dataset.focus = `month:${m.month}`;
-    const details = el('details', 'my-goals-month-detail', summary,
-      m.summary ? el('p', null, m.summary) : null,
-      el('ul', 'my-goals-list', ...m.priorities.map((p) => el('li', 'my-goals-item',
-        el('div', 'my-goals-row', el('span', 'my-goals-title', p.title), myGoalsMeta([myGoalsAsked(p.asked)], p.product)),
-        p.quote ? el('p', 'my-goals-quote', el('q', null, p.quote.text), ' ', myGoalsAt(p.quote.ts)) : null))),
-      word('p', 'my-goals-note', 'my_goals_no_reviews'));
-    details.open = mg.months.has(m.month);
-    details.addEventListener('toggle', () => (details.open ? mg.months.add(m.month) : mg.months.delete(m.month)));
-    rows.push(el('li', 'my-goals-month-row', details));
-  }
-  return [word('h3', null, 'my_goals_history'), word('p', 'my-goals-note', 'my_goals_history_note'), el('ul', 'my-goals-months', ...rows)];
-}
-
-function myGoalsDraw() {
-  // A drawing replaces every control, a reread's and a new day's too: the keyboard's focus goes
-  // back to the one with the same key when it is drawn again (#722, #724).
-  const focus = $('panel').contains(document.activeElement) ? document.activeElement.dataset?.focus : undefined;
-  const a = mg.answer ?? {};
-  const end = myGoalsDay(Date.now());
-  const tabs = el('nav', 'my-work-tabs my-goals-tabs', ...[['now', t('my_goals_tab_now', { end })], ['months', t('my_goals_tab_months')]].map(([key, label]) => {
-    const button = el('button', mg.tab === key ? 'tab my-goals-tab-on' : 'tab', label);
-    button.type = 'button';
-    button.dataset.focus = `tab:${key}`;
-    button.setAttribute('aria-pressed', String(mg.tab === key));
-    button.addEventListener('click', () => {
-      mg.tab = key;
-      myGoalsDraw();
-    });
-    return button;
-  }));
-  tabs.setAttribute('aria-label', t('my_goals_tabs_label'));
-  draw(word('span', null, 'my_goals'), [], [
-    el('div', 'my-work-intro', word('p', 'my-work-eyebrow', 'my_goals_eyebrow'), myWorkStatusLine(a.status)),
-    tabs, el('div', 'my-goals', ...(mg.tab === 'months' ? myGoalsMonths(a) : myGoalsNow(a))),
-  ]);
-  if (focus) [...$('panel').querySelectorAll('button, summary')].find((node) => node.dataset.focus === focus)?.focus({ preventScroll: true });
-  setStatus('');
 }
 
 // --- My Rules (docs/my-work-model.md V3): the rules learned from your requests, and yours ---
@@ -8779,7 +8537,7 @@ function myRulesDraw() {
 }
 
 const LOADERS = new Map([
-  ['my_work', showMyWork], ['my_goals', showMyGoals], ['my_rules', showMyRules], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
+  ['my_work', showMyWork], ['my_rules', showMyRules], ['records', showRecords], ['context', showContext], ['stats', showStats], ['settings', showSettings],
 ]);
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
@@ -8804,7 +8562,7 @@ async function show() {
   }
   setStatus(t('loading'));
   try {
-    const search = q && !['settings', 'my_work', 'my_goals', 'my_rules'].includes(view);
+    const search = q && !['settings', 'my_work', 'my_rules'].includes(view);
     const render = search ? await showSearch(repo, q) : await LOADERS.get(view)(repo);
     if (mine !== generation) return false;
     render();
@@ -8876,7 +8634,7 @@ async function poll() {
   if (polling || document.visibilityState !== 'visible') return;
   polling = true;
   try {
-    if ((view === 'my_work' && mw.rows) || view === 'my_goals' || view === 'my_rules') myWorkTimes();
+    if ((view === 'my_work' && mw.rows) || view === 'my_rules') myWorkTimes();
     await pollMaintenance();
     const { v } = await api('version');
     $('live').classList.remove('off');
@@ -8888,10 +8646,7 @@ async function poll() {
     // reads again each minute: its statuses age, and a write's link to its session comes later
     // (claude-mem ages its requests each minute).
     const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())
-      || (view === 'my_work' && Date.now() - mw.fetched >= 60000)
-      // My Goals reads again each minute too: a wait ends and a quote leaves the window with no
-      // change of the version (#722).
-      || (view === 'my_goals' && Date.now() - mg.fetched >= 60000)));
+      || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;

@@ -1927,6 +1927,13 @@ assert(panel.querySelector('.my-focus-change')&&btn(`card:keep:${L}`),'the chang
 // Leaving the page ends the visit's decisions.
 btn('chip:suggested').click();btn('chip:suggested').click();
 assert(btn('card:keep:fa_000000000006'),'Mine undecided again');
+// A Keep saving as the page is left records nothing in the next visit (#759).
+let free;const live=ctx.fetch;
+ctx.fetch=(url,options)=>options?.method==='POST'?new Promise(r=>{free=()=>r(posted(200,{state:'applied'}));}):live(url,options);
+btn('card:keep:fa_000000000006').click();await ticks();
+btn('chip:suggested').click();free();await ticks();ctx.fetch=live;
+btn('chip:suggested').click();
+assert(btn('card:keep:fa_000000000006'),'the next visit shows it as the server has it, undecided here');
 // With focus in the page, a changed poll waits.
 document.activeElement=btn(`card:keep:${L}`);
 ctx.__live=ctx.fetch;ctx.fetch=(url,options)=>url.startsWith('/api/my-work')?Promise.resolve(response({...page,requests:[req('f1',{focus:L,title:'Changed title'})]})):ctx.__live(url,options);
@@ -2779,47 +2786,14 @@ assert(requests.filter(r=>r.options.method).every(r=>r.options.method==='POST'),
 console.log('PASS: Remove from the page: card and summary, Undo through redraws, refusals named, JA/EN, Settings list, Show more and Bring back');
 }
 
-// Decision 57 slice 5b (docs/my-work-model.md V1, V2): the My Goals page and the status line, in
-// English and in Japanese.
+// Decision 57 slice 5b (docs/my-work-model.md V1): the status line, in English; My Work's, read on
+// its own. My Goals' page went with slice 10c-3b.
 {
 const run=code=>vm.runInContext(code,ctx);
 const panel=document.getElementById('panel');
 const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
 const day=Date.UTC(2026,9,27,12,0);
-const quote=(words,ts)=>({text:words,ts});
-const goal=(id,kind,rank,title,asked,quotes,product='')=>({id,kind,rank,title,product,asked,last:quotes[0].ts,quotes});
-const priorities=Array.from({length:7},(_,i)=>goal(`g${i+1}`,'priority',i+1,`Priority ${i+1}`,i===0?1:3,
-  [quote(`quote ${i+1}`,day-i*3600000)],i===1?'oboete':''));
-const asks=[goal('a1','ask',1,'Header test',2,[quote('add a header test',day),quote('the header test again',day-60000)]),
-  goal('a2','ask',2,'Logs in UTC',1,[quote('logs in UTC',day)])];
-const answer=status=>({current:{written:day,items:[...priorities,...asks]},window:{days:31,prompts:152},
-  month:{month:'2026-10',prompts:40},months:[{month:'2026-09',summary:'Worked on the parser.',prompts:112,
-  priorities:[{title:'Export',product:'billing',asked:4,quote:quote('ship the export',day-30*86400000)}]}],status});
-const draw=(a,tab='now')=>{ctx.__goals=a;run(`mg.answer=globalThis.__goals;mg.tab=${JSON.stringify(tab)};myGoalsDraw()`);return text(panel);};
 run('lang="en"');
-let shown=draw(answer({state:'written',at:day}));
-assert(shown.includes('This month · 31 days to'),'the inner tab names the window');
-assert(shown.includes('Top priorities')&&shown.includes('ranked by how recent, how often and how strongly you asked'),'the priorities heading');
-const section=panel.querySelectorAll('.my-goals-priorities')[0];
-assert.equal(section.children[1].children.length,5,'the top 5 first');
-assert.equal(section.children[2].className,'my-goals-more','the rest behind a disclosure');
-assert(text(section.children[2]).includes('2 more priorities')&&text(section.children[2]).includes('Priority 7'),'"2 more priorities" holds them');
-assert.equal(panel.querySelectorAll('.my-goals-first').length,1,'rank 1 stands out');
-assert(shown.includes('asked once')&&shown.includes('asked 3×')&&shown.includes(' · oboete'),'times asked and the product');
-assert(shown.includes('Why it’s here · 1 quote')&&shown.includes('Why it’s here · 2 quotes'),'the quotes behind a disclosure');
-assert.equal(panel.querySelectorAll('time')[0].dateTime,new Date(day).toISOString(),'a quote has the time it was typed');
-assert(shown.includes('Open asks')&&shown.includes('1 of 2 came up more than once.'),'the open asks panel');
-assert(shown.includes('Asked 2×, last'),'an ask says how often');
-assert(shown.includes('152 prompts you typed in the last 31 days'),'what it was read from');
-assert(shown.includes('Written'),'the status line says when it wrote');
-shown=draw(answer({state:'none'}),'months');
-assert(shown.includes('History')&&shown.includes('Current')&&shown.includes('Archived'),'the months, this one and the archived');
-assert(shown.includes('October 2026')&&shown.includes('Priority 1')&&shown.includes('40 prompts'),'this month from the current goals');
-assert(shown.includes('September 2026')&&shown.includes('Export')&&shown.includes('112 prompts')&&shown.includes('Worked on the parser.'),'a finished month opens to its goals');
-assert(shown.includes('billing')&&shown.includes('ship the export'),'with each priority\'s quote');
-assert(shown.includes('No request reviews cover this month, so it shows what you asked for, not what moved.'),'archived is not done');
-shown=draw({current:null,window:{days:31,prompts:0},month:{month:'2026-10',prompts:0},months:[],status:{state:'off'}});
-assert(shown.includes('No goals yet')&&shown.includes('Off: My Work is not written with AI.')&&shown.includes('Open Settings'),'none yet, and why');
 const line=status=>text(run(`myWorkStatusLine(${JSON.stringify(status)})`));
 assert.equal(line({state:'off'}),'Off: My Work is not written with AI. Open Settings');
 assert.equal(line({state:'summaries_off'}),'On, but waiting: summaries are off. Open Settings');
@@ -2830,40 +2804,12 @@ assert.equal(line({state:'waiting',why:'owner',until:day}),'Waiting: no AI provi
 assert(line({state:'written',at:day}).startsWith('Written'),'when it wrote');
 assert.equal(line({state:'none'}),'Nothing written yet.');
 assert.equal(run('myWorkStatusLine(null)'),null,'no line when the status did not read');
-// The same answer again draws nothing, so the quotes opened stay open.
-ctx.fetch=()=>Promise.resolve(response(answer({state:'none'})));
-run('mg.signature=null');
-(await run('showMyGoals()'))();
-const first=panel.children;
-(await run('showMyGoals()'))();
-assert.equal(panel.children,first,'the same answer again draws nothing');
-run('lang="ja"');
-shown=draw(answer({state:'waiting',why:'resting',until:day}));
-assert(shown.includes('今月 · ')&&shown.includes('までの 31 日')&&shown.includes('優先していること'),'the page in Japanese');
-assert(shown.includes('1 回頼みました')&&shown.includes('3 回頼みました')&&shown.includes('ほかに 2 件'),'asked and more, in Japanese');
-assert(shown.includes('ここにある理由 · 引用 1 件')&&shown.includes('まだ済んでいない頼みごと')&&shown.includes('2 件のうち 1 件は 2 回以上頼んでいます。'),'quotes and asks, in Japanese');
-assert(shown.includes('この 31 日にあなたが入力したプロンプト 152 件')&&shown.includes('待機中: どの AI も休んでいます。'),'source and status line, in Japanese');
-shown=draw(answer({state:'none'}),'months');
-assert(shown.includes('履歴')&&shown.includes('今月')&&shown.includes('記録')&&shown.includes('プロンプト 112 件'),'the months, in Japanese');
-run('lang="en"');
 // My Work's status line comes by a read of its own, after the requests'.
 ctx.fetch=url=>Promise.resolve(response(String(url).includes('my-work/status')?{state:'none'}:{requests:[],unlinked:0}));
 run('ui.setView("my_work")');
 (await run('showMyWork()'))();
 await new Promise(resolve=>setTimeout(resolve,0));
 assert(text(panel).includes('Nothing written yet.'),'My Work shows its status line once it reads');
-// #722: My Goals reads again each minute though the version stays as it was, and not before.
-const urls=[];
-ctx.fetch=url=>{const u=String(url);urls.push(u);return Promise.resolve(response(u.startsWith('/api/version')?{v:'v1'}
-  :u.startsWith('/api/repos')?{current:'',repos:[]}:answer({state:'none'})));};
-run('ui.setView("my_goals");version="v1";reposLoaded=true;mg.fetched=0');
-document.visibilityState='visible';
-await run('poll()');
-assert(urls.some(u=>u.startsWith('/api/my-goals')),'a minute on, My Goals reads again');
-urls.length=0;
-await run('poll()');
-delete document.visibilityState;
-assert(!urls.some(u=>u.startsWith('/api/my-goals')),'within the minute, it does not');
 // #722: of two reads of My Work's status line in flight, the later one's answer stays.
 const pending=[];
 ctx.fetch=()=>new Promise(resolve=>pending.push(resolve));
@@ -2872,101 +2818,35 @@ const older=run('myWorkLineRead()');const newer=run('myWorkLineRead()');
 pending[1](response({state:'written',at:day}));await newer;
 pending[0](response({state:'none'}));await older;
 assert(text(run('mw.line')).startsWith('Written'),'an older read landing later is dropped');
-// #722: choosing an inner tab keeps the keyboard's focus on it.
-draw(answer({state:'none'}));
-const monthsTab=panel.querySelectorAll('.tab').find(b=>text(b)==='Month by month');
-monthsTab.focus();monthsTab.click();
-assert.equal(text(document.activeElement),'Month by month','the focus is on the tab chosen');
-assert(document.activeElement.className.includes('my-goals-tab-on'),'in the new drawing');
-// #724: a drawing for a new answer or a new day gives the keyboard's focus back to the same
-// control, when it is drawn again.
-const keyed=(tag,key)=>panel.querySelectorAll(tag).find(node=>node.dataset.focus===key);
-draw(answer({state:'none'}));
-let before=keyed('summary','why:g2');
-before.focus();
-draw(answer({state:'written',at:day}));
-assert(keyed('summary','why:g2')!==before&&document.activeElement===keyed('summary','why:g2'),'the same quotes keep the focus');
-draw(answer({state:'none'}),'months');
-before=keyed('summary','month:2026-09');
-before.focus();
-draw(answer({state:'written',at:day}),'months');
-assert(keyed('summary','month:2026-09')!==before&&document.activeElement===keyed('summary','month:2026-09'),'the same month keeps it');
-draw(answer({state:'off'}));
-before=keyed('button','settings');
-before.focus();
-draw(answer({state:'summaries_off'}));
-assert(keyed('button','settings')!==before&&document.activeElement===keyed('button','settings'),'the status line\'s button keeps it');
-console.log('PASS: My Goals: top 5 and the rest, quotes with their times, open asks, the months, the status line, JA/EN, a reread each minute, the latest line, the focus kept');
+console.log('PASS: The status line: each state, My Work\'s read on its own, the latest line');
 }
 
-// Decision 57 slice 6b (docs/my-work-model.md L3, V2, V4): each goal's requests, its status word
-// and rollup, the lead, the open asks split, "No goal", and My Work's goal chip.
+// Decision 57 slice 6b (docs/my-work-model.md V2): the status words an area's header shows, by
+// claude-mem's statusOf over My Work's states, and asked again by full dates in UTC; slice 7a's
+// build story.
 {
 const run=code=>vm.runInContext(code,ctx);
-const panel=document.getElementById('panel');
 const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
 const day=Date.UTC(2026,9,20,12,0);
-const goal=(id,kind,rank,title,asked=1,last=day)=>({id,kind,rank,title,product:'',asked,last,quotes:[{text:title,ts:last}]});
-const req=(id,title,status,goals,progress=null)=>({id,title,status,goals,progress,updated:day,checked:null,work:[],sessions:[]});
-const g=(id,kind='priority')=>({id,kind,rank:1,title:id});
-const draw=(items,requests)=>{ctx.__goals={current:{written:day,items},window:{days:31,prompts:9},month:{month:'2026-10',prompts:9},months:[],status:{state:'none'}};
-  ctx.__requests=requests;run('mg.answer=globalThis.__goals;mg.requests=globalThis.__requests;mg.tab="now";myGoalsDraw()');return text(panel);};
+const req=(id,status,progress=null)=>({id,title:id,status,progress,updated:day,checked:null,work:[],sessions:[]});
 run('lang="en"');
-// The status words, by claude-mem's statusOf over My Work's states.
-const status=(rows,last=day)=>{ctx.__g=goal('g1','priority',1,'Fail fast',1,last);ctx.__rows=rows;return run('myGoalsStatus(globalThis.__g,globalThis.__rows)');};
+const status=(rows,last=day)=>{ctx.__g={last};ctx.__rows=rows;return run('myGoalsStatus(globalThis.__g,globalThis.__rows)');};
 assert.equal(status([]),'nothing');
-assert.equal(status([req('a','A','needs',[g('g1')]),req('b','B','working',[g('g1')])]),'your_move');
-assert.equal(status([req('a','A','ready',[g('g1')]),req('b','B','shipped',[g('g1')])]),'moving');
-assert.equal(status([req('a','A','checked',[g('g1')])]),'your_move','a checked request is the owner\'s move, as claude-mem');
-assert.equal(status([req('a','A','quiet',[g('g1')])]),'stalled');
-const shipped=done=>req('a','A','shipped',[g('g1')],{percent:100,reviewed:null,completed:done});
+assert.equal(status([req('a','needs'),req('b','working')]),'your_move');
+assert.equal(status([req('a','ready'),req('b','shipped')]),'moving');
+assert.equal(status([req('a','checked')]),'your_move','a checked request is the owner\'s move, as claude-mem');
+assert.equal(status([req('a','quiet')]),'stalled');
+const shipped=done=>req('a','shipped',{percent:100,reviewed:null,completed:done});
 assert.equal(status([shipped('2026-10-25')]),'shipped');
 assert.equal(status([shipped('2026-10-19')]),'asked_again');
 // asked_again_after_ship_compares_full_dates (V2): asked in a later year, on an earlier month and
 // day than the ship's, is asked again; claude-mem's month and day alone would say shipped.
 assert.equal(status([shipped('2025-10-27')]),'asked_again');
-// The page: before any request is linked, as it was; once one is, the lead, words and rollups.
-let shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs'),goal('g3','ask',1,'Header test',4),goal('g4','ask',2,'Docs')],
-  [req('r1','Request A','working',null)]);
-assert(!shown.includes('Your work is moving')&&!shown.includes('Nothing on it'),'nothing linked: no word yet');
-const rows=[req('r1','Request A','working',[g('g1'),g('g3','ask')],{percent:40,reviewed:day}),
-  req('r2','Request B','todo',[g('g1')]),req('r3','Request C','working',[]),req('r4','Request D','working',null)];
-shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs'),goal('g3','ask',1,'Header test',4),goal('g4','ask',2,'Docs',2)],rows);
-assert(shown.includes('Your work is moving 1 of your top 2 priorities. 0 are waiting on you, and 1 has nothing working on it.'),shown);
-assert(shown.includes('1 open ask has no request yet. The one you’ve asked for most is “Docs”, 2 times.'),'the lead\'s asks');
-assert(shown.includes('Moving')&&shown.includes('Nothing on it'),'each priority\'s word');
-assert(shown.includes('40% · 1 of 2 requests reviewed')&&shown.includes('Not counted: Request B'),'the rollup');
-assert(shown.includes('No requests, so no progress to measure'),'a priority nothing serves');
-assert(shown.includes('Requests serving it · 2')&&shown.includes('Start a request for this. Nothing is working on it.'),'its requests, or the next move');
-assert(shown.includes('Nothing is working on these · 1')&&shown.includes('Being worked on · 1'),'the open asks split');
-assert(shown.includes('No goal · 1')&&shown.includes('Request C'),'the requests linked to none');
-const summaries=panel.querySelectorAll('summary').filter(s=>s.dataset.focus?.startsWith('goal:'));
-assert.equal(summaries.length,2,'each priority opens');
-// Opening a request goes to its page on My Work.
-const open=panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r2');
-run('globalThis.__show=show;show=()=>{}');open.click();
-assert.equal(run('view'),'my_work');assert.equal(run('mw.request'),'r2');
-run('show=globalThis.__show;ui.setView("my_goals")');
-assert(draw([goal('g1','priority',1,'Fail fast'),goal('g5','ask',1,'Tests')],rows).includes('1 open ask has no request yet. The one you’ve asked for most is “Tests”, once.'),'asked once');
-run('lang="ja"');
-shown=draw([goal('g1','priority',1,'Fail fast',3),goal('g2','priority',2,'Logs'),goal('g3','ask',1,'Header test',4),goal('g4','ask',2,'Docs',2)],rows);
-assert(shown.includes('上位 2 件の優先していることのうち、1 件が進んでいます。0 件はあなたの番で、1 件は何も進んでいません。'),shown);
-assert(shown.includes('進んでいる')&&shown.includes('手つかず')&&shown.includes('目標なし · 1')&&shown.includes('まだ何も進んでいないもの · 1'),'the words in Japanese');
-run('lang="en"');
-// #729: a request opened from My Goals reads its work product again.
-draw([goal('g1','priority',1,'Fail fast')],[req('r9','R9','working',[g('g1')])]);
-run('mw.products={id:"r9",items:[]};mw.unread.add("r9")');
-run('globalThis.__show=show;show=()=>{}');
-panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r9').click();
-run('show=globalThis.__show;ui.setView("my_goals")');
-assert.equal(run('mw.products'),null,'the work product read again');
-assert.equal(run('mw.unread.has("r9")'),false);
-// #729: a failed read of My Work leaves the goals drawn.
-ctx.fetch=url=>String(url).includes('my-work')?Promise.reject(new Error('down')):Promise.resolve(response({current:{written:day,items:[goal('g1','priority',1,'Fail fast')]},window:{days:31,prompts:1},month:{month:'2026-10',prompts:1},months:[],status:{state:'none'}}));
-run('mg.signature=null');
-(await run('showMyGoals()'))();
-assert(text(panel).includes('Fail fast'),'the goals without My Work');
-run('mw.goals=0');
+// #731: asked again compares UTC days, as the ship day is recorded: in Tokyo an ask at 22:00 UTC
+// is the next local day, and a ship an hour later is not before it.
+const tz=process.env.TZ;process.env.TZ='Asia/Tokyo';
+assert.equal(status([shipped('2026-10-20')],Date.UTC(2026,9,20,22,0)),'shipped','one time zone');
+if(tz===undefined)delete process.env.TZ;else process.env.TZ=tz;
 // Slice 7a (P6, V4): the build story at My Work's top: nothing before one is written, then the
 // recap and the chapters behind one disclosure, the newest week first.
 run('mw.story=null');
@@ -2984,30 +2864,7 @@ section.querySelectorAll('summary')[0].focus();
 run('mw.request=null');
 assert.equal(run('myWorkReading()'),true,'reading the build story');
 run('lang="en";mw.story=null');
-// #731: asked again compares UTC days, as the ship day is recorded: in Tokyo an ask at 22:00 UTC
-// is the next local day, and a ship an hour later is not before it.
-const tz=process.env.TZ;process.env.TZ='Asia/Tokyo';
-assert.equal(status([shipped('2026-10-20')],Date.UTC(2026,9,20,22,0)),'shipped','one time zone');
-if(tz===undefined)delete process.env.TZ;else process.env.TZ=tz;
-// #731, #733: a request opened from My Goals drops a work product read still out, and its page is
-// drawn, at its top, with the focus on its heading.
-draw([goal('g1','priority',1,'Fail fast')],[req('r8','R8','working',[g('g1')])]);
-run('mw.productsAsk=4;reposLoaded=true');
-const r8=req('r8','R8','working',[g('g1')]);
-ctx.fetch=url=>{
-  const u=String(url);
-  if(u.includes('/api/my-work/status'))return Promise.resolve(response({state:'none'}));
-  if(u.includes('/api/my-work/product'))return Promise.resolve(response({products:[]}));
-  if(u.includes('/api/my-work'))return Promise.resolve(response({requests:[r8],range:'all',goals:1}));
-  return new Promise(()=>{});
-};
-await panel.querySelectorAll('button').find(b=>b.dataset.focus==='request:r8').listeners.click[0]();
-assert(run('mw.productsAsk')>4,'a read still out is dropped');
-assert.equal(run('view'),'my_work');
-assert(text(document.getElementById('heading')).includes('R8'),'the request\'s page is drawn');
-assert.equal(document.activeElement,document.getElementById('heading'),'the focus on its heading');
-run('ui.setView("my_goals");mw.goals=0');
-console.log('PASS: My Goals 6b: status words by My Work\'s states, full-date asked again, the rollup, the lead, the open asks split, No goal, requests opening on My Work, JA, the goal chip');
+console.log('PASS: Status words by My Work\'s states, asked again by full dates in UTC, the build story');
 }
 
 // Decision 57 slice 8a (docs/my-work-model.md V3, R3, R4): My Rules: the suggestions waiting with

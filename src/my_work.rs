@@ -887,7 +887,6 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
         answers.extend(answer(
             r,
             (&convs, &work, &reviews),
-            &goals,
             stores,
             (home, &mut key),
             (since, now),
@@ -902,10 +901,9 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     }
     let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
-    let goals = goals.len();
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
-    let answer = json!({"requests": answers, "unlinked": unlinked, "goals": goals, "story": story,
+    let answer = json!({"requests": answers, "unlinked": unlinked, "story": story,
         "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words()});
     Ok((answer, held))
 }
@@ -1825,7 +1823,6 @@ fn answer(
         &[Work],
         &BTreeMap<String, Review>,
     ),
-    goals: &[crate::my_work_goals::Item],
     (raw, k, rules, hidden): (&Raw, &Connection, &Rules, &HashSet<(String, i64)>),
     (home, key): (&Path, &mut Option<Vec<u8>>),
     (since, now): (i64, i64),
@@ -2047,7 +2044,6 @@ fn answer(
             "work": work,
             "progress": progress(&readings, review, (status, completed_at), rules),
             "story": story(review, rules),
-            "goals": crate::my_work_links::of_request(k, (&r.id.held(), raw.device()), hidden, goals, rules)?,
             "summaries": turns.iter().map(|t| t.s.id(raw.device())).collect::<Vec<_>>(),
             "cards": cards.iter().take(ACTIVITY).map(|c| c.c.id(raw.device())).collect::<Vec<_>>(),
         }),
