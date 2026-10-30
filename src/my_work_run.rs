@@ -25,6 +25,10 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 pub type Caller<'a> =
     dyn FnMut(&str, &str, &Value, &AnswerCheck, &Gate) -> Result<ChainResult> + 'a;
 
+/// The judge (J1) as the runner asks it for a job (J3): a state and its questions, to its answer,
+/// through the runner's egress gate.
+pub(crate) type Judging<'a> = dyn FnMut(crate::judge::Ask) -> Result<crate::judge::Asked> + 'a;
+
 /// My Work's pass of a curation round (A3): `true` asks only for a job due an hour or more.
 pub type Pass<'a> = dyn FnMut(&mut Raw, &Connection, &Connection, bool) -> Result<Phase> + 'a;
 
@@ -80,6 +84,13 @@ pub(crate) trait Job {
     fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>>;
     /// What it sends for `about` now; none when nothing is left to send.
     fn ask(&self, s: &Stores, about: &str, now: i64) -> Result<Option<Ask>>;
+    /// J3: what it decides with the judge, when the judge is on, before the round's call of the
+    /// chain: the ops to write, none when it decides nothing now. A method of the job, not a step
+    /// of the runner's, as the job's own read for the round (grouping's conversations and
+    /// requests) says what is left to judge, read once a round and not again.
+    fn judged(&self, _s: &Stores, _judge: &mut Judging, _now: i64) -> Result<Vec<MyWorkOp>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A request past `[my_work] calls_a_day`, a retry's or a fallback's too (A7): nothing is sent,
@@ -138,6 +149,8 @@ pub(crate) struct Runner<'a> {
     chain: &'a str,
     /// The phase of the call this round made, if it made one: a round makes one at most.
     called: Option<Phase>,
+    /// J1: the judge and the month's paid cap, as the worker read them; none without `[judge]`.
+    judge: Option<(&'a crate::config::Judge, f64)>,
 }
 
 impl<'a> Runner<'a> {
@@ -156,7 +169,14 @@ impl<'a> Runner<'a> {
             summary,
             chain,
             called: None,
+            judge: None,
         }
+    }
+
+    /// J3: the judge the jobs ask before the chain, with the month's paid cap.
+    pub(crate) fn judge(mut self, judge: Option<(&'a crate::config::Judge, f64)>) -> Self {
+        self.judge = judge;
+        self
     }
 
     /// One pass (A3): the job due the longest, of those due an hour or more when `overdue`; at
@@ -183,6 +203,11 @@ impl<'a> Runner<'a> {
             });
         }
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+        // J3: with the judge on, the jobs decide what they can before the chain; a round that
+        // decided ends there, and the next reads what the consumers applied of it.
+        if let Some(phase) = self.judged(raw, k, db, &reading, now)? {
+            return Ok(self.called(phase));
+        }
         // #730: the subjects a failed batch holds, each by its own wait.
         let holds = crate::providers_db::my_work_held(db, now)?;
         let held_by: BTreeSet<(String, String)> = (holds.iter())
@@ -454,6 +479,91 @@ impl<'a> Runner<'a> {
     fn called(&mut self, phase: Phase) -> Phase {
         self.called = Some(phase);
         phase
+    }
+
+    /// J3: each job's decisions with the judge, when it is on (`[judge]` there, on, and its key
+    /// read): the first job that decides gets its ops written, in one append, and the pass ends
+    /// with the phase that says so; none when no job decides. The judge's calls are its own, under
+    /// `[judge] daily_budget`, not A7's; the gate before each is the chain's otherwise (A5): forget
+    /// ordered, and the exclusions and the rules as the pass read them; and the judge still on.
+    fn judged(
+        &self,
+        raw: &mut Raw,
+        k: &Connection,
+        db: &Connection,
+        reading: &crate::curate::Reading,
+        now: i64,
+    ) -> Result<Option<Phase>> {
+        let Some((judge, cap)) = self
+            .judge
+            .filter(|(j, _)| j.enabled && crate::config::read_key(&j.key_file).is_ok())
+        else {
+            return Ok(None);
+        };
+        let (rules, none) = (self.rules, BTreeSet::new());
+        for job in &self.jobs {
+            let decided = {
+                let raw = &*raw;
+                let stores = Stores {
+                    raw,
+                    k,
+                    rules,
+                    summary: self.summary,
+                    reading,
+                    held: &none,
+                };
+                let gate = || -> Result<Option<crate::dispatch::Guard>> {
+                    let dispatch = raw.dispatch()?;
+                    reading.still(raw)?;
+                    crate::curate::rules_still(raw, rules)?;
+                    // The switch as it is now: turned off since the round read it, nothing goes.
+                    if !crate::judge::still_on(raw.home(), judge) {
+                        return Err(crate::curate::ListChanged.into());
+                    }
+                    Ok(Some(dispatch))
+                };
+                let mut ask = |ask: crate::judge::Ask<'_>| {
+                    crate::judge::ask(db, raw, rules, (judge, cap), ask, &gate)
+                };
+                job.judged(&stores, &mut ask, now)
+            };
+            let ops = match decided {
+                Ok(ops) => ops,
+                // Nothing kept: the next pass reads the list again.
+                Err(e) if e.is::<crate::curate::ListChanged>() => {
+                    return Ok(Some(Phase::Waiting {
+                        until: now,
+                        up: true,
+                    }));
+                }
+                Err(e) => return Err(e),
+            };
+            if ops.is_empty() {
+                continue;
+            }
+            // And before anything is kept: a decision with no call, or a pick of none, needs no
+            // request for the gate to stop.
+            if !crate::judge::still_on(raw.home(), judge) {
+                return Ok(Some(Phase::Waiting {
+                    until: now,
+                    up: true,
+                }));
+            }
+            let mut kept = Vec::new();
+            for op in ops {
+                kept.extend(fitted(op)?.map(|v| (OpKind::MyWork, v)));
+            }
+            return match raw.append_ops_fenced(&kept, reading.fence) {
+                Ok(_) => Ok(Some(Phase::Covered)),
+                // A forget after the job read its records keeps none of it.
+                Err(e) if e.is::<crate::curate::ListChanged>() => Ok(Some(Phase::Waiting {
+                    until: now,
+                    up: true,
+                })),
+                Err(e) => Err(e),
+            };
+        }
+        Ok(None)
     }
 }
 

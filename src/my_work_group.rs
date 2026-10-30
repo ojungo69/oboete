@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 use crate::curate::Reading;
 use crate::my_work::Seen;
-use crate::my_work_ops::Read;
-use crate::my_work_run::{Ask, Due, Job, Stores};
+use crate::my_work_ops::{MyWorkOp, Read};
+use crate::my_work_run::{Ask, Due, Job, Judging, Stores};
 use crate::raw::Raw;
 use crate::redact::Rules;
 
@@ -55,36 +55,40 @@ pub(crate) struct Group {
     pub ops: BTreeSet<(String, i64)>,
 }
 
-/// What the grouping ops a reader may show say, in time order (C5): each decided conversation's
-/// group by its anchor, the groups, the ignored conversations; and for each repository the newest
-/// op's time and the prompt records it was shown.
+/// What the grouping and judge ops a reader may show say, in time order (C5, J3): each decided
+/// conversation's group by its anchor, the groups, the ignored conversations, the conversations a
+/// judge looked at; and for each repository the newest grouping op's time and the prompt records
+/// it was shown.
 #[derive(Debug, Default)]
 pub(crate) struct Groups {
     pub of: HashMap<Key, Key>,
     pub groups: BTreeMap<Key, Group>,
     pub ignored: HashMap<Key, Option<String>>,
+    /// Each conversation a judge op names, decided by it or left to grouping (J3): asked once.
+    pub asked: HashSet<Key>,
     last: HashMap<String, (i64, HashSet<i64>)>,
 }
 
 impl Groups {
-    fn decided(&self, key: &Key) -> bool {
+    pub(crate) fn decided(&self, key: &Key) -> bool {
         self.of.contains_key(key) || self.ignored.contains_key(key)
     }
 }
 
-/// The grouping ops in knowledge.db, folded in time order (C5, S4): a later decision moves a
-/// conversation, continuing a request adds its links, and the newest title wins. An op that was
-/// shown a record of a session or repository excluded now is left out while the exclusion stands
-/// (S6), and so is every op built on one (`read.ops`), so the conversations they decided are
-/// undecided again; a forgotten op decides nothing (S5).
+/// The grouping and judge ops in knowledge.db, folded in one time order (C5, S4, J3): a later
+/// decision moves a conversation, continuing a request adds its links, and the newest title wins.
+/// The judge's ops decide as grouping's do, but are no grouping op to C5: its due check counts
+/// grouping's own. An op that was shown a record of a session or repository excluded now is left
+/// out while the exclusion stands (S6), and so is every op built on one (`read.ops`), so the
+/// conversations they decided are undecided again; a forgotten op decides nothing (S5).
 pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Groups> {
     let mut out = Groups::default();
     if !crate::consumer::manifest::exists(k, "table", "my_work")? {
         return Ok(out);
     }
     let mut st = k.prepare(
-        "SELECT device, ts, about, read, fields, skipped, forgotten, op_seq FROM my_work
-         WHERE job = 'group' ORDER BY ts, device, op_seq",
+        "SELECT device, ts, about, read, fields, skipped, forgotten, op_seq, job FROM my_work
+         WHERE job IN ('group', 'judge') ORDER BY ts, device, op_seq",
     )?;
     let rows = st.query_map([], |r| {
         Ok((
@@ -96,26 +100,33 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             r.get::<_, bool>(5)?,
             r.get::<_, Option<String>>(6)?,
             r.get::<_, i64>(7)?,
+            r.get::<_, String>(8)?,
         ))
     })?;
     // S6: the ops left out while an exclusion stands, any job's (`my_work_ops::hidden`).
     let hidden = crate::my_work_ops::hidden(raw, k, reading)?;
     for row in rows {
-        let (device, ts, repo, read, fields, skipped, forgotten, op_seq) = row?;
+        let (device, ts, repo, read, fields, skipped, forgotten, op_seq, job) = row?;
         if hidden.contains(&(device.clone(), op_seq)) {
             continue;
         }
-        let read: Read = serde_json::from_str(&read)?;
-        let shown = if forgotten.is_some() {
-            HashSet::new()
-        } else {
-            read.spans.iter().map(|s| s.0).collect()
-        };
-        out.last.insert(repo.clone(), (ts, shown));
+        let judged = job == crate::my_work_judge::NAME;
+        if !judged {
+            let read: Read = serde_json::from_str(&read)?;
+            let shown = if forgotten.is_some() {
+                HashSet::new()
+            } else {
+                read.spans.iter().map(|s| s.0).collect()
+            };
+            out.last.insert(repo.clone(), (ts, shown));
+        }
         if skipped || forgotten.is_some() {
             continue;
         }
         let fields: BTreeMap<String, Value> = serde_json::from_str(&fields)?;
+        if judged && let Some(c) = fields.get("conversation").and_then(key) {
+            out.asked.insert(c);
+        }
         for g in items(&fields, "groups") {
             let members = keys(&g["conversations"]);
             let Some(anchor) = members.first().cloned() else {
@@ -204,7 +215,7 @@ impl Grouping {
 /// The candidates (C1) of each repository, the oldest opening ask first: conversations with an
 /// opening ask that is a prompt of this device, active in the last 14 days, undecided, and naming
 /// no request id in their work (those requests are named by their agent).
-fn candidates<'a>(
+pub(crate) fn candidates<'a>(
     seen: &'a [Seen],
     groups: &Groups,
     device: &str,
@@ -305,11 +316,18 @@ impl Job for Grouping {
             keep: Box::new(move |answer: &Value| keep(answer, &labels, &rules)),
         }))
     }
+
+    /// J3: the request judge, over the conversations and requests the round read for grouping.
+    fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+        let read = self.read(s)?;
+        let (seen, groups) = &*read;
+        crate::my_work_judge::request(s, seen, groups, judge, now)
+    }
 }
 
 /// Which of `batch`'s opening asks an agent wrote (O4): the marks (O2), then the text tests over
 /// the agent text recorded in the lookback before them (O3).
-fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
+pub(crate) fn agent_sent(raw: &Raw, batch: &[&Seen]) -> Result<(HashSet<i64>, Vec<Sent>)> {
     let asks: Vec<AskRef> = (batch.iter())
         .filter_map(|c| {
             let (device, seq, ts, text) = c.ask.as_ref()?;
@@ -414,11 +432,11 @@ fn first_at(raw: &Raw, device: &str, ts: i64) -> Result<i64> {
 
 /// An opening ask's conversation, the conversation that sent it in a tool call (C3), and the tool
 /// record whose input held it (#692).
-type Sent = (Key, Key, i64);
+pub(crate) type Sent = (Key, Key, i64);
 
 /// What proves a link (C3): a work list its ends wrote, or an opening ask one sent the other, in
 /// the tool record named.
-enum Proof<'a> {
+pub(crate) enum Proof<'a> {
     List(&'a str),
     Sent(i64),
 }
@@ -436,6 +454,78 @@ struct Batch {
     ops: BTreeSet<i64>,
 }
 
+/// The proven links (C3) of the conversations of `batch`, of repository `repo`, to each other and
+/// to its open requests, each request by its anchor, and the open requests they name. Grouping
+/// shows them (A4), the request judge joins by one (J3).
+pub(crate) fn proven<'a>(
+    repo: &str,
+    batch: &[&Seen],
+    open: &[(&Key, &Group)],
+    by_key: &HashMap<&Key, &'a Seen>,
+    senders: &[Sent],
+) -> (Vec<(Proof<'a>, Vec<Key>)>, HashSet<Key>) {
+    let request_of = |key: &Key| {
+        open.iter()
+            .find(|(_, g)| g.members.contains(key))
+            .map(|(a, _)| (*a).clone())
+    };
+    // C3: a list written by two to eight conversations of the repository, one of them to be
+    // decided, links them, each request by its member that wrote it.
+    let mut writers: BTreeMap<&str, Vec<&Key>> = BTreeMap::new();
+    for c in by_key.values() {
+        for (r, list) in &c.lists {
+            if *r == repo {
+                writers.entry(list.as_str()).or_default().push(&c.key);
+            }
+        }
+    }
+    // In one order whatever the map's: the same records make the same prompt, whose digest a wait
+    // is kept by (A8).
+    for keys in writers.values_mut() {
+        keys.sort();
+    }
+    let deciding: HashSet<&Key> = batch.iter().map(|c| &c.key).collect();
+    let mut links: Vec<(Proof, Vec<Key>)> = Vec::new();
+    let mut linked: HashSet<Key> = HashSet::new();
+    for (list, keys) in &writers {
+        if keys.len() < 2 || keys.len() > LIST_MOST || !keys.iter().any(|k| deciding.contains(k)) {
+            continue;
+        }
+        let mut ends: Vec<Key> = Vec::new();
+        for key in keys {
+            let end = if deciding.contains(key) {
+                Some((*key).clone())
+            } else {
+                request_of(key)
+            };
+            if let Some(end) = end.filter(|e| !ends.contains(e)) {
+                ends.push(end);
+            }
+        }
+        if ends.len() >= 2 {
+            linked.extend(ends.iter().filter(|e| !deciding.contains(e)).cloned());
+            links.push((Proof::List(list), ends));
+        }
+    }
+    // C3: a conversation to decide whose opening ask another conversation sent in a tool call is
+    // linked to that conversation, when it is decided here too, else to its open request: the one
+    // sent first, the sender after it.
+    for (to, from, record) in senders {
+        let end = if deciding.contains(from) {
+            Some(from.clone())
+        } else {
+            request_of(from)
+        };
+        if let Some(end) = end.filter(|e| e != to) {
+            if !deciding.contains(&end) {
+                linked.insert(end.clone());
+            }
+            links.push((Proof::Sent(*record), vec![to.clone(), end]));
+        }
+    }
+    (links, linked)
+}
+
 impl Batch {
     /// Within `[summary] window_tokens` (A4): the first conversation, whatever it costs, then the
     /// open requests a proven link names, the other conversations and the other open requests, the
@@ -450,72 +540,11 @@ impl Batch {
     ) -> Batch {
         let rules = s.rules;
         let room = s.summary.window_tokens;
-        // C3: a list written by two to eight conversations of the repository, one of them to be
-        // decided, links them, each request by its member that wrote it.
         let repo = batch
             .first()
             .and_then(|c| c.repo.clone())
             .unwrap_or_default();
-        let request_of = |key: &Key| {
-            open.iter()
-                .find(|(_, g)| g.members.contains(key))
-                .map(|(a, _)| (*a).clone())
-        };
-        let mut writers: BTreeMap<&str, Vec<&Key>> = BTreeMap::new();
-        for c in by_key.values() {
-            for (r, list) in &c.lists {
-                if *r == repo {
-                    writers.entry(list.as_str()).or_default().push(&c.key);
-                }
-            }
-        }
-        // In one order whatever the map's: the same records make the same prompt, whose digest a
-        // wait is kept by (A8).
-        for keys in writers.values_mut() {
-            keys.sort();
-        }
-        let deciding: HashSet<&Key> = batch.iter().map(|c| &c.key).collect();
-        let mut links: Vec<(Proof, Vec<Key>)> = Vec::new();
-        let mut linked: HashSet<Key> = HashSet::new();
-        for (list, keys) in &writers {
-            if keys.len() < 2
-                || keys.len() > LIST_MOST
-                || !keys.iter().any(|k| deciding.contains(k))
-            {
-                continue;
-            }
-            let mut ends: Vec<Key> = Vec::new();
-            for key in keys {
-                let end = if deciding.contains(key) {
-                    Some((*key).clone())
-                } else {
-                    request_of(key)
-                };
-                if let Some(end) = end.filter(|e| !ends.contains(e)) {
-                    ends.push(end);
-                }
-            }
-            if ends.len() >= 2 {
-                linked.extend(ends.iter().filter(|e| !deciding.contains(e)).cloned());
-                links.push((Proof::List(list), ends));
-            }
-        }
-        // C3: a conversation to decide whose opening ask another conversation sent in a tool call
-        // is linked to that conversation, when it is decided here too, else to its open request:
-        // the one sent first, the sender after it.
-        for (to, from, record) in senders {
-            let end = if deciding.contains(from) {
-                Some(from.clone())
-            } else {
-                request_of(from)
-            };
-            if let Some(end) = end.filter(|e| e != to) {
-                if !deciding.contains(&end) {
-                    linked.insert(end.clone());
-                }
-                links.push((Proof::Sent(*record), vec![to.clone(), end]));
-            }
-        }
+        let (links, linked) = proven(&repo, batch, open, by_key, senders);
         let request_text = |anchor: &Key, g: &Group| -> (String, BTreeSet<i64>) {
             let mut shown = BTreeSet::new();
             let mut text = match &g.title {

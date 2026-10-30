@@ -27,6 +27,8 @@ pub(crate) const ROLE: &str = "my_work";
 const WORK: usize = 240;
 const CARDS: usize = 300;
 const SUMMARIES: usize = 100;
+/// The cards of a conversation the judges are shown at most (J2, claude-mem's).
+const CONTEXT_CARDS: usize = 8;
 /// The sessions found by their prompts alone: those of the newest 2,000 live prompts no exclusion
 /// takes, beyond claude-mem, which reads a session only for its work, observations or summaries.
 /// Every prompt of a session read is read, as claude-mem reads every prompt of the sessions it
@@ -1238,6 +1240,9 @@ pub(crate) struct Seen {
     /// The work-state lists it wrote to, by repository and name, from every write a call of its
     /// sent (C3).
     pub lists: BTreeSet<(String, String)>,
+    /// Its first cards of those My Work reads, the oldest first, each with a title: its device,
+    /// its window op and its title (J2).
+    pub cards: Vec<(String, i64, String)>,
 }
 
 /// Every conversation My Work reads (`gather`), as grouping reads it.
@@ -1267,9 +1272,15 @@ pub(crate) fn seen(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Vec<Seen>
             .chain(wrote)
             .max()
             .unwrap_or(0);
+        let cards = (c.cards.iter().rev())
+            .filter(|card| !card.c.title.trim().is_empty())
+            .take(CONTEXT_CARDS)
+            .map(|card| (card.c.device.clone(), card.c.op_seq, card.c.title.clone()))
+            .collect();
         out.push(Seen {
             named: named.get(&key).cloned().unwrap_or_default(),
             lists: lists.remove(&key).unwrap_or_default(),
+            cards,
             key,
             repo: c.repo,
             ask,
@@ -2310,7 +2321,7 @@ fn asks(text: &str) -> bool {
 
 /// claude-mem's `humanRequestTitle`: a `GOAL:` line or the first line, without its marks, its
 /// first sentence or clause, at most `TITLE` characters cut at a word.
-fn title(text: &str) -> String {
+pub(crate) fn title(text: &str) -> String {
     static GOAL: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?im)(?:^|\n)\s*GOAL\s*:\s*([^\n]+)").unwrap());
     static CALLED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bcalled\s*$").unwrap());

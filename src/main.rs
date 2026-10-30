@@ -42,6 +42,7 @@ mod my_work;
 mod my_work_focus;
 mod my_work_goals;
 mod my_work_group;
+mod my_work_judge;
 mod my_work_ops;
 mod my_work_place;
 mod my_work_progress;
