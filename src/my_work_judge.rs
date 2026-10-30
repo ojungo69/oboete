@@ -381,7 +381,8 @@ fn key((agent, session): &Key) -> Value {
 }
 
 /// Whether the my_work consumer has applied every op this device recorded, within
-/// `claims::applied`'s wait.
+/// `claims::applied`'s wait: `false` only when the wait ran out; a worker or a store that failed is
+/// an error (#777).
 fn caught_up(home: &Path) -> Result<bool> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(true);
@@ -389,7 +390,11 @@ fn caught_up(home: &Path) -> Result<bool> {
     let device = raw.device().to_owned();
     let top = raw.max_op_seq_of(&device)?;
     drop(raw);
-    Ok(crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")).is_ok())
+    match crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")) {
+        Ok(()) => Ok(true),
+        Err(e) if e.is::<crate::claims::NotYet>() => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// J4's answer as the page posts it.
@@ -1392,7 +1397,8 @@ mod tests {
     }
 
     /// J4: the request of a conversation the judge suggested names the request its pick is in,
-    /// with that request's id as the page has it and its title; no other request names one.
+    /// with that request's id as the page has it and its title; no other request names one. #777:
+    /// and the conversation it is about, by the id the page has it, which a Join follows.
     #[test]
     fn a_suggestion_shows_on_its_conversations_request_and_names_the_pick() {
         let mut h = Home::new();
@@ -1401,7 +1407,7 @@ mod tests {
         assert_ne!(own["id"], parser["id"]);
         assert_eq!(
             own["suggestion"],
-            json!({"id": parser["id"], "title": "Parser"})
+            json!({"id": parser["id"], "title": "Parser", "conversation": {"id": "c:claude:s2"}})
         );
         assert!(parser.get("suggestion").is_none(), "{parser}");
     }
@@ -1605,6 +1611,80 @@ mod tests {
         for s in ["s2", "s3"] {
             assert_eq!(h.request_of(s)["id"], parser["id"], "{s}");
         }
+    }
+
+    /// #777 (a_judge_op_folded_after_the_owners_answer_opens_no_suggestion): an answer that folds
+    /// before the judge op it answered, its time the earlier (another device's clock behind this
+    /// one's), opens no suggestion again: a conversation the owner placed takes none.
+    #[test]
+    fn a_judge_op_folded_after_the_owners_answer_opens_no_suggestion() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        assert!(h.groups().suggested.contains_key(&key("s2")));
+        let declined = json!({"conversation": ["claude", "s2"], "action": "not-this", "groups":
+            [{"conversations": [["claude", "s2"]], "title": null, "links": []}]});
+        let op = MyWorkOp {
+            job: NAME.into(),
+            about: R.into(),
+            entry: String::new(),
+            ts: h.t,
+            read: Read::default(),
+            removed: vec![],
+            fields: serde_json::from_value(declined).unwrap(),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.s.run();
+        let groups = h.groups();
+        assert!(!groups.suggested.contains_key(&key("s2")));
+        assert_eq!(groups.of.get(&key("s2")), Some(&key("s2")));
+        assert!(h.request_of("s2")["suggestion"].is_null());
+    }
+
+    /// #777 (catch_up_does_not_wait_for_unrelated_work_after_its_checkpoint_is_applied): with this
+    /// device's ops applied, the catch-up runs no worker, so a worker lock held elsewhere costs it
+    /// nothing.
+    #[test]
+    fn catch_up_does_not_wait_for_unrelated_work_after_its_checkpoint_is_applied() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let _held = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
+        let started = std::time::Instant::now();
+        assert!(caught_up(h.s.home.path()).unwrap());
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    /// #777 (a_failed_catch_up_is_unavailable_not_pending): a catch-up whose worker cannot run is
+    /// the store unavailable, 503, not an answer still being saved; one whose wait only runs out,
+    /// its pass among it, is 409 `my_work_pending`. Neither writes the answer.
+    #[test]
+    fn a_failed_catch_up_is_unavailable_not_pending() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+        // An op of this device the consumer has not applied yet.
+        h.grouped(&["s9"], "Unrelated");
+        let lock = h.s.home.path().join("state").join("worker.lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::create_dir(&lock).unwrap();
+        assert_eq!(h.post(answer.clone()), Err((503, "my_work_unavailable")));
+        std::fs::remove_dir(&lock).unwrap();
+        // The worker's pass, which waits 2 seconds for the lock held here, is within the wait: with
+        // a wait of 2 seconds, refused after the pass, not a whole wait after it.
+        let held = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
+        crate::claims::WAIT.set(Some(Duration::from_millis(2_000)));
+        let started = std::time::Instant::now();
+        let pending = h.post(answer);
+        let took = started.elapsed();
+        crate::claims::WAIT.set(None);
+        assert_eq!(pending, Err((409, "my_work_pending")));
+        assert!(took < Duration::from_millis(3_600), "{took:?}");
+        drop(held);
+        h.s.run();
+        assert!(h.groups().suggested.contains_key(&key("s2")), "not written");
     }
 
     /// #775: an exclusion of the repository while an answer stands hides its requests, and taken

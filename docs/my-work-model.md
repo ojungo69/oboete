@@ -2055,6 +2055,17 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   list. A read that fails leaves what was saved said as saved, the buttons usable again, as a
   review's does (#602), and My Focus's actions now do the same, an applied change keeping its
   Undo.
+- **After #776's reviews** (#777): a judge op that folds after the owner's answer, its time the
+  earlier (another device's clock behind), opens no suggestion again: a conversation the owner
+  placed takes none. The catch-up before an answer resolves at once when the consumer has applied
+  what this device recorded; else the worker's pass in the viewer's process (when no other worker
+  holds the lock) and the wait share the 10 seconds, a pass begun ending first. A worker or a store
+  that fails is 503 `my_work_unavailable`; only a wait that runs out is 409 `my_work_pending`. A
+  suggestion names the conversation it is about, by the id the page has it, which a Join follows to
+  where it went, not the request's member active last. The poll after an answer whose read
+  succeeded finds nothing new. A redraw keeps the search field the owner types in, with its caret.
+  A move applied and not read is drawn where the store has it, so that a later move's Undo goes
+  back there.
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).
