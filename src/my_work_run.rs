@@ -204,7 +204,7 @@ impl<'a> Runner<'a> {
         }
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
         // #730: the subjects a failed batch holds, each by its own wait; read before the judge's
-        // pass too, as a job's read for the round (placement's) is kept for the chain's (11c, D8).
+        // pass too, as a job's read for the round (placement's) is kept for the chain's (J5).
         let holds = crate::providers_db::my_work_held(db, now)?;
         let held_by: BTreeSet<(String, String)> = (holds.iter())
             .map(|(job, about, ..)| (job.clone(), about.clone()))

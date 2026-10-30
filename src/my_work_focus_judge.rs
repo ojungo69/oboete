@@ -4,7 +4,7 @@
 //! claude-mem's `FOCUS_AUTO_PLACE_THRESHOLD` is null. A request is asked once for its basis and the
 //! kept areas as they are: the pick, or the outcome of a call refused or failed, is kept as an op of
 //! its own job about the placement's subject, so that a request that moved, or kept areas that
-//! changed, are asked again, and nothing else is (11c's plan, D1 to D8).
+//! changed, are asked again, and nothing else is (docs/my-work-model.md, Slice 11c).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -61,7 +61,7 @@ pub(crate) fn digest(kept: &[&Area]) -> i64 {
     i64::from_str_radix(&crate::curate::sha256_hex(&lines.concat())[..13], 16).unwrap_or(0)
 }
 
-/// The op the judge keeps for `subject` now (D3): this device's newest about it, a pick or an
+/// The op the judge keeps for `subject` now (Slice 11c's "Current"): this device's newest about it, a pick or an
 /// outcome, when it is of `basis` and `areas` and nothing took it; none otherwise.
 pub(crate) fn current(
     s: &Stores,
@@ -80,7 +80,7 @@ pub(crate) fn current(
     }))
 }
 
-/// A pick as the placement model is shown it (D6): the area's id, or `other` when none fits, and
+/// A pick as the placement model is shown it (Slice 11c's "The hint"): the area's id, or `other` when none fits, and
 /// its probability; none for an outcome with no pick.
 pub(crate) fn hint(kept: &Kept) -> Option<String> {
     let focus = kept.op.fields.get("focus").and_then(Value::as_str)?;

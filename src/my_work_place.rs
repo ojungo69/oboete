@@ -257,7 +257,7 @@ impl Job for Place {
             return Ok(None);
         };
         let mut shown = Shown::areas(s, &round.focus);
-        // J5: each request's pick, the placement's own question's only (D6).
+        // J5: each request's pick, the placement's own question's only.
         let areas =
             crate::my_work_focus_judge::digest(&crate::my_work_focus_judge::kept(&round.focus));
         let hint = |u: &Unit| -> Result<Option<Kept>> {
@@ -363,7 +363,7 @@ impl Shown {
     }
 
     /// A request's block when it fits, or `first`; what it showed added to the read (S2), the
-    /// focus judge's op too when the block shows its pick (D6), so that what takes the pick takes
+    /// focus judge's op too when the block shows its pick (J5), so that what takes the pick takes
     /// the placement.
     fn request(&mut self, s: &Stores, u: &Unit, first: bool, judged: Option<Kept>) {
         let rules = s.rules;
@@ -1321,7 +1321,7 @@ mod tests {
         assert_eq!(h.focus().router_of(&subjects[0]), None);
     }
 
-    /// The line a request's block shows a pick in (D6).
+    /// The line a request's block shows a pick in (J5).
     const PICK: &str = "The judge's pick, a suggestion only:";
 
     /// J5: with a kept area, the judge is asked about a queued request before the chain, once, as
@@ -1539,7 +1539,7 @@ mod tests {
             }
         }
         // A request of two conversations in two repositories, the second's excluded on the way:
-        // the check covers each of the request's repositories, not its anchor's alone (D5).
+        // the check covers each of the request's repositories, not its anchor's alone.
         let mut h = Home::new();
         h.said("s1a", 1, "Build part 1 of the parser.");
         h.s.said("s1b", R2, h.t + 31 * MINUTE, "Test part 1 of the lexer.");
@@ -1590,7 +1590,7 @@ mod tests {
 
     /// J5, #730: a request a failed batch holds is in no batch, so the judge asks nothing of it, and
     /// the chain's call in the same pass, of the round the judge's pass read, leaves it out too
-    /// (11c, D8).
+    /// (Slice 11c's "Holds").
     #[test]
     fn a_held_request_is_neither_judged_nor_placed_until_its_wait_ends() {
         let mut h = Home::new();
@@ -1614,7 +1614,7 @@ mod tests {
         assert_eq!(shown(&sent[0]), [("R1".to_owned(), 2)], "{}", sent[0]);
     }
 
-    /// J5 (D3): a kept area renamed, or given another goal, before the request was placed: the pick
+    /// J5: a kept area renamed, or given another goal, before the request was placed: the pick
     /// for the areas as they were is not the current one, and the request is asked about again.
     #[test]
     fn a_kept_area_changed_before_the_placement_is_asked_about_again() {
@@ -1638,7 +1638,7 @@ mod tests {
         assert_eq!(judged[1].op.fields["p"], json!(0.9));
     }
 
-    /// J5 (D5): the judge is told each repository of the request, the anchor's and its other
+    /// J5: the judge is told each repository of the request, the anchor's and its other
     /// conversation's, so that its own check covers them all; one it finds excluded keeps nothing,
     /// so the next round reads the request again, as J3's `left`.
     #[test]
