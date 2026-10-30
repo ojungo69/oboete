@@ -4454,13 +4454,16 @@ function judgeTest() {
       if (!currentSettings(mine)) return;
       const outcome = res.ok ? answer.outcome : answer.code || PROVIDER_HTTP_ERRORS[res.status];
       const key = Object.hasOwn(TEXT, `judge_test_${outcome}`) ? `judge_test_${outcome}` : 'judge_test_failed';
-      // The call is counted: the judge's numbers read again, with what is being edited kept.
+      // The call is counted: the judge's numbers read again, with what is being edited kept. A
+      // save or a key saved meanwhile has the page now, its own answer included: this test says
+      // nothing more, and a save still running keeps its answer's place.
       const settings = res.ok ? await api('settings').catch(() => null) : null;
-      if (settings && !settings.error && currentSettings(mine)) {
+      if (!currentSettings(mine)) return;
+      if (settings && !settings.error && !button.closest('.settings')?.inert) {
         form = mergeProviderSettings(settings, mine, { op: 'key' });
         drawSettings();
       }
-      if (currentSettings(form)) setStatus(t(key), outcome !== 'ok', lang);
+      setStatus(t(key), outcome !== 'ok', lang);
     } catch {
       if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
     } finally {

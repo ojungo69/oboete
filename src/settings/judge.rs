@@ -56,30 +56,12 @@ pub(crate) fn save_key(
     authorized: &dyn Fn() -> bool,
     body: &[u8],
 ) -> Result<Value, Refusal> {
-    let owner = crate::config::home_dir();
-    let data = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
-    save_key_at(home, saving, authorized, body, &owner, data.as_deref())
+    super::managed_key(home, (saving, authorized), body, None, "judge", turned_on)
 }
 
-fn save_key_at(
-    home: &Path,
-    saving: &Mutex<()>,
-    authorized: &dyn Fn() -> bool,
-    body: &[u8],
-    owner: &Path,
-    data: Option<&Path>,
-) -> Result<Value, Refusal> {
-    // J1: off until a key is set; setting one is the owner turning it on.
-    super::managed_key(
-        home,
-        (saving, authorized),
-        body,
-        (owner, data),
-        "judge",
-        |doc| {
-            put(doc, "judge", "enabled", true.into());
-        },
-    )
+/// J1: off until a key is set; setting one is the owner turning it on.
+fn turned_on(doc: &mut toml_edit::DocumentMut) {
+    put(doc, "judge", "enabled", true.into());
 }
 
 /// `POST /api/judge/test {"confirmed": true}`: one made-up question with no recorded text, through
@@ -151,13 +133,14 @@ mod tests {
         let body =
             |version: &Value| serde_json::to_vec(&json!({"key": key, "version": version})).unwrap();
         let save = |body: &[u8], ok: bool| {
-            save_key_at(
+            let homes = Some((owner.path(), Some(data.path())));
+            super::super::managed_key(
                 home.path(),
-                &Mutex::new(()),
-                &|| ok,
+                (&Mutex::new(()), &|| ok),
                 body,
-                owner.path(),
-                Some(data.path()),
+                homes,
+                "judge",
+                turned_on,
             )
         };
         let before = file(home.path());

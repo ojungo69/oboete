@@ -372,27 +372,7 @@ pub(crate) fn save_key(
     authorized: &dyn Fn() -> bool,
     body: &[u8],
 ) -> Result<Value, Refusal> {
-    let owner = crate::config::home_dir();
-    let data = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
-    save_key_at(home, saving, authorized, body, &owner, data.as_deref())
-}
-
-fn save_key_at(
-    home: &Path,
-    saving: &Mutex<()>,
-    authorized: &dyn Fn() -> bool,
-    body: &[u8],
-    owner: &Path,
-    data: Option<&Path>,
-) -> Result<Value, Refusal> {
-    super::managed_key(
-        home,
-        (saving, authorized),
-        body,
-        (owner, data),
-        "embedding",
-        |_| {},
-    )
+    super::managed_key(home, (saving, authorized), body, None, "embedding", |_| {})
 }
 
 #[cfg(test)]
@@ -789,13 +769,13 @@ mod tests {
             });
             let key = scope.spawn(|| {
                 let posted = body(json!({"key": "SyntheticToken12345", "version": version}));
-                save_key_at(
+                super::super::managed_key(
                     home.path(),
-                    &saving,
-                    &authorized,
+                    (&saving, &authorized),
                     &posted,
-                    owner.path(),
-                    None,
+                    Some((owner.path(), None)),
+                    "embedding",
+                    |_| {},
                 )
             });
             std::thread::sleep(Duration::from_millis(300));
@@ -925,7 +905,15 @@ mod tests {
         let canary = format!("{}-{}", "NewSyntheticToken", "7d41e0b2");
         let save = |key: &str, version: &Value| {
             let posted = body(json!({"key": key, "version": version}));
-            save_key_at(home.path(), &saving, &|| true, &posted, owner.path(), None)
+            let homes = Some((owner.path(), None));
+            super::super::managed_key(
+                home.path(),
+                (&saving, &|| true),
+                &posted,
+                homes,
+                "embedding",
+                |_| {},
+            )
         };
         let refused = save(&format!("{canary} x"), &version).unwrap_err();
         assert_eq!(

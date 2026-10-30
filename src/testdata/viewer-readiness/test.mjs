@@ -1043,6 +1043,32 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert.equal(switchOf().checked,false,'the switch as edited stays');
   }
   settingsAnswer=null;
+  // A key saved while a test's numbers are read again has the page: the test's outcome is not
+  // said, and the read is not merged.
+  {
+    let release;settingsAnswer=new Promise(resolve=>{release=resolve;});
+    answers=[json({outcome:'ok'})];
+    const testButton=judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test');
+    document.getElementById('status').textContent='';
+    testButton.click();await settle();
+    const replaced=w4.formOf(settings({judge:{...on,calls_today:7}}));ctx.ui.setForm(replaced);ctx.ui.drawSettings();
+    release(json(settings({judge:{...on,calls_today:8}})));await settle();await settle();
+    assert.equal(ctx.ui.getForm(),replaced,'the newer form stays');
+    assert(!document.getElementById('status').textContent.includes('the key works'),'an older test is not said');
+    settingsAnswer=null;
+  }
+  // A save running when the read comes back keeps its place: the read is not merged.
+  {
+    let release;settingsAnswer=new Promise(resolve=>{release=resolve;});
+    answers=[json({outcome:'ok'})];
+    const mine=ctx.ui.getForm();
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
+    panel.querySelector('.settings').inert=true;
+    release(json(settings({judge:{...on,calls_today:9}})));await settle();await settle();
+    assert.equal(ctx.ui.getForm(),mine,'a running save keeps its place');
+    assert(document.getElementById('status').textContent.includes('the key works'),'the outcome is still said');
+    panel.querySelector('.settings').inert=false;settingsAnswer=null;
+  }
   answers=[json({code:'missing_key',field:'judge.test'},422)];
   judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
   assert(document.getElementById('status').textContent.includes('Paste the key first'),'a refusal in words');

@@ -672,15 +672,19 @@ struct ManagedKey {
 /// outside the store), and `[<table>] key_file` pointed at it with `then`'s other changes, against
 /// the version the page showed. The old file is left as it is. The answer is the settings with the
 /// key's state: the key is in no answer. `authorized` is the request's token checked again under
-/// config.lock, as for a choice.
+/// config.lock, as for a choice. `homes` is where the file may go (the owner's home and
+/// `XDG_DATA_HOME`), the owner's own when None (tests give their own).
 pub(super) fn managed_key(
     home: &Path,
     (saving, authorized): (&Mutex<()>, &dyn Fn() -> bool),
     body: &[u8],
-    (owner, data): (&Path, Option<&Path>),
+    homes: Option<(&Path, Option<&Path>)>,
     table: &str,
     then: impl FnOnce(&mut toml_edit::DocumentMut),
 ) -> Result<Value, Refusal> {
+    let owner_home = crate::config::home_dir();
+    let data_home = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
+    let (owner, data) = homes.unwrap_or((&owner_home, data_home.as_deref()));
     let field = format!("{table}.key");
     let posted: ManagedKey =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
