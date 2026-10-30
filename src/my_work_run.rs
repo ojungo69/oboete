@@ -541,6 +541,14 @@ impl<'a> Runner<'a> {
             if ops.is_empty() {
                 continue;
             }
+            // And before anything is kept: a decision with no call, or a pick of none, needs no
+            // request for the gate to stop.
+            if !crate::judge::still_on(raw.home(), judge) {
+                return Ok(Some(Phase::Waiting {
+                    until: now,
+                    up: true,
+                }));
+            }
             let mut kept = Vec::new();
             for op in ops {
                 kept.extend(fitted(op)?.map(|v| (OpKind::MyWork, v)));

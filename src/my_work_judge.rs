@@ -544,6 +544,9 @@ mod tests {
         /// The judge's ops, the oldest first.
         fn judged(&self) -> Vec<MyWorkOp> {
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
+            if !crate::consumer::manifest::exists(&k, "table", "my_work").unwrap() {
+                return Vec::new();
+            }
             let mut st = k
                 .prepare(
                     "SELECT about, entry, read, fields FROM my_work WHERE job = 'judge'
@@ -1169,5 +1172,44 @@ mod tests {
             h.ledger(),
             vec![("judge:jev".into(), "judge".into(), "ok".into())]
         );
+    }
+
+    /// J1: the switch turned off before a decision that needs no call is kept: the round keeps
+    /// nothing, as it keeps nothing of a pick.
+    #[test]
+    fn the_switch_turned_off_before_a_decision_is_kept_keeps_nothing() {
+        struct Off(Grouping, std::path::PathBuf);
+        impl Job for Off {
+            fn name(&self) -> &'static str {
+                self.0.name()
+            }
+            fn due(&self, s: &Stores, now: i64) -> Result<Vec<crate::my_work_run::Due>> {
+                self.0.due(s, now)
+            }
+            fn ask(
+                &self,
+                s: &Stores,
+                about: &str,
+                now: i64,
+            ) -> Result<Option<crate::my_work_run::Ask>> {
+                self.0.ask(s, about, now)
+            }
+            fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+                let config = self.1.join("config.toml");
+                let text = std::fs::read_to_string(&config).unwrap();
+                std::fs::write(&config, format!("{text}enabled = false\n")).unwrap();
+                self.0.judged(s, judge, now)
+            }
+        }
+        let mut h = Home::new();
+        h.said("s1", 0, "Build the parser.");
+        let job = Off(Grouping::default(), h.s.home.path().to_owned());
+        let (phase, _) = h.pass_with(true, Box::new(job), &|_| panic!("no call"));
+        assert!(
+            matches!(phase, Phase::Waiting { up: true, .. }),
+            "{phase:?}"
+        );
+        assert!(h.judged().is_empty());
+        assert!(!h.groups().decided(&key("s1")));
     }
 }

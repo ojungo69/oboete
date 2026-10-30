@@ -1996,9 +1996,10 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   that does not, keeps instead an op naming the conversation alone, `too_big`, read only its opening
   ask: grouping decides it, and nothing was paid for.
 - **The gate** is the runner's, as the chain's (A5), without A7's count: the judge's calls are its
-  own, under `[judge] daily_budget`. It reads `[judge]` again before each request: a switch turned
-  off since the round read the settings sends nothing more (a check after its pick too), and the
-  round keeps nothing.
+  own, under `[judge] daily_budget`. It reads `[judge]` again before each request, and the runner
+  again before it keeps a decision: a switch turned off since the round read the settings sends
+  nothing more (a check after its pick too), and the round keeps nothing (a decision with no call,
+  or a pick of none, too).
 - **No body cap of claude-mem's** (64 KB): Typesafe's answer decides, and a refusal leaves the
   conversation to grouping.
 - **The settings page** says that My Work asks Jev about each new conversation and what it is sent.
