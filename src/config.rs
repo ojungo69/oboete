@@ -23,8 +23,9 @@ pub struct Config {
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
     #[serde(default)]
     pub gemini: Option<GeminiPlace>,
-    /// What every paid entry together may spend in a calendar month (owner decision 5: USD 5).
-    #[serde(default = "default_paid_usd_per_month", deserialize_with = "usd")]
+    /// What every paid entry together may spend in a calendar month (owner decision 5: USD 5);
+    /// `inf`, no cap (decision 64).
+    #[serde(default = "default_paid_usd_per_month", deserialize_with = "usd_cap")]
     pub paid_usd_per_month: f64,
     /// `[chain]`: the user's changes to the chain by entry name, applied by `load()` (#94).
     #[serde(default)]
@@ -77,6 +78,23 @@ fn usd<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Er
             "a USD amount is a number, 0 or more",
         ))
     }
+}
+
+/// A monthly cap: a USD amount, or `inf` for none, which no spend passes (decision 64).
+fn usd_cap<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v == no_monthly_cap() || (v.is_finite() && v >= 0.0) {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(
+            "a USD cap is a number, 0 or more, or inf for no cap",
+        ))
+    }
+}
+
+/// A `paid_usd_per_month` no month reaches (decision 64), written `inf` in config.toml.
+pub(crate) fn no_monthly_cap() -> f64 {
+    f64::INFINITY
 }
 
 /// `gemini = "before-subscriptions"` puts it just before the first subscription CLI (it spares
@@ -1587,10 +1605,15 @@ enabled = false
         assert_eq!(c.paid_usd_per_month, 2.5);
         assert_eq!(parse_retention(text).unwrap().days, Some(90));
         for bad in ["-1.0", "nan", "inf"] {
-            assert!(toml::from_str::<Config>(&format!("paid_usd_per_month = {bad}")).is_err());
             assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_in = {bad}")).is_err());
             assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_out = {bad}")).is_err());
         }
+        // Decision 64: the monthly cap may be off, written `inf`; no other value outside 0 or more.
+        for bad in ["-1.0", "nan", "-inf"] {
+            assert!(toml::from_str::<Config>(&format!("paid_usd_per_month = {bad}")).is_err());
+        }
+        let off = toml::from_str::<Config>("paid_usd_per_month = inf").unwrap();
+        assert_eq!(off.paid_usd_per_month, no_monthly_cap());
         parse_capture(Some(text)).unwrap();
         // Every key `Config` reads, as its derived `Deserialize` names them, so that a key a later
         // version adds there never stops recording (CodeRabbit on #660: `[my_work]` did).

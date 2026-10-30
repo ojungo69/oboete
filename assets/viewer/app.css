@@ -479,6 +479,8 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 .settings .stopped { list-style: none; padding: 0; }
 .settings .stopped li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; overflow-wrap: anywhere; }
 .settings .note { display: block; max-width: 72ch; font-size: 12.5px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; font-weight: 400; }
+/* Decision 64: what still stops the calls of a cap turned off. */
+.settings .note.no-cap-warning { color: var(--yellow); margin-bottom: 8px; }
 .settings .scroll { overflow-x: auto; }
 .settings blockquote { margin: 8px 0; padding: 8px 14px; border-left: 3px solid var(--line-strong); color: var(--muted); font-style: italic; }
 .settings ul { padding-left: 20px; }

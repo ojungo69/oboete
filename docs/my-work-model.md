@@ -331,7 +331,9 @@ reservation. Turning it on is a person's act, on the settings page.
 A7. **At most 100 calls a day.** `[my_work] calls_a_day`, default 100, decision 57's figure. It is
 counted from the ledger's rows of role `my_work` over a rolling 24 hours, a new role filter beside
 `calls_in_a_day`. At the bound the jobs wait, held for budget. Money stays in the one monthly pool,
-with no share kept back for cards. (Claude; overrulable.)
+with no share kept back for cards. (Claude; overrulable.) Since decision 64 the bound may be no cap
+(4294967295, set on the settings page): the monthly pool and each service's own limits then bound
+the jobs, and the estimate (A6) shows no most.
 
 A8. **Waiting and giving up.** A job every entry fails waits in providers.db's `my_work_pending`
 (its key, reason, hold kind, attempts, next attempt), as `turn_pending` does: again in 10 minutes,
@@ -1918,7 +1920,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 
 - **`[judge]`** (J1): `key_file` (the token on line 2, read at each call), `enabled` (on when the
   table is there), `model` (`jev-latest`), `timeout_s` (15), `daily_budget` (300 calls in any 24
-  hours). Absent, the judge is off. The endpoint is fixed in code; the table refuses any other key
+  hours; since decision 64 set on the settings page, 1 to 100,000 or no cap, 4294967295). Absent,
+  the judge is off. The endpoint is fixed in code; the table refuses any other key
   (`base_url`, `headers`, `extra`), so no value of it sends the owner's text elsewhere.
 - **One call** (`judge::ask`): off or no key, nothing is reserved; a repository the owner excluded
   (`Raw::exclusions_now`: kept from being sent, or never recorded) is never sent, looked at again
