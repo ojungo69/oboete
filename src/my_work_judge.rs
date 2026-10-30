@@ -6,8 +6,11 @@
 //! own request. A call that fails leaves it to grouping, and it is not asked again (J1).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::Result;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::judge::{Ask, Asked};
@@ -16,6 +19,7 @@ use crate::my_work_group::{Group, Groups, Key, Proof};
 use crate::my_work_ops::{MyWorkOp, Read};
 use crate::my_work_run::{Judging, Stores};
 use crate::redact::Rules;
+use crate::settings::{Refusal, refused};
 
 /// The ops' job (S1).
 pub(crate) const NAME: &str = "judge";
@@ -374,6 +378,74 @@ fn clean(text: &str) -> String {
 
 fn key((agent, session): &Key) -> Value {
     json!([agent, session])
+}
+
+/// J4's answer as the page posts it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    /// The request My Work shows the suggestion on, by its shown id.
+    request: String,
+    action: String,
+}
+
+/// J4: the owner's Join or Not this on the request of a conversation the judge suggested, `POST
+/// /api/my-work/suggestion`, refused before it writes; an op of the job that reads nothing, as an
+/// owner's move in My Focus is. Join moves the conversation, and every conversation of its own
+/// request, into the request its pick is in now; Not this keeps them its own request, so a forget
+/// that takes the judge's op later leaves it so. Either closes the suggestion.
+pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+    let posted: Answer =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    let join = match posted.action.as_str() {
+        "join" => true,
+        "not-this" => false,
+        _ => return Err(refused(400, "bad_request", "action")),
+    };
+    if !(1..=80).contains(&posted.request.len()) {
+        return Err(refused(400, "bad_request", "request"));
+    }
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let unavailable = |_| refused(503, "my_work_unavailable", "");
+    let not_found = || refused(404, "suggestion_not_found", "request");
+    let held = crate::my_work_focus::held_of(home, &posted.request)
+        .map_err(unavailable)?
+        .ok_or_else(not_found)?;
+    let Some((raw, k)) = crate::search::b::stores(home).map_err(unavailable)? else {
+        return Err(not_found());
+    };
+    let reading =
+        crate::curate::Reading::now(&raw, crate::curate::Reads::Live).map_err(unavailable)?;
+    let groups = crate::my_work_group::groups(&raw, &k, &reading).map_err(unavailable)?;
+    drop((raw, k));
+    let Some((c, picked)) =
+        (groups.suggested.iter()).find(|(c, _)| crate::my_work::anchored(c) == held)
+    else {
+        return Err(not_found());
+    };
+    let Some(group) = groups.groups.get(c) else {
+        return Err(not_found());
+    };
+    // Its own request's other conversations come with it (claude-mem's `brought`).
+    let others = group.members.iter().filter(|m| *m != c).map(key);
+    let decision = if join {
+        let target = (groups.of.get(picked))
+            .filter(|target| *target != c)
+            .ok_or_else(|| refused(409, "suggestion_target_gone", "request"))?;
+        let ends = json!([key(target), key(c)]);
+        let members: Vec<Value> = [key(target), key(c)].into_iter().chain(others).collect();
+        json!([{"conversations": members, "title": null, "links": [{"conversations": ends,
+            "kind": "judge", "evidence": "Joined by the owner on the judge's suggestion."}]}])
+    } else {
+        let members: Vec<Value> = std::iter::once(key(c)).chain(others).collect();
+        json!([{"conversations": members, "title": null, "links": []}])
+    };
+    let fields = json!({"conversation": key(c), "action": posted.action, "groups": decision});
+    let applied = crate::my_work_ops::record(home, NAME, vec![(group.repo.clone(), fields)])
+        .map_err(unavailable)?;
+    Ok(json!({"state": if applied { "applied" } else { "pending" }}))
 }
 
 #[cfg(test)]
@@ -1211,5 +1283,244 @@ mod tests {
         );
         assert!(h.judged().is_empty());
         assert!(!h.groups().decided(&key("s1")));
+    }
+
+    /// J4: `s2` suggested to join `s1`'s request, Parser, at 0.6: the stub that served it, and
+    /// the seq of `s1`'s ask, which the suggestion was made on.
+    fn suggested(h: &mut Home) -> (Receiver<String>, i64) {
+        let ask = h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], "Parser");
+        h.said("s2", 5, "The parser drops a trailing comma.");
+        let rx = stub(vec![picked("r1", 0.94), checked(0.6)]);
+        h.pass(true, &|_| panic!("the chain is not asked"));
+        (rx, ask)
+    }
+
+    impl Home {
+        /// My Work's requests as the page reads them, through the gate, the ops written so far
+        /// applied first.
+        fn page(&self) -> Vec<Value> {
+            self.s.run();
+            let path = self.s.home.path();
+            let v = crate::my_work::read(path, crate::my_work::Range::All, crate::db::now_ms());
+            let v = crate::view::answered("my-work", v.unwrap());
+            v["requests"].as_array().unwrap().clone()
+        }
+
+        /// The request the page shows conversation `session` in.
+        fn request_of(&self, session: &str) -> Value {
+            let id = format!("c:claude:{session}");
+            (self.page().into_iter())
+                .find(|r| (r["sessions"].as_array().unwrap().iter()).any(|s| s["id"] == id))
+                .unwrap()
+        }
+
+        /// The owner's `action` on the request the page shows `session` in, as the page posts it.
+        fn answer_on(
+            &self,
+            session: &str,
+            action: &str,
+        ) -> std::result::Result<Value, (u16, &str)> {
+            let body = json!({"request": self.request_of(session)["id"], "action": action});
+            self.post(body)
+        }
+
+        fn post(&self, body: Value) -> std::result::Result<Value, (u16, &str)> {
+            let body = serde_json::to_vec(&body).unwrap();
+            act(self.s.home.path(), &Mutex::new(()), &body).map_err(|r| (r.status, r.code))
+        }
+
+        /// A grouping op that leaves `session` out of every request, as the model's.
+        fn ignored(&mut self, session: &str) {
+            let op = MyWorkOp {
+                job: "group".into(),
+                about: R.into(),
+                entry: "fake".into(),
+                ts: crate::db::now_ms(),
+                read: Read::default(),
+                removed: vec![],
+                fields: BTreeMap::from([
+                    ("groups".to_owned(), json!([])),
+                    (
+                        "ignored".to_owned(),
+                        json!([{"conversation": ["claude", session], "reason": "A test."}]),
+                    ),
+                ]),
+                skipped: false,
+                forgotten: None,
+            };
+            let op = serde_json::to_value(op).unwrap();
+            self.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        }
+
+        /// The home after the record `seq` of this device was forgotten and purged.
+        fn forgot(self, seq: i64) -> Self {
+            let Home { s, t, judge } = self;
+            let Store { home, raw } = s;
+            let device = raw.device().to_owned();
+            drop(raw);
+            let target = crate::forget::Target::Record { device, seq };
+            let preview = crate::forget::preview(home.path(), target).unwrap();
+            crate::forget::start(home.path(), &preview).unwrap();
+            crate::forget::purge(home.path()).unwrap();
+            let raw = crate::raw::open(home.path()).unwrap();
+            let h = Home {
+                s: Store { home, raw },
+                t,
+                judge,
+            };
+            h.s.run();
+            h
+        }
+    }
+
+    /// J4: the request of a conversation the judge suggested names the request its pick is in,
+    /// with that request's id as the page has it and its title; no other request names one.
+    #[test]
+    fn a_suggestion_shows_on_its_conversations_request_and_names_the_pick() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let (parser, own) = (h.request_of("s1"), h.request_of("s2"));
+        assert_ne!(own["id"], parser["id"]);
+        assert_eq!(
+            own["suggestion"],
+            json!({"id": parser["id"], "title": "Parser"})
+        );
+        assert!(parser.get("suggestion").is_none(), "{parser}");
+    }
+
+    /// J4: Join moves the conversation, and the conversations of its own request (claude-mem's
+    /// `brought`), into the request it picked, in an op that reads nothing and names that
+    /// request's anchor first; the suggestion is gone, and a second answer is refused.
+    #[test]
+    fn join_moves_the_conversation_and_what_it_anchored_into_the_pick() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        h.said("s3", 10, "The trailing comma again.");
+        h.grouped(&["s2", "s3"], "");
+        assert_eq!(h.request_of("s3")["id"], h.request_of("s2")["id"]);
+        assert_eq!(h.answer_on("s2", "join").unwrap()["state"], "applied");
+        let parser = h.request_of("s1");
+        assert_eq!(parser["title"], "Parser");
+        assert_eq!(parser["sessions"].as_array().unwrap().len(), 3, "{parser}");
+        for s in ["s2", "s3"] {
+            assert_eq!(h.request_of(s)["id"], parser["id"], "{s}");
+        }
+        assert!(h.page().iter().all(|r| r.get("suggestion").is_none()));
+        let op = h.judged().pop().unwrap();
+        assert_eq!(op.fields["action"], "join");
+        assert_eq!(
+            op.fields["groups"][0]["conversations"],
+            json!([["claude", "s1"], ["claude", "s2"], ["claude", "s3"]])
+        );
+        assert!(op.read.spans.is_empty() && op.read.ops.is_empty());
+        assert_eq!(
+            h.post(json!({"request": parser["id"], "action": "join"})),
+            Err((404, "suggestion_not_found"))
+        );
+    }
+
+    /// J4: Not this keeps it its own request, the suggestion goes, and the judge does not ask
+    /// about it again.
+    #[test]
+    fn not_this_keeps_it_its_own_request() {
+        let mut h = Home::new();
+        let (served, _) = suggested(&mut h);
+        let own = h.request_of("s2")["id"].clone();
+        assert_eq!(h.answer_on("s2", "not-this").unwrap()["state"], "applied");
+        let after = h.request_of("s2");
+        assert_eq!(after["id"], own);
+        assert!(after.get("suggestion").is_none(), "{after}");
+        assert_ne!(after["id"], h.request_of("s1")["id"]);
+        h.pass(true, &|_| panic!("the chain is not asked"));
+        assert_eq!(bodies(&served).len(), 2, "no call after the answer");
+        assert_eq!(
+            h.post(json!({"request": own, "action": "join"})),
+            Err((404, "suggestion_not_found"))
+        );
+    }
+
+    /// J4: the pick's anchor joined another request after the suggestion: the suggestion names
+    /// that request, and Join lands there without taking the anchor out of it.
+    #[test]
+    fn join_lands_in_the_request_the_pick_is_in_now() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        h.said("s0", -10, "Ship the reader.");
+        h.grouped(&["s0", "s1"], "Reader");
+        assert_eq!(h.request_of("s2")["suggestion"]["title"], "Reader");
+        h.answer_on("s2", "join").unwrap();
+        let reader = h.request_of("s2");
+        assert_eq!(reader["title"], "Reader");
+        for s in ["s0", "s1"] {
+            assert_eq!(h.request_of(s)["id"], reader["id"], "{s}");
+        }
+    }
+
+    /// J4: a body of another shape, an id that names no request or none with a suggestion, and a
+    /// Join whose pick is in no request any more are refused, and nothing is written.
+    #[test]
+    fn an_answer_is_refused_before_it_writes() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let (own, parser) = (
+            h.request_of("s2")["id"].clone(),
+            h.request_of("s1")["id"].clone(),
+        );
+        let before = h.judged().len();
+        for (body, refusal) in [
+            (
+                json!({"request": own, "action": "merge"}),
+                (400, "bad_request"),
+            ),
+            (
+                json!({"request": own, "action": "join", "more": 1}),
+                (400, "bad_request"),
+            ),
+            (
+                json!({"request": "", "action": "join"}),
+                (400, "bad_request"),
+            ),
+            (
+                json!({"request": "g:000000000000", "action": "join"}),
+                (404, "suggestion_not_found"),
+            ),
+            (
+                json!({"request": parser, "action": "join"}),
+                (404, "suggestion_not_found"),
+            ),
+        ] {
+            assert_eq!(h.post(body.clone()), Err(refusal), "{body}");
+        }
+        h.ignored("s1");
+        assert!(h.request_of("s2").get("suggestion").is_none());
+        assert_eq!(
+            h.post(json!({"request": own, "action": "join"})),
+            Err((409, "suggestion_target_gone"))
+        );
+        assert_eq!(h.judged().len(), before);
+    }
+
+    /// S5: a forget of a record the suggestion was made on takes it, and the conversation is
+    /// undecided again; after the owner's Join or Not this, the same forget leaves the answer.
+    #[test]
+    fn a_forget_takes_the_suggestion_and_leaves_the_owners_answer() {
+        for answer in [None, Some("join"), Some("not-this")] {
+            let mut h = Home::new();
+            let (_served, ask) = suggested(&mut h);
+            assert!(h.judged()[0].read.spans.iter().any(|s| s.0 == ask));
+            if let Some(action) = answer {
+                h.answer_on("s2", action).unwrap();
+            }
+            let h = h.forgot(ask);
+            let groups = h.groups();
+            assert!(!groups.suggested.contains_key(&key("s2")), "{answer:?}");
+            let anchor = match answer {
+                None => None,
+                Some("join") => Some(key("s1")),
+                Some(_) => Some(key("s2")),
+            };
+            assert_eq!(groups.of.get(&key("s2")), anchor.as_ref(), "{answer:?}");
+        }
     }
 }

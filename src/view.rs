@@ -1212,6 +1212,7 @@ impl Viewer {
             ("POST", "/api/hide") => (MAX_BODY, |v, b, _| v.hide(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
+            ("POST", "/api/my-work/suggestion") => (MAX_BODY, |v, b, _| v.my_work_suggestion(b)),
             ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
             ("POST", "/api/my-focus") => (MAX_BODY, |v, b, _| v.my_focus(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
@@ -1701,6 +1702,11 @@ impl Viewer {
     /// F6: the owner's action on My Focus.
     fn my_focus(&self, body: &[u8]) -> Response {
         saved(crate::my_work_focus::act(&self.home, &self.saving, body))
+    }
+
+    /// J4: the owner's Join or Not this on a judge's suggestion.
+    fn my_work_suggestion(&self, body: &[u8]) -> Response {
+        saved(crate::my_work_judge::act(&self.home, &self.saving, body))
     }
 
     /// Parity row 3: what forgetting an item the page shows takes, and the key its start brings.
@@ -2225,12 +2231,13 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     // Sourcery on #576). So does the id of each of its conversations (`sessions`), which is the
     // id of that conversation's own request (decision 55), and each work item's `stream`, the
     // fingerprint of a list the gate masks (CodeRabbit on #597), and the request's `version`, which
-    // a check names (rule 6).
+    // a check names (rule 6), and the id of the request a judge's suggestion names (J4).
     type Taken = (
         Option<String>,
         Vec<Option<String>>,
         Vec<Option<Value>>,
         Option<Value>,
+        Option<String>,
     );
     let ids: Vec<Taken> = match answer.get_mut("requests") {
         Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
@@ -2246,7 +2253,8 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
                     _ => Vec::new(),
                 };
                 let version = request.as_object_mut().and_then(|r| r.remove("version"));
-                (request_id(request), sessions, streams, version)
+                let suggested = request.get_mut("suggestion").and_then(request_id);
+                (request_id(request), sessions, streams, version, suggested)
             })
             .collect(),
         _ => Vec::new(),
@@ -2302,7 +2310,10 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
         }
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
-        for (request, (id, sessions, streams, version)) in requests.iter_mut().zip(ids) {
+        for (request, (id, sessions, streams, version, suggested)) in requests.iter_mut().zip(ids) {
+            if let Some(suggestion) = request.get_mut("suggestion") {
+                put_id(suggestion, suggested);
+            }
             if let Some(Value::Array(shown)) = request.get_mut("sessions") {
                 for (session, id) in shown.iter_mut().zip(sessions) {
                     put_id(session, id);
@@ -5037,6 +5048,95 @@ curate = false
         );
         assert_eq!(post(&body("r:rel", &version, false), "t0k", ours).0, 200);
         assert_eq!(request(&read(), "r:rel")["checked"], Value::Null);
+    }
+
+    /// J4: `POST /api/my-work/suggestion` passes `save_gate` (the token, this viewer's Origin)
+    /// and answers a judge's suggestion. The request a suggestion names leaves the route with its
+    /// id as the page has it, though a rule matches hex digits, so that the page can open it.
+    #[test]
+    fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
+        if !in_child("view::tests::the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id") {
+            return;
+        }
+        let (mut s, v) = feed_fixture();
+        let t = crate::db::now_ms() - 3_600_000;
+        s.said("s1", R, t, "Build the parser.");
+        s.said("s2", R, t + 300_000, "The parser drops a trailing comma.");
+        let op = |job: &str, fields: Value| {
+            let op = crate::my_work_ops::MyWorkOp {
+                job: job.into(),
+                about: R.into(),
+                entry: "fake".into(),
+                ts: crate::db::now_ms(),
+                read: crate::my_work_ops::Read::default(),
+                removed: vec![],
+                fields: serde_json::from_value(fields).unwrap(),
+                skipped: false,
+                forgotten: None,
+            };
+            (
+                crate::raw::OpKind::MyWork,
+                serde_json::to_value(op).unwrap(),
+            )
+        };
+        let parser = json!({"ignored": [],
+            "groups": [{"conversations": [["claude", "s1"]], "title": "Parser", "links": []}]});
+        let judged = json!({"conversation": ["claude", "s2"], "outcome": "suggested",
+            "groups": [{"conversations": [["claude", "s2"]], "title": null, "links": []}],
+            "suggestion": {"request": ["claude", "s1"], "score": 0.6}});
+        s.raw
+            .append_ops(&[op("group", parser), op("judge", judged)])
+            .unwrap();
+        s.run();
+        let home = s.home.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'hex', regex = '[0-9a-f]{12}' }]\n",
+        )
+        .unwrap();
+        redact::set_home(home).unwrap();
+        let read = || get(&v, "/api/my-work?range=all");
+        let of = |answer: &Value, session: &str| -> Value {
+            let id = format!("c:claude:{session}");
+            (answer["requests"].as_array().unwrap().iter())
+                .find(|r| (r["sessions"].as_array().unwrap().iter()).any(|s| s["id"] == id))
+                .unwrap()
+                .clone()
+        };
+        let first = read();
+        let (parser, own) = (of(&first, "s1"), of(&first, "s2"));
+        let id = parser["id"].as_str().unwrap();
+        assert!(id.starts_with("g:") && id.len() == 14, "{first}");
+        assert_eq!(own["suggestion"], json!({"id": id, "title": "Parser"}));
+        let post = |body: &[u8], token: &str, origin: &str| -> (u16, Value) {
+            let len = body.len().to_string();
+            let h = [
+                HOST,
+                ("Origin", origin),
+                ("X-Oboete-Token", token),
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            let r = match v.head("POST", "/api/my-work/suggestion", &h) {
+                Head::Body(_, save, given) => v.take(save, body, &given),
+                Head::Answer(r) => r,
+            };
+            (
+                r.status,
+                serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+            )
+        };
+        let ours = "http://127.0.0.1:4321";
+        let join = serde_json::to_vec(&json!({"request": own["id"], "action": "join"})).unwrap();
+        assert_eq!(post(&join, "wrong", ours).0, 401);
+        assert_eq!(post(&join, "t0k", "http://evil.example").0, 403);
+        let (status, answer) = post(&join, "t0k", ours);
+        assert_eq!(
+            (status, &answer["state"]),
+            (200, &json!("applied")),
+            "{answer}"
+        );
+        assert_eq!(of(&read(), "s2")["id"], id);
     }
 
     /// A feed over invented records, without the older timeline fixture's claims or imports.

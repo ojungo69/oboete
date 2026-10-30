@@ -1847,6 +1847,51 @@ answer={requests:[req('e1')],unlinked:0};
 ctx.fetch=()=>Promise.resolve(response(answer));
 document.activeElement=null;await run('myWorkLive()');
 assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includes('New update'),'an empty first answer is a baseline too');
+// J4: the request of a conversation the judge suggested shows "Looks like part of <title>" with
+// Join and Not this on its card, its row and its page; each posts its answer, reads My Work again
+// and says so; a Join from the request's page shows the request it joined; a refusal is said.
+{
+  const S={id:'p1',title:'Parser'};
+  const rows=()=>[req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:S})];
+  let sent=[],refuse=null,joined=false;
+  ctx.fetch=(url,options)=>{
+    if(options?.method==='POST'){
+      sent.push([url,JSON.parse(options.body)]);
+      return Promise.resolve(refuse?posted(refuse[0],{code:refuse[1]}):posted(200,{state:'applied'}));
+    }
+    return Promise.resolve(response({requests:joined?[req('p1',{title:'Parser'})]:rows(),unlinked:0}));
+  };
+  set(rows());run('mw.range="all";myWorkDraw()');
+  const line=node=>node.querySelector('.my-work-suggestion');
+  const answerOf=(node,action)=>node.querySelectorAll('button').find(n=>n.dataset.action===`my-work.suggestion.${action}`);
+  const label=node=>node.getAttribute?.('aria-label')??node.attrs['aria-label'];
+  assert(!line(card('p1')),'a request with no suggestion shows none');
+  assert.equal(text(line(card('s2')).querySelector('p')),'Looks like part of “Parser”.');
+  assert.deepEqual([label(answerOf(card('s2'),'join')),label(answerOf(card('s2'),'not-this'))],['Join: Parser','Not this: Parser']);
+  answerOf(card('s2'),'not-this').click();await ticks();
+  assert.deepEqual(sent,[['/api/my-work/suggestion',{request:'s2',action:'not-this'}]],'Not this names the request');
+  assert.equal(document.getElementById('status').textContent,'Kept as a request of its own.');
+  run('mw.layout="list";myWorkDraw()');
+  const tableRow=panel.querySelectorAll('tr').find(n=>n.dataset.id==='s2');
+  assert(line(tableRow)&&answerOf(tableRow,'join'),'the list row has it too');
+  run('mw.layout="cards";myWorkDraw()');
+  card('s2').querySelector('button').click();
+  assert(answerOf(panel,'join'),'the request page has it');
+  joined=true;
+  answerOf(panel,'join').click();await ticks();
+  assert.deepEqual(sent[1],['/api/my-work/suggestion',{request:'s2',action:'join'}],'Join names the request');
+  assert.equal(run('mw.request'),'p1','the request it joined is shown');
+  assert.equal(document.getElementById('status').textContent,'Joined to “Parser”.');
+  panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+  joined=false;refuse=[404,'suggestion_not_found'];set(rows());
+  answerOf(card('s2'),'join').click();await ticks();
+  assert.equal(document.getElementById('status').textContent,'That suggestion is no longer waiting for an answer. The page has been read again.');
+  refuse=null;
+  ctx.ui.setLang('ja');run('myWorkDraw()');
+  assert.equal(text(line(card('s2')).querySelector('p')),'「Parser」の一部のようです。');
+  assert.deepEqual([text(answerOf(card('s2'),'join')),text(answerOf(card('s2'),'not-this'))],['まとめる','違う']);
+  ctx.ui.setLang('en');run('mw.layout="cards";myWorkDraw()');
+}
 // Every My Work label in both languages, each language its own words.
 const labels=Object.entries(run('TEXT')).filter(([key])=>key.startsWith('my_work'));
 assert(labels.length>100,'My Work has its labels');
