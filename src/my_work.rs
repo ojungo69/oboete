@@ -919,8 +919,8 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
             continue;
         };
         let t = &answers[t];
-        let suggestion =
-            json!({"id": t["id"], "fingerprint": t["fingerprint"], "title": t["title"]});
+        let suggestion = json!({"id": t["id"], "fingerprint": t["fingerprint"], "title": t["title"],
+            "conversation": h.about});
         answers[i]["suggestion"] = suggestion;
     }
     let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
@@ -1368,6 +1368,9 @@ pub(crate) struct Held {
     sources: Sources,
     /// The held id of the request the judge's open suggestion names (J4).
     suggested: Option<String>,
+    /// The conversation that suggestion is about, as `sessions` shows it (its id and fingerprint),
+    /// which a Join follows to where it went (#777).
+    about: Option<Value>,
 }
 
 impl Held {
@@ -2053,12 +2056,20 @@ fn answer(
         .map(|((agent, session), _)| keyed(&crate::forget::session(agent, session), home, key))
         .collect::<Result<Vec<_>>>()?;
     let sources = sources(r, &items, &cards);
+    let about = match (&r.id, &r.suggested) {
+        (Id::Group(anchor), Some(_)) => {
+            let (id, fingerprint) = shown_id(&Id::Conversation(anchor.clone()), rules, home, key)?;
+            Some(json!({"id": id, "fingerprint": fingerprint}))
+        }
+        _ => None,
+    };
     let held = Held {
         key: filed,
         id: held,
         sessions: swept_by,
         sources,
         suggested: r.suggested.clone(),
+        about,
     };
     Ok(Some((
         json!({

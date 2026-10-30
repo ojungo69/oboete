@@ -28,6 +28,7 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;document.activeElement=this;}
+  setSelectionRange(start,end,direction){Object.assign(this,{selectionStart:start,selectionEnd:end,selectionDirection:direction});}
   select(){this.selected=true;}
   closest(selector){
     for(let node=this;node;node=node.parentElement){
@@ -1851,7 +1852,7 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
 // Join and Not this on its card, its row and its page; each posts its answer, reads My Work again
 // and says so; a Join from the request's page shows the request it joined; a refusal is said.
 {
-  const S={id:'p1',title:'Parser'};
+  const S={id:'p1',title:'Parser',conversation:{id:'c:claude:s2'}};
   const rows=()=>[req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:S})];
   // After a Join, the request that holds the conversation: Parser, or (#775) the one it went to.
   const both=(id,title)=>req(id,{title,sessions:[{agent:'claude',id:`c:claude:${id}`},{agent:'claude',id:'c:claude:s2'}]});
@@ -1862,7 +1863,7 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
       return Promise.resolve(refuse?posted(refuse[0],{code:refuse[1]}):posted(200,{state:'applied'}));
     }
     if(unread)return Promise.resolve({ok:false,status:503,json:async()=>({})});
-    return Promise.resolve(response({requests:joined?[joined]:rows(),unlinked:0}));
+    return Promise.resolve(response({requests:joined?[joined].flat():rows(),unlinked:0}));
   };
   set(rows());run('mw.range="all";myWorkDraw()');
   const line=node=>node.querySelector('.my-work-suggestion');
@@ -1896,6 +1897,10 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   assert.deepEqual(sent[1],['/api/my-work/suggestion',{request:'s2',action:'join'}],'Join names the request');
   assert.equal(run('mw.request'),'p1','the request it joined is shown');
   assert.equal(document.getElementById('status').textContent,'Joined to “Parser”.');
+  // #777 (an_unchanged_poll_after_an_answer_does_not_offer_show_updates): the poll after it reads
+  // the answer the page read after the Join, which is no update.
+  await run('myWorkLive()');
+  assert(!run('mw.pending')&&!text(panel).includes('New work updates are ready.'),'the same answer is no update');
   panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
   // #775 (join_opens_the_current_destination_after_the_pick_moves): Parser joined Reader after the
   // page drew it; the Join landed in Reader, which the page shows and names.
@@ -1911,6 +1916,16 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   joined=req('x1',{title:'Unrelated'});
   answerOf(panel,'join').click();await ticks();
   assert.deepEqual([run('mw.request'),document.getElementById('status').textContent],[null,'Saved. The page shows it at its next read.']);
+  // #777 (join_follows_the_suggested_anchor_after_a_members_grouping_is_forgotten): s2's request,
+  // drawn with s3 active since, which has left it by the Join; the Join put s2 into Parser, which
+  // the page shows and names, not s3's request of its own.
+  joined=null;set([req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:S,
+    sessions:[{agent:'claude',id:'c:claude:s3'},{agent:'claude',id:'c:claude:s2'}]})]);
+  card('s2').querySelector('button').click();
+  joined=[both('p1','Parser'),req('s3',{title:'Commas'})];
+  answerOf(panel,'join').click();await ticks();
+  assert.deepEqual([run('mw.request'),document.getElementById('status').textContent],['p1','Joined to “Parser”.']);
+  panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
   // #775 (suggestion_reread_failure_restores_controls): the read after an answer fails; what was
   // saved is said so, and every suggestion's buttons can be used again.
   joined=null;set([...rows(),req('s3',{title:'Another',suggestion:S})]);unread=true;
@@ -2248,6 +2263,26 @@ assert.equal(document.getElementById('status').textContent,'Put “Lexer” back
   assert(btn('menu:rename')&&!btn('menu:rename').disabled,'its menu is usable once it is saved');
   run('mw.area="suggested";mw.decided.clear();mw.saved=null;myWorkDraw()');
 }
+// #777 (a_save_that_ends_while_the_owner_types_in_search_keeps_the_field): the owner goes to the
+// requests while a Keep saves and types in the search field; saved, the page drawn again, the field
+// keeps its focus, its text and its caret.
+{
+  let release=null;
+  const kept=reply;
+  reply=()=>new Promise(r=>{release=()=>r(posted(200,{state:'applied'}));});
+  btn(`card:keep:${L}`).click();
+  run('mw.area=null;myWorkDraw()');
+  const field=()=>panel.querySelectorAll('input').find(n=>n.dataset.myWork==='search');
+  field().focus();field().value='lex';for(const cb of field().listeners.input)cb();
+  Object.assign(field(),{selectionStart:2,selectionEnd:2,selectionDirection:'none'});
+  release();await ticks();
+  reply=kept;
+  const typing=document.activeElement;
+  assert(panel.contains(typing)&&typing===field(),'the field has the focus');
+  assert.deepEqual([typing.value,typing.selectionStart,typing.selectionEnd],['lex',2,2],'its text and its caret');
+  document.activeElement=null;
+  run('mw.query="";mw.area="suggested";mw.decided.clear();mw.saved=null;myWorkDraw()');
+}
 // Saved but not read yet: the card stays undecided and says so (Codex on #758).
 reply=()=>posted(200,{state:'pending'});
 btn(`card:keep:${L}`).click();await ticks();
@@ -2383,6 +2418,19 @@ assert.equal(document.activeElement.dataset.myWork,'focus:move');
   await run('myWorkReread()');run('myWorkDraw()');
   assert(text(panel.querySelector('.my-focus-change')).includes('Undo'),'and after a read that works');
   panel.querySelectorAll('button').find(n=>n.dataset.myWork==='focus:undo').click();await ticks();
+}
+// #777 (a_second_focus_move_after_a_failed_reread_undoes_to_the_applied_area): the reads after
+// two moves fail; the second's Undo takes the request back where the first put it, as the store
+// has it.
+{
+  const kept=ctx.fetch;
+  ctx.fetch=(url,options)=>options?.method==='POST'?kept(url,options):Promise.resolve({ok:false,status:503,json:async()=>({})});
+  pick(D);await ticks();
+  pick(L);await ticks();
+  panel.querySelectorAll('button').find(n=>n.dataset.myWork==='focus:undo').click();await ticks();
+  assert.deepEqual(moves.at(-1),['/api/my-focus',{action:'move-request',request:'f1',area:D}],'back to Docs, where the first move put it');
+  ctx.fetch=kept;
+  await run('myWorkReread()');run('myWorkDraw()');
 }
 // From Sorting… there is nothing to move it back to.
 at=null;set([req('f1',{status:'needs'})]);

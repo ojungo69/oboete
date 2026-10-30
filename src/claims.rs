@@ -589,8 +589,10 @@ fn correction_recorded(
 }
 
 /// The owner's ops `seqs`, applied by `consumer` before the command returns: by this process or
-/// by the worker already running (which wakes on the new op). At most 10 seconds, else an error
-/// that says the `what` is recorded.
+/// by the worker already running (which wakes on the new op). At once when `consumer` has them;
+/// else within 10 seconds, the worker's pass in this process among them (a pass begun ends
+/// first), else `NotYet`, which says the `what` is recorded (#777). A worker or a store that fails
+/// is an error of its own.
 pub(crate) fn applied(
     home: &std::path::Path,
     k: &Connection,
@@ -598,9 +600,11 @@ pub(crate) fn applied(
     seqs: &[i64],
     (what, consumer): (&str, &str),
 ) -> Result<()> {
-    crate::worker::run_once(home)?;
     let at = seqs.last().copied().unwrap_or(0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let wait = std::time::Duration::from_secs(10);
+    #[cfg(test)]
+    let wait = WAIT.get().unwrap_or(wait);
+    let deadline = std::time::Instant::now() + wait;
     let done = || -> Result<bool> {
         let got = crate::knowledge::checkpoint::get_in(
             k,
@@ -610,13 +614,40 @@ pub(crate) fn applied(
         )?;
         Ok(got >= at)
     };
+    if done()? {
+        return Ok(());
+    }
+    crate::worker::run_once(home)?;
     while !done()? {
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("the {what} is recorded; the worker applies it when it next runs");
+            return Err(NotYet(format!(
+                "the {what} is recorded; the worker applies it when it next runs"
+            ))
+            .into());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Ok(())
+}
+
+/// `applied`'s wait ran out: what it waited on is recorded, and the worker applies it when it next
+/// runs.
+#[derive(Debug)]
+pub(crate) struct NotYet(String);
+
+impl std::fmt::Display for NotYet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotYet {}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's wait in place of `applied`'s 10 seconds.
+    pub(crate) static WAIT: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// `pref_add_in` of every repository.

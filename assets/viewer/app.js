@@ -7232,6 +7232,14 @@ async function myFocusWrite(bodies, text, undo, record = true) {
     // while saving is usable again (Codex on #776); a save the server took stays said as taken,
     // with its Undo, when the read fails (#602, #775).
     const read = view === 'my_work' ? await myWorkReread().then(() => true, () => false) : true;
+    // Applied, and not read: a request moved is where the store has it now, so that a later
+    // move's Undo takes it back there (#777).
+    if (saved?.applied && !read) {
+      for (const body of bodies.filter((b) => b.action === 'move-request')) {
+        const row = (mw.rows || []).find((r) => r.id === body.request);
+        if (row) row.focus = body.area;
+      }
+    }
     if (view === 'my_work') myWorkDraw();
     if (saved && !read) saved.unread = true;
     if (saved) {
@@ -7769,13 +7777,15 @@ async function myWorkAnswer(row, action) {
   if (view !== 'my_work') return;
   if (applied && action === 'not-this') message = t('my_work_suggestion_declined');
   if (applied && action === 'join') {
-    // Where the conversation is now; in no request read (out of the range read), said as saved.
-    const session = row.sessions?.[0]?.id;
+    // Where the conversation is now, the one the suggestion is about, not the request's member
+    // active last (#777); in no request read (out of the range read), said as saved.
+    const session = row.suggestion?.conversation?.id;
     const now = (mw.rows || []).find((r) => r.sessions?.some((s) => s.id === session));
     if (mw.request === row.id) mw.request = now?.id ?? null;
     message = now ? t('my_work_suggestion_joined', { title: now.title }) : t('my_work_saved_unread');
   }
-  mw.signature = '';
+  // The read after the answer recorded what it read, so the poll after it finds nothing new; a read
+  // that failed left the one before, which the next answer is not (#777).
   myWorkDraw('current');
   setStatus(message, failed, lang, 8000);
 }
@@ -7989,6 +7999,7 @@ function myWorkBanner() {
 }
 
 function myWorkDraw(focus = null) {
+  const typing = myWorkTyping();
   if (mw.request !== null) {
     myWorkDrawRequest();
     mw.changed.clear();
@@ -8009,7 +8020,18 @@ function myWorkDraw(focus = null) {
   ]));
   mw.changed.clear();
   setStatus('');
-  myWorkFocus(focus);
+  // The search field the owner types in keeps the focus and its caret, whatever a redraw asked
+  // for: a save that ends meanwhile draws the page again (#777).
+  if (typing && myWorkFocus('search')) document.activeElement.setSelectionRange?.(...typing);
+  else myWorkFocus(focus);
+}
+
+// The caret of the search field while the owner types in it, before a redraw replaces it.
+function myWorkTyping() {
+  const active = document.activeElement;
+  if (active?.dataset?.myWork !== 'search' || !$('panel').contains(active)) return null;
+  return [active.selectionStart ?? active.value.length, active.selectionEnd ?? active.value.length,
+    active.selectionDirection ?? 'none'];
 }
 
 // The tabs, the requests and the notes below the toolbar, drawn again alone as a person types in
@@ -8049,19 +8071,21 @@ function myWorkResults() {
 }
 
 // A redraw replaces the controls: the one in use takes the focus back (`app.js`'s handlers).
+// Whether it found what to focus.
 function myWorkFocus(focus) {
-  if (!focus) return;
+  if (!focus) return false;
   const panel = $('panel');
   if (focus === 'heading' || (focus === 'current' && mw.request !== null)) {
     $('heading').tabIndex = -1;
     $('heading').focus({ preventScroll: true });
-    return;
+    return true;
   }
   const nodes = [...panel.querySelectorAll('input, select, button, summary, h3')];
   const found = focus === 'current' || focus === 'agents' ? nodes.find((node) => node.className === 'my-work-heading')
     : nodes.find((node) => node.dataset.myWork === focus);
-  if (!found) return;
+  if (!found) return false;
   found.focus({ preventScroll: true });
+  return true;
 }
 
 function myWorkOpen(id) {

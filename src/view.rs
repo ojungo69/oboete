@@ -2231,13 +2231,14 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     // Sourcery on #576). So does the id of each of its conversations (`sessions`), which is the
     // id of that conversation's own request (decision 55), and each work item's `stream`, the
     // fingerprint of a list the gate masks (CodeRabbit on #597), and the request's `version`, which
-    // a check names (rule 6), and the id of the request a judge's suggestion names (J4).
+    // a check names (rule 6), and the id of the request a judge's suggestion names (J4) and of the
+    // conversation it is about, as `sessions` has it (#777).
     type Taken = (
         Option<String>,
         Vec<Option<String>>,
         Vec<Option<Value>>,
         Option<Value>,
-        Option<String>,
+        (Option<String>, Option<String>),
     );
     let ids: Vec<Taken> = match answer.get_mut("requests") {
         Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
@@ -2253,8 +2254,17 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
                     _ => Vec::new(),
                 };
                 let version = request.as_object_mut().and_then(|r| r.remove("version"));
+                let about = (request.get_mut("suggestion"))
+                    .and_then(|s| s.get_mut("conversation"))
+                    .and_then(request_id);
                 let suggested = request.get_mut("suggestion").and_then(request_id);
-                (request_id(request), sessions, streams, version, suggested)
+                (
+                    request_id(request),
+                    sessions,
+                    streams,
+                    version,
+                    (suggested, about),
+                )
             })
             .collect(),
         _ => Vec::new(),
@@ -2310,8 +2320,13 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
         }
     }
     if let Some(Value::Array(requests)) = answer.get_mut("requests") {
-        for (request, (id, sessions, streams, version, suggested)) in requests.iter_mut().zip(ids) {
+        for (request, (id, sessions, streams, version, (suggested, about))) in
+            requests.iter_mut().zip(ids)
+        {
             if let Some(suggestion) = request.get_mut("suggestion") {
+                if let Some(conversation) = suggestion.get_mut("conversation") {
+                    put_id(conversation, about);
+                }
                 put_id(suggestion, suggested);
             }
             if let Some(Value::Array(shown)) = request.get_mut("sessions") {
@@ -5052,7 +5067,9 @@ curate = false
 
     /// J4: `POST /api/my-work/suggestion` passes `save_gate` (the token, this viewer's Origin)
     /// and answers a judge's suggestion. The request a suggestion names leaves the route with its
-    /// id as the page has it, though a rule matches hex digits, so that the page can open it.
+    /// id as the page has it, though a rule matches hex digits, so that the page can open it; and
+    /// the conversation it is about with the id `sessions` has for it, though that rule masks its
+    /// session, so that a Join finds where it went (#777).
     #[test]
     fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
         if !in_child("view::tests::the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id") {
@@ -5060,8 +5077,10 @@ curate = false
         }
         let (mut s, v) = feed_fixture();
         let t = crate::db::now_ms() - 3_600_000;
+        // A session the rule below masks, its id shown with a fingerprint of 12 hex digits.
+        let s2 = "0123456789ab";
         s.said("s1", R, t, "Build the parser.");
-        s.said("s2", R, t + 300_000, "The parser drops a trailing comma.");
+        s.said(s2, R, t + 300_000, "The parser drops a trailing comma.");
         let op = |job: &str, fields: Value| {
             let op = crate::my_work_ops::MyWorkOp {
                 job: job.into(),
@@ -5081,8 +5100,8 @@ curate = false
         };
         let parser = json!({"ignored": [],
             "groups": [{"conversations": [["claude", "s1"]], "title": "Parser", "links": []}]});
-        let judged = json!({"conversation": ["claude", "s2"], "outcome": "suggested",
-            "groups": [{"conversations": [["claude", "s2"]], "title": null, "links": []}],
+        let judged = json!({"conversation": ["claude", s2], "outcome": "suggested",
+            "groups": [{"conversations": [["claude", s2]], "title": null, "links": []}],
             "suggestion": {"request": ["claude", "s1"], "score": 0.6}});
         s.raw
             .append_ops(&[op("group", parser), op("judge", judged)])
@@ -5103,11 +5122,32 @@ curate = false
                 .unwrap()
                 .clone()
         };
+        let holding = |answer: &Value, conversation: &Value| -> Value {
+            (answer["requests"].as_array().unwrap().iter())
+                .find(|r| {
+                    (r["sessions"].as_array().unwrap().iter()).any(|s| s["id"] == *conversation)
+                })
+                .unwrap()
+                .clone()
+        };
         let first = read();
-        let (parser, own) = (of(&first, "s1"), of(&first, "s2"));
+        let parser = of(&first, "s1");
+        let own = (first["requests"].as_array().unwrap().iter())
+            .find(|r| r.get("suggestion").is_some())
+            .unwrap()
+            .clone();
         let id = parser["id"].as_str().unwrap();
         assert!(id.starts_with("g:") && id.len() == 14, "{first}");
-        assert_eq!(own["suggestion"], json!({"id": id, "title": "Parser"}));
+        let conversation = own["sessions"][0]["id"].clone();
+        let shown = conversation.as_str().unwrap();
+        assert!(
+            shown.starts_with("c:[REDACTED]#") && shown.len() == 25,
+            "{own}"
+        );
+        assert_eq!(
+            own["suggestion"],
+            json!({"id": id, "title": "Parser", "conversation": {"id": conversation}})
+        );
         let post = |body: &[u8], token: &str, origin: &str| -> (u16, Value) {
             let len = body.len().to_string();
             let h = [
@@ -5136,7 +5176,7 @@ curate = false
             (200, &json!("applied")),
             "{answer}"
         );
-        assert_eq!(of(&read(), "s2")["id"], id);
+        assert_eq!(holding(&read(), &conversation)["id"], id);
     }
 
     /// A feed over invented records, without the older timeline fixture's claims or imports.

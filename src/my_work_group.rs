@@ -134,11 +134,13 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
         let fields: BTreeMap<String, Value> = serde_json::from_str(&fields)?;
         let owners = judged && fields.contains_key("action");
         if judged && let Some(c) = fields.get("conversation").and_then(key) {
-            // Only a decision of outcome `suggested` has one (J3).
+            // Only a decision of outcome `suggested` has one (J3). A conversation the owner placed
+            // takes none: a judge op folded after the owner's answer, its time the earlier (another
+            // device's clock behind), opens none again (#777).
             let picked = fields.get("suggestion").and_then(|s| key(&s["request"]));
             match picked {
-                Some(picked) => out.suggested.insert(c.clone(), picked),
-                None => out.suggested.remove(&c),
+                Some(picked) if !placed.contains(&c) => out.suggested.insert(c.clone(), picked),
+                _ => out.suggested.remove(&c),
             };
             out.asked.insert(c);
         }
