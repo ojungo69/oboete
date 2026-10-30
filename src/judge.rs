@@ -206,6 +206,9 @@ pub(crate) fn doctor_line(home: &std::path::Path, judge: Option<&config::Judge>)
         Err(e) => Err(e),
     };
     match calls {
+        Ok(calls) if j.daily_budget == config::no_daily_cap() => {
+            format!("judge (Jev): on, {calls} calls in the last 24 hours, no cap of calls a day")
+        }
         Ok(calls) => format!(
             "judge (Jev): on, {calls} of {} calls in the last 24 hours",
             j.daily_budget
@@ -575,6 +578,17 @@ mod tests {
         );
     }
 
+    /// Decision 64: with no cap of calls a day and no monthly cap, the judge asks.
+    #[test]
+    fn with_its_caps_off_the_judge_asks() {
+        let mut h = home();
+        h.judge.daily_budget = config::no_daily_cap();
+        let rx = stub(vec![("200 OK", picked("g7"))], "");
+        let answered = run(&h, &rules(""), config::no_monthly_cap(), asked(&[])).unwrap();
+        assert!(matches!(answered, Asked::Answered(_)), "{answered:?}");
+        assert_eq!(requests(&rx), 1);
+    }
+
     /// No retry and no redirect: an error status, a 429 and a redirect are one request each, its
     /// body never kept; a redirect's target receives nothing.
     #[test]
@@ -713,6 +727,12 @@ mod tests {
         assert_eq!(
             doctor_line(h.dir.path(), Some(&h.judge)),
             "judge (Jev): on, 0 of 300 calls in the last 24 hours"
+        );
+        // Decision 64: no cap is said, not counted against 4294967295.
+        h.judge.daily_budget = config::no_daily_cap();
+        assert_eq!(
+            doctor_line(h.dir.path(), Some(&h.judge)),
+            "judge (Jev): on, 0 calls in the last 24 hours, no cap of calls a day"
         );
         h.judge.enabled = false;
         assert!(

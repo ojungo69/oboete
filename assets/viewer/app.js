@@ -1256,6 +1256,7 @@ const TEXT = {
   onboarding_paid: ['Plus priced APIs with a monthly cap', '月額上限内で有料APIも使う'],
   onboarding_copy: ['Use this tier in draft', 'この段階を編集中の設定へ反映'],
   onboarding_effect: ['New curation through: {names}. Monthly paid cap: USD {cap}.', '新しい要約に使う要約役：{names}。有料利用の月額上限：USD {cap}。'],
+  onboarding_effect_no_cap: ['New curation through: {names}. Monthly paid cap: none.', '新しい要約に使う要約役：{names}。有料利用の月額上限：なし。'],
   onboarding_no_names: ['none', 'なし'],
   onboarding_unavailable: ['No eligible provider is configured for this tier. Applying it would leave summarizing off; inspect or add a provider below.', 'この段階で利用できる要約役は設定されていません。反映すると要約はオフになります。下で要約役を確認・追加してください。'],
   onboarding_draft_ready: ['Draft updated. Review the controls below and Save settings explicitly.', '編集中の設定に反映しました。下の項目を確認し、明示的に「設定を保存」を押してください。'],
@@ -1331,6 +1332,8 @@ const TEXT = {
   my_work_estimate: ['Calls a day with it on: about {calls}, at most {most}. At {name} ({model}) prices: about {usd} a day, at most {most_usd}.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。{name}({model})の料金で 1 日およそ {usd}、多くても {most_usd} です。'],
   my_work_estimate_free: ['Calls a day with it on: about {calls}, at most {most}. No paid AI is in the list, so nothing is charged; a subscription\'s allowance may be used.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。有料の AI が一覧にないため料金はかかりません(サブスクリプションの利用枠は使われることがあります)。'],
   my_work_estimate_none: ['An estimate appears here once something is recorded.', '記録がたまると、ここに見積もりが出ます。'],
+  my_work_estimate_no_cap: ['Calls a day with it on: about {calls}, with no cap. At {name} ({model}) prices: about {usd} a day; a busy day costs more.', 'オンのときの 1 日の呼び出し: およそ {calls} 回(上限なし)。{name}({model})の料金で 1 日およそ {usd} です。作業の多い日はこれより多くかかります。'],
+  my_work_estimate_free_no_cap: ['Calls a day with it on: about {calls}, with no cap. No paid AI is in the list, so nothing is charged; a subscription\'s allowance may be used.', 'オンのときの 1 日の呼び出し: およそ {calls} 回(上限なし)。有料の AI が一覧にないため料金はかかりません(サブスクリプションの利用枠は使われることがあります)。'],
   judge_h: ['Judge (Jev)', '判定役(Jev)'],
   judge_desc: ['Jev, a model by Typesafe, answers questions with probabilities instead of text. My Work asks it whether each new conversation continues an open request, and puts the conversation into that request when Jev is sure. Next, My Work will also ask it which focus area a request belongs to. What Jev cannot decide stays with the AI for summaries, as before.', 'Jev(Typesafe 社のモデル)は、文章ではなく確率で質問に答えます。My Work は新しい会話ごとに、開いている依頼の続きかどうかを Jev に尋ね、Jev が確かだと答えたときはその依頼にまとめます。次の更新から、依頼がどの分野に入るかも Jev に尋ねます。Jev が決められないものは、これまでどおり要約に使う AI が決めます。'],
   judge_sends: ['What it is sent: for each new conversation, its repository, when it started, its first 3 asks and its first 8 card titles, and the same of up to 19 open requests of that repository, with their titles; each masked as all text sent out is. Nothing from a repository you excluded is sent. Price: USD 0.042 for a million input tokens, counted in the monthly limit on paid calls. One judged conversation is about 10,000 to 16,000 tokens, under USD 0.001.', '送るもの: 新しい会話ごとに、そのリポジトリ、始まった時刻、最初の 3 つの依頼、最初の 8 枚のカードの題と、同じリポジトリの開いている依頼 (最大 19 件) の同じ内容と題名です。どれも外へ送る文と同じく伏せ字を通します。除外したリポジトリのものは送りません。料金: 入力 100 万トークンで 0.042 ドルで、有料の呼び出しの月額上限に含まれます。1 つの会話の判定はおよそ 1 万〜1.6 万トークンで、0.001 ドル未満です。'],
@@ -1340,6 +1343,9 @@ const TEXT = {
   judge_key_label: ['New Typesafe key', 'Typesafe の新しいキー'],
   judge_usage: ['Last 24 hours: {calls} of {most} calls. This month: {usd}.', '直近 24 時間: {most} 回のうち {calls} 回。今月の費用: {usd}。'],
   judge_usage_unknown: ['Its calls and spend cannot be read now.', '呼び出し回数と費用をいま読めません。'],
+  judge_usage_no_cap: ['Last 24 hours: {calls} calls, with no cap. This month: {usd}.', '直近 24 時間: {calls} 回(上限なし)。今月の費用: {usd}。'],
+  judge_calls: ['Calls a day, at most ({min} to {max})', '1 日の呼び出しの上限({min}〜{max} 回)'],
+  judge_calls_desc: ['At the limit, the judge is not asked until the next day.', '上限に達すると、翌日まで判定役に尋ねません。'],
   judge_test: ['Test the connection', '接続を試す'],
   judge_test_desc: ['Sends one made-up question, with nothing from your records. It counts as one call.', '作った質問を 1 つだけ送ります。記録の中身は送りません。呼び出し 1 回に数えます。'],
   judge_test_ok: ['Jev answered: the key works.', 'Jev が答えました。キーは使えます。'],
@@ -1693,6 +1699,11 @@ const TEXT = {
     'キーから決まります: キーの 1 日の上限の 5 分の 1(現在 {n} 回)',
   ],
   no_cap: ['No cap', '上限なし'],
+  // Decision 64: what still stops the calls of a cap turned off.
+  no_cap_paid_warning: ['With no cap, oboete does not stop paid calls by what they cost: only the limits you set with each service do. The caps of calls a day still apply.', '上限なしにすると、oboete は有料の呼び出しを金額では止めません。金額で止めるのは、各サービス側で決めた上限だけです。1 日の回数の上限は、そのまま効きます。'],
+  no_cap_calls_warning: ['With no cap, oboete does not stop these calls by their number a day. The monthly limit on paid calls and each service\'s own limits still apply.', '上限なしにすると、oboete はこの呼び出しを 1 日の回数では止めません。有料の呼び出しの月額上限と、各サービス側の上限は、そのまま効きます。'],
+  no_cap_row: ['Not stopped by its calls a day', '1 日の回数では止めません'],
+  simple_no_cap_confirm: ['Remove the monthly limit', '確認して月額上限をなくす'],
   model_fixed: [
     'This entry has model prices. Edit its model and prices in the individual provider above.',
     'この要約役にはモデルの料金があります。上の個別設定で、モデルと料金を一緒に変更してください。',
@@ -3341,11 +3352,15 @@ function formOf(s) {
     // A save's answer says where this page serves; other operations' answers keep what was known.
     viewRuntime: s.view_runtime ?? form?.viewRuntime ?? null,
     summary: { ...s.summary, window_tokens: String(s.summary.window_tokens), idle_minutes: String(s.summary.idle_minutes) },
-    paid_usd_per_month: String(s.paid_usd_per_month),
+    // Decision 64: no cap is null here and 4294967295 (`ranges.no_cap`) in a calls a day; turned
+    // off, a cap is typed again.
+    paid_usd_per_month: text(s.paid_usd_per_month),
+    paidNoCap: s.paid_usd_per_month === null,
     // docs/my-work-model.md A6: the switch and the daily bound, with the estimate shown first.
-    my_work: { curate: s.my_work.curate, calls_a_day: String(s.my_work.calls_a_day), estimate: s.my_work.estimate },
+    my_work: { curate: s.my_work.curate, calls_a_day: noCapText(s.my_work.calls_a_day, s.ranges),
+      noCap: s.my_work.calls_a_day === s.ranges.no_cap, estimate: s.my_work.estimate },
     // docs/my-work-model.md J1: the judge's state; its switch only once a key is set.
-    judge: s.judge ? { ...s.judge } : null,
+    judge: s.judge ? { ...s.judge, budget: noCapText(s.judge.daily_budget, s.ranges), noCap: s.judge.daily_budget === s.ranges.no_cap } : null,
     gemini: s.gemini ?? 'none',
     usd_this_month: s.usd_this_month,
     prompt_side: s.prompt_side ?? null,
@@ -3360,10 +3375,11 @@ function formOf(s) {
     hidden: 'hidden' in s ? s.hidden : form?.hidden ?? null,
     preference: preferenceDraft,
     maintenance: maintenanceDraft,
-    chain: s.chain.map((e) => ({
-      ...e,
-      edit: { on: e.on, daily_budget: text(e.daily_budget), timeout_s: text(e.timeout_s), model: text(e.model) },
-    })),
+    chain: s.chain.map((e) => {
+      const loaded = chainDailyAsLoaded(e, s.ranges);
+      return { ...e, edit: { on: e.on, daily_budget: loaded.daily_budget, timeout_s: text(e.timeout_s), model: text(e.model),
+        noCap: loaded.noCap, loaded } };
+    }),
     providers: (s.providers || []).map((p) => ({ ...p, edit: providerEdit(p.name, p.saved), editing: false })),
     newProvider: null,
     warnings: s.warnings,
@@ -4433,12 +4449,25 @@ function judgeSection(f) {
     parts.push(el('p', 'desc', t('judge_no_key')));
   }
   parts.push(f.keyInput ? keyField('judge/key', 'judge.key', t('judge_key_label')) : note(t('provider_key_unsupported')));
-  if (j.set) {
-    const usage = j.calls_today === null || j.usd_this_month === null ? t('judge_usage_unknown')
-      : t('judge_usage', { calls: j.calls_today.toLocaleString(lang), most: j.daily_budget.toLocaleString(lang), usd: usdValue(j.usd_this_month) });
-    parts.push(el('p', 'desc', usage), judgeTest());
-  }
+  if (j.set) parts.push(...judgeCalls(f, j), judgeTest());
   return el('section', 'judge-settings', ...parts);
+}
+
+// The judge's calls a day, with its No cap switch (decision 64) and its usage beside it.
+function judgeCalls(f, j) {
+  const open = j.daily_budget === f.ranges.no_cap;
+  let usage = t('judge_usage_unknown');
+  if (j.calls_today !== null && j.usd_this_month !== null) {
+    usage = t(open ? 'judge_usage_no_cap' : 'judge_usage', { calls: j.calls_today.toLocaleString(lang),
+      most: j.daily_budget.toLocaleString(lang), usd: usdValue(j.usd_this_month) });
+  }
+  const [least, most] = f.ranges.daily_budget;
+  const calls = input('number', j.budget, '', 'judge.daily_budget', (v) => { j.budget = v; });
+  [calls.min, calls.max] = [least, most];
+  return [el('label', 'field', el('span', null, t('judge_calls', { min: least.toLocaleString(lang), max: most.toLocaleString(lang) })),
+    calls, note(t('saved_value', { value: open ? t('no_cap') : j.daily_budget })), note(t('judge_calls_desc'))),
+  ...noCapSwitch(j.noCap, 'judge', t('judge_h'), calls, 'no_cap_calls_warning', (v) => { j.noCap = v; }),
+  el('p', 'desc', usage)];
 }
 
 // One made-up question sent on the owner's click, its outcome said in words.
@@ -5107,6 +5136,37 @@ function checkbox(checked, onChange) {
   return c;
 }
 
+// Decision 64: a calls-a-day or USD cap as its field shows it: empty when there is none.
+function noCapText(value, ranges) {
+  return value === null || value === undefined || value === ranges?.no_cap ? '' : String(value);
+}
+
+// Decision 64: a chain row's calls a day as its field and No cap switch show config.toml's. A
+// subscription has no calls a day to set; any other entry with none shows it as off.
+function chainDailyAsLoaded(r, ranges) {
+  return { daily_budget: noCapText(r.daily_budget, ranges), noCap: !r.subscription && r.effective_daily_budget === null };
+}
+
+// Whether a chain row's calls a day is still as loaded. Its No cap follows the entry's own value
+// too, which a save must not turn into a `[chain]` value unless the row was changed (Codex on #772).
+// The edit keeps what it was loaded as through the merges of later answers, so a change made
+// against one answer still counts after the next (#773).
+function chainDailyUntouched(r) {
+  return r.edit.daily_budget === r.edit.loaded.daily_budget && r.edit.noCap === r.edit.loaded.noCap;
+}
+
+// Decision 64: a cap's No cap switch beside its number. On, the number is set aside (kept, to turn
+// the cap on again) and `warning` says what still stops those calls.
+function noCapSwitch(on, field, subject, number, warning, set) {
+  const said = el('span', 'note no-cap-warning', t(warning));
+  const show = (v) => { number.disabled = v; said.hidden = !v; };
+  const box = checkbox(on, (v) => { set(v); show(v); });
+  box.dataset.field = `${field}.no_cap`;
+  box.setAttribute('aria-label', `${t('no_cap')}: ${subject}`);
+  show(on);
+  return [el('label', 'check', box, t('no_cap')), said];
+}
+
 // A text or number field that keeps its value in the form as it is typed; `field` is the name
 // the server uses when it refuses the value.
 function input(type, value, placeholder, field, onInput) {
@@ -5276,19 +5336,27 @@ function providerValidation(draft) {
 // and name-group edits stay local. Physical selectors are remapped only by the operation's raw
 // index changes, never by the first entry with a matching name.
 function preserveSettingsDrafts(next, mine) {
-  for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'inject', 'capture', 'backup', 'redaction', 'retention']) next[key] = mine[key];
+  for (const key of ['worker', 'view', 'summary', 'paid_usd_per_month', 'paidNoCap', 'inject', 'capture', 'backup', 'redaction', 'retention']) next[key] = mine[key];
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.neverFolder = mine.neverFolder;
   next.neverPattern = mine.neverPattern;
   // My Work's switch and bound as edited, with the estimate the answer brings (Codex on #671).
-  if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day };
+  if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day, noCap: mine.my_work.noCap };
   // The judge's switch as edited; one left as it was follows the answer (a key saved turns it on).
   if (next.judge && mine.judge && mine.judge.enabled !== mine.savedSettings.judge?.enabled) next.judge.enabled = mine.judge.enabled;
+  // Its calls a day as edited too; left as they were, they follow the answer.
+  const daily = mine.savedSettings.judge?.daily_budget;
+  if (next.judge && mine.judge && (mine.judge.budget !== noCapText(daily, mine.ranges) || mine.judge.noCap !== (daily === mine.ranges.no_cap))) {
+    Object.assign(next.judge, { budget: mine.judge.budget, noCap: mine.judge.noCap });
+  }
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
     const row = groups.get(r.name);
+    // A calls a day left as it was follows the answer, whose entry may have changed.
+    const fresh = row.edit;
     row.edit = { ...r.edit };
+    if (chainDailyUntouched(r)) Object.assign(row.edit, { daily_budget: fresh.daily_budget, noCap: fresh.noCap, loaded: fresh.loaded });
     groups.delete(r.name);
     return row;
   }), ...groups.values()];
@@ -5556,7 +5624,7 @@ function providerTestPreview(provider, preview, simple = false) {
     el('h4', null, t('provider_test_fixture')), el('pre', 'document-text', preview.fixture),
     note(t('provider_test_tokens', { tokens: preview.estimated_input_tokens, output: preview.max_output_tokens ?? t('provider_test_unknown_cost') })),
     el('p', null, t(preview.possible_charge ? 'provider_test_charge' : 'provider_test_no_charge',
-      { usd: usdValue(preview.estimated_usd), cap: usdValue(preview.monthly_cap_usd) })),
+      { usd: usdValue(preview.estimated_usd), cap: preview.monthly_cap_usd === null ? t('no_cap') : usdValue(preview.monthly_cap_usd) })),
     !preview.ready ? el('p', 'test-result error', t('provider_test_blocked', { reason: providerReason(preview.code) })) : null,
     run);
 }
@@ -5822,6 +5890,10 @@ function chainRow(r, i, redraw) {
   const budget = input('number', r.edit.daily_budget, r.effective_daily_budget === null ? t('no_cap') : String(r.effective_daily_budget), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
   [budget.min, budget.max] = form.ranges.daily_budget;
   budget.setAttribute('aria-label', `${t('col_budget')}: ${r.name}`);
+  const fromKey = !r.subscription && r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null;
+  const budgetOff = r.subscription ? [] : noCapSwitch(r.edit.noCap, `chain.${r.name}`, `${t('col_budget')}: ${r.name}`, budget, 'no_cap_row',
+    (v) => { r.edit.noCap = v; if (fromKey) fromKey.hidden = v; });
+  if (fromKey) fromKey.hidden = r.edit.noCap;
   const timeout = input('number', r.edit.timeout_s, String(r.effective_timeout_s), `chain.${r.name}.timeout_s`, (v) => { r.edit.timeout_s = v; });
   [timeout.min, timeout.max] = form.ranges.timeout_s;
   timeout.setAttribute('aria-label', `${t('col_timeout')}: ${r.name}`);
@@ -5832,7 +5904,7 @@ function chainRow(r, i, redraw) {
     el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null,
       r.differs.length ? note(t('differs', { what: r.differs.map((d) => t(`differs_${d}`)).join(lang === 'ja' ? '、' : ', ') })) : null),
     el('td', null, model, modelNote ? note(modelNote) : null, r.model !== null && !r.model_applied ? note(t('model_unapplied')) : null),
-    el('td', null, r.subscription ? note(t('provider_subscription')) : budget, !r.subscription && r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null),
+    el('td', null, r.subscription ? note(t('provider_subscription')) : budget, ...budgetOff, fromKey),
     el('td', null, timeout));
   return tr;
 }
@@ -5859,16 +5931,27 @@ function saveBody() {
     if (Number.isNaN(summary[key])) return { field: `summary.${key}` };
   }
   const paid = form.paid_usd_per_month.trim();
-  const cap = Number(paid);
+  const cap = form.paidNoCap ? null : Number(paid);
   const [least, most] = form.ranges.paid_usd_per_month;
-  if (paid === '' || !Number.isFinite(cap) || cap < least || (most !== null && cap > most)) return { field: 'paid_usd_per_month' };
+  if (!form.paidNoCap && (paid === '' || !Number.isFinite(cap) || cap < least || (most !== null && cap > most))) return { field: 'paid_usd_per_month' };
   if (!['none', 'before-subscriptions', 'after-subscriptions'].includes(form.gemini)) return { field: 'gemini' };
   // A value the file holds is sent as it is when it is not changed, in range or not, as a
   // provider's daily budget is (#680).
   const calls = form.my_work.calls_a_day;
   const unchangedCalls = /^\d+$/.test(String(calls)) && Number(calls) === form.savedSettings.my_work.calls_a_day;
-  const myWork = { curate: form.my_work.curate, calls_a_day: unchangedCalls ? Number(calls) : whole(String(calls), ...form.ranges.my_work_calls) };
+  let bound = unchangedCalls ? Number(calls) : whole(String(calls), ...form.ranges.my_work_calls);
+  if (form.my_work.noCap) bound = form.ranges.no_cap;
+  const myWork = { curate: form.my_work.curate, calls_a_day: bound };
   if (Number.isNaN(myWork.calls_a_day)) return { field: 'my_work.calls_a_day' };
+  let judge = null;
+  if (form.judge?.set) {
+    const j = form.judge, had = form.savedSettings.judge?.daily_budget;
+    let daily = j.budget.trim() === String(had) ? had : whole(j.budget, ...form.ranges.daily_budget);
+    if (j.noCap) daily = form.ranges.no_cap;
+    if (Number.isNaN(daily)) return { field: 'judge.daily_budget' };
+    // Sent only when it changed, as the retention period is.
+    judge = { enabled: j.enabled, ...(daily === had ? {} : { daily_budget: daily }) };
+  }
   let embedding = null;
   if (form.embedding) {
     const e = form.embedding.edit, w = form.embedding.workers;
@@ -5891,7 +5974,8 @@ function saveBody() {
       if (v.trim() === '') return null;
       return v.trim() === String(had) ? had : whole(v, min, max);
     };
-    const daily = optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
+    let daily = r.edit.noCap ? form.ranges.no_cap : optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
+    if (chainDailyUntouched(r)) daily = r.daily_budget ?? null;
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
     const timeout = optional(r.edit.timeout_s, r.timeout_s, ...form.ranges.timeout_s);
     if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
@@ -5906,7 +5990,7 @@ function saveBody() {
       ...(port === form.saved.view.port ? {} : { view: { port } }),
       summary,
       my_work: myWork,
-      ...(form.judge?.set ? { judge: { enabled: form.judge.enabled } } : {}),
+      ...(judge ? { judge } : {}),
       paid_usd_per_month: cap,
       gemini: form.gemini === 'none' ? null : form.gemini,
       inject: {
@@ -6006,7 +6090,7 @@ async function saveSettings(button, simple = null) {
       clearSimpleReceipt();
       // Keep a refused amount available to correct; switches, models and arrows show the last
       // saved state again, especially when masking could not be enabled.
-      if (button.type !== 'number') { mine.simpleMaskingOff = false; drawSettings(); }
+      if (button.type !== 'number') { mine.simpleMaskingOff = false; mine.simpleCapOff = false; drawSettings(); }
     }
   }
 }
@@ -6060,13 +6144,15 @@ function onboardingPlan(f,tier) {
   const current=Number(f.paid_usd_per_month);
   let cap=tier==='paid'?'5':'0';
   if(tier==='paid'&&Number.isFinite(current)&&current>0)cap=f.paid_usd_per_month;
+  // Decision 64: a cap the owner turned off stays off for paid calls; null is no cap.
+  if(tier==='paid'&&f.paidNoCap)cap=null;
   return {available:true,curate:true,names,
     cap};
 }
 function applyOnboardingValues(f,plan) {
   if(!plan)return;
   f.summary.curate=plan.curate;
-  if(plan.available)f.paid_usd_per_month=plan.cap;
+  if(plan.available){f.paidNoCap=plan.cap===null;if(plan.cap!==null)f.paid_usd_per_month=plan.cap;}
   if(plan.names){const enabled=new Set(plan.names);for(const row of f.chain)row.edit.on=enabled.has(row.name);}
 }
 function syncOnboardingControls(f) {
@@ -6076,6 +6162,8 @@ function syncOnboardingControls(f) {
   const field=name=>fields.find(node=>node.dataset.field===name);
   const curate=field('summary.curate');if(curate)curate.checked=f.summary.curate;
   const cap=field('paid_usd_per_month');if(cap)cap.value=f.paid_usd_per_month;
+  const off=field('paid_usd_per_month.no_cap');
+  if(off&&off.checked!==f.paidNoCap){off.checked=f.paidNoCap;off.dispatchEvent(new Event('change'));}
   for(const row of f.chain){
     const control=field(`chain.${row.name}.on`);
     if(control){control.checked=row.edit.on;control.closest('tr')?.classList.toggle('off',!row.edit.on);}
@@ -6099,6 +6187,7 @@ function onboardingSection(f) {
     onboardingTier=select.value;onboardingApplied=false;renderOnboarding(f);
   });
   const plan=onboardingPlan(f,onboardingTier);
+  const effect=plan?.cap===null?'onboarding_effect_no_cap':'onboarding_effect';
   const apply=el('button','quiet small',t('onboarding_copy'));
   apply.type='button';apply.dataset.action='onboarding.copy';apply.disabled=!plan;
   apply.addEventListener('click',()=>{
@@ -6135,7 +6224,7 @@ function onboardingSection(f) {
     el('p','desc',t('onboarding_scope')),
     el('label','field',el('span',null,t('onboarding_tier')),select),
     plan && el('p','desc',plan.available
-      ? t('onboarding_effect',{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
+      ? t(effect,{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
       : t('onboarding_unavailable')),
     destinations?.length?el('ul',null,...destinations):null,
     apply,onboardingApplied?el('p','desc',t('onboarding_draft_ready')):null,
@@ -6244,6 +6333,7 @@ function simpleFocus(key) {
   if (/^(resume|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
   if (key?.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
   if (key === 'mask.confirm') keys.push('redaction.enabled');
+  if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
   if (key === 'catalog.save' && simpleKeyName) keys.push(`key:${simpleKeyName}`);
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
@@ -6501,9 +6591,33 @@ function drawSimpleSettings(panel, f) {
     void simpleSettingsSave(button, body => { body.my_work = { curate: value, calls_a_day: f.savedSettings.my_work.calls_a_day }; },
       (next, answer) => { next.my_work = { ...next.my_work, curate: answer.my_work.curate }; }));
   const ready = chain.some(row => simpleProviderStatus(row, f.stopped) === 'ready');
-  const cap = input('number', simpleCapDraft ?? String(f.savedSettings.paid_usd_per_month), '', 'paid_usd_per_month',
+  // Decision 64: with no cap saved the limit is set aside until No cap is turned off, and turning
+  // it on waits for its confirmation, as turning masking off does.
+  const capOff = f.savedSettings.paid_usd_per_month === null;
+  const cap = input('number', simpleCapDraft ?? noCapText(f.savedSettings.paid_usd_per_month), '', 'paid_usd_per_month',
     (v) => { simpleCapDraft = v; });
   cap.min = 0; cap.step = 'any'; cap.inputMode = 'decimal'; cap.dataset.simpleFocus = 'paid_usd_per_month';
+  cap.disabled = (capOff && !f.simpleCapOn) || Boolean(f.simpleCapOff);
+  const noCap = simpleToggle((capOff && !f.simpleCapOn) || Boolean(f.simpleCapOff), 'paid_usd_per_month.no_cap',
+    `${t('no_cap')}: ${t('simple_limit')}`, (button, value) => {
+      // Back to a no cap already saved, nothing is to confirm or save.
+      if (value && capOff) { f.simpleCapOn = false; drawSettings(); simpleFocus('paid_usd_per_month.no_cap'); }
+      else if (value) { f.simpleCapOff = true; drawSettings(); simpleFocus('cap.confirm'); }
+      else { f.simpleCapOff = false; f.simpleCapOn = capOff; drawSettings(); simpleFocus(capOff ? 'paid_usd_per_month' : 'paid_usd_per_month.no_cap'); }
+    }, t('no_cap'));
+  const capConfirm = el('button', 'quiet', t('simple_no_cap_confirm'));
+  capConfirm.type = 'button'; capConfirm.dataset.simpleFocus = 'cap.confirm';
+  capConfirm.addEventListener('click', () => void simpleSettingsSave(capConfirm, body => { body.paid_usd_per_month = null; }, (next, answer) => {
+    next.paid_usd_per_month = noCapText(answer.paid_usd_per_month);
+    next.paidNoCap = answer.paid_usd_per_month === null;
+    simpleCapDraft = null;
+  }));
+  const capCancel = el('button', 'quiet', t('simple_cancel'));
+  capCancel.type = 'button'; capCancel.dataset.simpleFocus = 'cap.cancel';
+  capCancel.addEventListener('click', () => { f.simpleCapOff = false; drawSettings(); simpleFocus('paid_usd_per_month.no_cap'); });
+  // The warning: with its confirmation while the cap is being turned off, alone once it is off.
+  let capWarning = capOff ? note(t('no_cap_paid_warning')) : null;
+  if (f.simpleCapOff) capWarning = el('div', 'simple-warning', el('p', 'desc error', t('no_cap_paid_warning')), el('div', 'actions', capConfirm, capCancel));
   const saveCap = () => {
     const value = Number(cap.value);
     if (!cap.value.trim() || !Number.isFinite(value) || value < 0) {
@@ -6512,7 +6626,8 @@ function drawSimpleSettings(panel, f) {
     if (cap.disabled) return;
     if (value === f.savedSettings.paid_usd_per_month) { simpleCapDraft = null; return; }
     void simpleSettingsSave(cap, body => { body.paid_usd_per_month = value; }, (next, answer) => {
-      next.paid_usd_per_month = String(answer.paid_usd_per_month);
+      next.paid_usd_per_month = noCapText(answer.paid_usd_per_month);
+      next.paidNoCap = answer.paid_usd_per_month === null;
       if (Number(simpleCapDraft) === answer.paid_usd_per_month) simpleCapDraft = null;
     });
   };
@@ -6541,7 +6656,8 @@ function drawSimpleSettings(panel, f) {
     simpleBlock('ai', curate, el('ol', 'simple-providers', ...chain.map((row, i) => simpleProviderRow(f, row, i))), simpleCatalog(f)),
     simpleBlock('my_work', myWorkEstimate(f.my_work.estimate), myWork),
     simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
-      el('p', 'spend', f.usd_this_month === null ? t('spend_unavailable') : t('simple_spent', { usd: usdValue(f.usd_this_month) })))),
+      el('p', 'spend', f.usd_this_month === null ? t('spend_unavailable') : t('simple_spent', { usd: usdValue(f.usd_this_month) }))),
+    noCap, capWarning),
     f.embedding ? simpleBlock('search', embeddingChoice(f, true)) : null,
     simpleBlock('inject', ...inject), captureSection(f, true),
     simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
@@ -6556,8 +6672,11 @@ function myWorkEstimate(estimate) {
   if (!estimate) return el('p', 'desc', t('my_work_estimate_none'));
   const money = (v) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumSignificantDigits: 2 }).format(v);
   const [calls, most] = estimate.calls;
-  if (!estimate.usd) return el('p', 'desc', t('my_work_estimate_free', { calls, most }));
-  return el('p', 'desc', t('my_work_estimate', { calls, most, usd: money(estimate.usd[0]), most_usd: money(estimate.usd[1]),
+  // Decision 64: with no cap of calls a day there is no most.
+  const open = most === null ? '_no_cap' : '';
+  if (!estimate.usd) return el('p', 'desc', t(`my_work_estimate_free${open}`, { calls, most }));
+  return el('p', 'desc', t(`my_work_estimate${open}`, { calls, most, usd: money(estimate.usd[0]),
+    most_usd: estimate.usd[1] === null ? '' : money(estimate.usd[1]),
     name: estimate.priced?.name ?? '', model: estimate.priced?.model ?? '' }));
 }
 
@@ -6605,6 +6724,8 @@ function drawSettings() {
   myWorkCurate.dataset.field = 'my_work.curate';
   const myWorkCalls = input('number', f.my_work.calls_a_day, '', 'my_work.calls_a_day', (v) => { f.my_work.calls_a_day = v; });
   [myWorkCalls.min, myWorkCalls.max] = f.ranges.my_work_calls;
+  const myWorkOff = noCapSwitch(f.my_work.noCap, 'my_work', t('my_work_h'), myWorkCalls, 'no_cap_calls_warning', (v) => { f.my_work.noCap = v; });
+  const savedCalls = f.saved.my_work.calls_a_day === f.ranges.no_cap ? t('no_cap') : f.saved.my_work.calls_a_day;
   const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
   summaryLanguage.className = 'summary-language';
   const summarySize = (key) => {
@@ -6619,6 +6740,7 @@ function drawSettings() {
   if (f.ranges.paid_usd_per_month[1] !== null) cap.max = f.ranges.paid_usd_per_month[1];
   cap.step = 'any';
   cap.inputMode = 'decimal';
+  const capOff = noCapSwitch(f.paidNoCap, 'paid_usd_per_month', t('paid_cap'), cap, 'no_cap_paid_warning', (v) => { f.paidNoCap = v; });
   const usd = (v) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(v);
   let spending;
   if (f.usd_this_month === null) spending = t('spend_unavailable');
@@ -6689,13 +6811,16 @@ function drawSettings() {
         el('label', 'check', myWorkCurate, t('my_work_on')),
         saved(t(f.saved.my_work.curate ? 'value_on' : 'value_off')),
         el('label', 'field', el('span', null, t('my_work_calls', { min: f.ranges.my_work_calls[0].toLocaleString(lang), max: f.ranges.my_work_calls[1].toLocaleString(lang) })),
-          myWorkCalls, saved(f.saved.my_work.calls_a_day), note(t('my_work_calls_desc')))),
+          myWorkCalls, saved(savedCalls), note(t('my_work_calls_desc'))),
+        ...myWorkOff),
       judgeSection(f),
       el('section', null,
         el('h3', null, t('spending_h')),
         el('div', 'spending-cap',
-          el('label', 'field', el('span', null, t('paid_cap')), cap, saved(usd(f.saved.paid_usd_per_month))),
+          el('label', 'field', el('span', null, t('paid_cap')), cap,
+            saved(f.saved.paid_usd_per_month === null ? t('no_cap') : usd(f.saved.paid_usd_per_month))),
           el('p', 'spend', spending)),
+        ...capOff,
         el('p', 'desc', t('paid_cap_desc')),
         el('label', 'field', el('span', null, t('gemini_label')), gemini,
           saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),

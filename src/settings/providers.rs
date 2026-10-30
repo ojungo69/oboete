@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    BUDGET, MODEL_CHARS, Refusal, TIMEOUT_S, alone, bytes, config_lock, endpoint_supported,
-    invalid, parsed, put_root, refused, show, utf8, version,
+    BUDGET, MODEL_CHARS, Refusal, TIMEOUT_S, alone, bytes, calls_cap, config_lock,
+    endpoint_supported, invalid, parsed, put_root, refused, show, utf8, version,
 };
 use crate::config::{self, Provider};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike};
@@ -188,7 +188,7 @@ impl Draft {
                 };
                 // No new subscription daily-call cap. Legacy caps survive an unrelated edit.
                 if *daily_budget != *budget
-                    && (*subscription || daily_budget.is_some_and(|v| !BUDGET.contains(&v)))
+                    && (*subscription || daily_budget.is_some_and(|v| !calls_cap(v, &BUDGET)))
                 {
                     return Err(refused(422, "range", "providers.daily_budget"));
                 }
@@ -865,7 +865,8 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
         json!({"version": posted.version, "selector": posted.selector, "destination": destination,
         "model": model, "fixture": crate::provider::PROBE_PROMPT, "max_output_tokens": max_output,
         "estimated_input_tokens": input, "estimated_usd": usd.filter(|v| v.is_finite()),
-        "monthly_cap_usd": selected.paid_cap, "possible_charge": possible_charge,
+        "monthly_cap_usd": selected.paid_cap.is_finite().then_some(selected.paid_cap),
+        "possible_charge": possible_charge,
         "ready": code.is_none(), "code": code}),
     )
 }
@@ -1453,6 +1454,28 @@ mod tests {
         assert_eq!(text(), before);
     }
 
+    /// Decision 64: an entry made or edited on the page may have no cap of calls a day, written
+    /// 4294967295, and a subscription still takes none.
+    #[test]
+    fn an_http_entry_may_be_given_no_cap_of_calls_a_day() {
+        let home = home("providers = []\n");
+        let mut entry = http("open", "https://example.invalid/v1");
+        entry["daily_budget"] = json!(u32::MAX);
+        send(home.path(), json!({"op": "create", "entry": entry})).unwrap();
+        let text = || String::from_utf8(bytes(home.path()).unwrap().unwrap()).unwrap();
+        assert!(text().contains("daily_budget = 4294967295"), "{}", text());
+        let path = home.path().join("config.toml");
+        let loaded = config::from_text(&path, &text()).unwrap();
+        assert_eq!(loaded.providers.last().unwrap().daily_budget(), u32::MAX);
+        let mut sub = http("sub", "https://example.invalid/v1");
+        sub["daily_budget"] = json!(u32::MAX);
+        sub["subscription"] = json!(true);
+        let before = text();
+        let r = send(home.path(), json!({"op": "create", "entry": sub})).unwrap_err();
+        assert_eq!((r.status, r.code), (422, "range"));
+        assert_eq!(text(), before);
+    }
+
     #[test]
     fn editing_other_native_fields_keeps_legacy_http_caps_but_rejects_new_invalid_caps() {
         for budget in [0_u32, u32::MAX] {
@@ -1485,7 +1508,9 @@ mod tests {
                 for kept in ["# original", "# legacy cap", "future = \"kept\""] {
                     assert!(text.contains(kept), "{text}");
                 }
-                entry["daily_budget"] = json!(if budget == 0 { u32::MAX } else { 0 });
+                // Out of range, and not the no cap (decision 64), which a subscription takes no
+                // more than any other new cap.
+                entry["daily_budget"] = json!(if budget == 0 { 100_001 } else { 0 });
                 let r = send(
                     home.path(),
                     json!({"op": "edit", "selector": selector, "entry": entry}),

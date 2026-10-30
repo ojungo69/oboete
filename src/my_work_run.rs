@@ -732,15 +732,25 @@ pub(crate) fn doctor_line(home: &std::path::Path, cfg: &crate::config::Config) -
             );
         }
     };
+    // With no cap (decision 64) there is no most of calls or of USD to name.
+    let capped = cfg.my_work.calls_a_day != crate::config::no_daily_cap();
     let usd = match (&e.usd, &e.priced) {
-        (Some((typical, most)), Some((name, model))) => format!(
+        (Some((typical, most)), Some((name, model))) if capped => format!(
             ", about USD {typical:.3} a day, at most USD {most:.2}, at {name}'s prices ({model})"
         ),
+        (Some((typical, _)), Some((name, model))) => {
+            format!(", about USD {typical:.3} a day, at {name}'s prices ({model})")
+        }
         _ => ", no USD: no paid entry is in the chain".to_owned(),
     };
+    let most = if capped {
+        format!("at most {}", e.calls.1)
+    } else {
+        "no cap of calls a day".to_owned()
+    };
     format!(
-        "my work: {state} ([my_work] curate); calls a day with it on: about {}, at most {}{usd}",
-        e.calls.0, e.calls.1
+        "my work: {state} ([my_work] curate); calls a day with it on: about {}, {most}{usd}",
+        e.calls.0
     )
 }
 
@@ -1457,6 +1467,20 @@ mod tests {
         }
         let line = doctor(window);
         assert!(line.contains("at most USD 1.90"), "{line}");
+        // With no cap (decision 64), no most of calls or of USD: 4294967295 is not a most.
+        let no_cap = "[my_work]\ncalls_a_day = 4294967295\n";
+        let line = doctor(format!("{no_cap}{entry}"));
+        assert!(
+            line.contains("about 1, no cap of calls a day, about USD "),
+            "{line}"
+        );
+        assert!(!line.contains("at most"), "{line}");
+        assert!(line.ends_with("at p's prices (m)"), "{line}");
+        let line = doctor(format!("providers = []\n{no_cap}"));
+        assert!(
+            line.ends_with("about 1, no cap of calls a day, no USD: no paid entry is in the chain"),
+            "{line}"
+        );
     }
 
     /// V1: the status line says off, on and waiting for summaries, waiting at the daily bound or

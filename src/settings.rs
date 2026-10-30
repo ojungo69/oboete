@@ -205,7 +205,8 @@ pub fn show(home: &Path) -> Value {
             "calls_a_day": cfg.my_work.calls_a_day,
             "estimate": my_work_estimate(home, &cfg),
         },
-        "paid_usd_per_month": cfg.paid_usd_per_month,
+        // Decision 64: null is no cap, `inf` in config.toml, which JSON cannot carry.
+        "paid_usd_per_month": cfg.paid_usd_per_month.is_finite().then_some(cfg.paid_usd_per_month),
         "gemini": cfg.gemini.map(gemini_place),
         "usd_this_month": spend,
         // G23: how the last prompt that could ask the resident viewer took its block.
@@ -266,6 +267,8 @@ pub fn show(home: &Path) -> Value {
             "view_port": [1, u16::MAX],
             "retention_days": [config::RETENTION_DAYS.start(), config::RETENTION_DAYS.end()],
             "my_work_calls": [MY_WORK_CALLS.start(), MY_WORK_CALLS.end()],
+            // Calls a day that no day reaches: the no cap of each calls-a-day field (decision 64).
+            "no_cap": config::no_daily_cap(),
         },
     })
 }
@@ -276,9 +279,11 @@ fn my_work_estimate(home: &Path, cfg: &config::Config) -> Value {
     let Some(Ok(e)) = crate::my_work_run::home_estimate(home, cfg) else {
         return Value::Null;
     };
+    // With no cap of calls a day there is no most (decision 64): null, not 4294967295 calls.
+    let capped = cfg.my_work.calls_a_day != config::no_daily_cap();
     json!({
-        "calls": [e.calls.0, e.calls.1],
-        "usd": e.usd.map(|(typical, most)| [typical, most]),
+        "calls": [e.calls.0, capped.then_some(e.calls.1)],
+        "usd": e.usd.map(|(typical, most)| json!([typical, capped.then_some(most)])),
         "priced": e.priced.map(|(name, model)| json!({"name": name, "model": model})),
     })
 }
@@ -528,7 +533,9 @@ struct Save {
     /// Older pages omitting this field keep the saved port.
     view: Option<ViewIn>,
     summary: SummaryIn,
-    paid_usd_per_month: f64,
+    /// Null is no cap (decision 64). Left out (None) is refused, as before, not read as no cap.
+    #[serde(default, deserialize_with = "given")]
+    paid_usd_per_month: Option<Option<f64>>,
     gemini: Option<config::GeminiPlace>,
     inject: InjectIn,
     capture: CaptureIn,
@@ -596,10 +603,18 @@ struct MyWorkIn {
 #[serde(deny_unknown_fields)]
 struct JudgeIn {
     enabled: bool,
+    /// `[judge] daily_budget`; older pages leave it alone.
+    #[serde(default)]
+    daily_budget: Option<u32>,
 }
 
 /// `[my_work] calls_a_day` as the page takes it: one call a day at the least.
 const MY_WORK_CALLS: std::ops::RangeInclusive<u32> = 1..=10_000;
+
+/// A calls-a-day cap the page takes: one in `range`, or none (decision 64).
+fn calls_cap(n: u32, range: &std::ops::RangeInclusive<u32>) -> bool {
+    range.contains(&n) || n == config::no_daily_cap()
+}
 
 /// Only the summary fields the page edits; `shrink` stays as the file has it.
 #[derive(Deserialize)]
@@ -909,7 +924,7 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
     if let Some(m) = &posted.my_work {
         // A value the file holds stays as it is when it is not changed, in range or not, as a
         // provider's daily budget does (#680).
-        if m.calls_a_day != now.my_work.calls_a_day && !MY_WORK_CALLS.contains(&m.calls_a_day) {
+        if m.calls_a_day != now.my_work.calls_a_day && !calls_cap(m.calls_a_day, &MY_WORK_CALLS) {
             return Err(refused(422, "range", "my_work.calls_a_day"));
         }
         // Turning it on is the owner's act on this page, its estimate shown first (A6).
@@ -928,20 +943,30 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
     if let Some(j) = &posted.judge {
         // `[judge]` needs its key file: with none, a key is set first (`judge::save_key`).
         match &now.judge {
-            Some(saved) if saved.enabled != j.enabled => {
-                put(&mut doc, "judge", "enabled", j.enabled.into());
+            Some(saved) => {
+                if let Some(n) = j.daily_budget.filter(|n| *n != saved.daily_budget) {
+                    if !calls_cap(n, &BUDGET) {
+                        return Err(refused(422, "range", "judge.daily_budget"));
+                    }
+                    put(&mut doc, "judge", "daily_budget", i64::from(n).into());
+                }
+                if saved.enabled != j.enabled {
+                    put(&mut doc, "judge", "enabled", j.enabled.into());
+                }
             }
-            Some(_) => {}
             None if j.enabled => return Err(refused(422, "missing_key", "judge.enabled")),
+            None if j.daily_budget.is_some() => {
+                return Err(refused(422, "missing_key", "judge.daily_budget"));
+            }
             None => {}
         }
     }
-    if posted.paid_usd_per_month != now.paid_usd_per_month {
-        put_root(
-            &mut doc,
-            "paid_usd_per_month",
-            Some(posted.paid_usd_per_month.into()),
-        );
+    // A null is no cap, written `inf` (decision 64); left out, `checked` refused it.
+    if let Some(cap) = posted.paid_usd_per_month {
+        let cap = cap.unwrap_or(config::no_monthly_cap());
+        if cap != now.paid_usd_per_month {
+            put_root(&mut doc, "paid_usd_per_month", Some(cap.into()));
+        }
     }
     if posted.gemini != now.gemini {
         put_root(
@@ -1248,7 +1273,10 @@ struct Chain {
 /// or the entries are not the chain's; each value equal to the entry's own is left out. `now` is
 /// the file as it applies before the save.
 fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result<Chain, Refusal> {
-    if !posted.paid_usd_per_month.is_finite() || posted.paid_usd_per_month < 0.0 {
+    let Some(cap) = posted.paid_usd_per_month else {
+        return Err(refused(422, "type", "paid_usd_per_month"));
+    };
+    if cap.is_some_and(|v| !v.is_finite() || v < 0.0) {
         return Err(refused(422, "range", "paid_usd_per_month"));
     }
     let i = &posted.inject;
@@ -1338,7 +1366,7 @@ fn put_entry(
     };
     if let Some(n) = e.daily_budget {
         let had = each(&|p| p.daily_budget() == n) || now.daily_budget.get(&e.name) == Some(&n);
-        if !had && !BUDGET.contains(&n) {
+        if !had && !calls_cap(n, &BUDGET) {
             return Err(refused(422, "range", field("daily_budget")));
         }
         // A budget from the key follows the key: any number typed is the user's.
@@ -2380,6 +2408,136 @@ mod tests {
         config::load_capture(home.path()).unwrap();
     }
 
+    /// Decision 64: My Work's calls a day, the judge's and a curator's each take 4294967295 for no
+    /// cap, which `ranges.no_cap` states; one short of it is out of range, and My Work's estimate
+    /// then has no most, neither of calls nor of USD.
+    #[test]
+    fn each_calls_a_day_cap_may_be_no_cap() {
+        let text = "[[providers]]\nkind = \"openai\"\nname = \"paid\"\n\
+                    base_url = \"https://example.invalid/v1\"\nmodel = \"m\"\n\
+                    limits = { usd_per_mtok_in = 1.0 }\n\n\
+                    [judge]\nkey_file = \"/k/TYPESAFE_KEY.md\"\n";
+        let home = home_with(Some(text));
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let prompt = crate::raw::Event {
+            session: "s1".into(),
+            repo: Some("r".into()),
+            ts: crate::db::now_ms(),
+            ..crate::raw::test_event(&json!({"prompt": "Build the parser."}).to_string())
+        };
+        raw.append(&prompt).unwrap();
+        drop(raw);
+        let shown = show(home.path());
+        let no_cap = json!(u32::MAX);
+        assert_eq!(shown["ranges"]["no_cap"], no_cap);
+        assert_eq!(shown["my_work"]["estimate"]["calls"][1], 100);
+        assert!(shown["my_work"]["estimate"]["usd"][1].is_f64(), "{shown}");
+        let open = save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["my_work"] = json!({"curate": false, "calls_a_day": u32::MAX});
+                v["judge"] = json!({"enabled": true, "daily_budget": u32::MAX});
+                v["chain"][0]["daily_budget"] = json!(u32::MAX);
+            }),
+        )
+        .unwrap();
+        let cfg = config::load(home.path()).unwrap();
+        assert_eq!(cfg.my_work.calls_a_day, u32::MAX);
+        assert_eq!(cfg.judge.unwrap().daily_budget, u32::MAX);
+        assert_eq!(cfg.providers[0].daily_budget(), u32::MAX);
+        assert_eq!(open["chain"][0]["effective_daily_budget"], Value::Null);
+        assert_eq!(open["judge"]["daily_budget"], no_cap);
+        let estimate = &open["my_work"]["estimate"];
+        assert_eq!(estimate["calls"][1], Value::Null, "{estimate}");
+        assert!(estimate["calls"][0].as_u64().unwrap() >= 1, "{estimate}");
+        assert!(
+            estimate["usd"][0].is_f64() && estimate["usd"][1].is_null(),
+            "{estimate}"
+        );
+        let before = file(&home).unwrap();
+        for (field, edit) in [
+            (
+                "my_work.calls_a_day",
+                json!({"curate": false, "calls_a_day": u32::MAX - 1}),
+            ),
+            (
+                "judge.daily_budget",
+                json!({"enabled": true, "daily_budget": u32::MAX - 1}),
+            ),
+            (
+                "judge.daily_budget",
+                json!({"enabled": true, "daily_budget": 0}),
+            ),
+        ] {
+            let key = if field.starts_with("judge") {
+                "judge"
+            } else {
+                "my_work"
+            };
+            let r = save_to(&home, &posted(&open, |v| v[key] = edit)).unwrap_err();
+            assert_eq!((r.status, r.code, r.field.as_str()), (422, "range", field));
+            assert_eq!(file(&home).as_deref(), Some(before.as_str()));
+        }
+        let r = save_to(
+            &home,
+            &posted(&open, |v| {
+                v["chain"][0]["daily_budget"] = json!(u32::MAX - 1)
+            }),
+        )
+        .unwrap_err();
+        assert_eq!((r.status, r.code), (422, "range"));
+        // A cap again, and an older page that sends no judge budget leaves it.
+        let capped = save_to(
+            &home,
+            &posted(&open, |v| {
+                v["judge"] = json!({"enabled": true, "daily_budget": 50})
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            config::load(home.path())
+                .unwrap()
+                .judge
+                .unwrap()
+                .daily_budget,
+            50
+        );
+        save_to(
+            &home,
+            &posted(&capped, |v| v["judge"] = json!({"enabled": false})),
+        )
+        .unwrap();
+        let judge = config::load(home.path()).unwrap().judge.unwrap();
+        assert_eq!((judge.enabled, judge.daily_budget), (false, 50));
+        // With no `[judge]`, a budget is refused as turning it on is.
+        let home = home_with(Some("providers = []\n"));
+        let shown = show(home.path());
+        let r = save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["judge"] = json!({"enabled": false, "daily_budget": 50})
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "missing_key", "judge.daily_budget")
+        );
+        assert_eq!(file(&home).as_deref(), Some("providers = []\n"));
+        // One written by hand out of range stays through a save that sends it unchanged (#680).
+        let text = "providers = []\n[judge]\nkey_file = \"/k/TYPESAFE_KEY.md\"\ndaily_budget = 0\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["judge"] = json!({"enabled": true, "daily_budget": 0})
+            }),
+        )
+        .unwrap();
+        assert_eq!(file(&home).as_deref(), Some(text));
+    }
+
     /// docs/retention.md: the page shows `[retention] days`, saves a day count in range or null for
     /// forever, refuses one out of range, and an older page that sends none leaves it.
     #[test]
@@ -2647,7 +2805,7 @@ mod tests {
     }
 
     #[test]
-    fn the_paid_cap_takes_finite_values_of_0_or_more_only() {
+    fn the_paid_cap_takes_values_of_0_or_more_or_null_for_no_cap() {
         let home = home_with(Some(
             "paid_usd_per_month = 5.0 # monthly cap\n[summary]\nfuture = 7\n",
         ));
@@ -2668,11 +2826,49 @@ mod tests {
                 "{text}"
             );
         }
+        // Decision 64: a null is no cap, written `inf` and shown null; a save that leaves it keeps
+        // it, and a number brings a cap back.
+        shown = save_to(
+            &home,
+            &posted(&shown, |v| v["paid_usd_per_month"] = Value::Null),
+        )
+        .unwrap();
+        assert_eq!(shown["paid_usd_per_month"], Value::Null);
+        assert_eq!(
+            config::load(home.path()).unwrap().paid_usd_per_month,
+            config::no_monthly_cap()
+        );
+        let text = file(&home).unwrap();
+        assert!(
+            text.contains("paid_usd_per_month = inf") && text.contains("# monthly cap"),
+            "{text}"
+        );
+        shown = save_to(
+            &home,
+            &posted(&shown, |v| v["summary"]["language"] = json!("English")),
+        )
+        .unwrap();
+        assert_eq!(shown["paid_usd_per_month"], Value::Null, "left as it was");
+        shown = save_to(
+            &home,
+            &posted(&shown, |v| v["paid_usd_per_month"] = json!(5.0)),
+        )
+        .unwrap();
+        assert_eq!(config::load(home.path()).unwrap().paid_usd_per_month, 5.0);
         let before = file(&home).unwrap();
+        // Left out, it is refused, not read as no cap.
+        let left_out = posted(&shown, |v| {
+            v.as_object_mut().unwrap().remove("paid_usd_per_month");
+        });
+        let r = save_to(&home, &left_out).unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "type", "paid_usd_per_month")
+        );
+        assert_eq!(file(&home).as_deref(), Some(before.as_str()));
         let invalid = [
             ("paid_usd_per_month", json!(-0.1)),
             ("paid_usd_per_month", json!("5")),
-            ("paid_usd_per_month", Value::Null),
         ];
         for (field, value) in invalid {
             let refusal = save_to(&home, &posted(&shown, |v| v[field] = value)).unwrap_err();
