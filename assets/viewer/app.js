@@ -3378,7 +3378,7 @@ function formOf(s) {
     chain: s.chain.map((e) => {
       const loaded = chainDailyAsLoaded(e, s.ranges);
       return { ...e, edit: { on: e.on, daily_budget: loaded.daily_budget, timeout_s: text(e.timeout_s), model: text(e.model),
-        noCap: loaded.noCap } };
+        noCap: loaded.noCap, loaded } };
     }),
     providers: (s.providers || []).map((p) => ({ ...p, edit: providerEdit(p.name, p.saved), editing: false })),
     newProvider: null,
@@ -4449,22 +4449,25 @@ function judgeSection(f) {
     parts.push(el('p', 'desc', t('judge_no_key')));
   }
   parts.push(f.keyInput ? keyField('judge/key', 'judge.key', t('judge_key_label')) : note(t('provider_key_unsupported')));
-  if (j.set) {
-    const open = j.daily_budget === f.ranges.no_cap;
-    let usage = t('judge_usage_unknown');
-    if (j.calls_today !== null && j.usd_this_month !== null) {
-      usage = t(open ? 'judge_usage_no_cap' : 'judge_usage', { calls: j.calls_today.toLocaleString(lang),
-        most: j.daily_budget.toLocaleString(lang), usd: usdValue(j.usd_this_month) });
-    }
-    const [least, most] = f.ranges.daily_budget;
-    const calls = input('number', j.budget, '', 'judge.daily_budget', (v) => { j.budget = v; });
-    [calls.min, calls.max] = [least, most];
-    parts.push(el('label', 'field', el('span', null, t('judge_calls', { min: least.toLocaleString(lang), max: most.toLocaleString(lang) })),
-      calls, note(t('saved_value', { value: open ? t('no_cap') : j.daily_budget })), note(t('judge_calls_desc'))),
-    ...noCapSwitch(j.noCap, 'judge', t('judge_h'), calls, 'no_cap_calls_warning', (v) => { j.noCap = v; }),
-    el('p', 'desc', usage), judgeTest());
-  }
+  if (j.set) parts.push(...judgeCalls(f, j), judgeTest());
   return el('section', 'judge-settings', ...parts);
+}
+
+// The judge's calls a day, with its No cap switch (decision 64) and its usage beside it.
+function judgeCalls(f, j) {
+  const open = j.daily_budget === f.ranges.no_cap;
+  let usage = t('judge_usage_unknown');
+  if (j.calls_today !== null && j.usd_this_month !== null) {
+    usage = t(open ? 'judge_usage_no_cap' : 'judge_usage', { calls: j.calls_today.toLocaleString(lang),
+      most: j.daily_budget.toLocaleString(lang), usd: usdValue(j.usd_this_month) });
+  }
+  const [least, most] = f.ranges.daily_budget;
+  const calls = input('number', j.budget, '', 'judge.daily_budget', (v) => { j.budget = v; });
+  [calls.min, calls.max] = [least, most];
+  return [el('label', 'field', el('span', null, t('judge_calls', { min: least.toLocaleString(lang), max: most.toLocaleString(lang) })),
+    calls, note(t('saved_value', { value: open ? t('no_cap') : j.daily_budget })), note(t('judge_calls_desc'))),
+  ...noCapSwitch(j.noCap, 'judge', t('judge_h'), calls, 'no_cap_calls_warning', (v) => { j.noCap = v; }),
+  el('p', 'desc', usage)];
 }
 
 // One made-up question sent on the owner's click, its outcome said in words.
@@ -5146,9 +5149,10 @@ function chainDailyAsLoaded(r, ranges) {
 
 // Whether a chain row's calls a day is still as loaded. Its No cap follows the entry's own value
 // too, which a save must not turn into a `[chain]` value unless the row was changed (Codex on #772).
-function chainDailyUntouched(r, ranges) {
-  const loaded = chainDailyAsLoaded(r, ranges);
-  return r.edit.daily_budget === loaded.daily_budget && r.edit.noCap === loaded.noCap;
+// The edit keeps what it was loaded as through the merges of later answers, so a change made
+// against one answer still counts after the next (#773).
+function chainDailyUntouched(r) {
+  return r.edit.daily_budget === r.edit.loaded.daily_budget && r.edit.noCap === r.edit.loaded.noCap;
 }
 
 // Decision 64: a cap's No cap switch beside its number. On, the number is set aside (kept, to turn
@@ -5352,7 +5356,7 @@ function preserveSettingsDrafts(next, mine) {
     // A calls a day left as it was follows the answer, whose entry may have changed.
     const fresh = row.edit;
     row.edit = { ...r.edit };
-    if (chainDailyUntouched(r, mine.ranges)) Object.assign(row.edit, { daily_budget: fresh.daily_budget, noCap: fresh.noCap });
+    if (chainDailyUntouched(r)) Object.assign(row.edit, { daily_budget: fresh.daily_budget, noCap: fresh.noCap, loaded: fresh.loaded });
     groups.delete(r.name);
     return row;
   }), ...groups.values()];
@@ -5970,8 +5974,8 @@ function saveBody() {
       if (v.trim() === '') return null;
       return v.trim() === String(had) ? had : whole(v, min, max);
     };
-    const daily = chainDailyUntouched(r, form.ranges) ? r.daily_budget ?? null
-      : r.edit.noCap ? form.ranges.no_cap : optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
+    let daily = r.edit.noCap ? form.ranges.no_cap : optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
+    if (chainDailyUntouched(r)) daily = r.daily_budget ?? null;
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
     const timeout = optional(r.edit.timeout_s, r.timeout_s, ...form.ranges.timeout_s);
     if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
@@ -6183,6 +6187,7 @@ function onboardingSection(f) {
     onboardingTier=select.value;onboardingApplied=false;renderOnboarding(f);
   });
   const plan=onboardingPlan(f,onboardingTier);
+  const effect=plan?.cap===null?'onboarding_effect_no_cap':'onboarding_effect';
   const apply=el('button','quiet small',t('onboarding_copy'));
   apply.type='button';apply.dataset.action='onboarding.copy';apply.disabled=!plan;
   apply.addEventListener('click',()=>{
@@ -6219,7 +6224,7 @@ function onboardingSection(f) {
     el('p','desc',t('onboarding_scope')),
     el('label','field',el('span',null,t('onboarding_tier')),select),
     plan && el('p','desc',plan.available
-      ? t(plan.cap===null?'onboarding_effect_no_cap':'onboarding_effect',{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
+      ? t(effect,{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
       : t('onboarding_unavailable')),
     destinations?.length?el('ul',null,...destinations):null,
     apply,onboardingApplied?el('p','desc',t('onboarding_draft_ready')):null,
@@ -6610,6 +6615,9 @@ function drawSimpleSettings(panel, f) {
   const capCancel = el('button', 'quiet', t('simple_cancel'));
   capCancel.type = 'button'; capCancel.dataset.simpleFocus = 'cap.cancel';
   capCancel.addEventListener('click', () => { f.simpleCapOff = false; drawSettings(); simpleFocus('paid_usd_per_month.no_cap'); });
+  // The warning: with its confirmation while the cap is being turned off, alone once it is off.
+  let capWarning = capOff ? note(t('no_cap_paid_warning')) : null;
+  if (f.simpleCapOff) capWarning = el('div', 'simple-warning', el('p', 'desc error', t('no_cap_paid_warning')), el('div', 'actions', capConfirm, capCancel));
   const saveCap = () => {
     const value = Number(cap.value);
     if (!cap.value.trim() || !Number.isFinite(value) || value < 0) {
@@ -6649,8 +6657,7 @@ function drawSimpleSettings(panel, f) {
     simpleBlock('my_work', myWorkEstimate(f.my_work.estimate), myWork),
     simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
       el('p', 'spend', f.usd_this_month === null ? t('spend_unavailable') : t('simple_spent', { usd: usdValue(f.usd_this_month) }))),
-    noCap, f.simpleCapOff ? el('div', 'simple-warning', el('p', 'desc error', t('no_cap_paid_warning')),
-      el('div', 'actions', capConfirm, capCancel)) : capOff ? note(t('no_cap_paid_warning')) : null),
+    noCap, capWarning),
     f.embedding ? simpleBlock('search', embeddingChoice(f, true)) : null,
     simpleBlock('inject', ...inject), captureSection(f, true),
     simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',

@@ -533,9 +533,9 @@ struct Save {
     /// Older pages omitting this field keep the saved port.
     view: Option<ViewIn>,
     summary: SummaryIn,
-    /// Null is no cap (decision 64); left out is refused, as before.
-    #[serde(deserialize_with = "nullable")]
-    paid_usd_per_month: Option<f64>,
+    /// Null is no cap (decision 64). Left out (None) is refused, as before, not read as no cap.
+    #[serde(default, deserialize_with = "given")]
+    paid_usd_per_month: Option<Option<f64>>,
     gemini: Option<config::GeminiPlace>,
     inject: InjectIn,
     capture: CaptureIn,
@@ -578,14 +578,6 @@ fn given<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
-}
-
-/// A field that must be given, as a `T` or a null: with `deserialize_with` and no `default`, serde
-/// refuses it left out instead of reading it as a null.
-fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
-    d: D,
-) -> Result<Option<T>, D::Error> {
-    Option::<T>::deserialize(d)
 }
 
 #[derive(Deserialize)]
@@ -969,12 +961,12 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
             None => {}
         }
     }
-    // A null is no cap, written `inf` (decision 64).
-    let cap = posted
-        .paid_usd_per_month
-        .unwrap_or(config::no_monthly_cap());
-    if cap != now.paid_usd_per_month {
-        put_root(&mut doc, "paid_usd_per_month", Some(cap.into()));
+    // A null is no cap, written `inf` (decision 64); left out, `checked` refused it.
+    if let Some(cap) = posted.paid_usd_per_month {
+        let cap = cap.unwrap_or(config::no_monthly_cap());
+        if cap != now.paid_usd_per_month {
+            put_root(&mut doc, "paid_usd_per_month", Some(cap.into()));
+        }
     }
     if posted.gemini != now.gemini {
         put_root(
@@ -1281,10 +1273,10 @@ struct Chain {
 /// or the entries are not the chain's; each value equal to the entry's own is left out. `now` is
 /// the file as it applies before the save.
 fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result<Chain, Refusal> {
-    if posted
-        .paid_usd_per_month
-        .is_some_and(|v| !v.is_finite() || v < 0.0)
-    {
+    let Some(cap) = posted.paid_usd_per_month else {
+        return Err(refused(422, "type", "paid_usd_per_month"));
+    };
+    if cap.is_some_and(|v| !v.is_finite() || v < 0.0) {
         return Err(refused(422, "range", "paid_usd_per_month"));
     }
     let i = &posted.inject;
@@ -2868,7 +2860,11 @@ mod tests {
         let left_out = posted(&shown, |v| {
             v.as_object_mut().unwrap().remove("paid_usd_per_month");
         });
-        assert!(save_to(&home, &left_out).is_err());
+        let r = save_to(&home, &left_out).unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "type", "paid_usd_per_month")
+        );
         assert_eq!(file(&home).as_deref(), Some(before.as_str()));
         let invalid = [
             ("paid_usd_per_month", json!(-0.1)),

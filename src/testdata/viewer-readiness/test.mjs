@@ -804,6 +804,9 @@ f=ctx.w6merge(settings('resident',{ranges,chain:[row('p',{effective_daily_budget
 ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.deepEqual([off('chain.p').checked,field('chain.p.daily_budget').disabled,daily()],[false,false,[null]],
   'a cap set in the entry\'s editor survives the next whole save');
+// Set back to no cap in its editor, the row left as loaded shows it so again (#773).
+f=ctx.w6merge(settings('resident',{ranges,chain:[row('p',{effective_daily_budget:null})]}),f,edited);ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([off('chain.p').checked,daily()],[true,[null]],'the next answer is followed again');
 // Turned off before the operation, the switch stays off and is sent.
 f=loaded();ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),true);
 f=ctx.w6merge(settings('resident',{ranges,chain:[row('p')]}),f,edited);ctx.ui.setForm(f);ctx.ui.drawSettings();
@@ -811,6 +814,23 @@ assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'a switch changed 
 // Two entries of one name, the first with no cap and the other with 7: a save keeps both.
 f=loaded({entries:2,differs:['daily_budget'],effective_daily_budget:null});ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.deepEqual([off('chain.p').checked,daily()],[true,[null]],'an unrelated save keeps mixed caps under one name');
+// #773: a change made against one answer stays a change through the next, whatever that answer's
+// row shows: two entries of one name, 7 and no cap, reordered to no cap and 7, and back.
+const moved={op:'move',selector:{source:'file',index:0},to:1};
+const two=effective=>settings('resident',{ranges,chain:[row('p',{entries:2,differs:['daily_budget'],effective_daily_budget:effective})]});
+f=w6.formOf(two(7));ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),true);
+f=ctx.w6merge(two(null),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'a pending No cap survives a reorder of entries of one name');
+f=ctx.w6merge(two(7),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'and the reorder back');
+// A number typed is sent; typed back to what it was, the row is as loaded again.
+f=loaded();ctx.ui.setForm(f);ctx.ui.drawSettings();typeIn(field('chain.p.daily_budget'),'50');
+assert.deepEqual(daily(),[50],'a number typed is sent');
+typeIn(field('chain.p.daily_budget'),'');
+assert.deepEqual(daily(),[null],'typed back, it is sent as config.toml has it');
+// A switch turned off and on again, with nothing else changed, is as loaded.
+f=w6.formOf(two(null));ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),false);tick(off('chain.p'),true);
+assert.deepEqual(daily(),[null],'a switch turned back is sent as config.toml has it');
 // A CLI entry's own calls a day lifted by a [chain] no cap: a subscription's row has no field, and a
 // save keeps it.
 f=w6.formOf(settings('resident',{ranges,chain:[row('cli',{subscription:true,daily_budget:NO,effective_daily_budget:null})]}));
