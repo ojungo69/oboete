@@ -1523,7 +1523,8 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             crate::my_work_run::jobs(),
             Box::new(call),
             (&rules, &cfg.summary, &chain),
-        );
+        )
+        .judge(cfg.judge.as_ref().map(|j| (j, cfg.paid_usd_per_month)));
         crate::turns::round(
             raw,
             k,

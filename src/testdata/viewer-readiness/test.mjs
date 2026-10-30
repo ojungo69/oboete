@@ -48,7 +48,7 @@ const ctx=vm.createContext({document,location:{hash:'#t=0123456789abcdef01234567
 const sourcePath=fs.realpathSync(process.argv[2]||new URL('../../../assets/viewer/app.js',import.meta.url));
 const source=fs.readFileSync(sourcePath,'utf8');
 vm.runInContext(source.replace('await start();',''),ctx,{filename:sourcePath});
-vm.runInContext('globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;}};',ctx);
+vm.runInContext('globalThis.ui={showSettings,drawSettings,setView:v=>{view=v;},setForm:v=>{form=v;},getForm:()=>form,setLang:v=>{lang=v;},nextVisit:()=>{++generation;}};',ctx);
 // The view the page opens on, before the checks below change it.
 const initialView=vm.runInContext('view',ctx);
 // A whole settings answer, set by the W4 checks below for the later ones that open Settings.
@@ -1068,6 +1068,24 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert.equal(ctx.ui.getForm(),mine,'a running save keeps its place');
     assert(document.getElementById('status').textContent.includes('the key works'),'the outcome is still said');
     panel.querySelector('.settings').inert=false;settingsAnswer=null;
+  }
+  // #766: settings left and opened again while a test is out keep the old form until the new
+  // visit is read; the old visit's test says nothing and merges nothing, whether its answer or
+  // its read comes back after.
+  for(const out of ['answer','read']){
+    let release;const held=new Promise(resolve=>{release=resolve;});
+    const read=json(settings({judge:{...on,calls_today:11}}));
+    answers=[out==='answer'?held:json({outcome:'ok'})];
+    settingsAnswer=out==='read'?held:Promise.resolve(read);
+    const mine=ctx.ui.getForm();
+    document.getElementById('status').textContent='';
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
+    ctx.ui.setView('my_work');ctx.ui.nextVisit();ctx.ui.setView('settings');ctx.ui.nextVisit();
+    release(out==='answer'?json({outcome:'ok'}):read);await settle();await settle();await settle();
+    assert.equal(ctx.ui.getForm(),mine,`an earlier visit's test merges nothing (${out})`);
+    assert.equal(document.getElementById('status').textContent,'',`and says nothing (${out})`);
+    assert(!text(judged()).includes('11 of 300 calls'),`its read is not drawn (${out})`);
+    settingsAnswer=null;
   }
   answers=[json({code:'missing_key',field:'judge.test'},422)];
   judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();

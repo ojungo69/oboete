@@ -299,7 +299,9 @@ A3. **One call a round, and its place.** A due check is a read of knowledge.db a
 no call. A round sends one call, in this order: the oldest due turn summary; then a My Work job
 due for 60 minutes or more; then a window; then any due My Work job. So the jobs go in the owner's
 pauses, and still within an hour while windows go a step at a time (decision 56). (Claude;
-overrulable.)
+overrulable.) The request judge (J3) goes first in My Work's place, its call not counted here: a
+round in which it decides a conversation ends there, so new conversations, each a round, go before
+a window.
 
 A4. **Every call fits an 8,000-token request and a 4,000-token answer.** Each job's fixed
 instructions stay under 1,500 estimated tokens, and its data within `[summary] window_tokens`
@@ -602,7 +604,7 @@ none of which any store here has, and the calibration script, which needs the ow
 placements. No older op is read again in the new shape: no store holds a `links` or a `goals` op
 (the owner's, and the dogfood user's two, counted 2026-10-28).
 
-### J. The judges (decision 62, rows X12 and X15)
+### J. The judges (decisions 62 and 63, rows X12 and X15)
 
 J1. **Jev**, Typesafe's decision model: answers with probabilities, not text. Called through
 Typesafe's own API, `POST https://api.typesafe.ai/v1/systemone`, model `jev-latest` (it answered
@@ -613,18 +615,24 @@ balance" without prepaid credit, so it is not built. Every state goes through th
 (S6); a conversation or request of a repository the owner excluded is never sent (spec 5.5),
 checked before the call; each call is in the provider ledger; the spending cap counts its input
 tokens at USD 0.042 a million (output is free). No retry, as claude-mem: what a failed call would
-have decided goes to the model that decides it without a judge.
+have decided goes to the model that decides it without a judge. A forget that takes what a judge's
+op read takes the op, as a grouping op's (S5): its conversation is undecided, and asked, again.
 
 J2. **The context** of a conversation, as claude-mem's: its repository, when it started, its first 3
 asks (250 characters each) and its first 8 card titles (120 each), each text gated; a request's adds
 its title.
 
-J3. **The request judge**, before grouping (C). For each candidate conversation (C1) a single proven
-link to one open request (C3: the same work list, a delegation) joins it with no call.
+J3. **The request judge**, before grouping (C), while the judge is on. For each candidate
+conversation (C1) a single proven link to one open request (C3: the same work list, a delegation)
+joins it with no call; with no open request in its repository it is its own request, with no call.
 Otherwise Jev chooses among the repository's 19 most recently active open requests and none, then
-answers whether the conversation is the same work as the pick. From 0.8 it joins: a grouping op as
-the model's, its link of kind `judge` with the scores as evidence. From 0.5 it is its own request,
-with a suggestion to join. Below, or none, its own request. A failure leaves it to grouping.
+answers whether the conversation is the same work as the pick. The check's score decides, as
+claude-mem's `bandFor`: from 0.8 it joins, its link of kind `judge` with the scores as evidence;
+from 0.5 it is its own request, with a suggestion to join; below, or none, its own request. Each
+decision is an op of the job `judge`, whose groups the fold reads as a grouping op's, though
+grouping's due check (C5) counts grouping's own. A failure leaves it to grouping, and the judge does
+not ask it again. Off, grouping decides each conversation as before, shown the same proven links,
+where claude-mem's rules judge joins with no call without Jev too.
 
 J4. **Join or Not this**, on the card of a conversation the judge suggested: "Looks like part of
 <title>", with Join and Not this, each an owner op. Join moves it, and anything it anchored, into
@@ -641,6 +649,12 @@ input tokens in English and 14,222 in Japanese, a check 1,106 and 1,532, 0.16 to
 Both languages picked the continued request (0.74, 0.94) and judged it the same work (0.96, 0.97).
 Jev's documentation says English is where it is best and CJK is handled less well: the owner's own
 pairs measure it once it runs.
+
+J7. **Where the judges send** (decision 63): after 11c, one slice lets the owner choose from a list
+fixed in the code, never a free address, so no value of the settings sends the owner's text
+elsewhere: Typesafe's Jev; Cloudflare's Clef and Clef-flash; Liquid's d1 through its API; d1 on this
+PC. Each answers the same state and typed questions. The default is picked in decision 34's single
+evaluation, each one's Japanese judgements and cost side by side: Japanese is measured on none.
 
 ### R. My Rules (row X13)
 
@@ -681,7 +695,7 @@ rule the owner adopted.
 ### S. Where it is kept
 
 S1. **One new op kind, `my_work`**, whose `job` is `group`, `review`, `links`, `story`, `rules`,
-`goals`, `rule` (the owner's action), `focus` (My Focus, F8) or `place` (F3). Approved, edited and turned-off rules also use the
+`goals`, `rule` (the owner's action), `focus` (My Focus, F8), `place` (F3) or `judge` (J3). Approved, edited and turned-off rules also use the
 existing kinds: `claim` through `pref add`, and `correction` through correct, mute and unmute.
 Checks stay in `state/my-work-reviews.json`. Nothing goes to `state/` or providers.db that a
 rebuild needs.
@@ -873,7 +887,8 @@ goals' window is the last 31 days, rolling, and each finished calendar month is 
     Other pass; the links job removed. 10c: the page, My Goals' tab removed. It needs slices 5 to 8.
 11. **The judges** (J1 to J6, decision 62). 11a: the `[judge]` provider, its key on the settings
     page, its probe in doctor, the gate, the cap and the ledger. 11b: the request judge and Join or
-    Not this. 11c: the focus judge's hint. It needs slice 3 and, for 11c, slice 10.
+    Not this. 11c: the focus judge's hint. 11d: where the judges send (J7). It needs slice 3 and,
+    for 11c, slice 10.
 
 After slice 11, the side by side with claude-mem that decision 50 asks for.
 
@@ -1946,6 +1961,46 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **#763**: a second look at the exclusions that fails cancels the reservation before its error
   is returned.
 - Settings descriptions wrap a long path at a phone's width.
+
+### Slice 11b-1: the request judge (2026-10-30)
+
+- **Where it runs** (J3): a method of the job (`Job::judged`), grouping's, over the conversations
+  and requests the round already read for grouping; the runner asks it after the reading and before
+  any job's due check, while the judge is on (`[judge]` there, on, its key on line 2). A decision
+  ends the round (A3); the worker drains the consumers before the next, which reads it.
+- **One conversation a round**: the earliest candidate (C1) no judge op names. The next can be
+  offered the request the first became, as claude-mem's run puts a new request first.
+- **The steps**: J3's, claude-mem's word for word (its instructions and criteria, 19 candidates,
+  0.8 and 0.5 on the check's score). The requests are keyed `r1` to `r19`, labels and never
+  recorded text. A request's title is its group's, else its opening ask's as the page makes one,
+  else claude-mem's "Untitled request".
+- **The context** (J2): claude-mem's four fields. Its first 3 asks are the prompts My Work reads as
+  asks, where claude-mem sends the first 3 prompts whatever they say; its first 8 cards are the
+  oldest of those My Work reads (its newest 300), each with a title. Each text is cut at `# Attached
+  files`, its white space collapsed, then gated and cut.
+- **The op**: job `judge`, about the repository, entry `judge:rules` (no call) or `judge:jev`;
+  `read` what it showed (the opening ask and every prompt record sent, as spans of this device's;
+  this device's card ops, and the grouping and judge ops behind each request shown), so a forget
+  or an exclusion reaches it as a grouping op (S5, S6); fields `conversation`, `outcome` (`rules`,
+  `alone`, `none`, `joined`, `suggested`, `own`, `too_big`, or why nothing was decided), `groups` as a
+  grouping op's, and, when suggested, `suggestion` (`request`, the pick's anchor, and the check's
+  `score`).
+- **A failure**: a refused or failed call, or a state a key of which the gate would change, keeps an
+  op with its `outcome` and no groups: grouping decides the conversation, and the judge does not ask
+  it again. An exclusion found on the way, or the judge turned off, keeps nothing; the gate's
+  `ListChanged` keeps nothing, and the pass waits as the chain's does.
+- **Too big to keep**: an op past its cap (`raw::MAX_OP_BYTES`) would be kept as a skip that names
+  no conversation, and the judge would ask for it again each round. So the largest decision a read
+  could make is measured before Jev is asked; one that would not fit, or a decision with no call
+  that does not, keeps instead an op naming the conversation alone, `too_big`, read only its opening
+  ask: grouping decides it, and nothing was paid for.
+- **The gate** is the runner's, as the chain's (A5), without A7's count: the judge's calls are its
+  own, under `[judge] daily_budget`.
+- **No body cap of claude-mem's** (64 KB): Typesafe's answer decides, and a refusal leaves the
+  conversation to grouping.
+- **The settings page** says that My Work asks Jev about each new conversation and what it is sent.
+  **#766**: a connection test of a visit that ended says and merges nothing.
+- **Then**: 11b-2, the suggestion on the card, with Join and Not this (J4).
 
 ## Not built
 
