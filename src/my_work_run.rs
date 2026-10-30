@@ -203,16 +203,17 @@ impl<'a> Runner<'a> {
             });
         }
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
-        // J3: with the judge on, the jobs decide what they can before the chain; a round that
-        // decided ends there, and the next reads what the consumers applied of it.
-        if let Some(phase) = self.judged(raw, k, db, &reading, now)? {
-            return Ok(self.called(phase));
-        }
-        // #730: the subjects a failed batch holds, each by its own wait.
+        // #730: the subjects a failed batch holds, each by its own wait; read before the judge's
+        // pass too, as a job's read for the round (placement's) is kept for the chain's (11c, D8).
         let holds = crate::providers_db::my_work_held(db, now)?;
         let held_by: BTreeSet<(String, String)> = (holds.iter())
             .map(|(job, about, ..)| (job.clone(), about.clone()))
             .collect();
+        // J3: with the judge on, the jobs decide what they can before the chain; a round that
+        // decided ends there, and the next reads what the consumers applied of it.
+        if let Some(phase) = self.judged(raw, k, db, (&reading, &held_by), now)? {
+            return Ok(self.called(phase));
+        }
         let stores = Stores {
             raw,
             k,
@@ -491,7 +492,7 @@ impl<'a> Runner<'a> {
         raw: &mut Raw,
         k: &Connection,
         db: &Connection,
-        reading: &crate::curate::Reading,
+        (reading, held): (&crate::curate::Reading, &BTreeSet<(String, String)>),
         now: i64,
     ) -> Result<Option<Phase>> {
         let Some((judge, cap)) = self
@@ -500,7 +501,7 @@ impl<'a> Runner<'a> {
         else {
             return Ok(None);
         };
-        let (rules, none) = (self.rules, BTreeSet::new());
+        let rules = self.rules;
         for job in &self.jobs {
             let decided = {
                 let raw = &*raw;
@@ -510,7 +511,7 @@ impl<'a> Runner<'a> {
                     rules,
                     summary: self.summary,
                     reading,
-                    held: &none,
+                    held,
                 };
                 let gate = || -> Result<Option<crate::dispatch::Guard>> {
                     let dispatch = raw.dispatch()?;

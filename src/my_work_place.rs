@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 
 use crate::my_work::{AskFrom, ReviewInput};
 use crate::my_work_focus::{Focus, GOAL_CHARS, NAME_CHARS, OTHER};
-use crate::my_work_ops::{Kept, Read};
-use crate::my_work_run::{Ask, Due, Job, Stores, strict};
+use crate::my_work_focus_judge::Queued;
+use crate::my_work_ops::{Kept, MyWorkOp, Read};
+use crate::my_work_run::{Ask, Due, Job, Judging, Stores, strict};
 use crate::redact::Rules;
 
 pub(crate) const NAME: &str = "place";
@@ -44,12 +45,13 @@ struct Unit {
 
 /// One round's read: the units, the areas, the due requests in batches of `BATCH` by subject,
 /// the oldest first, each with since when its first is due, and the Other pass when it is due:
-/// since when, and its requests by subject.
+/// since when, and its requests by subject; and the ops an exclusion leaves out (S6).
 struct Round {
     units: Vec<Unit>,
     focus: Focus,
     batches: Vec<(i64, Vec<String>)>,
     other: Option<(i64, Vec<String>)>,
+    hidden: HashSet<(String, i64)>,
 }
 
 /// The placement job, for one round: what it read for its due check, kept for the call it makes.
@@ -137,6 +139,7 @@ fn round(s: &Stores, now: i64) -> Result<Round> {
         focus,
         batches,
         other,
+        hidden,
     })
 }
 
@@ -214,6 +217,22 @@ impl Job for Place {
         Ok(due)
     }
 
+    /// J5: before the chain's call, the focus judge's pick for each queued request, one a pass,
+    /// the batches' order.
+    fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+        let round = self.read(s, now)?;
+        let unit = |subject: &String| round.units.iter().find(|u| u.subject == *subject);
+        let queued: Vec<Queued> = (round.batches.iter().flat_map(|(_, b)| b))
+            .filter_map(unit)
+            .map(|u| Queued {
+                subject: &u.subject,
+                basis: u.basis,
+                input: &u.input,
+            })
+            .collect();
+        crate::my_work_focus_judge::next(s, (&round.focus, &round.hidden), &queued, judge)
+    }
+
     /// F3: `about`'s batch, the oldest first, as far as it fits; F4: the Other pass.
     fn ask(&self, s: &Stores, about: &str, now: i64) -> Result<Option<Ask>> {
         let round = self.read(s, now)?;
@@ -238,9 +257,18 @@ impl Job for Place {
             return Ok(None);
         };
         let mut shown = Shown::areas(s, &round.focus);
-        shown.request(s, lead, true);
+        // J5: each request's pick, the placement's own question's only (D6).
+        let areas =
+            crate::my_work_focus_judge::digest(&crate::my_work_focus_judge::kept(&round.focus));
+        let hint = |u: &Unit| -> Result<Option<Kept>> {
+            if question == Question::Other {
+                return Ok(None);
+            }
+            crate::my_work_focus_judge::current(s, &round.hidden, &u.subject, (u.basis, areas))
+        };
+        shown.request(s, lead, true, hint(lead)?);
         for u in others {
-            shown.request(s, u, false);
+            shown.request(s, u, false, hint(u)?);
         }
         // F4: the set as a whole, though a pass may show less than all of it.
         // shortcut: requests that do not fit one call wait for the set to move, a pass of more
@@ -334,8 +362,10 @@ impl Shown {
         }
     }
 
-    /// A request's block when it fits, or `first`; what it showed added to the read (S2).
-    fn request(&mut self, s: &Stores, u: &Unit, first: bool) {
+    /// A request's block when it fits, or `first`; what it showed added to the read (S2), the
+    /// focus judge's op too when the block shows its pick (D6), so that what takes the pick takes
+    /// the placement.
+    fn request(&mut self, s: &Stores, u: &Unit, first: bool, judged: Option<Kept>) {
         let rules = s.rules;
         let label = format!("R{}", self.subjects.len() + 1);
         let (mut block, mut spans, mut ops) = (format!("### {label}\n"), Vec::new(), vec![]);
@@ -375,6 +405,12 @@ impl Shown {
                 .map(|repo| crate::redact::outbound_with(repo, rules))
                 .collect();
             block.push_str(&format!("Repositories: {}\n", repos.join(", ")));
+        }
+        if let Some(judged) = &judged
+            && let Some(pick) = crate::my_work_focus_judge::hint(judged)
+        {
+            block.push_str(&format!("The judge's pick, a suggestion only: {pick}\n"));
+            ops.push(judged.op_seq);
         }
         let cost = crate::budget::estimate(&block);
         if !first && cost > self.left {
@@ -440,6 +476,9 @@ fn prompt(question: Question, language: &str, data: &str) -> String {
         Question::Place => format!(
             "You sort the pieces of work a developer asked coding agents for into the \
              developer's focus areas. {shown}\
+             A request may carry the judge's pick among the areas the developer kept: an area's \
+             id, or `{OTHER}` when it judged that none fits, and its probability. It is only a \
+             suggestion; you decide the placement from the request and the areas.\n\
              Place every request shown exactly once: in the one listed area it belongs to, by \
              the area's id, or in `{OTHER}` when no area fits. A request belongs to an area when \
              its work serves that area's goal; the same repository alone is not enough. Give \
@@ -676,9 +715,12 @@ mod tests {
     use crate::curate::{Phase, Reading, Reads};
     use crate::my_work_ops::MyWorkOp;
     use crate::my_work_run::Runner;
+    use crate::provider::tests::{request_body, serve_each};
     use crate::provider::{AnswerCheck, ChainFailed, ChainResult, Fallback, Gate, Skip};
     use crate::raw::OpKind;
     use crate::search::b::fixture::Store;
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
 
     const R: &str = "/r/parser";
     const MINUTE: i64 = 60_000;
@@ -830,6 +872,16 @@ mod tests {
         /// One pass of a runner of the placement job alone, the chain answering `answer` and
         /// refusing what the check refuses: the prompts sent.
         fn pass(&mut self, answer: &dyn Fn(&str) -> Value) -> Vec<String> {
+            self.pass_with(None, Box::new(Place::default()), answer)
+        }
+
+        /// `pass` of `job`, with the judge (its stub at `judge::AT`) when one is given.
+        fn pass_with(
+            &mut self,
+            judge: Option<&crate::config::Judge>,
+            job: Box<dyn Job>,
+            answer: &dyn Fn(&str) -> Value,
+        ) -> Vec<String> {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let db = crate::providers_db::open(self.s.home.path()).unwrap();
@@ -860,15 +912,88 @@ mod tests {
             };
             let mut runner = Runner::new(
                 (true, 100),
-                vec![Box::new(Place::default()) as Box<dyn Job>],
+                vec![job],
                 Box::new(call),
                 (&rules, &self.summary, "chain"),
-            );
+            )
+            .judge(judge.map(|j| (j, 5.0)));
             let _: Phase = runner.pass(&mut self.s.raw, &k, &db, false).unwrap();
             drop(runner);
             self.s.run();
             sent.into_inner()
         }
+
+        /// The judge as the runner is given it, its key set and `[judge]` in config.toml; nothing
+        /// a test does not serve reaches Typesafe.
+        fn judge(&self) -> crate::config::Judge {
+            let home = self.s.home.path();
+            let key_file = home.join("TYPESAFE_KEY.md");
+            std::fs::write(&key_file, "# a test key\nTESTKEY_for_the_stub\n").unwrap();
+            let table = format!("[judge]\nkey_file = '{}'\n", key_file.display());
+            std::fs::write(home.join("config.toml"), table).unwrap();
+            crate::judge::AT.set(Some("http://127.0.0.1:9".into()));
+            crate::config::Judge {
+                enabled: true,
+                key_file,
+                model: "jev-latest".into(),
+                timeout_s: 5,
+                daily_budget: 300,
+            }
+        }
+
+        /// The focus judge's ops (J5), the oldest first.
+        fn judged(&self) -> Vec<Kept> {
+            let none = HashSet::new();
+            let job = (crate::my_work_focus_judge::NAME, None);
+            let mut ops = self
+                .with(|s| crate::my_work_ops::shown(s.k, job, None, &none, false, usize::MAX))
+                .unwrap();
+            ops.reverse();
+            ops
+        }
+
+        /// The home after the record `seq` of this device was forgotten and purged.
+        fn forgot(self, seq: i64) -> Self {
+            let Home { s, t, summary } = self;
+            let Store { home, raw } = s;
+            let device = raw.device().to_owned();
+            drop(raw);
+            let target = crate::forget::Target::Record { device, seq };
+            let preview = crate::forget::preview(home.path(), target).unwrap();
+            crate::forget::start(home.path(), &preview).unwrap();
+            crate::forget::purge(home.path()).unwrap();
+            let raw = crate::raw::open(home.path()).unwrap();
+            let h = Home {
+                s: Store { home, raw },
+                t,
+                summary,
+            };
+            h.s.run();
+            h
+        }
+    }
+
+    /// The stub answering `answers` in Jev's place.
+    fn stub(answers: Vec<(&'static str, Vec<u8>)>) -> Receiver<String> {
+        let (url, rx) = serve_each(answers, "");
+        crate::judge::AT.set(Some(url));
+        rx
+    }
+
+    /// The bodies of the requests the stub received.
+    fn bodies(rx: &Receiver<String>) -> Vec<Value> {
+        std::iter::from_fn(|| rx.recv_timeout(Duration::from_millis(300)).ok())
+            .map(|r| request_body(&r))
+            .collect()
+    }
+
+    /// Jev's answer choosing `choice` at `p`.
+    fn chose(choice: &str, p: f64) -> (&'static str, Vec<u8>) {
+        let body = json!({"model": "jev-1.14.0",
+            "answers": {"area": {"type": "choice", "choice": choice, "confidence": p,
+                "probabilities": {choice: p}}},
+            "usage": {"input_tokens": 9_000, "output_tokens": 12}});
+        ("200 OK", body.to_string().into_bytes())
     }
 
     /// Each request shown, by its label, with the `<i>` of its title `Request <i>`.
@@ -1194,5 +1319,347 @@ mod tests {
         (h.s.raw).exclude_capture(("repo", R), false).unwrap();
         h.s.run();
         assert_eq!(h.focus().router_of(&subjects[0]), None);
+    }
+
+    /// The line a request's block shows a pick in (D6).
+    const PICK: &str = "The judge's pick, a suggestion only:";
+
+    /// J5: with a kept area, the judge is asked about a queued request before the chain, once, as
+    /// claude-mem asks it: its pick is kept as an op of its own, and the placement's call shows it as
+    /// a suggestion and lists its op among what it read, so that what takes the pick takes the
+    /// placement.
+    #[test]
+    fn the_judge_picks_once_and_the_placement_is_shown_its_pick() {
+        let mut h = Home::new();
+        let subjects = h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        let judge = h.judge();
+        let rx = stub(vec![chose(AREA, 0.82)]);
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        assert!(
+            h.pass_with(Some(&judge), Box::new(Place::default()), &none)
+                .is_empty()
+        );
+        let asked = bodies(&rx);
+        assert_eq!(asked.len(), 1);
+        let question = &asked[0]["questions"]["area"];
+        assert_eq!(question["type"], "choice");
+        assert!(
+            (question["instructions"].as_str().unwrap())
+                .starts_with("`request` is one piece of the owner's work.")
+        );
+        assert_eq!(
+            question["criteria"],
+            json!({AREA: format!("`areas.{AREA}`: The parser"), "none": "None of these focus areas"})
+        );
+        let state = &asked[0]["state"];
+        assert_eq!(state["request"]["title"], "Request 1");
+        assert_eq!(
+            state["request"]["asks"],
+            json!(["Build part 1 of the parser."])
+        );
+        assert_eq!(
+            state["areas"],
+            json!({AREA: {"name": "The parser", "goal": null, "about": null}})
+        );
+        let judged = h.judged();
+        assert_eq!(judged.len(), 1);
+        let pick = &judged[0];
+        assert_eq!(
+            (
+                pick.op.about.as_str(),
+                &pick.op.fields["focus"],
+                &pick.op.fields["p"]
+            ),
+            (subjects[0].as_str(), &json!(AREA), &json!(0.82))
+        );
+        assert_eq!(
+            pick.op.fields["evidence"],
+            "Jev: \"The parser\" over 1 kept focus area (p 0.82)."
+        );
+        let sent = h.pass_with(Some(&judge), Box::new(Place::default()), &|p| {
+            placed(p, &[AREA])
+        });
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].contains(&format!("{PICK} {AREA} (p 0.82)")),
+            "{}",
+            sent[0]
+        );
+        assert!(sent[0].contains("It is only a suggestion"), "{}", sent[0]);
+        let placement = h.last(&subjects[0]).unwrap();
+        assert!(placement.op.read.ops.contains(&pick.op_seq));
+        assert!(bodies(&rx).is_empty(), "asked once");
+    }
+
+    /// J5: with no kept area (a suggested one only), or with the judge off, nothing is asked and the
+    /// placement's call shows no pick.
+    #[test]
+    fn with_no_kept_area_or_the_judge_off_nothing_is_asked() {
+        let mut h = Home::new();
+        h.requests(1);
+        h.area(AREA, "The parser", "suggested", "system");
+        let judge = h.judge();
+        let rx = stub(vec![chose(AREA, 0.9)]);
+        let sent = h.pass_with(Some(&judge), Box::new(Place::default()), &|p| {
+            placed(p, &[AREA])
+        });
+        assert_eq!(sent.len(), 1);
+        assert!(!sent[0].contains(PICK), "{}", sent[0]);
+        assert!(bodies(&rx).is_empty() && h.judged().is_empty());
+        let mut h = Home::new();
+        h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        let sent = h.pass_with(None, Box::new(Place::default()), &|p| placed(p, &[AREA]));
+        assert_eq!(sent.len(), 1);
+        assert!(!sent[0].contains(PICK), "{}", sent[0]);
+        assert!(h.judged().is_empty());
+    }
+
+    /// J5 (claude-mem's `pickAmong`): more kept areas than one question takes, 19, are asked in
+    /// sets, then over the sets' winners; with no winner, none at the lowest probability a set gave.
+    #[test]
+    fn more_kept_areas_than_a_question_takes_are_asked_in_sets_then_over_the_winners() {
+        let ids: Vec<String> = (1..=20).map(|i| format!("fa_{i:012x}")).collect();
+        let home = || {
+            let mut h = Home::new();
+            h.requests(1);
+            for (i, id) in ids.iter().enumerate() {
+                h.area(id, &format!("Area {:02}", i + 1), "kept", "owner");
+            }
+            h
+        };
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        let offered = |b: &Value| {
+            b["questions"]["area"]["criteria"]
+                .as_object()
+                .unwrap()
+                .len()
+                - 1
+        };
+        let mut h = home();
+        let judge = h.judge();
+        let rx = stub(vec![
+            chose(&ids[0], 0.7),
+            chose(&ids[19], 0.6),
+            chose(&ids[19], 0.9),
+        ]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        let asked = bodies(&rx);
+        assert_eq!(asked.iter().map(offered).collect::<Vec<_>>(), [19, 1, 2]);
+        let final_question = asked[2]["questions"]["area"]["criteria"]
+            .as_object()
+            .unwrap();
+        assert!(final_question.contains_key(&ids[0]) && final_question.contains_key(&ids[19]));
+        let pick = &h.judged()[0].op;
+        assert_eq!(
+            (&pick.fields["focus"], &pick.fields["p"]),
+            (&json!(ids[19]), &json!(0.9))
+        );
+        assert_eq!(
+            pick.fields["evidence"],
+            "Jev: \"Area 20\" over 20 kept focus areas, asked in 2 sets of up to 19 and 1 final \
+             question over the set winners (p 0.90)."
+        );
+        let mut h = home();
+        let judge = h.judge();
+        let rx = stub(vec![chose("none", 0.8), chose("none", 0.6)]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        assert_eq!(bodies(&rx).len(), 2);
+        let pick = &h.judged()[0].op;
+        assert_eq!(
+            (&pick.fields["focus"], &pick.fields["p"]),
+            (&json!(OTHER), &json!(0.6))
+        );
+    }
+
+    /// J5: a call refused or failed is kept with its outcome, for the request's basis and the kept
+    /// areas, so the next pass places the request with no pick and asks Jev nothing more (claude-mem
+    /// asks no call again); once the request moves, it is asked again.
+    #[test]
+    fn a_failed_call_is_kept_and_asked_again_only_once_the_request_moves() {
+        let mut h = Home::new();
+        h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        let judge = h.judge();
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        let rx = stub(vec![("500 Internal Server Error", b"{}".to_vec())]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        assert_eq!(bodies(&rx).len(), 1);
+        let judged = h.judged();
+        assert_eq!(judged.len(), 1);
+        assert_eq!(
+            (
+                &judged[0].op.fields["focus"],
+                &judged[0].op.fields["outcome"]
+            ),
+            (&Value::Null, &json!("error"))
+        );
+        let sent = h.pass_with(Some(&judge), Box::new(Place::default()), &|p| {
+            placed(p, &[AREA])
+        });
+        assert_eq!(sent.len(), 1, "placed with no pick");
+        assert!(!sent[0].contains(PICK), "{}", sent[0]);
+        assert_eq!(h.judged().len(), 1, "asked nothing more");
+        // The request moves: a third conversation joins it.
+        h.said("s1c", 50, "Document part 1 of the parser.");
+        let keys = json!([["claude", "s1a"], ["claude", "s1b"], ["claude", "s1c"]]);
+        let groups = json!([{"conversations": keys, "title": "Request 1", "links": []}]);
+        h.op("group", R, json!({"groups": groups, "ignored": []}));
+        let rx = stub(vec![chose(AREA, 0.8)]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        assert_eq!(bodies(&rx).len(), 1);
+        assert_eq!(h.judged().len(), 2);
+    }
+
+    /// J5: a repository of the request excluded after the round read it, before the judge is asked:
+    /// nothing goes, and nothing is kept of the judge.
+    #[test]
+    fn an_exclusion_found_on_the_way_sends_nothing_and_keeps_nothing() {
+        const R2: &str = "/r/lexer";
+        struct Racing(Place, std::path::PathBuf);
+        impl Job for Racing {
+            fn name(&self) -> &'static str {
+                self.0.name()
+            }
+            fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
+                self.0.due(s, now)
+            }
+            fn ask(&self, s: &Stores, about: &str, now: i64) -> Result<Option<Ask>> {
+                self.0.ask(s, about, now)
+            }
+            /// The round's read first, then the exclusion, then the judge.
+            fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+                self.0.due(s, now)?;
+                crate::raw::open(&self.1)
+                    .unwrap()
+                    .exclude(R2, false)
+                    .unwrap();
+                self.0.judged(s, judge, now)
+            }
+        }
+        // A request of two conversations in two repositories, the second's excluded on the way:
+        // the check covers each of the request's repositories, not its anchor's alone (D5).
+        let mut h = Home::new();
+        h.said("s1a", 1, "Build part 1 of the parser.");
+        h.s.said("s1b", R2, h.t + 31 * MINUTE, "Test part 1 of the lexer.");
+        let keys = json!([["claude", "s1a"], ["claude", "s1b"]]);
+        let groups = json!([{"conversations": keys, "title": "Request 1", "links": []}]);
+        h.op("group", R, json!({"groups": groups, "ignored": []}));
+        h.area(AREA, "The parser", "kept", "owner");
+        let judge = h.judge();
+        let rx = stub(vec![chose(AREA, 0.9)]);
+        let job = Racing(Place::default(), h.s.home.path().to_owned());
+        let sent = h.pass_with(Some(&judge), Box::new(job), &|p| placed(p, &[AREA]));
+        assert!(sent.is_empty(), "nor the chain");
+        assert!(bodies(&rx).is_empty());
+        assert!(h.judged().is_empty());
+    }
+
+    /// J5, S5: a forget of what the judge read, a prompt of the request's anchor, takes its pick and
+    /// so the placement that showed it; the request is asked about again.
+    #[test]
+    fn a_forget_of_what_the_judge_read_takes_its_pick_and_the_placement() {
+        let mut h = Home::new();
+        let subjects = h.requests(1);
+        let read = h.said("s1a", 2, "And its error messages.");
+        h.area(AREA, "The parser", "kept", "owner");
+        let judge = h.judge();
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        let _rx = stub(vec![chose(AREA, 0.82)]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &|p| {
+            placed(p, &[AREA])
+        });
+        let pick = h.judged().remove(0);
+        assert!(
+            pick.op.read.spans.contains(&(read, read)),
+            "{:?}",
+            pick.op.read
+        );
+        let mut h = h.forgot(read);
+        assert!(h.judged()[0].op.forgotten.is_some(), "the pick is taken");
+        assert!(
+            h.last(&subjects[0]).unwrap().op.forgotten.is_some(),
+            "and the placement"
+        );
+        let rx = stub(vec![chose(AREA, 0.7)]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        assert_eq!(bodies(&rx).len(), 1, "asked again");
+    }
+
+    /// J5, #730: a request a failed batch holds is in no batch, so the judge asks nothing of it, and
+    /// the chain's call in the same pass, of the round the judge's pass read, leaves it out too
+    /// (11c, D8).
+    #[test]
+    fn a_held_request_is_neither_judged_nor_placed_until_its_wait_ends() {
+        let mut h = Home::new();
+        let subjects = h.requests(2);
+        h.area(AREA, "The parser", "kept", "owner");
+        let judge = h.judge();
+        let db = crate::providers_db::open(h.s.home.path()).unwrap();
+        let later = crate::db::now_ms() + 3_600_000;
+        crate::providers_db::set_my_work_held(&db, (NAME, &subjects[0]), "time", later).unwrap();
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        let rx = stub(vec![chose(AREA, 0.8)]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        let sent = h.pass_with(Some(&judge), Box::new(Place::default()), &|p| {
+            placed(p, &[AREA, AREA])
+        });
+        assert_eq!(bodies(&rx).len(), 1);
+        let judged = h.judged();
+        assert_eq!(judged.len(), 1);
+        assert_eq!(judged[0].op.about, subjects[1]);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(shown(&sent[0]), [("R1".to_owned(), 2)], "{}", sent[0]);
+    }
+
+    /// J5 (D3): a kept area renamed, or given another goal, before the request was placed: the pick
+    /// for the areas as they were is not the current one, and the request is asked about again.
+    #[test]
+    fn a_kept_area_changed_before_the_placement_is_asked_about_again() {
+        let mut h = Home::new();
+        h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        let judge = h.judge();
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        let rx = stub(vec![chose(AREA, 0.6), chose(AREA, 0.9)]);
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        h.area(AREA, "The parser and its lexer", "kept", "owner");
+        h.pass_with(Some(&judge), Box::new(Place::default()), &none);
+        let asked = bodies(&rx);
+        assert_eq!(asked.len(), 2);
+        assert_eq!(
+            asked[1]["state"]["areas"][AREA]["name"],
+            "The parser and its lexer"
+        );
+        let judged = h.judged();
+        assert_eq!(judged.len(), 2);
+        assert_eq!(judged[1].op.fields["p"], json!(0.9));
+    }
+
+    /// J5 (D5): the judge is told each repository of the request, the anchor's and its other
+    /// conversation's, so that its own check covers them all; one it finds excluded keeps nothing,
+    /// so the next round reads the request again, as J3's `left`.
+    #[test]
+    fn the_judge_is_told_each_repository_and_an_exclusion_keeps_nothing() {
+        const R2: &str = "/r/lexer";
+        let mut h = Home::new();
+        h.said("s1a", 1, "Build part 1 of the parser.");
+        h.s.said("s1b", R2, h.t + 31 * MINUTE, "Test part 1 of the lexer.");
+        let keys = json!([["claude", "s1a"], ["claude", "s1b"]]);
+        let groups = json!([{"conversations": keys, "title": "Request 1", "links": []}]);
+        h.op("group", R, json!({"groups": groups, "ignored": []}));
+        h.area(AREA, "The parser", "kept", "owner");
+        let told = RefCell::new(Vec::new());
+        let ops = h.with(|s| {
+            let mut judge = |ask: crate::judge::Ask| -> Result<crate::judge::Asked> {
+                told.borrow_mut().push(ask.repos.to_vec());
+                Ok(crate::judge::Asked::Skipped("excluded"))
+            };
+            Place::default().judged(s, &mut judge, crate::db::now_ms())
+        });
+        assert!(ops.unwrap().is_empty());
+        assert_eq!(told.into_inner(), [vec![R2.to_owned(), R.to_owned()]]);
     }
 }

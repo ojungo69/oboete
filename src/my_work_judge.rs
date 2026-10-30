@@ -27,12 +27,12 @@ pub(crate) const NAME: &str = "judge";
 const RULES: &str = "judge:rules";
 
 // claude-mem's request judge (request-judge.mjs, 15.4.0, as 15.7.0 has it), word for word.
-const CANDIDATES: usize = 19;
+pub(crate) const CANDIDATES: usize = 19;
 const JOIN: f64 = 0.8;
 const SUGGEST: f64 = 0.5;
 const ASKS: usize = 3;
 const ASK_CHARS: usize = 250;
-const TITLE_CHARS: usize = 120;
+pub(crate) const TITLE_CHARS: usize = 120;
 const PICK: &str = "`conversation` was started after each of `requests`. Which of `requests` does \
 it continue: the same overall piece of work (same feature, page, skill, release or investigation), \
 or another run of the same recurring routine? A person tracking their requests would want both on \
@@ -42,9 +42,9 @@ overall piece of work (same feature, page, skill, release or investigation), or 
 same recurring routine. A person tracking their requests would want both on one card.";
 const NONE: &str = "None of these: a separate ask of its own";
 /// claude-mem's `ownTitle` when a request has no title and its ask makes none.
-const UNTITLED: &str = "Untitled request";
+pub(crate) const UNTITLED: &str = "Untitled request";
 /// What is gated of a text before it is cleaned and cut, in characters.
-const WINDOW: usize = 2_000;
+pub(crate) const WINDOW: usize = 2_000;
 
 #[cfg(test)]
 thread_local! {
@@ -55,9 +55,9 @@ thread_local! {
 /// What the judge was shown of this device's records and ops (S2): the prompt records, and the
 /// card and grouping ops whose text it read.
 #[derive(Default, Clone)]
-struct Shown {
-    spans: BTreeSet<i64>,
-    ops: BTreeSet<i64>,
+pub(crate) struct Shown {
+    pub spans: BTreeSet<i64>,
+    pub ops: BTreeSet<i64>,
 }
 
 /// The earliest candidate (C1) no judge op names yet, judged (J3): the op that says what was
@@ -325,7 +325,7 @@ fn left(
 /// A conversation as claude-mem's `contextReader` gives it (J2): its repository, the minute it
 /// started, its first asks and its first cards' titles, each cut at the attached files, its white
 /// space collapsed, gated and cut; what it reads of this device's records and ops in `shown`.
-fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
+pub(crate) fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
     let device = s.raw.device();
     let mut asks = Vec::new();
     for (d, seq, _, text) in c.asks.iter().take(ASKS) {
@@ -351,7 +351,7 @@ fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
 
 /// Whether `op` stays whole within an op's cap, its removals aside (`raw::fitted` drops those
 /// first), with room for a decision's few words more than the one measured.
-fn fits(op: &MyWorkOp) -> Result<bool> {
+pub(crate) fn fits(op: &MyWorkOp) -> Result<bool> {
     #[cfg(test)]
     let cap = CAP.get().unwrap_or(crate::raw::MAX_OP_BYTES);
     #[cfg(not(test))]
@@ -365,7 +365,7 @@ fn fits(op: &MyWorkOp) -> Result<bool> {
 
 /// A text as Jev is shown it (J2): gated first, as it was recorded (A5), so that a rule over
 /// several lines still matches; then claude-mem's `clean`, and cut.
-fn said(text: &str, max: usize, rules: &Rules) -> String {
+pub(crate) fn said(text: &str, max: usize, rules: &Rules) -> String {
     let gated = crate::my_work::shown(text, WINDOW, rules);
     crate::my_work::shown(&clean(&gated), max, rules)
 }
