@@ -485,7 +485,7 @@ impl<'a> Runner<'a> {
     /// read): the first job that decides gets its ops written, in one append, and the pass ends
     /// with the phase that says so; none when no job decides. The judge's calls are its own, under
     /// `[judge] daily_budget`, not A7's; the gate before each is the chain's otherwise (A5): forget
-    /// ordered, and the exclusions and the rules as the pass read them.
+    /// ordered, and the exclusions and the rules as the pass read them; and the judge still on.
     fn judged(
         &self,
         raw: &mut Raw,
@@ -516,6 +516,10 @@ impl<'a> Runner<'a> {
                     let dispatch = raw.dispatch()?;
                     reading.still(raw)?;
                     crate::curate::rules_still(raw, rules)?;
+                    // The switch as it is now: turned off since the round read it, nothing goes.
+                    if !crate::judge::still_on(raw.home(), judge) {
+                        return Err(crate::curate::ListChanged.into());
+                    }
                     Ok(Some(dispatch))
                 };
                 let mut ask = |ask: crate::judge::Ask<'_>| {

@@ -1976,8 +1976,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   else claude-mem's "Untitled request".
 - **The context** (J2): claude-mem's four fields. Its first 3 asks are the prompts My Work reads as
   asks, where claude-mem sends the first 3 prompts whatever they say; its first 8 cards are the
-  oldest of those My Work reads (its newest 300), each with a title. Each text is cut at `# Attached
-  files`, its white space collapsed, then gated and cut.
+  oldest of those My Work reads (its newest 300), each with a title. Each text is gated first, as it
+  was recorded, so that a rule over several lines still matches; then cut at `# Attached files`,
+  its white space collapsed, and cut.
 - **The op**: job `judge`, about the repository, entry `judge:rules` (no call) or `judge:jev`;
   `read` what it showed (the opening ask and every prompt record sent, as spans of this device's;
   this device's card ops, and the grouping and judge ops behind each request shown), so a forget
@@ -1987,7 +1988,7 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   `score`).
 - **A failure**: a refused or failed call, or a state a key of which the gate would change, keeps an
   op with its `outcome` and no groups: grouping decides the conversation, and the judge does not ask
-  it again. An exclusion found on the way, or the judge turned off, keeps nothing; the gate's
+  it again. An exclusion found on the way, or a key file emptied, keeps nothing; the gate's
   `ListChanged` keeps nothing, and the pass waits as the chain's does.
 - **Too big to keep**: an op past its cap (`raw::MAX_OP_BYTES`) would be kept as a skip that names
   no conversation, and the judge would ask for it again each round. So the largest decision a read
@@ -1995,7 +1996,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   that does not, keeps instead an op naming the conversation alone, `too_big`, read only its opening
   ask: grouping decides it, and nothing was paid for.
 - **The gate** is the runner's, as the chain's (A5), without A7's count: the judge's calls are its
-  own, under `[judge] daily_budget`.
+  own, under `[judge] daily_budget`. It reads `[judge]` again before each request: a switch turned
+  off since the round read the settings sends nothing more (a check after its pick too), and the
+  round keeps nothing.
 - **No body cap of claude-mem's** (64 KB): Typesafe's answer decides, and a refusal leaves the
   conversation to grouping.
 - **The settings page** says that My Work asks Jev about each new conversation and what it is sent.

@@ -216,6 +216,13 @@ pub(crate) fn doctor_line(home: &std::path::Path, judge: Option<&config::Judge>)
     }
 }
 
+/// Whether `j` is still the judge `[judge]` says now, on, with the same key file: a switch turned
+/// off since the round read the settings sends nothing more (J1). One that does not read is not.
+pub(crate) fn still_on(home: &std::path::Path, j: &config::Judge) -> bool {
+    (config::load(home).ok().and_then(|c| c.judge))
+        .is_some_and(|now| now.enabled && now.key_file == j.key_file)
+}
+
 /// Whether a repository of `repos` is kept from being sent, or never recorded, now (spec 5.5).
 fn excluded(raw: &Raw, repos: &[String]) -> Result<bool> {
     let excluded = raw.exclusions_now()?;

@@ -15,6 +15,7 @@ use crate::my_work::Seen;
 use crate::my_work_group::{Group, Groups, Key, Proof};
 use crate::my_work_ops::{MyWorkOp, Read};
 use crate::my_work_run::{Judging, Stores};
+use crate::redact::Rules;
 
 /// The ops' job (S1).
 pub(crate) const NAME: &str = "judge";
@@ -38,6 +39,8 @@ same recurring routine. A person tracking their requests would want both on one 
 const NONE: &str = "None of these: a separate ask of its own";
 /// claude-mem's `ownTitle` when a request has no title and its ask makes none.
 const UNTITLED: &str = "Untitled request";
+/// What is gated of a text before it is cleaned and cut, in characters.
+const WINDOW: usize = 2_000;
 
 #[cfg(test)]
 thread_local! {
@@ -55,8 +58,8 @@ struct Shown {
 
 /// The earliest candidate (C1) no judge op names yet, judged (J3): the op that says what was
 /// decided, or that the conversation was left to grouping; none when no conversation is left to
-/// judge, or when the judge did not ask (its repository excluded on the way, or the judge turned
-/// off: the next round reads it again).
+/// judge, or when the judge did not ask (its repository excluded on the way, or its key gone: the
+/// next round reads it again).
 pub(crate) fn request(
     s: &Stores,
     seen: &[Seen],
@@ -206,7 +209,9 @@ pub(crate) fn request(
         };
         let asked = anchor_seen.and_then(|a| a.ask.as_ref());
         let title = (g.title.clone())
-            .or_else(|| asked.map(|a| crate::my_work::title(&a.3)))
+            .or_else(|| {
+                asked.map(|a| crate::my_work::title(&crate::my_work::shown(&a.3, WINDOW, s.rules)))
+            })
             .filter(|t| !t.trim().is_empty());
         if g.title.is_none()
             && let Some((d, seq, ..)) = asked
@@ -300,8 +305,8 @@ pub(crate) fn request(
 
 /// What a call the judge did not answer leaves (J1): a refused or failed one an op naming the
 /// conversation and why, with no decision, so grouping decides it and the judge does not ask
-/// again; none when nothing went because the judge was turned off or the repository excluded on
-/// the way, as the next round reads both.
+/// again; none when nothing went because the judge was off, its key gone or the repository
+/// excluded on the way, as the next round reads each.
 fn left(
     why: &'static str,
     shown: Shown,
@@ -320,21 +325,21 @@ fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
     let device = s.raw.device();
     let mut asks = Vec::new();
     for (d, seq, _, text) in c.asks.iter().take(ASKS) {
-        let text = clean(text);
+        let text = said(text, ASK_CHARS, s.rules);
         if text.is_empty() {
             continue;
         }
         if d == device {
             shown.spans.insert(*seq);
         }
-        asks.push(crate::my_work::shown(&text, ASK_CHARS, s.rules));
+        asks.push(text);
     }
     let mut recorded = Vec::new();
     for (d, op, title) in &c.cards {
         if d == device {
             shown.ops.insert(*op);
         }
-        recorded.push(crate::my_work::shown(&clean(title), TITLE_CHARS, s.rules));
+        recorded.push(said(title, TITLE_CHARS, s.rules));
     }
     let started = (c.ask.as_ref()).map(|a| crate::db::utc(a.2)[..16].replacen(' ', "T", 1));
     json!({"worktree": c.repo, "started": started, "asks": asks, "agent_recorded": recorded})
@@ -352,6 +357,13 @@ fn fits(op: &MyWorkOp) -> Result<bool> {
         ..op.clone()
     };
     Ok(serde_json::to_string(&bare)?.len() + 512 <= cap)
+}
+
+/// A text as Jev is shown it (J2): gated first, as it was recorded (A5), so that a rule over
+/// several lines still matches; then claude-mem's `clean`, and cut.
+fn said(text: &str, max: usize, rules: &Rules) -> String {
+    let gated = crate::my_work::shown(text, WINDOW, rules);
+    crate::my_work::shown(&clean(&gated), max, rules)
 }
 
 /// claude-mem's `clean`: the text before `# Attached files`, its white space collapsed.
@@ -400,7 +412,7 @@ mod tests {
             std::fs::write(&key_file, "# a test key\nTESTKEY_for_the_stub\n").unwrap();
             // Nothing a test does not serve answers: no test reaches Typesafe.
             crate::judge::AT.set(Some("http://127.0.0.1:9".into()));
-            Self {
+            let h = Self {
                 s,
                 t: crate::db::now_ms() - 60 * MINUTE,
                 judge: config::Judge {
@@ -410,7 +422,16 @@ mod tests {
                     timeout_s: 5,
                     daily_budget: 300,
                 },
-            }
+            };
+            h.config("");
+            h
+        }
+
+        /// The home's config.toml: `[judge]` as the runner is given it, then `extra`.
+        fn config(&self, extra: &str) {
+            let table = format!("[judge]\nkey_file = '{}'\n", self.judge.key_file.display());
+            let path = self.s.home.path().join("config.toml");
+            std::fs::write(path, format!("{table}{extra}")).unwrap();
         }
 
         fn said(&mut self, session: &str, at: i64, text: &str) -> i64 {
@@ -464,6 +485,16 @@ mod tests {
             answer: &dyn Fn(&str) -> Value,
         ) -> (Phase, Vec<String>) {
             self.s.run();
+            self.run_pass(on, job, answer)
+        }
+
+        /// A pass with no run of the consumers first: what they last applied, as it stands.
+        fn run_pass(
+            &mut self,
+            on: bool,
+            job: Box<dyn Job>,
+            answer: &dyn Fn(&str) -> Value,
+        ) -> (Phase, Vec<String>) {
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let db = crate::providers_db::open(self.s.home.path()).unwrap();
             let (rules, summary) = (Rules::load(self.s.home.path()).unwrap(), Summary::default());
@@ -744,11 +775,9 @@ mod tests {
     #[test]
     fn jev_is_shown_what_claude_mem_shows_it_gated() {
         let mut h = Home::new();
-        std::fs::write(
-            h.s.home.path().join("config.toml"),
+        h.config(
             "[redaction]\nextra_rules = [{ id = \"codename\", regex = \"codename-[a-z]+\" }]\n",
-        )
-        .unwrap();
+        );
         let first = h.said("s1", 0, "Build the parser.");
         h.s.cards(
             first,
@@ -1063,5 +1092,82 @@ mod tests {
         assert!(bodies(&rx).is_empty());
         assert!(h.judged().is_empty());
         assert!(h.ledger().is_empty(), "{:?}", h.ledger());
+    }
+
+    /// A5: what Jev is shown is gated as it was recorded, before claude-mem's clean collapses its
+    /// lines: a rule over two lines, written after the record was read and before a rescan reached
+    /// it, still keeps its secret out.
+    #[test]
+    fn a_rule_over_lines_is_kept_before_the_text_is_cleaned() {
+        let mut h = Home::new();
+        h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], "Parser");
+        h.said("s2", 5, "Fix the parser.\nowner\nACME-7731 is the account.");
+        h.s.run();
+        h.config(
+            "[redaction]\nextra_rules = [{ id = \"owner\", regex = 'owner\\n(ACME-[0-9]+)', \
+             secret_group = 1 }]\n",
+        );
+        let rx = stub(vec![picked("r1", 0.94), checked(0.9)]);
+        h.run_pass(true, Box::new(Grouping::default()), &|_| panic!("no call"));
+        let sent = bodies(&rx);
+        assert_eq!(sent.len(), 2);
+        assert!(!sent[0].to_string().contains("ACME-7731"), "{}", sent[0]);
+        assert!(
+            sent[0].to_string().contains("Fix the parser. owner"),
+            "{}",
+            sent[0]
+        );
+    }
+
+    /// J1: the switch turned off between the pick and the check: the check does not go, and nothing
+    /// is kept of the pick.
+    #[test]
+    fn the_switch_turned_off_on_the_way_sends_and_keeps_nothing_more() {
+        struct Turning(Grouping, std::path::PathBuf);
+        impl Job for Turning {
+            fn name(&self) -> &'static str {
+                self.0.name()
+            }
+            fn due(&self, s: &Stores, now: i64) -> Result<Vec<crate::my_work_run::Due>> {
+                self.0.due(s, now)
+            }
+            fn ask(
+                &self,
+                s: &Stores,
+                about: &str,
+                now: i64,
+            ) -> Result<Option<crate::my_work_run::Ask>> {
+                self.0.ask(s, about, now)
+            }
+            /// The switch off once the first request is answered.
+            fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+                let mut turning = |ask: Ask<'_>| {
+                    let asked = judge(ask);
+                    let config = self.1.join("config.toml");
+                    let text = std::fs::read_to_string(&config).unwrap();
+                    std::fs::write(&config, format!("{text}enabled = false\n")).unwrap();
+                    asked
+                };
+                self.0.judged(s, &mut turning, now)
+            }
+        }
+        let mut h = Home::new();
+        h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], "Parser");
+        h.said("s2", 5, "The parser drops a trailing comma.");
+        let rx = stub(vec![picked("r1", 0.94), checked(0.9)]);
+        let job = Turning(Grouping::default(), h.s.home.path().to_owned());
+        let (phase, _) = h.pass_with(true, Box::new(job), &|_| panic!("no call"));
+        assert!(
+            matches!(phase, Phase::Waiting { up: true, .. }),
+            "{phase:?}"
+        );
+        assert_eq!(bodies(&rx).len(), 1);
+        assert!(h.judged().is_empty());
+        assert_eq!(
+            h.ledger(),
+            vec![("judge:jev".into(), "judge".into(), "ok".into())]
+        );
     }
 }
