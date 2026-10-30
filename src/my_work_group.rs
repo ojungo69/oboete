@@ -147,11 +147,11 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             let Some(first) = members.first() else {
                 continue;
             };
-            let moved = !owners && placed.contains(first);
-            let anchor = match out.of.get(first) {
-                Some(now) if moved => now.clone(),
-                _ => first.clone(),
-            };
+            // Led by a conversation the owner moved into another request, a Not this's staying put.
+            let moved = (!owners && placed.contains(first))
+                .then(|| out.of.get(first).filter(|now| *now != first).cloned())
+                .flatten();
+            let anchor = moved.clone().unwrap_or_else(|| first.clone());
             for m in members.iter().filter(|m| owners || !placed.contains(*m)) {
                 out.of.insert(m.clone(), anchor.clone());
                 out.ignored.remove(m);
@@ -170,7 +170,10 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             });
             group.ops.insert((device.clone(), op_seq));
             // A title for the request it meant does not rename the one it continues now.
-            if let Some(title) = g["title"].as_str().filter(|t| !t.is_empty() && !moved) {
+            if let Some(title) = g["title"]
+                .as_str()
+                .filter(|t| !t.is_empty() && moved.is_none())
+            {
                 group.title = Some(title.to_owned());
             }
             for link in g["links"].as_array().into_iter().flatten() {

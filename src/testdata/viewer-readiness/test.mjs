@@ -1904,6 +1904,13 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   answerOf(panel,'join').click();await ticks();
   assert.deepEqual([run('mw.request'),document.getElementById('status').textContent],['r1','Joined to “Reader”.']);
   panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+  // Codex on #776 (join_without_a_loaded_destination_does_not_name_the_old_pick): the read after a
+  // Join holds no request with the conversation; the page goes back to the list and says it was
+  // saved, naming no request.
+  joined=null;set(rows());card('s2').querySelector('button').click();
+  joined=req('x1',{title:'Unrelated'});
+  answerOf(panel,'join').click();await ticks();
+  assert.deepEqual([run('mw.request'),document.getElementById('status').textContent],[null,'Saved. The page shows it at its next read.']);
   // #775 (suggestion_reread_failure_restores_controls): the read after an answer fails; what was
   // saved is said so, and every suggestion's buttons can be used again.
   joined=null;set([...rows(),req('s3',{title:'Another',suggestion:S})]);unread=true;
@@ -2227,6 +2234,20 @@ btn(`card:undo:${L}`).click();await ticks();
 assert.deepEqual(posts.at(-1),{action:'restore-suggestion',area:L});
 assert(btn(`card:keep:${L}`),'undecided again');
 assert.equal(document.getElementById('status').textContent,'Put “Lexer” back in Suggested.');
+// Codex on #776 (suggestion_save_reenables_the_area_opened_while_waiting): a kept area opened while
+// a Keep saves; saved, its menu is usable, though the Keep's caller draws only on Suggested.
+{
+  let release=null;
+  const kept=reply;
+  reply=()=>new Promise(r=>{release=()=>r(posted(200,{state:'applied'}));});
+  btn(`card:keep:${L}`).click();
+  run(`mw.area="${P}";myWorkDraw()`);
+  assert(btn('menu:rename')?.disabled,'its menu waits while the Keep saves');
+  release();await ticks();
+  reply=kept;
+  assert(btn('menu:rename')&&!btn('menu:rename').disabled,'its menu is usable once it is saved');
+  run('mw.area="suggested";mw.decided.clear();mw.saved=null;myWorkDraw()');
+}
 // Saved but not read yet: the card stays undecided and says so (Codex on #758).
 reply=()=>posted(200,{state:'pending'});
 btn(`card:keep:${L}`).click();await ticks();
@@ -2243,6 +2264,19 @@ document.activeElement=null;btn(`card:undo:${L}`).click();await ticks();
 assert.equal(document.activeElement?.dataset.myWork,`card:undo:${L}`);
 reply=()=>posted(200,{state:'applied'});
 btn(`card:undo:${L}`).click();await ticks();
+// Codex on #776 (applied_keep_stays_decided_when_its_read_fails): applied, the Keep is decided
+// though the read after it fails, and its Undo is sent.
+{
+  const kept=ctx.fetch;
+  ctx.fetch=(url,options)=>options?.method==='POST'?kept(url,options):Promise.resolve({ok:false,status:503,json:async()=>({})});
+  btn(`card:keep:${L}`).click();await ticks();
+  assert(btn(`card:show:${L}`)&&btn(`card:undo:${L}`),'decided, with Show it and its Undo');
+  assert.equal(document.getElementById('status').textContent,'Saved. The page shows it at its next read.');
+  ctx.fetch=kept;
+  btn(`card:undo:${L}`).click();await ticks();
+  assert.deepEqual(posts.at(-1),{action:'restore-suggestion',area:L});
+  assert(btn(`card:keep:${L}`),'undecided again');
+}
 // Dismiss an area you wrote: no Undo, as the server never puts it back in Suggested (Codex and
 // CodeRabbit on #758).
 btn('card:dismiss:fa_000000000006').click();await ticks();
@@ -2342,7 +2376,13 @@ assert.equal(document.activeElement.dataset.myWork,'focus:move');
   pick(D);await ticks();
   assert.equal(document.getElementById('status').textContent,'Saved. The page shows it at its next read.');
   assert(move()&&move().querySelectorAll('button').every(n=>!n.disabled),'Move to… is usable again');
+  // Codex on #776 (applied_focus_move_keeps_undo_after_a_failed_reread_recovers): it was applied,
+  // so it keeps its Undo, and a read that works later leaves it.
+  assert(text(panel.querySelector('.my-focus-change')).includes('Undo'),'the move keeps its Undo');
   ctx.fetch=kept;
+  await run('myWorkReread()');run('myWorkDraw()');
+  assert(text(panel.querySelector('.my-focus-change')).includes('Undo'),'and after a read that works');
+  panel.querySelectorAll('button').find(n=>n.dataset.myWork==='focus:undo').click();await ticks();
 }
 // From Sorting… there is nothing to move it back to.
 at=null;set([req('f1',{status:'needs'})]);

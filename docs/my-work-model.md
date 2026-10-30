@@ -2043,15 +2043,18 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   repository, which hides its requests while it stands.
 - **The owner's answer stands** (#775): a model's decision kept after it, asked before it (a
   judge's or a grouping call whose answer arrived later), moves none of the conversations the
-  owner placed. One that continues a request whose anchor the owner moved continues the request
-  that anchor is in now, without renaming it, as an owner's placement outranks the router's in My
-  Focus. The route applies what this device recorded before resolving an answer, so that an
+  owner placed. One that continues a request whose anchor the owner moved into another continues
+  the request that anchor is in now, without renaming it, as an owner's placement outranks the
+  router's in My Focus; a Not this leaves its anchor where it is, so continuing it titles it as
+  before. The route applies what this device recorded before resolving an answer, so that an
   answer posted while an earlier one waits is resolved after it; still waiting after 10 seconds,
   it is refused (409 `my_work_pending`).
 - **The page after an answer** (#775): only the answers' buttons wait, and My Work is read again
   and drawn once. A Join names, and from the request's page shows, the request the conversation
-  is in as that read has it; a read that fails leaves what was saved said as saved, the buttons
-  usable again, as a review's does (#602), and My Focus's actions now do the same.
+  is in as that read has it; in none it read, it is said as saved and the page goes back to the
+  list. A read that fails leaves what was saved said as saved, the buttons usable again, as a
+  review's does (#602), and My Focus's actions now do the same, an applied change keeping its
+  Undo.
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).

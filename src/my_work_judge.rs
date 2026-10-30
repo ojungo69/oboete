@@ -1619,4 +1619,18 @@ mod tests {
         h.s.raw.exclude(R, true).unwrap();
         assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
     }
+
+    /// Codex on #776: a Not this leaves the conversation where it is, so a model's current
+    /// decision that continues its request gives that request its title, as C5's newest title.
+    #[test]
+    fn a_current_grouping_continuation_can_title_a_not_this_request() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        h.answer_on("s2", "not-this").unwrap();
+        h.said("s3", 10, "The trailing comma, in the tests too.");
+        h.grouped(&["s2", "s3"], "Trailing commas");
+        let own = h.request_of("s2");
+        assert_eq!(own["title"], "Trailing commas");
+        assert_eq!(h.request_of("s3")["id"], own["id"]);
+    }
 }

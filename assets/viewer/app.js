@@ -7228,10 +7228,12 @@ async function myFocusWrite(bodies, text, undo, record = true) {
   } finally {
     mw.moving = false;
     mw.signature = '';
-    // Read again, each caller drawing the page after it; a save the server took stays said as
-    // taken when the read fails (#602, #775).
+    // Read again and drawn, whichever page its caller draws on after it, so that what was drawn
+    // while saving is usable again (Codex on #776); a save the server took stays said as taken,
+    // with its Undo, when the read fails (#602, #775).
     const read = view === 'my_work' ? await myWorkReread().then(() => true, () => false) : true;
-    if (saved && !read) saved = { applied: false, unread: true };
+    if (view === 'my_work') myWorkDraw();
+    if (saved && !read) saved.unread = true;
     if (saved) {
       const said = typeof text === 'function' ? text() : text;
       // A Suggested card's Keep, Merge and Dismiss: the card shows it with its own Undo, once it
@@ -7496,7 +7498,9 @@ function myFocusDecide(area, body, decision) {
   // The visit it was made in: one left while it saved records nothing in the next (#759).
   const visit = mw.decided;
   void myFocusWrite([body], text, null, false).then((ok) => {
-    // Decided once read: saved but not read yet, the card stays as it was (Codex on #758).
+    // Decided once applied, as a read then shows it; one held back stays as it was (Codex on #758).
+    // Applied, it is decided though the read after it failed: the store holds it, its Undo acts on
+    // the store, and the next poll reads it (Codex on #776).
     if (ok === true) visit.set(area.id, { decision, area, into: body.into ?? null });
     if (ok === true || ok === 'pending') mw.editing = null;
     if (view !== 'my_work' || mw.area !== 'suggested') return;
@@ -7763,11 +7767,13 @@ async function myWorkAnswer(row, action) {
     mw.answering = false;
   }
   if (view !== 'my_work') return;
-  if (applied) {
+  if (applied && action === 'not-this') message = t('my_work_suggestion_declined');
+  if (applied && action === 'join') {
+    // Where the conversation is now; in no request read (out of the range read), said as saved.
     const session = row.sessions?.[0]?.id;
     const now = (mw.rows || []).find((r) => r.sessions?.some((s) => s.id === session));
-    if (action === 'join' && mw.request === row.id && now) mw.request = now.id;
-    message = action === 'join' ? t('my_work_suggestion_joined', { title: now?.title ?? row.suggestion.title }) : t('my_work_suggestion_declined');
+    if (mw.request === row.id) mw.request = now?.id ?? null;
+    message = now ? t('my_work_suggestion_joined', { title: now.title }) : t('my_work_saved_unread');
   }
   mw.signature = '';
   myWorkDraw('current');
