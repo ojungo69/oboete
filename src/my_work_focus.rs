@@ -561,7 +561,7 @@ fn write(home: &Path, ops: Vec<(String, Map<String, Value>)>) -> Result<Value, R
 }
 
 /// The held id of the request My Work shows as `shown`, read as the page reads it.
-fn held_of(home: &Path, shown: &str) -> Result<Option<String>> {
+pub(crate) fn held_of(home: &Path, shown: &str) -> Result<Option<String>> {
     let (answer, held) = crate::my_work::reviewing(home, crate::db::now_ms())?;
     let answer = crate::view::answered("my-work", answer);
     let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);

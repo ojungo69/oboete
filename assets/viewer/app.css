@@ -830,6 +830,10 @@ button.my-work-open:focus-visible { outline: none; }
 .my-work-summary, .my-work-next p, .my-work-agent-requests p { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .my-work-summary { color: var(--text); }
 .my-work-copy-note { color: var(--muted); font-style: italic; }
+/* J4: the judge's suggestion on a request, with Join and Not this. */
+.my-work-suggestion { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.my-work-suggestion p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.my-work-suggestion .actions { display: flex; gap: 6px; }
 .my-work-progress { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; color: var(--muted); font-size: 12.5px; }
 .my-work-meter { width: 7rem; height: 8px; accent-color: var(--accent); }
 .my-work-estimate { font-style: italic; }

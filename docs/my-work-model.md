@@ -638,8 +638,8 @@ where claude-mem's rules judge joins with no call without Jev too.
 
 J4. **Join or Not this**, on the card of a conversation the judge suggested: "Looks like part of
 <title>", with Join and Not this, each an owner op. Join moves it, and anything it anchored, into
-that request; Not this keeps it its own and it is never suggested again. claude-mem 15.4 has the
-route and no button.
+that request; Not this keeps it its own and it is never suggested again. claude-mem 15.4 and 15.7
+have the route and no button.
 
 J5. **The focus judge**, before placement (F3), when a kept area exists: one choice per queued request
 over the kept areas and none, 19 areas a question, more asked in sets and a final question over
@@ -2008,6 +2008,40 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **The settings page** says that My Work asks Jev about each new conversation and what it is sent.
   **#766**: a connection test of a visit that ended says and merges nothing.
 - **Then**: 11b-2, the suggestion on the card, with Join and Not this (J4).
+
+### Slice 11b-2: Join or Not this (2026-10-31)
+
+- **Where it shows** (J4): on the request a conversation anchors while the judge's suggestion on
+  it is open, "Looks like part of “<title>”" with Join and Not this, on its card, its row in the
+  list and its page (and so on the request cards the by-agent view opens).
+- **The suggestion**: the fold keeps each conversation's open one with the anchor the judge
+  picked (`Groups::suggested`), opened by a judge op of outcome `suggested` and closed by any
+  other decision on it or by the owner's answer. The request row names the request the picked
+  anchor is in now (`of`), its id and title as this answer shows them: `suggestion {id, title}`;
+  none when the answer shows no such request. Its id leaves the gate's walk and comes back, as a
+  request's own does (S6).
+- **The route**: `POST /api/my-work/suggestion`, `{request, action}` with `action` `join` or
+  `not-this`, past the save gate as the other owner actions. Refused before it writes: 400
+  `bad_request` (another shape, an id of no length or over 80 characters); 404
+  `suggestion_not_found` (no such request, or no open suggestion on it); 409
+  `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 503
+  `my_work_unavailable`. It answers `applied` or `pending`, as My Focus does, and the page reads
+  My Work again and says what was done; a Join from the request's page shows the request it
+  joined, whose id stays.
+- **The op**: one op of job `judge` by the owner (no entry), about the conversation's repository,
+  that read nothing: fields `conversation`, `action` and `groups`. Join: the anchor of the request
+  the pick is in now first (an op naming the picked anchor first would take it out of that
+  request), the conversation, and its own request's other conversations (claude-mem's
+  `brought`), with a link of kind `judge` whose evidence is "Joined by the owner on the judge's
+  suggestion."; Not this: the conversation and its own request's other conversations, so they
+  stay its own request even when a forget later takes the judge's op. The judge does not ask
+  either again (`asked`).
+- **A forget** (S5) that takes what the judge read takes its op and so the suggestion: the
+  conversation is undecided again, and the judge may ask about it again. The owner's answer read
+  nothing, so the same forget leaves it as it was.
+- **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
+  any button for the suggestion.
+- **Then**: 11c, the focus judge's hint (J5).
 
 ## Not built
 

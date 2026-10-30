@@ -666,6 +666,9 @@ struct Request {
     group_ops: Vec<(String, i64)>,
     owns: Vec<(Key, Owns)>,
     work: Vec<usize>,
+    /// J4: the held id of the request a judge's open suggestion on its anchor names, the one the
+    /// picked anchor is in now.
+    suggested: Option<String>,
 }
 
 impl Request {
@@ -678,6 +681,7 @@ impl Request {
             group_ops: Vec::new(),
             owns: Vec::new(),
             work: Vec::new(),
+            suggested: None,
         }
     }
 
@@ -701,6 +705,11 @@ impl Request {
 /// request takes (claude-mem's "N work records need a linked human request").
 pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
     Ok(read_held(home, range, now)?.0)
+}
+
+/// The held id of the request `anchor` anchors (C6), as `Held::id` gives it.
+pub(crate) fn anchored(anchor: &Key) -> String {
+    Id::Group(anchor.clone()).held()
 }
 
 /// `read` of every range, with what each request's check is filed under, in the answer's order:
@@ -900,6 +909,19 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
     for (a, h) in answers.iter_mut().zip(&held) {
         a["focus"] = json!(focus.of(&crate::my_work_focus::subject(h.id())));
+    }
+    // J4: the request a suggestion names, as this answer shows it; none when it shows no such.
+    let shown: HashMap<&str, usize> = (held.iter().enumerate())
+        .map(|(i, h)| (h.id(), i))
+        .collect();
+    for (i, h) in held.iter().enumerate() {
+        let Some(&t) = h.suggested.as_deref().and_then(|t| shown.get(t)) else {
+            continue;
+        };
+        let t = &answers[t];
+        let suggestion =
+            json!({"id": t["id"], "fingerprint": t["fingerprint"], "title": t["title"]});
+        answers[i]["suggestion"] = suggestion;
     }
     let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
@@ -1212,6 +1234,10 @@ fn build(
             r.group_ops = group
                 .map(|g| g.ops.iter().cloned().collect())
                 .unwrap_or_default();
+            r.suggested = (grouped.suggested.get(anchor))
+                .and_then(|picked| grouped.of.get(picked))
+                .filter(|target| *target != anchor)
+                .map(|target| Id::Group(target.clone()).held());
         }
     }
     Ok(Built {
@@ -1340,6 +1366,8 @@ pub(crate) struct Held {
     id: String,
     sessions: Vec<String>,
     sources: Sources,
+    /// The held id of the request the judge's open suggestion names (J4).
+    suggested: Option<String>,
 }
 
 impl Held {
@@ -2030,6 +2058,7 @@ fn answer(
         id: held,
         sessions: swept_by,
         sources,
+        suggested: r.suggested.clone(),
     };
     Ok(Some((
         json!({

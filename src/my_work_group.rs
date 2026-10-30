@@ -66,6 +66,9 @@ pub(crate) struct Groups {
     pub ignored: HashMap<Key, Option<String>>,
     /// Each conversation a judge op names, decided by it or left to grouping (J3): asked once.
     pub asked: HashSet<Key>,
+    /// J4: each conversation with a judge's open suggestion, and the anchor of the request it
+    /// picked; the owner's Join or Not this, or another decision on it, closes it.
+    pub suggested: HashMap<Key, Key>,
     last: HashMap<String, (i64, HashSet<i64>)>,
 }
 
@@ -125,6 +128,12 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
         }
         let fields: BTreeMap<String, Value> = serde_json::from_str(&fields)?;
         if judged && let Some(c) = fields.get("conversation").and_then(key) {
+            // Only a decision of outcome `suggested` has one (J3).
+            let picked = fields.get("suggestion").and_then(|s| key(&s["request"]));
+            match picked {
+                Some(picked) => out.suggested.insert(c.clone(), picked),
+                None => out.suggested.remove(&c),
+            };
             out.asked.insert(c);
         }
         for g in items(&fields, "groups") {

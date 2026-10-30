@@ -2559,6 +2559,12 @@ const TEXT = {
   my_focus_moved: ['Moved “{title}” to {area}.', '「{title}」を「{area}」へ移しました。'],
   my_focus_saved: ['Saved on this computer. The next round of sorting never overrides it.', 'このコンピューターに保存しました。この後の自動の振り分けで変わることはありません。'],
   my_focus_pending: ['Saved. It shows here once My Work has read it.', '保存しました。My Work が読み込むと、ここに反映されます。'],
+  // J4: the judge's suggestion on a request, and the owner's two answers.
+  my_work_suggestion: ['Looks like part of “{title}”.', '「{title}」の一部のようです。'],
+  my_work_suggestion_join: ['Join', 'まとめる'],
+  my_work_suggestion_not_this: ['Not this', '違う'],
+  my_work_suggestion_joined: ['Joined to “{title}”.', '「{title}」にまとめました。'],
+  my_work_suggestion_declined: ['Kept as a request of its own.', '別の依頼のままにしました。'],
   my_focus_undo: ['Undo', '元に戻す'],
   my_focus_no_undo: ['This one can’t be undone from here.', 'この変更は、ここからは元に戻せません。'],
   my_focus_suggested: ['Suggested', '提案'],
@@ -2646,6 +2652,9 @@ const TEXT = {
   focus_merge_target: ['That area can’t take a merge now.', 'その分野には、今は合併できません。'],
   focus_restore: ['An area you wrote can’t be put back in Suggested.', 'あなたが作った分野は、提案に戻せません。'],
   focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
+  suggestion_not_found: ['That suggestion is no longer waiting for an answer. The page has been read again.', 'その提案は、もう答えを待っていません。ページを読み直しました。'],
+  suggestion_target_gone: ['The request it suggested is no longer there. The page has been read again.', '提案された依頼は、もうありません。ページを読み直しました。'],
+  my_work_unavailable: ['My Work can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   my_rules: ['My Rules', '規則'],
   my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],
   my_rules_where: ['Rules you approve or add reach Claude Code, Codex and Grok at the start of every session, as your preferences. A rule of one repository reaches only the sessions in it.', '承認した規則と追加した規則は、あなたの好みとして、Claude Code・Codex・Grok の毎回のセッションの始めに渡ります。1 つのリポジトリの規則は、そのリポジトリのセッションにだけ渡ります。'],
@@ -6932,6 +6941,8 @@ const mw = {
   // a save in progress, and the last change with its Undo; the asks under no area, and the
   // header's quotes opened.
   area: null, areas: [], moving: false, saved: null, otherAsks: [], why: new Set(),
+  // J4: an answer to a judge's suggestion on its way.
+  answering: false,
   // F7: the words an area's name may not reuse; the area being edited, how, and the draft.
   pageWords: [], editing: null, draft: '',
   // F7: the Suggested page's decisions on this visit (claude-mem keeps them until the page is
@@ -7683,6 +7694,7 @@ function myWorkCard(row) {
     el('h3', 'my-work-title', myWorkOpener('my-work-open', row, row.title)),
     el('p', 'my-work-summary', myWorkActivity(row)),
     row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
+    myWorkSuggestion(row),
     myWorkProgress(row),
     myFocusChip(row),
     el('div', 'my-work-context', myWorkContributors(row), el('span', 'my-work-project', myWorkProjects(row))),
@@ -7699,6 +7711,54 @@ function myWorkCell(label, ...children) {
   return cell;
 }
 
+// J4: "Looks like part of <title>" with Join and Not this, on the request of a conversation the
+// judge suggested; nothing when it suggested none.
+function myWorkSuggestion(row) {
+  const s = row.suggestion;
+  if (!s) return null;
+  const button = (action, key) => {
+    const b = el('button', 'quiet small', t(key));
+    b.type = 'button';
+    b.dataset.action = `my-work.suggestion.${action}`;
+    b.setAttribute('aria-label', `${t(key)}: ${s.title}`);
+    b.disabled = mw.answering;
+    b.addEventListener('click', () => void myWorkAnswer(row, action));
+    return b;
+  };
+  return el('div', 'my-work-suggestion', el('p', null, t('my_work_suggestion', { title: s.title })),
+    el('div', 'actions', button('join', 'my_work_suggestion_join'), button('not-this', 'my_work_suggestion_not_this')));
+}
+
+// J4: the owner's answer, then My Work read again. A request page left by a Join shows the request
+// it joined, whose id stays.
+async function myWorkAnswer(row, action) {
+  if (mw.answering) return;
+  mw.answering = true;
+  myWorkDraw();
+  let message = null;
+  let failed = false;
+  try {
+    const { res, answer } = await memoryWrite('my-work/suggestion', { request: row.id, action });
+    if (!res.ok) {
+      failed = true;
+      message = memoryFailure(res, answer);
+    } else if (answer.state !== 'applied') {
+      message = t('my_focus_pending');
+    } else {
+      if (action === 'join' && mw.request === row.id) mw.request = row.suggestion.id;
+      message = action === 'join' ? t('my_work_suggestion_joined', { title: row.suggestion.title }) : t('my_work_suggestion_declined');
+    }
+  } catch {
+    failed = true;
+    message = t('memory_result_unknown');
+  } finally {
+    mw.answering = false;
+    mw.signature = '';
+    if (view === 'my_work') await show();
+    if (message && view === 'my_work') setStatus(message, failed, lang, 8000);
+  }
+}
+
 // `request-views.js` `requestList`.
 function myWorkTable(rows) {
   const heads = ['my_work_col_status', 'my_work_col_request', 'my_work_col_next', 'my_work_col_updated'].map((key) => word('th', null, key));
@@ -7709,7 +7769,8 @@ function myWorkTable(rows) {
     arrow.setAttribute('aria-label', t('my_work_open_label', { title: row.title }));
     const tr = el('tr', 'my-work-row',
       myWorkCell('my_work_col_status', myWorkBadge(row.status)),
-      myWorkCell('my_work_col_request', myWorkOpener('my-work-row-title', row, row.title), el('p', 'my-work-project', myWorkProjects(row))),
+      myWorkCell('my_work_col_request', myWorkOpener('my-work-row-title', row, row.title), el('p', 'my-work-project', myWorkProjects(row)),
+        myWorkSuggestion(row)),
       myWorkCell('my_work_col_next', el('p', 'my-work-next-copy', myWorkNextLine(row)?.text || myWorkActivity(row)),
         row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null),
       myWorkCell('my_work_col_updated', myWorkTime(row.updated)),
@@ -8110,6 +8171,7 @@ function myWorkDrawRequest() {
     el('ul', 'my-work-ids', ...list.map((id) => el('li', null, fullText(id, id))))) : null);
   draw(row.title, [], [back, myWorkSlot(),
     el('div', 'my-work-request-meta', myWorkBadge(row.status), el('span', 'my-work-project', myWorkProjects(row)), myWorkTime(row.updated)),
+    myWorkSuggestion(row),
     myWorkProgress(row),
     el('dl', 'my-work-facts', myWorkFact('my_work_contributors', myWorkContributors(row)),
       myWorkFact('my_work_started', row.started > 0 ? localTime(row.started, lang) : t('my_work_not_recorded')),
