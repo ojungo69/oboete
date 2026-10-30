@@ -519,6 +519,14 @@ assert(tier.text('onboarding_first_h','ja').includes('最初のAI利用段階'))
 assert(tier.text('onboarding_again_h','ja').includes('変更'));
 f=fixture();f.saved={capture:{store_prompts:false}};f.capture={store_prompts:true};
 vm.runInContext('globalThis.onboardingPanel=onboardingSection;',ctx);
+// CodeRabbit on #772: the guide's effect with no cap for paid calls says none, never USD null.
+const unlimited=fixture();unlimited.paid_usd_per_month='';unlimited.paidNoCap=true;
+unlimited.saved={capture:{store_prompts:false}};unlimited.capture={store_prompts:false};
+ctx.onboardingPanel(unlimited);vm.runInContext("onboardingTier='paid';",ctx);
+ctx.ui.setLang('en');const said=text(ctx.onboardingPanel(unlimited));
+assert(said.includes('Monthly paid cap: none.')&&!said.includes('null'),'no cap for paid calls is said as none');
+ctx.ui.setLang('ja');
+assert(text(ctx.onboardingPanel(unlimited)).includes('有料利用の月額上限：なし。'));
 ctx.ui.setLang('en');
 assert(text(ctx.onboardingPanel(f)).includes('A new typed phrase will not be searchable'),
   'the journey follows saved prompt privacy, including an unsaved opt-in');
@@ -782,8 +790,32 @@ assert.equal(w6.saveBody().body.my_work.calls_a_day,NO,'a day\'s no cap is sent 
 assert.deepEqual([off('chain.groq').checked,off('chain.claude').checked,off('chain.pro')],[false,true,undefined],
   'an entry with no calls a day shows as off; a subscription has no switch');
 tick(off('chain.groq'),true);
-assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.chain.map(r=>r.daily_budget))),[NO,NO,null],'each entry off is sent as 4294967295');
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.chain.map(r=>r.daily_budget))),[NO,null,null],
+  'an entry turned off is sent as 4294967295; one left as loaded, as config.toml has it');
 assert.equal(off('chain.groq').getAttribute?.('aria-label')??off('chain.groq').attrs['aria-label'],'No cap: Calls a day: groq');
+// Codex on #772: a row left as loaded is sent as config.toml has it and follows an answer whose
+// entry changed, so no save turns an entry's own calls a day into a [chain] value it did not ask for.
+vm.runInContext('globalThis.w6merge=mergeProviderSettings;',ctx);
+const edited={op:'edit',selector:{source:'file',index:0},entry:{kind:'openai',subscription:false}};
+const daily=()=>JSON.parse(JSON.stringify(w6.saveBody().body.chain.map(r=>r.daily_budget)));
+const loaded=extra=>w6.formOf(settings('resident',{ranges,chain:[row('p',extra)]}));
+// An entry with no calls a day of its own, given 7 in its editor: the answer's 7 shows and is kept.
+f=ctx.w6merge(settings('resident',{ranges,chain:[row('p',{effective_daily_budget:7})]}),loaded({effective_daily_budget:null}),edited);
+ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([off('chain.p').checked,field('chain.p.daily_budget').disabled,daily()],[false,false,[null]],
+  'a cap set in the entry\'s editor survives the next whole save');
+// Turned off before the operation, the switch stays off and is sent.
+f=loaded();ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),true);
+f=ctx.w6merge(settings('resident',{ranges,chain:[row('p')]}),f,edited);ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'a switch changed before an operation is kept and sent');
+// Two entries of one name, the first with no cap and the other with 7: a save keeps both.
+f=loaded({entries:2,differs:['daily_budget'],effective_daily_budget:null});ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([off('chain.p').checked,daily()],[true,[null]],'an unrelated save keeps mixed caps under one name');
+// A CLI entry's own calls a day lifted by a [chain] no cap: a subscription's row has no field, and a
+// save keeps it.
+f=w6.formOf(settings('resident',{ranges,chain:[row('cli',{subscription:true,daily_budget:NO,effective_daily_budget:null})]}));
+ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([field('chain.cli.daily_budget'),daily()],[undefined,[NO]],'an unrelated save keeps a CLI entry\'s [chain] no cap');
 // Loaded off: ticked, its field empty and set aside, said as saved; turned on again, a number is due.
 f=w6.formOf(settings('resident',{ranges,paid_usd_per_month:null,
   my_work:{curate:false,calls_a_day:NO,estimate:{calls:[3,null],usd:[0.0123,null],priced:{name:'p',model:'m'}}}}));
@@ -806,7 +838,7 @@ typeIn(field('my_work.calls_a_day'),'40');
 assert.equal(w6.saveBody().body.my_work.calls_a_day,40);
 ctx.ui.setLang('ja');ctx.ui.drawSettings();
 shown=text(panel);
-assert(shown.includes('上限なし')&&shown.includes('止まるのは、各サービス側で決めた上限に達したときだけです。'),'the Japanese switch and warning');
+assert(shown.includes('上限なし')&&shown.includes('金額で止めるのは、各サービス側で決めた上限だけです。1 日の回数の上限は、そのまま効きます。'),'the Japanese switch and warning');
 assert(shown.includes('およそ 3 回(上限なし)'),'the Japanese estimate with no most');
 ctx.ui.setLang('en');
 console.log('PASS: the caps\' No cap switches');

@@ -1256,6 +1256,7 @@ const TEXT = {
   onboarding_paid: ['Plus priced APIs with a monthly cap', '月額上限内で有料APIも使う'],
   onboarding_copy: ['Use this tier in draft', 'この段階を編集中の設定へ反映'],
   onboarding_effect: ['New curation through: {names}. Monthly paid cap: USD {cap}.', '新しい要約に使う要約役：{names}。有料利用の月額上限：USD {cap}。'],
+  onboarding_effect_no_cap: ['New curation through: {names}. Monthly paid cap: none.', '新しい要約に使う要約役：{names}。有料利用の月額上限：なし。'],
   onboarding_no_names: ['none', 'なし'],
   onboarding_unavailable: ['No eligible provider is configured for this tier. Applying it would leave summarizing off; inspect or add a provider below.', 'この段階で利用できる要約役は設定されていません。反映すると要約はオフになります。下で要約役を確認・追加してください。'],
   onboarding_draft_ready: ['Draft updated. Review the controls below and Save settings explicitly.', '編集中の設定に反映しました。下の項目を確認し、明示的に「設定を保存」を押してください。'],
@@ -1699,7 +1700,7 @@ const TEXT = {
   ],
   no_cap: ['No cap', '上限なし'],
   // Decision 64: what still stops the calls of a cap turned off.
-  no_cap_paid_warning: ['With no cap, oboete does not stop paid calls by what they cost: only the limits you set with each service do.', '上限なしにすると、oboete は有料の呼び出しを金額では止めません。止まるのは、各サービス側で決めた上限に達したときだけです。'],
+  no_cap_paid_warning: ['With no cap, oboete does not stop paid calls by what they cost: only the limits you set with each service do. The caps of calls a day still apply.', '上限なしにすると、oboete は有料の呼び出しを金額では止めません。金額で止めるのは、各サービス側で決めた上限だけです。1 日の回数の上限は、そのまま効きます。'],
   no_cap_calls_warning: ['With no cap, oboete does not stop these calls by their number a day. The monthly limit on paid calls and each service\'s own limits still apply.', '上限なしにすると、oboete はこの呼び出しを 1 日の回数では止めません。有料の呼び出しの月額上限と、各サービス側の上限は、そのまま効きます。'],
   no_cap_row: ['Not stopped by its calls a day', '1 日の回数では止めません'],
   simple_no_cap_confirm: ['Remove the monthly limit', '確認して月額上限をなくす'],
@@ -3374,12 +3375,11 @@ function formOf(s) {
     hidden: 'hidden' in s ? s.hidden : form?.hidden ?? null,
     preference: preferenceDraft,
     maintenance: maintenanceDraft,
-    chain: s.chain.map((e) => ({
-      ...e,
-      edit: { on: e.on, daily_budget: noCapText(e.daily_budget, s.ranges), timeout_s: text(e.timeout_s), model: text(e.model),
-        // A subscription has no calls a day to set; any other entry with none shows it as off.
-        noCap: !e.subscription && e.effective_daily_budget === null },
-    })),
+    chain: s.chain.map((e) => {
+      const loaded = chainDailyAsLoaded(e, s.ranges);
+      return { ...e, edit: { on: e.on, daily_budget: loaded.daily_budget, timeout_s: text(e.timeout_s), model: text(e.model),
+        noCap: loaded.noCap } };
+    }),
     providers: (s.providers || []).map((p) => ({ ...p, edit: providerEdit(p.name, p.saved), editing: false })),
     newProvider: null,
     warnings: s.warnings,
@@ -5138,6 +5138,19 @@ function noCapText(value, ranges) {
   return value === null || value === undefined || value === ranges?.no_cap ? '' : String(value);
 }
 
+// Decision 64: a chain row's calls a day as its field and No cap switch show config.toml's. A
+// subscription has no calls a day to set; any other entry with none shows it as off.
+function chainDailyAsLoaded(r, ranges) {
+  return { daily_budget: noCapText(r.daily_budget, ranges), noCap: !r.subscription && r.effective_daily_budget === null };
+}
+
+// Whether a chain row's calls a day is still as loaded. Its No cap follows the entry's own value
+// too, which a save must not turn into a `[chain]` value unless the row was changed (Codex on #772).
+function chainDailyUntouched(r, ranges) {
+  const loaded = chainDailyAsLoaded(r, ranges);
+  return r.edit.daily_budget === loaded.daily_budget && r.edit.noCap === loaded.noCap;
+}
+
 // Decision 64: a cap's No cap switch beside its number. On, the number is set aside (kept, to turn
 // the cap on again) and `warning` says what still stops those calls.
 function noCapSwitch(on, field, subject, number, warning, set) {
@@ -5336,7 +5349,10 @@ function preserveSettingsDrafts(next, mine) {
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
     const row = groups.get(r.name);
+    // A calls a day left as it was follows the answer, whose entry may have changed.
+    const fresh = row.edit;
     row.edit = { ...r.edit };
+    if (chainDailyUntouched(r, mine.ranges)) Object.assign(row.edit, { daily_budget: fresh.daily_budget, noCap: fresh.noCap });
     groups.delete(r.name);
     return row;
   }), ...groups.values()];
@@ -5954,7 +5970,8 @@ function saveBody() {
       if (v.trim() === '') return null;
       return v.trim() === String(had) ? had : whole(v, min, max);
     };
-    const daily = r.edit.noCap ? form.ranges.no_cap : optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
+    const daily = chainDailyUntouched(r, form.ranges) ? r.daily_budget ?? null
+      : r.edit.noCap ? form.ranges.no_cap : optional(r.edit.daily_budget, r.daily_budget, ...form.ranges.daily_budget);
     if (Number.isNaN(daily)) return { field: `chain.${r.name}.daily_budget` };
     const timeout = optional(r.edit.timeout_s, r.timeout_s, ...form.ranges.timeout_s);
     if (Number.isNaN(timeout)) return { field: `chain.${r.name}.timeout_s` };
@@ -6202,7 +6219,7 @@ function onboardingSection(f) {
     el('p','desc',t('onboarding_scope')),
     el('label','field',el('span',null,t('onboarding_tier')),select),
     plan && el('p','desc',plan.available
-      ? t('onboarding_effect',{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
+      ? t(plan.cap===null?'onboarding_effect_no_cap':'onboarding_effect',{names:plan.names?.join(', ')||t('onboarding_no_names'),cap:plan.cap})
       : t('onboarding_unavailable')),
     destinations?.length?el('ul',null,...destinations):null,
     apply,onboardingApplied?el('p','desc',t('onboarding_draft_ready')):null,
