@@ -1331,6 +1331,26 @@ const TEXT = {
   my_work_estimate: ['Calls a day with it on: about {calls}, at most {most}. At {name} ({model}) prices: about {usd} a day, at most {most_usd}.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。{name}({model})の料金で 1 日およそ {usd}、多くても {most_usd} です。'],
   my_work_estimate_free: ['Calls a day with it on: about {calls}, at most {most}. No paid AI is in the list, so nothing is charged; a subscription\'s allowance may be used.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。有料の AI が一覧にないため料金はかかりません(サブスクリプションの利用枠は使われることがあります)。'],
   my_work_estimate_none: ['An estimate appears here once something is recorded.', '記録がたまると、ここに見積もりが出ます。'],
+  judge_h: ['Judge (Jev)', '判定役(Jev)'],
+  judge_desc: ['Jev, a model by Typesafe, answers questions with probabilities instead of text. For now you can set its key and test the connection here; My Work does not ask it yet. Next, My Work will ask it whether a new conversation continues an open request, and which focus area a request belongs to. What it cannot decide will stay with the AI for summaries, as now.', 'Jev(Typesafe 社のモデル)は、文章ではなく確率で質問に答えます。いまはここでキーを入れて接続を試せるだけで、My Work はまだ Jev に尋ねません。次の更新から My Work は、新しい会話が開いている依頼の続きかどうかと、依頼がどの分野に入るかを Jev に尋ねます。Jev が決められないものは、いまと同じく要約に使う AI が決めます。'],
+  judge_sends: ['What it will be sent: for each conversation, its repository, when it started, its first 3 asks and its first 8 card titles, each masked as all text sent out is. Nothing from a repository you excluded is sent. Price: USD 0.042 for a million input tokens, counted in the monthly limit on paid calls. One judged conversation is about 10,000 to 16,000 tokens, under USD 0.001.', '送るもの(My Work が尋ねるようになってから): 会話ごとに、そのリポジトリ、始まった時刻、最初の 3 つの依頼、最初の 8 枚のカードの題です。どれも外へ送る文と同じく伏せ字を通します。除外したリポジトリのものは送りません。料金: 入力 100 万トークンで 0.042 ドルで、有料の呼び出しの月額上限に含まれます。1 つの会話の判定はおよそ 1 万〜1.6 万トークンで、0.001 ドル未満です。'],
+  judge_on: ['Use the judge', '判定役を使う'],
+  judge_no_key: ['Off: no key yet. Paste the key from Typesafe below to turn it on.', 'オフ: まだキーがありません。下に Typesafe のキーを貼り付けるとオンになります。'],
+  judge_key_file: ['Key: {state} ({file})', 'キー: {state}（{file}）'],
+  judge_key_label: ['New Typesafe key', 'Typesafe の新しいキー'],
+  judge_usage: ['Last 24 hours: {calls} of {most} calls. This month: {usd}.', '直近 24 時間: {most} 回のうち {calls} 回。今月の費用: {usd}。'],
+  judge_usage_unknown: ['Its calls and spend cannot be read now.', '呼び出し回数と費用をいま読めません。'],
+  judge_test: ['Test the connection', '接続を試す'],
+  judge_test_desc: ['Sends one made-up question, with nothing from your records. It counts as one call.', '作った質問を 1 つだけ送ります。記録の中身は送りません。呼び出し 1 回に数えます。'],
+  judge_test_ok: ['Jev answered: the key works.', 'Jev が答えました。キーは使えます。'],
+  judge_test_error: ['Jev did not answer. Check the key, then try again.', 'Jev が答えませんでした。キーを確かめて、もう一度試してください。'],
+  judge_test_shape: ['Jev answered in an unexpected form. Try again later.', 'Jev の答えが想定と違う形でした。しばらくしてから試してください。'],
+  judge_test_budget: ['Today\'s calls or this month\'s limit on paid calls are used up.', '今日の呼び出し回数か、今月の有料の呼び出しの上限に達しています。'],
+  judge_test_gate: ['The judge is paused for now. Try again later.', '判定役はいま休止中です。しばらくしてから試してください。'],
+  judge_test_off: ['The judge is off. Turn it on and save, then try again.', '判定役がオフです。オンにして保存してから試してください。'],
+  judge_test_key: ['No key was found in its file. Paste the key again.', 'キーのファイルにキーがありません。もう一度貼り付けてください。'],
+  judge_test_missing_key: ['Paste the key first.', '先にキーを貼り付けてください。'],
+  judge_test_failed: ['The test could not run. Try again.', 'テストを実行できませんでした。もう一度試してください。'],
   simple_my_work_h: ['My Work, written by AI', 'AI が書く My Work'],
   simple_my_work_desc: ['The AI for summaries groups conversations into requests and writes their progress and your goals. It runs only while summaries are created.', '要約に使う AI が会話を依頼ごとにまとめ、進み具合と目標を書きます。「記録を要約する」がオンのときだけ動きます。'],
   simple_my_work: ['Write My Work with AI', 'My Work を AI で書く'],
@@ -3324,6 +3344,8 @@ function formOf(s) {
     paid_usd_per_month: String(s.paid_usd_per_month),
     // docs/my-work-model.md A6: the switch and the daily bound, with the estimate shown first.
     my_work: { curate: s.my_work.curate, calls_a_day: String(s.my_work.calls_a_day), estimate: s.my_work.estimate },
+    // docs/my-work-model.md J1: the judge's state; its switch only once a key is set.
+    judge: s.judge ? { ...s.judge } : null,
     gemini: s.gemini ?? 'none',
     usd_this_month: s.usd_this_month,
     prompt_side: s.prompt_side ?? null,
@@ -4392,9 +4414,63 @@ function workersAiSettings(f) {
     el('p', 'desc', usage),
     el('p', 'desc', t('embedding_key_file', { state: t(w.key === 'ok' ? 'key_ok' : 'key_missing'), file: w.key_file })),
     note(t('embedding_key_desc')),
-    f.keyInput ? embeddingKeyField() : note(t('provider_key_unsupported')));
+    f.keyInput ? keyField('embedding/key', 'embedding.key', t('embedding_key_label')) : note(t('provider_key_unsupported')));
   details.open = (embeddingDraft.choice ?? f.embedding.provider) === 'workers-ai';
   return details;
+}
+
+// docs/my-work-model.md J1: Jev, Typesafe's judge. Off until its key is set here; then its switch,
+// its key file's state, its calls and spend, and one test of a made-up question.
+function judgeSection(f) {
+  const j = f.judge;
+  if (!j) return null;
+  const parts = [el('h3', null, t('judge_h')), el('p', 'desc', t('judge_desc')), el('p', 'desc', t('judge_sends'))];
+  if (j.set) {
+    parts.push(el('label', 'check', checkbox(j.enabled, (v) => { j.enabled = v; }), t('judge_on')),
+      note(t('saved_value', { value: t(f.savedSettings.judge?.enabled ? 'value_on' : 'value_off') })),
+      el('p', 'desc', t('judge_key_file', { state: t(j.key === 'ok' ? 'key_ok' : 'key_missing'), file: j.key_file })));
+  } else {
+    parts.push(el('p', 'desc', t('judge_no_key')));
+  }
+  parts.push(f.keyInput ? keyField('judge/key', 'judge.key', t('judge_key_label')) : note(t('provider_key_unsupported')));
+  if (j.set) {
+    const usage = j.calls_today === null || j.usd_this_month === null ? t('judge_usage_unknown')
+      : t('judge_usage', { calls: j.calls_today.toLocaleString(lang), most: j.daily_budget.toLocaleString(lang), usd: usdValue(j.usd_this_month) });
+    parts.push(el('p', 'desc', usage), judgeTest());
+  }
+  return el('section', 'judge-settings', ...parts);
+}
+
+// One made-up question sent on the owner's click, its outcome said in words.
+function judgeTest() {
+  const button = el('button', 'small', t('judge_test'));
+  button.type = 'button';
+  button.dataset.field = 'judge.test';
+  button.addEventListener('click', async () => {
+    const mine = form;
+    button.disabled = true;
+    try {
+      const { res, answer } = await memoryWrite('judge/test', { confirmed: true });
+      if (!currentSettings(mine)) return;
+      const outcome = res.ok ? answer.outcome : answer.code || PROVIDER_HTTP_ERRORS[res.status];
+      const key = Object.hasOwn(TEXT, `judge_test_${outcome}`) ? `judge_test_${outcome}` : 'judge_test_failed';
+      // The call is counted: the judge's numbers read again, with what is being edited kept. A
+      // save or a key saved meanwhile has the page now, its own answer included: this test says
+      // nothing more, and a save still running keeps its answer's place.
+      const settings = res.ok ? await api('settings').catch(() => null) : null;
+      if (!currentSettings(mine)) return;
+      if (settings && !settings.error && !button.closest('.settings')?.inert) {
+        form = mergeProviderSettings(settings, mine, { op: 'key' });
+        drawSettings();
+      }
+      setStatus(t(key), outcome !== 'ok', lang);
+    } catch {
+      if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return el('div', 'judge-test', button, note(t('judge_test_desc')));
 }
 
 function embeddingSection(f) {
@@ -4408,15 +4484,15 @@ function embeddingSection(f) {
 }
 
 // As a provider's key field: the token is only in the field and the one request that carries it.
-function embeddingKeyField() {
+function keyField(route, field, label) {
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
   i.spellcheck = false;
   i.autocapitalize = 'off';
   i.placeholder = t('key_placeholder');
-  i.dataset.field = 'embedding.key';
-  i.setAttribute('aria-label', t('embedding_key_label'));
+  i.dataset.field = field;
+  i.setAttribute('aria-label', label);
   const save = el('button', 'small', t('key_save'));
   save.type = 'button';
   save.disabled = true;
@@ -4427,18 +4503,18 @@ function embeddingKeyField() {
   save.addEventListener('click', () => {
     const body = { key: i.value, version: form.version };
     i.value = '';
-    void embeddingKeySave(save, body);
+    void keySave(route, save, body);
   });
   return el('div', 'key-input', i, save);
 }
 
-async function embeddingKeySave(button, body) {
+async function keySave(route, button, body) {
   const mine = form;
   const fields = button.closest('.settings');
   button.disabled = true;
   fields.inert = true;
   try {
-    const { res, answer } = await memoryWrite('embedding/key', body);
+    const { res, answer } = await memoryWrite(route, body);
     if (!currentSettings(mine)) return;
     if (res.status === 409) return reloadProviderSettings(await api('settings'));
     if (!res.ok) {
@@ -4447,7 +4523,7 @@ async function embeddingKeySave(button, body) {
       setStatus(providerReason(answer.code || PROVIDER_HTTP_ERRORS[res.status], 'key'), true, lang);
       return;
     }
-    form = mergeProviderSettings(answer, mine, { op: 'embedding-key' });
+    form = mergeProviderSettings(answer, mine, { op: 'key' });
     drawSettings();
     setStatus(t(answer.key_saved?.durable ? 'key_saved' : 'key_not_durable'), !answer.key_saved?.durable, lang);
   } catch {
@@ -5203,6 +5279,8 @@ function preserveSettingsDrafts(next, mine) {
   next.neverPattern = mine.neverPattern;
   // My Work's switch and bound as edited, with the estimate the answer brings (Codex on #671).
   if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day };
+  // The judge's switch as edited; one left as it was follows the answer (a key saved turns it on).
+  if (next.judge && mine.judge && mine.judge.enabled !== mine.savedSettings.judge?.enabled) next.judge.enabled = mine.judge.enabled;
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
   const groups = new Map(next.chain.map((r) => [r.name, r]));
   next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
@@ -5825,6 +5903,7 @@ function saveBody() {
       ...(port === form.saved.view.port ? {} : { view: { port } }),
       summary,
       my_work: myWork,
+      ...(form.judge?.set ? { judge: { enabled: form.judge.enabled } } : {}),
       paid_usd_per_month: cap,
       gemini: form.gemini === 'none' ? null : form.gemini,
       inject: {
@@ -6608,6 +6687,7 @@ function drawSettings() {
         saved(t(f.saved.my_work.curate ? 'value_on' : 'value_off')),
         el('label', 'field', el('span', null, t('my_work_calls', { min: f.ranges.my_work_calls[0].toLocaleString(lang), max: f.ranges.my_work_calls[1].toLocaleString(lang) })),
           myWorkCalls, saved(f.saved.my_work.calls_a_day), note(t('my_work_calls_desc')))),
+      judgeSection(f),
       el('section', null,
         el('h3', null, t('spending_h')),
         el('div', 'spending-cap',

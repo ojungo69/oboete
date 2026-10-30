@@ -643,6 +643,15 @@ pub fn usd_this_month(conn: &Connection) -> Result<f64> {
     )?)
 }
 
+/// What `provider`'s calls cost since the first of this month (UTC), its reserved ones included.
+pub fn usd_this_month_of(conn: &Connection, provider: &str) -> Result<f64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls WHERE ts>=?1 AND provider=?2",
+        params![chrono_free_month_start(now_ms()), provider],
+        |r| r.get(0),
+    )?)
+}
+
 /// What embedding calls, of documents and of queries, are estimated to have cost since the first
 /// of this month (UTC): `[embedding] monthly_usd`'s count (milestone 4 D8).
 pub fn embed_usd_this_month(conn: &Connection) -> Result<f64> {

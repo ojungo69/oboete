@@ -28,7 +28,8 @@ const OUTPUT_BOUND: u32 = 256;
 #[cfg(test)]
 thread_local! {
     /// A loopback URL a test calls in the endpoint's place.
-    static AT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// One request: `state` and `questions`, keyed by ids and question names, never by recorded text
@@ -132,11 +133,13 @@ pub(crate) fn ask(
             return Err(e);
         }
     };
-    // Again under the gate's admission: an exclusion written since the first look still holds.
-    if excluded(raw, ask.repos)? {
+    // Again under the gate's admission: an exclusion written since the first look still holds. A
+    // read that fails sends nothing either, and leaves no reservation (#763).
+    let now = excluded(raw, ask.repos);
+    if !matches!(now, Ok(false)) {
         drop(admission);
         reservation.cancel(db)?;
-        return Ok(Asked::Skipped("excluded"));
+        return now.map(|_| Asked::Skipped("excluded"));
     }
     let start = Instant::now();
     let sent = post(j, &key, &body, admission);
@@ -181,6 +184,36 @@ pub(crate) fn ask(
         |s| s,
     )?;
     Ok(answers.map_or(Asked::Skipped(outcome), Asked::Answered))
+}
+
+/// Doctor's line: the judge's switch, its key file, and its calls in the last 24 hours.
+pub(crate) fn doctor_line(home: &std::path::Path, judge: Option<&config::Judge>) -> String {
+    let Some(j) = judge else {
+        return "judge (Jev): off, no key set ([judge]; set one on the settings page)".to_owned();
+    };
+    if !j.enabled {
+        return "judge (Jev): off ([judge] enabled = false)".to_owned();
+    }
+    if config::read_key(&j.key_file).is_err() {
+        return format!(
+            "judge (Jev): on, but {} has no key on line 2: nothing is sent",
+            j.key_file.display()
+        );
+    }
+    let calls = match providers_db::read_only(home) {
+        Ok(Some(db)) => providers_db::calls_in_a_day(&db, NAME).map(|(calls, _)| calls),
+        Ok(None) => Ok(0),
+        Err(e) => Err(e),
+    };
+    match calls {
+        Ok(calls) => format!(
+            "judge (Jev): on, {calls} of {} calls in the last 24 hours",
+            j.daily_budget
+        ),
+        Err(_) => {
+            "judge (Jev): on; its calls unknown: the provider ledger does not read".to_owned()
+        }
+    }
 }
 
 /// Whether a repository of `repos` is kept from being sent, or never recorded, now (spec 5.5).
@@ -482,6 +515,35 @@ mod tests {
         assert!(ledger(&h.db).is_empty());
     }
 
+    /// #763: a second look at the exclusions that fails returns its error, sends nothing and
+    /// leaves no reservation.
+    #[test]
+    fn a_second_exclusion_read_that_fails_leaves_no_reservation() {
+        let mut h = home();
+        let rx = stub(vec![("200 OK", picked("g7"))], "");
+        // A repository never recorded makes the read load the capture settings from config.toml.
+        h.raw
+            .exclude_capture(("repo", "github.com/o/other"), false)
+            .unwrap();
+        let config = h.dir.path().join("config.toml");
+        let gate = || {
+            std::fs::write(&config, "[capture\n")?;
+            Ok(None)
+        };
+        let repos = ["github.com/o/r".to_owned()];
+        let answered = ask(
+            &h.db,
+            &h.raw,
+            &rules(""),
+            (&h.judge, 5.0),
+            asked(&repos),
+            &gate,
+        );
+        assert!(answered.is_err(), "{answered:?}");
+        assert_eq!(requests(&rx), 0);
+        assert!(ledger(&h.db).is_empty());
+    }
+
     /// The daily calls and the month's paid cap refuse before anything is sent, each with a row.
     #[test]
     fn the_daily_calls_and_the_paid_cap_refuse_with_a_row_and_no_request() {
@@ -634,6 +696,26 @@ mod tests {
         assert_eq!(requests(&rx), 0);
         assert!(ledger(&h.db).is_empty());
         drop(h.dir);
+    }
+
+    /// Doctor's line names each state without the key.
+    #[test]
+    fn doctor_names_the_judges_state() {
+        let mut h = home();
+        assert!(doctor_line(h.dir.path(), None).contains("off, no key set"));
+        assert_eq!(
+            doctor_line(h.dir.path(), Some(&h.judge)),
+            "judge (Jev): on, 0 of 300 calls in the last 24 hours"
+        );
+        h.judge.enabled = false;
+        assert!(
+            doctor_line(h.dir.path(), Some(&h.judge)).contains("off ([judge] enabled = false)")
+        );
+        h.judge.enabled = true;
+        std::fs::write(&h.judge.key_file, "a note only\n").unwrap();
+        let line = doctor_line(h.dir.path(), Some(&h.judge));
+        assert!(line.contains("has no key on line 2"), "{line}");
+        assert!(!line.contains(KEY));
     }
 
     #[test]

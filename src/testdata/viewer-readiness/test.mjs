@@ -1006,6 +1006,77 @@ ctx.ui.setLang('ja');f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettin
 assert(text(panel).includes('意味での検索')&&text(section()).includes('このパソコンで処理'),'Japanese section');
 ctx.ui.setLang('en');
 console.log('PASS: the embedder is reviewed, agreed and run; its values and token');
+
+// docs/my-work-model.md J1: the judge. With no key, no switch and nothing in the save; the key
+// typed, sent once and kept nowhere, turns it on; its switch then saves; a test says its outcome.
+{
+  for(const [key,[en,ja]] of Object.entries(w4.TEXT).filter(([key])=>key.startsWith('judge_'))){
+    assert(en&&ja&&en!==ja,`${key} has its English and Japanese`);
+  }
+  const judge=(extra={})=>({set:false,enabled:false,key:'missing',key_file:null,daily_budget:null,calls_today:0,usd_this_month:0,...extra});
+  const on=judge({set:true,enabled:true,key:'ok',key_file:'/home/u/.local/share/oboete/keys/k1',daily_budget:300,calls_today:2,usd_this_month:0.0004});
+  const judged=()=>panel.querySelector('.judge-settings');
+  const switchOf=()=>judged().querySelectorAll('input').find(node=>node.type==='checkbox');
+  assert.equal(w4.formOf(settings()).judge,null,'an older server shows no section');
+  f=w4.formOf(settings({judge:judge()}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+  assert(judged()&&text(judged()).includes('no key yet'),'the judge with no key');
+  assert(!switchOf(),'no switch before a key');
+  assert(!('judge' in w4.saveBody().body),'and nothing of it in a save');
+  const k=field('judge.key');
+  type(k,'apikey_0123456789abcdef_Synthetic');
+  answers=[json({...settings({judge:on}),key_saved:{durable:true}})];
+  judged().querySelectorAll('button').find(node=>node.parentElement===k.parentElement).click();await settle();
+  assert.deepEqual(posted.at(-1),{url:'/api/judge/key',body:{key:'apikey_0123456789abcdef_Synthetic',version:'v1'}});
+  assert(!JSON.stringify(ctx.ui.getForm()).includes('apikey_0123456789abcdef_Synthetic'),'the key is not kept');
+  assert(switchOf().checked,'a key saved turns it on');
+  assert(text(judged()).includes('Key found')&&text(judged()).includes('2 of 300 calls'),'its key and calls');
+  change(switchOf(),false);
+  assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:false},'the switch saves');
+  // After a test the judge's numbers are read again, and the switch as edited stays.
+  settingsAnswer=Promise.resolve(json(settings({judge:{...on,calls_today:3}})));
+  for(const [outcome,words] of [['ok','the key works'],['error','Check the key'],['budget','used up'],['other','could not run']]){
+    answers=[json({outcome})];
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
+    assert.deepEqual(posted.at(-1),{url:'/api/judge/test',body:{confirmed:true}});
+    assert(document.getElementById('status').textContent.includes(words),`the test's ${outcome}`);
+    assert(text(judged()).includes('3 of 300 calls'),`its calls read again after ${outcome}`);
+    assert.equal(switchOf().checked,false,'the switch as edited stays');
+  }
+  settingsAnswer=null;
+  // A key saved while a test's numbers are read again has the page: the test's outcome is not
+  // said, and the read is not merged.
+  {
+    let release;settingsAnswer=new Promise(resolve=>{release=resolve;});
+    answers=[json({outcome:'ok'})];
+    const testButton=judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test');
+    document.getElementById('status').textContent='';
+    testButton.click();await settle();
+    const replaced=w4.formOf(settings({judge:{...on,calls_today:7}}));ctx.ui.setForm(replaced);ctx.ui.drawSettings();
+    release(json(settings({judge:{...on,calls_today:8}})));await settle();await settle();
+    assert.equal(ctx.ui.getForm(),replaced,'the newer form stays');
+    assert(!document.getElementById('status').textContent.includes('the key works'),'an older test is not said');
+    settingsAnswer=null;
+  }
+  // A save running when the read comes back keeps its place: the read is not merged.
+  {
+    let release;settingsAnswer=new Promise(resolve=>{release=resolve;});
+    answers=[json({outcome:'ok'})];
+    const mine=ctx.ui.getForm();
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
+    panel.querySelector('.settings').inert=true;
+    release(json(settings({judge:{...on,calls_today:9}})));await settle();await settle();
+    assert.equal(ctx.ui.getForm(),mine,'a running save keeps its place');
+    assert(document.getElementById('status').textContent.includes('the key works'),'the outcome is still said');
+    panel.querySelector('.settings').inert=false;settingsAnswer=null;
+  }
+  answers=[json({code:'missing_key',field:'judge.test'},422)];
+  judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();
+  assert(document.getElementById('status').textContent.includes('Paste the key first'),'a refusal in words');
+  ctx.ui.setLang('ja');f=w4.formOf(settings({judge:on}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+  assert(text(judged()).includes('判定役')&&text(judged()).includes('直近 24 時間: 300 回のうち 2 回'),'Japanese section');
+  ctx.ui.setLang('en');
+  console.log('PASS: the judge: no key, the key once, its switch, its test, JA/EN');
+}
 }
 
 // Simple controls save only their own change, using the existing whole-settings operation.

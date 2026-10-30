@@ -31,13 +31,6 @@ struct Start {
     confirmed: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeySave {
-    key: String,
-    version: String,
-}
-
 /// The page's Workers AI values in its settings save; `account_id` absent keeps the saved one,
 /// which the page cannot remove (a `workers-ai` choice needs it).
 #[derive(Deserialize)]
@@ -379,45 +372,7 @@ pub(crate) fn save_key(
     authorized: &dyn Fn() -> bool,
     body: &[u8],
 ) -> Result<Value, Refusal> {
-    let owner = crate::config::home_dir();
-    let data = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
-    save_key_at(home, saving, authorized, body, &owner, data.as_deref())
-}
-
-fn save_key_at(
-    home: &Path,
-    saving: &Mutex<()>,
-    authorized: &dyn Fn() -> bool,
-    body: &[u8],
-    owner: &Path,
-    data: Option<&Path>,
-) -> Result<Value, Refusal> {
-    let posted: KeySave =
-        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
-    if !crate::keyfile::valid(&posted.key) {
-        return Err(refused(422, "bad_key", "embedding.key"));
-    }
-    let _held = saving.lock().unwrap_or_else(PoisonError::into_inner);
-    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
-    if !authorized() {
-        return Err(unauthorized());
-    }
-    let was = bytes(home).map_err(|_| invalid())?;
-    if version(was.as_deref()) != posted.version {
-        return Err(stale());
-    }
-    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
-    parsed(&home.join("config.toml"), text).ok_or_else(invalid)?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
-    let new_key = crate::keyfile::managed(&posted.key, home, owner, data)
-        .map_err(|r| refused(r.status(), r.code(), "embedding.key"))?;
-    let filename =
-        (new_key.path().to_str()).ok_or_else(|| refused(422, "not_utf8", "embedding.key"))?;
-    put(&mut doc, "embedding", "key_file", filename.into());
-    let mut answer = super::providers::commit(home, &posted.version, doc)?;
-    answer["key_saved"] = json!({"durable": new_key.durable});
-    new_key.retain();
-    Ok(answer)
+    super::managed_key(home, (saving, authorized), body, None, "embedding", |_| {})
 }
 
 #[cfg(test)]
@@ -814,13 +769,13 @@ mod tests {
             });
             let key = scope.spawn(|| {
                 let posted = body(json!({"key": "SyntheticToken12345", "version": version}));
-                save_key_at(
+                super::super::managed_key(
                     home.path(),
-                    &saving,
-                    &authorized,
+                    (&saving, &authorized),
                     &posted,
-                    owner.path(),
-                    None,
+                    Some((owner.path(), None)),
+                    "embedding",
+                    |_| {},
                 )
             });
             std::thread::sleep(Duration::from_millis(300));
@@ -950,7 +905,15 @@ mod tests {
         let canary = format!("{}-{}", "NewSyntheticToken", "7d41e0b2");
         let save = |key: &str, version: &Value| {
             let posted = body(json!({"key": key, "version": version}));
-            save_key_at(home.path(), &saving, &|| true, &posted, owner.path(), None)
+            let homes = Some((owner.path(), None));
+            super::super::managed_key(
+                home.path(),
+                (&saving, &|| true),
+                &posted,
+                homes,
+                "embedding",
+                |_| {},
+            )
         };
         let refused = save(&format!("{canary} x"), &version).unwrap_err();
         assert_eq!(

@@ -18,6 +18,7 @@ pub(crate) mod claims;
 pub(crate) mod embedding;
 pub(crate) mod forget;
 pub(crate) mod hide;
+pub(crate) mod judge;
 pub(crate) mod maintenance;
 pub(crate) mod privacy;
 mod providers;
@@ -243,6 +244,7 @@ pub fn show(home: &Path) -> Value {
             crate::model_fetch::BGE_M3,
             crate::model_fetch::RUNTIME.as_ref(),
         ),
+        "judge": judge::section(cfg.judge.as_ref(), &ledger),
         "chain": chain,
         "providers": providers,
         // Where a key typed on the page can be written (#94 part 3; macOS and Windows: #281).
@@ -542,6 +544,8 @@ struct Save {
     embedding: Option<embedding::Values>,
     /// `[my_work]` (docs/my-work-model.md A6); older pages leave it alone.
     my_work: Option<MyWorkIn>,
+    /// `[judge] enabled` (docs/my-work-model.md J1); older pages leave it alone.
+    judge: Option<JudgeIn>,
     /// Every chain entry once, in the order the page wants.
     chain: Vec<EntryIn>,
 }
@@ -586,6 +590,12 @@ struct ViewIn {
 struct MyWorkIn {
     curate: bool,
     calls_a_day: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgeIn {
+    enabled: bool,
 }
 
 /// `[my_work] calls_a_day` as the page takes it: one call a day at the least.
@@ -648,6 +658,63 @@ struct KeySave {
     entry: String,
     key: String,
     version: String,
+}
+
+/// The body of a key typed for one table's own key file (`[embedding]`, `[judge]`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedKey {
+    key: String,
+    version: String,
+}
+
+/// A key typed on the page, written as a provider's is (`keyfile::managed`: a new owner-only file
+/// outside the store), and `[<table>] key_file` pointed at it with `then`'s other changes, against
+/// the version the page showed. The old file is left as it is. The answer is the settings with the
+/// key's state: the key is in no answer. `authorized` is the request's token checked again under
+/// config.lock, as for a choice. `homes` is where the file may go (the owner's home and
+/// `XDG_DATA_HOME`), the owner's own when None (tests give their own).
+pub(super) fn managed_key(
+    home: &Path,
+    (saving, authorized): (&Mutex<()>, &dyn Fn() -> bool),
+    body: &[u8],
+    homes: Option<(&Path, Option<&Path>)>,
+    table: &str,
+    then: impl FnOnce(&mut toml_edit::DocumentMut),
+) -> Result<Value, Refusal> {
+    let owner_home = crate::config::home_dir();
+    let data_home = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
+    let (owner, data) = homes.unwrap_or((&owner_home, data_home.as_deref()));
+    let field = format!("{table}.key");
+    let posted: ManagedKey =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    if !crate::keyfile::valid(&posted.key) {
+        return Err(refused(422, "bad_key", field));
+    }
+    let _held = saving
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _config = config_lock(home).map_err(|_| refused(500, "write_failed", ""))?;
+    if !authorized() {
+        return Err(refused(401, "unauthorized", ""));
+    }
+    let was = bytes(home).map_err(|_| invalid())?;
+    if version(was.as_deref()) != posted.version {
+        return Err(refused(409, "stale", ""));
+    }
+    let text = utf8(was.as_deref()).ok_or_else(invalid)?;
+    parsed(&home.join("config.toml"), text).ok_or_else(invalid)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| invalid())?;
+    let new_key = crate::keyfile::managed(&posted.key, home, owner, data)
+        .map_err(|r| refused(r.status(), r.code(), field.clone()))?;
+    let filename =
+        (new_key.path().to_str()).ok_or_else(|| refused(422, "not_utf8", field.clone()))?;
+    put(&mut doc, table, "key_file", filename.into());
+    then(&mut doc);
+    let mut answer = providers::commit(home, &posted.version, doc)?;
+    answer["key_saved"] = json!({"durable": new_key.durable});
+    new_key.retain();
+    Ok(answer)
 }
 
 #[derive(Deserialize)]
@@ -856,6 +923,17 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
                 "calls_a_day",
                 i64::from(m.calls_a_day).into(),
             );
+        }
+    }
+    if let Some(j) = &posted.judge {
+        // `[judge]` needs its key file: with none, a key is set first (`judge::save_key`).
+        match &now.judge {
+            Some(saved) if saved.enabled != j.enabled => {
+                put(&mut doc, "judge", "enabled", j.enabled.into());
+            }
+            Some(_) => {}
+            None if j.enabled => return Err(refused(422, "missing_key", "judge.enabled")),
+            None => {}
         }
     }
     if posted.paid_usd_per_month != now.paid_usd_per_month {
@@ -3094,6 +3172,51 @@ mod tests {
     }
 
     /// Each refusal leaves the file's bytes as they were.
+    /// J1: the judge's switch saves where `[judge]` is; with no table (no key yet) turning it on
+    /// is refused and nothing is written, and an older page that leaves it out changes nothing.
+    #[test]
+    fn the_judges_switch_saves_only_where_its_key_is() {
+        let text = "providers = []\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        let r = save_to(
+            &home,
+            &posted(&shown, |v| v["judge"] = json!({"enabled": true})),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "missing_key", "judge.enabled")
+        );
+        assert_eq!(file(&home).as_deref(), Some(text));
+        save_to(
+            &home,
+            &posted(&shown, |v| v["judge"] = json!({"enabled": false})),
+        )
+        .unwrap();
+        assert_eq!(file(&home).as_deref(), Some(text));
+        let text = "providers = []\n[judge]\nkey_file = \"/k/TYPESAFE_KEY.md\"\n";
+        let home = home_with(Some(text));
+        let shown = show(home.path());
+        assert_eq!(
+            (&shown["judge"]["set"], &shown["judge"]["enabled"]),
+            (&json!(true), &json!(true))
+        );
+        let saved = save_to(
+            &home,
+            &posted(&shown, |v| v["judge"] = json!({"enabled": false})),
+        )
+        .unwrap();
+        assert_eq!(saved["judge"]["enabled"], false);
+        assert!(!config::load(home.path()).unwrap().judge.unwrap().enabled);
+        let shown = show(home.path());
+        save_to(&home, &posted(&shown, |_| {})).unwrap();
+        assert!(
+            !config::load(home.path()).unwrap().judge.unwrap().enabled,
+            "left out, left alone"
+        );
+    }
+
     /// A hand-written `judge:` entry left on does not count as the chain in use (`load_chain`
     /// leaves it out): turning off the last other entry is refused.
     #[test]

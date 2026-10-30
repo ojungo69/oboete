@@ -1923,6 +1923,30 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **The hooks read past `[judge]`** (`CaptureConfig`), as every table `Config` reads.
 - **Then**: 11a-2, the key and the switch on the settings page, and doctor's line and probe.
 
+### Slice 11a-2: the judge on the settings page (2026-10-30)
+
+- **The key** (`POST /api/judge/key`): typed on the page, written as a provider's key is
+  (`keyfile::managed`, owner-only and outside the store, by the same function as Workers AI's
+  token, `settings::managed_key`), `[judge] key_file` pointed at it and the
+  judge turned on; no answer holds the key. A key of the shape Typesafe gives (`apikey_…`) is one
+  `keyfile::valid` takes.
+- **The switch** (`judge.enabled` in the settings save): saved only where `[judge]` is; with no
+  key yet the page shows no switch, and a save that turns it on there is refused (`missing_key`).
+- **The page's group** ("Judge (Jev)", in the everyday group after My Work, in both languages):
+  what it does (and, until 11b and 11c, that My Work does not ask it yet), what it sends and its
+  price; off with no key, or its switch, its key file's state, its calls in the last 24 hours of
+  its daily bound and its spend this month (its own ledger rows; none when the ledger does not
+  read), read again after a connection test.
+- **The connection test** (`POST /api/judge/test {"confirmed": true}`), a button beside it, sends
+  one made-up question with nothing from the records, through `judge::ask` as any call goes, and
+  the page says its outcome in words. It replaces the plan's `doctor --probe`: doctor has no
+  probes, and the providers' tests are the page's too.
+- **Doctor's line**: off with no key, off by the switch, on with no key on line 2 of its file, or
+  on with its calls in the last 24 hours.
+- **#763**: a second look at the exclusions that fails cancels the reservation before its error
+  is returned.
+- Settings descriptions wrap a long path at a phone's width.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

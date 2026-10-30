@@ -29,8 +29,6 @@ mod hook;
 mod hookstate;
 mod import;
 mod isolation;
-// docs/my-work-model.md slice 11a: the judges of slices 11b and 11c call it.
-#[cfg_attr(not(test), allow(dead_code))]
 mod judge;
 mod keyfile;
 mod knowledge;

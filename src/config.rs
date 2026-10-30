@@ -18,9 +18,7 @@ pub struct Config {
     #[serde(default)]
     pub embedding: Embedding,
     /// `[judge]`: Jev, outside the curator chain (docs/my-work-model.md J1); absent, it is off.
-    /// Read by its callers from slice 11b.
     #[serde(default)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub judge: Option<Judge>,
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
     #[serde(default)]
