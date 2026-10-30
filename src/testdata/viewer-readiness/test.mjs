@@ -1853,13 +1853,16 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
 {
   const S={id:'p1',title:'Parser'};
   const rows=()=>[req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:S})];
-  let sent=[],refuse=null,joined=false;
+  // After a Join, the request that holds the conversation: Parser, or (#775) the one it went to.
+  const both=(id,title)=>req(id,{title,sessions:[{agent:'claude',id:`c:claude:${id}`},{agent:'claude',id:'c:claude:s2'}]});
+  let sent=[],refuse=null,joined=null,unread=false;
   ctx.fetch=(url,options)=>{
     if(options?.method==='POST'){
       sent.push([url,JSON.parse(options.body)]);
       return Promise.resolve(refuse?posted(refuse[0],{code:refuse[1]}):posted(200,{state:'applied'}));
     }
-    return Promise.resolve(response({requests:joined?[req('p1',{title:'Parser'})]:rows(),unlinked:0}));
+    if(unread)return Promise.resolve({ok:false,status:503,json:async()=>({})});
+    return Promise.resolve(response({requests:joined?[joined]:rows(),unlinked:0}));
   };
   set(rows());run('mw.range="all";myWorkDraw()');
   const line=node=>node.querySelector('.my-work-suggestion');
@@ -1868,6 +1871,17 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   assert(!line(card('p1')),'a request with no suggestion shows none');
   assert.equal(text(line(card('s2')).querySelector('p')),'Looks like part of “Parser”.');
   assert.deepEqual([label(answerOf(card('s2'),'join')),label(answerOf(card('s2'),'not-this'))],['Join: Parser','Not this: Parser']);
+  // While an answer is on its way, the answers' buttons wait (#775).
+  {
+    let release=null;
+    const kept=ctx.fetch;
+    ctx.fetch=(url,options)=>options?.method==='POST'?new Promise(r=>{release=()=>r(posted(200,{state:'applied'}));}):kept(url,options);
+    answerOf(card('s2'),'not-this').click();
+    const waiting=panel.querySelectorAll('.my-work-answer');
+    assert(waiting.length===2&&waiting.every(b=>b.disabled),'the buttons wait');
+    release();await ticks();
+    ctx.fetch=kept;
+  }
   answerOf(card('s2'),'not-this').click();await ticks();
   assert.deepEqual(sent,[['/api/my-work/suggestion',{request:'s2',action:'not-this'}]],'Not this names the request');
   assert.equal(document.getElementById('status').textContent,'Kept as a request of its own.');
@@ -1877,13 +1891,28 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   run('mw.layout="cards";myWorkDraw()');
   card('s2').querySelector('button').click();
   assert(answerOf(panel,'join'),'the request page has it');
-  joined=true;
+  joined=both('p1','Parser');
   answerOf(panel,'join').click();await ticks();
   assert.deepEqual(sent[1],['/api/my-work/suggestion',{request:'s2',action:'join'}],'Join names the request');
   assert.equal(run('mw.request'),'p1','the request it joined is shown');
   assert.equal(document.getElementById('status').textContent,'Joined to “Parser”.');
   panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
-  joined=false;refuse=[404,'suggestion_not_found'];set(rows());
+  // #775 (join_opens_the_current_destination_after_the_pick_moves): Parser joined Reader after the
+  // page drew it; the Join landed in Reader, which the page shows and names.
+  joined=null;set(rows());card('s2').querySelector('button').click();
+  joined=both('r1','Reader');
+  answerOf(panel,'join').click();await ticks();
+  assert.deepEqual([run('mw.request'),document.getElementById('status').textContent],['r1','Joined to “Reader”.']);
+  panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+  // #775 (suggestion_reread_failure_restores_controls): the read after an answer fails; what was
+  // saved is said so, and every suggestion's buttons can be used again.
+  joined=null;set([...rows(),req('s3',{title:'Another',suggestion:S})]);unread=true;
+  answerOf(card('s2'),'not-this').click();await ticks();
+  unread=false;
+  assert.equal(document.getElementById('status').textContent,'Saved. The page shows it at its next read.');
+  const answers=panel.querySelectorAll('.my-work-answer');
+  assert(answers.length===4&&answers.every(b=>!b.disabled),'the buttons are usable again');
+  joined=null;refuse=[404,'suggestion_not_found'];set(rows());
   answerOf(card('s2'),'join').click();await ticks();
   assert.equal(document.getElementById('status').textContent,'That suggestion is no longer waiting for an answer. The page has been read again.');
   refuse=null;
@@ -2306,6 +2335,15 @@ assert.deepEqual(moves[1],['/api/my-focus',{action:'move-request',request:'f1',a
 assert.equal(panel.querySelectorAll('.my-focus-change').length,0,'undone, the bar is gone');
 assert.equal(document.getElementById('status').textContent,'Moved “Request f1” to Parser.');
 assert.equal(document.activeElement.dataset.myWork,'focus:move');
+// #775: the read after a move fails: what was saved is said so, and Move to… is usable again.
+{
+  const kept=ctx.fetch;
+  ctx.fetch=(url,options)=>options?.method==='POST'?Promise.resolve(posted(200,{state:'applied'})):Promise.resolve({ok:false,status:503,json:async()=>({})});
+  pick(D);await ticks();
+  assert.equal(document.getElementById('status').textContent,'Saved. The page shows it at its next read.');
+  assert(move()&&move().querySelectorAll('button').every(n=>!n.disabled),'Move to… is usable again');
+  ctx.fetch=kept;
+}
 // From Sorting… there is nothing to move it back to.
 at=null;set([req('f1',{status:'needs'})]);
 card('f1').querySelector('button').click();

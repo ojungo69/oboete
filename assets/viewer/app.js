@@ -2654,6 +2654,7 @@ const TEXT = {
   focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   suggestion_not_found: ['That suggestion is no longer waiting for an answer. The page has been read again.', 'その提案は、もう答えを待っていません。ページを読み直しました。'],
   suggestion_target_gone: ['The request it suggested is no longer there. The page has been read again.', '提案された依頼は、もうありません。ページを読み直しました。'],
+  my_work_pending: ['The last answer is still being saved. Try again in a moment.', '前の答えをまだ保存しています。少し待ってから、もう一度お試しください。'],
   my_work_unavailable: ['My Work can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   my_rules: ['My Rules', '規則'],
   my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],
@@ -7227,7 +7228,10 @@ async function myFocusWrite(bodies, text, undo, record = true) {
   } finally {
     mw.moving = false;
     mw.signature = '';
-    if (view === 'my_work') await show();
+    // Read again, each caller drawing the page after it; a save the server took stays said as
+    // taken when the read fails (#602, #775).
+    const read = view === 'my_work' ? await myWorkReread().then(() => true, () => false) : true;
+    if (saved && !read) saved = { applied: false, unread: true };
     if (saved) {
       const said = typeof text === 'function' ? text() : text;
       // A Suggested card's Keep, Merge and Dismiss: the card shows it with its own Undo, once it
@@ -7237,6 +7241,7 @@ async function myFocusWrite(bodies, text, undo, record = true) {
           undo: saved.applied && undo ? { bodies: undo.bodies, text: undo.text ?? t('my_focus_undone', { text: said }) } : null };
       }
       message = record || saved.applied ? said : t('my_focus_pending');
+      if (saved.unread) message = t('my_work_saved_unread');
     }
     // The page's live region says it: the change bar is drawn anew with each redraw, too late to
     // be read out. Held, it outlasts the redraw that clears the status.
@@ -7717,7 +7722,7 @@ function myWorkSuggestion(row) {
   const s = row.suggestion;
   if (!s) return null;
   const button = (action, key) => {
-    const b = el('button', 'quiet small', t(key));
+    const b = el('button', 'quiet small my-work-answer', t(key));
     b.type = 'button';
     b.dataset.action = `my-work.suggestion.${action}`;
     b.setAttribute('aria-label', `${t(key)}: ${s.title}`);
@@ -7729,34 +7734,44 @@ function myWorkSuggestion(row) {
     el('div', 'actions', button('join', 'my_work_suggestion_join'), button('not-this', 'my_work_suggestion_not_this')));
 }
 
-// J4: the owner's answer, then My Work read again. A request page left by a Join shows the request
-// it joined, whose id stays.
+// J4: the owner's answer, then My Work read again and drawn once (#775). Only the answers' buttons
+// wait, as a review's do, since drawing clears the status line; a save the server took stays said
+// as taken when the read after it fails (#602). A Join names, and from the request's page shows,
+// the request the conversation is in as the read after it has it.
 async function myWorkAnswer(row, action) {
   if (mw.answering) return;
   mw.answering = true;
-  myWorkDraw();
-  let message = null;
-  let failed = false;
+  for (const button of $('panel').querySelectorAll('.my-work-answer')) button.disabled = true;
+  let message = t('memory_result_unknown');
+  let failed = true;
+  let applied = false;
   try {
     const { res, answer } = await memoryWrite('my-work/suggestion', { request: row.id, action });
-    if (!res.ok) {
-      failed = true;
-      message = memoryFailure(res, answer);
-    } else if (answer.state !== 'applied') {
-      message = t('my_focus_pending');
-    } else {
-      if (action === 'join' && mw.request === row.id) mw.request = row.suggestion.id;
-      message = action === 'join' ? t('my_work_suggestion_joined', { title: row.suggestion.title }) : t('my_work_suggestion_declined');
+    if (!res.ok) message = memoryFailure(res, answer);
+    else {
+      failed = false;
+      applied = answer.state === 'applied';
+      if (!applied) message = t('my_focus_pending');
     }
+    await myWorkReread().catch(() => {
+      applied = false;
+      if (res.ok) message = t('my_work_saved_unread');
+    });
   } catch {
-    failed = true;
-    message = t('memory_result_unknown');
+    // Not saved, as far as the page knows; nothing changed.
   } finally {
     mw.answering = false;
-    mw.signature = '';
-    if (view === 'my_work') await show();
-    if (message && view === 'my_work') setStatus(message, failed, lang, 8000);
   }
+  if (view !== 'my_work') return;
+  if (applied) {
+    const session = row.sessions?.[0]?.id;
+    const now = (mw.rows || []).find((r) => r.sessions?.some((s) => s.id === session));
+    if (action === 'join' && mw.request === row.id && now) mw.request = now.id;
+    message = action === 'join' ? t('my_work_suggestion_joined', { title: now?.title ?? row.suggestion.title }) : t('my_work_suggestion_declined');
+  }
+  mw.signature = '';
+  myWorkDraw('current');
+  setStatus(message, failed, lang, 8000);
 }
 
 // `request-views.js` `requestList`.

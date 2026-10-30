@@ -380,6 +380,18 @@ fn key((agent, session): &Key) -> Value {
     json!([agent, session])
 }
 
+/// Whether the my_work consumer has applied every op this device recorded, within
+/// `claims::applied`'s wait.
+fn caught_up(home: &Path) -> Result<bool> {
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(true);
+    };
+    let device = raw.device().to_owned();
+    let top = raw.max_op_seq_of(&device)?;
+    drop(raw);
+    Ok(crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")).is_ok())
+}
+
 /// J4's answer as the page posts it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -409,6 +421,11 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unavailable = |_| refused(503, "my_work_unavailable", "");
+    // #775: what this device recorded before, an earlier answer among it, applied first, so that
+    // this answer is resolved against it; still pending after the wait, it is refused.
+    if !caught_up(home).map_err(unavailable)? {
+        return Err(refused(409, "my_work_pending", ""));
+    }
     let not_found = || refused(404, "suggestion_not_found", "request");
     let held = crate::my_work_focus::held_of(home, &posted.request)
         .map_err(unavailable)?
@@ -1522,5 +1539,84 @@ mod tests {
             };
             assert_eq!(groups.of.get(&key("s2")), anchor.as_ref(), "{answer:?}");
         }
+    }
+
+    /// #775 (an_inflight_grouping_answer_cannot_undo_the_owners_join): a model's decision kept
+    /// after the owner's Join, asked before it, moves none of the conversations the owner placed.
+    /// One led by the conversation the owner moved continues the request it is in now, without
+    /// renaming it; one that lists it among others leaves it, and so does one that leaves it out.
+    #[test]
+    fn an_inflight_grouping_answer_cannot_undo_the_owners_join() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        h.answer_on("s2", "join").unwrap();
+        h.said("s3", 10, "The trailing comma again.");
+        h.grouped(&["s2", "s3"], "Stale");
+        h.said("s4", 12, "Check the commas.");
+        h.grouped(&["s4", "s2"], "Other");
+        h.ignored("s2");
+        let parser = h.request_of("s1");
+        assert_eq!(parser["title"], "Parser");
+        // The request the owner joined it to is no conversation the owner moved: continued, it
+        // takes the model's title as before.
+        h.said("s5", 14, "All of the parser.");
+        h.grouped(&["s1", "s5"], "Parser, all of it");
+        assert_eq!(h.request_of("s5")["title"], "Parser, all of it");
+        let parser = h.request_of("s1");
+        for s in ["s2", "s3"] {
+            assert_eq!(h.request_of(s)["id"], parser["id"], "{s}");
+        }
+        assert_eq!(h.request_of("s4")["title"], "Other");
+    }
+
+    /// #775 (pending_owner_joins_preserve_the_current_destination): an answer posted while an
+    /// earlier one waits to be applied is resolved after it. s3 suggested to s2's request, and s2's
+    /// Join into s1 recorded but not yet applied: s3's Join lands in s1, and s2 stays there.
+    #[test]
+    fn pending_owner_joins_preserve_the_current_destination() {
+        let mut h = Home::new();
+        let _first = suggested(&mut h);
+        h.said("s3", 10, "The trailing comma, once more.");
+        let _second = stub(vec![picked("r1", 0.9), checked(0.6)]);
+        h.pass(true, &|_| panic!("the chain is not asked"));
+        let (s2, s3) = (h.request_of("s2"), h.request_of("s3"));
+        assert_eq!(
+            s3["suggestion"]["id"], s2["id"],
+            "s3 suggested to s2's request"
+        );
+        let joined = json!({"conversation": ["claude", "s2"], "action": "join", "groups":
+            [{"conversations": [["claude", "s1"], ["claude", "s2"]], "title": null, "links": []}]});
+        let op = MyWorkOp {
+            job: NAME.into(),
+            about: R.into(),
+            entry: String::new(),
+            ts: crate::db::now_ms(),
+            read: Read::default(),
+            removed: vec![],
+            fields: serde_json::from_value(joined).unwrap(),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.post(json!({"request": s3["id"], "action": "join"}))
+            .unwrap();
+        let parser = h.request_of("s1");
+        for s in ["s2", "s3"] {
+            assert_eq!(h.request_of(s)["id"], parser["id"], "{s}");
+        }
+    }
+
+    /// #775: an exclusion of the repository while an answer stands hides its requests, and taken
+    /// back, the answer is as it was: the owner's op read nothing, so no exclusion hides it.
+    #[test]
+    fn an_exclusion_hides_the_answered_requests_and_leaves_the_answer() {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        h.answer_on("s2", "join").unwrap();
+        h.s.raw.exclude(R, false).unwrap();
+        assert!(h.page().is_empty(), "{:?}", h.page());
+        h.s.raw.exclude(R, true).unwrap();
+        assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
     }
 }
