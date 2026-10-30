@@ -3807,6 +3807,40 @@ pub(crate) mod tests {
         assert!(note.contains("10 record(s) and 2 op(s)"), "{note}");
     }
 
+    /// #775: the owner's answer to a judge's suggestion (J4) is an op as any other: a restore
+    /// brings it back as it was.
+    #[test]
+    fn the_owners_answer_to_a_suggestion_survives_a_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 10);
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        let fields = serde_json::json!({"conversation": ["claude", "s2"], "action": "join",
+            "groups": [{"conversations": [["claude", "s1"], ["claude", "s2"]], "title": null,
+                "links": []}]});
+        let answer = crate::my_work_ops::MyWorkOp {
+            job: "judge".into(),
+            about: "github.com/o/r".into(),
+            entry: String::new(),
+            ts: 1,
+            read: crate::my_work_ops::Read::default(),
+            removed: vec![],
+            fields: serde_json::from_value(fields).unwrap(),
+            skipped: false,
+            forgotten: None,
+        };
+        let answer = serde_json::to_value(answer).unwrap();
+        raw.append_ops(&[(raw::OpKind::MyWork, answer)]).unwrap();
+        let before = raw.ops_after(&dev, 0, 100).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(restored.ops_after(&dev, 0, 100).unwrap(), before);
+    }
+
     /// docs/work-state.md L4: work state is in the op log, so a restore brings it back as it was.
     #[test]
     fn work_state_survives_a_backup_and_restore() {

@@ -108,6 +108,11 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
     })?;
     // S6: the ops left out while an exclusion stands, any job's (`my_work_ops::hidden`).
     let hidden = crate::my_work_ops::hidden(raw, k, reading)?;
+    // #775: the conversations the owner placed (J4). A model's later decision, asked before the
+    // owner answered and kept after, moves none of them; one that continues a request whose
+    // anchor the owner moved continues the request that anchor is in now. An owner's placement
+    // outranks the router's in My Focus the same way.
+    let mut placed: HashSet<Key> = HashSet::new();
     for row in rows {
         let (device, ts, repo, read, fields, skipped, forgotten, op_seq, job) = row?;
         if hidden.contains(&(device.clone(), op_seq)) {
@@ -127,6 +132,7 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             continue;
         }
         let fields: BTreeMap<String, Value> = serde_json::from_str(&fields)?;
+        let owners = judged && fields.contains_key("action");
         if judged && let Some(c) = fields.get("conversation").and_then(key) {
             // Only a decision of outcome `suggested` has one (J3).
             let picked = fields.get("suggestion").and_then(|s| key(&s["request"]));
@@ -138,12 +144,22 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
         }
         for g in items(&fields, "groups") {
             let members = keys(&g["conversations"]);
-            let Some(anchor) = members.first().cloned() else {
+            let Some(first) = members.first() else {
                 continue;
             };
-            for m in &members {
+            // Led by a conversation the owner moved into another request, a Not this's staying put.
+            let moved = (!owners && placed.contains(first))
+                .then(|| out.of.get(first).filter(|now| *now != first).cloned())
+                .flatten();
+            let anchor = moved.clone().unwrap_or_else(|| first.clone());
+            for m in members.iter().filter(|m| owners || !placed.contains(*m)) {
                 out.of.insert(m.clone(), anchor.clone());
                 out.ignored.remove(m);
+            }
+            if owners {
+                // A Join's first is the request it joins, which the owner did not move.
+                let join = fields.get("action").and_then(Value::as_str) == Some("join");
+                placed.extend(members.iter().skip(usize::from(join)).cloned());
             }
             let group = out.groups.entry(anchor).or_insert_with(|| Group {
                 repo: repo.clone(),
@@ -153,7 +169,11 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
                 ops: BTreeSet::new(),
             });
             group.ops.insert((device.clone(), op_seq));
-            if let Some(title) = g["title"].as_str().filter(|t| !t.is_empty()) {
+            // A title for the request it meant does not rename the one it continues now.
+            if let Some(title) = g["title"]
+                .as_str()
+                .filter(|t| !t.is_empty() && moved.is_none())
+            {
                 group.title = Some(title.to_owned());
             }
             for link in g["links"].as_array().into_iter().flatten() {
@@ -162,7 +182,7 @@ pub(crate) fn groups(raw: &Raw, k: &Connection, reading: &Reading) -> Result<Gro
             }
         }
         for i in items(&fields, "ignored") {
-            if let Some(key) = key(&i["conversation"]) {
+            if let Some(key) = key(&i["conversation"]).filter(|k| owners || !placed.contains(k)) {
                 out.of.remove(&key);
                 out.ignored
                     .insert(key, i["reason"].as_str().map(str::to_owned));

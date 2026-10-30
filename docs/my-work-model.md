@@ -724,8 +724,9 @@ op was shown, or an op it read: a turn or window op taken in the same pass, or a
 `my_work` op. Ops are judged in op order, so an update built on a taken op is taken too. Taken, an
 op keeps its job and key, its fields blanked and a `forgotten` mark, as a turn op is, and the job
 is due again. The backups are rewritten by the same rule. An op that lists no `read` is never
-taken by this rule, as `Judge::turn` passes over a turn op without `from`; so every job but
-`rule` must list it.
+taken by this rule, as `Judge::turn` passes over a turn op without `from`; so every op a model's
+answer made must list it. An owner's op reads nothing: an action on a rule suggestion (job
+`rule`), on My Focus (job `focus`) or on the judge's suggestion (job `judge`, J4).
 
 S6. **Exclusion, rescans, retention.** While an exclusion stands, every `my_work` op that read a
 record of the excluded session or repository is hidden, and so is every op built on one, followed
@@ -2038,7 +2039,22 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   either again (`asked`).
 - **A forget** (S5) that takes what the judge read takes its op and so the suggestion: the
   conversation is undecided again, and the judge may ask about it again. The owner's answer read
-  nothing, so the same forget leaves it as it was.
+  nothing, so the same forget leaves it as it was, and so does an exclusion (S6) of its
+  repository, which hides its requests while it stands.
+- **The owner's answer stands** (#775): a model's decision kept after it, asked before it (a
+  judge's or a grouping call whose answer arrived later), moves none of the conversations the
+  owner placed. One that continues a request whose anchor the owner moved into another continues
+  the request that anchor is in now, without renaming it, as an owner's placement outranks the
+  router's in My Focus; a Not this leaves its anchor where it is, so continuing it titles it as
+  before. The route applies what this device recorded before resolving an answer, so that an
+  answer posted while an earlier one waits is resolved after it; still waiting after 10 seconds,
+  it is refused (409 `my_work_pending`).
+- **The page after an answer** (#775): only the answers' buttons wait, and My Work is read again
+  and drawn once. A Join names, and from the request's page shows, the request the conversation
+  is in as that read has it; in none it read, it is said as saved and the page goes back to the
+  list. A read that fails leaves what was saved said as saved, the buttons usable again, as a
+  review's does (#602), and My Focus's actions now do the same, an applied change keeping its
+  Undo.
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).
