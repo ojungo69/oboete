@@ -1,5 +1,5 @@
-/* DESIGN.md: the tokens, the radius scale and the layers. The arrangement is claude-mem's viewer;
-   the colors are Notion's, darker where WCAG AA asks for it. */
+/* The tokens, the radius scale and the layers are set out in DESIGN.md. The arrangement is
+   claude-mem's viewer; the colors are Notion's, darker where WCAG AA asks for it. */
 :root {
   color-scheme: light dark;
   --bg: #ffffff;
@@ -938,7 +938,9 @@ button.my-work-open:focus-visible { outline: none; }
 .my-work-next { min-width: 0; flex: 1 1 14rem; }
 .my-work-next-label { font-weight: 600; color: var(--text); }
 .my-work-open-label { color: var(--accent); font-weight: 600; white-space: nowrap; }
-.badge.my-work-badge { display: inline-flex; gap: 4px; align-items: center; }
+/* My Work keeps its own status words until its restyle: the sans face, first letter raised. */
+.badge.my-work-badge { display: inline-flex; gap: 4px; align-items: center; padding: 0 8px; font: 600 12px/20px var(--sans); letter-spacing: 0.01em; text-transform: none; }
+.badge.my-work-badge::first-letter { text-transform: uppercase; }
 .badge.my-work-needs { background: var(--red-bg); color: var(--red); }
 .badge.my-work-blocked { background: var(--yellow-bg); color: var(--yellow); }
 .badge.my-work-ready, .badge.my-work-checked { background: var(--green-bg); color: var(--green); }
@@ -1130,10 +1132,6 @@ span.my-focus-chip { font-style: italic; text-decoration: none; cursor: default;
   .my-work-table td { padding: 4px 0; border: 0; }
   .my-work-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; font-weight: 600; }
 }
-
-/* My Work keeps its own status words until its restyle: the sans face, first letter raised. */
-.badge.my-work-badge { padding: 0 8px; font: 600 12px/20px var(--sans); letter-spacing: 0.01em; text-transform: none; }
-.badge.my-work-badge::first-letter { text-transform: uppercase; }
 
 @media (max-width: 768px) {
   .feed-card { padding: 18px 20px 16px; }
