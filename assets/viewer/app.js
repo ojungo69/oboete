@@ -188,7 +188,7 @@ async function claimPanel(uid, existing = null) {
     ? el('li', null, word('p', 'text pending', 'quote_expired'), el('span', 'meta', q.key))
     : el('li', null, el('p', 'text', q.text), fullText(q.key, q.key))));
   const history = c.history.map((change) => el('li', null,
-    el('div', 'meta', localTime(change.ts),
+    el('div', 'meta', localTime(change.ts, lang),
       change.tier === null && change.recipe === null ? word('span', null, 'owner_correction') : null,
       change.tier === null ? null : word('span', null, 'tier', { tier: change.tier }),
       change.recipe === null ? null : word('span', null, 'recipe', { recipe: change.recipe }),
@@ -197,7 +197,7 @@ async function claimPanel(uid, existing = null) {
     change.body === null ? word('p', 'text pending', 'text_unchanged') : el('p', 'text', change.body)));
   const loaded = el('section', 'detail claim-view',
     word('h3', null, 'claim_title', { uid: c.uid }),
-    el('div', 'meta', badge(c.kind, true), badge(c.status, true), badge(c.label, true), localTime(c.when)),
+    el('div', 'meta', badge(c.kind, true), badge(c.status, true), badge(c.label, true), localTime(c.when, lang)),
     el('dl', 'claim-meta', ...row('delivered', t(c.delivered ? 'yes' : 'no')),
       ...row('speaker', metadata(c.speaker)), ...row('scope', metadata(c.scope)), ...row('repository', c.repo ?? '–')),
     el('p', 'text', c.text),
@@ -280,7 +280,7 @@ function claimOwnerControls(c, panel) {
 
 function entryMeta(d, all) {
   return el('div', 'meta', badge(d.class, true), d.label ? badge(d.label, true) : null,
-    badge(d.kind, true), d.status ? badge(d.status, true) : null, localTime(d.when),
+    badge(d.kind, true), d.status ? badge(d.status, true) : null, localTime(d.when, lang),
     all ? el('span', null, d.repo ?? '–') : null, el('span', null, d.key));
 }
 
@@ -336,6 +336,10 @@ function setView(name) {
 function draw(heading, list, panel) {
   $('heading').removeAttribute('lang');
   $('heading').replaceChildren(...(Array.isArray(heading) ? heading : [heading]));
+  // What the view holds, under its heading as claude-mem's page heads say; not on a session's page.
+  const lede = `lede_${view}`;
+  $('lede').textContent = Object.hasOwn(TEXT, lede) && !(view === 'sessions' && ses.open) ? t(lede) : '';
+  $('lede').hidden = !$('lede').textContent;
   $('list').replaceChildren(...present(list));
   $('list').classList.toggle('feed', view === 'timeline');
   $('panel').replaceChildren(...present(panel));
@@ -1009,6 +1013,12 @@ const TEXT = {
   simple_agent_partial: ['Check the connection', '接続の確認が必要です'],
   simple_agent_connect: ['Connection settings for {name}', '{name} の接続設定'],
   timeline: ['Timeline', 'タイムライン'],
+  lede_timeline: ['Cards, session summaries and prompts from your agents\' work, newest first.',
+    'エージェントの作業から残ったカード・会話の要約・プロンプトを、新しい順に並べています。'],
+  lede_sessions: ['Each conversation with an agent, with what was recorded in it.',
+    'エージェントとの会話ごとに、その中で記録されたものをまとめています。'],
+  lede_records: ['Search the claims, imported history and raw records oboete keeps.',
+    'oboete が保存している主張・取り込んだ履歴・元の記録を探せます。'],
   sessions: ['Sessions', '会話'],
   back_to_sessions: ['← Back to sessions', '← 会話の一覧へ'],
   session_item: ['1 item', '1 件'],
@@ -6802,7 +6812,7 @@ function drawSettings() {
   }));
   const save = el('button', 'save', t('settings_save'));
   save.type = 'submit';
-  // The common settings first and open; the rest folded (docs/viewer-design.md). A new home opens
+  // The common settings first and open; the rest folded (DESIGN.md). A new home opens
   // its guide and the resident choice it is to save, and a waiting provider its group.
   const formEl = el('form', null,
     settingsGroup('start', f.firstRun, onboardingSection(f)),
