@@ -36,9 +36,9 @@ struct JudgeKey {
 
 /// The judge as the page shows it: `set` when `[judge]` is there, its switch, where it sends and the
 /// list it chooses from (each destination's key: `ok`, `missing`, or `none` for d1 on this PC, its
-/// price, and whether it stays on this PC), Cloudflare's account id, and the calls in the last 24
-/// hours and spend this month of the destination in use. A ledger that does not read gives no
-/// numbers (null), as the page's other totals.
+/// price, and whether it stays on this PC), Cloudflare's account id, the calls in the last 24 hours
+/// of the destination in use (as its cap counts them), and the judge's spend this month wherever it
+/// was sent. A ledger that does not read gives no numbers (null), as the page's other totals.
 pub(crate) fn section(
     judge: Option<&crate::config::Judge>,
     ledger: &anyhow::Result<Option<Connection>>,
@@ -123,7 +123,7 @@ fn save_key_with(
     let Some(field) = crate::judge::fixed(to).key.map(|key| key.field) else {
         return Err(refused(422, "no_key", "judge.key"));
     };
-    let cloudflare = matches!(to, Destination::Clef | Destination::ClefFlash);
+    let cloudflare = crate::judge::cloudflare(to);
     let account = match posted.account_id {
         Some(a) if cloudflare && crate::config::account_id(&a) => Some(a),
         _ if cloudflare => return Err(refused(422, "bad_account", "judge.account_id")),

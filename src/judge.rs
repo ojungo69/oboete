@@ -97,6 +97,12 @@ pub(crate) fn key_file(j: &config::Judge) -> Option<&std::path::Path> {
     key_file_of(j, j.destination)
 }
 
+/// Whether `d` is one of Cloudflare's: its address names the account, and its answer comes in an
+/// envelope.
+pub(crate) fn cloudflare(d: Destination) -> bool {
+    matches!(d, Destination::Clef | Destination::ClefFlash)
+}
+
 /// The model selector `j` sends.
 fn model(j: &config::Judge) -> &str {
     fixed(j.destination).model.unwrap_or(&j.model)
@@ -459,13 +465,12 @@ fn post(
 /// why not: `json`, or Cloudflare's `envelope`.
 fn answer_of(d: Destination, raw: &[u8]) -> std::result::Result<Value, &'static str> {
     let mut out: Value = serde_json::from_slice(raw).map_err(|_| "json")?;
-    match d {
-        Destination::Clef | Destination::ClefFlash => (out["success"] == true
-            && out["result"].is_object())
-        .then(|| out["result"].take())
-        .ok_or("envelope"),
-        _ => Ok(out),
+    if !cloudflare(d) {
+        return Ok(out);
     }
+    (out["success"] == true && out["result"].is_object())
+        .then(|| out["result"].take())
+        .ok_or("envelope")
 }
 
 #[cfg(test)]
