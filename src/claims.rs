@@ -618,6 +618,8 @@ pub(crate) fn applied(
         return Ok(());
     }
     crate::worker::run_once(home)?;
+    #[cfg(test)]
+    PASSED.set(Some(std::time::Instant::now()));
     while !done()? {
         if std::time::Instant::now() >= deadline {
             return Err(NotYet(format!(
@@ -647,6 +649,9 @@ impl std::error::Error for NotYet {}
 thread_local! {
     /// A test's wait in place of `applied`'s 10 seconds.
     pub(crate) static WAIT: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+    /// When `applied`'s pass ended, for a test of how long it waits after it (#782).
+    pub(crate) static PASSED: std::cell::Cell<Option<std::time::Instant>> =
         const { std::cell::Cell::new(None) };
 }
 
