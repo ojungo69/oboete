@@ -1396,6 +1396,32 @@ mod tests {
         assert!(bodies(&rx).is_empty(), "asked once");
     }
 
+    /// J7: the focus judge's pick names the destination that made it, as its op's entry and in its
+    /// evidence.
+    #[test]
+    fn the_focus_judge_s_pick_names_its_destination() {
+        let mut h = Home::new();
+        h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        let mut judge = h.judge();
+        judge.destination = crate::config::Destination::D1Local;
+        let config = h.s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, format!("{text}destination = \"d1-local\"\n")).unwrap();
+        let _rx = stub(vec![chose(AREA, 0.82)]);
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        assert!(
+            h.pass_with(Some(&judge), Box::new(Place::default()), &none)
+                .is_empty()
+        );
+        let judged = h.judged();
+        assert_eq!(judged[0].op.entry, "judge:d1-local");
+        assert_eq!(
+            judged[0].op.fields["evidence"],
+            "d1 on this PC: \"The parser\" over 1 kept focus area (p 0.82)."
+        );
+    }
+
     /// J5: with no kept area (a suggested one only), or with the judge off, nothing is asked and the
     /// placement's call shows no pick.
     #[test]

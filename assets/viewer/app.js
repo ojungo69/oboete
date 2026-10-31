@@ -4531,7 +4531,7 @@ function judgeDestination(f, j) {
   pick.dataset.field = 'judge.destination';
   pick.addEventListener('change', () => { j.to = pick.value; drawSettings(); });
   return el('label', 'field', el('span', null, t('judge_to')), pick,
-    note(t('saved_value', { value: judgeName(j.destination) })));
+    j.set ? note(t('saved_value', { value: judgeName(j.destination) })) : null);
 }
 
 // The chosen destination's key: whether it is there, and a field for a new one, posted with the

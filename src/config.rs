@@ -278,9 +278,9 @@ pub struct Judge {
 pub(crate) const JUDGE_PREFIX: &str = "judge:";
 
 /// Where the judges send (docs/my-work-model.md J7, decision 63): one of a list fixed in the code,
-/// each an address, a model and a price in `judge::fixed`.
+/// each an address, a model and a price in `judge::fixed`, read by its `id`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(try_from = "String")]
 pub enum Destination {
     /// Typesafe's Jev, the default until decision 34's single evaluation picks one.
     #[default]
@@ -303,7 +303,7 @@ impl Destination {
         Destination::D1Local,
     ];
 
-    /// Its name in `[judge] destination`, as serde reads it.
+    /// Its name in `[judge] destination` and on the settings page.
     pub(crate) fn id(self) -> &'static str {
         match self {
             Destination::Jev => "jev",
@@ -312,6 +312,15 @@ impl Destination {
             Destination::D1 => "d1",
             Destination::D1Local => "d1-local",
         }
+    }
+}
+
+impl TryFrom<String> for Destination {
+    type Error = &'static str;
+    fn try_from(id: String) -> std::result::Result<Self, Self::Error> {
+        (Destination::ALL.into_iter())
+            .find(|d| d.id() == id)
+            .ok_or("not one of the judge's destinations")
     }
 }
 

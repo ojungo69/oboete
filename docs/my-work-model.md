@@ -2149,14 +2149,17 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **The ledger**: each destination's own name, `judge:<destination>`, at its own price inside the
   month's paid cap; d1 on this PC is free and records no USD. The calls a day count the destination
   in use. Each decision op's `entry` is that name, and its evidence names the destination
-  ("Clef-flash: picked over …").
+  ("Clef-flash: picked over …"). The settings page shows the calls of the destination in use and the
+  judge's spend this month wherever it was sent.
 - **The settings page**: the list, each with its price or that it stays on this PC; the chosen one's
   note (where it is sent, what it needs) and its key: Typesafe's, Cloudflare's token with the account
   ID, Liquid's, none for d1 on this PC. A key saved (`POST /api/judge/key` with `destination` and,
   for Cloudflare, `account_id`) goes into its service's own field, chooses that destination and turns
-  the judge on. The page's save takes the destination; one chosen while the judge is on needs what it
-  sends with (`missing_key`). With no `[judge]`, d1 on this PC alone turns on, needing no key. Doctor
-  names the destination, d1 on this PC with its address.
+  the judge on. A key's state on the page is its file's; the account id shows in its own field. The
+  page's save takes the destination; turning the judge on, or choosing another destination while it
+  is on, needs what that destination sends with (`missing_key`), and a judge on and left as it is
+  stays as it was. With no `[judge]`, d1 on this PC alone turns on, needing no key. Doctor names the
+  destination, d1 on this PC with its address.
 - **Limits**:
   - Liquid's is built from its documentation and not called: no Liquid key was set. Its
     documentation says a `noul` question has no criteria, where Jev, Clef and Ollama take them, and
@@ -2166,6 +2169,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     19 large requests in Japanese can be one) is refused, left to grouping and not asked again.
   - With d1 on this PC chosen, whatever program listens at 127.0.0.1:11434 receives what the judge is
     shown; another user of the PC could hold that port while Ollama is down. The page says so.
+  - d1 on this PC answers within `[judge] timeout_s` (15 s unless set) or not at all: a question of
+    10,000 tokens and more on a CPU can take longer, and is then left to grouping. Ollama takes a
+    request of up to 64 KiB (each choice here has at most 20 options, within its 26).
   - The calls a day count the destination in use: switched the same day, the count starts again.
 - **#780**: one op builder (`my_work_judge::op_of`) for both judges; the focus judge's `next` in
   parts, each within Codacy's limits.

@@ -33,63 +33,73 @@ pub(crate) const ROLE: &str = "judge";
 const OUTPUT_BOUND: u32 = 256;
 
 /// What the code fixes of a destination (J7): its rows' name in the provider ledger, its name in
-/// evidence, doctor and the page, the model its address takes (Jev's is `[judge] model`), its USD
-/// a million input tokens (the answer is free), and the `[judge]` field naming its key's file,
-/// none for d1 on this PC.
+/// evidence, doctor and the page, the model its address takes (none for Jev, whose is `[judge]
+/// model`), its USD a million input tokens (the answer is free), and its key, none for d1 on this
+/// PC.
 pub(crate) struct Fixed {
     pub name: &'static str,
     pub label: &'static str,
-    model: &'static str,
+    model: Option<&'static str>,
     pub usd_per_mtok_in: f64,
-    pub key_field: Option<&'static str>,
+    pub key: Option<Key>,
+}
+
+/// A service's key: the `[judge]` field the settings page writes its file into, and the reading of
+/// that field, together so that the key written is the key sent.
+#[derive(Clone, Copy)]
+pub(crate) struct Key {
+    pub field: &'static str,
+    file: fn(&config::Judge) -> Option<&std::path::Path>,
 }
 
 pub(crate) fn fixed(d: Destination) -> Fixed {
-    let cloudflare = Some("cloudflare_key_file");
-    let (name, label, model, usd_per_mtok_in, key_field) = match d {
-        Destination::Jev => (NAME, "Jev", "jev-latest", 0.042, Some("key_file")),
-        Destination::Clef => ("judge:clef", "Clef", "clef", 0.24, cloudflare),
+    let typesafe = Key {
+        field: "key_file",
+        file: |j| j.key_file.as_deref(),
+    };
+    let cloudflare = Key {
+        field: "cloudflare_key_file",
+        file: |j| j.cloudflare_key_file.as_deref(),
+    };
+    let liquid = Key {
+        field: "liquid_key_file",
+        file: |j| j.liquid_key_file.as_deref(),
+    };
+    let (name, label, model, usd_per_mtok_in, key) = match d {
+        Destination::Jev => (NAME, "Jev", None, 0.042, Some(typesafe)),
+        Destination::Clef => ("judge:clef", "Clef", Some("clef"), 0.24, Some(cloudflare)),
         Destination::ClefFlash => (
             "judge:clef-flash",
             "Clef-flash",
-            "clef-flash",
+            Some("clef-flash"),
             0.038,
-            cloudflare,
+            Some(cloudflare),
         ),
-        Destination::D1 => (
-            "judge:d1",
-            "d1 (Liquid)",
-            "d1.1",
-            0.02,
-            Some("liquid_key_file"),
-        ),
-        Destination::D1Local => ("judge:d1-local", "d1 on this PC", "d1", 0.0, None),
+        Destination::D1 => ("judge:d1", "d1 (Liquid)", Some("d1.1"), 0.02, Some(liquid)),
+        Destination::D1Local => ("judge:d1-local", "d1 on this PC", Some("d1"), 0.0, None),
     };
     Fixed {
         name,
         label,
         model,
         usd_per_mtok_in,
-        key_field,
+        key,
     }
 }
 
-/// The file of the key `j`'s destination takes (`Fixed::key_field`); none for d1 on this PC.
+/// The file of the key destination `d` takes, as `j` names it; none for d1 on this PC.
+pub(crate) fn key_file_of(j: &config::Judge, d: Destination) -> Option<&std::path::Path> {
+    fixed(d).key.and_then(|key| (key.file)(j))
+}
+
+/// The file of the key `j`'s destination takes.
 pub(crate) fn key_file(j: &config::Judge) -> Option<&std::path::Path> {
-    match j.destination {
-        Destination::Jev => j.key_file.as_deref(),
-        Destination::Clef | Destination::ClefFlash => j.cloudflare_key_file.as_deref(),
-        Destination::D1 => j.liquid_key_file.as_deref(),
-        Destination::D1Local => None,
-    }
+    key_file_of(j, j.destination)
 }
 
 /// The model selector `j` sends.
 fn model(j: &config::Judge) -> &str {
-    match j.destination {
-        Destination::Jev => &j.model,
-        d => fixed(d).model,
-    }
+    fixed(j.destination).model.unwrap_or(&j.model)
 }
 
 #[cfg(test)]
@@ -298,7 +308,7 @@ fn missing(j: &config::Judge) -> Option<String> {
     if url(j).is_none() {
         return Some("no Cloudflare account id is set".to_owned());
     }
-    let field = fixed(j.destination).key_field?;
+    let field = fixed(j.destination).key?.field;
     match key_file(j) {
         None => Some(format!("no key is set ([judge] {field})")),
         Some(file) if config::read_key(file).is_err() => {
@@ -316,13 +326,13 @@ pub(crate) fn ready(j: &config::Judge) -> bool {
 /// The address `j` sends to, its destination's: Cloudflare's names the account, only when its id
 /// is 32 lowercase hex digits (`config::account_id`), so the host and the path stay the list's.
 pub(crate) fn url(j: &config::Judge) -> Option<String> {
-    let model = fixed(j.destination).model;
     match j.destination {
         Destination::Jev => Some(JEV.to_owned()),
         Destination::Clef | Destination::ClefFlash => {
             let account = (j.cloudflare_account_id.as_deref()).filter(|a| config::account_id(a))?;
             Some(format!(
-                "{CLOUDFLARE}{account}/ai/run/@cf/cloudflare/{model}"
+                "{CLOUDFLARE}{account}/ai/run/@cf/cloudflare/{}",
+                model(j)
             ))
         }
         Destination::D1 => Some(LIQUID.to_owned()),
@@ -334,7 +344,7 @@ pub(crate) fn url(j: &config::Judge) -> Option<String> {
 /// Cloudflare's account id, is missing or does not read, and nothing goes.
 fn target(j: &config::Judge) -> Option<(String, Option<String>)> {
     let url = url(j)?;
-    let key = match fixed(j.destination).key_field {
+    let key = match fixed(j.destination).key {
         Some(_) => Some(config::read_key(key_file(j)?).ok()?),
         None => None,
     };
@@ -441,19 +451,20 @@ fn post(
     if raw.len() as u64 > max {
         return Err(("shape", "too large".to_owned(), true));
     }
-    answer_of(j.destination, &raw).ok_or_else(|| ("shape", "envelope".to_owned(), true))
+    answer_of(j.destination, &raw).map_err(|detail| ("shape", detail.to_owned(), true))
 }
 
 /// The answer in `raw`, the body `d`'s address answered with: Cloudflare's from inside its
-/// envelope, when the envelope says it succeeded (its REST API's form, called 2026-10-31). JSON
-/// that does not parse is not one, nor is another envelope.
-fn answer_of(d: Destination, raw: &[u8]) -> Option<Value> {
-    let mut out: Value = serde_json::from_slice(raw).ok()?;
+/// envelope, when the envelope says it succeeded (its REST API's form, called 2026-10-31). Else
+/// why not: `json`, or Cloudflare's `envelope`.
+fn answer_of(d: Destination, raw: &[u8]) -> std::result::Result<Value, &'static str> {
+    let mut out: Value = serde_json::from_slice(raw).map_err(|_| "json")?;
     match d {
-        Destination::Clef | Destination::ClefFlash => {
-            (out["success"] == true && out["result"].is_object()).then(|| out["result"].take())
-        }
-        _ => Some(out),
+        Destination::Clef | Destination::ClefFlash => (out["success"] == true
+            && out["result"].is_object())
+        .then(|| out["result"].take())
+        .ok_or("envelope"),
+        _ => Ok(out),
     }
 }
 
@@ -995,6 +1006,16 @@ mod tests {
             let row = &kept[0];
             assert!(row.starts_with("judge:clef-flash judge c1 shape "), "{row}");
             assert!(row.contains("envelope"), "{row}");
+        }
+        // A body that is not JSON is `json`, from Cloudflare or any other.
+        for d in [config::Destination::ClefFlash, config::Destination::Jev] {
+            let mut h = home();
+            sending_to(&mut h, d);
+            let _rx = stub(vec![("200 OK", b"<html>busy</html>".to_vec())], "");
+            let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
+            assert_eq!(asked_, Asked::Skipped("shape"), "{d:?}");
+            let row = &ledger(&h.db)[0];
+            assert!(row.contains("json") && !row.contains("envelope"), "{row}");
         }
     }
 

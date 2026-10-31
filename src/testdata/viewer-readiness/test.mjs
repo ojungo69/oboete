@@ -1264,6 +1264,13 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert(text(judged()).includes('Saved: Jev (Typesafe)'),'the saved one noted');
     assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'clef-flash'},'the choice saves with the page');
     type(field('judge.account_id'),' 0123456789ABCDEF0123456789ABCDEF ');
+    // A test's numbers read again keep the destination chosen and the account typed.
+    settingsAnswer=Promise.resolve(json(settings({judge:on})));
+    answers=[json({outcome:'ok'})];
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
+    settingsAnswer=null;
+    assert.equal(pick().value,'clef-flash','the choice kept through a read');
+    assert.equal(field('judge.account_id').value,' 0123456789ABCDEF0123456789ABCDEF ','the account typed kept through a read');
     const k=field('judge.key');
     type(k,'cfut_0123456789abcdef_Synthetic');
     const chosen={...on,destination:'clef-flash',destinations:dests({jev:'ok',clef:'ok','clef-flash':'ok'}),
@@ -1278,6 +1285,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     // d1 on this PC: no key; with no `[judge]` yet it turns on with none.
     f=w4.formOf(settings({judge:judge()}));ctx.ui.setForm(f);ctx.ui.drawSettings();
     assert(!switchOf(),'no switch before a key');
+    assert(!text(judged()).includes('Saved:'),'nothing saved is said with no [judge]');
     choose('d1-local');
     assert(text(judged()).includes('127.0.0.1:11434')&&!field('judge.key'),'d1 on this PC: its address, and no key');
     change(switchOf(),true);

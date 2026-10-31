@@ -50,40 +50,36 @@ pub(crate) fn section(
             crate::providers_db::calls_in_a_day(db, name)
                 .ok()
                 .map(|(calls, _)| calls),
-            crate::providers_db::usd_this_month_of(db, name).ok(),
+            // The judge's spend, wherever it was sent.
+            (Destination::ALL.iter())
+                .try_fold(0.0, |sum, d| {
+                    let name = crate::judge::fixed(*d).name;
+                    crate::providers_db::usd_this_month_of(db, name).map(|usd| sum + usd)
+                })
+                .ok(),
         ),
         Ok(None) => (Some(0), Some(0.0)),
         Err(_) => (None, None),
     };
-    let key = |d: Destination| {
-        let fixed = crate::judge::fixed(d);
-        let ready = judge.is_some_and(|j| {
-            crate::judge::ready(&crate::config::Judge {
-                enabled: true,
-                destination: d,
-                ..j.clone()
-            })
-        });
-        match fixed.key_field {
-            None => "none",
-            Some(_) if ready => "ok",
-            Some(_) => "missing",
+    // A key's state is its file's; Cloudflare's account id has its own field on the page.
+    let key = |d: Destination| match (crate::judge::fixed(d).key, judge) {
+        (None, _) => "none",
+        (Some(_), Some(j))
+            if crate::judge::key_file_of(j, d)
+                .is_some_and(|f| crate::config::read_key(f).is_ok()) =>
+        {
+            "ok"
         }
+        (Some(_), _) => "missing",
     };
     let destinations: Vec<Value> = (Destination::ALL.iter())
         .map(|&d| {
             let fixed = crate::judge::fixed(d);
             json!({"id": d.id(), "key": key(d), "usd_per_mtok_in": fixed.usd_per_mtok_in,
-                "local": fixed.key_field.is_none()})
+                "local": fixed.key.is_none()})
         })
         .collect();
-    let key_file = judge.and_then(|j| {
-        let in_use = crate::config::Judge {
-            destination: to,
-            ..j.clone()
-        };
-        crate::judge::key_file(&in_use).map(|f| f.display().to_string())
-    });
+    let key_file = (judge.and_then(crate::judge::key_file)).map(|f| f.display().to_string());
     json!({
         "set": judge.is_some(),
         "enabled": judge.is_some_and(|j| j.enabled),
@@ -124,7 +120,7 @@ fn save_key_with(
     let posted: JudgeKey =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     let to = posted.destination;
-    let Some(field) = crate::judge::fixed(to).key_field else {
+    let Some(field) = crate::judge::fixed(to).key.map(|key| key.field) else {
         return Err(refused(422, "no_key", "judge.key"));
     };
     let cloudflare = matches!(to, Destination::Clef | Destination::ClefFlash);
@@ -391,6 +387,7 @@ mod tests {
             daily_budget: 300,
         };
         let shown = section(Some(&judge), &Ok(Some(db)));
+        // The calls are the destination's in use, as the cap counts them; the spend is the judge's.
         assert_eq!(
             (
                 &shown["destination"],
@@ -398,8 +395,17 @@ mod tests {
                 &shown["usd_this_month"],
                 &shown["key"]
             ),
-            (&json!("clef-flash"), &json!(1), &json!(0.5), &json!("ok"))
+            (&json!("clef-flash"), &json!(1), &json!(0.75), &json!("ok"))
         );
+        // A key's state is its file's: Cloudflare's token is there without the account id too,
+        // which the page shows in its own field.
+        let no_account = crate::config::Judge {
+            cloudflare_account_id: None,
+            ..judge.clone()
+        };
+        let shown_ = section(Some(&no_account), &Ok(None));
+        assert_eq!(shown_["destinations"][2]["key"], "ok");
+        assert_eq!(shown_["cloudflare_account_id"], Value::Null);
         assert_eq!(shown["cloudflare_account_id"], ACCOUNT);
         let list = shown["destinations"].as_array().unwrap();
         let of = |key: &str| list.iter().map(|d| d[key].clone()).collect::<Vec<_>>();

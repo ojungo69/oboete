@@ -611,54 +611,81 @@ struct JudgeIn {
     destination: Option<config::Destination>,
 }
 
-/// `[judge]` as the page saves it (J1, J7). `[judge]` needs a key file, so a key is set first
-/// (`judge::save_key`), except for d1 on this PC, which needs none: turned on, it writes the table.
-/// A destination chosen while the judge is on needs what it sends with.
+/// `[judge]` as the page saves it (J1, J7).
 fn judge_in(
     doc: &mut toml_edit::DocumentMut,
     j: &JudgeIn,
     saved: Option<&config::Judge>,
 ) -> Result<(), Refusal> {
-    let budget = |doc: &mut toml_edit::DocumentMut, n: u32| {
-        if !calls_cap(n, &BUDGET) {
-            return Err(refused(422, "range", "judge.daily_budget"));
-        }
-        put(doc, "judge", "daily_budget", i64::from(n).into());
-        Ok(())
-    };
     let Some(saved) = saved else {
-        match (j.enabled, j.destination) {
-            (true, Some(config::Destination::D1Local)) => {}
-            (true, _) => return Err(refused(422, "missing_key", "judge.enabled")),
-            _ if j.daily_budget.is_some() => {
-                return Err(refused(422, "missing_key", "judge.daily_budget"));
-            }
-            _ => return Ok(()),
-        }
-        if let Some(n) = j.daily_budget {
-            budget(doc, n)?;
-        }
-        put(doc, "judge", "destination", "d1-local".into());
-        put(doc, "judge", "enabled", true.into());
-        return Ok(());
+        return judge_table_in(doc, j);
     };
     if let Some(n) = j.daily_budget.filter(|n| *n != saved.daily_budget) {
-        budget(doc, n)?;
+        judge_budget_in(doc, n)?;
     }
-    if let Some(to) = j.destination.filter(|d| *d != saved.destination) {
-        let chosen = config::Judge {
-            enabled: true,
-            destination: to,
-            ..saved.clone()
-        };
-        if j.enabled && !crate::judge::ready(&chosen) {
-            return Err(refused(422, "missing_key", "judge.destination"));
-        }
+    let to = j.destination.unwrap_or(saved.destination);
+    if let Some(refusal) = judge_on_refused(j, saved, to) {
+        return Err(refusal);
+    }
+    let switching = to != saved.destination;
+    if switching {
         put(doc, "judge", "destination", to.id().into());
     }
     if saved.enabled != j.enabled {
         put(doc, "judge", "enabled", j.enabled.into());
     }
+    Ok(())
+}
+
+/// The refusal of a judge turned on, or sent to `to` while on, without what that destination sends
+/// with (J7): its key, and Cloudflare's account id. One on and left as it is stays as it was.
+fn judge_on_refused(
+    j: &JudgeIn,
+    saved: &config::Judge,
+    to: config::Destination,
+) -> Option<Refusal> {
+    let switching = to != saved.destination;
+    let chosen = config::Judge {
+        enabled: true,
+        destination: to,
+        ..saved.clone()
+    };
+    if !j.enabled || !(switching || !saved.enabled) || crate::judge::ready(&chosen) {
+        return None;
+    }
+    let field = if switching {
+        "judge.destination"
+    } else {
+        "judge.enabled"
+    };
+    Some(refused(422, "missing_key", field))
+}
+
+/// With no `[judge]`, a key is set first (`judge::save_key`), except for d1 on this PC, which needs
+/// none: turned on, it writes the table, `enabled` with it.
+fn judge_table_in(doc: &mut toml_edit::DocumentMut, j: &JudgeIn) -> Result<(), Refusal> {
+    match (j.enabled, j.destination) {
+        (true, Some(config::Destination::D1Local)) => {}
+        (true, _) => return Err(refused(422, "missing_key", "judge.enabled")),
+        _ if j.daily_budget.is_some() => {
+            return Err(refused(422, "missing_key", "judge.daily_budget"));
+        }
+        _ => return Ok(()),
+    }
+    if let Some(n) = j.daily_budget {
+        judge_budget_in(doc, n)?;
+    }
+    put(doc, "judge", "destination", "d1-local".into());
+    put(doc, "judge", "enabled", true.into());
+    Ok(())
+}
+
+/// `[judge] daily_budget`: one in the page's range, or no cap (decision 64).
+fn judge_budget_in(doc: &mut toml_edit::DocumentMut, n: u32) -> Result<(), Refusal> {
+    if !calls_cap(n, &BUDGET) {
+        return Err(refused(422, "range", "judge.daily_budget"));
+    }
+    put(doc, "judge", "daily_budget", i64::from(n).into());
     Ok(())
 }
 
@@ -3499,6 +3526,18 @@ mod tests {
         assert_eq!(destination(&home), ("jev", true));
         let r = choose(&home, true, "clef-omni").unwrap_err();
         assert_eq!((r.status, r.code), (422, "type"));
+        // One saved while off, with no key, is not turned on by the switch alone either; one on
+        // stays on as it was.
+        choose(&home, false, "clef-flash").unwrap();
+        let text = file(&home).unwrap();
+        let shown = show(home.path());
+        let on = |v: &mut Value| v["judge"] = json!({"enabled": true});
+        let r = save_to(&home, &posted(&shown, on)).unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "missing_key", "judge.enabled")
+        );
+        assert_eq!(file(&home).as_deref(), Some(text.as_str()));
         // With no `[judge]`, d1 on this PC alone writes it, on.
         let home = home_with(Some("providers = []\n"));
         let r = choose(&home, true, "jev").unwrap_err();
