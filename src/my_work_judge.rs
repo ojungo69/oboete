@@ -89,32 +89,9 @@ pub(crate) fn request(
         .collect();
     let mut shown = Shown::default();
     shown.spans.insert(*opening);
-    let op_of = |shown: Shown, entry: &str, fields: Vec<(&str, Value)>| -> Result<MyWorkOp> {
-        let mut fields: BTreeMap<String, Value> = (fields.into_iter())
-            .map(|(name, v)| (name.to_owned(), v))
-            .collect();
-        fields.insert("conversation".into(), key(&c.key));
-        let top = s.raw.max_seq_of(device)?;
-        let mut removed = Vec::new();
-        for &seq in &shown.spans {
-            removed.extend(s.raw.removed_in(device, seq, seq, Some(top))?);
-        }
-        removed.sort();
-        removed.dedup();
-        Ok(MyWorkOp {
-            job: NAME.into(),
-            about: repo.clone(),
-            entry: entry.into(),
-            ts: crate::db::now_ms(),
-            read: Read {
-                spans: shown.spans.iter().map(|&seq| (seq, seq)).collect(),
-                ops: shown.ops.into_iter().collect(),
-            },
-            removed,
-            fields,
-            skipped: false,
-            forgotten: None,
-        })
+    let decision = |shown: Shown, entry: &str, mut fields: Vec<(&str, Value)>| {
+        fields.push(("conversation", key(&c.key)));
+        op_of(s, (NAME, repo, entry), &shown, fields)
     };
     // Too big for an op's cap, a decision would be kept as a skip that names no conversation, and
     // the judge would ask for it again each round: it is left to grouping instead.
@@ -123,7 +100,7 @@ pub(crate) fn request(
             spans: BTreeSet::from([*opening]),
             ops: BTreeSet::new(),
         };
-        op_of(
+        decision(
             shown,
             crate::judge::NAME,
             vec![("outcome", json!("too_big"))],
@@ -131,7 +108,7 @@ pub(crate) fn request(
     };
     let decided =
         |shown: Shown, entry: &str, fields: Vec<(&str, Value)>| -> Result<Vec<MyWorkOp>> {
-            let op = op_of(shown, entry, fields)?;
+            let op = decision(shown, entry, fields)?;
             Ok(vec![if fits(&op)? { op } else { too_big()? }])
         };
     let own = || json!([{"conversations": [key(&c.key)], "title": null, "links": []}]);
@@ -250,7 +227,7 @@ pub(crate) fn request(
         ("groups", joined(ranked[0].0, "judge", evidence(1.0, 1.0))),
         ("suggestion", json!({"request": key(&c.key), "score": 1.0})),
     ];
-    if !fits(&op_of(shown.clone(), crate::judge::NAME, largest)?)? {
+    if !fits(&decision(shown.clone(), crate::judge::NAME, largest)?)? {
         return Ok(vec![too_big()?]);
     }
     let span = format!("{NAME} {repo}");
@@ -347,6 +324,41 @@ pub(crate) fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
     }
     let started = (c.ask.as_ref()).map(|a| crate::db::utc(a.2)[..16].replacen(' ', "T", 1));
     json!({"worktree": c.repo, "started": started, "asks": asks, "agent_recorded": recorded})
+}
+
+/// A judge's op (S1, S2) of `job` about `about`, decided by `entry`: its fields, the last of a
+/// name winning, what it was shown of this device's records and ops, and the records removed since
+/// in the spans it read. Both judges build theirs with it (#780).
+pub(crate) fn op_of(
+    s: &Stores,
+    (job, about, entry): (&str, &str, &str),
+    shown: &Shown,
+    fields: Vec<(&str, Value)>,
+) -> Result<MyWorkOp> {
+    let device = s.raw.device();
+    let top = s.raw.max_seq_of(device)?;
+    let mut removed = Vec::new();
+    for &seq in &shown.spans {
+        removed.extend(s.raw.removed_in(device, seq, seq, Some(top))?);
+    }
+    removed.sort();
+    removed.dedup();
+    Ok(MyWorkOp {
+        job: job.into(),
+        about: about.to_owned(),
+        entry: entry.into(),
+        ts: crate::db::now_ms(),
+        read: Read {
+            spans: shown.spans.iter().map(|&seq| (seq, seq)).collect(),
+            ops: shown.ops.iter().copied().collect(),
+        },
+        removed,
+        fields: (fields.into_iter())
+            .map(|(name, v)| (name.to_owned(), v))
+            .collect(),
+        skipped: false,
+        forgotten: None,
+    })
 }
 
 /// Whether `op` stays whole within an op's cap, its removals aside (`raw::fitted` drops those
