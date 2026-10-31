@@ -500,10 +500,7 @@ impl<'a> Runner<'a> {
         (reading, held): (&crate::curate::Reading, &BTreeSet<(String, String)>),
         now: i64,
     ) -> Result<Option<Phase>> {
-        let Some((judge, cap)) = self
-            .judge
-            .filter(|(j, _)| j.enabled && crate::config::read_key(&j.key_file).is_ok())
-        else {
+        let Some((judge, cap)) = self.judge.filter(|(j, _)| crate::judge::ready(j)) else {
             return Ok(None);
         };
         let rules = self.rules;
@@ -531,9 +528,10 @@ impl<'a> Runner<'a> {
                 let mut ask = |ask: crate::judge::Ask<'_>| {
                     crate::judge::ask(db, raw, rules, (judge, cap), ask, &gate)
                 };
+                let at = crate::judge::fixed(judge.destination);
                 let mut judging = Judging {
-                    entry: crate::judge::NAME,
-                    label: "Jev",
+                    entry: at.name,
+                    label: at.label,
                     ask: &mut ask,
                 };
                 job.judged(&stores, &mut judging, now)

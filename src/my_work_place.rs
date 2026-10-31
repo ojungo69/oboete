@@ -934,7 +934,11 @@ mod tests {
             crate::judge::AT.set(Some("http://127.0.0.1:9".into()));
             crate::config::Judge {
                 enabled: true,
-                key_file,
+                destination: crate::config::Destination::Jev,
+                key_file: Some(key_file),
+                cloudflare_key_file: None,
+                cloudflare_account_id: None,
+                liquid_key_file: None,
                 model: "jev-latest".into(),
                 timeout_s: 5,
                 daily_budget: 300,

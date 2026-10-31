@@ -606,6 +606,60 @@ struct JudgeIn {
     /// `[judge] daily_budget`; older pages leave it alone.
     #[serde(default)]
     daily_budget: Option<u32>,
+    /// `[judge] destination` (J7); older pages leave it alone.
+    #[serde(default)]
+    destination: Option<config::Destination>,
+}
+
+/// `[judge]` as the page saves it (J1, J7). `[judge]` needs a key file, so a key is set first
+/// (`judge::save_key`), except for d1 on this PC, which needs none: turned on, it writes the table.
+/// A destination chosen while the judge is on needs what it sends with.
+fn judge_in(
+    doc: &mut toml_edit::DocumentMut,
+    j: &JudgeIn,
+    saved: Option<&config::Judge>,
+) -> Result<(), Refusal> {
+    let budget = |doc: &mut toml_edit::DocumentMut, n: u32| {
+        if !calls_cap(n, &BUDGET) {
+            return Err(refused(422, "range", "judge.daily_budget"));
+        }
+        put(doc, "judge", "daily_budget", i64::from(n).into());
+        Ok(())
+    };
+    let Some(saved) = saved else {
+        match (j.enabled, j.destination) {
+            (true, Some(config::Destination::D1Local)) => {}
+            (true, _) => return Err(refused(422, "missing_key", "judge.enabled")),
+            _ if j.daily_budget.is_some() => {
+                return Err(refused(422, "missing_key", "judge.daily_budget"));
+            }
+            _ => return Ok(()),
+        }
+        if let Some(n) = j.daily_budget {
+            budget(doc, n)?;
+        }
+        put(doc, "judge", "destination", "d1-local".into());
+        put(doc, "judge", "enabled", true.into());
+        return Ok(());
+    };
+    if let Some(n) = j.daily_budget.filter(|n| *n != saved.daily_budget) {
+        budget(doc, n)?;
+    }
+    if let Some(to) = j.destination.filter(|d| *d != saved.destination) {
+        let chosen = config::Judge {
+            enabled: true,
+            destination: to,
+            ..saved.clone()
+        };
+        if j.enabled && !crate::judge::ready(&chosen) {
+            return Err(refused(422, "missing_key", "judge.destination"));
+        }
+        put(doc, "judge", "destination", to.id().into());
+    }
+    if saved.enabled != j.enabled {
+        put(doc, "judge", "enabled", j.enabled.into());
+    }
+    Ok(())
 }
 
 /// `[my_work] calls_a_day` as the page takes it: one call a day at the least.
@@ -678,9 +732,9 @@ struct KeySave {
 /// The body of a key typed for one table's own key file (`[embedding]`, `[judge]`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManagedKey {
-    key: String,
-    version: String,
+pub(super) struct ManagedKey {
+    pub key: String,
+    pub version: String,
 }
 
 /// A key typed on the page, written as a provider's is (`keyfile::managed`: a new owner-only file
@@ -691,18 +745,31 @@ struct ManagedKey {
 /// `XDG_DATA_HOME`), the owner's own when None (tests give their own).
 pub(super) fn managed_key(
     home: &Path,
-    (saving, authorized): (&Mutex<()>, &dyn Fn() -> bool),
+    auth: (&Mutex<()>, &dyn Fn() -> bool),
     body: &[u8],
     homes: Option<(&Path, Option<&Path>)>,
     table: &str,
+    then: impl FnOnce(&mut toml_edit::DocumentMut),
+) -> Result<Value, Refusal> {
+    let posted: ManagedKey =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    managed_key_at(home, auth, &posted, homes, (table, "key_file"), then)
+}
+
+/// `managed_key` for a body its caller read, with the key's file in `[<table>] <field>` (the
+/// judge's services each have their own, J7).
+pub(super) fn managed_key_at(
+    home: &Path,
+    (saving, authorized): (&Mutex<()>, &dyn Fn() -> bool),
+    posted: &ManagedKey,
+    homes: Option<(&Path, Option<&Path>)>,
+    (table, key_field): (&str, &str),
     then: impl FnOnce(&mut toml_edit::DocumentMut),
 ) -> Result<Value, Refusal> {
     let owner_home = crate::config::home_dir();
     let data_home = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
     let (owner, data) = homes.unwrap_or((&owner_home, data_home.as_deref()));
     let field = format!("{table}.key");
-    let posted: ManagedKey =
-        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     if !crate::keyfile::valid(&posted.key) {
         return Err(refused(422, "bad_key", field));
     }
@@ -724,7 +791,7 @@ pub(super) fn managed_key(
         .map_err(|r| refused(r.status(), r.code(), field.clone()))?;
     let filename =
         (new_key.path().to_str()).ok_or_else(|| refused(422, "not_utf8", field.clone()))?;
-    put(&mut doc, table, "key_file", filename.into());
+    put(&mut doc, table, key_field, filename.into());
     then(&mut doc);
     let mut answer = providers::commit(home, &posted.version, doc)?;
     answer["key_saved"] = json!({"durable": new_key.durable});
@@ -941,25 +1008,7 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
         }
     }
     if let Some(j) = &posted.judge {
-        // `[judge]` needs its key file: with none, a key is set first (`judge::save_key`).
-        match &now.judge {
-            Some(saved) => {
-                if let Some(n) = j.daily_budget.filter(|n| *n != saved.daily_budget) {
-                    if !calls_cap(n, &BUDGET) {
-                        return Err(refused(422, "range", "judge.daily_budget"));
-                    }
-                    put(&mut doc, "judge", "daily_budget", i64::from(n).into());
-                }
-                if saved.enabled != j.enabled {
-                    put(&mut doc, "judge", "enabled", j.enabled.into());
-                }
-            }
-            None if j.enabled => return Err(refused(422, "missing_key", "judge.enabled")),
-            None if j.daily_budget.is_some() => {
-                return Err(refused(422, "missing_key", "judge.daily_budget"));
-            }
-            None => {}
-        }
+        judge_in(&mut doc, j, now.judge.as_ref())?;
     }
     // A null is no cap, written `inf` (decision 64); left out, `checked` refused it.
     if let Some(cap) = posted.paid_usd_per_month {
@@ -3411,6 +3460,53 @@ mod tests {
             !config::load(home.path()).unwrap().judge.unwrap().enabled,
             "left out, left alone"
         );
+    }
+
+    /// J7: the destination saves from the page. One chosen while the judge is on needs what it
+    /// sends with (a key, and Cloudflare's account id); d1 on this PC needs none, so it alone writes
+    /// `[judge]` where there is none. A name not on the list is refused.
+    #[test]
+    fn a_destination_chosen_while_on_needs_its_key() {
+        fn choose(home: &tempfile::TempDir, enabled: bool, d: &str) -> Result<Value, Refusal> {
+            let shown = show(home.path());
+            let to = json!({"enabled": enabled, "destination": d});
+            save_to(home, &posted(&shown, |v| v["judge"] = to))
+        }
+        let destination = |home: &tempfile::TempDir| {
+            let j = config::load(home.path()).unwrap().judge.unwrap();
+            (j.destination.id(), j.enabled)
+        };
+        let keys = tempfile::tempdir().unwrap();
+        let typesafe = keys.path().join("TYPESAFE_KEY.md");
+        std::fs::write(&typesafe, "# a test key\nTESTKEY_for_the_stub\n").unwrap();
+        let text = format!(
+            "providers = []\n[judge]\nkey_file = '{}'\n",
+            typesafe.display()
+        );
+        let home = home_with(Some(&text));
+        assert_eq!(show(home.path())["judge"]["destination"], "jev");
+        let r = choose(&home, true, "clef-flash").unwrap_err();
+        assert_eq!(
+            (r.status, r.code, r.field.as_str()),
+            (422, "missing_key", "judge.destination")
+        );
+        assert_eq!(file(&home).as_deref(), Some(text.as_str()));
+        choose(&home, false, "clef-flash").unwrap();
+        assert_eq!(destination(&home), ("clef-flash", false));
+        choose(&home, true, "d1-local").unwrap();
+        assert_eq!(destination(&home), ("d1-local", true));
+        choose(&home, true, "jev").unwrap();
+        assert_eq!(destination(&home), ("jev", true));
+        let r = choose(&home, true, "clef-omni").unwrap_err();
+        assert_eq!((r.status, r.code), (422, "type"));
+        // With no `[judge]`, d1 on this PC alone writes it, on.
+        let home = home_with(Some("providers = []\n"));
+        let r = choose(&home, true, "jev").unwrap_err();
+        assert_eq!((r.status, r.code), (422, "missing_key"));
+        choose(&home, false, "d1-local").unwrap();
+        assert_eq!(file(&home).as_deref(), Some("providers = []\n"));
+        choose(&home, true, "d1-local").unwrap();
+        assert_eq!(destination(&home), ("d1-local", true));
     }
 
     /// A hand-written `judge:` entry left on does not count as the chain in use (`load_chain`

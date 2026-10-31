@@ -1,5 +1,6 @@
-//! The judge on the settings page (docs/my-work-model.md J1, slice 11a-2): its state, its key typed
-//! on the page, and one connection test of a made-up question. Answers carry codes, never the key.
+//! The judge on the settings page (docs/my-work-model.md J1, J7; slices 11a-2 and 11d): where it
+//! sends, its state, a key typed on the page for each service, and one connection test of a
+//! made-up question. Answers carry codes, never a key.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -8,8 +9,11 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Refusal, invalid, put, refused};
-use crate::judge::{Asked, NAME};
+use super::{ManagedKey, Refusal, invalid, put, refused};
+use crate::config::Destination;
+use crate::judge::Asked;
+#[cfg(test)]
+use crate::judge::NAME;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,46 +21,130 @@ struct Test {
     confirmed: bool,
 }
 
-/// The judge as the page shows it: `set` when `[judge]` is there (a key was given), its switch,
-/// whether its key file has a key, and its calls in the last 24 hours and spend this month.
-/// A ledger that does not read gives no numbers (null), as the page's other totals.
+/// The body of a key typed for a destination (J7). An older page sends Typesafe's alone (Jev's).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgeKey {
+    key: String,
+    version: String,
+    #[serde(default)]
+    destination: Destination,
+    /// Cloudflare's account id, with its token: the address names it.
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+/// The judge as the page shows it: `set` when `[judge]` is there, its switch, where it sends and the
+/// list it chooses from (each destination's key: `ok`, `missing`, or `none` for d1 on this PC, its
+/// price, and whether it stays on this PC), Cloudflare's account id, and the calls in the last 24
+/// hours and spend this month of the destination in use. A ledger that does not read gives no
+/// numbers (null), as the page's other totals.
 pub(crate) fn section(
     judge: Option<&crate::config::Judge>,
     ledger: &anyhow::Result<Option<Connection>>,
 ) -> Value {
+    let to = judge.map_or(Destination::Jev, |j| j.destination);
+    let name = crate::judge::fixed(to).name;
     let (calls, usd) = match ledger {
         Ok(Some(db)) => (
-            crate::providers_db::calls_in_a_day(db, NAME)
+            crate::providers_db::calls_in_a_day(db, name)
                 .ok()
                 .map(|(calls, _)| calls),
-            crate::providers_db::usd_this_month_of(db, NAME).ok(),
+            crate::providers_db::usd_this_month_of(db, name).ok(),
         ),
         Ok(None) => (Some(0), Some(0.0)),
         Err(_) => (None, None),
     };
-    let key = judge.is_some_and(|j| crate::config::read_key(&j.key_file).is_ok());
+    let key = |d: Destination| {
+        let fixed = crate::judge::fixed(d);
+        let ready = judge.is_some_and(|j| {
+            crate::judge::ready(&crate::config::Judge {
+                enabled: true,
+                destination: d,
+                ..j.clone()
+            })
+        });
+        match fixed.key_field {
+            None => "none",
+            Some(_) if ready => "ok",
+            Some(_) => "missing",
+        }
+    };
+    let destinations: Vec<Value> = (Destination::ALL.iter())
+        .map(|&d| {
+            let fixed = crate::judge::fixed(d);
+            json!({"id": d.id(), "key": key(d), "usd_per_mtok_in": fixed.usd_per_mtok_in,
+                "local": fixed.key_field.is_none()})
+        })
+        .collect();
+    let key_file = judge.and_then(|j| {
+        let in_use = crate::config::Judge {
+            destination: to,
+            ..j.clone()
+        };
+        crate::judge::key_file(&in_use).map(|f| f.display().to_string())
+    });
     json!({
         "set": judge.is_some(),
         "enabled": judge.is_some_and(|j| j.enabled),
-        "key": if key { "ok" } else { "missing" },
-        "key_file": judge.map(|j| j.key_file.display().to_string()),
+        "destination": to.id(),
+        "destinations": destinations,
+        "key": key(to),
+        "key_file": key_file,
+        "cloudflare_account_id": judge.and_then(|j| j.cloudflare_account_id.clone()),
         "daily_budget": judge.map(|j| j.daily_budget),
         "calls_today": calls,
         "usd_this_month": usd,
     })
 }
 
-/// `POST /api/judge/key {"key", "version"}`: the key typed on the page, written as a provider's is
-/// (`keyfile::managed`: a new owner-only file outside the store), `[judge] key_file` pointed at it
-/// and the judge turned on, against the version the page showed. The old file is left as it is.
-/// `authorized` is the request's token checked again under config.lock.
+/// `POST /api/judge/key {"key", "version", "destination", "account_id"}`: the key typed on the page
+/// for a destination, written as a provider's is (`keyfile::managed`: a new owner-only file outside
+/// the store), its service's `[judge]` field pointed at it, Cloudflare's account id beside it, that
+/// destination chosen and the judge turned on, against the version the page showed (J7). The old
+/// file is left as it is. `authorized` is the request's token checked again under config.lock.
 pub(crate) fn save_key(
     home: &Path,
     saving: &Mutex<()>,
     authorized: &dyn Fn() -> bool,
     body: &[u8],
 ) -> Result<Value, Refusal> {
-    super::managed_key(home, (saving, authorized), body, None, "judge", turned_on)
+    save_key_with(home, (saving, authorized), body, None)
+}
+
+/// `save_key` with where the key's file may go (`managed_key`'s `homes`). Everything the body names
+/// is checked before a file is written: d1 on this PC takes no key, and Cloudflare's token comes
+/// with its account id, which no other's does.
+fn save_key_with(
+    home: &Path,
+    auth: (&Mutex<()>, &dyn Fn() -> bool),
+    body: &[u8],
+    homes: Option<(&Path, Option<&Path>)>,
+) -> Result<Value, Refusal> {
+    let posted: JudgeKey =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    let to = posted.destination;
+    let Some(field) = crate::judge::fixed(to).key_field else {
+        return Err(refused(422, "no_key", "judge.key"));
+    };
+    let cloudflare = matches!(to, Destination::Clef | Destination::ClefFlash);
+    let account = match posted.account_id {
+        Some(a) if cloudflare && crate::config::account_id(&a) => Some(a),
+        _ if cloudflare => return Err(refused(422, "bad_account", "judge.account_id")),
+        Some(_) => return Err(refused(400, "bad_request", "")),
+        None => None,
+    };
+    let key = ManagedKey {
+        key: posted.key,
+        version: posted.version,
+    };
+    super::managed_key_at(home, auth, &key, homes, ("judge", field), |doc| {
+        put(doc, "judge", "destination", to.id().into());
+        if let Some(a) = account {
+            put(doc, "judge", "cloudflare_account_id", a.into());
+        }
+        turned_on(doc);
+    })
 }
 
 /// J1: off until a key is set; setting one is the owner turning it on.
@@ -134,14 +222,7 @@ mod tests {
             |version: &Value| serde_json::to_vec(&json!({"key": key, "version": version})).unwrap();
         let save = |body: &[u8], ok: bool| {
             let homes = Some((owner.path(), Some(data.path())));
-            super::super::managed_key(
-                home.path(),
-                (&Mutex::new(()), &|| ok),
-                body,
-                homes,
-                "judge",
-                turned_on,
-            )
+            save_key_with(home.path(), (&Mutex::new(()), &|| ok), body, homes)
         };
         let before = file(home.path());
         assert_eq!(save(&body(&json!("stale")), true).unwrap_err().status, 409);
@@ -158,11 +239,9 @@ mod tests {
         let cfg = crate::config::load(home.path()).unwrap();
         let judge = cfg.judge.unwrap();
         assert!(judge.enabled);
-        assert_eq!(crate::config::read_key(&judge.key_file).unwrap(), key);
-        assert!(
-            !judge.key_file.starts_with(home.path()),
-            "outside the store"
-        );
+        let key_file = judge.key_file.as_ref().unwrap();
+        assert_eq!(crate::config::read_key(key_file).unwrap(), key);
+        assert!(!key_file.starts_with(home.path()), "outside the store");
         assert!(!file(home.path()).contains(&key));
         // A key of another shape is refused before anything is written.
         let after = file(home.path());
@@ -207,6 +286,155 @@ mod tests {
         );
         assert_eq!(refusal(json!({"prompt": "x"})).unwrap_err().status, 400);
         assert!(!home.path().join("providers.db").exists());
+    }
+
+    /// J7: a key typed for a destination goes into its service's own field (a managed file outside
+    /// the store), with the destination chosen and the judge on; Cloudflare's with its account id,
+    /// which must be one. d1 on this PC takes no key. A refused key writes nothing, and no answer
+    /// holds a key.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_saved_for_a_destination_goes_into_its_own_field() {
+        use crate::config::Destination;
+        const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
+        let home = home("providers = []\n");
+        let owner = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let save = |mut body: Value| {
+            body["version"] = super::super::show(home.path())["version"].clone();
+            let homes = Some((owner.path(), Some(data.path())));
+            let body = serde_json::to_vec(&body).unwrap();
+            save_key_with(home.path(), (&Mutex::new(()), &|| true), &body, homes)
+        };
+        let token = format!("cfut_{}_{}", "0123456789abcdef", "synthetic");
+        let before = file(home.path());
+        for (body, code) in [
+            (
+                json!({"key": token, "destination": "clef-flash"}),
+                "bad_account",
+            ),
+            (
+                json!({"key": token, "destination": "clef", "account_id": "0123456789ABCDEF0123456789abcdef"}),
+                "bad_account",
+            ),
+            (json!({"key": token, "destination": "d1-local"}), "no_key"),
+        ] {
+            assert_eq!(save(body).unwrap_err().code, code);
+        }
+        let other = json!({"key": token, "destination": "d1", "account_id": ACCOUNT});
+        assert_eq!(save(other).unwrap_err().status, 400);
+        assert_eq!(file(home.path()), before);
+        let answer =
+            save(json!({"key": token, "destination": "clef-flash", "account_id": ACCOUNT}));
+        let answer = answer.unwrap();
+        assert!(!answer.to_string().contains(&token), "{answer}");
+        assert_eq!(answer["judge"]["destination"], "clef-flash");
+        let j = crate::config::load(home.path()).unwrap().judge.unwrap();
+        assert_eq!((j.destination, j.enabled), (Destination::ClefFlash, true));
+        assert!(j.key_file.is_none(), "Typesafe's left unset");
+        assert_eq!(j.cloudflare_account_id.as_deref(), Some(ACCOUNT));
+        let file_ = j.cloudflare_key_file.clone().unwrap();
+        assert_eq!(crate::config::read_key(&file_).unwrap(), token);
+        assert!(!file_.starts_with(home.path()), "outside the store");
+        assert!(crate::judge::ready(&j));
+        let liquid = format!("liquid_{}_{}", "0123456789abcdef", "synthetic");
+        save(json!({"key": liquid, "destination": "d1"})).unwrap();
+        let j = crate::config::load(home.path()).unwrap().judge.unwrap();
+        assert_eq!(j.destination, Destination::D1);
+        let file_ = j.liquid_key_file.clone().unwrap();
+        assert_eq!(crate::config::read_key(&file_).unwrap(), liquid);
+        assert_eq!(
+            j.cloudflare_account_id.as_deref(),
+            Some(ACCOUNT),
+            "left as it was"
+        );
+        assert!(!file(home.path()).contains(&token) && !file(home.path()).contains(&liquid));
+    }
+
+    /// J7: the page is shown the list (each destination, whether its key is there, its price, and
+    /// whether it stays on this PC) and the destination in use, whose calls and spend are its own
+    /// rows'. No key is in it.
+    #[test]
+    fn the_section_lists_the_destinations_and_counts_the_one_in_use() {
+        const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::providers_db::open(dir.path()).unwrap();
+        for (provider, usd) in [(NAME, 0.25), ("judge:clef-flash", 0.5)] {
+            crate::providers_db::record(
+                &db,
+                &crate::providers_db::Call {
+                    provider,
+                    role: "judge",
+                    span: "s",
+                    outcome: "ok",
+                    ms: 1,
+                    detail: None,
+                    bytes_out: 1,
+                    est_tokens: None,
+                    usage: Default::default(),
+                    usd: Some(usd),
+                },
+            )
+            .unwrap();
+        }
+        let cloudflare = dir.path().join("CF_KEY.md");
+        std::fs::write(&cloudflare, "# a test key\nCFTOKEN_for_the_stub\n").unwrap();
+        let judge = crate::config::Judge {
+            enabled: true,
+            destination: crate::config::Destination::ClefFlash,
+            key_file: None,
+            cloudflare_key_file: Some(cloudflare),
+            cloudflare_account_id: Some(ACCOUNT.into()),
+            liquid_key_file: None,
+            model: "jev-latest".into(),
+            timeout_s: 15,
+            daily_budget: 300,
+        };
+        let shown = section(Some(&judge), &Ok(Some(db)));
+        assert_eq!(
+            (
+                &shown["destination"],
+                &shown["calls_today"],
+                &shown["usd_this_month"],
+                &shown["key"]
+            ),
+            (&json!("clef-flash"), &json!(1), &json!(0.5), &json!("ok"))
+        );
+        assert_eq!(shown["cloudflare_account_id"], ACCOUNT);
+        let list = shown["destinations"].as_array().unwrap();
+        let of = |key: &str| list.iter().map(|d| d[key].clone()).collect::<Vec<_>>();
+        assert_eq!(
+            of("id"),
+            [
+                json!("jev"),
+                json!("clef"),
+                json!("clef-flash"),
+                json!("d1"),
+                json!("d1-local")
+            ]
+        );
+        assert_eq!(
+            of("key"),
+            [
+                json!("missing"),
+                json!("ok"),
+                json!("ok"),
+                json!("missing"),
+                json!("none")
+            ]
+        );
+        assert_eq!(
+            of("local"),
+            [
+                json!(false),
+                json!(false),
+                json!(false),
+                json!(false),
+                json!(true)
+            ]
+        );
+        assert_eq!(list[2]["usd_per_mtok_in"], 0.038);
+        assert!(!shown.to_string().contains("CFTOKEN"), "{shown}");
     }
 
     /// The test sends one made-up question, as a call goes: its row in the ledger, its outcome in
@@ -263,7 +491,11 @@ mod tests {
         }
         let judge = crate::config::Judge {
             enabled: false,
-            key_file: dir.path().join("none"),
+            destination: crate::config::Destination::Jev,
+            key_file: Some(dir.path().join("none")),
+            cloudflare_key_file: None,
+            cloudflare_account_id: None,
+            liquid_key_file: None,
             model: "jev-latest".into(),
             timeout_s: 15,
             daily_budget: 300,

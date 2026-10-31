@@ -521,7 +521,11 @@ mod tests {
                 t: crate::db::now_ms() - 60 * MINUTE,
                 judge: config::Judge {
                     enabled: true,
-                    key_file,
+                    destination: config::Destination::Jev,
+                    key_file: Some(key_file),
+                    cloudflare_key_file: None,
+                    cloudflare_account_id: None,
+                    liquid_key_file: None,
                     model: "jev-latest".into(),
                     timeout_s: 5,
                     daily_budget: 300,
@@ -533,7 +537,8 @@ mod tests {
 
         /// The home's config.toml: `[judge]` as the runner is given it, then `extra`.
         fn config(&self, extra: &str) {
-            let table = format!("[judge]\nkey_file = '{}'\n", self.judge.key_file.display());
+            let key_file = self.judge.key_file.as_ref().unwrap();
+            let table = format!("[judge]\nkey_file = '{}'\n", key_file.display());
             let path = self.s.home.path().join("config.toml");
             std::fs::write(path, format!("{table}{extra}")).unwrap();
         }
@@ -742,7 +747,7 @@ mod tests {
         assert_eq!(h.pass(true, &answer).1.len(), 1);
         let mut h = Home::new();
         h.said("s1", 0, "Build the parser.");
-        std::fs::write(&h.judge.key_file, "# no key\n").unwrap();
+        std::fs::write(h.judge.key_file.as_ref().unwrap(), "# no key\n").unwrap();
         assert_eq!(h.pass(true, &answer).1.len(), 1);
         assert!(h.judged().is_empty() && h.ledger().is_empty());
     }
@@ -806,6 +811,30 @@ mod tests {
         assert_eq!((phase, prompts.len()), (Phase::Idle, 0));
         assert_eq!(h.judged().len(), 1);
         assert!(h.ledger().is_empty());
+    }
+
+    /// J7: the judge sends where `[judge]` says: a decision made through d1 on this PC is its op's
+    /// entry, its evidence names it, and its calls are its own rows in the ledger.
+    #[test]
+    fn a_decision_names_the_destination_that_made_it() {
+        let mut h = Home::new();
+        h.judge.destination = config::Destination::D1Local;
+        h.config("destination = \"d1-local\"\n");
+        h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], "Parser");
+        h.said("s2", 5, "The parser drops a trailing comma.");
+        let rx = stub(vec![picked("r1", 0.94), checked(0.9)]);
+        h.pass(true, &|_| panic!("the chain is not asked"));
+        assert_eq!(bodies(&rx).len(), 2);
+        let op = &h.judged()[0];
+        assert_eq!(op.entry, "judge:d1-local");
+        assert_eq!(
+            op.fields["groups"][0]["links"][0]["evidence"],
+            "d1 on this PC: picked over 1 open request (p 0.94); the check \"continues that \
+             request\" scored 0.90."
+        );
+        let row = ("judge:d1-local".into(), "judge".into(), "ok".into());
+        assert_eq!(h.ledger(), vec![row.clone(), row]);
     }
 
     /// J3: Jev picks among the open requests, then checks its pick; the check's score is the band:
