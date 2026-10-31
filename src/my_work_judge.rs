@@ -23,7 +23,8 @@ use crate::settings::{Refusal, refused};
 
 /// The ops' job (S1).
 pub(crate) const NAME: &str = "judge";
-/// The entry of a decision made with no call; Jev's is `judge::NAME`.
+/// The entry of a decision made with no call; the judge's is its destination's name in the
+/// ledger (`Judging::entry`).
 const RULES: &str = "judge:rules";
 
 // claude-mem's request judge (request-judge.mjs, 15.4.0, as 15.7.0 has it), word for word.
@@ -71,6 +72,7 @@ pub(crate) fn request(
     judge: &mut Judging,
     now: i64,
 ) -> Result<Vec<MyWorkOp>> {
+    let (entry, who) = (judge.entry, judge.label);
     let device = s.raw.device();
     let candidates = crate::my_work_group::candidates(seen, groups, device, now);
     let Some(c) = (candidates.values().flatten())
@@ -100,11 +102,7 @@ pub(crate) fn request(
             spans: BTreeSet::from([*opening]),
             ops: BTreeSet::new(),
         };
-        decision(
-            shown,
-            crate::judge::NAME,
-            vec![("outcome", json!("too_big"))],
-        )
+        decision(shown, entry, vec![("outcome", json!("too_big"))])
     };
     let decided =
         |shown: Shown, entry: &str, fields: Vec<(&str, Value)>| -> Result<Vec<MyWorkOp>> {
@@ -152,7 +150,7 @@ pub(crate) fn request(
     if open.is_empty() {
         return decided(
             shown,
-            crate::judge::NAME,
+            entry,
             vec![("outcome", json!("alone")), ("groups", own())],
         );
     }
@@ -217,7 +215,7 @@ pub(crate) fn request(
     criteria.insert("none".into(), json!(NONE));
     let evidence = |p: f64, score: f64| {
         format!(
-            "Jev: picked over {considered} (p {p:.2}); the check \"continues that request\" \
+            "{who}: picked over {considered} (p {p:.2}); the check \"continues that request\" \
              scored {score:.2}."
         )
     };
@@ -227,12 +225,12 @@ pub(crate) fn request(
         ("groups", joined(ranked[0].0, "judge", evidence(1.0, 1.0))),
         ("suggestion", json!({"request": key(&c.key), "score": 1.0})),
     ];
-    if !fits(&decision(shown.clone(), crate::judge::NAME, largest)?)? {
+    if !fits(&decision(shown.clone(), entry, largest)?)? {
         return Ok(vec![too_big()?]);
     }
     let span = format!("{NAME} {repo}");
     let repos = [repo.clone()];
-    let picked = judge(Ask {
+    let picked = (judge.ask)(Ask {
         span: &span,
         state: json!({"conversation": conversation, "requests": requests}),
         questions: json!({"pick": {"type": "choice", "instructions": PICK, "criteria": criteria}}),
@@ -240,20 +238,20 @@ pub(crate) fn request(
     })?;
     let pick = match picked {
         Asked::Answered(answers) => answers["pick"].clone(),
-        Asked::Skipped(why) => return left(why, shown, decided),
+        Asked::Skipped(why) => return left(why, (shown, entry), decided),
     };
     let choice = pick["choice"].as_str().unwrap_or("none");
     let p = pick["probabilities"][choice].as_f64().unwrap_or(0.0);
     let Some((anchor, request)) = labels.get(choice) else {
         return decided(
             shown,
-            crate::judge::NAME,
+            entry,
             vec![("outcome", json!("none")), ("groups", own())],
         );
     };
 
     // The check of the pick: its score is the band (claude-mem's `bandFor`).
-    let checked = judge(Ask {
+    let checked = (judge.ask)(Ask {
         span: &span,
         state: json!({"request": request, "conversation": conversation}),
         questions: json!({"same": {"type": "noul", "instructions": CHECK,
@@ -262,7 +260,7 @@ pub(crate) fn request(
     })?;
     let score = match checked {
         Asked::Answered(answers) => answers["same"]["noul"].as_f64().unwrap_or(0.0),
-        Asked::Skipped(why) => return left(why, shown, decided),
+        Asked::Skipped(why) => return left(why, (shown, entry), decided),
     };
     let fields = if score >= JOIN {
         vec![
@@ -281,7 +279,7 @@ pub(crate) fn request(
     } else {
         vec![("outcome", json!("own")), ("groups", own())]
     };
-    decided(shown, crate::judge::NAME, fields)
+    decided(shown, entry, fields)
 }
 
 /// What a call the judge did not answer leaves (J1): a refused or failed one an op naming the
@@ -290,13 +288,13 @@ pub(crate) fn request(
 /// excluded on the way, as the next round reads each.
 fn left(
     why: &'static str,
-    shown: Shown,
+    (shown, entry): (Shown, &str),
     decided: impl FnOnce(Shown, &str, Vec<(&str, Value)>) -> Result<Vec<MyWorkOp>>,
 ) -> Result<Vec<MyWorkOp>> {
     if matches!(why, "off" | "key" | "excluded") {
         return Ok(Vec::new());
     }
-    decided(shown, crate::judge::NAME, vec![("outcome", json!(why))])
+    decided(shown, entry, vec![("outcome", json!(why))])
 }
 
 /// A conversation as claude-mem's `contextReader` gives it (J2): its repository, the minute it
@@ -1099,7 +1097,7 @@ mod tests {
                     .unwrap()
                     .exclude("elsewhere", false)
                     .unwrap();
-                judge(Ask {
+                (judge.ask)(Ask {
                     span: "judge r",
                     state: json!({"conversation": {"asks": ["Build it."]}}),
                     questions: json!({"same": {"type": "noul", "instructions": CHECK,
@@ -1251,12 +1249,18 @@ mod tests {
             }
             /// The switch off once the first request is answered.
             fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+                let (entry, label) = (judge.entry, judge.label);
                 let mut turning = |ask: Ask<'_>| {
-                    let asked = judge(ask);
+                    let asked = (judge.ask)(ask);
                     let config = self.1.join("config.toml");
                     let text = std::fs::read_to_string(&config).unwrap();
                     std::fs::write(&config, format!("{text}enabled = false\n")).unwrap();
                     asked
+                };
+                let mut turning = Judging {
+                    entry,
+                    label,
+                    ask: &mut turning,
                 };
                 self.0.judged(s, &mut turning, now)
             }

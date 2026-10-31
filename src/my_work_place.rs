@@ -1653,9 +1653,14 @@ mod tests {
         h.area(AREA, "The parser", "kept", "owner");
         let told = RefCell::new(Vec::new());
         let ops = h.with(|s| {
-            let mut judge = |ask: crate::judge::Ask| -> Result<crate::judge::Asked> {
+            let mut ask = |ask: crate::judge::Ask| -> Result<crate::judge::Asked> {
                 told.borrow_mut().push(ask.repos.to_vec());
                 Ok(crate::judge::Asked::Skipped("excluded"))
+            };
+            let mut judge = Judging {
+                entry: crate::judge::NAME,
+                label: "Jev",
+                ask: &mut ask,
             };
             Place::default().judged(s, &mut judge, crate::db::now_ms())
         });

@@ -106,7 +106,11 @@ pub(crate) fn next(
     let Some(q) = due(s, hidden, queued, areas)? else {
         return Ok(Vec::new());
     };
-    let keeping = Keeping { q, areas };
+    let keeping = Keeping {
+        q,
+        areas,
+        entry: judge.entry,
+    };
     let (request, repos, mut shown) = asked_about(s, q)?;
     let state = shown_areas(s, focus, &kept, &mut shown);
     // Nothing is paid for that could not be kept: an op as large as a pick, else one that says so,
@@ -114,7 +118,10 @@ pub(crate) fn next(
     let largest = vec![
         ("focus", json!(OTHER)),
         ("p", json!(1.0)),
-        ("evidence", json!(evidence(None, 1.0, kept.len(), (0, 0)))),
+        (
+            "evidence",
+            json!(evidence((judge.label, None), 1.0, kept.len(), (0, 0))),
+        ),
     ];
     if !crate::my_work_judge::fits(&keeping.op(s, &shown, largest)?)? {
         return Ok(vec![keeping.outcome(s, &Shown::default(), "too_big")?]);
@@ -129,19 +136,21 @@ pub(crate) fn next(
     let mut tally = (0, 0);
     let mut ask = |set: &[&Area]| question.ask(s, judge, set);
     let answer = pick_among(&kept, &mut tally, &mut ask)?;
-    keeping.decided(s, &shown, answer, (&kept, tally))
+    keeping.decided(s, &shown, answer, (&kept, tally, judge.label))
 }
 
 /// The ops about one queued request: of its basis and of the kept areas as `digest` numbers them.
 struct Keeping<'a> {
     q: &'a Queued<'a>,
     areas: i64,
+    /// The judge's name in the ledger (`Judging::entry`).
+    entry: &'static str,
 }
 
 impl Keeping<'_> {
     fn op(&self, s: &Stores, shown: &Shown, mut fields: Vec<(&str, Value)>) -> Result<MyWorkOp> {
         fields.extend([("basis", json!(self.q.basis)), ("areas", json!(self.areas))]);
-        let about = (NAME, self.q.subject, crate::judge::NAME);
+        let about = (NAME, self.q.subject, self.entry);
         crate::my_work_judge::op_of(s, about, shown, fields)
     }
 
@@ -161,7 +170,7 @@ impl Keeping<'_> {
         s: &Stores,
         shown: &Shown,
         answer: Answer,
-        (kept, tally): (&[&Area], (usize, usize)),
+        (kept, tally, who): (&[&Area], (usize, usize), &str),
     ) -> Result<Vec<MyWorkOp>> {
         let (choice, p) = match answer {
             Answer::Picked(choice, p) => (choice, p),
@@ -171,7 +180,7 @@ impl Keeping<'_> {
         Ok(vec![self.op(
             s,
             shown,
-            picked(s, kept, (&choice, p), tally),
+            picked(s, (kept, who), (&choice, p), tally),
         )?])
     }
 }
@@ -246,7 +255,7 @@ impl Question<'_> {
             areas.insert(a.id.clone(), self.areas[&a.id].clone());
         }
         criteria.insert("none".into(), json!(NONE));
-        let asked = judge(Ask {
+        let asked = (judge.ask)(Ask {
             span: self.span,
             state: json!({"request": self.request, "areas": areas}),
             questions: json!({"area": {"type": "choice", "instructions": AREA, "criteria": criteria}}),
@@ -272,7 +281,7 @@ impl Question<'_> {
 /// A pick's fields: the area's id, or `other` when none fits, its probability and its evidence.
 fn picked(
     s: &Stores,
-    kept: &[&Area],
+    (kept, who): (&[&Area], &str),
     (choice, p): (&str, f64),
     tally: (usize, usize),
 ) -> Vec<(&'static str, Value)> {
@@ -283,7 +292,7 @@ fn picked(
         ("p", json!(p)),
         (
             "evidence",
-            json!(evidence(name.as_deref(), p, kept.len(), tally)),
+            json!(evidence((who, name.as_deref()), p, kept.len(), tally)),
         ),
     ]
 }
@@ -337,7 +346,12 @@ fn pick_among(
 
 /// claude-mem's evidence of a pick: the area's name, or none fits, over how many kept areas and how
 /// they were asked, with the probability.
-fn evidence(name: Option<&str>, p: f64, kept: usize, (sets, finals): (usize, usize)) -> String {
+fn evidence(
+    (who, name): (&str, Option<&str>),
+    p: f64,
+    kept: usize,
+    (sets, finals): (usize, usize),
+) -> String {
     let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let mut asked = plural(kept, "kept focus area");
     if sets > 0 {
@@ -353,8 +367,8 @@ fn evidence(name: Option<&str>, p: f64, kept: usize, (sets, finals): (usize, usi
         }
     }
     match name {
-        Some(name) => format!("Jev: \"{name}\" over {asked} (p {p:.2})."),
-        None => format!("Jev: none of {asked} fits (p {p:.2})."),
+        Some(name) => format!("{who}: \"{name}\" over {asked} (p {p:.2})."),
+        None => format!("{who}: none of {asked} fits (p {p:.2})."),
     }
 }
 

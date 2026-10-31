@@ -26,8 +26,13 @@ pub type Caller<'a> =
     dyn FnMut(&str, &str, &Value, &AnswerCheck, &Gate) -> Result<ChainResult> + 'a;
 
 /// The judge (J1) as the runner asks it for a job (J3): a state and its questions, to its answer,
-/// through the runner's egress gate.
-pub(crate) type Judging<'a> = dyn FnMut(crate::judge::Ask) -> Result<crate::judge::Asked> + 'a;
+/// through the runner's egress gate; with its name in the ledger, each decision op's entry, and
+/// its name in a decision's evidence (J7: where it sends).
+pub(crate) struct Judging<'a> {
+    pub entry: &'static str,
+    pub label: &'static str,
+    pub ask: &'a mut dyn FnMut(crate::judge::Ask) -> Result<crate::judge::Asked>,
+}
 
 /// My Work's pass of a curation round (A3): `true` asks only for a job due an hour or more.
 pub type Pass<'a> = dyn FnMut(&mut Raw, &Connection, &Connection, bool) -> Result<Phase> + 'a;
@@ -526,7 +531,12 @@ impl<'a> Runner<'a> {
                 let mut ask = |ask: crate::judge::Ask<'_>| {
                     crate::judge::ask(db, raw, rules, (judge, cap), ask, &gate)
                 };
-                job.judged(&stores, &mut ask, now)
+                let mut judging = Judging {
+                    entry: crate::judge::NAME,
+                    label: "Jev",
+                    ask: &mut ask,
+                };
+                job.judged(&stores, &mut judging, now)
             };
             let ops = match decided {
                 Ok(ops) => ops,
