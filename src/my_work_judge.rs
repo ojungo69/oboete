@@ -1673,15 +1673,16 @@ mod tests {
         assert_eq!(h.post(answer.clone()), Err((503, "my_work_unavailable")));
         std::fs::remove_dir(&lock).unwrap();
         // The worker's pass, which waits 2 seconds for the lock held here, is within the wait: with
-        // a wait of 2 seconds, refused after the pass, not a whole wait after it.
+        // a wait of 2 seconds, refused right after the pass, not a whole wait after it. Timed inside
+        // `applied`, from the pass's end to the refusal, which a slow runner does not move (#782:
+        // from the post's start, macOS CI took 3.6 s and more).
         let held = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
         crate::claims::WAIT.set(Some(Duration::from_millis(2_000)));
-        let started = std::time::Instant::now();
         let pending = h.post(answer);
-        let took = started.elapsed();
         crate::claims::WAIT.set(None);
+        let after = crate::claims::AFTER_PASS.take().unwrap();
         assert_eq!(pending, Err((409, "my_work_pending")));
-        assert!(took < Duration::from_millis(3_600), "{took:?}");
+        assert!(after < Duration::from_millis(1_000), "{after:?}");
         drop(held);
         h.s.run();
         assert!(h.groups().suggested.contains_key(&key("s2")), "not written");
