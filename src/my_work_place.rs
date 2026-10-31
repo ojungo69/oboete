@@ -934,7 +934,11 @@ mod tests {
             crate::judge::AT.set(Some("http://127.0.0.1:9".into()));
             crate::config::Judge {
                 enabled: true,
-                key_file,
+                destination: crate::config::Destination::Jev,
+                key_file: Some(key_file),
+                cloudflare_key_file: None,
+                cloudflare_account_id: None,
+                liquid_key_file: None,
                 model: "jev-latest".into(),
                 timeout_s: 5,
                 daily_budget: 300,
@@ -1392,6 +1396,32 @@ mod tests {
         assert!(bodies(&rx).is_empty(), "asked once");
     }
 
+    /// J7: the focus judge's pick names the destination that made it, as its op's entry and in its
+    /// evidence.
+    #[test]
+    fn the_focus_judge_s_pick_names_its_destination() {
+        let mut h = Home::new();
+        h.requests(1);
+        h.area(AREA, "The parser", "kept", "owner");
+        let mut judge = h.judge();
+        judge.destination = crate::config::Destination::D1Local;
+        let config = h.s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, format!("{text}destination = \"d1-local\"\n")).unwrap();
+        let _rx = stub(vec![chose(AREA, 0.82)]);
+        let none = |_: &str| -> Value { panic!("the chain is not asked") };
+        assert!(
+            h.pass_with(Some(&judge), Box::new(Place::default()), &none)
+                .is_empty()
+        );
+        let judged = h.judged();
+        assert_eq!(judged[0].op.entry, "judge:d1-local");
+        assert_eq!(
+            judged[0].op.fields["evidence"],
+            "d1 on this PC: \"The parser\" over 1 kept focus area (p 0.82)."
+        );
+    }
+
     /// J5: with no kept area (a suggested one only), or with the judge off, nothing is asked and the
     /// placement's call shows no pick.
     #[test]
@@ -1653,9 +1683,14 @@ mod tests {
         h.area(AREA, "The parser", "kept", "owner");
         let told = RefCell::new(Vec::new());
         let ops = h.with(|s| {
-            let mut judge = |ask: crate::judge::Ask| -> Result<crate::judge::Asked> {
+            let mut ask = |ask: crate::judge::Ask| -> Result<crate::judge::Asked> {
                 told.borrow_mut().push(ask.repos.to_vec());
                 Ok(crate::judge::Asked::Skipped("excluded"))
+            };
+            let mut judge = Judging {
+                entry: crate::judge::NAME,
+                label: "Jev",
+                ask: &mut ask,
             };
             Place::default().judged(s, &mut judge, crate::db::now_ms())
         });

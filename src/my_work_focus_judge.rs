@@ -6,7 +6,7 @@
 //! its own job about the placement's subject, so that a request that moved, or kept areas that
 //! changed, are asked again, and nothing else is (docs/my-work-model.md, Slice 11c).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};
@@ -16,7 +16,7 @@ use crate::my_work::{AskFrom, ReviewInput, Seen};
 use crate::my_work_focus::{Area, Focus, GOAL_CHARS, NAME_CHARS, OTHER};
 use crate::my_work_group::Key;
 use crate::my_work_judge::{CANDIDATES, Shown, TITLE_CHARS, UNTITLED, WINDOW};
-use crate::my_work_ops::{Kept, MyWorkOp, Read};
+use crate::my_work_ops::{Kept, MyWorkOp};
 use crate::my_work_run::{Judging, Stores};
 
 /// The ops' job (S1).
@@ -103,17 +103,126 @@ pub(crate) fn next(
         return Ok(Vec::new());
     }
     let areas = digest(&kept);
-    let mut due = None;
-    for q in queued {
-        if current(s, hidden, q.subject, (q.basis, areas))?.is_none() {
-            due = Some(q);
-            break;
-        }
-    }
-    let Some(q) = due else {
+    let Some(q) = due(s, hidden, queued, areas)? else {
         return Ok(Vec::new());
     };
-    let device = s.raw.device();
+    let keeping = Keeping {
+        q,
+        areas,
+        entry: judge.entry,
+        who: judge.label,
+        kept: &kept,
+    };
+    let (request, repos, mut shown) = asked_about(s, q)?;
+    let state = shown_areas(s, focus, &kept, &mut shown);
+    // Nothing is paid for that could not be kept: an op as large as a pick, else one that says so,
+    // read of nothing, which keeps the request from being asked again for its basis.
+    let largest = vec![
+        ("focus", json!(OTHER)),
+        ("p", json!(1.0)),
+        (
+            "evidence",
+            json!(evidence((keeping.who, None), 1.0, kept.len(), (0, 0))),
+        ),
+    ];
+    if !crate::my_work_judge::fits(&keeping.op(s, &shown, largest)?)? {
+        return Ok(vec![keeping.outcome(s, &Shown::default(), "too_big")?]);
+    }
+    let span = format!("{NAME} {}", q.subject);
+    let question = Question {
+        span: &span,
+        request: &request,
+        repos: &repos,
+        areas: &state,
+    };
+    let mut tally = (0, 0);
+    let mut ask = |set: &[&Area]| question.ask(s, judge, set);
+    let answer = pick_among(&kept, &mut tally, &mut ask)?;
+    keeping.decided(s, &shown, answer, tally)
+}
+
+/// The ops about one queued request: of its basis and of the kept areas as `digest` numbers them.
+struct Keeping<'a> {
+    q: &'a Queued<'a>,
+    areas: i64,
+    /// The judge's name in the ledger and its name in evidence (`Judging`).
+    entry: &'static str,
+    who: &'static str,
+    /// The areas it chose among.
+    kept: &'a [&'a Area],
+}
+
+impl Keeping<'_> {
+    fn op(&self, s: &Stores, shown: &Shown, mut fields: Vec<(&str, Value)>) -> Result<MyWorkOp> {
+        fields.extend([("basis", json!(self.q.basis)), ("areas", json!(self.areas))]);
+        let about = (NAME, self.q.subject, self.entry);
+        crate::my_work_judge::op_of(s, about, shown, fields)
+    }
+
+    /// An op with no pick, and why.
+    fn outcome(&self, s: &Stores, shown: &Shown, why: &str) -> Result<MyWorkOp> {
+        self.op(
+            s,
+            shown,
+            vec![("focus", Value::Null), ("outcome", json!(why))],
+        )
+    }
+
+    /// The op of what the judge answered: its pick, or why there is none; none when nothing went
+    /// (the judge turned off or its key gone on the way, or a repository excluded: J3's `left`).
+    fn decided(
+        &self,
+        s: &Stores,
+        shown: &Shown,
+        answer: Answer,
+        tally: (usize, usize),
+    ) -> Result<Vec<MyWorkOp>> {
+        let (choice, p) = match answer {
+            Answer::Picked(choice, p) => (choice, p),
+            Answer::Skipped("off" | "key" | "excluded") => return Ok(Vec::new()),
+            Answer::Skipped(why) => return Ok(vec![self.outcome(s, shown, why)?]),
+        };
+        let picked = self.picked(s, &choice, p, tally);
+        Ok(vec![self.op(s, shown, picked)?])
+    }
+
+    /// A pick's fields: the area's id, or `other` when none fits, its probability and its evidence.
+    fn picked(
+        &self,
+        s: &Stores,
+        choice: &str,
+        p: f64,
+        tally: (usize, usize),
+    ) -> Vec<(&'static str, Value)> {
+        let area = self.kept.iter().find(|a| a.id == choice);
+        let name = area.map(|a| crate::my_work::shown(a.name(), NAME_CHARS, s.rules));
+        let evidence = evidence((self.who, name.as_deref()), p, self.kept.len(), tally);
+        vec![
+            ("focus", json!(area.map_or(OTHER, |a| a.id.as_str()))),
+            ("p", json!(p)),
+            ("evidence", json!(evidence)),
+        ]
+    }
+}
+
+/// The first of `queued` with no current op for `areas`.
+fn due<'a>(
+    s: &Stores,
+    hidden: &HashSet<(String, i64)>,
+    queued: &'a [Queued<'a>],
+    areas: i64,
+) -> Result<Option<&'a Queued<'a>>> {
+    for q in queued {
+        if current(s, hidden, q.subject, (q.basis, areas))?.is_none() {
+            return Ok(Some(q));
+        }
+    }
+    Ok(None)
+}
+
+/// The request `q` as the judge is shown it, the repositories of its conversations, and what that
+/// read of this device's records and ops.
+fn asked_about(s: &Stores, q: &Queued) -> Result<(Value, Vec<String>, Shown)> {
     let seen = crate::my_work::seen(s.raw, s.k, s.rules)?;
     let of: Vec<&Seen> = (seen.iter())
         .filter(|c| q.input.conversations.contains(&c.key))
@@ -123,9 +232,15 @@ pub(crate) fn next(
     repos.dedup();
     let mut shown = Shown::default();
     let request = request(s, q, &of, &mut shown);
-    // What each kept area shows, and the ops it was read from (S2), as placement's call lists them.
+    Ok((request, repos, shown))
+}
+
+/// What each kept area shows, gated and cut, and the ops it was read from (S2), as placement's
+/// call lists them.
+fn shown_areas(s: &Stores, focus: &Focus, kept: &[&Area], shown: &mut Shown) -> Map<String, Value> {
+    let device = s.raw.device();
     let mut state = Map::new();
-    for a in &kept {
+    for a in kept {
         let gated = |key: &str, cap| {
             let text = crate::my_work::shown(a.text(key).unwrap_or_default(), cap, s.rules);
             (!text.is_empty()).then_some(text)
@@ -138,95 +253,49 @@ pub(crate) fn next(
         let own = focus.sources(&a.id).iter().filter(|(d, _)| d == device);
         shown.ops.extend(own.map(|(_, seq)| *seq));
     }
-    let op_of = |shown: &Shown, fields: Vec<(&str, Value)>| -> Result<MyWorkOp> {
-        let mut fields: BTreeMap<String, Value> = (fields.into_iter())
-            .map(|(name, v)| (name.to_owned(), v))
-            .collect();
-        fields.insert("basis".into(), json!(q.basis));
-        fields.insert("areas".into(), json!(areas));
-        let top = s.raw.max_seq_of(device)?;
-        let mut removed = Vec::new();
-        for &seq in &shown.spans {
-            removed.extend(s.raw.removed_in(device, seq, seq, Some(top))?);
-        }
-        removed.sort();
-        removed.dedup();
-        Ok(MyWorkOp {
-            job: NAME.into(),
-            about: q.subject.to_owned(),
-            entry: crate::judge::NAME.into(),
-            ts: crate::db::now_ms(),
-            read: Read {
-                spans: shown.spans.iter().map(|&seq| (seq, seq)).collect(),
-                ops: shown.ops.iter().copied().collect(),
-            },
-            removed,
-            fields,
-            skipped: false,
-            forgotten: None,
-        })
-    };
-    let outcome = |shown: &Shown, why: &str| {
-        op_of(shown, vec![("focus", Value::Null), ("outcome", json!(why))])
-    };
-    // Nothing is paid for that could not be kept: an op as large as a pick, else one that says so,
-    // read of nothing, which keeps the request from being asked again for its basis.
-    let largest = vec![
-        ("focus", json!(OTHER)),
-        ("p", json!(1.0)),
-        ("evidence", json!(evidence(None, 1.0, kept.len(), (0, 0)))),
-    ];
-    if !crate::my_work_judge::fits(&op_of(&shown, largest)?)? {
-        return Ok(vec![outcome(&Shown::default(), "too_big")?]);
-    }
-    let span = format!("{NAME} {}", q.subject);
-    let mut tally = (0, 0);
-    let mut ask = |set: &[&Area]| -> Result<Answer> {
+    state
+}
+
+/// One request's question to the judge, asked of one set of kept areas at a time.
+struct Question<'a> {
+    span: &'a str,
+    request: &'a Value,
+    repos: &'a [String],
+    /// Each kept area as `shown_areas` shows it, by its id.
+    areas: &'a Map<String, Value>,
+}
+
+impl Question<'_> {
+    fn ask(&self, s: &Stores, judge: &mut Judging, set: &[&Area]) -> Result<Answer> {
         let mut criteria = Map::new();
         let mut areas = Map::new();
         for a in set {
             let name = crate::my_work::shown(a.name(), NAME_CHARS, s.rules);
             criteria.insert(a.id.clone(), json!(format!("`areas.{}`: {name}", a.id)));
-            areas.insert(a.id.clone(), state[&a.id].clone());
+            areas.insert(a.id.clone(), self.areas[&a.id].clone());
         }
         criteria.insert("none".into(), json!(NONE));
-        let asked = judge(Ask {
-            span: &span,
-            state: json!({"request": request, "areas": areas}),
+        let asked = (judge.ask)(Ask {
+            span: self.span,
+            state: json!({"request": self.request, "areas": areas}),
             questions: json!({"area": {"type": "choice", "instructions": AREA, "criteria": criteria}}),
-            repos: &repos,
+            repos: self.repos,
         })?;
-        Ok(match asked {
-            Asked::Answered(answers) => {
-                let choice = answers["area"]["choice"]
-                    .as_str()
-                    .unwrap_or("none")
-                    .to_owned();
-                match answers["area"]["probabilities"][choice.as_str()].as_f64() {
-                    Some(p) if p.is_finite() => Answer::Picked(choice, p),
-                    _ => Answer::Skipped("shape"),
-                }
-            }
-            Asked::Skipped(why) => Answer::Skipped(why),
-        })
-    };
-    let picked = pick_among(&kept, &mut tally, &mut ask)?;
-    let (choice, p) = match picked {
-        Answer::Picked(choice, p) => (choice, p),
-        Answer::Skipped("off" | "key" | "excluded") => return Ok(Vec::new()),
-        Answer::Skipped(why) => return Ok(vec![outcome(&shown, why)?]),
-    };
-    let area = kept.iter().find(|a| a.id == choice);
-    let name = area.map(|a| crate::my_work::shown(a.name(), NAME_CHARS, s.rules));
-    let fields = vec![
-        ("focus", json!(area.map_or(OTHER, |a| a.id.as_str()))),
-        ("p", json!(p)),
-        (
-            "evidence",
-            json!(evidence(name.as_deref(), p, kept.len(), tally)),
-        ),
-    ];
-    Ok(vec![op_of(&shown, fields)?])
+        let answers = match asked {
+            Asked::Answered(answers) => answers,
+            Asked::Skipped(why) => return Ok(Answer::Skipped(why)),
+        };
+        let choice = answers["area"]["choice"]
+            .as_str()
+            .unwrap_or("none")
+            .to_owned();
+        Ok(
+            match answers["area"]["probabilities"][choice.as_str()].as_f64() {
+                Some(p) if p.is_finite() => Answer::Picked(choice, p),
+                _ => Answer::Skipped("shape"),
+            },
+        )
+    }
 }
 
 /// What one question answered: a kept area's id or `none` with its probability, or why there is
@@ -278,7 +347,12 @@ fn pick_among(
 
 /// claude-mem's evidence of a pick: the area's name, or none fits, over how many kept areas and how
 /// they were asked, with the probability.
-fn evidence(name: Option<&str>, p: f64, kept: usize, (sets, finals): (usize, usize)) -> String {
+fn evidence(
+    (who, name): (&str, Option<&str>),
+    p: f64,
+    kept: usize,
+    (sets, finals): (usize, usize),
+) -> String {
     let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let mut asked = plural(kept, "kept focus area");
     if sets > 0 {
@@ -294,8 +368,8 @@ fn evidence(name: Option<&str>, p: f64, kept: usize, (sets, finals): (usize, usi
         }
     }
     match name {
-        Some(name) => format!("Jev: \"{name}\" over {asked} (p {p:.2})."),
-        None => format!("Jev: none of {asked} fits (p {p:.2})."),
+        Some(name) => format!("{who}: \"{name}\" over {asked} (p {p:.2})."),
+        None => format!("{who}: none of {asked} fits (p {p:.2})."),
     }
 }
 

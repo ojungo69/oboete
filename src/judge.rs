@@ -1,8 +1,9 @@
-//! The judge (docs/my-work-model.md J1): Typesafe's Jev, asked outside the curator chain at one
-//! fixed endpoint. What it is shown goes through the outbound gate, a conversation of an excluded
-//! repository is never sent, and each call is a row of the provider ledger, inside the month's
-//! paid cap with every paid entry. A failed call is not made again: what it would have decided is
-//! left to the model that decides it without a judge, as claude-mem leaves it.
+//! The judge (docs/my-work-model.md J1, J7): a decision model asked outside the curator chain at
+//! one of the addresses fixed here, Typesafe's Jev unless the owner chose another of the list. What
+//! it is shown goes through the outbound gate, a conversation of an excluded repository is never
+//! sent, and each call is a row of the provider ledger under its destination's name, inside the
+//! month's paid cap with every paid entry. A failed call is not made again: what it would have
+//! decided is left to the model that decides it without a judge, as claude-mem leaves it.
 
 use std::time::{Duration, Instant};
 
@@ -10,20 +11,102 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 
-use crate::config::{self, Limits, Provider};
+use crate::config::{self, Destination, Limits, Provider};
 use crate::providers_db::{self, Usage};
 use crate::raw::Raw;
 use crate::redact::Rules;
 
-/// Typesafe's endpoint (J1): no value of `[judge]` sends anything elsewhere.
-pub(crate) const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
-/// The judge's rows in the provider ledger, a name no chain entry has (`config::JUDGE_PREFIX`).
+/// The addresses of the list (J7, decision 63); no value of `[judge]` sends anything elsewhere.
+/// Typesafe's, Jev's (J1).
+const JEV: &str = "https://api.typesafe.ai/v1/systemone";
+/// Cloudflare's Workers AI, an account's: the account id and the model follow.
+const CLOUDFLARE: &str = "https://api.cloudflare.com/client/v4/accounts/";
+/// Liquid's.
+const LIQUID: &str = "https://api.liquid.ai/decisions/v1/systemone";
+/// d1 on this PC: Ollama's port, which llama.cpp's server can be started on too.
+pub(crate) const LOCAL: &str = "127.0.0.1:11434";
+/// Jev's rows in the provider ledger. Each destination's name starts `judge:`, as no chain entry's
+/// does (`config::JUDGE_PREFIX`).
 pub(crate) const NAME: &str = "judge:jev";
 pub(crate) const ROLE: &str = "judge";
-/// USD a million input tokens; the answer is free (J1).
-const USD_PER_MTOK_IN: f64 = 0.042;
 /// The answer's bound in the ledger's reservation; free, so it only bounds the count.
 const OUTPUT_BOUND: u32 = 256;
+
+/// What the code fixes of a destination (J7): its rows' name in the provider ledger, its name in
+/// evidence, doctor and the page, the model its address takes (none for Jev, whose is `[judge]
+/// model`), its USD a million input tokens (the answer is free), and its key, none for d1 on this
+/// PC.
+pub(crate) struct Fixed {
+    pub name: &'static str,
+    pub label: &'static str,
+    model: Option<&'static str>,
+    pub usd_per_mtok_in: f64,
+    pub key: Option<Key>,
+}
+
+/// A service's key: the `[judge]` field the settings page writes its file into, and the reading of
+/// that field, together so that the key written is the key sent.
+#[derive(Clone, Copy)]
+pub(crate) struct Key {
+    pub field: &'static str,
+    file: fn(&config::Judge) -> Option<&std::path::Path>,
+}
+
+pub(crate) fn fixed(d: Destination) -> Fixed {
+    let typesafe = Key {
+        field: "key_file",
+        file: |j| j.key_file.as_deref(),
+    };
+    let cloudflare = Key {
+        field: "cloudflare_key_file",
+        file: |j| j.cloudflare_key_file.as_deref(),
+    };
+    let liquid = Key {
+        field: "liquid_key_file",
+        file: |j| j.liquid_key_file.as_deref(),
+    };
+    let (name, label, model, usd_per_mtok_in, key) = match d {
+        Destination::Jev => (NAME, "Jev", None, 0.042, Some(typesafe)),
+        Destination::Clef => ("judge:clef", "Clef", Some("clef"), 0.24, Some(cloudflare)),
+        Destination::ClefFlash => (
+            "judge:clef-flash",
+            "Clef-flash",
+            Some("clef-flash"),
+            0.038,
+            Some(cloudflare),
+        ),
+        Destination::D1 => ("judge:d1", "d1 (Liquid)", Some("d1.1"), 0.02, Some(liquid)),
+        Destination::D1Local => ("judge:d1-local", "d1 on this PC", Some("d1"), 0.0, None),
+    };
+    Fixed {
+        name,
+        label,
+        model,
+        usd_per_mtok_in,
+        key,
+    }
+}
+
+/// The file of the key destination `d` takes, as `j` names it; none for d1 on this PC.
+pub(crate) fn key_file_of(j: &config::Judge, d: Destination) -> Option<&std::path::Path> {
+    fixed(d).key.and_then(|key| (key.file)(j))
+}
+
+/// The file of the key `j`'s destination takes.
+pub(crate) fn key_file(j: &config::Judge) -> Option<&std::path::Path> {
+    key_file_of(j, j.destination)
+}
+
+/// Whether `d` is one of Cloudflare's: its address names the account, and its answer comes in an
+/// envelope.
+pub(crate) fn cloudflare(d: Destination) -> bool {
+    matches!(d, Destination::Clef | Destination::ClefFlash)
+}
+
+/// The model selector `j` sends.
+fn model(j: &config::Judge) -> &str {
+    fixed(j.destination).model.unwrap_or(&j.model)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -50,22 +133,24 @@ pub(crate) enum Asked {
     Skipped(&'static str),
 }
 
-/// The judge as an entry of the budget (`budget::reserve`): its daily calls and its price.
+/// The judge as an entry of the budget (`budget::reserve`): its daily calls and its price, under
+/// its destination's name.
 fn entry(j: &config::Judge) -> Provider {
+    let fixed = fixed(j.destination);
     Provider::Openai {
-        name: NAME.into(),
+        name: fixed.name.into(),
         enabled: j.enabled,
-        base_url: ENDPOINT.into(),
+        base_url: url(j).unwrap_or_default(),
         api: config::Api::Openai,
-        key_file: Some(j.key_file.clone()),
-        model: j.model.clone(),
+        key_file: key_file(j).map(std::path::Path::to_path_buf),
+        model: model(j).into(),
         daily_budget: Some(j.daily_budget),
         timeout_s: j.timeout_s,
         retry_429: false,
         extra: Map::new(),
         headers: Default::default(),
         limits: Limits {
-            usd_per_mtok_in: USD_PER_MTOK_IN,
+            usd_per_mtok_in: fixed.usd_per_mtok_in,
             usd_per_mtok_out: 0.0,
             max_output_tokens: OUTPUT_BOUND,
             ..Limits::default()
@@ -88,7 +173,7 @@ pub(crate) fn ask(
     if !j.enabled {
         return Ok(Asked::Skipped("off"));
     }
-    let Ok(key) = config::read_key(&j.key_file) else {
+    let Some((url, key)) = target(j) else {
         return Ok(Asked::Skipped("key"));
     };
     if excluded(raw, ask.repos)? {
@@ -97,7 +182,8 @@ pub(crate) fn ask(
     if !(gated(&mut ask.state, rules) && gated(&mut ask.questions, rules)) {
         return Ok(Asked::Skipped("masked"));
     }
-    let body = json!({"model": j.model, "state": ask.state, "questions": ask.questions});
+    let body = json!({"model": model(j), "state": ask.state, "questions": ask.questions});
+    let name = fixed(j.destination).name;
     let text = body.to_string();
     let est = crate::budget::estimate(&text);
     let p = entry(j);
@@ -110,7 +196,7 @@ pub(crate) fn ask(
                     providers_db::record(
                         db,
                         &providers_db::Call {
-                            provider: NAME,
+                            provider: name,
                             role: ROLE,
                             span: ask.span,
                             outcome: refusal.outcome,
@@ -142,7 +228,7 @@ pub(crate) fn ask(
         return now.map(|_| Asked::Skipped("excluded"));
     }
     let start = Instant::now();
-    let sent = post(j, &key, &body, admission);
+    let sent = post(j, (&url, key.as_deref()), &body, admission);
     let ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
     let (outcome, detail, answers, usage, billed) = match sent {
         Ok(out) => {
@@ -169,7 +255,7 @@ pub(crate) fn ask(
     reservation.settle(
         db,
         &providers_db::Call {
-            provider: NAME,
+            provider: name,
             role: ROLE,
             span: ask.span,
             outcome,
@@ -186,44 +272,98 @@ pub(crate) fn ask(
     Ok(answers.map_or(Asked::Skipped(outcome), Asked::Answered))
 }
 
-/// Doctor's line: the judge's switch, its key file, and its calls in the last 24 hours.
+/// Doctor's line: the judge's destination (d1 on this PC with its address) and switch, what it
+/// lacks, and its calls in the last 24 hours.
 pub(crate) fn doctor_line(home: &std::path::Path, judge: Option<&config::Judge>) -> String {
     let Some(j) = judge else {
         return "judge (Jev): off, no key set ([judge]; set one on the settings page)".to_owned();
     };
+    let label = fixed(j.destination).label;
+    let at = match j.destination {
+        Destination::D1Local => format!("judge ({label}, {LOCAL})"),
+        _ => format!("judge ({label})"),
+    };
     if !j.enabled {
-        return "judge (Jev): off ([judge] enabled = false)".to_owned();
+        return format!("{at}: off ([judge] enabled = false)");
     }
-    if config::read_key(&j.key_file).is_err() {
-        return format!(
-            "judge (Jev): on, but {} has no key on line 2: nothing is sent",
-            j.key_file.display()
-        );
+    if let Some(missing) = missing(j) {
+        return format!("{at}: on, but {missing}: nothing is sent");
     }
+    let name = fixed(j.destination).name;
     let calls = match providers_db::read_only(home) {
-        Ok(Some(db)) => providers_db::calls_in_a_day(&db, NAME).map(|(calls, _)| calls),
+        Ok(Some(db)) => providers_db::calls_in_a_day(&db, name).map(|(calls, _)| calls),
         Ok(None) => Ok(0),
         Err(e) => Err(e),
     };
     match calls {
         Ok(calls) if j.daily_budget == config::no_daily_cap() => {
-            format!("judge (Jev): on, {calls} calls in the last 24 hours, no cap of calls a day")
+            format!("{at}: on, {calls} calls in the last 24 hours, no cap of calls a day")
         }
         Ok(calls) => format!(
-            "judge (Jev): on, {calls} of {} calls in the last 24 hours",
+            "{at}: on, {calls} of {} calls in the last 24 hours",
             j.daily_budget
         ),
-        Err(_) => {
-            "judge (Jev): on; its calls unknown: the provider ledger does not read".to_owned()
-        }
+        Err(_) => format!("{at}: on; its calls unknown: the provider ledger does not read"),
     }
 }
 
-/// Whether `j` is still the judge `[judge]` says now, on, with the same key file: a switch turned
-/// off since the round read the settings sends nothing more (J1). One that does not read is not.
+/// What `j`'s destination lacks to be asked, said without its key or its account id: none when
+/// it has what it needs.
+fn missing(j: &config::Judge) -> Option<String> {
+    // Only Cloudflare's address can be missing: it names the account.
+    if url(j).is_none() {
+        return Some("no Cloudflare account id is set".to_owned());
+    }
+    let field = fixed(j.destination).key?.field;
+    match key_file(j) {
+        None => Some(format!("no key is set ([judge] {field})")),
+        Some(file) if config::read_key(file).is_err() => {
+            Some(format!("{} has no key on line 2", file.display()))
+        }
+        Some(_) => None,
+    }
+}
+
+/// Whether `j` is on with what its destination needs to be asked (J7).
+pub(crate) fn ready(j: &config::Judge) -> bool {
+    j.enabled && target(j).is_some()
+}
+
+/// The address `j` sends to, its destination's: Cloudflare's names the account, only when its id
+/// is 32 lowercase hex digits (`config::account_id`), so the host and the path stay the list's.
+pub(crate) fn url(j: &config::Judge) -> Option<String> {
+    match j.destination {
+        Destination::Jev => Some(JEV.to_owned()),
+        Destination::Clef | Destination::ClefFlash => {
+            let account = (j.cloudflare_account_id.as_deref()).filter(|a| config::account_id(a))?;
+            Some(format!(
+                "{CLOUDFLARE}{account}/ai/run/@cf/cloudflare/{}",
+                model(j)
+            ))
+        }
+        Destination::D1 => Some(LIQUID.to_owned()),
+        Destination::D1Local => Some(format!("http://{LOCAL}/v1/systemone")),
+    }
+}
+
+/// Where `j` sends and the key it sends with (none for d1 on this PC): none when its key, or
+/// Cloudflare's account id, is missing or does not read, and nothing goes.
+fn target(j: &config::Judge) -> Option<(String, Option<String>)> {
+    let url = url(j)?;
+    let key = match fixed(j.destination).key {
+        Some(_) => Some(config::read_key(key_file(j)?).ok()?),
+        None => None,
+    };
+    Some((url, key))
+}
+
+/// Whether `j` is still the judge `[judge]` says now, on, sending to the same address with the
+/// same key file: a switch turned off, or another destination chosen, since the round read the
+/// settings sends nothing more (J1, J7). One that does not read is not.
 pub(crate) fn still_on(home: &std::path::Path, j: &config::Judge) -> bool {
+    let sends = |j: &config::Judge| (j.destination, url(j), key_file(j).map(|f| f.to_owned()));
     (config::load(home).ok().and_then(|c| c.judge))
-        .is_some_and(|now| now.enabled && now.key_file == j.key_file)
+        .is_some_and(|now| now.enabled && sends(&now) == sends(j))
 }
 
 /// Whether a repository of `repos` is kept from being sent, or never recorded, now (spec 5.5).
@@ -277,24 +417,24 @@ fn answered(questions: &Value, out: &Value) -> Option<Map<String, Value>> {
     Some(answers.clone())
 }
 
-/// One POST with no redirect followed: the answer as JSON, or the outcome, a detail of its status
+/// One POST to `url`, with `key` when its destination takes one, and no redirect followed: the
+/// answer as JSON (Cloudflare's from inside its envelope), or the outcome, a detail of its status
 /// or kind (no error body is kept: it can echo what was sent) and whether it may have been billed.
 fn post(
     j: &config::Judge,
-    key: &str,
+    (url, key): (&str, Option<&str>),
     body: &Value,
     admission: Option<crate::dispatch::Guard>,
 ) -> std::result::Result<Value, (&'static str, String, bool)> {
     #[cfg(test)]
-    let url = AT
-        .with_borrow(Clone::clone)
-        .unwrap_or_else(|| ENDPOINT.into());
+    let url = AT.with_borrow(Clone::clone).unwrap_or_else(|| url.into());
     #[cfg(not(test))]
-    let url = ENDPOINT.to_owned();
+    let url = url.to_owned();
     let timeout = Duration::from_secs(j.timeout_s);
-    let req = crate::provider::admitted_agent(&url, timeout, 0, admission.as_ref())
-        .post(&url)
-        .header("Authorization", &format!("Bearer {key}"));
+    let mut req = crate::provider::admitted_agent(&url, timeout, 0, admission.as_ref()).post(&url);
+    if let Some(key) = key {
+        req = req.header("Authorization", &format!("Bearer {key}"));
+    }
     let resp = match &admission {
         Some(admission) => crate::dispatch::json(req, body, admission),
         None => req.send_json(body),
@@ -317,7 +457,20 @@ fn post(
     if raw.len() as u64 > max {
         return Err(("shape", "too large".to_owned(), true));
     }
-    serde_json::from_slice(&raw).map_err(|_| ("shape", "json".to_owned(), true))
+    answer_of(j.destination, &raw).map_err(|detail| ("shape", detail.to_owned(), true))
+}
+
+/// The answer in `raw`, the body `d`'s address answered with: Cloudflare's from inside its
+/// envelope, when the envelope says it succeeded (its REST API's form, called 2026-10-31). Else
+/// why not: `json`, or Cloudflare's `envelope`.
+fn answer_of(d: Destination, raw: &[u8]) -> std::result::Result<Value, &'static str> {
+    let mut out: Value = serde_json::from_slice(raw).map_err(|_| "json")?;
+    if !cloudflare(d) {
+        return Ok(out);
+    }
+    (out["success"] == true && out["result"].is_object())
+        .then(|| out["result"].take())
+        .ok_or("envelope")
 }
 
 #[cfg(test)]
@@ -327,6 +480,9 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     const KEY: &str = "TESTKEY_for_the_stub";
+    const CF_KEY: &str = "CFTOKEN_for_the_stub";
+    const LIQUID_KEY: &str = "liquid_KEY_for_the_stub";
+    const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 
     struct Home {
         dir: tempfile::TempDir,
@@ -344,13 +500,39 @@ mod tests {
             db: providers_db::open(dir.path()).unwrap(),
             judge: config::Judge {
                 enabled: true,
-                key_file,
+                destination: config::Destination::Jev,
+                key_file: Some(key_file),
+                cloudflare_key_file: None,
+                cloudflare_account_id: None,
+                liquid_key_file: None,
                 model: "jev-latest".into(),
                 timeout_s: 5,
                 daily_budget: 300,
             },
             dir,
         }
+    }
+
+    /// `h`'s judge sending to `d`, each service's own key in a file of its own.
+    fn sending_to(h: &mut Home, d: config::Destination) {
+        let file = |name: &str, key: &str| {
+            let file = h.dir.path().join(name);
+            std::fs::write(&file, format!("# a test key\n{key}\n")).unwrap();
+            file
+        };
+        let (cloudflare, liquid) = (file("CF_KEY.md", CF_KEY), file("LIQUID_KEY.md", LIQUID_KEY));
+        h.judge.cloudflare_key_file = Some(cloudflare);
+        h.judge.cloudflare_account_id = Some(ACCOUNT.into());
+        h.judge.liquid_key_file = Some(liquid);
+        h.judge.destination = d;
+    }
+
+    /// `answer` in Cloudflare's envelope, as its REST API answered on 2026-10-31.
+    fn enveloped(answer: &[u8]) -> Vec<u8> {
+        let answer: Value = serde_json::from_slice(answer).unwrap();
+        json!({"result": answer, "success": true, "errors": [], "messages": []})
+            .to_string()
+            .into_bytes()
     }
 
     fn rules(toml: &str) -> Rules {
@@ -709,7 +891,7 @@ mod tests {
             Asked::Skipped("off")
         );
         h.judge.enabled = true;
-        std::fs::write(&h.judge.key_file, "only a note\n").unwrap();
+        std::fs::write(h.judge.key_file.as_ref().unwrap(), "only a note\n").unwrap();
         assert_eq!(
             run(&h, &rules(""), 5.0, asked(&[])).unwrap(),
             Asked::Skipped("key")
@@ -717,6 +899,192 @@ mod tests {
         assert_eq!(requests(&rx), 0);
         assert!(ledger(&h.db).is_empty());
         drop(h.dir);
+    }
+
+    /// J7 (decision 63): each destination's address is fixed here. Cloudflare's names the account
+    /// id in its path only when it is 32 lowercase hex digits, so no value of `[judge]` reaches
+    /// another host or path, and without one the judge is not ready.
+    #[test]
+    fn each_destination_is_a_fixed_address() {
+        use config::Destination::*;
+        let mut h = home();
+        let cloudflare = |model: &str| {
+            format!(
+                "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/ai/run/@cf/cloudflare/{model}"
+            )
+        };
+        for (d, at) in [
+            (Jev, "https://api.typesafe.ai/v1/systemone".to_owned()),
+            (Clef, cloudflare("clef")),
+            (ClefFlash, cloudflare("clef-flash")),
+            (
+                D1,
+                "https://api.liquid.ai/decisions/v1/systemone".to_owned(),
+            ),
+            (D1Local, "http://127.0.0.1:11434/v1/systemone".to_owned()),
+        ] {
+            sending_to(&mut h, d);
+            assert_eq!(url(&h.judge).as_deref(), Some(at.as_str()), "{d:?}");
+            assert!(ready(&h.judge), "{d:?}");
+        }
+        sending_to(&mut h, ClefFlash);
+        for bad in [
+            None,
+            Some("0123456789ABCDEF0123456789abcdef"),
+            Some("0123456789abcdef0123456789abcde"),
+            Some("0123456789abcdef0123456789abcdef/../../zones"),
+        ] {
+            h.judge.cloudflare_account_id = bad.map(Into::into);
+            assert_eq!(url(&h.judge), None, "{bad:?}");
+            assert!(!ready(&h.judge), "{bad:?}");
+        }
+    }
+
+    /// J7: each destination is asked with its own model selector and its own service's key (none
+    /// for d1 on this PC), its answer read where its API puts it (Cloudflare's inside its
+    /// envelope), and its call kept in the ledger under its own name at its own price.
+    #[test]
+    fn each_destination_sends_its_model_and_key_and_keeps_its_own_row() {
+        use config::Destination::*;
+        let row =
+            |name: &str, usd: &str| format!("{name} judge c1 ok  Some(1000000) Some(12) {usd}");
+        for (d, model, key, kept) in [
+            (
+                Jev,
+                "jev-latest",
+                Some(KEY),
+                row("judge:jev", "Some(0.042)"),
+            ),
+            (Clef, "clef", Some(CF_KEY), row("judge:clef", "Some(0.24)")),
+            (
+                ClefFlash,
+                "clef-flash",
+                Some(CF_KEY),
+                row("judge:clef-flash", "Some(0.038)"),
+            ),
+            (D1, "d1.1", Some(LIQUID_KEY), row("judge:d1", "Some(0.02)")),
+            (D1Local, "d1", None, row("judge:d1-local", "None")),
+        ] {
+            let mut h = home();
+            sending_to(&mut h, d);
+            let answer = match d {
+                Clef | ClefFlash => enveloped(&picked("g7")),
+                _ => picked("g7"),
+            };
+            let rx = stub(vec![("200 OK", answer)], "");
+            let answered = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
+            assert!(
+                matches!(answered, Asked::Answered(_)),
+                "{d:?}: {answered:?}"
+            );
+            let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(request_body(&request)["model"], model, "{d:?}");
+            let lower = request.to_lowercase();
+            match key {
+                Some(key) => {
+                    let header = format!("authorization: bearer {}", key.to_lowercase());
+                    assert!(lower.contains(&header), "{d:?}");
+                }
+                None => assert!(!lower.contains("authorization"), "{d:?}"),
+            }
+            assert_eq!(ledger(&h.db), [kept], "{d:?}");
+        }
+    }
+
+    /// J7: Cloudflare's answer is the `result` of its envelope when `success` is true; another
+    /// envelope, or an answer outside one, is not its own (`shape`), and is paid for as sent.
+    #[test]
+    fn cloudflare_s_envelope_is_read_or_refused() {
+        let answer: Value = serde_json::from_slice(&picked("g7")).unwrap();
+        for body in [
+            json!({"result": answer, "success": false, "errors": [{"code": 3040}], "messages": []}),
+            json!({"success": true, "errors": [], "messages": []}),
+            answer.clone(),
+        ] {
+            let mut h = home();
+            sending_to(&mut h, config::Destination::ClefFlash);
+            let _rx = stub(vec![("200 OK", body.to_string().into_bytes())], "");
+            let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
+            assert_eq!(asked_, Asked::Skipped("shape"), "{body}");
+            let kept = ledger(&h.db);
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            let row = &kept[0];
+            assert!(row.starts_with("judge:clef-flash judge c1 shape "), "{row}");
+            assert!(row.contains("envelope"), "{row}");
+        }
+        // A body that is not JSON is `json`, from Cloudflare or any other.
+        for d in [config::Destination::ClefFlash, config::Destination::Jev] {
+            let mut h = home();
+            sending_to(&mut h, d);
+            let _rx = stub(vec![("200 OK", b"<html>busy</html>".to_vec())], "");
+            let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
+            assert_eq!(asked_, Asked::Skipped("shape"), "{d:?}");
+            let row = &ledger(&h.db)[0];
+            assert!(row.contains("json") && !row.contains("envelope"), "{row}");
+        }
+    }
+
+    /// J7: a destination without what it needs sends nothing and keeps no row: Cloudflare's without
+    /// its token or its account id, Liquid's without its key. d1 on this PC needs neither.
+    #[test]
+    fn a_destination_without_its_key_sends_nothing() {
+        use config::Destination::*;
+        let mut h = home();
+        let rx = stub(vec![("200 OK", picked("g7"))], "");
+        for (d, unset) in [(Clef, "token"), (ClefFlash, "account"), (D1, "key")] {
+            sending_to(&mut h, d);
+            match unset {
+                "token" => h.judge.cloudflare_key_file = None,
+                "account" => h.judge.cloudflare_account_id = None,
+                _ => h.judge.liquid_key_file = None,
+            }
+            assert!(!ready(&h.judge), "{d:?}");
+            let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
+            assert_eq!(asked_, Asked::Skipped("key"), "{d:?}");
+        }
+        assert_eq!(requests(&rx), 0);
+        assert!(ledger(&h.db).is_empty());
+        sending_to(&mut h, D1Local);
+        (
+            h.judge.key_file,
+            h.judge.cloudflare_key_file,
+            h.judge.liquid_key_file,
+        ) = (None, None, None);
+        assert!(ready(&h.judge));
+    }
+
+    /// J7: the round's judge is not the one `[judge]` names once its destination, or the key file
+    /// or account id that destination reads, changed since the round read the settings.
+    #[test]
+    fn a_destination_switched_since_the_round_read_it_is_not_still_on() {
+        use config::Destination::*;
+        let mut h = home();
+        sending_to(&mut h, ClefFlash);
+        let path = |f: &Option<std::path::PathBuf>| f.as_ref().unwrap().display().to_string();
+        let (config, jev) = (h.dir.path().join("config.toml"), path(&h.judge.key_file));
+        let table = |destination: &str, account: &str, cloudflare: &str| {
+            let text = format!(
+                "providers = []\n[judge]\ndestination = \"{destination}\"\nkey_file = '{jev}'\n\
+                 cloudflare_key_file = '{cloudflare}'\ncloudflare_account_id = \"{account}\"\n"
+            );
+            std::fs::write(&config, text).unwrap();
+        };
+        let cloudflare = path(&h.judge.cloudflare_key_file);
+        table("clef-flash", ACCOUNT, &cloudflare);
+        assert!(still_on(h.dir.path(), &h.judge));
+        table("clef", ACCOUNT, &cloudflare);
+        assert!(!still_on(h.dir.path(), &h.judge));
+        table("clef-flash", &"f".repeat(32), &cloudflare);
+        assert!(!still_on(h.dir.path(), &h.judge));
+        table("clef-flash", ACCOUNT, &path(&h.judge.liquid_key_file));
+        assert!(!still_on(h.dir.path(), &h.judge));
+        // Jev's key file is not Clef-flash's: Jev's alone changed, it is still the same judge.
+        table("clef-flash", ACCOUNT, &cloudflare);
+        h.judge.key_file = None;
+        assert!(still_on(h.dir.path(), &h.judge));
+        sending_to(&mut h, D1Local);
+        table("d1-local", ACCOUNT, &cloudflare);
+        assert!(still_on(h.dir.path(), &h.judge));
     }
 
     /// Doctor's line names each state without the key.
@@ -739,10 +1107,33 @@ mod tests {
             doctor_line(h.dir.path(), Some(&h.judge)).contains("off ([judge] enabled = false)")
         );
         h.judge.enabled = true;
-        std::fs::write(&h.judge.key_file, "a note only\n").unwrap();
+        std::fs::write(h.judge.key_file.as_ref().unwrap(), "a note only\n").unwrap();
         let line = doctor_line(h.dir.path(), Some(&h.judge));
         assert!(line.contains("has no key on line 2"), "{line}");
         assert!(!line.contains(KEY));
+        // J7: the destination is named, d1 on this PC with the address it is sent to; one without
+        // what it needs says so, its account id not repeated.
+        h.judge.daily_budget = 300;
+        sending_to(&mut h, config::Destination::D1Local);
+        assert_eq!(
+            doctor_line(h.dir.path(), Some(&h.judge)),
+            "judge (d1 on this PC, 127.0.0.1:11434): on, 0 of 300 calls in the last 24 hours"
+        );
+        sending_to(&mut h, config::Destination::ClefFlash);
+        h.judge.cloudflare_account_id = None;
+        let line = doctor_line(h.dir.path(), Some(&h.judge));
+        assert_eq!(
+            line,
+            "judge (Clef-flash): on, but no Cloudflare account id is set: nothing is sent"
+        );
+        h.judge.cloudflare_account_id = Some(ACCOUNT.into());
+        std::fs::write(h.judge.cloudflare_key_file.as_ref().unwrap(), "a note\n").unwrap();
+        let line = doctor_line(h.dir.path(), Some(&h.judge));
+        assert!(line.starts_with("judge (Clef-flash): on, but "), "{line}");
+        assert!(
+            line.contains("has no key on line 2") && !line.contains(ACCOUNT),
+            "{line}"
+        );
     }
 
     #[test]

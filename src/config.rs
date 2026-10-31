@@ -241,15 +241,30 @@ fn default_idle_minutes() -> u32 {
     10
 }
 
-/// `[judge]` (docs/my-work-model.md J1): Typesafe's Jev, asked at its own fixed endpoint
-/// (`judge::ENDPOINT`): no value of the table sends the owner's text anywhere else.
+/// `[judge]` (docs/my-work-model.md J1, J7): the judges, asked outside the curator chain at one
+/// of the addresses `judge.rs` fixes (`destination`): no value of the table sends the owner's text
+/// anywhere else.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Judge {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// The key file, the token on line 2 (`read_key`), read at each call.
-    pub key_file: PathBuf,
+    /// Where it sends (J7, decision 63); Typesafe's Jev unless set.
+    #[serde(default)]
+    pub destination: Destination,
+    /// Typesafe's key file, Jev's: the token on line 2 (`read_key`), read at each call.
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
+    /// Cloudflare's, for Clef and Clef-flash: an API token's file, and the account id its address
+    /// names (32 lowercase hex digits, checked at load).
+    #[serde(default)]
+    pub cloudflare_key_file: Option<PathBuf>,
+    #[serde(default)]
+    pub cloudflare_account_id: Option<String>,
+    /// Liquid's key file, for its d1.
+    #[serde(default)]
+    pub liquid_key_file: Option<PathBuf>,
+    /// Jev's model selector; the other destinations' are fixed with their addresses (J7).
     #[serde(default = "default_judge_model")]
     pub model: String,
     #[serde(default = "default_judge_timeout")]
@@ -261,6 +276,59 @@ pub struct Judge {
 
 /// What no chain entry's name starts with: the judge's own names in the provider ledger.
 pub(crate) const JUDGE_PREFIX: &str = "judge:";
+
+/// Where the judges send (docs/my-work-model.md J7, decision 63): one of a list fixed in the code,
+/// each an address, a model and a price in `judge::fixed`, read by its `id`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub enum Destination {
+    /// Typesafe's Jev, the default until decision 34's single evaluation picks one.
+    #[default]
+    Jev,
+    /// Cloudflare's own models, in Workers AI.
+    Clef,
+    ClefFlash,
+    /// Liquid's d1, through its API.
+    D1,
+    /// d1 run on this PC, at Ollama's port.
+    D1Local,
+}
+
+impl Destination {
+    pub(crate) const ALL: [Destination; 5] = [
+        Destination::Jev,
+        Destination::Clef,
+        Destination::ClefFlash,
+        Destination::D1,
+        Destination::D1Local,
+    ];
+
+    /// Its name in `[judge] destination` and on the settings page.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Destination::Jev => "jev",
+            Destination::Clef => "clef",
+            Destination::ClefFlash => "clef-flash",
+            Destination::D1 => "d1",
+            Destination::D1Local => "d1-local",
+        }
+    }
+}
+
+impl TryFrom<String> for Destination {
+    type Error = &'static str;
+    fn try_from(id: String) -> std::result::Result<Self, Self::Error> {
+        (Destination::ALL.into_iter())
+            .find(|d| d.id() == id)
+            .ok_or("not one of the judge's destinations")
+    }
+}
+
+/// Whether `id` is a Cloudflare account id: 32 lowercase hex digits, which is all that reaches the
+/// path of the judge's address (J7).
+pub(crate) fn account_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
 
 fn default_judge_model() -> String {
     "jev-latest".into()
@@ -874,6 +942,7 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
         }
     }
     overlay(&mut cfg);
+    judge_checked(path, cfg.judge.as_ref())?;
     // A CLI's subscription pays for it, and its answer has no cap to price; prices are for HTTP.
     if let Some(p) = cfg
         .providers
@@ -919,6 +988,17 @@ pub(crate) fn from_text(path: &Path, text: &str) -> Result<Config> {
         ),
     }
     Ok(cfg)
+}
+
+/// J7: only an account id reaches the judge's address, never a path or another host.
+fn judge_checked(path: &Path, judge: Option<&Judge>) -> Result<()> {
+    let account = judge.and_then(|j| j.cloudflare_account_id.as_deref());
+    anyhow::ensure!(
+        account.is_none_or(account_id),
+        "{}: [judge] cloudflare_account_id is not a Cloudflare account id (32 lowercase hex digits)",
+        path.display()
+    );
+    Ok(())
 }
 
 /// `load()` for the callers that build a chain (the worker, `recurate`): the entries turned off
@@ -1855,6 +1935,60 @@ model = "haiku"
         load(dir.path()).unwrap()
     }
 
+    /// J7: each destination of the list loads by its name; a table written before it (a Typesafe
+    /// key and the switch) is Jev's, as it was. A name not on the list, or an account id that is not
+    /// Cloudflare's, is refused at load, and neither is repeated in the error.
+    #[test]
+    fn the_judge_sends_to_one_of_the_list() {
+        for d in Destination::ALL {
+            let cfg = load_text(&format!("[judge]\ndestination = \"{}\"\n", d.id()));
+            assert_eq!(cfg.judge.unwrap().destination, d);
+        }
+        let old = load_text("[judge]\nkey_file = \"/k/TYPESAFE_KEY.md\"\nenabled = true\n");
+        let old = old.judge.unwrap();
+        assert_eq!(old.destination, Destination::Jev);
+        assert_eq!(
+            old.key_file.as_deref(),
+            Some(Path::new("/k/TYPESAFE_KEY.md"))
+        );
+        let account = "0123456789abcdef0123456789abcdef";
+        let cfg = load_text(&format!(
+            "[judge]\ndestination = \"clef-flash\"\ncloudflare_account_id = \"{account}\"\n"
+        ));
+        assert_eq!(
+            cfg.judge.unwrap().cloudflare_account_id.as_deref(),
+            Some(account)
+        );
+        for (line, says) in [
+            ("destination = \"clef-omni\"", "line 2 is not valid here"),
+            (
+                "destination = \"https://example.invalid\"",
+                "line 2 is not valid here",
+            ),
+            (
+                "cloudflare_account_id = \"0123456789ABCDEF0123456789abcdef\"",
+                "not a Cloudflare account id",
+            ),
+            (
+                "cloudflare_account_id = \"0123456789abcdef0123456789abcde\"",
+                "not a Cloudflare account id",
+            ),
+            (
+                "cloudflare_account_id = \"../../zones/z/purge_cache?x=\"",
+                "not a Cloudflare account id",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let text = format!("[judge]\n{line}\n");
+            std::fs::write(dir.path().join("config.toml"), &text).unwrap();
+            let err = format!("{:#}", load(dir.path()).unwrap_err());
+            assert!(err.contains(says), "{line}: {err}");
+            if line.starts_with("cloudflare") {
+                assert!(!err.contains("ABCDEF") && !err.contains("zones"), "{err}");
+            }
+        }
+    }
+
     /// J1: `[judge]` absent is off; present, its defaults; a destination of its own is refused,
     /// and a chain entry named as the judge's ledger rows is never in the chain, with a warning.
     #[test]
@@ -1865,7 +1999,11 @@ model = "haiku"
             cfg.judge,
             Some(Judge {
                 enabled: true,
-                key_file: "/k/TYPESAFE_KEY.md".into(),
+                destination: Destination::Jev,
+                key_file: Some("/k/TYPESAFE_KEY.md".into()),
+                cloudflare_key_file: None,
+                cloudflare_account_id: None,
+                liquid_key_file: None,
                 model: "jev-latest".into(),
                 timeout_s: 15,
                 daily_budget: 300,

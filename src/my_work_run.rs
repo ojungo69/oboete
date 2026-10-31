@@ -26,8 +26,13 @@ pub type Caller<'a> =
     dyn FnMut(&str, &str, &Value, &AnswerCheck, &Gate) -> Result<ChainResult> + 'a;
 
 /// The judge (J1) as the runner asks it for a job (J3): a state and its questions, to its answer,
-/// through the runner's egress gate.
-pub(crate) type Judging<'a> = dyn FnMut(crate::judge::Ask) -> Result<crate::judge::Asked> + 'a;
+/// through the runner's egress gate; with its name in the ledger, each decision op's entry, and
+/// its name in a decision's evidence (J7: where it sends).
+pub(crate) struct Judging<'a> {
+    pub entry: &'static str,
+    pub label: &'static str,
+    pub ask: &'a mut dyn FnMut(crate::judge::Ask) -> Result<crate::judge::Asked>,
+}
 
 /// My Work's pass of a curation round (A3): `true` asks only for a job due an hour or more.
 pub type Pass<'a> = dyn FnMut(&mut Raw, &Connection, &Connection, bool) -> Result<Phase> + 'a;
@@ -495,10 +500,7 @@ impl<'a> Runner<'a> {
         (reading, held): (&crate::curate::Reading, &BTreeSet<(String, String)>),
         now: i64,
     ) -> Result<Option<Phase>> {
-        let Some((judge, cap)) = self
-            .judge
-            .filter(|(j, _)| j.enabled && crate::config::read_key(&j.key_file).is_ok())
-        else {
+        let Some((judge, cap)) = self.judge.filter(|(j, _)| crate::judge::ready(j)) else {
             return Ok(None);
         };
         let rules = self.rules;
@@ -526,7 +528,13 @@ impl<'a> Runner<'a> {
                 let mut ask = |ask: crate::judge::Ask<'_>| {
                     crate::judge::ask(db, raw, rules, (judge, cap), ask, &gate)
                 };
-                job.judged(&stores, &mut ask, now)
+                let at = crate::judge::fixed(judge.destination);
+                let mut judging = Judging {
+                    entry: at.name,
+                    label: at.label,
+                    ask: &mut ask,
+                };
+                job.judged(&stores, &mut judging, now)
             };
             let ops = match decided {
                 Ok(ops) => ops,

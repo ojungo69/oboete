@@ -23,7 +23,8 @@ use crate::settings::{Refusal, refused};
 
 /// The ops' job (S1).
 pub(crate) const NAME: &str = "judge";
-/// The entry of a decision made with no call; Jev's is `judge::NAME`.
+/// The entry of a decision made with no call; the judge's is its destination's name in the
+/// ledger (`Judging::entry`).
 const RULES: &str = "judge:rules";
 
 // claude-mem's request judge (request-judge.mjs, 15.4.0, as 15.7.0 has it), word for word.
@@ -71,6 +72,7 @@ pub(crate) fn request(
     judge: &mut Judging,
     now: i64,
 ) -> Result<Vec<MyWorkOp>> {
+    let (entry, who) = (judge.entry, judge.label);
     let device = s.raw.device();
     let candidates = crate::my_work_group::candidates(seen, groups, device, now);
     let Some(c) = (candidates.values().flatten())
@@ -89,32 +91,9 @@ pub(crate) fn request(
         .collect();
     let mut shown = Shown::default();
     shown.spans.insert(*opening);
-    let op_of = |shown: Shown, entry: &str, fields: Vec<(&str, Value)>| -> Result<MyWorkOp> {
-        let mut fields: BTreeMap<String, Value> = (fields.into_iter())
-            .map(|(name, v)| (name.to_owned(), v))
-            .collect();
-        fields.insert("conversation".into(), key(&c.key));
-        let top = s.raw.max_seq_of(device)?;
-        let mut removed = Vec::new();
-        for &seq in &shown.spans {
-            removed.extend(s.raw.removed_in(device, seq, seq, Some(top))?);
-        }
-        removed.sort();
-        removed.dedup();
-        Ok(MyWorkOp {
-            job: NAME.into(),
-            about: repo.clone(),
-            entry: entry.into(),
-            ts: crate::db::now_ms(),
-            read: Read {
-                spans: shown.spans.iter().map(|&seq| (seq, seq)).collect(),
-                ops: shown.ops.into_iter().collect(),
-            },
-            removed,
-            fields,
-            skipped: false,
-            forgotten: None,
-        })
+    let decision = |shown: Shown, entry: &str, mut fields: Vec<(&str, Value)>| {
+        fields.push(("conversation", key(&c.key)));
+        op_of(s, (NAME, repo, entry), &shown, fields)
     };
     // Too big for an op's cap, a decision would be kept as a skip that names no conversation, and
     // the judge would ask for it again each round: it is left to grouping instead.
@@ -123,15 +102,11 @@ pub(crate) fn request(
             spans: BTreeSet::from([*opening]),
             ops: BTreeSet::new(),
         };
-        op_of(
-            shown,
-            crate::judge::NAME,
-            vec![("outcome", json!("too_big"))],
-        )
+        decision(shown, entry, vec![("outcome", json!("too_big"))])
     };
     let decided =
         |shown: Shown, entry: &str, fields: Vec<(&str, Value)>| -> Result<Vec<MyWorkOp>> {
-            let op = op_of(shown, entry, fields)?;
+            let op = decision(shown, entry, fields)?;
             Ok(vec![if fits(&op)? { op } else { too_big()? }])
         };
     let own = || json!([{"conversations": [key(&c.key)], "title": null, "links": []}]);
@@ -175,7 +150,7 @@ pub(crate) fn request(
     if open.is_empty() {
         return decided(
             shown,
-            crate::judge::NAME,
+            entry,
             vec![("outcome", json!("alone")), ("groups", own())],
         );
     }
@@ -240,7 +215,7 @@ pub(crate) fn request(
     criteria.insert("none".into(), json!(NONE));
     let evidence = |p: f64, score: f64| {
         format!(
-            "Jev: picked over {considered} (p {p:.2}); the check \"continues that request\" \
+            "{who}: picked over {considered} (p {p:.2}); the check \"continues that request\" \
              scored {score:.2}."
         )
     };
@@ -250,12 +225,12 @@ pub(crate) fn request(
         ("groups", joined(ranked[0].0, "judge", evidence(1.0, 1.0))),
         ("suggestion", json!({"request": key(&c.key), "score": 1.0})),
     ];
-    if !fits(&op_of(shown.clone(), crate::judge::NAME, largest)?)? {
+    if !fits(&decision(shown.clone(), entry, largest)?)? {
         return Ok(vec![too_big()?]);
     }
     let span = format!("{NAME} {repo}");
     let repos = [repo.clone()];
-    let picked = judge(Ask {
+    let picked = (judge.ask)(Ask {
         span: &span,
         state: json!({"conversation": conversation, "requests": requests}),
         questions: json!({"pick": {"type": "choice", "instructions": PICK, "criteria": criteria}}),
@@ -263,20 +238,20 @@ pub(crate) fn request(
     })?;
     let pick = match picked {
         Asked::Answered(answers) => answers["pick"].clone(),
-        Asked::Skipped(why) => return left(why, shown, decided),
+        Asked::Skipped(why) => return left(why, (shown, entry), decided),
     };
     let choice = pick["choice"].as_str().unwrap_or("none");
     let p = pick["probabilities"][choice].as_f64().unwrap_or(0.0);
     let Some((anchor, request)) = labels.get(choice) else {
         return decided(
             shown,
-            crate::judge::NAME,
+            entry,
             vec![("outcome", json!("none")), ("groups", own())],
         );
     };
 
     // The check of the pick: its score is the band (claude-mem's `bandFor`).
-    let checked = judge(Ask {
+    let checked = (judge.ask)(Ask {
         span: &span,
         state: json!({"request": request, "conversation": conversation}),
         questions: json!({"same": {"type": "noul", "instructions": CHECK,
@@ -285,7 +260,7 @@ pub(crate) fn request(
     })?;
     let score = match checked {
         Asked::Answered(answers) => answers["same"]["noul"].as_f64().unwrap_or(0.0),
-        Asked::Skipped(why) => return left(why, shown, decided),
+        Asked::Skipped(why) => return left(why, (shown, entry), decided),
     };
     let fields = if score >= JOIN {
         vec![
@@ -304,7 +279,7 @@ pub(crate) fn request(
     } else {
         vec![("outcome", json!("own")), ("groups", own())]
     };
-    decided(shown, crate::judge::NAME, fields)
+    decided(shown, entry, fields)
 }
 
 /// What a call the judge did not answer leaves (J1): a refused or failed one an op naming the
@@ -313,13 +288,13 @@ pub(crate) fn request(
 /// excluded on the way, as the next round reads each.
 fn left(
     why: &'static str,
-    shown: Shown,
+    (shown, entry): (Shown, &str),
     decided: impl FnOnce(Shown, &str, Vec<(&str, Value)>) -> Result<Vec<MyWorkOp>>,
 ) -> Result<Vec<MyWorkOp>> {
     if matches!(why, "off" | "key" | "excluded") {
         return Ok(Vec::new());
     }
-    decided(shown, crate::judge::NAME, vec![("outcome", json!(why))])
+    decided(shown, entry, vec![("outcome", json!(why))])
 }
 
 /// A conversation as claude-mem's `contextReader` gives it (J2): its repository, the minute it
@@ -347,6 +322,41 @@ pub(crate) fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
     }
     let started = (c.ask.as_ref()).map(|a| crate::db::utc(a.2)[..16].replacen(' ', "T", 1));
     json!({"worktree": c.repo, "started": started, "asks": asks, "agent_recorded": recorded})
+}
+
+/// A judge's op (S1, S2) of `job` about `about`, decided by `entry`: its fields, the last of a
+/// name winning, what it was shown of this device's records and ops, and the records removed since
+/// in the spans it read. Both judges build theirs with it (#780).
+pub(crate) fn op_of(
+    s: &Stores,
+    (job, about, entry): (&str, &str, &str),
+    shown: &Shown,
+    fields: Vec<(&str, Value)>,
+) -> Result<MyWorkOp> {
+    let device = s.raw.device();
+    let top = s.raw.max_seq_of(device)?;
+    let mut removed = Vec::new();
+    for &seq in &shown.spans {
+        removed.extend(s.raw.removed_in(device, seq, seq, Some(top))?);
+    }
+    removed.sort();
+    removed.dedup();
+    Ok(MyWorkOp {
+        job: job.into(),
+        about: about.to_owned(),
+        entry: entry.into(),
+        ts: crate::db::now_ms(),
+        read: Read {
+            spans: shown.spans.iter().map(|&seq| (seq, seq)).collect(),
+            ops: shown.ops.iter().copied().collect(),
+        },
+        removed,
+        fields: (fields.into_iter())
+            .map(|(name, v)| (name.to_owned(), v))
+            .collect(),
+        skipped: false,
+        forgotten: None,
+    })
 }
 
 /// Whether `op` stays whole within an op's cap, its removals aside (`raw::fitted` drops those
@@ -511,7 +521,11 @@ mod tests {
                 t: crate::db::now_ms() - 60 * MINUTE,
                 judge: config::Judge {
                     enabled: true,
-                    key_file,
+                    destination: config::Destination::Jev,
+                    key_file: Some(key_file),
+                    cloudflare_key_file: None,
+                    cloudflare_account_id: None,
+                    liquid_key_file: None,
                     model: "jev-latest".into(),
                     timeout_s: 5,
                     daily_budget: 300,
@@ -523,7 +537,8 @@ mod tests {
 
         /// The home's config.toml: `[judge]` as the runner is given it, then `extra`.
         fn config(&self, extra: &str) {
-            let table = format!("[judge]\nkey_file = '{}'\n", self.judge.key_file.display());
+            let key_file = self.judge.key_file.as_ref().unwrap();
+            let table = format!("[judge]\nkey_file = '{}'\n", key_file.display());
             let path = self.s.home.path().join("config.toml");
             std::fs::write(path, format!("{table}{extra}")).unwrap();
         }
@@ -732,7 +747,7 @@ mod tests {
         assert_eq!(h.pass(true, &answer).1.len(), 1);
         let mut h = Home::new();
         h.said("s1", 0, "Build the parser.");
-        std::fs::write(&h.judge.key_file, "# no key\n").unwrap();
+        std::fs::write(h.judge.key_file.as_ref().unwrap(), "# no key\n").unwrap();
         assert_eq!(h.pass(true, &answer).1.len(), 1);
         assert!(h.judged().is_empty() && h.ledger().is_empty());
     }
@@ -796,6 +811,30 @@ mod tests {
         assert_eq!((phase, prompts.len()), (Phase::Idle, 0));
         assert_eq!(h.judged().len(), 1);
         assert!(h.ledger().is_empty());
+    }
+
+    /// J7: the judge sends where `[judge]` says: a decision made through d1 on this PC is its op's
+    /// entry, its evidence names it, and its calls are its own rows in the ledger.
+    #[test]
+    fn a_decision_names_the_destination_that_made_it() {
+        let mut h = Home::new();
+        h.judge.destination = config::Destination::D1Local;
+        h.config("destination = \"d1-local\"\n");
+        h.said("s1", 0, "Build the parser.");
+        h.grouped(&["s1"], "Parser");
+        h.said("s2", 5, "The parser drops a trailing comma.");
+        let rx = stub(vec![picked("r1", 0.94), checked(0.9)]);
+        h.pass(true, &|_| panic!("the chain is not asked"));
+        assert_eq!(bodies(&rx).len(), 2);
+        let op = &h.judged()[0];
+        assert_eq!(op.entry, "judge:d1-local");
+        assert_eq!(
+            op.fields["groups"][0]["links"][0]["evidence"],
+            "d1 on this PC: picked over 1 open request (p 0.94); the check \"continues that \
+             request\" scored 0.90."
+        );
+        let row = ("judge:d1-local".into(), "judge".into(), "ok".into());
+        assert_eq!(h.ledger(), vec![row.clone(), row]);
     }
 
     /// J3: Jev picks among the open requests, then checks its pick; the check's score is the band:
@@ -1087,7 +1126,7 @@ mod tests {
                     .unwrap()
                     .exclude("elsewhere", false)
                     .unwrap();
-                judge(Ask {
+                (judge.ask)(Ask {
                     span: "judge r",
                     state: json!({"conversation": {"asks": ["Build it."]}}),
                     questions: json!({"same": {"type": "noul", "instructions": CHECK,
@@ -1239,12 +1278,18 @@ mod tests {
             }
             /// The switch off once the first request is answered.
             fn judged(&self, s: &Stores, judge: &mut Judging, now: i64) -> Result<Vec<MyWorkOp>> {
+                let (entry, label) = (judge.entry, judge.label);
                 let mut turning = |ask: Ask<'_>| {
-                    let asked = judge(ask);
+                    let asked = (judge.ask)(ask);
                     let config = self.1.join("config.toml");
                     let text = std::fs::read_to_string(&config).unwrap();
                     std::fs::write(&config, format!("{text}enabled = false\n")).unwrap();
                     asked
+                };
+                let mut turning = Judging {
+                    entry,
+                    label,
+                    ask: &mut turning,
                 };
                 self.0.judged(s, &mut turning, now)
             }
