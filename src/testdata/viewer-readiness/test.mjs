@@ -3504,3 +3504,34 @@ run('lang="en";show=globalThis.__show');
 console.log('PASS: My Rules 8a: suggestions with approve, edit then approve and reject; your rules with off/on, edit and undo; rejected undone; add rule; Undo; refusals; JA/EN');
 console.log('PASS: My Rules 8b: rules by scope; approve and add with Applies; rules removed undone; a repository refused; JA');
 }
+// Decision 66: in a browser that kept the token from an earlier visit, the page opens from its
+// address alone; an address's token is kept once the viewer takes it, a kept token the viewer
+// refuses is forgotten, and a refused address token is never kept.
+{
+const page=async(hash,kept,status,meanwhile=()=>{})=>{
+  const store=new Map(kept?[['oboete-token',kept]]:[]);
+  const sent=[];
+  const c=vm.createContext({document,location:{hash,port:'17373',replaced:[],replace(){}},URL,URLSearchParams,
+    navigator:{language:'en'},window:{addEventListener(){}},setInterval(){},TextEncoder,Uint8Array,console,
+    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,String(v)),removeItem:k=>store.delete(k)},
+    fetch:(url,options)=>{
+      sent.push(options?.headers?.['X-Oboete-Token']);
+      meanwhile(store);
+      return Promise.resolve({ok:status===200,status,json:async()=>({current:'',repos:[]})});
+    }});
+  vm.runInContext(source.replace('await start();',''),c,{filename:sourcePath});
+  const outcome=await vm.runInContext("api('repos').then(()=>'ok',e=>e.status)",c);
+  return [outcome,sent,store.get('oboete-token')??null];
+};
+const A='a'.repeat(32),K='b'.repeat(32);
+assert.deepEqual(await page('',K,200),['ok',[K],K],'the address alone sends the kept token');
+assert.deepEqual(await page('',K,401),[401,[K],null],'a kept token the viewer refuses is forgotten');
+assert.deepEqual(await page(`#t=${A}`,K,200),['ok',[A],A],'the address token wins and is kept once taken');
+assert.deepEqual(await page(`#t=${A}`,K,401),[401,[A],K],'a refused address token is not kept, and the kept one stays');
+assert.deepEqual(await page(`#t=${A}`,null,503),[503,[A],null],'nor one the viewer did not answer for');
+assert.deepEqual(await page('',null,401),[401,[''],null],'no token anywhere sends none');
+const N='c'.repeat(32);
+assert.deepEqual(await page('',K,401,store=>store.set('oboete-token',N)),[401,[K],N],
+  'a refused kept token leaves a newer one another tab kept meanwhile');
+console.log('PASS: decision 66: the kept token opens the page from its address alone; refused, forgotten; an address token kept once taken');
+}

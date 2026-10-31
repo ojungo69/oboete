@@ -1,6 +1,12 @@
 // Loaded as a module (strict, deferred, top-level await). Store text is rendered as text nodes.
 
-const token = new URLSearchParams(location.hash.slice(1)).get('t') || '';
+// The page's token: the one in its address, else the one this browser kept from an earlier visit
+// to this address (decision 66). An address's token is kept once the viewer takes it; a kept token
+// it refuses is forgotten, and the page asks for the full address again.
+const TOKEN_KEY = 'oboete-token';
+const addressToken = new URLSearchParams(location.hash.slice(1)).get('t') || '';
+const token = addressToken || recall(TOKEN_KEY, '');
+let tokenKept = !addressToken;
 const $ = (id) => document.getElementById(id);
 
 // append and replaceChildren would print a null as "null": a view leaves out a part with null.
@@ -58,11 +64,17 @@ async function api(name, params = {}) {
   const res = await fetch(`/api/${name}?${new URLSearchParams(params)}`, {
     headers: { 'X-Oboete-Token': token },
   });
+  // Only its own: another tab may have kept a newer token meanwhile.
+  if (res.status === 401 && !addressToken && recall(TOKEN_KEY, '') === token) forget(TOKEN_KEY);
   if (!res.ok) {
     const error = new Error();
     error.status = res.status;
     error.resource = name;
     throw error;
+  }
+  if (!tokenKept) {
+    remember(TOKEN_KEY, token);
+    tokenKept = true;
   }
   return res.json();
 }
@@ -70,6 +82,9 @@ async function api(name, params = {}) {
 // localStorage is a convenience: a private window or blocked storage just forgets.
 function remember(key, value) {
   try { localStorage.setItem(key, value); } catch { /* ignore */ }
+}
+function forget(key) {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
 }
 function recall(key, fallback) {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -2150,8 +2165,8 @@ const TEXT = {
   write_failed: ['config.toml could not be written.', 'config.toml に書き込めませんでした。'],
   dispatch_busy: ['A call to an AI service is still being sent, so the masking settings were not saved. Save again in a moment.', 'AI サービスへの送信が続いているため、マスキングの設定を保存できませんでした。少し待ってからもう一度保存してください。'],
   unauthorized: [
-    'This page needs the full address printed by `oboete view` (it carries the access key after #).',
-    'このページは `oboete view` が表示するアドレス全体(# の後ろのアクセスキーを含む)で開いてください。',
+    'This page needs the full address printed by `oboete view` (it carries the access key after #). Opened from it once, this browser opens the same address later without the part after #.',
+    'このページは `oboete view` が表示するアドレス全体(# の後ろのアクセスキーを含む)で開いてください。一度そのアドレスで開くと、このブラウザでは以後、同じアドレスを # から後ろなしで開けます。',
   ],
   forbidden: [
     'Please open the viewer through the address `oboete view` prints.',

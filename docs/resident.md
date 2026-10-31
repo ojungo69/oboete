@@ -195,6 +195,13 @@ Every write from the page checks the token its request brought again once its bo
 settings save and a new token check it again under that lock, so a request that waited while a new
 token was made does nothing, not even put back the port the new token moved from; the moves take
 effect in the order they were written. The token is never replaced on its own.
+The page keeps the token in the browser's storage for its address (decision 66): opened once from
+the full address, it opens from `http://127.0.0.1:<port>/` alone in that browser. It keeps a token
+only after the viewer took it, forgets a kept token the viewer refuses (401), and never lets a kept
+token stand in for one in the address; it forgets the kept token only while it still holds the one
+that page sent, since another tab may have kept a newer one. Storage belongs to one scheme, host
+and port, so a page of another port or name (`localhost` is another name) cannot read it; a page another program serves at the same address while the
+viewer is down can, as it could read a bookmark's token opened there, and a new token ends both.
 What the token may do is an owner decision (below). The local HTTP API and the bot adapter get
 their own credential and never reuse `state/view-token`.
 
@@ -423,7 +430,8 @@ left as a setting to add before a public release.
   the sync service too.
 - While the viewer is down (after a boot, a crash, the moment of an update), another program
   listening on the port receives the click of the bookmark or the poll of an open tab, and its page
-  can read the token from the address. `oboete view` itself sends the token nowhere.
+  can read the token from the address, or the copy the browser kept for the address (decision 66)
+  after a visit to the address alone. `oboete view` itself sends the token nowhere.
 - A suspected squat is ended by `oboete view --new-token`, which changes the token and the address;
   the old bookmark is deleted by hand.
 - A port changed by hand in config.toml keeps the token, so the old bookmark's port is free for
