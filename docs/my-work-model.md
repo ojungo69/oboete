@@ -697,7 +697,7 @@ rule the owner adopted.
 ### S. Where it is kept
 
 S1. **One new op kind, `my_work`**, whose `job` is `group`, `review`, `links`, `story`, `rules`,
-`goals`, `rule` (the owner's action), `focus` (My Focus, F8), `place` (F3) or `judge` (J3). Approved, edited and turned-off rules also use the
+`goals`, `rule` (the owner's action), `focus` (My Focus, F8), `place` (F3), `judge` (J3) or `focus-judge` (J5). Approved, edited and turned-off rules also use the
 existing kinds: `claim` through `pref add`, and `correction` through correct, mute and unmute.
 Checks stay in `state/my-work-reviews.json`. Nothing goes to `state/` or providers.db that a
 rebuild needs.
@@ -2069,6 +2069,50 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).
+
+### Slice 11c: the focus judge's hint (2026-10-31)
+
+- **Where it runs** (J5): placement's own `Job::judged`, over the requests its round queued (F3),
+  in the batches' order, as grouping's request judge runs (J3); one request a pass, the earliest
+  with no current op. Its op ends the round, so the chain's call waits until each queued request
+  has its pick or its outcome. Kept in the store, not for one round as claude-mem's run keeps it: a
+  round makes one call, and picks kept for a round whose call goes to another job would be asked
+  again in the next.
+- **The question**: claude-mem's, word for word (`askFocusArea`): one choice over the kept areas
+  (status `kept`) and `none`, the areas keyed by their ids, never by recorded text, each with its
+  name, goal and what it is about, gated; 19 a question, more asked in sets, then a question over
+  the sets' winners, and none, when no set picks an area, at the lowest probability a set gave.
+  With no kept area, nothing is asked.
+- **The request** as Jev is shown it: its title (its group's, else its opening ask's as the page
+  makes one, else "Untitled request"), then its anchor conversation's context (J2): the
+  conversation its placement is known by, or, for a request its agent named, the one whose opening
+  ask came first. The exclusion check covers each of the request's repositories, not its anchor's
+  alone.
+- **The op**: job `focus-judge` (S1), about the placement's subject, entry `judge:jev`; fields
+  `focus` (the area's id, or `other` when none fits), `p`, and claude-mem's `evidence`, or, for a
+  call refused or failed, `focus` null and its `outcome`; and each time `basis` (F3's) and `areas`,
+  a digest of the kept areas' ids, names, goals and abouts. `read`: what it showed, the anchor's
+  prompts and cards and the grouping ops behind its title, and the areas' ops, so a forget or an
+  exclusion reaches it (S5, S6).
+- **Current**: this device's newest op about the subject, a pick or an outcome alike, when its
+  `basis` and `areas` are the request's and the kept areas' now and nothing took it. A request
+  that moved, or kept areas renamed or given another goal before it was placed, is asked again; a
+  refused or failed call is not (claude-mem asks no call again), and the request is placed with no
+  pick. An exclusion found on the way, or the judge turned off or its key gone, keeps nothing, as
+  J3's.
+- **The hint**: the placement's call shows a request's current pick as "The judge's pick, a
+  suggestion only: <id> (p 0.82)", and its instructions say, as claude-mem 15.7's skill does, that
+  a pick is only a suggestion and the model decides from the request and the areas. The pick's op
+  is among what the placement read, so what takes the pick takes the placement. It places nothing
+  alone (claude-mem's `FOCUS_AUTO_PLACE_THRESHOLD` is null).
+- **Holds** (#730): the runner reads the held subjects before the judge's pass, which keeps
+  placement's read for the round, so a request a failed batch holds is neither asked about nor put
+  in the chain's batch until its wait ends.
+- **The settings page** says that My Work asks Jev which area of My focus each request belongs to,
+  and what it sends for it.
+- **Not built**: claude-mem's calibration script and any threshold that places a request without
+  the model (F9).
+- **Then**: 11d, where the judges send (J7).
 
 ## Not built
 

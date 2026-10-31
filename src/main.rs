@@ -40,6 +40,7 @@ mod migrate;
 mod model_fetch;
 mod my_work;
 mod my_work_focus;
+mod my_work_focus_judge;
 mod my_work_goals;
 mod my_work_group;
 mod my_work_judge;

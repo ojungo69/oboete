@@ -13,11 +13,21 @@ use serde_json::Value;
 use crate::raw::Removal;
 
 /// The jobs (S1): the curators', `rule`, the owner's action on a suggested rule, which holds no
-/// model text, `focus`, My Focus's areas and placements (F8), and `judge`, the request judge's
-/// decisions (J3). `links`, the goal links of slice 6, writes no more since slice 10c-3b; its ops
+/// model text, `focus`, My Focus's areas and placements (F8), `judge`, the request judge's
+/// decisions (J3), and `focus-judge`, the focus judge's picks (J5). `links`, the goal links of slice 6, writes no more since slice 10c-3b; its ops
 /// stay known, so a forget and an exclusion still reach them.
 pub(crate) const JOBS: &[&str] = &[
-    "group", "review", "links", "story", "rules", "goals", "rule", "focus", "place", "judge",
+    "group",
+    "review",
+    "links",
+    "story",
+    "rules",
+    "goals",
+    "rule",
+    "focus",
+    "place",
+    "judge",
+    "focus-judge",
 ];
 
 /// What a job was shown (S2): the spans of this device's records, and the op seqs of the turn,
