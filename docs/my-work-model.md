@@ -652,11 +652,11 @@ Both languages picked the continued request (0.74, 0.94) and judged it the same 
 Jev's documentation says English is where it is best and CJK is handled less well: the owner's own
 pairs measure it once it runs.
 
-J7. **Where the judges send** (decision 63): after 11c, one slice lets the owner choose from a list
-fixed in the code, never a free address, so no value of the settings sends the owner's text
-elsewhere: Typesafe's Jev; Cloudflare's Clef and Clef-flash; Liquid's d1 through its API; d1 on this
-PC. Each answers the same state and typed questions. The default is picked in decision 34's single
-evaluation, each one's Japanese judgements and cost side by side: Japanese is measured on none.
+J7. **Where the judges send** (decision 63): the owner chooses from a list fixed in the code, never a
+free address, so no value of the settings sends the owner's text elsewhere: Typesafe's Jev (the
+default); Cloudflare's Clef and Clef-flash; Liquid's d1 through its API; d1 on this PC. Each answers
+the same state and typed questions. The default is picked in decision 34's single evaluation, each
+one's Japanese judgements and cost side by side: Japanese is measured on none. As built: slice 11d.
 
 ### R. My Rules (row X13)
 
@@ -1983,7 +1983,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   oldest of those My Work reads (its newest 300), each with a title. Each text is gated first, as it
   was recorded, so that a rule over several lines still matches; then cut at `# Attached files`,
   its white space collapsed, and cut.
-- **The op**: job `judge`, about the repository, entry `judge:rules` (no call) or `judge:jev`;
+- **The op**: job `judge`, about the repository, entry `judge:rules` (no call) or the judge's
+  destination's name (`judge:jev` unless another is chosen, J7);
   `read` what it showed (the opening ask and every prompt record sent, as spans of this device's;
   this device's card ops, and the grouping and judge ops behind each request shown), so a forget
   or an exclusion reaches it as a grouping op (S5, S6); fields `conversation`, `outcome` (`rules`,
@@ -2088,7 +2089,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   conversation its placement is known by, or, for a request its agent named, the one whose opening
   ask came first. The exclusion check covers each of the request's repositories, not its anchor's
   alone.
-- **The op**: job `focus-judge` (S1), about the placement's subject, entry `judge:jev`; fields
+- **The op**: job `focus-judge` (S1), about the placement's subject, entry the judge's
+  destination's name (`judge:jev` unless another is chosen, J7); fields
   `focus` (the area's id, or `other` when none fits), `p`, and claude-mem's `evidence`, or, for a
   call refused or failed, `focus` null and its `outcome`; and each time `basis` (F3's) and `areas`,
   a digest of the kept areas' ids, names, goals and abouts. `read`: what it showed, the anchor's
@@ -2113,6 +2115,62 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **Not built**: claude-mem's calibration script and any threshold that places a request without
   the model (F9).
 - **Then**: 11d, where the judges send (J7).
+
+### Slice 11d: where the judges send (2026-10-31)
+
+- **The list** (`judge::fixed`, `judge::url`): each destination's address, model selector, price (USD
+  a million input tokens; the answer is free) and key, fixed in the code.
+
+  | `destination` | Name | Address | Model | Price | Key |
+  |---|---|---|---|---|---|
+  | `jev` (default) | Jev (Typesafe) | `https://api.typesafe.ai/v1/systemone` | `[judge] model` (`jev-latest`) | 0.042 | `key_file` |
+  | `clef` | Clef (Cloudflare) | `https://api.cloudflare.com/client/v4/accounts/<account>/ai/run/@cf/cloudflare/clef` | `clef` | 0.24 | `cloudflare_key_file`, `cloudflare_account_id` |
+  | `clef-flash` | Clef-flash (Cloudflare) | the same, ending `/clef-flash` | `clef-flash` | 0.038 | the same |
+  | `d1` | d1 (Liquid) | `https://api.liquid.ai/decisions/v1/systemone` | `d1.1` | 0.02 | `liquid_key_file` |
+  | `d1-local` | d1 on this PC | `http://127.0.0.1:11434/v1/systemone` | `d1` | free | none |
+
+  Liquid's API lists `d1.1`, the successor of d1 at its price, and `d1-ultra`: decision 63's
+  "Liquid's d1" is `d1.1`. Neither `d1-ultra` nor Cloudflare's Clef-omni is on the list. The port is
+  Ollama's (`ollama pull d1`); llama.cpp's server runs there with `--port 11434`.
+- **`[judge]`**: `destination` (`jev` unless set), `key_file` (Typesafe's, as before, now
+  optional), `cloudflare_key_file`, `cloudflare_account_id`, `liquid_key_file`; `model` is Jev's
+  alone. A table written before 11d is Jev's, unchanged. A destination not on the list, or an
+  account id that is not 32 lowercase hex digits, is refused at load, its value not repeated; only
+  such an id reaches the address's path, so its host and path stay the list's.
+- **Ready**: on, with the destination's key on line 2 of its file and, for Cloudflare, the account
+  id; d1 on this PC needs neither. A round's judge asks no more (`still_on`) once its destination,
+  its address or its key file changed since the round read the settings.
+- **The call**: J1's rules for every destination, d1 on this PC included: gated, the excluded
+  repositories checked before and under the admission, one POST, no redirect, no retry. The key goes
+  as `Authorization: Bearer`, and none to d1 on this PC. Cloudflare's REST API answers inside an
+  envelope, `{"result": …, "success": true, "errors": [], "messages": []}` (called 2026-10-31 with a
+  made-up question: Clef-flash in 0.4 s and Clef in 0.5 s, 227 input tokens each); the answer is its
+  `result` when `success` is true, else `shape`.
+- **The ledger**: each destination's own name, `judge:<destination>`, at its own price inside the
+  month's paid cap; d1 on this PC is free and records no USD. The calls a day count the destination
+  in use. Each decision op's `entry` is that name, and its evidence names the destination
+  ("Clef-flash: picked over …").
+- **The settings page**: the list, each with its price or that it stays on this PC; the chosen one's
+  note (where it is sent, what it needs) and its key: Typesafe's, Cloudflare's token with the account
+  ID, Liquid's, none for d1 on this PC. A key saved (`POST /api/judge/key` with `destination` and,
+  for Cloudflare, `account_id`) goes into its service's own field, chooses that destination and turns
+  the judge on. The page's save takes the destination; one chosen while the judge is on needs what it
+  sends with (`missing_key`). With no `[judge]`, d1 on this PC alone turns on, needing no key. Doctor
+  names the destination, d1 on this PC with its address.
+- **Limits**:
+  - Liquid's is built from its documentation and not called: no Liquid key was set. Its
+    documentation says a `noul` question has no criteria, where Jev, Clef and Ollama take them, and
+    the request judge's check sends some. The settings page's connection test sends a `noul` with
+    criteria, so it answers this once a Liquid key is set.
+  - Clef-flash's hosted model reads 24,576 tokens since 2026-10-09: a longer question (a pick among
+    19 large requests in Japanese can be one) is refused, left to grouping and not asked again.
+  - With d1 on this PC chosen, whatever program listens at 127.0.0.1:11434 receives what the judge is
+    shown; another user of the PC could hold that port while Ollama is down. The page says so.
+  - The calls a day count the destination in use: switched the same day, the count starts again.
+- **#780**: one op builder (`my_work_judge::op_of`) for both judges; the focus judge's `next` in
+  parts, each within Codacy's limits.
+- **Then**: the side by side with claude-mem that decision 50 asks for; decision 34's single
+  evaluation picks the default destination.
 
 ## Not built
 

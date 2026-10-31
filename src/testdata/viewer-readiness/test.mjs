@@ -1126,8 +1126,11 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
   for(const [key,[en,ja]] of Object.entries(w4.TEXT).filter(([key])=>key.startsWith('judge_'))){
     assert(en&&ja&&en!==ja,`${key} has its English and Japanese`);
   }
-  const judge=(extra={})=>({set:false,enabled:false,key:'missing',key_file:null,daily_budget:null,calls_today:0,usd_this_month:0,...extra});
-  const on=judge({set:true,enabled:true,key:'ok',key_file:'/home/u/.local/share/oboete/keys/k1',daily_budget:300,calls_today:2,usd_this_month:0.0004});
+  const dests=(keys={})=>[['jev',0.042,false],['clef',0.24,false],['clef-flash',0.038,false],['d1',0.02,false],['d1-local',0,true]]
+    .map(([id,usd,local])=>({id,key:local?'none':(keys[id]??'missing'),usd_per_mtok_in:usd,local}));
+  const judge=(extra={})=>({set:false,enabled:false,destination:'jev',destinations:dests(),key:'missing',key_file:null,
+    cloudflare_account_id:null,daily_budget:null,calls_today:0,usd_this_month:0,...extra});
+  const on=judge({set:true,enabled:true,key:'ok',destinations:dests({jev:'ok'}),key_file:'/home/u/.local/share/oboete/keys/k1',daily_budget:300,calls_today:2,usd_this_month:0.0004});
   const judged=()=>panel.querySelector('.judge-settings');
   const switchOf=()=>judged().querySelectorAll('input').find(node=>node.type==='checkbox');
   assert.equal(w4.formOf(settings()).judge,null,'an older server shows no section');
@@ -1139,7 +1142,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
   type(k,'apikey_0123456789abcdef_Synthetic');
   answers=[json({...settings({judge:on}),key_saved:{durable:true}})];
   judged().querySelectorAll('button').find(node=>node.parentElement===k.parentElement).click();await settle();
-  assert.deepEqual(posted.at(-1),{url:'/api/judge/key',body:{key:'apikey_0123456789abcdef_Synthetic',version:'v1'}});
+  assert.deepEqual(posted.at(-1),{url:'/api/judge/key',body:{key:'apikey_0123456789abcdef_Synthetic',version:'v1',destination:'jev'}});
   assert(!JSON.stringify(ctx.ui.getForm()).includes('apikey_0123456789abcdef_Synthetic'),'the key is not kept');
   assert(switchOf().checked,'a key saved turns it on');
   assert(text(judged()).includes('Key found')&&text(judged()).includes('2 of 300 calls'),'its key and calls');
@@ -1165,7 +1168,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
   }
   // After a test the judge's numbers are read again, and the switch as edited stays.
   settingsAnswer=Promise.resolve(json(settings({judge:{...on,calls_today:3}})));
-  for(const [outcome,words] of [['ok','the key works'],['error','Check the key'],['budget','used up'],['other','could not run']]){
+  for(const [outcome,words] of [['ok','Jev (Typesafe) answered: the connection works'],['error','Check the key'],['budget','used up'],['other','could not run']]){
     answers=[json({outcome})];
     judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
     assert.deepEqual(posted.at(-1),{url:'/api/judge/test',body:{confirmed:true}});
@@ -1185,7 +1188,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     const replaced=w4.formOf(settings({judge:{...on,calls_today:7}}));ctx.ui.setForm(replaced);ctx.ui.drawSettings();
     release(json(settings({judge:{...on,calls_today:8}})));await settle();await settle();
     assert.equal(ctx.ui.getForm(),replaced,'the newer form stays');
-    assert(!document.getElementById('status').textContent.includes('the key works'),'an older test is not said');
+    assert(!document.getElementById('status').textContent.includes('the connection works'),'an older test is not said');
     settingsAnswer=null;
   }
   // A save running when the read comes back keeps its place: the read is not merged.
@@ -1197,7 +1200,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     panel.querySelector('.settings').inert=true;
     release(json(settings({judge:{...on,calls_today:9}})));await settle();await settle();
     assert.equal(ctx.ui.getForm(),mine,'a running save keeps its place');
-    assert(document.getElementById('status').textContent.includes('the key works'),'the outcome is still said');
+    assert(document.getElementById('status').textContent.includes('the connection works'),'the outcome is still said');
     panel.querySelector('.settings').inert=false;settingsAnswer=null;
   }
   // #766: settings left for another tab and opened again, as the tabs do it (`show`), while a test
@@ -1229,12 +1232,12 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     for(const r of reads.slice(reads.indexOf(visit)+1))r(json(settings({judge:{...on,calls_today:11}})));
     await settle();await settle();await settle();
     assert.equal(ctx.ui.getForm(),mine,`an earlier visit's test merges nothing (${out})`);
-    assert(!document.getElementById('status').textContent.includes('the key works'),`and says nothing (${out})`);
+    assert(!document.getElementById('status').textContent.includes('the connection works'),`and says nothing (${out})`);
     assert(!text(judged()).includes('11 of 300 calls'),`its read is not drawn (${out})`);
     visit(json(settings({judge:{...on,calls_today:12}})));await settle();await settle();await settle();
     assert.notEqual(ctx.ui.getForm(),mine,`the new visit has its own form (${out})`);
     assert(text(judged()).includes('12 of 300 calls'),`the new visit's read is drawn (${out})`);
-    assert(!document.getElementById('status').textContent.includes('the key works'),`the old test said nothing after (${out})`);
+    assert(!document.getElementById('status').textContent.includes('the connection works'),`the old test said nothing after (${out})`);
     ctx.fetch=fetchBefore;
   }
   answers=[json({code:'missing_key',field:'judge.test'},422)];
@@ -1244,6 +1247,50 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
   assert(text(judged()).includes('判定役')&&text(judged()).includes('直近 24 時間: 300 回のうち 2 回'),'Japanese section');
   ctx.ui.setLang('en');
   console.log('PASS: the judge: no key, the key once, its switch, its test, JA/EN');
+  // docs/my-work-model.md J7: where the judge sends. The list, each with its price; a destination
+  // chosen shows its note and its key at once and is saved with the page; Cloudflare's token goes
+  // with the account ID; d1 on this PC takes no key and turns on with none.
+  {
+    const pick=()=>judged().querySelectorAll('select').find(node=>node.dataset.field==='judge.destination');
+    const choose=id=>{const s=pick();s.value=id;for(const cb of s.listeners.change||[])cb({target:s});};
+    f=w4.formOf(settings({judge:on}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+    assert.deepEqual(pick().options.map(o=>o.value),['jev','clef','clef-flash','d1','d1-local'],'the five of the list');
+    assert.equal(pick().value,'jev');
+    assert(text(pick()).includes('Clef-flash (Cloudflare Workers AI): USD 0.038 for a million input tokens'),'each with its price');
+    assert(text(pick()).includes('d1 on this PC (Ollama): free, and nothing leaves this PC'),'and the one that stays here');
+    assert(text(judged()).includes('api.typesafe.ai')&&!field('judge.account_id'),'where Jev is sent, with no account');
+    choose('clef-flash');
+    assert(text(judged()).includes('api.cloudflare.com')&&text(judged()).includes('24,000 tokens'),'where Clef-flash is sent');
+    assert(text(judged()).includes('Saved: Jev (Typesafe)'),'the saved one noted');
+    assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'clef-flash'},'the choice saves with the page');
+    type(field('judge.account_id'),' 0123456789ABCDEF0123456789ABCDEF ');
+    const k=field('judge.key');
+    type(k,'cfut_0123456789abcdef_Synthetic');
+    const chosen={...on,destination:'clef-flash',destinations:dests({jev:'ok',clef:'ok','clef-flash':'ok'}),
+      cloudflare_account_id:'0123456789abcdef0123456789abcdef'};
+    answers=[json({...settings({judge:chosen}),key_saved:{durable:true}})];
+    judged().querySelectorAll('button').find(node=>node.parentElement===k.parentElement).click();await settle();
+    assert.deepEqual(posted.at(-1),{url:'/api/judge/key',body:{key:'cfut_0123456789abcdef_Synthetic',version:'v1',
+      destination:'clef-flash',account_id:'0123456789abcdef0123456789abcdef'}},'the token with its destination and account');
+    assert.equal(pick().value,'clef-flash','the key saved chose it');
+    assert.equal(field('judge.account_id').value,'0123456789abcdef0123456789abcdef','the account as saved');
+    assert(!('destination' in w4.saveBody().body.judge),'saved, it is not sent again');
+    // d1 on this PC: no key; with no `[judge]` yet it turns on with none.
+    f=w4.formOf(settings({judge:judge()}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+    assert(!switchOf(),'no switch before a key');
+    choose('d1-local');
+    assert(text(judged()).includes('127.0.0.1:11434')&&!field('judge.key'),'d1 on this PC: its address, and no key');
+    change(switchOf(),true);
+    assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'d1-local'},'turned on with no key');
+    choose('d1');
+    assert(text(judged()).includes('api.liquid.ai')&&!switchOf(),'Liquid\'s, its key not there yet');
+    assert(!('judge' in w4.saveBody().body),'one with no key is not saved');
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();
+    assert(text(judged()).includes('送り先')&&text(pick()).includes('この PC の d1(Ollama): 無料。この PC の外に出ません'),'Japanese list');
+    ctx.ui.setLang('en');
+    for(const key of ['missing_key','bad_account'])assert(w4.TEXT[key][0]&&w4.TEXT[key][1]&&w4.TEXT[key][0]!==w4.TEXT[key][1],`${key} in words`);
+    console.log('PASS: J7: the list and its prices, a destination\'s key, d1 on this PC with none');
+  }
 }
 }
 

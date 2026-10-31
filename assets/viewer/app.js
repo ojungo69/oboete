@@ -1359,13 +1359,31 @@ const TEXT = {
   my_work_estimate_none: ['An estimate appears here once something is recorded.', '記録がたまると、ここに見積もりが出ます。'],
   my_work_estimate_no_cap: ['Calls a day with it on: about {calls}, with no cap. At {name} ({model}) prices: about {usd} a day; a busy day costs more.', 'オンのときの 1 日の呼び出し: およそ {calls} 回(上限なし)。{name}({model})の料金で 1 日およそ {usd} です。作業の多い日はこれより多くかかります。'],
   my_work_estimate_free_no_cap: ['Calls a day with it on: about {calls}, with no cap. No paid AI is in the list, so nothing is charged; a subscription\'s allowance may be used.', 'オンのときの 1 日の呼び出し: およそ {calls} 回(上限なし)。有料の AI が一覧にないため料金はかかりません(サブスクリプションの利用枠は使われることがあります)。'],
-  judge_h: ['Judge (Jev)', '判定役(Jev)'],
-  judge_desc: ['Jev, a model by Typesafe, answers questions with probabilities instead of text. My Work asks it whether each new conversation continues an open request, and puts the conversation into that request when Jev is sure. It also asks which area of My focus each request waiting to be sorted belongs to, and shows the answer to the AI that sorts requests as a suggestion only. What Jev cannot decide stays with the AI for summaries, as before.', 'Jev(Typesafe 社のモデル)は、文章ではなく確率で質問に答えます。My Work は新しい会話ごとに、開いている依頼の続きかどうかを Jev に尋ね、Jev が確かだと答えたときはその依頼にまとめます。また、分野に振り分ける前の依頼ごとに、マイフォーカスのどの分野に入るかを Jev に尋ね、その答えを参考として、依頼を振り分ける AI に見せます。Jev が決められないものは、これまでどおり要約に使う AI が決めます。'],
-  judge_sends: ['What it is sent: for each new conversation, its repository, when it started, its first 3 asks and its first 8 card titles, and the same of up to 19 open requests of that repository, with their titles; for each request to be sorted, its title, the same of its first conversation, and the names, goals and descriptions of the areas in My focus; each masked as all text sent out is. Nothing from a repository you excluded is sent. Price: USD 0.042 for a million input tokens, counted in the monthly limit on paid calls. One judged conversation is about 10,000 to 16,000 tokens, under USD 0.001.', '送るもの: 新しい会話ごとに、そのリポジトリ、始まった時刻、最初の 3 つの依頼、最初の 8 枚のカードの題と、同じリポジトリの開いている依頼 (最大 19 件) の同じ内容と題名です。分野に振り分ける依頼ごとに、その題名と最初の会話の同じ内容、マイフォーカスの分野の名前・目標・説明も送ります。どれも外へ送る文と同じく伏せ字を通します。除外したリポジトリのものは送りません。料金: 入力 100 万トークンで 0.042 ドルで、有料の呼び出しの月額上限に含まれます。1 つの会話の判定はおよそ 1 万〜1.6 万トークンで、0.001 ドル未満です。'],
+  judge_h: ['Judge', '判定役'],
+  judge_desc: ['The judge is a decision model: it answers questions with probabilities instead of text. My Work asks it whether each new conversation continues an open request, and puts the conversation into that request when the judge is sure. It also asks which area of My focus each request waiting to be sorted belongs to, and shows the answer to the AI that sorts requests as a suggestion only. What the judge cannot decide stays with the AI for summaries, as before.', '判定役は判断用のモデルで、文章ではなく確率で質問に答えます。My Work は新しい会話ごとに、開いている依頼の続きかどうかを判定役に尋ね、判定役が確かだと答えたときはその依頼にまとめます。また、分野に振り分ける前の依頼ごとに、マイフォーカスのどの分野に入るかを判定役に尋ね、その答えを参考として、依頼を振り分ける AI に見せます。判定役が決められないものは、これまでどおり要約に使う AI が決めます。'],
+  judge_sends: ['What it is sent: for each new conversation, its repository, when it started, its first 3 asks and its first 8 card titles, and the same of up to 19 open requests of that repository, with their titles; for each request to be sorted, its title, the same of its first conversation, and the names, goals and descriptions of the areas in My focus; each masked as all text sent out is. Nothing from a repository you excluded is sent. The price is beside each destination below and counts in the monthly limit on paid calls. One judged conversation is about 10,000 to 16,000 tokens.', '送るもの: 新しい会話ごとに、そのリポジトリ、始まった時刻、最初の 3 つの依頼、最初の 8 枚のカードの題と、同じリポジトリの開いている依頼 (最大 19 件) の同じ内容と題名です。分野に振り分ける依頼ごとに、その題名と最初の会話の同じ内容、マイフォーカスの分野の名前・目標・説明も送ります。どれも外へ送る文と同じく伏せ字を通します。除外したリポジトリのものは送りません。料金は下の送り先ごとに書いてあり、有料の呼び出しの月額上限に含まれます。1 つの会話の判定はおよそ 1 万〜1.6 万トークンです。'],
+  judge_to: ['Where it sends', '送り先'],
+  judge_to_jev: ['Jev (Typesafe)', 'Jev(Typesafe)'],
+  judge_to_clef: ['Clef (Cloudflare Workers AI)', 'Clef(Cloudflare Workers AI)'],
+  judge_to_clef_flash: ['Clef-flash (Cloudflare Workers AI)', 'Clef-flash(Cloudflare Workers AI)'],
+  judge_to_d1: ['d1 (Liquid AI)', 'd1(Liquid AI)'],
+  judge_to_d1_local: ['d1 on this PC (Ollama)', 'この PC の d1(Ollama)'],
+  judge_price: ['{name}: USD {usd} for a million input tokens', '{name}: 入力 100 万トークンで {usd} ドル'],
+  judge_price_local: ['{name}: free, and nothing leaves this PC', '{name}: 無料。この PC の外に出ません'],
+  judge_note_jev: ['Sent to Typesafe (api.typesafe.ai) with your Typesafe key.', 'Typesafe(api.typesafe.ai)へ、Typesafe のキーで送ります。'],
+  judge_note_clef: ['Sent to Cloudflare Workers AI (api.cloudflare.com) under your account: it needs a Cloudflare API token that may use Workers AI, and your account ID.', 'Cloudflare Workers AI(api.cloudflare.com)へ、あなたのアカウントで送ります。Workers AI を使える Cloudflare の API トークンと、アカウント ID が必要です。'],
+  judge_note_clef_flash: ['Sent to Cloudflare Workers AI (api.cloudflare.com) under your account: it needs a Cloudflare API token that may use Workers AI, and your account ID. Clef-flash reads up to about 24,000 tokens; a longer question is not answered and is left to the AI for summaries.', 'Cloudflare Workers AI(api.cloudflare.com)へ、あなたのアカウントで送ります。Workers AI を使える Cloudflare の API トークンと、アカウント ID が必要です。Clef-flash が読めるのはおよそ 2 万 4 千トークンまでで、それより長い質問には答えず、要約に使う AI に任せます。'],
+  judge_note_d1: ['Sent to Liquid AI (api.liquid.ai), to its d1.1 model, with your Liquid AI key. Liquid AI documents the same questions as Jev; the connection test below shows whether it answers them.', 'Liquid AI(api.liquid.ai)の d1.1 モデルへ、Liquid AI のキーで送ります。Liquid AI の説明では Jev と同じ形の質問を受け付けます。答えられるかは、下の接続テストで確かめられます。'],
+  judge_note_d1_local: ['Sent to the program on this PC at 127.0.0.1:11434, Ollama\'s address: install Ollama and run "ollama pull d1" first. Nothing leaves this PC, but whatever program listens at that address receives what the judge is shown, so keep Ollama running while the judge is on. No key is needed.', 'この PC の 127.0.0.1:11434(Ollama のアドレス)で待つプログラムへ送ります。先に Ollama を入れて「ollama pull d1」を実行してください。この PC の外には出ませんが、そのアドレスで待つプログラムは何であれ判定役に見せる内容を受け取るので、判定役をオンにしている間は Ollama を動かしておいてください。キーは要りません。'],
   judge_on: ['Use the judge', '判定役を使う'],
-  judge_no_key: ['Off: no key yet. Paste the key from Typesafe below to turn it on.', 'オフ: まだキーがありません。下に Typesafe のキーを貼り付けるとオンになります。'],
+  judge_no_key: ['Off: no key yet. Choose where it sends, then paste that service\'s key below to turn it on. d1 on this PC needs no key.', 'オフ: まだキーがありません。送り先を選び、その送り先のキーを下に貼り付けるとオンになります。この PC の d1 にはキーは要りません。'],
   judge_key_file: ['Key: {state} ({file})', 'キー: {state}（{file}）'],
   judge_key_label: ['New Typesafe key', 'Typesafe の新しいキー'],
+  judge_key_label_cloudflare: ['New Cloudflare API token', 'Cloudflare の新しい API トークン'],
+  judge_key_label_liquid: ['New Liquid AI key', 'Liquid AI の新しいキー'],
+  judge_key_state: ['Key: {state}', 'キー: {state}'],
+  judge_account: ['Cloudflare account ID (32 letters a–f and digits)', 'Cloudflare のアカウント ID(a〜f と数字の 32 文字)'],
+  judge_account_desc: ['Sent with the token below when you save it.', '下のトークンを保存するときに一緒に送ります。'],
   judge_usage: ['Last 24 hours: {calls} of {most} calls. This month: {usd}.', '直近 24 時間: {most} 回のうち {calls} 回。今月の費用: {usd}。'],
   judge_usage_unknown: ['Its calls and spend cannot be read now.', '呼び出し回数と費用をいま読めません。'],
   judge_usage_no_cap: ['Last 24 hours: {calls} calls, with no cap. This month: {usd}.', '直近 24 時間: {calls} 回(上限なし)。今月の費用: {usd}。'],
@@ -1373,13 +1391,13 @@ const TEXT = {
   judge_calls_desc: ['At the limit, the judge is not asked until the next day.', '上限に達すると、翌日まで判定役に尋ねません。'],
   judge_test: ['Test the connection', '接続を試す'],
   judge_test_desc: ['Sends one made-up question, with nothing from your records. It counts as one call.', '作った質問を 1 つだけ送ります。記録の中身は送りません。呼び出し 1 回に数えます。'],
-  judge_test_ok: ['Jev answered: the key works.', 'Jev が答えました。キーは使えます。'],
-  judge_test_error: ['Jev did not answer. Check the key, then try again.', 'Jev が答えませんでした。キーを確かめて、もう一度試してください。'],
-  judge_test_shape: ['Jev answered in an unexpected form. Try again later.', 'Jev の答えが想定と違う形でした。しばらくしてから試してください。'],
+  judge_test_ok: ['{name} answered: the connection works.', '{name} が答えました。接続できています。'],
+  judge_test_error: ['{name} did not answer. Check the key (and for d1 on this PC, that Ollama is running), then try again.', '{name} が答えませんでした。キー(この PC の d1 なら Ollama が動いているか)を確かめて、もう一度試してください。'],
+  judge_test_shape: ['{name} answered in an unexpected form. Try again later.', '{name} の答えが想定と違う形でした。しばらくしてから試してください。'],
   judge_test_budget: ['Today\'s calls or this month\'s limit on paid calls are used up.', '今日の呼び出し回数か、今月の有料の呼び出しの上限に達しています。'],
   judge_test_gate: ['The judge is paused for now. Try again later.', '判定役はいま休止中です。しばらくしてから試してください。'],
   judge_test_off: ['The judge is off. Turn it on and save, then try again.', '判定役がオフです。オンにして保存してから試してください。'],
-  judge_test_key: ['No key was found in its file. Paste the key again.', 'キーのファイルにキーがありません。もう一度貼り付けてください。'],
+  judge_test_key: ['This destination has no key yet, or no key was found in its file (Cloudflare\'s also needs the account ID). Paste the key again.', 'この送り先のキーがまだ無いか、キーのファイルにキーがありません(Cloudflare はアカウント ID も必要です)。もう一度貼り付けてください。'],
   judge_test_missing_key: ['Paste the key first.', '先にキーを貼り付けてください。'],
   judge_test_failed: ['The test could not run. Try again.', 'テストを実行できませんでした。もう一度試してください。'],
   simple_my_work_h: ['My Work, written by AI', 'AI が書く My Work'],
@@ -2139,6 +2157,8 @@ const TEXT = {
     'config.toml がほかの場所で変更されました。現在の値を表示し直しましたので、もう一度変更してください。',
   ],
   range: ['This value is out of range.', 'この値は範囲外です。'],
+  missing_key: ['Save this destination\'s key first, or turn the judge off.', '先にこの送り先のキーを保存するか、判定役をオフにしてください。'],
+  bad_account: ['That is not a Cloudflare account ID: it is 32 letters a–f and digits, on your Cloudflare dashboard.', 'Cloudflare のアカウント ID ではありません。a〜f と数字の 32 文字で、Cloudflare のダッシュボードにあります。'],
   names: ['The list of curators has changed. Please reload the page.', '要約役の一覧が変わりました。ページを再読み込みしてください。'],
   model: [
     'A model name uses letters, digits and . _ : / @ + - (200 characters at most).',
@@ -3394,8 +3414,10 @@ function formOf(s) {
     // docs/my-work-model.md A6: the switch and the daily bound, with the estimate shown first.
     my_work: { curate: s.my_work.curate, calls_a_day: noCapText(s.my_work.calls_a_day, s.ranges),
       noCap: s.my_work.calls_a_day === s.ranges.no_cap, estimate: s.my_work.estimate },
-    // docs/my-work-model.md J1: the judge's state; its switch only once a key is set.
-    judge: s.judge ? { ...s.judge, budget: noCapText(s.judge.daily_budget, s.ranges), noCap: s.judge.daily_budget === s.ranges.no_cap } : null,
+    // docs/my-work-model.md J1, J7: the judge's state, where it sends as chosen here (`to`) and
+    // Cloudflare's account ID as typed.
+    judge: s.judge ? { ...s.judge, to: s.judge.destination, account: s.judge.cloudflare_account_id ?? '',
+      budget: noCapText(s.judge.daily_budget, s.ranges), noCap: s.judge.daily_budget === s.ranges.no_cap } : null,
     gemini: s.gemini ?? 'none',
     usd_this_month: s.usd_this_month,
     prompt_side: s.prompt_side ?? null,
@@ -4470,22 +4492,64 @@ function workersAiSettings(f) {
   return details;
 }
 
-// docs/my-work-model.md J1: Jev, Typesafe's judge. Off until its key is set here; then its switch,
-// its key file's state, its calls and spend, and one test of a made-up question.
+// docs/my-work-model.md J1, J7: the judge, sending where the owner chose from a list fixed in the
+// code. Its destination, what is sent there, that destination's key (Cloudflare's with the account
+// ID; d1 on this PC takes none), then its switch, its calls and spend, and one test.
 function judgeSection(f) {
   const j = f.judge;
   if (!j) return null;
-  const parts = [el('h3', null, t('judge_h')), el('p', 'desc', t('judge_desc')), el('p', 'desc', t('judge_sends'))];
-  if (j.set) {
+  const chosen = j.destinations.find((d) => d.id === j.to) || j.destinations[0];
+  const parts = [el('h3', null, t('judge_h')), el('p', 'desc', t('judge_desc')), el('p', 'desc', t('judge_sends')),
+    judgeDestination(f, j), el('p', 'desc', t(`judge_note_${chosen.id.replaceAll('-', '_')}`))];
+  if (j.set || chosen.local) {
     parts.push(el('label', 'check', checkbox(j.enabled, (v) => { j.enabled = v; }), t('judge_on')),
-      note(t('saved_value', { value: t(f.savedSettings.judge?.enabled ? 'value_on' : 'value_off') })),
-      el('p', 'desc', t('judge_key_file', { state: t(j.key === 'ok' ? 'key_ok' : 'key_missing'), file: j.key_file })));
+      note(t('saved_value', { value: t(f.savedSettings.judge?.enabled ? 'value_on' : 'value_off') })));
   } else {
     parts.push(el('p', 'desc', t('judge_no_key')));
   }
-  parts.push(f.keyInput ? keyField('judge/key', 'judge.key', t('judge_key_label')) : note(t('provider_key_unsupported')));
-  if (j.set) parts.push(...judgeCalls(f, j), judgeTest());
+  if (!chosen.local) parts.push(...judgeKey(f, j, chosen));
+  if (j.set) parts.push(...judgeCalls(f, j), judgeTest(j));
   return el('section', 'judge-settings', ...parts);
+}
+
+// A destination's name on the page.
+function judgeName(id) {
+  return t(`judge_to_${id.replaceAll('-', '_')}`);
+}
+
+// J7: the list, each destination with its price, or that it stays on this PC; the saved one noted.
+// A destination chosen here shows its note and its key at once, and is saved with the page.
+function judgeDestination(f, j) {
+  const pick = el('select', 'judge-to', ...j.destinations.map((d) => {
+    const name = judgeName(d.id);
+    const option = el('option', null, d.local ? t('judge_price_local', { name })
+      : t('judge_price', { name, usd: d.usd_per_mtok_in }));
+    option.value = d.id;
+    return option;
+  }));
+  pick.value = j.to;
+  pick.dataset.field = 'judge.destination';
+  pick.addEventListener('change', () => { j.to = pick.value; drawSettings(); });
+  return el('label', 'field', el('span', null, t('judge_to')), pick,
+    note(t('saved_value', { value: judgeName(j.destination) })));
+}
+
+// The chosen destination's key: whether it is there, and a field for a new one, posted with the
+// destination, and for Cloudflare with the account ID typed beside it (the server checks its form).
+function judgeKey(f, j, chosen) {
+  const cloudflare = chosen.id === 'clef' || chosen.id === 'clef-flash';
+  const service = cloudflare ? 'cloudflare' : chosen.id === 'd1' ? 'liquid' : null;
+  const state = t(chosen.key === 'ok' ? 'key_ok' : 'key_missing');
+  const parts = [el('p', 'desc', chosen.id === j.destination && j.key_file
+    ? t('judge_key_file', { state, file: j.key_file }) : t('judge_key_state', { state }))];
+  if (!f.keyInput) return [...parts, note(t('provider_key_unsupported'))];
+  if (cloudflare) {
+    const account = input('text', j.account, '', 'judge.account_id', (v) => { j.account = v; });
+    parts.push(el('label', 'field', el('span', null, t('judge_account')), account, note(t('judge_account_desc'))));
+  }
+  const more = () => ({ destination: chosen.id, ...(cloudflare ? { account_id: j.account.trim().toLowerCase() } : {}) });
+  parts.push(keyField('judge/key', 'judge.key', t(service ? `judge_key_label_${service}` : 'judge_key_label'), more));
+  return parts;
 }
 
 // The judge's calls a day, with its No cap switch (decision 64) and its usage beside it.
@@ -4505,8 +4569,9 @@ function judgeCalls(f, j) {
   el('p', 'desc', usage)];
 }
 
-// One made-up question sent on the owner's click, its outcome said in words.
-function judgeTest() {
+// One made-up question sent on the owner's click to the destination saved, its outcome said in
+// words.
+function judgeTest(j) {
   const button = el('button', 'small', t('judge_test'));
   button.type = 'button';
   button.dataset.field = 'judge.test';
@@ -4530,7 +4595,7 @@ function judgeTest() {
         form = mergeProviderSettings(settings, mine, { op: 'key' });
         drawSettings();
       }
-      setStatus(t(key), outcome !== 'ok', lang);
+      setStatus(t(key, { name: judgeName(j.destination) }), outcome !== 'ok', lang);
     } catch {
       if (here()) setStatus(t('network_failed'), true, lang);
     } finally {
@@ -4551,7 +4616,8 @@ function embeddingSection(f) {
 }
 
 // As a provider's key field: the token is only in the field and the one request that carries it.
-function keyField(route, field, label) {
+// `more` adds to the body what the route takes beside the key (the judge's destination).
+function keyField(route, field, label, more = () => ({})) {
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
@@ -4568,7 +4634,7 @@ function keyField(route, field, label) {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
   save.addEventListener('click', () => {
-    const body = { key: i.value, version: form.version };
+    const body = { key: i.value, version: form.version, ...more() };
     i.value = '';
     void keySave(route, save, body);
   });
@@ -5379,6 +5445,13 @@ function preserveSettingsDrafts(next, mine) {
   if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day, noCap: mine.my_work.noCap };
   // The judge's switch as edited; one left as it was follows the answer (a key saved turns it on).
   if (next.judge && mine.judge && mine.judge.enabled !== mine.savedSettings.judge?.enabled) next.judge.enabled = mine.judge.enabled;
+  // Where it sends and Cloudflare's account ID as edited; left as they were, or saved with a key
+  // (which chooses its destination), they follow the answer.
+  if (next.judge && mine.judge) {
+    if (mine.judge.to !== mine.savedSettings.judge?.destination) next.judge.to = mine.judge.to;
+    const typed = mine.judge.account.trim().toLowerCase();
+    if (![mine.savedSettings.judge?.cloudflare_account_id ?? '', next.judge.cloudflare_account_id ?? ''].includes(typed)) next.judge.account = mine.judge.account;
+  }
   // Its calls a day as edited too; left as they were, they follow the answer.
   const daily = mine.savedSettings.judge?.daily_budget;
   if (next.judge && mine.judge && (mine.judge.budget !== noCapText(daily, mine.ranges) || mine.judge.noCap !== (daily === mine.ranges.no_cap))) {
@@ -5984,8 +6057,12 @@ function saveBody() {
     let daily = j.budget.trim() === String(had) ? had : whole(j.budget, ...form.ranges.daily_budget);
     if (j.noCap) daily = form.ranges.no_cap;
     if (Number.isNaN(daily)) return { field: 'judge.daily_budget' };
-    // Sent only when it changed, as the retention period is.
-    judge = { enabled: j.enabled, ...(daily === had ? {} : { daily_budget: daily }) };
+    // Each sent only when it changed, as the retention period is.
+    judge = { enabled: j.enabled, ...(daily === had ? {} : { daily_budget: daily }),
+      ...(j.to === j.destination ? {} : { destination: j.to }) };
+  } else if (form.judge?.to === 'd1-local' && form.judge.enabled) {
+    // J7: d1 on this PC needs no key, so turned on it writes `[judge]`.
+    judge = { enabled: true, destination: 'd1-local' };
   }
   let embedding = null;
   if (form.embedding) {
