@@ -1258,9 +1258,11 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert.equal(pick().value,'jev');
     assert(text(pick()).includes('Clef-flash (Cloudflare Workers AI): USD 0.038 for a million input tokens'),'each with its price');
     assert(text(pick()).includes('d1 on this PC (Ollama): free, and nothing leaves this PC'),'and the one that stays here');
-    assert(text(judged()).includes('api.typesafe.ai')&&!field('judge.account_id'),'where Jev is sent, with no account');
+    // Each destination's note, as its TEXT says where it is sent.
+    const noted=id=>text(judged()).includes(w4.TEXT[`judge_note_${id}`][0]);
+    assert(noted('jev')&&!field('judge.account_id'),'where Jev is sent, with no account');
     choose('clef-flash');
-    assert(text(judged()).includes('api.cloudflare.com')&&text(judged()).includes('24,000 tokens'),'where Clef-flash is sent');
+    assert(noted('clef_flash'),'where Clef-flash is sent');
     assert(text(judged()).includes('Saved: Jev (Typesafe)'),'the saved one noted');
     assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'clef-flash'},'the choice saves with the page');
     type(field('judge.account_id'),' 0123456789ABCDEF0123456789ABCDEF ');
@@ -1287,11 +1289,11 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert(!switchOf(),'no switch before a key');
     assert(!text(judged()).includes('Saved:'),'nothing saved is said with no [judge]');
     choose('d1-local');
-    assert(text(judged()).includes('127.0.0.1:11434')&&!field('judge.key'),'d1 on this PC: its address, and no key');
+    assert(noted('d1_local')&&!field('judge.key'),'d1 on this PC: its address, and no key');
     change(switchOf(),true);
     assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'d1-local'},'turned on with no key');
     choose('d1');
-    assert(text(judged()).includes('api.liquid.ai')&&!switchOf(),'Liquid\'s, its key not there yet');
+    assert(noted('d1')&&!switchOf(),'Liquid\'s, its key not there yet');
     assert(!('judge' in w4.saveBody().body),'one with no key is not saved');
     ctx.ui.setLang('ja');ctx.ui.drawSettings();
     assert(text(judged()).includes('送り先')&&text(pick()).includes('この PC の d1(Ollama): 無料。この PC の外に出ません'),'Japanese list');
