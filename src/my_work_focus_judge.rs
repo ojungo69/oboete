@@ -110,6 +110,8 @@ pub(crate) fn next(
         q,
         areas,
         entry: judge.entry,
+        who: judge.label,
+        kept: &kept,
     };
     let (request, repos, mut shown) = asked_about(s, q)?;
     let state = shown_areas(s, focus, &kept, &mut shown);
@@ -120,7 +122,7 @@ pub(crate) fn next(
         ("p", json!(1.0)),
         (
             "evidence",
-            json!(evidence((judge.label, None), 1.0, kept.len(), (0, 0))),
+            json!(evidence((keeping.who, None), 1.0, kept.len(), (0, 0))),
         ),
     ];
     if !crate::my_work_judge::fits(&keeping.op(s, &shown, largest)?)? {
@@ -136,15 +138,18 @@ pub(crate) fn next(
     let mut tally = (0, 0);
     let mut ask = |set: &[&Area]| question.ask(s, judge, set);
     let answer = pick_among(&kept, &mut tally, &mut ask)?;
-    keeping.decided(s, &shown, answer, (&kept, tally, judge.label))
+    keeping.decided(s, &shown, answer, tally)
 }
 
 /// The ops about one queued request: of its basis and of the kept areas as `digest` numbers them.
 struct Keeping<'a> {
     q: &'a Queued<'a>,
     areas: i64,
-    /// The judge's name in the ledger (`Judging::entry`).
+    /// The judge's name in the ledger and its name in evidence (`Judging`).
     entry: &'static str,
+    who: &'static str,
+    /// The areas it chose among.
+    kept: &'a [&'a Area],
 }
 
 impl Keeping<'_> {
@@ -170,18 +175,33 @@ impl Keeping<'_> {
         s: &Stores,
         shown: &Shown,
         answer: Answer,
-        (kept, tally, who): (&[&Area], (usize, usize), &str),
+        tally: (usize, usize),
     ) -> Result<Vec<MyWorkOp>> {
         let (choice, p) = match answer {
             Answer::Picked(choice, p) => (choice, p),
             Answer::Skipped("off" | "key" | "excluded") => return Ok(Vec::new()),
             Answer::Skipped(why) => return Ok(vec![self.outcome(s, shown, why)?]),
         };
-        Ok(vec![self.op(
-            s,
-            shown,
-            picked(s, (kept, who), (&choice, p), tally),
-        )?])
+        let picked = self.picked(s, &choice, p, tally);
+        Ok(vec![self.op(s, shown, picked)?])
+    }
+
+    /// A pick's fields: the area's id, or `other` when none fits, its probability and its evidence.
+    fn picked(
+        &self,
+        s: &Stores,
+        choice: &str,
+        p: f64,
+        tally: (usize, usize),
+    ) -> Vec<(&'static str, Value)> {
+        let area = self.kept.iter().find(|a| a.id == choice);
+        let name = area.map(|a| crate::my_work::shown(a.name(), NAME_CHARS, s.rules));
+        let evidence = evidence((self.who, name.as_deref()), p, self.kept.len(), tally);
+        vec![
+            ("focus", json!(area.map_or(OTHER, |a| a.id.as_str()))),
+            ("p", json!(p)),
+            ("evidence", json!(evidence)),
+        ]
     }
 }
 
@@ -276,25 +296,6 @@ impl Question<'_> {
             },
         )
     }
-}
-
-/// A pick's fields: the area's id, or `other` when none fits, its probability and its evidence.
-fn picked(
-    s: &Stores,
-    (kept, who): (&[&Area], &str),
-    (choice, p): (&str, f64),
-    tally: (usize, usize),
-) -> Vec<(&'static str, Value)> {
-    let area = kept.iter().find(|a| a.id == choice);
-    let name = area.map(|a| crate::my_work::shown(a.name(), NAME_CHARS, s.rules));
-    vec![
-        ("focus", json!(area.map_or(OTHER, |a| a.id.as_str()))),
-        ("p", json!(p)),
-        (
-            "evidence",
-            json!(evidence((who, name.as_deref()), p, kept.len(), tally)),
-        ),
-    ]
 }
 
 /// What one question answered: a kept area's id or `none` with its probability, or why there is
