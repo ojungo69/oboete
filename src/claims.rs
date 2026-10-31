@@ -619,9 +619,11 @@ pub(crate) fn applied(
     }
     crate::worker::run_once(home)?;
     #[cfg(test)]
-    PASSED.set(Some(std::time::Instant::now()));
+    let passed = std::time::Instant::now();
     while !done()? {
         if std::time::Instant::now() >= deadline {
+            #[cfg(test)]
+            AFTER_PASS.set(Some(passed.elapsed()));
             return Err(NotYet(format!(
                 "the {what} is recorded; the worker applies it when it next runs"
             ))
@@ -650,8 +652,9 @@ thread_local! {
     /// A test's wait in place of `applied`'s 10 seconds.
     pub(crate) static WAIT: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
-    /// When `applied`'s pass ended, for a test of how long it waits after it (#782).
-    pub(crate) static PASSED: std::cell::Cell<Option<std::time::Instant>> =
+    /// How long `applied` went on waiting after its pass before it gave up, for a test that the
+    /// pass counts within the wait (#782).
+    pub(crate) static AFTER_PASS: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
 }
 
