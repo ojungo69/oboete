@@ -2172,11 +2172,13 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     program is the user's, root's or the `ollama` account's: Ollama's Linux installer runs it as that
     system account, which only root makes. Else nothing is sent: the call is an `error` that says
     why (`no listener`, `untrusted listener`, `listeners unread`), with no bytes out. The tables are
-    read right before the request, under its admission: another user's program could take the port
-    only if the trusted one closed in that moment. Under WSL's mirrored networking a connection no
-    Linux socket takes reaches Windows' loopback, whose owner Linux cannot read, so with no Linux
-    listener nothing is sent. On macOS and Windows nothing reads a socket's owner: whatever program
-    listens there receives what the judge is shown, and the page says so.
+    read right before the request, under its admission, and the connection follows. The check is
+    racy in that moment: another user's program could take the port if no socket then held it for
+    IPv4, the trusted one having closed or being IPv6-only (below). Under WSL's mirrored networking
+    a connection no Linux socket takes reaches Windows' loopback, whose owner Linux cannot read, so
+    with no Linux listener nothing is sent. On macOS and Windows nothing reads a socket's owner:
+    whatever program listens there receives what the judge is shown. The page says both, and that
+    a program on the Windows side of WSL is not checked.
   - The check is of the socket's owner. A port forwarded by the firewall with no socket there
     (Docker without its userland proxy, an iptables REDIRECT) has no listener, and nothing is sent.
     The tables do not say whether a `::` socket is IPv6-only: another user's is counted and

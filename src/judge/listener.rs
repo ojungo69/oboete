@@ -18,7 +18,7 @@ pub(super) const UNREAD: &str = "listeners unread";
 /// installer runs it as (only root makes an account).
 #[cfg(target_os = "linux")]
 pub(super) fn ours(port: u16) -> Result<(), &'static str> {
-    let table = |path: &str| match std::fs::read_to_string(path) {
+    let read = |path: &str| match std::fs::read_to_string(path) {
         Ok(text) => Ok(text),
         // A kernel without IPv6 has no tcp6, and no listener in it.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && path.ends_with('6') => {
@@ -26,10 +26,9 @@ pub(super) fn ours(port: u16) -> Result<(), &'static str> {
         }
         Err(_) => Err(UNREAD),
     };
-    let (tcp, tcp6) = (table("/proc/net/tcp")?, table("/proc/net/tcp6")?);
+    let (tcp, tcp6) = (read("/proc/net/tcp")?, read("/proc/net/tcp6")?);
+    let euid = euid_of(&read("/proc/self/status")?).ok_or(UNREAD)?;
     let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    let euid = unsafe { libc::geteuid() };
     listening(&tcp, &tcp6, port, &trusted(euid, &passwd))
 }
 
@@ -98,6 +97,13 @@ fn reached(a: IpAddr) -> bool {
         IpAddr::V4(a) => v4(a),
         IpAddr::V6(a) => a.is_unspecified() || a.to_ipv4_mapped().is_some_and(v4),
     }
+}
+
+/// The effective uid in `status`, /proc/self/status's text: its `Uid:` line is real, effective,
+/// saved and filesystem uid.
+fn euid_of(status: &str) -> Option<u32> {
+    let uids = status.lines().find_map(|line| line.strip_prefix("Uid:"))?;
+    uids.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// The owners a listener may have: this user (`euid`), root, and the `ollama` account of `passwd`,
@@ -208,6 +214,16 @@ mod tests {
         }
         let short = table(&[("100007F:2CAA", "0A", 1000)]);
         assert_eq!(listening(&short, "", PORT, &[1000, 0]), Err(UNREAD));
+    }
+
+    /// This user is the effective uid of /proc/self/status, the second of its `Uid:` line.
+    #[test]
+    fn this_user_is_the_effective_uid() {
+        let status = "Name:\toboete\nUmask:\t0022\nUid:\t1000\t1001\t1002\t1003\n\
+                      Gid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(euid_of(status), Some(1001));
+        assert_eq!(euid_of("Name:\toboete\n"), None);
+        assert_eq!(euid_of("Uid:\t1000\n"), None);
     }
 
     /// The owners trusted are this user, root and the `ollama` account, read by its name alone.
