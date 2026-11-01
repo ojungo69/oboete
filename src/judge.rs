@@ -16,6 +16,8 @@ use crate::providers_db::{self, Usage};
 use crate::raw::Raw;
 use crate::redact::Rules;
 
+mod listener;
+
 /// The addresses of the list (J7, decision 63); no value of `[judge]` sends anything elsewhere.
 /// Typesafe's, Jev's (J1).
 const JEV: &str = "https://api.typesafe.ai/v1/systemone";
@@ -228,7 +230,7 @@ pub(crate) fn ask(
         return now.map(|_| Asked::Skipped("excluded"));
     }
     let start = Instant::now();
-    let sent = post(j, (&url, key.as_deref()), &body, admission);
+    let (sent, bytes_out) = send(j, (&url, key.as_deref()), (&body, &text), admission);
     let ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
     let (outcome, detail, answers, usage, billed) = match sent {
         Ok(out) => {
@@ -261,7 +263,7 @@ pub(crate) fn ask(
             outcome,
             ms,
             detail,
-            bytes_out: text.len(),
+            bytes_out,
             est_tokens: Some(est),
             usage,
             usd,
@@ -350,6 +352,8 @@ pub(crate) fn url(j: &config::Judge) -> Option<String> {
 /// Cloudflare's account id, is missing or does not read, and nothing goes.
 fn target(j: &config::Judge) -> Option<(String, Option<String>)> {
     let url = url(j)?;
+    #[cfg(test)]
+    let url = AT.with_borrow(Clone::clone).unwrap_or(url);
     let key = match fixed(j.destination).key {
         Some(_) => Some(config::read_key(key_file(j)?).ok()?),
         None => None,
@@ -417,6 +421,29 @@ fn answered(questions: &Value, out: &Value) -> Option<Map<String, Value>> {
     Some(answers.clone())
 }
 
+/// What `post` answers: the answer, or the outcome, its detail and whether it may have been billed.
+type Posted = std::result::Result<Value, (&'static str, String, bool)>;
+
+/// `body` (as `text`) posted to `url`, but to d1 on this PC only when the program listening at its
+/// port may be asked (#786): else no request is made. What `post` answers, and the bytes out:
+/// `text`'s length once a request went, none before.
+fn send(
+    j: &config::Judge,
+    (url, key): (&str, Option<&str>),
+    (body, text): (&Value, &str),
+    admission: Option<crate::dispatch::Guard>,
+) -> (Posted, usize) {
+    let port = || url.parse::<ureq::http::Uri>().ok()?.port_u16();
+    let allowed = match j.destination {
+        Destination::D1Local => port().map_or(Err(listener::UNREAD), listener::ours),
+        _ => Ok(()),
+    };
+    match allowed {
+        Ok(()) => (post(j, (url, key), body, admission), text.len()),
+        Err(why) => (Err(("error", why.to_owned(), false)), 0),
+    }
+}
+
 /// One POST to `url`, with `key` when its destination takes one, and no redirect followed: the
 /// answer as JSON (Cloudflare's from inside its envelope), or the outcome, a detail of its status
 /// or kind (no error body is kept: it can echo what was sent) and whether it may have been billed.
@@ -425,13 +452,9 @@ fn post(
     (url, key): (&str, Option<&str>),
     body: &Value,
     admission: Option<crate::dispatch::Guard>,
-) -> std::result::Result<Value, (&'static str, String, bool)> {
-    #[cfg(test)]
-    let url = AT.with_borrow(Clone::clone).unwrap_or_else(|| url.into());
-    #[cfg(not(test))]
-    let url = url.to_owned();
+) -> Posted {
     let timeout = Duration::from_secs(j.timeout_s);
-    let mut req = crate::provider::admitted_agent(&url, timeout, 0, admission.as_ref()).post(&url);
+    let mut req = crate::provider::admitted_agent(url, timeout, 0, admission.as_ref()).post(url);
     if let Some(key) = key {
         req = req.header("Authorization", &format!("Bearer {key}"));
     }
@@ -1051,6 +1074,27 @@ mod tests {
             h.judge.liquid_key_file,
         ) = (None, None, None);
         assert!(ready(&h.judge));
+    }
+
+    /// #786: d1 on this PC is asked only when a program that may be asked listens at its port. With
+    /// none there, nothing is sent: the call is an `error` that says why, and no byte went out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn d1_on_this_pc_with_no_listener_sends_nothing() {
+        let mut h = home();
+        sending_to(&mut h, config::Destination::D1Local);
+        // Port 0: no socket ever listens there, so no other test's stub can take it meanwhile.
+        AT.set(Some("http://127.0.0.1:0/v1/systemone".to_owned()));
+        let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
+        assert_eq!(asked_, Asked::Skipped("error"));
+        assert_eq!(
+            ledger(&h.db),
+            ["judge:d1-local judge c1 error no listener None None None"]
+        );
+        let out: i64 = (h.db)
+            .query_row("SELECT bytes_out FROM provider_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(out, 0);
     }
 
     /// J7: the round's judge is not the one `[judge]` names once its destination, or the key file

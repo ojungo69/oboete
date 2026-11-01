@@ -2167,8 +2167,30 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     criteria, so it answers this once a Liquid key is set.
   - Clef-flash's hosted model reads 24,576 tokens since 2026-10-09: a longer question (a pick among
     19 large requests in Japanese can be one) is refused, left to grouping and not asked again.
-  - With d1 on this PC chosen, whatever program listens at 127.0.0.1:11434 receives what the judge is
-    shown; another user of the PC could hold that port while Ollama is down. The page says so.
+  - d1 on this PC (#786): on Linux the judge sends only when a program listens where a connection to
+    127.0.0.1:11434 reaches it (127.0.0.1 or 0.0.0.0, or `::` and either mapped) and each such
+    program is the user's, root's or the `ollama` account's: Ollama's Linux installer runs it as that
+    system account, which only root makes. Else nothing is sent: the call is an `error` that says
+    why (`no listener`, `untrusted listener`, `listeners unread`), with no bytes out. The tables are
+    read right before the request, under its admission, and the connection follows. The check is
+    racy in that moment: another user's program could take the port if no socket then held it for
+    IPv4, the trusted one having closed or being IPv6-only (below). Under WSL's mirrored networking
+    a connection no Linux socket takes reaches Windows' loopback, whose owner Linux cannot read, so
+    with no Linux listener nothing is sent. On macOS and Windows nothing reads a socket's owner:
+    whatever program listens there receives what the judge is shown. The page says both, and that
+    a program on the Windows side of WSL is not checked.
+  - The `ollama` account is read from /etc/passwd, where Ollama's installer, distribution packages
+    and systemd-sysusers put it. One that only the name service knows (LDAP, SSSD, a systemd
+    `DynamicUser`) is not found, and its listener is refused (#789).
+  - The check is of the socket's owner. A port forwarded by the firewall with no socket there
+    (Docker without its userland proxy, an iptables REDIRECT) has no listener, and nothing is sent.
+    The tables do not say whether a `::` socket is IPv6-only: another user's is counted and
+    refuses; a trusted one alone is counted too, and a connection to 127.0.0.1 then goes past it,
+    refused on Linux and, under WSL's mirrored networking, to Windows' loopback.
+  - Ollama's API has no authentication: whoever reaches it, another user of the PC or the network
+    when Ollama listens beyond the loopback, can replace the model `d1` and so the judge's
+    answers (picks and scores of the schema's shape). What is sent stays with the listener the
+    check admitted.
   - d1 on this PC answers within `[judge] timeout_s` (15 s unless set) or not at all: a question of
     10,000 tokens and more on a CPU can take longer, and is then left to grouping. Ollama takes a
     request of up to 64 KiB (each choice here has at most 20 options, within its 26).
