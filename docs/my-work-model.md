@@ -2167,8 +2167,16 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     criteria, so it answers this once a Liquid key is set.
   - Clef-flash's hosted model reads 24,576 tokens since 2026-10-09: a longer question (a pick among
     19 large requests in Japanese can be one) is refused, left to grouping and not asked again.
-  - With d1 on this PC chosen, whatever program listens at 127.0.0.1:11434 receives what the judge is
-    shown; another user of the PC could hold that port while Ollama is down. The page says so.
+  - d1 on this PC (#786): on Linux the judge sends only when a program listens where a connection to
+    127.0.0.1:11434 reaches it (127.0.0.1 or 0.0.0.0, or `::` and either mapped) and each such
+    program is the user's, root's or the `ollama` account's: Ollama's Linux installer runs it as that
+    system account, which only root makes. Else nothing is sent: the call is an `error` that says
+    why (`no listener`, `untrusted listener`, `listeners unread`), with no bytes out. The tables are
+    read right before the request, under its admission: another user's program could take the port
+    only if the trusted one closed in that moment. Under WSL's mirrored networking a connection no
+    Linux socket takes reaches Windows' loopback, whose owner Linux cannot read, so with no Linux
+    listener nothing is sent. On macOS and Windows nothing reads a socket's owner: whatever program
+    listens there receives what the judge is shown, and the page says so.
   - d1 on this PC answers within `[judge] timeout_s` (15 s unless set) or not at all: a question of
     10,000 tokens and more on a CPU can take longer, and is then left to grouping. Ollama takes a
     request of up to 64 KiB (each choice here has at most 20 options, within its 26).
