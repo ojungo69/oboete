@@ -37,7 +37,9 @@ person, and a saved key ending its rest.
 - **The remedy**, in the agent's line and in the terminal note (in the summary language, Japanese
   or English), with the entry's name, which is the owner's config, never the provider's words:
   - a refused key: put a new key on the settings page; the next pass uses it;
-  - spent credits: add credits with the provider, or turn the entry off on the settings page;
+  - spent credits: add credits with the provider, or turn the entry off on the settings page; an
+    Anthropic entry is tried again every 30 minutes (decision 68), so added credits are used within
+    half an hour;
   - a missing model: choose another model on the settings page.
   A wait on time whose cause is the owner's no longer says that the providers do not answer.
 - **A saved key ends its rest**: a key saved on the settings page clears the rests of the entries

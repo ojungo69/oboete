@@ -36,6 +36,10 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
 /// uploads the whole window (groq-20b: 20 such 400s in the owner's store, 2026-09-22..26).
 const BREAKER_AFTER: u32 = 3;
 const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
+/// How long an Anthropic entry whose credits are spent rests before it is tried again: claude-mem
+/// tries a spent credential again after 30 minutes, so credits added meanwhile are used without
+/// `oboete resume` (decision 68). The refusal is not billed.
+const CREDITS_RETRY: Duration = Duration::from_secs(30 * 60);
 /// Longest rest a subscription's own reset can set: a weekly window resets within 7 days.
 const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
 /// How long a read of a key's own limit may take (#238).
@@ -1898,7 +1902,7 @@ fn http_send(
         if matches!(status, 400 | 422) && names_reasoning(&text) {
             message.push_str(REASONING_REFUSED);
         }
-        // Spent credits are not luck: the entry rests as a spent month's budget does.
+        // Spent credits are not luck: the entry rests until the next try (`CREDITS_RETRY`).
         let spent =
             api == Api::Anthropic && (status == 402 || status == 400 && credits_spent(&text));
         if spent {
@@ -1914,7 +1918,7 @@ fn http_send(
             message,
             usage: Usage::default(),
             sent: true,
-            cool_until: spent.then(providers_db::next_month),
+            cool_until: spent.then(|| db::now_ms() + CREDITS_RETRY.as_millis() as i64),
             rate,
             uncredited: false,
         });
@@ -8292,14 +8296,23 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 "canary: an issue with your billing",
             ),
         ] {
+            // Decision 68: tried again 30 minutes on, as claude-mem tries a spent credential, so
+            // credits added meanwhile are used without `oboete resume`.
+            let before = db::now_ms();
             let e = send(Api::Anthropic, status, body(kind, message), "");
+            let after = db::now_ms();
             assert_eq!(
                 e.message,
                 format!("http {}: {kind} (credits spent)", &status[..3])
             );
-            assert_eq!(e.cool_until, Some(providers_db::next_month()));
+            let half_hour = 30 * 60 * 1000;
+            let until = e.cool_until.unwrap();
+            assert!(
+                (before + half_hour..=after + half_hour).contains(&until),
+                "{until}"
+            );
             let rested = next_state(providers_db::State::default(), &e);
-            assert_eq!(rested.down_until, providers_db::next_month());
+            assert_eq!(rested.down_until, until);
         }
         // Another 400 is the answer's own; an OpenAI-compatible entry's says nothing of credits.
         let e = send(
