@@ -1082,8 +1082,8 @@ const TEXT = {
   live_off: ['Viewer unreachable', 'ビューアーに接続できません'],
   live_hint: ['Checks for new memory every few seconds', '数秒ごとに新しい記憶を確認します'],
   queue_waiting: ['{n} records wait to be curated into memory', '{n} 件の記録が要約を待っています'],
-  queue_held: ['{n} records wait: curation is paused until a provider answers or a limit resets (see Settings)',
-    '{n} 件の記録が待っています: 要約役が応答するか上限が戻るまで要約は止まっています (設定を参照)'],
+  queue_held: ['{n} records wait: curation is paused until a provider answers, a limit resets or you act on it in Settings',
+    '{n} 件の記録が待っています: 要約役が応答するか、上限が戻るか、設定で対処するまで要約は止まっています'],
   unreachable: ['The viewer is not answering. Start `oboete view` again and open the address it prints.', 'ビューアーから応答がありません。`oboete view` を起動し直し、表示されたアドレスを開いてください。'],
   more: ['More', 'もっと見る'],
   entries_loaded: ['{n} entries loaded.', '{n} 件を読み込みました。'],
@@ -9075,7 +9075,10 @@ function drawQueue() {
   $('queue').hidden = !shown;
   $('queue').textContent = shown ? String(waiting) : '';
   $('queue').className = shown && held ? 'queue held' : 'queue';
+  // Its hint is its accessible name too: the count and why it waits reach a screen reader as an
+  // image the heading leaves out of its own name (`brand-name`), never as a live announcement.
   $('queue').title = shown ? t(held ? 'queue_held' : 'queue_waiting', { n: waiting }) : '';
+  $('queue').setAttribute('aria-label', $('queue').title);
   $('brand-mark').className = shown && !held ? 'mark-wrap busy' : 'mark-wrap';
 }
 

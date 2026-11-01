@@ -2870,16 +2870,21 @@ fn waiting(home: &Path) -> Result<Option<(i64, bool)>> {
         return Ok(None);
     };
     let device = raw.device();
+    // As session start's backlog: no count while a tombstone the worker has not applied may
+    // change the facts, so a forgotten record is never counted (cubic on #796).
+    let manifest = crate::knowledge::checkpoint::get(&k, "manifest", device)?;
+    if !crate::consumer::manifest::exists(&k, "table", "manifest_facts")?
+        || !raw.tombstones_after(device, manifest)?.is_empty()
+    {
+        return Ok(None);
+    }
     let curated = crate::curate::curated_through(&raw)?;
     let (checkpoint, part) = raw.curation_checkpoint(device)?;
-    let waiting = match crate::consumer::manifest::exists(&k, "table", "manifest_facts")? {
-        true => k.query_row(
-            "SELECT COUNT(*) FROM manifest_facts WHERE device = ?1 AND fact = 'event' AND seq > ?2",
-            rusqlite::params![device, curated],
-            |r| r.get(0),
-        )?,
-        false => 0,
-    };
+    let waiting = k.query_row(
+        "SELECT COUNT(*) FROM manifest_facts WHERE device = ?1 AND fact = 'event' AND seq > ?2",
+        rusqlite::params![device, curated],
+        |r| r.get(0),
+    )?;
     let next = part.map_or((checkpoint + 1, 0), |o| (checkpoint, o));
     let held = match crate::providers_db::read_only(home)? {
         Some(db) => crate::providers_db::pending_of(&db, device)?.is_some_and(|p| {
@@ -3097,6 +3102,16 @@ mod tests {
             (json!(3), json!(false))
         );
         assert!(answer["v"].is_string());
+        // A forget the worker has not applied yet: no count until it has.
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq: 2,
+            })
+            .unwrap();
+        assert_eq!(polled(&home).unwrap()["waiting"], Value::Null);
+        s.run();
+        assert_eq!(polled(&home).unwrap()["waiting"], json!(2));
         // Every provider failed the window that starts at the checkpoint: it waits, held.
         let db = crate::providers_db::open(&home).unwrap();
         let pending = crate::providers_db::Pending {
