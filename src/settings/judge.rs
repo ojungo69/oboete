@@ -150,7 +150,8 @@ fn turned_on(doc: &mut toml_edit::DocumentMut) {
 
 /// `POST /api/judge/test {"confirmed": true}`: one made-up question with no recorded text, through
 /// `judge::ask` as any call goes (its budget, its ledger row). The answer is its outcome:
-/// `ok`, or why there is none (`judge::Asked::Skipped`).
+/// `ok`, or why there is none (`judge::Asked::Skipped`), or `refused` with the reason d1 on this
+/// PC's check gave (#791).
 pub(crate) fn test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     let posted: Test = serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     if !posted.confirmed {
@@ -181,10 +182,12 @@ pub(crate) fn test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
         &|| Ok(None),
     )
     .map_err(internal)?;
-    Ok(json!({"outcome": match asked {
-        Asked::Answered(_) => "ok",
-        Asked::Skipped(why) => why,
-    }}))
+    Ok(match asked {
+        Asked::Answered(_) => json!({"outcome": "ok"}),
+        // #791: nothing went, and why: said apart from a request that had no good answer.
+        Asked::Refused(why) => json!({"outcome": "refused", "reason": why}),
+        Asked::Skipped(why) => json!({ "outcome": why }),
+    })
 }
 
 #[cfg(test)]
@@ -282,6 +285,24 @@ mod tests {
         );
         assert_eq!(refusal(json!({"prompt": "x"})).unwrap_err().status, 400);
         assert!(!home.path().join("providers.db").exists());
+    }
+
+    /// #791: a test of d1 on this PC that the check refused sent nothing, and says `refused`; one
+    /// that went and had no good answer is still `error`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_test_refused_before_sending_is_told_apart_from_one_unanswered() {
+        let home = home("providers = []\n[judge]\nenabled = true\ndestination = \"d1-local\"\n");
+        let tested = || test(home.path(), br#"{"confirmed": true}"#).unwrap();
+        // Port 0: no socket ever listens there.
+        crate::judge::AT.set(Some("http://127.0.0.1:0/v1/systemone".to_owned()));
+        assert_eq!(
+            tested(),
+            json!({"outcome": "refused", "reason": "no listener"})
+        );
+        let (url, _rx) = crate::provider::tests::serve_each(vec![("500 Oops", b"{}".to_vec())], "");
+        crate::judge::AT.set(Some(url));
+        assert_eq!(tested(), json!({"outcome": "error"}));
     }
 
     /// J7: a key typed for a destination goes into its service's own field (a managed file outside

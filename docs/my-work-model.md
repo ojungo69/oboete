@@ -2172,7 +2172,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     127.0.0.1:11434 reaches it (127.0.0.1 or 0.0.0.0, or `::` and either mapped) and each such
     program is the user's, root's or the `ollama` account's: Ollama's Linux installer runs it as that
     system account, which only root makes. Else nothing is sent: the call is an `error` that says
-    why (`no listener`, `untrusted listener`, `listeners unread`), with no bytes out. The tables are
+    why (`no listener`, `untrusted listener`, `listeners unread`), with no bytes out, and the settings
+    page's connection test says nothing was sent, and why (`refused` with the reason, #791). The tables are
     read right before the request, under its admission, and the connection follows. The check is
     racy in that moment: another user's program could take the port if no socket then held it for
     IPv4, the trusted one having closed or being IPv6-only (below). Under WSL's mirrored networking

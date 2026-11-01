@@ -238,7 +238,7 @@ pub(crate) fn request(
     })?;
     let pick = match picked {
         Asked::Answered(answers) => answers["pick"].clone(),
-        Asked::Skipped(why) => return left(why, (shown, entry), decided),
+        other => return left(other.unanswered(), (shown, entry), decided),
     };
     let choice = pick["choice"].as_str().unwrap_or("none");
     let p = pick["probabilities"][choice].as_f64().unwrap_or(0.0);
@@ -260,7 +260,7 @@ pub(crate) fn request(
     })?;
     let score = match checked {
         Asked::Answered(answers) => answers["same"]["noul"].as_f64().unwrap_or(0.0),
-        Asked::Skipped(why) => return left(why, (shown, entry), decided),
+        other => return left(other.unanswered(), (shown, entry), decided),
     };
     let fields = if score >= JOIN {
         vec![

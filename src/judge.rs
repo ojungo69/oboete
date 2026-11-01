@@ -133,6 +133,21 @@ pub(crate) enum Asked {
     /// Why nothing was answered: `off`, `key`, `excluded`, `masked` (a key the gate would change),
     /// a budget refusal's outcome, or a sent call's (`error`, `shape`).
     Skipped(&'static str),
+    /// Nothing was sent: d1 on this PC's check refused what listens at its address (#786), for
+    /// this reason. Its ledger row is an `error` with the reason as its detail.
+    Refused(&'static str),
+}
+
+impl Asked {
+    /// What a judge records of a call that gave no answer: why, a refusal before sending being an
+    /// `error`, as its ledger row is (#791).
+    pub(crate) fn unanswered(&self) -> &'static str {
+        match self {
+            Asked::Answered(_) => "ok",
+            Asked::Skipped(why) => why,
+            Asked::Refused(_) => "error",
+        }
+    }
 }
 
 /// The judge as an entry of the budget (`budget::reserve`): its daily calls and its price, under
@@ -230,7 +245,7 @@ pub(crate) fn ask(
         return now.map(|_| Asked::Skipped("excluded"));
     }
     let start = Instant::now();
-    let (sent, bytes_out) = send(j, (&url, key.as_deref()), (&body, &text), admission);
+    let (sent, refused) = send(j, (&url, key.as_deref()), &body, admission);
     let ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
     let (outcome, detail, answers, usage, billed) = match sent {
         Ok(out) => {
@@ -263,7 +278,8 @@ pub(crate) fn ask(
             outcome,
             ms,
             detail,
-            bytes_out,
+            // No byte went before a refusal (#786).
+            bytes_out: refused.map_or(text.len(), |_| 0),
             est_tokens: Some(est),
             usage,
             usd,
@@ -271,7 +287,8 @@ pub(crate) fn ask(
         None,
         |s| s,
     )?;
-    Ok(answers.map_or(Asked::Skipped(outcome), Asked::Answered))
+    let unanswered = refused.map_or(Asked::Skipped(outcome), Asked::Refused);
+    Ok(answers.map_or(unanswered, Asked::Answered))
 }
 
 /// Doctor's line: the judge's destination (d1 on this PC with its address) and switch, what it
@@ -424,23 +441,23 @@ fn answered(questions: &Value, out: &Value) -> Option<Map<String, Value>> {
 /// What `post` answers: the answer, or the outcome, its detail and whether it may have been billed.
 type Posted = std::result::Result<Value, (&'static str, String, bool)>;
 
-/// `body` (as `text`) posted to `url`, but to d1 on this PC only when the program listening at its
-/// port may be asked (#786): else no request is made. What `post` answers, and the bytes out:
-/// `text`'s length once a request went, none before.
+/// `body` posted to `url`, but to d1 on this PC only when the program listening at its port may
+/// be asked (#786): else no request is made. What `post` answers, and why the check refused when
+/// it did.
 fn send(
     j: &config::Judge,
     (url, key): (&str, Option<&str>),
-    (body, text): (&Value, &str),
+    body: &Value,
     admission: Option<crate::dispatch::Guard>,
-) -> (Posted, usize) {
+) -> (Posted, Option<&'static str>) {
     let port = || url.parse::<ureq::http::Uri>().ok()?.port_u16();
     let allowed = match j.destination {
         Destination::D1Local => port().map_or(Err(listener::UNREAD), listener::ours),
         _ => Ok(()),
     };
     match allowed {
-        Ok(()) => (post(j, (url, key), body, admission), text.len()),
-        Err(why) => (Err(("error", why.to_owned(), false)), 0),
+        Ok(()) => (post(j, (url, key), body, admission), None),
+        Err(why) => (Err(("error", why.to_owned(), false)), Some(why)),
     }
 }
 
@@ -1086,7 +1103,10 @@ mod tests {
         // Port 0: no socket ever listens there, so no other test's stub can take it meanwhile.
         AT.set(Some("http://127.0.0.1:0/v1/systemone".to_owned()));
         let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
-        assert_eq!(asked_, Asked::Skipped("error"));
+        assert_eq!(asked_, Asked::Refused("no listener"));
+        // #791: the judges' ops keep it as any call that failed.
+        assert_eq!(asked_.unanswered(), "error");
+        assert_eq!(Asked::Skipped("budget").unanswered(), "budget");
         assert_eq!(
             ledger(&h.db),
             ["judge:d1-local judge c1 error no listener None None None"]
