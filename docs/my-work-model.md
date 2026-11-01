@@ -2179,6 +2179,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     with no Linux listener nothing is sent. On macOS and Windows nothing reads a socket's owner:
     whatever program listens there receives what the judge is shown. The page says both, and that
     a program on the Windows side of WSL is not checked.
+  - The `ollama` account is read from /etc/passwd, where Ollama's installer, distribution packages
+    and systemd-sysusers put it. One that only the name service knows (LDAP, SSSD, a systemd
+    `DynamicUser`) is not found, and its listener is refused (#789).
   - The check is of the socket's owner. A port forwarded by the firewall with no socket there
     (Docker without its userland proxy, an iptables REDIRECT) has no listener, and nothing is sent.
     The tables do not say whether a `::` socket is IPv6-only: another user's is counted and

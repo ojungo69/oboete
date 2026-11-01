@@ -18,8 +18,10 @@ pub(super) const UNREAD: &str = "listeners unread";
 /// installer runs it as (only root makes an account).
 #[cfg(target_os = "linux")]
 pub(super) fn ours(port: u16) -> Result<(), &'static str> {
-    let read = |path: &str| match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text),
+    // As text where bytes that are not UTF-8 (a program's name cut short, a full name in
+    // /etc/passwd) do not keep the numbers around them from reading.
+    let read = |path: &str| match std::fs::read(path) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         // A kernel without IPv6 has no tcp6, and no listener in it.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && path.ends_with('6') => {
             Ok(String::new())
@@ -28,7 +30,7 @@ pub(super) fn ours(port: u16) -> Result<(), &'static str> {
     };
     let (tcp, tcp6) = (read("/proc/net/tcp")?, read("/proc/net/tcp6")?);
     let euid = euid_of(&read("/proc/self/status")?).ok_or(UNREAD)?;
-    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let passwd = read("/etc/passwd").unwrap_or_default();
     listening(&tcp, &tcp6, port, &trusted(euid, &passwd))
 }
 
