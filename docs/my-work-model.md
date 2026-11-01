@@ -2151,8 +2151,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   in use. Each decision op's `entry` is that name, and its evidence names the destination
   ("Clef-flash: picked over …"). The settings page shows the calls of the destination in use and the
   judge's spend this month wherever it was sent.
-- **The settings page**: the list, each with its price or that it stays on this PC; the chosen one's
-  note (where it is sent, what it needs) and its key: Typesafe's, Cloudflare's token with the account
+- **The settings page**: the list by name, and under it the chosen one's price or that it stays on
+  this PC (#788: a price beside each name cut the names short); the chosen one's note (where it is
+  sent, what it needs) and its key: Typesafe's, Cloudflare's token with the account
   ID, Liquid's, none for d1 on this PC. A key saved (`POST /api/judge/key` with `destination` and,
   for Cloudflare, `account_id`) goes into its service's own field, chooses that destination and turns
   the judge on. A key's state on the page is its file's; the account id shows in its own field. The
@@ -2189,8 +2190,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
     refused on Linux and, under WSL's mirrored networking, to Windows' loopback.
   - Ollama's API has no authentication: whoever reaches it, another user of the PC or the network
     when Ollama listens beyond the loopback, can replace the model `d1` and so the judge's
-    answers (picks and scores of the schema's shape). What is sent stays with the listener the
-    check admitted.
+    answers (picks and scores of the schema's shape). What is sent goes to whatever listens at the
+    port when the request is made, as the race above allows.
   - d1 on this PC answers within `[judge] timeout_s` (15 s unless set) or not at all: a question of
     10,000 tokens and more on a CPU can take longer, and is then left to grouping. Ollama takes a
     request of up to 64 KiB (each choice here has at most 20 options, within its 26).

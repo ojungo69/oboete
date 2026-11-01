@@ -1247,7 +1247,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
   assert(text(judged()).includes('判定役')&&text(judged()).includes('直近 24 時間: 300 回のうち 2 回'),'Japanese section');
   ctx.ui.setLang('en');
   console.log('PASS: the judge: no key, the key once, its switch, its test, JA/EN');
-  // docs/my-work-model.md J7: where the judge sends. The list, each with its price; a destination
+  // docs/my-work-model.md J7: where the judge sends. The list by name, the chosen one's price under it; a destination
   // chosen shows its note and its key at once and is saved with the page; Cloudflare's token goes
   // with the account ID; d1 on this PC takes no key and turns on with none.
   {
