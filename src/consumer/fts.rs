@@ -319,6 +319,9 @@ impl Consumer for Fts {
             "CREATE INDEX IF NOT EXISTS raw_docs_tools ON raw_docs(ts, device, seq)
                WHERE kind = 'tool'",
         )?;
+        // The repositories' records counted with their newest time (`view::repos_in`) from an
+        // index, not by reading each record's text: 4.5 s cold on this PC's store (2026-11-01).
+        k.execute_batch("CREATE INDEX IF NOT EXISTS raw_docs_repo ON raw_docs(repo, ts)")?;
         let recs = raw.after(raw.device(), after, BATCH)?;
         for r in &recs {
             let (e, text) = match &r.item {

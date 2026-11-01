@@ -49,7 +49,9 @@ fn cover(k: &Connection) -> Result<()> {
     k.execute_batch(
         "CREATE INDEX IF NOT EXISTS imported_cover ON imported(rowid, repo, ts, kind, session, uid);
          -- N5: a timeline's documents of a repository in time order (`search::b::imported_side`).
-         CREATE INDEX IF NOT EXISTS imported_time ON imported(repo, ts, uid);",
+         CREATE INDEX IF NOT EXISTS imported_time ON imported(repo, ts, uid);
+         -- Every repository's, newest first, read to the page's end (`search::b::imported_side`).
+         CREATE INDEX IF NOT EXISTS imported_newest ON imported(ts, uid);",
     )?;
     Ok(())
 }

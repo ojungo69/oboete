@@ -2817,19 +2817,22 @@ fn repos(home: &Path) -> Result<Vec<Value>> {
     repos_in(&k)
 }
 
+/// Each repository's counts and newest time. Its records are counted from the Fts consumer's
+/// index `raw_docs_repo`, not by reading each record's text (4.5 s cold on this PC's store,
+/// 2026-11-01).
+const REPOS: &str = "SELECT repo, SUM(claims), SUM(imported), SUM(records), MAX(last) FROM (
+       SELECT repo, COUNT(DISTINCT uid) AS claims, 0 AS imported, 0 AS records,
+              MAX(valid_from) AS last
+       FROM derivations WHERE repo IS NOT NULL GROUP BY repo
+       UNION ALL
+       SELECT repo, 0, COUNT(DISTINCT uid), 0, MAX(ts) FROM imported GROUP BY repo
+       UNION ALL
+       SELECT repo, 0, 0, COUNT(*), MAX(ts) FROM raw_docs WHERE repo IS NOT NULL GROUP BY repo)
+     GROUP BY repo ORDER BY MAX(last) DESC, repo";
+
 /// Existing repository enumeration on a caller-owned connection, without opening stores.
 pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
-    let mut st = k.prepare(
-        "SELECT repo, SUM(claims), SUM(imported), SUM(records), MAX(last) FROM (
-           SELECT repo, COUNT(DISTINCT uid) AS claims, 0 AS imported, 0 AS records,
-                  MAX(valid_from) AS last
-           FROM derivations WHERE repo IS NOT NULL GROUP BY repo
-           UNION ALL
-           SELECT repo, 0, COUNT(DISTINCT uid), 0, MAX(ts) FROM imported GROUP BY repo
-           UNION ALL
-           SELECT repo, 0, 0, COUNT(*), MAX(ts) FROM raw_docs WHERE repo IS NOT NULL GROUP BY repo)
-         GROUP BY repo ORDER BY MAX(last) DESC, repo",
-    )?;
+    let mut st = k.prepare(REPOS)?;
     let rows = st.query_map([], |r| {
         Ok(json!({
             "repo": r.get::<_, String>(0)?,
@@ -2977,6 +2980,47 @@ fn params(query: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use crate::search::b::fixture::Store;
+
+    /// The repositories' records are counted from the Fts consumer's index alone, and counted
+    /// right: a scan of `raw_docs` read every record's text (4.5 s cold on this PC's store).
+    #[test]
+    fn the_repositories_records_are_counted_from_an_index() {
+        let mut s = Store::new();
+        s.said("s1", "github.com/o/a", 1_000, "First words.");
+        s.said("s1", "github.com/o/a", 2_000, "Second words.");
+        s.said("s2", "github.com/o/b", 3_000, "Other words.");
+        s.run();
+        let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
+        let plan: Vec<String> = (k.prepare(&format!("EXPLAIN QUERY PLAN {REPOS}")).unwrap())
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            !plan.iter().any(|p| p.starts_with("SCAN raw_docs")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter().any(|p| p.contains("INDEX raw_docs_repo")),
+            "{plan:?}"
+        );
+        let records: Vec<(String, i64)> = (repos_in(&k).unwrap().iter())
+            .map(|r| {
+                (
+                    r["repo"].as_str().unwrap().to_owned(),
+                    r["records"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert!(
+            records.contains(&("github.com/o/a".into(), 2)),
+            "{records:?}"
+        );
+        assert!(
+            records.contains(&("github.com/o/b".into(), 1)),
+            "{records:?}"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     fn w5b_post(v: &Viewer, target: &str, value: Value) -> Response {
