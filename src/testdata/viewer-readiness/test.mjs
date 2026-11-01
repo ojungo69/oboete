@@ -1320,12 +1320,18 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     // program at its address.
     const local={...on,destination:'d1-local',key:'none',key_file:null};
     f=w4.formOf(settings({judge:local}));ctx.ui.setForm(f);ctx.ui.drawSettings();
-    settingsAnswer=Promise.resolve(json(settings({judge:local})));
-    answers=[json({outcome:'error'})];
-    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
-    settingsAnswer=null;
-    const said=document.getElementById('status').textContent;
-    assert(said.includes('ollama pull d1')&&said.includes('Ollama\'s own account')&&!said.includes('Check the key'),'what to check for d1 on this PC');
+    const testSays=async outcome=>{
+      settingsAnswer=Promise.resolve(json(settings({judge:local})));
+      answers=[json({outcome})];
+      judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
+      settingsAnswer=null;
+      return document.getElementById('status').textContent;
+    };
+    const unanswered=await testSays('error');
+    assert(unanswered.includes('ollama pull d1')&&!unanswered.includes('Check the key')&&!unanswered.includes('Nothing was sent'),'what to check for d1 on this PC');
+    // #791: a request the check refused went nowhere, and the page says so.
+    const refused=await testSays('refused');
+    assert(refused.includes('Nothing was sent')&&refused.includes('Ollama\'s own account'),'a refusal before sending');
     for(const key of ['missing_key','bad_account'])assert(w4.TEXT[key][0]&&w4.TEXT[key][1]&&w4.TEXT[key][0]!==w4.TEXT[key][1],`${key} in words`);
     console.log('PASS: J7: the list and its prices, a destination\'s key, d1 on this PC with none');
   }

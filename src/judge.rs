@@ -326,6 +326,14 @@ fn missing(j: &config::Judge) -> Option<String> {
     }
 }
 
+/// Whether `j`'s latest call is one the check of d1 on this PC refused before any request was
+/// made (#786, #791): its row's detail is the check's reason.
+pub(crate) fn refused_before_sending(db: &Connection, j: &config::Judge) -> Result<bool> {
+    let detail = providers_db::last_detail(db, fixed(j.destination).name)?;
+    let reasons = [listener::NONE, listener::UNTRUSTED, listener::UNREAD];
+    Ok(detail.is_some_and(|d| reasons.contains(&providers_db::visible_detail(&d))))
+}
+
 /// Whether `j` is on with what its destination needs to be asked (J7).
 pub(crate) fn ready(j: &config::Judge) -> bool {
     j.enabled && target(j).is_some()

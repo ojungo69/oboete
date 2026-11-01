@@ -181,10 +181,17 @@ pub(crate) fn test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
         &|| Ok(None),
     )
     .map_err(internal)?;
-    Ok(json!({"outcome": match asked {
+    let outcome = match asked {
         Asked::Answered(_) => "ok",
+        // #791: nothing went: said apart from a request that had no good answer.
+        Asked::Skipped("error")
+            if crate::judge::refused_before_sending(&db, judge).map_err(internal)? =>
+        {
+            "refused"
+        }
         Asked::Skipped(why) => why,
-    }}))
+    };
+    Ok(json!({ "outcome": outcome }))
 }
 
 #[cfg(test)]
@@ -282,6 +289,21 @@ mod tests {
         );
         assert_eq!(refusal(json!({"prompt": "x"})).unwrap_err().status, 400);
         assert!(!home.path().join("providers.db").exists());
+    }
+
+    /// #791: a test of d1 on this PC that the check refused sent nothing, and says `refused`; one
+    /// that went and had no good answer is still `error`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_test_refused_before_sending_is_told_apart_from_one_unanswered() {
+        let home = home("providers = []\n[judge]\nenabled = true\ndestination = \"d1-local\"\n");
+        let tested = || test(home.path(), br#"{"confirmed": true}"#).unwrap();
+        // Port 0: no socket ever listens there.
+        crate::judge::AT.set(Some("http://127.0.0.1:0/v1/systemone".to_owned()));
+        assert_eq!(tested(), json!({"outcome": "refused"}));
+        let (url, _rx) = crate::provider::tests::serve_each(vec![("500 Oops", b"{}".to_vec())], "");
+        crate::judge::AT.set(Some(url));
+        assert_eq!(tested(), json!({"outcome": "error"}));
     }
 
     /// J7: a key typed for a destination goes into its service's own field (a managed file outside
