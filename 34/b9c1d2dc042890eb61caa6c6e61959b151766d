@@ -1,0 +1,23 @@
+assets/viewer/app.js
+  s_f7d8663ba9ca22::t_d294ad1aefaa52 1377
+docs/my-work-model.md
+  s_f7d8663ba9ca22::t_dd24a706b64bb8 2182-2184
+src/judge/listener.rs
+  s_f7d8663ba9ca22::t_51d8ae087f4e8f 21-24,33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "34b9c1d2dc042890eb61caa6c6e61959b151766d",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
