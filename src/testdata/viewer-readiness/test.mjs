@@ -1256,13 +1256,16 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     f=w4.formOf(settings({judge:on}));ctx.ui.setForm(f);ctx.ui.drawSettings();
     assert.deepEqual(pick().options.map(o=>o.value),['jev','clef','clef-flash','d1','d1-local'],'the five of the list');
     assert.equal(pick().value,'jev');
-    assert(text(pick()).includes('Clef-flash (Cloudflare Workers AI): USD 0.038 for a million input tokens'),'each with its price');
-    assert(text(pick()).includes('d1 on this PC (Ollama): free, and nothing leaves this PC'),'and the one that stays here');
+    // The list names them only, so a name is not cut short; the chosen one's price is under it.
+    assert(text(pick()).includes('Clef-flash (Cloudflare Workers AI)')&&!text(pick()).includes('USD'),'each by its name');
+    const priced=()=>pick().parentElement.querySelectorAll('.note').map(text);
+    assert(priced().includes('USD 0.042 for a million input tokens'),'the chosen one\'s price');
     // Each destination's note, as its TEXT says where it is sent.
     const noted=id=>text(judged()).includes(w4.TEXT[`judge_note_${id}`][0]);
     assert(noted('jev')&&!field('judge.account_id'),'where Jev is sent, with no account');
     choose('clef-flash');
     assert(noted('clef_flash'),'where Clef-flash is sent');
+    assert(priced().includes('USD 0.038 for a million input tokens'),'and its price');
     assert(text(judged()).includes('Saved: Jev (Typesafe)'),'the saved one noted');
     assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'clef-flash'},'the choice saves with the page');
     type(field('judge.account_id'),' 0123456789ABCDEF0123456789ABCDEF ');
@@ -1290,13 +1293,16 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert(!text(judged()).includes('Saved:'),'nothing saved is said with no [judge]');
     choose('d1-local');
     assert(noted('d1_local')&&!field('judge.key'),'d1 on this PC: its address, and no key');
+    assert(priced().includes('Free, and nothing leaves this PC'),'and that it stays here');
     change(switchOf(),true);
     assert.deepEqual(plain(w4.saveBody().body.judge),{enabled:true,destination:'d1-local'},'turned on with no key');
     choose('d1');
     assert(noted('d1')&&!switchOf(),'Liquid\'s, its key not there yet');
     assert(!('judge' in w4.saveBody().body),'one with no key is not saved');
     ctx.ui.setLang('ja');ctx.ui.drawSettings();
-    assert(text(judged()).includes('送り先')&&text(pick()).includes('この PC の d1(Ollama): 無料。この PC の外に出ません'),'Japanese list');
+    assert(text(judged()).includes('送り先')&&text(pick()).includes('この PC の d1(Ollama)'),'Japanese list');
+    choose('d1-local');
+    assert(priced().includes('無料。この PC の外に出ません'),'and its price in Japanese');
     ctx.ui.setLang('en');
     for(const key of ['missing_key','bad_account'])assert(w4.TEXT[key][0]&&w4.TEXT[key][1]&&w4.TEXT[key][0]!==w4.TEXT[key][1],`${key} in words`);
     console.log('PASS: J7: the list and its prices, a destination\'s key, d1 on this PC with none');

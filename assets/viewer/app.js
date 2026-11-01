@@ -1368,13 +1368,13 @@ const TEXT = {
   judge_to_clef_flash: ['Clef-flash (Cloudflare Workers AI)', 'Clef-flash(Cloudflare Workers AI)'],
   judge_to_d1: ['d1 (Liquid AI)', 'd1(Liquid AI)'],
   judge_to_d1_local: ['d1 on this PC (Ollama)', 'この PC の d1(Ollama)'],
-  judge_price: ['{name}: USD {usd} for a million input tokens', '{name}: 入力 100 万トークンで {usd} ドル'],
-  judge_price_local: ['{name}: free, and nothing leaves this PC', '{name}: 無料。この PC の外に出ません'],
+  judge_price: ['USD {usd} for a million input tokens', '入力 100 万トークンで {usd} ドル'],
+  judge_price_local: ['Free, and nothing leaves this PC', '無料。この PC の外に出ません'],
   judge_note_jev: ['Sent to Typesafe (api.typesafe.ai) with your Typesafe key.', 'Typesafe(api.typesafe.ai)へ、Typesafe のキーで送ります。'],
   judge_note_clef: ['Sent to Cloudflare Workers AI (api.cloudflare.com) under your account: it needs a Cloudflare API token that may use Workers AI, and your account ID.', 'Cloudflare Workers AI(api.cloudflare.com)へ、あなたのアカウントで送ります。Workers AI を使える Cloudflare の API トークンと、アカウント ID が必要です。'],
   judge_note_clef_flash: ['Sent to Cloudflare Workers AI (api.cloudflare.com) under your account: it needs a Cloudflare API token that may use Workers AI, and your account ID. Clef-flash reads up to about 24,000 tokens; a longer question is not answered and is left to the AI for summaries.', 'Cloudflare Workers AI(api.cloudflare.com)へ、あなたのアカウントで送ります。Workers AI を使える Cloudflare の API トークンと、アカウント ID が必要です。Clef-flash が読めるのはおよそ 2 万 4 千トークンまでで、それより長い質問には答えず、要約に使う AI に任せます。'],
   judge_note_d1: ['Sent to Liquid AI (api.liquid.ai), to its d1.1 model, with your Liquid AI key. Liquid AI documents the same questions as Jev; the connection test below shows whether it answers them.', 'Liquid AI(api.liquid.ai)の d1.1 モデルへ、Liquid AI のキーで送ります。Liquid AI の説明では Jev と同じ形の質問を受け付けます。答えられるかは、下の接続テストで確かめられます。'],
-  judge_note_d1_local: ['Sent to the program on this PC at 127.0.0.1:11434, Ollama\'s address: install Ollama and run "ollama pull d1" first. Nothing leaves this PC, but whatever program listens at that address receives what the judge is shown, so keep Ollama running while the judge is on. No key is needed.', 'この PC の 127.0.0.1:11434(Ollama のアドレス)で待つプログラムへ送ります。先に Ollama を入れて「ollama pull d1」を実行してください。この PC の外には出ませんが、そのアドレスで待つプログラムは何であれ判定役に見せる内容を受け取るので、判定役をオンにしている間は Ollama を動かしておいてください。キーは要りません。'],
+  judge_note_d1_local: ['Sent to the program on this PC at 127.0.0.1:11434, Ollama\'s address: install Ollama and run "ollama pull d1" first. Nothing leaves this PC. On Linux, oboete first checks that the program waiting there is yours, root\'s or Ollama\'s own account\'s, and sends nothing otherwise. On macOS and Windows it cannot check, and whatever program waits at that address receives what the judge is shown, so keep Ollama running while the judge is on. No key is needed.', 'この PC の 127.0.0.1:11434(Ollama のアドレス)で待つプログラムへ送ります。先に Ollama を入れて「ollama pull d1」を実行してください。この PC の外には出ません。Linux では、そこで待つプログラムがあなたか root か Ollama 専用のアカウントのものかを先に確かめ、違えば何も送りません。macOS と Windows では確かめられず、そのアドレスで待つプログラムは何であれ判定役に見せる内容を受け取るので、判定役をオンにしている間は Ollama を動かしておいてください。キーは要りません。'],
   judge_on: ['Use the judge', '判定役を使う'],
   judge_no_key: ['Off: no key yet. Choose where it sends, then paste that service\'s key below to turn it on. d1 on this PC needs no key.', 'オフ: まだキーがありません。送り先を選び、その送り先のキーを下に貼り付けるとオンになります。この PC の d1 にはキーは要りません。'],
   judge_key_file: ['Key: {state} ({file})', 'キー: {state}（{file}）'],
@@ -4500,7 +4500,7 @@ function judgeSection(f) {
   if (!j) return null;
   const chosen = j.destinations.find((d) => d.id === j.to) || j.destinations[0];
   const parts = [el('h3', null, t('judge_h')), el('p', 'desc', t('judge_desc')), el('p', 'desc', t('judge_sends')),
-    judgeDestination(f, j), el('p', 'desc', t(`judge_note_${chosen.id.replaceAll('-', '_')}`))];
+    judgeDestination(j, chosen), el('p', 'desc', t(`judge_note_${chosen.id.replaceAll('-', '_')}`))];
   if (j.set || chosen.local) {
     parts.push(el('label', 'check', checkbox(j.enabled, (v) => { j.enabled = v; }), t('judge_on')),
       note(t('saved_value', { value: t(f.savedSettings.judge?.enabled ? 'value_on' : 'value_off') })));
@@ -4517,13 +4517,12 @@ function judgeName(id) {
   return t(`judge_to_${id.replaceAll('-', '_')}`);
 }
 
-// J7: the list, each destination with its price, or that it stays on this PC; the saved one noted.
-// A destination chosen here shows its note and its key at once, and is saved with the page.
-function judgeDestination(f, j) {
+// J7: the list by name (a price beside each cut the names short at the field's width); under it
+// the chosen one's price, or that it stays on this PC, and the saved one. A destination chosen
+// here shows its note and its key at once, and is saved with the page.
+function judgeDestination(j, chosen) {
   const pick = el('select', 'judge-to', ...j.destinations.map((d) => {
-    const name = judgeName(d.id);
-    const option = el('option', null, d.local ? t('judge_price_local', { name })
-      : t('judge_price', { name, usd: d.usd_per_mtok_in }));
+    const option = el('option', null, judgeName(d.id));
     option.value = d.id;
     return option;
   }));
@@ -4531,6 +4530,7 @@ function judgeDestination(f, j) {
   pick.dataset.field = 'judge.destination';
   pick.addEventListener('change', () => { j.to = pick.value; drawSettings(); });
   return el('label', 'field', el('span', null, t('judge_to')), pick,
+    note(chosen.local ? t('judge_price_local') : t('judge_price', { usd: chosen.usd_per_mtok_in })),
     j.set ? note(t('saved_value', { value: judgeName(j.destination) })) : null);
 }
 
