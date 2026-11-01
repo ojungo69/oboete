@@ -1394,7 +1394,10 @@ const TEXT = {
   judge_test_ok: ['{name} answered: the connection works.', '{name} が答えました。接続できています。'],
   judge_test_error: ['{name} did not answer. Check the key, then try again.', '{name} が答えませんでした。キーを確かめて、もう一度試してください。'],
   judge_test_error_local: ['d1 on this PC did not answer. Check that Ollama is running and has the model ("ollama pull d1"), then try again.', 'この PC の d1 が答えませんでした。Ollama が動いていて、モデルが入っているか(「ollama pull d1」)を確かめて、もう一度試してください。'],
-  judge_test_refused: ['Nothing was sent: no program of yours, of root or of Ollama\'s own account waits at 127.0.0.1:11434, or another one waits there too. Start Ollama, then try again.', '何も送っていません。127.0.0.1:11434 で、あなたか root か Ollama 専用のアカウントのプログラムが待っていないか、それ以外のプログラムも待っています。Ollama を起動してから、もう一度試してください。'],
+  judge_test_refused: ['Nothing was sent: oboete could not confirm that the program at 127.0.0.1:11434 is yours, root\'s or Ollama\'s own account\'s. Check that Ollama is running, then try again.', '何も送っていません。127.0.0.1:11434 のプログラムが、あなたか root か Ollama 専用のアカウントのものだと確かめられませんでした。Ollama が動いているか確かめてから、もう一度試してください。'],
+  judge_test_refused_none: ['Nothing was sent: nothing waits at 127.0.0.1:11434. Start Ollama, then try again.', '何も送っていません。127.0.0.1:11434 で待っているプログラムがありません。Ollama を起動してから、もう一度試してください。'],
+  judge_test_refused_untrusted: ['Nothing was sent: a program at 127.0.0.1:11434 is not yours, root\'s or Ollama\'s own account\'s, so oboete does not send to it. Stop that program, start Ollama, then try again.', '何も送っていません。127.0.0.1:11434 で待つプログラムに、あなたでも root でも Ollama 専用のアカウントでもないものがあるので、oboete は送りません。そのプログラムを止めて Ollama を起動してから、もう一度試してください。'],
+  judge_test_refused_unread: ['Nothing was sent: oboete could not read which programs wait at 127.0.0.1:11434 (it reads /proc/net/tcp and /proc/net/tcp6). Try again; if it stays so, check that those files can be read.', '何も送っていません。127.0.0.1:11434 で待つプログラムを読み取れませんでした(/proc/net/tcp と /proc/net/tcp6 を読みます)。もう一度試して、続くようならそのファイルが読めるか確かめてください。'],
   judge_test_shape: ['{name} answered in an unexpected form. Try again later.', '{name} の答えが想定と違う形でした。しばらくしてから試してください。'],
   judge_test_budget: ['Today\'s calls or this month\'s limit on paid calls are used up.', '今日の呼び出し回数か、今月の有料の呼び出しの上限に達しています。'],
   judge_test_gate: ['The judge is paused for now. Try again later.', '判定役はいま休止中です。しばらくしてから試してください。'],
@@ -4519,6 +4522,9 @@ function judgeName(id) {
   return t(`judge_to_${id.replaceAll('-', '_')}`);
 }
 
+// #791: d1 on this PC's check's reasons, as the connection test answers them, and their words.
+const JUDGE_REFUSALS = { 'no listener': 'none', 'untrusted listener': 'untrusted', 'listeners unread': 'unread' };
+
 // J7: the list by name (a price beside each cut the names short at the field's width); under it
 // the chosen one's price, or that it stays on this PC, and the saved one. A destination chosen
 // here shows its note and its key at once, and is saved with the page.
@@ -4594,8 +4600,10 @@ function judgeTest(j) {
       const { res, answer } = await memoryWrite('judge/test', { confirmed: true });
       if (!here()) return;
       const outcome = res.ok ? answer.outcome : answer.code || PROVIDER_HTTP_ERRORS[res.status];
-      // d1 on this PC has no key: what to check there instead (#786).
-      const local = outcome === 'error' && j.destination === 'd1-local' ? '_local' : '';
+      // d1 on this PC has no key: what to check there instead (#786), and why the check sent
+      // nothing (#791).
+      const local = outcome === 'error' && j.destination === 'd1-local' ? '_local'
+        : outcome === 'refused' && Object.hasOwn(JUDGE_REFUSALS, answer.reason) ? `_${JUDGE_REFUSALS[answer.reason]}` : '';
       const key = Object.hasOwn(TEXT, `judge_test_${outcome}`) ? `judge_test_${outcome}${local}` : 'judge_test_failed';
       // The call is counted: the judge's numbers read again, with what is being edited kept. A
       // save or a key saved meanwhile has the page now, its own answer included: this test says

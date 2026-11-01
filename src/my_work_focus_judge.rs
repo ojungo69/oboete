@@ -283,7 +283,7 @@ impl Question<'_> {
         })?;
         let answers = match asked {
             Asked::Answered(answers) => answers,
-            Asked::Skipped(why) => return Ok(Answer::Skipped(why)),
+            other => return Ok(Answer::Skipped(other.unanswered())),
         };
         let choice = answers["area"]["choice"]
             .as_str()
