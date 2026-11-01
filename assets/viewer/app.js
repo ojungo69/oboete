@@ -1081,6 +1081,9 @@ const TEXT = {
   live: ['Live', '更新中'],
   live_off: ['Viewer unreachable', 'ビューアーに接続できません'],
   live_hint: ['Checks for new memory every few seconds', '数秒ごとに新しい記憶を確認します'],
+  queue_waiting: ['{n} records wait to be curated into memory', '{n} 件の記録が要約を待っています'],
+  queue_held: ['{n} records wait: curation is paused until a provider answers or a limit resets (see Settings)',
+    '{n} 件の記録が待っています: 要約役が応答するか上限が戻るまで要約は止まっています (設定を参照)'],
   unreachable: ['The viewer is not answering. Start `oboete view` again and open the address it prints.', 'ビューアーから応答がありません。`oboete view` を起動し直し、表示されたアドレスを開いてください。'],
   more: ['More', 'もっと見る'],
   entries_loaded: ['{n} entries loaded.', '{n} 件を読み込みました。'],
@@ -2864,6 +2867,7 @@ function applyLanguage() {
   for (const option of $('repo').options) labelRepo(option);
   $('live').textContent = t($('live').classList.contains('off') ? 'live_off' : 'live');
   $('live').title = t('live_hint');
+  drawQueue();
   $('help').title = t('welcome_help');
   $('help').setAttribute('aria-label', t('welcome_help'));
   $('welcome-title').textContent = t('welcome_title');
@@ -9060,6 +9064,20 @@ async function refresh(live, selectedRepo) {
 let version = null;
 let polling = false;
 let pollFailureNotice = null;
+// The poll's count of records waiting to be curated, and whether curation is held (decision 67).
+let queue = {};
+
+// Beside the mark, as claude-mem shows its queue beside its logo: the count while records wait,
+// and the mark turning while they are curated. A held curation keeps its count, still.
+function drawQueue() {
+  const { waiting, held } = queue;
+  const shown = Number.isSafeInteger(waiting) && waiting > 0;
+  $('queue').hidden = !shown;
+  $('queue').textContent = shown ? String(waiting) : '';
+  $('queue').className = shown && held ? 'queue held' : 'queue';
+  $('queue').title = shown ? t(held ? 'queue_held' : 'queue_waiting', { n: waiting }) : '';
+  $('brand-mark').className = shown && !held ? 'mark-wrap busy' : 'mark-wrap';
+}
 
 async function pollMaintenance() {
   if(view==='settings' && form?.maintenance)await refreshMaintenance(form.maintenance);
@@ -9072,7 +9090,9 @@ async function poll() {
   try {
     if ((view === 'my_work' && mw.rows) || view === 'my_rules') myWorkTimes();
     await pollMaintenance();
-    const { v } = await api('version');
+    const { v, waiting, held } = await api('version');
+    queue = { waiting, held };
+    drawQueue();
     $('live').classList.remove('off');
     $('live').textContent = t('live');
     // Either language's, as the page may have switched since (Codex on #373).
@@ -9088,6 +9108,8 @@ async function poll() {
     version = v;
     drawnWithoutBaseline = false;
   } catch (e) {
+    queue = {};
+    drawQueue();
     $('live').classList.add('off');
     $('live').textContent = t('live_off');
     if (e.status || view === 'timeline') pollFailureNotice = showError(e.status ? e : { key: 'unreachable' }, poll);

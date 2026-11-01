@@ -3501,7 +3501,7 @@ fn reaches(curating: bool) -> &'static str {
 
 /// This device's last record the curation phase has read whole: a record its checkpoint is
 /// inside of is curated only up to its offset.
-fn curated_through(raw: &Raw) -> Result<i64> {
+pub(crate) fn curated_through(raw: &Raw) -> Result<i64> {
     raw.curation_checkpoint(raw.device())
         .and_then(whole_through)
 }
