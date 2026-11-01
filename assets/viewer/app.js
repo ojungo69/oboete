@@ -1392,7 +1392,8 @@ const TEXT = {
   judge_test: ['Test the connection', '接続を試す'],
   judge_test_desc: ['Sends one made-up question, with nothing from your records. It counts as one call.', '作った質問を 1 つだけ送ります。記録の中身は送りません。呼び出し 1 回に数えます。'],
   judge_test_ok: ['{name} answered: the connection works.', '{name} が答えました。接続できています。'],
-  judge_test_error: ['{name} did not answer. Check the key (and for d1 on this PC, that Ollama is running), then try again.', '{name} が答えませんでした。キー(この PC の d1 なら Ollama が動いているか)を確かめて、もう一度試してください。'],
+  judge_test_error: ['{name} did not answer. Check the key, then try again.', '{name} が答えませんでした。キーを確かめて、もう一度試してください。'],
+  judge_test_error_local: ['d1 on this PC did not answer. Check that Ollama is running and has the model ("ollama pull d1"), then try again. On Linux, oboete sends only to a program of yours, of root or of Ollama\'s own account at 127.0.0.1:11434.', 'この PC の d1 が答えませんでした。Ollama が動いていて、モデルが入っているか(「ollama pull d1」)を確かめて、もう一度試してください。Linux では、127.0.0.1:11434 で待つプログラムがあなたか root か Ollama 専用のアカウントのものでないと送りません。'],
   judge_test_shape: ['{name} answered in an unexpected form. Try again later.', '{name} の答えが想定と違う形でした。しばらくしてから試してください。'],
   judge_test_budget: ['Today\'s calls or this month\'s limit on paid calls are used up.', '今日の呼び出し回数か、今月の有料の呼び出しの上限に達しています。'],
   judge_test_gate: ['The judge is paused for now. Try again later.', '判定役はいま休止中です。しばらくしてから試してください。'],
@@ -4528,9 +4529,16 @@ function judgeDestination(j, chosen) {
   }));
   pick.value = j.to;
   pick.dataset.field = 'judge.destination';
-  pick.addEventListener('change', () => { j.to = pick.value; drawSettings(); });
-  return el('label', 'field', el('span', null, t('judge_to')), pick,
-    note(chosen.local ? t('judge_price_local') : t('judge_price', { usd: chosen.usd_per_mtok_in })),
+  pick.setAttribute('aria-describedby', 'judge-price');
+  // The page drawn again keeps the focus on the list, so a keyboard goes on from it.
+  pick.addEventListener('change', () => {
+    j.to = pick.value;
+    drawSettings();
+    [...$('panel').querySelectorAll('select')].find((s) => s.dataset.field === 'judge.destination')?.focus();
+  });
+  const price = note(chosen.local ? t('judge_price_local') : t('judge_price', { usd: chosen.usd_per_mtok_in }));
+  price.id = 'judge-price';
+  return el('label', 'field', el('span', null, t('judge_to')), pick, price,
     j.set ? note(t('saved_value', { value: judgeName(j.destination) })) : null);
 }
 
@@ -4585,7 +4593,9 @@ function judgeTest(j) {
       const { res, answer } = await memoryWrite('judge/test', { confirmed: true });
       if (!here()) return;
       const outcome = res.ok ? answer.outcome : answer.code || PROVIDER_HTTP_ERRORS[res.status];
-      const key = Object.hasOwn(TEXT, `judge_test_${outcome}`) ? `judge_test_${outcome}` : 'judge_test_failed';
+      // d1 on this PC has no key: what to check there instead (#786).
+      const local = outcome === 'error' && j.destination === 'd1-local' ? '_local' : '';
+      const key = Object.hasOwn(TEXT, `judge_test_${outcome}`) ? `judge_test_${outcome}${local}` : 'judge_test_failed';
       // The call is counted: the judge's numbers read again, with what is being edited kept. A
       // save or a key saved meanwhile has the page now, its own answer included: this test says
       // nothing more, and a save still running keeps its answer's place.

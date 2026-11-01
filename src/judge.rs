@@ -1083,10 +1083,8 @@ mod tests {
     fn d1_on_this_pc_with_no_listener_sends_nothing() {
         let mut h = home();
         sending_to(&mut h, config::Destination::D1Local);
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = free.local_addr().unwrap().port();
-        drop(free);
-        AT.set(Some(format!("http://127.0.0.1:{port}/v1/systemone")));
+        // Port 0: no socket ever listens there, so no other test's stub can take it meanwhile.
+        AT.set(Some("http://127.0.0.1:0/v1/systemone".to_owned()));
         let asked_ = run(&h, &rules(""), 5.0, asked(&[])).unwrap();
         assert_eq!(asked_, Asked::Skipped("error"));
         assert_eq!(

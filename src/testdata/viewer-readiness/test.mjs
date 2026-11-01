@@ -1260,6 +1260,16 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert(text(pick()).includes('Clef-flash (Cloudflare Workers AI)')&&!text(pick()).includes('USD'),'each by its name');
     const priced=()=>pick().parentElement.querySelectorAll('.note').map(text);
     assert(priced().includes('USD 0.042 for a million input tokens'),'the chosen one\'s price');
+    // Each one's own price as it is chosen; the price describes the list, and the list drawn again
+    // keeps the focus.
+    for(const [id,price] of [['clef','USD 0.24 for a million input tokens'],['d1','USD 0.02 for a million input tokens'],
+      ['clef-flash','USD 0.038 for a million input tokens'],['d1-local','Free, and nothing leaves this PC'],['jev','USD 0.042 for a million input tokens']]){
+      choose(id);
+      assert(priced().includes(price),`${id}'s price`);
+      const describedBy=pick().attrs['aria-describedby'];
+      assert(describedBy&&pick().parentElement.querySelectorAll('.note').some(n=>n.id===describedBy&&text(n)===price),`${id}'s price describes the list`);
+      assert.equal(document.activeElement,pick(),`the list keeps the focus after ${id} is chosen`);
+    }
     // Each destination's note, as its TEXT says where it is sent.
     const noted=id=>text(judged()).includes(w4.TEXT[`judge_note_${id}`][0]);
     assert(noted('jev')&&!field('judge.account_id'),'where Jev is sent, with no account');
@@ -1303,7 +1313,19 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     assert(text(judged()).includes('送り先')&&text(pick()).includes('この PC の d1(Ollama)'),'Japanese list');
     choose('d1-local');
     assert(priced().includes('無料。この PC の外に出ません'),'and its price in Japanese');
+    choose('clef');
+    assert(priced().includes('入力 100 万トークンで 0.24 ドル'),'a price in dollars in Japanese');
     ctx.ui.setLang('en');
+    // #786: a failed test of d1 on this PC says what to check there, and what is asked of the
+    // program at its address.
+    const local={...on,destination:'d1-local',key:'none',key_file:null};
+    f=w4.formOf(settings({judge:local}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+    settingsAnswer=Promise.resolve(json(settings({judge:local})));
+    answers=[json({outcome:'error'})];
+    judged().querySelectorAll('button').find(node=>node.dataset.field==='judge.test').click();await settle();await settle();
+    settingsAnswer=null;
+    const said=document.getElementById('status').textContent;
+    assert(said.includes('ollama pull d1')&&said.includes('Ollama\'s own account')&&!said.includes('Check the key'),'what to check for d1 on this PC');
     for(const key of ['missing_key','bad_account'])assert(w4.TEXT[key][0]&&w4.TEXT[key][1]&&w4.TEXT[key][0]!==w4.TEXT[key][1],`${key} in words`);
     console.log('PASS: J7: the list and its prices, a destination\'s key, d1 on this PC with none');
   }
