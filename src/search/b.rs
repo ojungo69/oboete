@@ -3196,7 +3196,18 @@ fn imported_side(named: bool, older: bool) -> String {
             documents("i.repo = ?2", &format!("AND {window}")),
             documents("i.repo = ?3 AND ?3 <> ?2", &format!("AND {window}"))
         ),
-        false => documents("1", ""),
+        // Every repository's: the page's rows chosen by their keys alone, read in time order from
+        // the consumer's `imported_newest` to the page's end, then the text of those: choosing
+        // among the texts read all of them (9.5 s of a cold first timeline on this PC's store,
+        // 2026-11-01).
+        false => documents(
+            &format!(
+                "i.rowid IN (SELECT i.rowid FROM imported i WHERE {side}
+                   AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid)
+                   ORDER BY {order} LIMIT ?5 + ?6)"
+            ),
+            "",
+        ),
     }
 }
 
@@ -4640,6 +4651,43 @@ mod tests {
             }
         }
         assert_eq!(found(&k), covered);
+    }
+
+    /// Every repository's timeline reads the text of its page's imported documents alone, chosen
+    /// by their keys from the consumer's index in time order, `imported_newest`: choosing among
+    /// the texts read every document's (9.5 s of a cold first timeline on this PC's store,
+    /// 2026-11-01). It shows the newest first, each document once.
+    #[test]
+    fn every_repositorys_timeline_reads_the_texts_of_its_page_alone() {
+        let mut s = Store::new();
+        let mut uids = Vec::new();
+        for n in 0..12_i64 {
+            let project = if n % 3 == 0 { "other" } else { "r" };
+            let body = format!("note {n}");
+            uids.push(s.imported(&format!("d{n:02}"), project, 1_000 * (n + 1), "", &body));
+        }
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        for older in [true, false] {
+            let sql = format!("EXPLAIN QUERY PLAN {}", imported_side(false, older));
+            let mut st = k.prepare(&sql).unwrap();
+            let nulls = vec![Value::Null; st.parameter_count()];
+            let plan: Vec<String> = st
+                .query_map(params_from_iter(nulls), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let by_key = |p: &&String| p.starts_with("SEARCH i USING INTEGER PRIMARY KEY");
+            assert!(plan.iter().any(|p| by_key(&p)), "{plan:?}");
+            // The newest first from the consumer's index in time order, stopping at the page's end.
+            let by_time = |p: &&String| p.contains("COVERING INDEX imported_newest (ts");
+            assert!(plan.iter().any(|p| by_time(&p)), "{plan:?}");
+            assert!(!plan.iter().any(|p| p == "SCAN i"), "{plan:?}");
+        }
+        let keys = |items: Vec<Item>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
+        let newest: Vec<String> = uids.iter().rev().take(5).cloned().collect();
+        assert_eq!(keys(timeline(home, None, None, None, 5).unwrap()), newest);
     }
 
     /// N5 (docs/memory-lookup.md): a timeline reads a repository's imported documents by the

@@ -7901,9 +7901,11 @@ fn remove_with_sidecars(db: &Path) -> Result<()> {
 
 /// Slice 3c: the forgotten records, `r` each one's row, `o` its identity and `d` the denial
 /// naming it.
+// CROSS JOIN keeps this order: SQLite with no statistics put `records` first and read every record
+// to find the few a forget denied (about 3 s a My Work page on a 4 GB store).
 const FORGOTTEN_RECORDS: &str = "denied_records d
-    JOIN import_origins o ON o.origin = d.origin
-    JOIN records r ON r.device = o.device AND r.seq = o.seq";
+    CROSS JOIN import_origins o ON o.origin = d.origin
+    CROSS JOIN records r ON r.device = o.device AND r.seq = o.seq";
 
 /// Slice 3d: what forget took (`Raw::forgotten_records`): each forgotten record by device, in seq
 /// order, with its denial's job and when its forget tombstone was written (none for a preview's
@@ -9188,6 +9190,29 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What forget took is read from its denials outward, never by a scan of every record: with
+    /// no statistics the planner put `records` first, and each My Work page read the whole of
+    /// raw.db (about 3 s on a 4 GB store, 2026-11-01).
+    #[test]
+    fn forgotten_records_are_read_from_the_denials() {
+        let home = tempfile::tempdir().unwrap();
+        let raw = open(home.path()).unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT o.device, o.seq FROM {FORGOTTEN_RECORDS}
+             WHERE r.type = 'event' ORDER BY o.device, o.seq"
+        );
+        let plan: Vec<String> = (raw.conn.prepare(&sql).unwrap())
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(plan[0].starts_with("SCAN d "), "{plan:?}");
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN r")),
+            "{plan:?}"
+        );
+    }
 
     /// Parity row 31: the newest hook record's seq and time as the viewer reads them, a replayed
     /// record's never; none before a store exists.
