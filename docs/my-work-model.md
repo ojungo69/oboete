@@ -2151,8 +2151,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   in use. Each decision op's `entry` is that name, and its evidence names the destination
   ("Clef-flash: picked over …"). The settings page shows the calls of the destination in use and the
   judge's spend this month wherever it was sent.
-- **The settings page**: the list, each with its price or that it stays on this PC; the chosen one's
-  note (where it is sent, what it needs) and its key: Typesafe's, Cloudflare's token with the account
+- **The settings page**: the list by name, and under it the chosen one's price or that it stays on
+  this PC (#788: a price beside each name cut the names short); the chosen one's note (where it is
+  sent, what it needs) and its key: Typesafe's, Cloudflare's token with the account
   ID, Liquid's, none for d1 on this PC. A key saved (`POST /api/judge/key` with `destination` and,
   for Cloudflare, `account_id`) goes into its service's own field, chooses that destination and turns
   the judge on. A key's state on the page is its file's; the account id shows in its own field. The
