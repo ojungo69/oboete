@@ -3632,3 +3632,46 @@ assert.deepEqual(await page('',K,401,store=>store.set('oboete-token',N)),[401,[K
   'a refused kept token leaves a newer one another tab kept meanwhile');
 console.log('PASS: decision 66: the kept token opens the page from its address alone; refused, forgotten; an address token kept once taken');
 }
+// Decision 67 (row X27): the records waiting to be curated, beside the mark as claude-mem shows
+// its queue; the mark turns while they are curated and stands still while curation is held; no
+// count while curation is off, none are waiting or the viewer does not answer.
+{
+const run=code=>vm.runInContext(code,ctx);
+const reply=value=>({ok:true,status:200,json:async()=>value});
+const queue=document.getElementById('queue'),mark=document.getElementById('brand-mark');
+let answer={};
+ctx.fetch=url=>Promise.resolve(reply(url.startsWith('/api/version')?{v:'q1',...answer}:{current:'',repos:[]}));
+document.visibilityState='visible';
+const pollWith=async a=>{answer=a;run('polling=false');await run('poll()');};
+await pollWith({waiting:3,held:false});
+assert.equal(queue.hidden,false,'records waiting show their count');
+assert.equal(queue.textContent,'3');
+assert.equal(queue.title,'3 records wait to be curated into memory');
+assert.equal(queue.attrs['aria-label'],queue.title,'a screen reader is told the count');
+assert.equal(queue.className,'queue');
+assert.equal(mark.className,'mark-wrap busy','the mark turns while they are curated');
+await pollWith({waiting:4,held:true});
+assert.equal(queue.textContent,'4');
+assert.equal(queue.className,'queue held','a held curation shows its count apart');
+assert.equal(mark.className,'mark-wrap','and the mark stands still');
+assert.equal(queue.title,'4 records wait: curation is paused until a provider answers, a limit resets or you act on it in Settings');
+assert.equal(queue.attrs['aria-label'],queue.title,'and why it waits');
+await pollWith({waiting:0,held:false});
+assert(queue.hidden,'none waiting, no count');
+assert.equal(mark.className,'mark-wrap');
+await pollWith({});
+assert(queue.hidden,'curation off, no count');
+await pollWith({waiting:5,held:false});
+document.documentElement=new Node('html');
+run("lang='ja';applyLanguage()");
+assert.equal(queue.title,'5 件の記録が要約を待っています','the hint follows the language');
+run("lang='en';applyLanguage()");
+delete document.documentElement;
+ctx.fetch=()=>Promise.reject(new Error('down'));
+run('polling=false');
+await run('poll()');
+assert(queue.hidden,'a viewer that does not answer shows no count');
+assert.equal(mark.className,'mark-wrap');
+delete document.visibilityState;
+console.log('PASS: decision 67: the records waiting to be curated beside the mark, turning, held, off and unreachable');
+}

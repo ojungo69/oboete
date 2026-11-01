@@ -2139,7 +2139,7 @@ impl Viewer {
                 let (current, branch) = self.checkout()?.unwrap_or_default();
                 json!({ "current": current, "branch": branch, "repos": repos(&self.home)? })
             }
-            "version" => json!({ "v": version(&self.home)? }),
+            "version" => polled(&self.home)?,
             "stats" => stats(&self.home)?,
             _ => return Ok(Response::text(404, "not found")),
         };
@@ -2845,6 +2845,58 @@ pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// What the page asks every few seconds: the version of what it shows (`version`) and, while
+/// curation is on, how many of this machine's records wait to be curated into cards and whether
+/// curation waits for a provider or the owner (decision 67, row X27: claude-mem's queue beside its
+/// logo). A count that does not read leaves them out: it never stops the page's poll.
+fn polled(home: &Path) -> Result<Value> {
+    let mut answer = json!({ "v": version(home)? });
+    if let Ok(Some((waiting, held))) = waiting(home) {
+        answer["waiting"] = waiting.into();
+        answer["held"] = held.into();
+    }
+    Ok(answer)
+}
+
+/// How many of this device's live records past the curation checkpoint wait to be curated, as
+/// session start's backlog counts them (`consumer::manifest`), and whether the window that starts
+/// at the checkpoint is held (every provider failed it, or a budget or the owner holds it). None
+/// while curation is off.
+fn waiting(home: &Path) -> Result<Option<(i64, bool)>> {
+    if !crate::config::load(home)?.summary.curate {
+        return Ok(None);
+    }
+    let Some((raw, k)) = search::b::stores(home)? else {
+        return Ok(None);
+    };
+    let device = raw.device();
+    // As session start's backlog: no count while a tombstone the worker has not applied may
+    // change the facts, so a forgotten record is never counted (cubic on #796).
+    let manifest = crate::knowledge::checkpoint::get(&k, "manifest", device)?;
+    if !crate::consumer::manifest::exists(&k, "table", "manifest_facts")?
+        || !raw.tombstones_after(device, manifest)?.is_empty()
+    {
+        return Ok(None);
+    }
+    let curated = crate::curate::curated_through(&raw)?;
+    let (checkpoint, part) = raw.curation_checkpoint(device)?;
+    let waiting = k.query_row(
+        "SELECT COUNT(*) FROM manifest_facts WHERE device = ?1 AND fact = 'event' AND seq > ?2",
+        rusqlite::params![device, curated],
+        |r| r.get(0),
+    )?;
+    let next = part.map_or((checkpoint + 1, 0), |o| (checkpoint, o));
+    let held = match crate::providers_db::read_only(home)? {
+        Some(db) => crate::providers_db::pending_of(&db, device)?.is_some_and(|p| {
+            // As `curate::stopped` reads it: the owner's hold stands until the owner ends it.
+            (p.from_seq, p.from_offset.unwrap_or(0)) == next
+                && (p.hold == "owner" || p.next_attempt_at > crate::db::now_ms())
+        }),
+        None => false,
+    };
+    Ok(Some((waiting, held)))
+}
+
 /// Changes when what the page shows changes: an op appended (a claim, a correction, an exclusion,
 /// an import), an op the worker applied, a session started, a prompt typed, or a record hidden (a
 /// tombstone, which reads hide before the worker applies it). Live prompts move it at capture
@@ -3020,6 +3072,84 @@ mod tests {
             records.contains(&("github.com/o/b".into(), 1)),
             "{records:?}"
         );
+    }
+
+    /// Decision 67, row X27: the page's poll says how many of this machine's records wait to be
+    /// curated into cards, and whether curation waits for a provider or the owner; nothing while
+    /// curation is off.
+    #[test]
+    fn the_poll_says_how_many_records_wait_to_be_curated() {
+        let mut s = Store::new();
+        let home = s.home.path().to_owned();
+        for (n, text) in ["Fix the parser.", "Then the tests.", "And the docs."]
+            .iter()
+            .enumerate()
+        {
+            s.said("s1", "github.com/o/r", 1_000 * (n as i64 + 1), text);
+        }
+        s.run();
+        let config = home.join("config.toml");
+        std::fs::write(&config, "providers = []\n").unwrap();
+        assert_eq!(
+            polled(&home).unwrap()["waiting"],
+            Value::Null,
+            "curation off"
+        );
+        std::fs::write(&config, "providers = []\n[summary]\ncurate = true\n").unwrap();
+        let answer = polled(&home).unwrap();
+        assert_eq!(
+            (answer["waiting"].clone(), answer["held"].clone()),
+            (json!(3), json!(false))
+        );
+        assert!(answer["v"].is_string());
+        // A forget the worker has not applied yet: no count until it has.
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq: 2,
+            })
+            .unwrap();
+        assert_eq!(polled(&home).unwrap()["waiting"], Value::Null);
+        s.run();
+        assert_eq!(polled(&home).unwrap()["waiting"], json!(2));
+        // Every provider failed the window that starts at the checkpoint: it waits, held.
+        let db = crate::providers_db::open(&home).unwrap();
+        let pending = crate::providers_db::Pending {
+            device: s.raw.device().to_owned(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 3,
+            to_offset: None,
+            reason: "every provider failed".into(),
+            hold: "retry".into(),
+            attempts: 3,
+            next_attempt_at: crate::db::now_ms() + 3_600_000,
+            since: crate::db::now_ms(),
+            prompt: String::new(),
+        };
+        crate::providers_db::set_pending(&db, &pending).unwrap();
+        assert_eq!(polled(&home).unwrap()["held"], json!(true));
+        // Due now, the next pass tries it again: it is not held.
+        let due = crate::providers_db::Pending {
+            next_attempt_at: crate::db::now_ms() - 1,
+            ..pending.clone()
+        };
+        crate::providers_db::set_pending(&db, &due).unwrap();
+        assert_eq!(polled(&home).unwrap()["held"], json!(false));
+        // The owner's hold stands until the owner ends it, whatever its time.
+        let owner = crate::providers_db::Pending {
+            hold: "owner".into(),
+            ..due.clone()
+        };
+        crate::providers_db::set_pending(&db, &owner).unwrap();
+        assert_eq!(polled(&home).unwrap()["held"], json!(true));
+        // A window that does not start where the checkpoint ends waits for nothing.
+        let other = crate::providers_db::Pending {
+            from_seq: 2,
+            ..owner
+        };
+        crate::providers_db::set_pending(&db, &other).unwrap();
+        assert_eq!(polled(&home).unwrap()["held"], json!(false));
     }
 
     #[cfg(target_os = "linux")]
