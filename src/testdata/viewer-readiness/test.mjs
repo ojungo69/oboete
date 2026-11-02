@@ -2879,6 +2879,33 @@ console.log('PASS: the caps\' No cap switches');
       delete document.visibilityState;
       assert(text(all('.simple-provider')[0].querySelector('.simple-state')).startsWith('Resting until'),'its answer is drawn');
     }
+    // A poll's rests read that does not answer, then Settings opened again: the poll reads the rests
+    // again (Codex's review of 69b-3c-1c).
+    {
+      let rests=0;const [hung,giveHung]=later();const [next]=later();
+      ctx.fetch=url=>{
+        if(url.startsWith('/api/version?'))return Promise.resolve(json({v:vm.runInContext('version',ctx),waiting:0,held:0}));
+        if(url.startsWith('/api/rests?')){rests++;return rests===1?hung:rests===2?next:Promise.resolve(json({stopped:[],resting:[]}));}
+        if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+        if(url.startsWith('/api/settings?'))return Promise.resolve(json(ai(['alpha'],{stopped:[],resting:[]})));
+        if(url.startsWith('/api/hidden?'))return Promise.resolve(json([]));
+        return new Promise(()=>{});
+      };
+      f=draw(ai(['alpha'],{stopped:[],resting:[]}));
+      vm.runInContext('restsPolled=null',ctx);
+      document.visibilityState='visible';
+      void vm.runInContext('poll()',ctx);await settled();
+      assert.equal(rests,1,'the poll\'s read is on its way, and does not answer');
+      (await ctx.ui.showSettings())();await settled();
+      const before=rests;
+      void vm.runInContext('poll()',ctx);await settled();
+      assert.equal(rests,before+1,'Settings opened again, the poll reads the rests again');
+      // The old read answering at last does not let the poll start another beside the new one.
+      giveHung(json({stopped:[],resting:[]}));await settled();
+      void vm.runInContext('poll()',ctx);await settled();
+      delete document.visibilityState;
+      assert.equal(rests,before+1,'the old read ended, the new one is still the only one on its way');
+    }
     document.activeElement=null;
   }
   ctx.fetch=w6fetch;

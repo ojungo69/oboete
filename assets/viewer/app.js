@@ -3343,8 +3343,10 @@ function promptSide(side) {
 function loadedForm(s) {
   lineDrafts.clear();
   formLoads += 1;
-  // A rests read started before is older than this form's lists (Codex's review of 69b-3c-1b).
+  // A rests read started before is older than this form's lists (Codex's review of 69b-3c-1b), and
+  // the poll does not wait for one of its own (Codex's review of 69b-3c-1c).
   restsAsked += 1;
+  restsPolled = null;
   return formOf(s);
 }
 // How many times the settings were read, or a form was made from a recovery's answer: a key waiting
@@ -9872,7 +9874,10 @@ async function pollMaintenance() {
   // Started, not waited for, and one at a time: a read that does not answer stops no other read of
   // the poll (#817), and one slower than the poll is not dropped for the next (Codex's review of
   // 69b-3c-1c).
-  if (view === 'settings' && form && !restsPolled) restsPolled = refreshRests().finally(() => { restsPolled = null; });
+  if (view === 'settings' && form && !restsPolled) {
+    const read = refreshRests().finally(() => { if (restsPolled === read) restsPolled = null; });
+    restsPolled = read;
+  }
   const d = embeddingDraft;
   if (view === 'settings' && form?.embedding && (d.busy || d.watch || d.status?.active)) await refreshEmbedding();
 }
