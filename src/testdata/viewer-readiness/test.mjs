@@ -1660,6 +1660,36 @@ console.log('PASS: the caps\' No cap switches');
       assert(clean(),`after ${label}, the general save has nothing to send`);
     }
   }
+  // 69b-2b: Settings is drawn before the privacy state is read, which on a large store takes most
+  // of a second; until it is, and while it is read again after a save, the privacy blocks say it is
+  // being read, not that it cannot be.
+  {
+    const [reading,unreadable]=['privacy_reading','privacy_unavailable'].map(key=>ctx.tier.text(key,'en'));
+    ctx.ui.setLang('en');
+    let [privacyAnswer,givePrivacy]=later();
+    // The saves are answered from `answers`, as in the rest of this block.
+    const mock=w6fetch;
+    ctx.fetch=(url,options)=>{
+      if(!options?.method&&url.startsWith('/api/settings?'))return Promise.resolve(json(ai(['alpha'])));
+      if(!options?.method&&url.startsWith('/api/hidden'))return Promise.resolve(json({items:[]}));
+      if(!options?.method&&url.startsWith('/api/privacy?'))return privacyAnswer;
+      return mock(url,options);
+    };
+    ctx.ui.setView('settings');
+    const render=await ctx.ui.showSettings();render();posted.length=0;
+    const group=()=>panel.querySelector('.group-s-privacy');
+    assert(text(group()).includes(reading)&&!text(group()).includes(unreadable),'drawn before the privacy read, which is said as being read');
+    givePrivacy(json(privacy));await settled();
+    assert(!text(group()).includes(reading)&&text(more('privacy').querySelector('.never-more')).includes('github.com/acme/live'),'then drawn with it');
+    assert(text(group().querySelector('.group-desc')).includes('1 place'),'its heading counts the places never recorded');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(ai(['alpha'],{version:'v2',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    assert.equal(posted.length,1);
+    assert(text(group()).includes(reading)&&!text(group()).includes(unreadable),'read again after a save, said as being read meanwhile');
+    givePrivacy(json({},503));await settled();
+    assert(text(group()).includes(unreadable)&&!text(group()).includes(reading),'a read that fails says so');
+  }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;
   ctx.ui.setForm(null);
