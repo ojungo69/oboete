@@ -224,7 +224,7 @@ The viewer is served by `src/view.rs` from three files compiled into the binary:
 
 Decision 65 (2026-10-31): the viewer's arrangement follows claude-mem's viewer and its colours are Notion's: a header across the window with the views as a segmented control, one centred column with a line under each list view's heading saying what it holds, every record a bordered card with its kind as a tag and its agent as a pill, settings in groups that fold between rules, a session's summary edged in gold and a prompt in purple; white and near-black grounds, warm greys and one blue for actions and focus, each made darker or lighter where WCAG AA needs it; no cream ground, no orange accent, no gradient and no tinted card. The font stack stays the system's. This file replaces `docs/viewer-design.md`. As built, "no gradient" means no gradient used as colour: a few shapes are painted with flat single-stop gradients because the page may load no image (see Shapes).
 
-The page is a tool kept open beside an agent's work, read often and changed rarely. It is dense but not cramped: one 48rem column (82rem on My Work), 15px text at 1.65, cards 16-20px apart. The interaction that defines it is inside the card: facts and narrative open in place, with no navigation. Settings save each change at once (decision 69): a switch or a choice when it changes, a number or a text when it is left or on Enter. Adding, editing or removing an AI entry, a key and the page's port have buttons of their own, and no monthly cap, masking off and a saved masking rule removed wait for a confirmation in the status line.
+The page is a tool kept open beside an agent's work, read often and changed rarely. It is dense but not cramped: one 48rem column (82rem on My Work), 15px text at 1.65, cards 16-20px apart. The interaction that defines it is inside the card: facts and narrative open in place, with no navigation. Settings save each change at once (decision 69): a switch or a choice when it changes, a number or a text when it is left or on Enter. Adding, editing or removing an AI entry, a key and the page's port have buttons of their own; no monthly cap and masking off wait for a confirmation beside their switches, and the removal of a saved masking rule waits for one in the status line.
 
 Depth is a 1px border, not a shadow and not a fill. In light mode the card and the page are both white, so the edge alone separates them. Shadows exist only on what floats over the page.
 
@@ -353,7 +353,7 @@ Shapes the page draws without images are made from borders and flat single-stop 
 - **Behaviour per width:** see Layout.
 
 ### Segmented control
-Used three times: the header's views (`#tabs`, buttons `.tab`, the open one `.active`), Settings' simple and detailed views (`.settings-view-switch`, `aria-pressed`), My Work's cards, list and agents (`.my-work-switch`, `aria-pressed`).
+Used twice: the header's views (`#tabs`, buttons `.tab`, the open one `.active`) and My Work's cards, list and agents (`.my-work-switch`, `aria-pressed`). Settings has no view switch: it is one page (decision 69).
 - **Track:** Quiet Surface, 1px Edge, 8px radius, 3px padding, 2px gap; the header's is 38px high.
 - **Segment:** 30px, 6px radius, no border, muted 13px weight 500; hover takes the Hover fill and ink.
 - **Pressed:** raised: Surface fill, ink, the raised-segment shadow with a 1px Line ring.
@@ -387,13 +387,13 @@ The heading (26px), a search's query words in the accent, then the lede in muted
 - **Detail:** a claim or document opens under what opened it, on Quiet Surface, 6px radius, 14px 16px.
 
 ### Settings
-- **Language** row first, then groups.
-- **Simple page (decision 69):** groups of its own: What agents are given, AI for summaries, My Work, Search by meaning, Privacy and Agents; the first two open first. The detailed page's start, computer and maintenance groups are not on it. A closed group's description line says what it holds now ("2 in use, tried in this order · $0.39 used this month"). Each AI is a line: its place in muted mono numerals, its name (14.5px 600), its model in muted 13px, its state at the right; open, its controls sit 22px in. The AI turned off and the places never recorded are smaller disclosures closed at first, labelled with their count. Spend is shown in cents.
+- **Language** row first, then the lead, the start guide, the warnings, and the groups.
+- **One page (decision 69, 69b-2):** six groups (What agents are given; AI for summaries; My Work; Search by meaning; Privacy; Agents), the first two open first; then This computer and Maintenance, closed (This computer open on a new home, and while its resident choice is unsaved). Each of the six ends on a smaller disclosure, "More settings", holding the detailed controls that belong to it, its sections parted by Line rules with 16px around them. A closed group's description line says what it holds now ("2 in use, tried in this order · $0.39 used this month"). Each AI is a line: its place in muted mono numerals, its name (14.5px 600), its model in muted 13px, its state at the right; open, its controls sit 22px in. The AI turned off and the places never recorded are smaller disclosures closed at first, labelled with their count. Spend is shown in cents.
 - **Group:** a `details` between 1px Line rules, no box. Its summary is a grid: title (15px 600) and description (13px muted) at the left, a chevron (7px, 1.5px muted borders) at the right that turns from down to up when open (150ms). Sections inside a group are separated by Line rules with 20px above.
 - **Start guide:** the one group shown as a callout: Quiet Surface, no rules, 8px radius, 0 20px padding.
 - **Smaller disclosures:** inline, 14px 500, a 6px chevron before the words.
-- **No Save bar** (decision 69, 2026-11-02): each change saves at once; the status line says so, and asks there before a change that weakens a protection.
-- **Warnings** after the form: Gold Fill callout, 8px radius.
+- **No Save bar** (decision 69, 2026-11-02): each change saves at once, and the status line says so. No monthly cap and masking off ask for their confirmation beside their switches; the removal of a saved masking rule asks for it in the status line.
+- **Warnings** under the start guide: Gold Fill callout, 8px radius.
 
 ### Fields
 36px high, 7px 10px, 6px radius, the ground as fill, a Strong Line edge. Hover: the edge in Muted. Focus: the edge in Focus Blue doubled by a 1px ring of the same blue. Invalid (`.invalid`): the edge in red, and a red ring when focused. Disabled: Quiet Surface fill, muted text. Placeholders in muted at full opacity. Checkboxes and radios are 16px with the accent as their colour. Labels sit above in 13px 500 with a 6px gap.

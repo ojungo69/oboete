@@ -16,12 +16,11 @@ class Node {
   setAttribute(name,value){this.attrs[name]=value;}
   removeAttribute(name){delete this.attrs[name];}
   querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+  // In document order, as a browser gives them, a list of selectors too (Codex's review of 69b-2a).
   querySelectorAll(selector){
-    if(selector.includes(','))return selector.split(',').flatMap(part=>this.querySelectorAll(part.trim()));
-    const tag=selector.toUpperCase();
-    return this.children.filter(node=>node&&typeof node==='object').flatMap(node=>[
-      ...(node.tagName===tag||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1))?[node]:[]),
-      ...node.querySelectorAll(selector)]);
+    const parts=selector.split(',').map(part=>part.trim());
+    const matches=node=>parts.some(part=>node.tagName===part.toUpperCase()||part.startsWith('.')&&node.className.split(' ').includes(part.slice(1)));
+    return this.children.filter(node=>node&&typeof node==='object').flatMap(node=>[...(matches(node)?[node]:[]),...node.querySelectorAll(selector)]);
   }
   contains(node){return this===node||this.children.some(child=>child&&typeof child==='object'&&child.contains(node));}
   get childNodes(){return this.children;}
@@ -56,8 +55,7 @@ const initialView=vm.runInContext('view',ctx);
 let validSettings=null;
 // The simple page uses the saved chain, including unavailable and disabled entries.
 {
-const simple=vm.runInContext('({status:simpleProviderStatus,models:simpleProviderModels,listed:catalogHasProvider,chain:simpleSavedChain,catalog:AI_CATALOG,mode:settingsMode})',ctx);
-assert.equal(simple.mode,'simple','Settings starts with the simple view');
+const simple=vm.runInContext('({status:simpleProviderStatus,models:simpleProviderModels,listed:catalogHasProvider,chain:simpleSavedChain,catalog:AI_CATALOG})',ctx);
 const row={name:'groq',key:'ok',on:true,effective_model:'openai/gpt-oss-20b',model_rule:'any'};
 assert.equal(simple.status(row,[]),'ready');
 assert.equal(simple.status({...row,key:'missing',on:false},['groq']),'missing','a missing key is explained before other states');
@@ -85,16 +83,7 @@ assert(simple.listed({name:'groq'},[{name:'groq',on:false}]),'an off entry is al
 assert(!simple.listed({name:'groq'},[{name:'groq-20b'}]),'similar names are separate entries');
 assert(!simple.listed({name:''},[{name:''}]),'the custom server is never a duplicate');
 assert.equal(new Set(simple.catalog.filter(entry=>entry.name).map(entry=>entry.name)).size,simple.catalog.length-1);
-const remembered=[];
-ctx.localStorage.setItem=(key,value)=>remembered.push([key,value]);
-const switcher=vm.runInContext('settingsViewSwitch()',ctx);
-switcher.querySelectorAll('button')[1].click();
-assert.deepEqual(remembered.at(-1),['oboete-settings-view','detailed'],'the view choice uses remember');
-switcher.querySelectorAll('button')[0].click();
-assert.deepEqual(remembered.at(-1),['oboete-settings-view','simple']);
 }
-// Existing detailed-page checks continue to exercise the whole original page.
-vm.runInContext("settingsMode='detailed';",ctx);
 const text=node=>typeof node==='string'?node:(node?.children||[]).map(text).join(' ');
 const response=value=>({ok:true,status:200,json:async()=>value});
 const rows=(state)=>['claude','codex','grok','agy','opencode','pi','cursor'].map((agent,index)=>({
@@ -737,8 +726,9 @@ console.log('PASS: the retention period');
 // monthly cap, masking off and a saved masking rule removed wait for their confirmation; a new
 // masking rule waits until it has its id and pattern, and survives the saves meanwhile.
 {
-  const formEl=()=>panel.querySelector('form');
-  const fire=(name,ev)=>{for(const cb of formEl().listeners[name]||[])cb(ev);};
+  // The event reaches the control's own form, as it bubbles there: a control outside the general
+  // forms reaches none (decision 69, 69b-2).
+  const fire=(name,ev)=>{for(const cb of ev.target?.closest?.('form')?.listeners[name]||[])cb(ev);};
   const sent=()=>posted.map(p=>JSON.parse(p.body));
   const any=name=>panel.querySelectorAll('input, textarea').find(node=>node.dataset.field===name);
   const action=name=>[...panel.querySelectorAll('button'),...document.getElementById('status').querySelectorAll('button')].filter(n=>n.dataset.action===name).at(-1);
@@ -788,22 +778,24 @@ console.log('PASS: the retention period');
   answers=[json({code:'port_unavailable',field:'view.port'},409)];
   action('port.move').click();await settle();
   assert.equal(sent()[0].view.port,17400,'its button saves it');
-  // No monthly cap: asked first, saved once confirmed.
+  // No monthly cap and masking off are the Privacy and AI groups' own switches, each with its
+  // confirmation (decision 69, 69b-2). A draft of either that a general save would carry (the
+  // guide's Apply can bring one) is asked first, saved once confirmed.
+  const nudge=()=>fire('change',{target:field('worker.resident')});
   f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
-  const noCap=panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
-  tick(noCap,true);fire('change',{target:noCap});await settle();
+  f.paidNoCap=true;nudge();await settle();
   assert.equal(posted.length,0,'no cap is not saved at once');
   assert(document.getElementById('status').textContent.includes('does not stop paid calls'),'its warning asks first');
   answers=[json(settings('resident',{version:'v2',paid_usd_per_month:null}))];
   action('held.confirm').focus();action('held.confirm').click();await settle();
   assert.equal(posted.length,1);assert.equal(sent()[0].paid_usd_per_month,null,'confirmed, it is saved');
-  assert.equal(document.activeElement?.dataset.field,'paid_usd_per_month.no_cap','the focus goes back to the switch confirmed');
+  assert.equal(document.activeElement?.dataset.field,'worker.resident','the focus goes back to the control changed');
   // Masking off: asked first; Cancel goes back to what is saved.
   f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
-  tick(field('redaction.enabled'),false);fire('change',{target:field('redaction.enabled')});await settle();
+  f.redaction.enabled=false;nudge();await settle();
   assert.equal(posted.length,0,'masking off is not saved at once');
   action('held.cancel').click();
-  assert.equal(field('redaction.enabled').checked,true,'cancelled, masking stays on');
+  assert.equal(ctx.ui.getForm().redaction.enabled,true,'cancelled, the form goes back to what is saved');
   // A new masking rule waits until it has its id and pattern, and survives a save meanwhile.
   const rule={id:'acme-token',regex:'acme_[a-z0-9]{8}',keywords:[],entropy:null,secret_group:null};
   f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
@@ -837,20 +829,20 @@ console.log('PASS: the retention period');
   // its answer, with that answer's version (Codex, cubic and CodeRabbit).
   f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
   let first;answers=[new Promise(resolve=>{first=resolve;})];
+  const noteOff={...settings('resident').inject,session_start_note:false};
   tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
-  tick(field('summary.curate'),true);fire('change',{target:field('summary.curate')});await settle();
+  tick(field('inject.session_start_note'),false);fire('change',{target:field('inject.session_start_note')});await settle();
   assert.equal(posted.length,1,'a change made while a save is on its way waits for its answer');
-  answers=[json(settings('resident',{version:'v3',worker:{resident:false},summary:{...settings('resident').summary,curate:true}}))];
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},inject:noteOff}))];
   first(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
   assert.equal(posted.length,2,'and is sent after it');
   assert.equal(sent()[1].version,'v2','with the version that answer gave');
-  assert.equal(sent()[1].summary.curate,true);assert.equal(sent()[1].worker.resident,false);
+  assert.equal(sent()[1].inject.session_start_note,false);assert.equal(sent()[1].worker.resident,false);
   // A confirm left in the status line waits behind a save on its way as well (round 1's review).
   f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
-  const noCapAgain=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
-  tick(noCapAgain(),true);fire('change',{target:noCapAgain()});await settle();
+  f.paidNoCap=true;nudge();await settle();
   const staleConfirm=action('held.confirm');
-  tick(noCapAgain(),false);fire('change',{target:noCapAgain()});await settle();
+  f.paidNoCap=false;nudge();await settle();
   let held;answers=[new Promise(resolve=>{held=resolve;})];
   tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
   assert.equal(posted.length,1);
@@ -867,10 +859,8 @@ console.log('PASS: the retention period');
   assert.equal(field('view.port').value,'17400','and the port typed stays');
   // The port's button asks first for what waits for a confirmation, as any save does (Codex, cubic
   // and CodeRabbit), and every change waiting is said and confirmed together (CodeRabbit).
-  const capOff=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
   f=w6.formOf(settings('resident',{paid_usd_per_month:5,redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
-  tick(capOff(),true);fire('change',{target:capOff()});await settle();
-  tick(field('redaction.enabled'),false);fire('change',{target:field('redaction.enabled')});await settle();
+  f.paidNoCap=true;f.redaction.enabled=false;
   typeIn(field('view.port'),'17400');
   action('port.move').click();await settle();
   assert.equal(posted.length,0,'the port button does not pass a change waiting for its confirmation');
@@ -918,7 +908,8 @@ console.log('PASS: the retention period');
   assert.equal(field('summary.idle_minutes').parentElement.closest('details').open,true,'its fold opened');
   // Enter saves a field; on a link or a button it keeps its own meaning (CodeRabbit).
   let stopped=false;
-  fire('keydown',{key:'Enter',target:document.createElement('a'),preventDefault(){stopped=true;}});
+  const link=document.createElement('a');field('inject.session_start_chars').closest('form').append(link);
+  fire('keydown',{key:'Enter',target:link,preventDefault(){stopped=true;}});
   assert.equal(stopped,false,'Enter on a link is left alone');
   fire('keydown',{key:'Enter',target:field('inject.session_start_chars'),preventDefault(){stopped=true;}});
   assert.equal(stopped,true,'Enter in a field is the field\'s');
@@ -1018,7 +1009,7 @@ console.log('PASS: the retention period');
   // Enter in the port's field, with a change waiting for its confirmation, moves the port once
   // confirmed: the form's own save after it does not take the confirmation's place (CodeRabbit).
   f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
-  tick(capOff(),true);fire('change',{target:capOff()});await settle();
+  f.paidNoCap=true;nudge();await settle();
   typeIn(field('view.port'),'17400');
   const enter={key:'Enter',target:field('view.port'),preventDefault(){}};
   for(const cb of field('view.port').listeners.keydown||[])cb(enter);
@@ -1063,11 +1054,11 @@ console.log('PASS: the retention period');
   saving(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
   assert.equal(posted.length,2);assert.equal(posted[1].url,'/api/providers');
   assert.equal(JSON.parse(posted[1].body).version,'v2','and sends with the version that save gave');
-  tick(field('summary.curate'),true);fire('change',{target:field('summary.curate')});await settle();
+  tick(field('inject.session_start_note'),false);fire('change',{target:field('inject.session_start_note')});await settle();
   assert.equal(posted.length,2,'a change made while the provider write is on its way waits for it');
-  answers=[json(settings('resident',{version:'v4',worker:{resident:false},summary:{...settings('resident').summary,curate:true}}))];
+  answers=[json(settings('resident',{version:'v4',worker:{resident:false},inject:{...settings('resident').inject,session_start_note:false}}))];
   writing(json(settings('resident',{version:'v3',worker:{resident:false}})));await write;await settle();
-  assert.equal(posted.length,3);assert.equal(sent().at(-1).summary?.curate,true);
+  assert.equal(posted.length,3);assert.equal(sent().at(-1).inject?.session_start_note,false);
   assert.equal(sent().at(-1).version,'v3','and is saved after it, with the version it gave');
   // Round 4 of #802. Waiting for a save on its way, the provider write's control and the page wait
   // too, so no other write is chosen meanwhile; the page the save drew again waits for the write
@@ -1143,8 +1134,10 @@ f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
 shown=text(panel);
 assert(shown.includes('My Work, written by AI')&&shown.includes('An estimate appears here once something is recorded.'),'My Work before anything is recorded');
 assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:false,calls_a_day:100},'the saved switch and bound are sent');
-tick(field('my_work.curate'),true);typeIn(field('my_work.calls_a_day'),'250');
-assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:true,calls_a_day:250},'what is ticked and typed is sent');
+// My Work on is the group's own switch (decision 69, 69b-2): a general save sends it as saved.
+assert(!field('my_work.curate'),'one My Work switch on the page');
+typeIn(field('my_work.calls_a_day'),'250');
+assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.my_work)),{curate:false,calls_a_day:250},'what is typed is sent, the switch as saved');
 for(const bad of ['0','10001','1.5','']){f.my_work.calls_a_day=bad;assert.equal(w6.saveBody().field,'my_work.calls_a_day',`bound ${bad} refused before sending`);}
 // #680: a bound the file holds out of range is sent as it is while it is not changed.
 f=w6.formOf(settings('resident',{my_work:{curate:false,calls_a_day:0,estimate:null}}));ctx.ui.setForm(f);
@@ -1170,14 +1163,12 @@ const warned=()=>panel.querySelectorAll('.no-cap-warning').filter(node=>!node.hi
 f=w6.formOf(settings('resident',{ranges,paid_usd_per_month:5,
   chain:[row('groq'),row('claude',{effective_daily_budget:null}),row('pro',{subscription:true,effective_daily_budget:null})]}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('paid_usd_per_month').checked,field('paid_usd_per_month').disabled,warned()],[false,false,1],'a cap shows as a cap');
-tick(off('paid_usd_per_month'),true);
-assert.deepEqual([field('paid_usd_per_month').disabled,warned()],[true,2],'No cap sets the number aside and warns');
-assert.equal(w6.saveBody().body.paid_usd_per_month,null,'the month\'s no cap is sent as null');
-tick(off('paid_usd_per_month'),false);
-assert.equal(w6.saveBody().body.paid_usd_per_month,5,'turned on again, the number kept is sent');
+// The month's No cap is the AI group's own switch, with its confirmation (decision 69, 69b-2; the
+// simple page's tests): a general save sends the month as saved.
+assert.deepEqual([off('paid_usd_per_month'),warned()],[undefined,1],'a cap shows as a cap; an entry with no calls a day says so');
+assert.equal(w6.saveBody().body.paid_usd_per_month,5,'the month is sent as saved');
 tick(off('my_work'),true);
-assert.equal(field('my_work.calls_a_day').disabled,true);
+assert.deepEqual([field('my_work.calls_a_day').disabled,warned()],[true,2],'No cap sets the number aside and warns');
 assert.equal(w6.saveBody().body.my_work.calls_a_day,NO,'a day\'s no cap is sent as 4294967295');
 assert.deepEqual([off('chain.groq').checked,off('chain.claude').checked,off('chain.pro')],[false,true,undefined],
   'an entry with no calls a day shows as off; a subscription has no switch');
@@ -1232,18 +1223,13 @@ assert.deepEqual([field('chain.cli.daily_budget'),daily()],[undefined,[NO]],'an 
 f=w6.formOf(settings('resident',{ranges,paid_usd_per_month:null,
   my_work:{curate:false,calls_a_day:NO,estimate:{calls:[3,null],usd:[0.0123,null],priced:{name:'p',model:'m'}}}}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.equal(off('paid_usd_per_month').checked,true);
-assert.deepEqual([field('paid_usd_per_month').value,field('paid_usd_per_month').disabled],['',true]);
+assert.deepEqual([field('paid_usd_per_month').value,field('paid_usd_per_month').disabled],['',true],'the month\'s limit set aside');
 assert.deepEqual([field('my_work.calls_a_day').value,field('my_work.calls_a_day').disabled],['',true]);
 shown=text(panel);
 assert(!shown.includes(String(NO)),'4294967295 is never shown');
-assert.equal(shown.split('Saved: No cap').length-1,2,'each saved no cap is said, the month\'s and My Work\'s');
+assert.equal(shown.split('Saved: No cap').length-1,1,'My Work\'s saved no cap is said');
 assert(shown.includes('about 3, with no cap. At p (m) prices: about $0.012 a day; a busy day costs more.'),'the estimate with no most');
 assert.deepEqual([w6.saveBody().body.paid_usd_per_month,w6.saveBody().body.my_work.calls_a_day],[null,NO],'caps left off stay off');
-tick(off('paid_usd_per_month'),false);
-assert.equal(w6.saveBody().field,'paid_usd_per_month','turned on again, a cap is typed first');
-typeIn(field('paid_usd_per_month'),'7');
-assert.equal(w6.saveBody().body.paid_usd_per_month,7);
 tick(off('my_work'),false);
 assert.equal(w6.saveBody().field,'my_work.calls_a_day');
 typeIn(field('my_work.calls_a_day'),'40');
@@ -1254,6 +1240,430 @@ assert(shown.includes('上限なし')&&shown.includes('金額で止めるのは�
 assert(shown.includes('およそ 3 回(上限なし)'),'the Japanese estimate with no most');
 ctx.ui.setLang('en');
 console.log('PASS: the caps\' No cap switches');
+}
+// Decision 69 (69b-2a): one settings page. The simple controls' saves and the general autosave go
+// one at a time, each built from what is saved when its turn comes; what no body carries, and the
+// confirmations waiting, outlive every answer; the focus goes back to the control it was on, on
+// its side of the page; nothing outside the general forms starts a general save; a new home's
+// resident choice counts as unsaved until a general save sends it (#803).
+{
+  vm.runInContext('globalThis.w7={bodyKey};',ctx);
+  const {w7}=ctx;
+  const w6fetch=ctx.fetch;
+  let reread=null;
+  ctx.fetch=(url,options)=>{
+    if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+    if(url.startsWith('/api/settings?')&&reread)return Promise.resolve(json(reread));
+    return new Promise(()=>{});
+  };
+  const sent=()=>posted.map(p=>JSON.parse(p.body));
+  // The event reaches the control's own form, as it bubbles there.
+  const fire=(name,ev)=>{for(const cb of ev.target?.closest?.('form')?.listeners[name]||[])cb(ev);};
+  const all=sel=>panel.querySelectorAll(sel);
+  const controls=()=>[...all('input'),...all('select'),...all('textarea')];
+  const simple=key=>[...controls(),...all('button')].find(n=>n.dataset.simpleFocus===key);
+  const general=name=>controls().find(n=>n.dataset.field===name&&!n.dataset.simpleFocus);
+  const action=name=>[...all('button'),...document.getElementById('status').querySelectorAll('button')].filter(n=>n.dataset.action===name).at(-1);
+  const flip=(node,v)=>{node.checked=v;for(const cb of node.listeners.change||[])cb({target:node});};
+  const leave=(node,next=null)=>{fire('change',{target:node});fire('focusout',{target:node,relatedTarget:next});if(next)next.focus();else document.activeElement=null;};
+  const later=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return [promise,resolve];};
+  const settled=async(n=4)=>{for(let i=0;i<n;i++)await settle();};
+  const draw=s=>{const g=w6.formOf(s);ctx.ui.setForm(g);ctx.ui.drawSettings();posted.length=0;return g;};
+  // What the general save would send is what is saved: nothing waits unseen for the next one.
+  const clean=()=>w7.bodyKey(w6.saveBody(true).body)===ctx.ui.getForm().savedKey;
+  const status=()=>document.getElementById('status').textContent;
+  const inGeneral=n=>Boolean(n.closest('.general-form'));
+  const pageControls=document.querySelectorAll;document.querySelectorAll=sel=>panel.querySelectorAll(sel);
+  const base=settings('resident');
+  const curated={...base.summary,curate:true};
+  const sized=n=>({...base.inject,session_start_chars:n});
+  const row=(name,extra={})=>({name,on:true,key:'ok',key_file:null,effective_model:'model-'+name,model_rule:'any',model:null,model_applied:true,
+    daily_budget:null,timeout_s:null,effective_timeout_s:90,differs:[],entries:1,subscription:false,budget_from_key:false,effective_daily_budget:200,...extra});
+  const entry=(name,index)=>({name,selector:{source:'config',index},saved:{enabled:true,kind:'openai',base_url:'http://127.0.0.1:9/v1',
+    model:'model-'+name,key:'none',timeout_s:60,limits:{}},effective:{on:true,order:index,model:'model-'+name,timeout_s:60}});
+  const search={provider:'none',workers_ai:{account_id:null,key_file:'/home/made-up/CF_WORKERS_AI_KEY.md',key:'missing',daily_requests:200,
+    monthly_usd:1,usd_this_month:0,requests_today:0},local:{unavailable:null,files:'not_downloaded',dir:'/home/made-up/.oboete/models/bge-m3',held:0}};
+  const ai=(names,extra={})=>settings('resident',{chain:names.map(n=>row(n)),providers:names.map((n,i)=>entry(n,i)),
+    embedding:search,ranges:{...base.ranges,daily_requests:[1,100000]},...extra});
+  const masked=(rules,enabled=true)=>({enabled,extra_rules:rules,allowlist:[]});
+  const rule={id:'acme-token',regex:'acme_[a-z0-9]{8}',keywords:[],entropy:null,secret_group:null};
+  const judge={set:true,enabled:true,destination:'jev',destinations:[{id:'jev',key:'ok',usd_per_mtok_in:0.042,local:false}],key:'ok',
+    key_file:'/home/made-up/.local/share/oboete/keys/k1',cloudflare_account_id:null,daily_budget:300,calls_today:0,usd_this_month:0};
+  const phrase=()=>general('onboarding.phrase');
+
+  // One page: no switch between two views; each group closes on its More settings, holding the
+  // detailed controls that belong to it; This computer and Maintenance close the page.
+  const privacy={available:true,repositories:[{label:'github.com/acme/live',selector:'r2',never_recorded:false},
+    {label:'github.com/acme/old',selector:'r1',never_recorded:true}],folders:[],patterns:[],rescan:{state:'idle',processed:null,total:null}};
+  // A key missing: the AI line shows its key field, as each entry in More settings does.
+  let f=draw(ai(['alpha','beta'],{judge,privacy,key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')]}));
+  assert(!panel.querySelector('.settings-view-switch'),'no switch between two views');
+  assert.equal(vm.runInContext('typeof settingsMode',ctx),'undefined','no view is kept');
+  const more=key=>panel.querySelector(`.group-s-${key}`)?.querySelector('.more-settings');
+  const fieldsIn=node=>[...node.querySelectorAll('input'),...node.querySelectorAll('select'),...node.querySelectorAll('textarea')].map(n=>n.dataset.field).filter(Boolean);
+  const holds=(key,fields,classes=[])=>{
+    assert(more(key),`${key} has its More settings`);
+    for(const name of fields)assert(fieldsIn(more(key)).includes(name),`${key}'s More settings holds ${name}`);
+    for(const cls of classes)assert(more(key).querySelector(cls),`${key}'s More settings holds ${cls}`);
+  };
+  holds('inject',['inject.session_start_chars','inject.session_start_note','inject.session_start_list','inject.per_prompt_chars',
+    'inject.per_prompt_wait_ms','inject.correction_chars']);
+  holds('ai',['summary.language','summary.window_tokens','summary.idle_minutes','gemini','chain.alpha.model','chain.alpha.daily_budget',
+    'chain.alpha.timeout_s'],['.provider-entries','.stopped-state']);
+  holds('my_work',['my_work.calls_a_day','my_work.no_cap'],['.judge-settings']);
+  holds('search',['embedding.account_id','embedding.daily_requests','embedding.monthly_usd'],['.workers-ai']);
+  holds('privacy',['retention.forever','redaction.allowlist'],['.capture-settings','.never-more','.retention']);
+  assert(text(more('privacy').querySelector('.never-more')).includes('github.com/acme/live')
+    &&!text(more('privacy').querySelector('.never-more')).includes('github.com/acme/old'),'More settings lists the repositories recorded');
+  assert(text(panel.querySelector('.never-record')).includes('github.com/acme/old')
+    &&!text(panel.querySelector('.never-record')).includes('github.com/acme/live'),'the group lists those never recorded');
+  holds('agents',['preference.text'],['.preference','.agent-setup','.agent-readiness']);
+  for(const name of ['worker.resident','view.port','backup.dir'])assert(fieldsIn(panel.querySelector('.group-computer')).includes(name),`This computer holds ${name}`);
+  for(const cls of ['.view-address','.hidden-settings','.doctor-diagnostics','.maintenance'])assert(panel.querySelector('.group-maintenance').querySelector(cls),`Maintenance holds ${cls}`);
+  assert(!more('ai').querySelectorAll('button').some(b=>text(b)==='Add provider'),'one way to add an AI: the catalog');
+  assert.equal(more('ai').querySelectorAll('th').length,4,'the chain table without its order and its switch');
+  // What the simple controls own is theirs alone (decision 3); every control is drawn once, told
+  // by its simple focus, or by its field and its AI entry, inside the general forms or not (4d).
+  const generalFields=new Set(controls().filter(inGeneral).map(n=>n.dataset.field).filter(Boolean));
+  for(const owned of ['summary.curate','my_work.curate','paid_usd_per_month','paid_usd_per_month.no_cap','inject.session_start',
+    'inject.per_prompt','redaction.enabled','chain.alpha.on','embedding.choice','never.folder'])
+    assert(!generalFields.has(owned),`${owned} is the simple control's alone`);
+  const seen=new Map();
+  for(const n of controls().filter(n=>n.dataset.field||n.dataset.simpleFocus)){
+    const key=n.dataset.simpleFocus?`simple ${n.dataset.simpleFocus}`
+      :[n.dataset.field,n.closest('.provider-entry')?.dataset.selector??''].join(' ');
+    seen.set(key,(seen.get(key)||0)+1);
+  }
+  assert.deepEqual([...seen].filter(([,n])=>n>1),[],'each control once');
+  assert(panel.querySelectorAll('.simple-block').every(n=>!n.closest('form')),'no simple control is inside a form');
+  ctx.ui.setLang('ja');ctx.ui.drawSettings();
+  assert(text(panel).includes('細かい設定')&&text(panel).includes('このパソコン')&&text(panel).includes('診断と保守'),'Japanese');
+  for(const key of ['more_settings','never_recorded_none','never_repos_h','simple_never_more','simple_entry_detail','inject_chars','per_prompt_chars']){
+    const [en,ja]=[ctx.tier.text(key,'en'),ctx.tier.text(key,'ja')];
+    assert(en&&ja&&en!==ja,`${key} in both languages`);
+  }
+  ctx.ui.setLang('en');ctx.ui.drawSettings();
+  assert(text(panel).includes('More settings')&&text(panel).includes('This computer'),'English');
+
+  // A link to a detailed control opens the folds around it, its group's More settings among them,
+  // and focuses it.
+  const opened=node=>{
+    if(!node)return false;
+    for(let d=node.parentElement?.closest('details');d;d=d.parentElement?.closest('details'))if(!d.open)return false;
+    return true;
+  };
+  f=draw(ai(['alpha']));
+  panel.querySelectorAll('.simple-provider').find(n=>n.dataset.providerName==='alpha').querySelectorAll('button')
+    .find(b=>b.className.includes('simple-link')).click();
+  assert(document.activeElement?.className.includes('provider-entry')&&document.activeElement.closest('.more-settings'),
+    'the AI line\'s link focuses its entry in More settings');
+  assert(opened(document.activeElement),'with the folds around it open');
+  f=draw(ai(['alpha']));
+  const customAt=vm.runInContext('AI_CATALOG.findIndex(entry=>!entry.name)',ctx);
+  panel.querySelector('.simple-catalog').querySelectorAll('button')[customAt].click();
+  assert(document.activeElement?.className.includes('new-provider')&&opened(document.activeElement),
+    'the catalog\'s own server opens the new entry\'s form in More settings');
+  document.activeElement=null;
+
+  // A simple switch clicked while a general save is on its way waits for its answer, disabled
+  // with the page inert, then sends with that answer's version and what it saved.
+  f=draw(ai(['alpha']));
+  let [answer,give]=later();answers=[answer];
+  typeIn(general('my_work.calls_a_day'),'200');leave(general('my_work.calls_a_day'));
+  assert.equal(posted.length,1,'the calls a day are sent');
+  const myWork=simple('my_work.curate');flip(myWork,true);await settle();
+  assert.equal(posted.length,1,'a simple switch clicked meanwhile waits');
+  assert.deepEqual([myWork.disabled,panel.querySelector('.settings').inert],[true,true],'disabled, with the page');
+  let [simpleAnswer,giveSimple]=later();answers=[simpleAnswer];
+  give(json(ai(['alpha'],{version:'v2',my_work:{curate:false,calls_a_day:200,estimate:null}})));await settled();
+  assert.equal(posted.length,2,'then it is sent');
+  assert.equal(sent()[1].version,'v2','with the version the save gave');
+  assert.deepEqual(sent()[1].my_work,{curate:true,calls_a_day:200},'and the calls a day it saved');
+  assert.deepEqual([simple('my_work.curate').disabled,panel.querySelector('.settings').inert],[true,true],
+    'the page the answer drew again waits for it, its switch too');
+  giveSimple(json(ai(['alpha'],{version:'v3',my_work:{curate:true,calls_a_day:200,estimate:null}})));await settled();
+  assert.deepEqual([simple('my_work.curate').disabled,Boolean(panel.querySelector('.settings').inert)],[false,false],'and is usable after it');
+  assert(clean(),'nothing is left to save');
+  // ...and masking off confirmed meanwhile keeps the rule the save changed.
+  f=draw(ai(['alpha'],{redaction:masked([rule])}));
+  [answer,give]=later();answers=[answer];
+  const regex=()=>general('redaction.extra_rules.0.regex');
+  typeIn(regex(),'acme_[a-z0-9]{12}');leave(regex());
+  assert.equal(posted.length,1);
+  flip(simple('redaction.enabled'),false);simple('mask.confirm').click();await settle();
+  assert.equal(posted.length,1,'masking off confirmed meanwhile waits');
+  const changed={...rule,regex:'acme_[a-z0-9]{12}'};
+  answers=[json(ai(['alpha'],{version:'v3',redaction:masked([changed],false)}))];
+  give(json(ai(['alpha'],{version:'v2',redaction:masked([changed])})));await settled();
+  assert.equal(posted.length,2);
+  assert.deepEqual([sent()[1].version,sent()[1].redaction.enabled,sent()[1].redaction.extra_rules[0].regex],['v2',false,'acme_[a-z0-9]{12}'],
+    'masking off keeps the rule the save changed');
+  // A general change made during a simple save waits for it, and is sent with its answer's version.
+  f=draw(ai(['alpha']));
+  [answer,give]=later();answers=[answer];
+  flip(simple('summary.curate'),true);await settle();
+  assert.equal(posted.length,1,'the simple switch is sent');
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settle();
+  assert.equal(posted.length,1,'a general change made meanwhile waits for it');
+  answers=[json(ai(['alpha'],{version:'v3',summary:curated,inject:sized(4000)}))];
+  give(json(ai(['alpha'],{version:'v2',summary:curated})));await settled();
+  assert.equal(posted.length,2,'then it is sent');
+  assert.deepEqual([sent()[1].version,sent()[1].inject.session_start_chars,sent()[1].summary.curate],['v2',4000,true],
+    'with the version and what the simple save saved');
+  // A general save refused as stale reads the settings again; a simple save waiting sends what was read.
+  f=draw(ai(['alpha']));
+  [answer,give]=later();answers=[answer];
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  flip(simple('summary.curate'),true);await settle();
+  assert.equal(posted.length,1);
+  reread=ai(['alpha'],{version:'v9',inject:sized(5000)});
+  answers=[json(ai(['alpha'],{version:'v10',summary:curated,inject:sized(5000)}))];
+  give(json({code:'stale'},409));await settled(6);
+  assert.equal(posted.length,2,'after the stale save is read again, the simple save is sent');
+  assert.deepEqual([sent()[1].version,sent()[1].inject.session_start_chars,sent()[1].summary.curate],['v9',5000,true],'with what was read');
+  reread=null;
+
+  // What no body carries outlives a simple save: the guide's phrase is in no body and stays.
+  f=draw(ai(['alpha']));
+  typeIn(phrase(),'a made-up phrase');fire('input',{target:phrase()});leave(phrase());
+  assert.equal(posted.length,0,'the guide\'s phrase starts no save');
+  answers=[json(ai(['alpha'],{version:'v2',summary:curated}))];
+  flip(simple('summary.curate'),true);await settled();
+  assert.equal(posted.length,1);
+  assert(!posted[0].body.includes('a made-up phrase'),'the phrase is in no body');
+  assert.equal(phrase().value,'a made-up phrase','and stays through the answer');
+  // The masking-off and no-cap confirmations open stay open through a general save and a provider
+  // write, and still work.
+  f=draw(ai(['alpha'],{paid_usd_per_month:5,redaction:masked([])}));
+  flip(simple('redaction.enabled'),false);flip(simple('paid_usd_per_month.no_cap'),true);
+  assert(simple('mask.confirm')&&simple('cap.confirm'),'both confirmations open');
+  answers=[json(ai(['alpha'],{version:'v2',paid_usd_per_month:5,redaction:masked([]),inject:sized(4000)}))];
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+  assert.equal(posted.length,1);
+  assert(simple('mask.confirm')&&simple('cap.confirm'),'they stay open through a general save');
+  answers=[json(ai(['alpha'],{version:'v3',paid_usd_per_month:5,redaction:masked([]),inject:sized(4000)}))];
+  await w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:true},action('port.move'));await settled();
+  assert.deepEqual(posted.map(p=>p.url),['/api/settings','/api/providers']);
+  assert(simple('mask.confirm')&&simple('cap.confirm'),'and through a provider write');
+  answers=[json(ai(['alpha'],{version:'v4',paid_usd_per_month:5,redaction:masked([],false),inject:sized(4000)}))];
+  simple('mask.confirm').click();await settled();
+  assert.deepEqual([sent()[2].version,sent()[2].redaction.enabled],['v3',false],'masking off still works');
+  answers=[json(ai(['alpha'],{version:'v5',paid_usd_per_month:null,redaction:masked([],false),inject:sized(4000)}))];
+  simple('cap.confirm').click();await settled();
+  assert.deepEqual([sent()[3].version,sent()[3].paid_usd_per_month],['v4',null],'and so does no cap');
+  // ...and a finite cap opened while no cap is saved.
+  f=draw(ai(['alpha'],{paid_usd_per_month:null}));
+  flip(simple('paid_usd_per_month.no_cap'),false);
+  assert.equal(simple('paid_usd_per_month').disabled,false,'a cap can be typed');
+  answers=[json(ai(['alpha'],{version:'v2',paid_usd_per_month:null,inject:sized(4000)}))];
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+  assert.equal(simple('paid_usd_per_month').disabled,false,'it stays open through a general save');
+  answers=[json(ai(['alpha'],{version:'v3',paid_usd_per_month:3,inject:sized(4000)}))];
+  const limit=simple('paid_usd_per_month');typeIn(limit,'3');for(const cb of limit.listeners.blur)cb();await settled();
+  assert.deepEqual([sent()[1].version,sent()[1].paid_usd_per_month],['v2',3],'and saves the cap typed');
+  // A saved rule removed waits in the status line; masking off confirmed inline meanwhile keeps the
+  // rule, and the removal is asked again, and still works both ways.
+  for(const way of ['confirm','cancel']){
+    f=draw(ai(['alpha'],{redaction:masked([rule])}));
+    const remove=all('button').find(n=>text(n)==='Remove this rule');
+    remove.click();fire('click',{target:remove});await settle();
+    assert.equal(posted.length,0);assert(status().includes('acme-token'),'a saved rule removed waits');
+    flip(simple('redaction.enabled'),false);
+    answers=[json(ai(['alpha'],{version:'v2',redaction:masked([rule],false)}))];
+    simple('mask.confirm').click();await settled();
+    assert.equal(posted.length,1);
+    assert.deepEqual([sent()[0].redaction.enabled,sent()[0].redaction.extra_rules.map(r=>r.id)],[false,['acme-token']],
+      'masking off is sent with the saved rule');
+    assert(status().includes('acme-token'),'the removal is asked again');
+    if(way==='confirm'){
+      answers=[json(ai(['alpha'],{version:'v3',redaction:masked([],false)}))];
+      action('held.confirm').click();await settled();
+      assert.deepEqual([sent()[1].version,sent()[1].redaction.extra_rules,sent()[1].redaction.enabled],['v2',[],false],
+        'confirmed, the rule is removed, masking as saved');
+    }else{
+      action('held.cancel').click();await settle();
+      assert.equal(posted.length,1,'cancelled, nothing is sent');
+      assert.equal(general('redaction.extra_rules.0.id').value,'acme-token','and the rule is back');
+    }
+  }
+
+  // The focus goes back where it was through a redraw: the model column, edited or emptied, with
+  // its caret; the AI line's model choice to its own.
+  f=draw(ai(['alpha']));
+  const column=()=>general('chain.alpha.model');
+  for(const typed of ['other-model','']){
+    const [start,end]=typed?[3,5]:[0,0];
+    column().focus();typeIn(column(),typed);column().setSelectionRange(start,end);
+    ctx.ui.drawSettings();
+    assert.equal(document.activeElement,column(),`the model column (${typed||'emptied'}) has the focus back`);
+    assert.deepEqual([column().value,column().selectionStart,column().selectionEnd],[typed,start,end],'with its text and its caret');
+  }
+  simple('model:alpha').focus();ctx.ui.drawSettings();
+  assert.equal(document.activeElement,simple('model:alpha'),'the AI line\'s model choice keeps its own');
+  // A field each AI entry repeats goes back to its own entry's, not to another's or the AI line's.
+  f=draw(ai(['alpha','beta'],{key_input:true,chain:['alpha','beta'].map(n=>row(n,{key:'missing'}))}));
+  assert(simple('key:beta'),'the AI line has its key field too');
+  const keyOf=name=>more('ai').querySelectorAll('.provider-entry').find(n=>text(n).includes(name))
+    ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
+  assert(keyOf('beta')&&keyOf('alpha')!==keyOf('beta'),'each entry has its key field');
+  keyOf('beta').focus();ctx.ui.drawSettings();
+  assert.equal(document.activeElement,keyOf('beta'),'the second entry\'s key field has the focus back');
+  const modelOf=name=>more('ai').querySelectorAll('.provider-entry').find(n=>text(n).includes(name))
+    ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
+  // A key refused is marked on the field it was typed in: the AI line's, not its entry's in More
+  // settings (Codex's review of 69b-2a).
+  answers=[json({code:'bad_key',field:'providers.key'},422)];
+  const lineKey=()=>simple('key:alpha');
+  typeIn(lineKey(),'a made-up wrong key');simple('key-save:alpha').click();await settled();
+  assert.equal(posted.at(-1).url,'/api/providers/key');
+  assert.deepEqual([lineKey().attrs['aria-invalid'],keyOf('alpha').attrs['aria-invalid'],document.activeElement===lineKey()],['true',undefined,true],
+    'the AI line\'s key field is marked and focused');
+  answers=[json({code:'bad_key',field:'providers.key'},422)];
+  typeIn(keyOf('alpha'),'another made-up key');more('ai').querySelectorAll('button').find(b=>b.dataset.simpleFocus?.startsWith('key-save:entry:')&&b.closest('.provider-entry')===keyOf('alpha').closest('.provider-entry')).click();await settled();
+  assert.deepEqual([keyOf('alpha').attrs['aria-invalid'],document.activeElement===keyOf('alpha')],['true',true],'and an entry\'s on the entry');
+  posted.length=0;document.activeElement=null;
+  modelOf('beta').focus();modelOf('beta').setSelectionRange(2,4);ctx.ui.drawSettings();
+  assert.deepEqual([document.activeElement===modelOf('beta'),modelOf('beta').selectionStart],[true,2],
+    'and so does its editor\'s model, which each entry repeats');
+  // The guide's phrase and the preferences' text, typed while a general save is on its way, keep
+  // their text, focus and caret through its answer, and start no save.
+  f=draw(ai(['alpha']));
+  [answer,give]=later();answers=[answer];
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  phrase().focus();typeIn(phrase(),'made-up words');phrase().setSelectionRange(4,4);fire('input',{target:phrase()});
+  give(json(ai(['alpha'],{version:'v2',inject:sized(4000)})));await settled();
+  assert.deepEqual([document.activeElement===phrase(),phrase().value,phrase().selectionStart],[true,'made-up words',4],
+    'the guide\'s phrase keeps its text, focus and caret');
+  const preference=()=>general('preference.text');
+  [answer,give]=later();answers=[answer];
+  typeIn(general('inject.session_start_chars'),'4500');leave(general('inject.session_start_chars'));
+  preference().focus();typeIn(preference(),'made-up preference');preference().setSelectionRange(6,6);fire('input',{target:preference()});
+  give(json(ai(['alpha'],{version:'v3',inject:sized(4500)})));await settled();
+  assert.deepEqual([document.activeElement===preference(),preference().value,preference().selectionStart],[true,'made-up preference',6],
+    'the preferences\' text keeps its text, focus and caret');
+  assert.equal(posted.length,2,'and neither starts a save');
+  document.activeElement=null;
+
+  // An arrow waiting for a save on its way moves its AI past the next one in use in the order saved
+  // when its turn comes; an AI gone meanwhile moves nothing.
+  f=draw(ai(['alpha','beta','gamma']));
+  [answer,give]=later();answers=[answer];
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  simple('move:beta:1').click();await settle();
+  assert.equal(posted.length,1);
+  answers=[json(ai(['alpha','beta','gamma'],{version:'v3',inject:sized(4000)}))];
+  give(json(ai(['beta','alpha','gamma'],{version:'v2',inject:sized(4000)})));await settled();
+  assert.equal(posted.length,2);
+  assert.deepEqual(sent()[1].chain.map(r=>r.name),['alpha','beta','gamma'],'beta moves past alpha, and nothing else moves');
+  f=draw(ai(['alpha','beta','gamma']));
+  [answer,give]=later();answers=[answer];
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  simple('move:beta:1').click();await settle();
+  give(json(ai(['alpha','gamma'],{version:'v2',inject:sized(4000)})));await settled();
+  assert.equal(posted.length,1,'an AI gone meanwhile moves nothing');
+  // An AI whose entries are all off is not in use, though its name's switch is on: an arrow moves
+  // past it, as the lines show it (Codex's review of 69b-2a).
+  const offEntry={...entry('beta',1),saved:{...entry('beta',1).saved,enabled:false}};
+  const offBeta=(order,extra={})=>ai(order,{providers:[entry('alpha',0),offEntry,entry('gamma',2)],...extra});
+  f=draw(offBeta(['alpha','beta','gamma']));
+  assert.deepEqual(panel.querySelector('.simple-providers').querySelectorAll('.simple-provider').map(n=>n.dataset.providerName),['alpha','gamma'],
+    'beta, its entry off, is not in use');
+  answers=[json(offBeta(['gamma','beta','alpha'],{version:'v2'}))];
+  simple('move:gamma:-1').click();await settled();
+  assert.deepEqual(sent()[0].chain.map(r=>r.name),['gamma','beta','alpha'],'gamma moves past alpha, the AI in use above it');
+
+  // Nothing outside the general forms starts a general save: the preferences have their own form,
+  // in no other; the maintenance actions and the agents' setup are in none.
+  f=draw(ai(['alpha']));
+  const preferences=preference().closest('form');
+  assert(preferences&&!preferences.parentElement.closest('form'),'the preferences\' form is in no other form');
+  for(const b of [...panel.querySelector('.group-maintenance').querySelectorAll('button'),...panel.querySelector('.agent-setup').querySelectorAll('button')])
+    assert(!b.closest('form'),'maintenance and agent setup actions are in no form');
+  for(const cb of preferences.listeners.submit||[])await cb({target:preferences,preventDefault(){}});
+  await settle();
+  assert.equal(posted.length,0,'the preferences\' submit sends no general save');
+  // The chain table keeps its model column, which clears a name's model.
+  f=draw(ai(['alpha'],{chain:[row('alpha',{model:'pinned-model',effective_model:'pinned-model'})]}));
+  answers=[json(ai(['alpha'],{version:'v2'}))];
+  typeIn(column(),'');leave(column());await settled();
+  assert.equal(sent()[0].chain[0].model,null,'emptied, the model column clears the name\'s model');
+  // A model a general save sent and the viewer refused is marked on the column it was typed in,
+  // not on the AI line's choice of the same field (Codex's review of 69b-2a).
+  f=draw(ai(['alpha']));
+  answers=[json({code:'bad_request',field:'chain.alpha.model'},400)];
+  typeIn(column(),'bad model');leave(column());await settled();
+  assert.deepEqual([column().attrs['aria-invalid'],simple('model:alpha').attrs['aria-invalid'],document.activeElement===column()],['true',undefined,true],
+    'the refused model is marked and focused where it was typed');
+  document.activeElement=null;
+
+  // #803: a new home shows the resident worker on, as recommended, unsaved. A simple save leaves
+  // it so; the guide's tier, phrase, jumps and search send nothing; its Apply saves the resident
+  // choice shown with what it applies, even when that changes nothing else.
+  const free={...entry('alpha',0),selector:{source:'builtin',index:0},saved:{enabled:true,kind:'openai',endpoint_supported:true,
+    base_url:'https://free.example.invalid/v1',model:'model-alpha',key:'ok',timeout_s:60,limits:{usd_per_mtok_in:0,usd_per_mtok_out:0}}};
+  const home=(extra={})=>ai(['alpha'],{first_run:true,worker:{resident:false},providers:[free],...extra});
+  f=draw(home());
+  assert.equal(general('worker.resident').checked,true,'a new home shows the resident worker on');
+  assert(!clean(),'the key of what is saved takes it as saved, off');
+  assert.equal(panel.querySelector('.group-computer').open,true,'This computer is open');
+  answers=[json(home({version:'v2',first_run:false,summary:curated}))];
+  flip(simple('summary.curate'),true);await settled();
+  assert.equal(sent()[0].worker,undefined,'a simple save sends no resident choice');
+  assert.equal(general('worker.resident').checked,true,'the choice shown stays');
+  assert(!clean(),'unsaved');
+  assert.equal(panel.querySelector('.group-computer').open,true,'This computer stays open while it is');
+  const tier=controls().find(n=>n.dataset.field==='onboarding.tier');
+  tier.value='free';for(const cb of tier.listeners.change||[])cb({target:tier});fire('change',{target:tier});
+  typeIn(phrase(),'made-up');fire('input',{target:phrase()});leave(phrase());
+  for(const b of panel.querySelector('.onboarding').querySelectorAll('button')){if(!b.dataset.action)b.click();fire('click',{target:b});}
+  await settle();
+  assert.equal(posted.length,1,'the guide\'s tier, phrase, jumps and search send nothing');
+  answers=[json(home({version:'v3',first_run:false,summary:curated,worker:{resident:true}}))];
+  action('onboarding.copy').click();await settled();
+  assert.equal(posted.length,2,'its Apply saves');
+  assert.deepEqual([sent()[1].version,sent()[1].worker.resident,sent()[1].summary.curate],['v2',true,true],
+    'with the resident choice shown, though nothing else changed');
+  assert(clean(),'after it, nothing waits');
+  assert.equal(general('worker.resident').checked,true,'and the switch shows what is saved');
+
+  // Decision 3: after each kind of simple save, the general save has nothing to send.
+  {
+    let saved=ai(['groq','beta'],{version:'s1',paid_usd_per_month:5,redaction:masked([])});
+    ctx.fetch=(url,options)=>{
+      if(options?.method!=='POST')return new Promise(()=>{});
+      posted.push({url,body:options.body});
+      const body=JSON.parse(options.body);
+      const prior=name=>saved.chain.find(e=>e.name===name);
+      const chain=body.chain?body.chain.map(r=>({...prior(r.name),...r,effective_model:r.model||prior(r.name).effective_model})):saved.chain;
+      saved={...saved,...body,chain,version:'s'+(posted.length+1)};
+      return Promise.resolve(json(saved));
+    };
+    f=draw(saved);
+    const steps=[
+      ['summaries on',()=>flip(simple('summary.curate'),true)],
+      ['My Work on',()=>flip(simple('my_work.curate'),true)],
+      ['session start off',()=>flip(simple('inject.session_start'),false)],
+      ['each prompt on',()=>flip(simple('inject.per_prompt'),true)],
+      ['an AI off',()=>flip(simple('on:beta'),false)],
+      ['an AI on',()=>flip(simple('on:beta'),true)],
+      ['an AI moved',()=>simple('move:beta:-1').click()],
+      ['a model chosen',()=>{const m=simple('model:groq');m.value='openai/gpt-oss-20b';for(const cb of m.listeners.change)cb({target:m});}],
+      ['the monthly cap typed',()=>{const c=simple('paid_usd_per_month');typeIn(c,'7');for(const cb of c.listeners.blur)cb();}],
+      ['masking off',()=>{flip(simple('redaction.enabled'),false);simple('mask.confirm').click();}],
+      ['masking on',()=>flip(simple('redaction.enabled'),true)],
+      ['no cap',()=>{flip(simple('paid_usd_per_month.no_cap'),true);simple('cap.confirm').click();}],
+    ];
+    for(const [label,step] of steps){
+      const before=posted.length;
+      step();await settled();
+      assert.equal(posted.length,before+1,`${label} is saved`);
+      assert(clean(),`after ${label}, the general save has nothing to send`);
+    }
+  }
+  ctx.fetch=w6fetch;
+  document.querySelectorAll=pageControls;
+  ctx.ui.setForm(null);
+  console.log('PASS: decision 69 (69b-2a): one page, the saves in turn, drafts and confirmations kept, focus, the new home\'s resident choice');
 }
 }
 
@@ -1350,8 +1760,11 @@ ctx.fetch=(url,options)=>{
 };
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const panel=document.getElementById('panel');
-const section=()=>panel.querySelector('.embedding-settings');
-const select=()=>section().querySelectorAll('select').find(node=>node.dataset.field==='embedding.choice');
+// One choice of method, the Search group's (decision 69, 69b-2); its More settings hold the local
+// files' line and Workers AI's values.
+const section=()=>panel.querySelector('.group-s-search');
+const radio=value=>section().querySelectorAll('input').find(node=>node.dataset.simpleFocus===`embedding:${value}`);
+const choose=value=>{const node=radio(value);node.checked=true;for(const cb of node.listeners.change)cb({target:node});};
 const button=action=>section().querySelectorAll('button').find(node=>node.dataset.action===action);
 const field=name=>panel.querySelectorAll('input').find(node=>node.dataset.field===name);
 const type=(node,value)=>{node.value=value;for(const cb of node.listeners.input||[])cb({target:node});};
@@ -1364,17 +1777,16 @@ for(const [key,[en,ja]] of Object.entries(w4.TEXT).filter(([key])=>key.startsWit
 }
 let f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(section(),'Settings shows the embedder');
-assert.deepEqual(plain(select().options.map(node=>node.value)),['none','local','workers-ai']);
-assert.equal(select().value,'none');
-select().value='local';for(const cb of select().listeners.change)cb({target:select()});
-assert(text(section()).includes('not been downloaded'),'the local files state is shown');
+assert.deepEqual(plain(section().querySelectorAll('input').filter(node=>node.dataset.field==='embedding.choice').map(node=>node.value)),['none','local','workers-ai']);
+assert.equal(radio('none').checked,true);
+assert(text(section().querySelector('.embedding-settings')).includes('not been downloaded'),'the local files state is shown in More settings');
 assert(!button('embedding.start'),'no taking before the review');
 const consent={choice:'local',dir:'/home/u/.oboete/models/bge-m3',check:false,
   get:[{host:'huggingface.co',bytes:2283937811,source:'model'},{host:'github.com',bytes:9125960,source:'runtime'}]};
 const key='ab'.repeat(32);
 answers=[json({preview_key:key,consent})];
-button('embedding.preview').click();await settle();
-assert.deepEqual(posted.at(-1),{url:'/api/embedding/preview',body:{choice:'local'}});
+choose('local');await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/embedding/preview',body:{choice:'local'}},'choosing a method reviews it');
 let shown=text(section());
 assert(shown.includes('huggingface.co')&&shown.includes('BAAI’s bge-m3, MIT License')&&shown.includes('github.com'),'what is downloaded, from where');
 assert(shown.includes('2.3 GB')&&shown.includes('9 MB'),'sizes as the page says them elsewhere');
@@ -1387,13 +1799,13 @@ let finish;answers=[new Promise(resolve=>{finish=resolve;})];
 button('embedding.start').click();await settle();
 assert.deepEqual(posted.at(-1),{url:'/api/embedding',body:{choice:'local',preview_key:key,confirmed:true}});
 assert(text(section()).includes('Downloading the model'),'the run shows while its answer waits');
-assert(select().disabled,'no other method meanwhile');
+assert(radio('workers-ai').disabled,'no other method meanwhile');
 const stopped={active:null,held:0,last:{choice:'local',phase:'failed',code:'embedding_no_space',held:0,get:2293063771}};
 settingsAnswer=Promise.resolve(json({},503));
 finish(json(stopped));
 await settle();await settle();await settle();
 assert(text(section()).includes('not enough free disk space'),'a stopped run says why');
-assert(!select().disabled);
+assert(!radio('workers-ai').disabled);
 // The settings could not be read after it: the run stays watched, and the next poll reads them.
 assert(w4.embeddingDraft().watch,'a failed read after the answer keeps the run watched');
 settingsAnswer=null;runStatus=stopped;
@@ -1404,9 +1816,8 @@ assert(!w4.embeddingDraft().watch);
 runStatus=null;
 
 // A refusal is worded, and points at the field it needs.
-select().value='workers-ai';for(const cb of select().listeners.change)cb({target:select()});
 answers=[json({code:'no_account',field:'embedding.choice'},422)];
-button('embedding.preview').click();await settle();
+choose('workers-ai');await settle();
 assert(text(section()).includes('Cloudflare account ID first'));
 
 // Workers AI's values: checked before the save, the account lowercased, an empty one kept.
@@ -1426,24 +1837,21 @@ assert.equal(w4.formOf(settings({embedding:undefined})).embedding,null,'an older
 // The simple view appends no absent part: the page showed "null" under its lead wherever a summary
 // service was ready, and where an older viewer sends no search section.
 {
-  vm.runInContext("settingsMode='simple';",ctx);
-  const ready={chain:[{name:'groq',key:'ok',on:true,effective_model:'openai/gpt-oss-20b',model_rule:'any'}],
-    providers:[{name:'groq',saved:{enabled:true}}],stopped:[]};
+  const ready={chain:[{name:'groq',key:'ok',on:true,effective_model:'openai/gpt-oss-20b',model_rule:'any',differs:[]}],
+    providers:[{name:'groq',selector:{source:'builtin',index:0},saved:{enabled:true,kind:'openai',base_url:'https://api.groq.com/openai/v1',
+      model:'openai/gpt-oss-20b',key:'ok',timeout_s:60,limits:{}},effective:{on:true,order:0,model:'openai/gpt-oss-20b',timeout_s:60}}],stopped:[]};
   for(const [label,s] of [['ready',settings(ready)],['no search section',settings({embedding:undefined})]]){
     f=w4.formOf(s);ctx.ui.setForm(f);ctx.ui.drawSettings();
     const parts=panel.querySelector('.settings').children;
     assert(parts.length>3&&parts.every(part=>part!==null&&part!==undefined),`simple view, ${label}: no absent part`);
   }
-  // Parity row 3: what was removed from the page is listed here only while there is some.
-  const removedBlock=()=>panel.querySelectorAll('.simple-block').find(node=>node.dataset.simpleBlock==='hidden');
+  // Parity row 3: what was removed from the page is listed once, under Maintenance (decision 69,
+  // 69b-2).
   const removed={items:[{kind:'card',id:'12.0',title:'Azimuth parser',repo_name:'fern',ts:30}]};
   f=w4.formOf({...settings(ready),hidden:removed});ctx.ui.setForm(f);ctx.ui.drawSettings();
-  assert(removedBlock()&&text(removedBlock()).includes('Azimuth parser'),'the simple page lists what was removed');
-  f=w4.formOf({...settings(ready),hidden:{items:[]}});ctx.ui.setForm(f);ctx.ui.drawSettings();
-  assert(!removedBlock(),'and shows no block while nothing is');
-  vm.runInContext("settingsMode='detailed';",ctx);
-  f=w4.formOf({...settings(),hidden:removed});ctx.ui.setForm(f);ctx.ui.drawSettings();
-  assert(text(panel.querySelector('.hidden-settings')).includes('Azimuth parser'),'the detailed page lists it under maintenance');
+  assert.equal(panel.querySelectorAll('.hidden-settings').length,1,'one list of what was removed');
+  assert(text(panel.querySelector('.group-maintenance').querySelector('.hidden-settings')).includes('Azimuth parser'),
+    'it is under maintenance');
   assert.deepEqual(w4.formOf(settings()).hidden,removed,
     "a save's answer, which has no list, keeps the one read (CodeRabbit on #658)");
   assert.equal(w4.formOf({...settings(),hidden:null}).hidden,null,'a list Settings could not read says so');
@@ -1474,6 +1882,14 @@ let gets=settingsGets;
 await w4.refreshEmbedding();await settle();
 assert.equal(settingsGets,gets+1,'a watched run that ended reads the settings again');
 assert(!w4.embeddingDraft().watch);
+// Read again after a download, More settings' files line says the files are ready (decision 69,
+// 69b-2: it is drawn with the page, outside the choice the run redraws).
+f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+settingsAnswer=Promise.resolve(json(settings({embedding:embedding({provider:'local',local:{...embedding().local,files:'ready',held:2283937811}})})));
+w4.embeddingDraft().watch=true;runStatus={active:null,held:0,last:{choice:'local',phase:'done',code:null,held:0,get:2283937811}};
+await w4.refreshEmbedding();await settle();await settle();
+assert(text(section().querySelector('.embedding-settings')).includes('files are ready'),'the files line is drawn again with the settings read');
+settingsAnswer=null;runStatus={active:null,held:0,last:{choice:'workers-ai',phase:'done',code:null,held:0,get:0}};
 // That read fails: the run stays watched, and the next poll reads the settings again.
 w4.embeddingDraft().watch=true;settingsAnswer=Promise.resolve(json({},503));
 await w4.refreshEmbedding();await settle();
@@ -1507,7 +1923,8 @@ f=w4.formOf(settings({embedding:embedding({provider:'workers-ai'})}));ctx.ui.set
 assert(text(section()).includes('sent to the account saved here'),'the destination beside the account');
 
 ctx.ui.setLang('ja');f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert(text(panel).includes('意味での検索')&&text(section()).includes('このパソコンで処理'),'Japanese section');
+assert(text(panel).includes('意味で記憶を探す')&&text(section()).includes('このパソコンで探す')
+  &&text(section()).includes('モデルはまだダウンロードしていません'),'Japanese section');
 ctx.ui.setLang('en');
 console.log('PASS: the embedder is reviewed, agreed and run; its values and token');
 
@@ -1724,7 +2141,9 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     const none=await testSays('refused','no listener');
     assert(none.includes('Nothing was sent')&&none.includes('nothing waits')&&none.includes('Start Ollama'),'nothing listens');
     const untrusted=await testSays('refused','untrusted listener');
-    assert(untrusted.includes('Nothing was sent')&&untrusted.includes('Ollama\'s own account')&&!untrusted.includes('Start Ollama'),'another user\'s program');
+    // Words only this reason's text has (#794): mapped back to the general refusal, the test fails.
+    assert(untrusted.includes('Nothing was sent')&&untrusted.includes('Stop that program')&&!untrusted.includes('Check that Ollama is running'),
+      'another user\'s program');
     const unread=await testSays('refused','listeners unread');
     assert(unread.includes('Nothing was sent')&&unread.includes('could not read')&&!unread.includes('Ollama\'s own account'),'the tables unread');
     const older=await testSays('refused');
@@ -1737,7 +2156,7 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
 
 // Simple controls save only their own change, using the existing whole-settings operation.
 {
-vm.runInContext("settingsMode='simple';globalThis.simpleUi={formOf,TEXT,embeddingDraft:()=>embeddingDraft,renderEmbedding};",ctx);
+vm.runInContext("globalThis.simpleUi={formOf,TEXT,embeddingDraft:()=>embeddingDraft,renderEmbedding};",ctx);
 const plain=value=>JSON.parse(JSON.stringify(value));
 const privacy={available:true,repositories:[],folders:[],rescan:{state:'idle',processed:null,total:null}};
 let saved={version:'simple-v1',first_run:true,resident_supported:true,worker:{resident:false},view:{port:17373},
@@ -1753,7 +2172,7 @@ let saved={version:'simple-v1',first_run:true,resident_supported:true,worker:{re
   chain:[{name:'groq',on:true,key:'missing',effective_model:'openai/gpt-oss-120b',model_rule:'any',model:null,
     daily_budget:null,timeout_s:null,differs:[]}],
   providers:[{name:'groq',selector:{source:'builtin',index:0},saved:{enabled:true,kind:'openai',base_url:'https://api.groq.com/openai/v1',
-    model:'openai/gpt-oss-120b',limits:{}},effective:{on:true}}]};
+    model:'openai/gpt-oss-120b',key:'missing',limits:{}},effective:{on:true}}]};
 const requests=[];let refuseNext=false;
 ctx.fetch=(url,options)=>{
   if(!options?.method){assert(url.startsWith('/api/privacy?'));return Promise.resolve(diagnosticResponse(privacy));}
@@ -1774,7 +2193,7 @@ f.retention.forever=false;f.retention.edit='90';
 ctx.ui.setForm(f);ctx.ui.setView('settings');ctx.ui.setLang('ja');ctx.ui.drawSettings();
 assert.equal(panel.querySelectorAll('.simple-block').length,8,'all eight blocks are present');
 assert(text(panel).includes('要約に使える AI がまだない'),'an unusable home has a clear first action');
-assert(!panel.querySelector('form'),'simple settings have no competing whole-page save');
+assert(panel.querySelectorAll('.simple-block').every(node=>!node.closest('form')),'no simple control is inside a general form');
 assert(!text(panel).includes('4294967295'),'field ranges stay in detailed settings');
 assert(panel.querySelector('.simple-provider').querySelectorAll('input').some(node=>node.dataset.field==='providers.key'),
   'the existing write-only key field is inline');
@@ -1909,11 +2328,15 @@ assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later en
     chain:[row('groq',true),row('groq-20b',false),row('openrouter',true)],
     providers:[provider('groq',0),provider('groq-20b',1),provider('openrouter',2)]};
   ctx.ui.setForm(ctx.simpleUi.formOf(plain(saved)));ctx.ui.setLang('ja');ctx.ui.drawSettings();
-  const groups=()=>panel.querySelectorAll('.settings-group');
+  const all=()=>panel.querySelectorAll('.settings-group');
   const titleOf=g=>text(g.querySelector('.group-title')),stateOf=g=>text(g.querySelector('.group-desc'));
-  assert.deepEqual(groups().map(titleOf),['エージェントに渡す記憶','要約に使う AI','AI が書く My Work','意味で記憶を探す',
-    '記録しないものと秘密','接続するエージェント'],'what is given first, then the AI, as the owner asked');
-  assert.deepEqual(groups().map(g=>g.open),[true,true,false,false,false,false],'two groups open, the rest closed');
+  // Decision 69 (69b-2): one page. The guide on top; This computer and Maintenance, which the mock
+  // has not, at the bottom, closed.
+  assert.deepEqual(all().map(titleOf),['はじめに','エージェントに渡す記憶','要約に使う AI','AI が書く My Work','意味で記憶を探す',
+    '記録しないものと秘密','接続するエージェント','このパソコン','診断と保守'],'what is given first, then the AI, as the owner asked');
+  assert.deepEqual(all().map(g=>g.open),[true,true,true,false,false,false,false,true,false],
+    'two groups open, the rest closed; on a new home, as here, the guide and This computer too');
+  const groups=()=>all().slice(1,7);
   assert(stateOf(groups()[0]).includes('セッション開始時：オン')&&stateOf(groups()[0]).includes('依頼ごと：オフ'),stateOf(groups()[0]));
   assert(stateOf(groups()[1]).includes('2 個')&&stateOf(groups()[1]).includes('$0.39'),stateOf(groups()[1]));
   assert(stateOf(groups()[2]).includes('オフ'),'My Work says it is off');
@@ -1951,7 +2374,6 @@ assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later en
     'Privacy','Agents']);
   assert(stateOf(groups()[1]).includes('2 in use')&&stateOf(groups()[1]).includes('$0.39'),stateOf(groups()[1]));
 }
-vm.runInContext("settingsMode='detailed';",ctx);
 console.log('PASS: simple status/models/catalog, remembered view, seven JA/EN blocks, isolated autosaves and masking confirmation');
 }
 // My Work (X10, decision 55): the tab, the three views, the filters, the request page and the
@@ -3686,7 +4108,6 @@ assert.equal(text(section.querySelector('h3')),'Removed from the page');
 assert(text(section).includes('Azimuth parser')&&text(section).includes('card')&&text(section).includes('fern'));
 assert.equal(run('hiddenSection')({hidden:{items:[]}}).querySelectorAll('p').at(-1).dataset.i18n,'hidden_none');
 assert.equal(run('hiddenSection')({hidden:null}).querySelectorAll('p').at(-1).dataset.i18n,'hidden_unavailable');
-assert.equal(run('hiddenSection')(f,true).dataset.simpleBlock,'hidden','the simple page shows it as one of its blocks');
 ctx.ui.setView('settings');ctx.ui.setForm(f);
 // The whole page is drawn by other checks: here, only that the list is drawn again.
 const drawSettings=run('drawSettings');let drawn=0;ctx.drawSettings=()=>{drawn++;};
@@ -3720,10 +4141,10 @@ delete status.textContent;status.children=[];
   assert.equal(g.hidden.next,null);
   assert.equal(drawnMore,1,'Settings is drawn again with both pages');
   assert(!showMore(run('hiddenSection')(g)),'no Show more at the end');
-  const simple=run('hiddenSection')({hidden:{items:g.hidden.items,next}},true);
-  assert(showMore(simple)&&text(showMore(simple))==='More','the simple page has it too');
+  const listed=run('hiddenSection')({hidden:{items:g.hidden.items,next}});
+  assert(showMore(listed)&&text(showMore(listed))==='More','Show more is worded');
   ctx.ui.setLang('ja');
-  assert.equal(text(showMore(run('hiddenSection')({hidden:{items:g.hidden.items,next}},true))),'もっと見る');
+  assert.equal(text(showMore(run('hiddenSection')({hidden:{items:g.hidden.items,next}}))),'もっと見る');
   ctx.ui.setLang('en');
   // A page that cannot be read leaves the list as it was and says so.
   const h={hidden:{items:g.hidden.items,next}};ctx.ui.setForm(h);
