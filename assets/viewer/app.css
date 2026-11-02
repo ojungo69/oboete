@@ -658,7 +658,7 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .simple-provider-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 /* Decision 69: one line for each AI, in the order they are tried; it opens on what to change. */
 .settings .simple-provider-fold { margin: 0; }
-.settings .simple-provider-fold > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; width: 100%; padding: 12px 0; font-weight: 400; }
+.settings details.simple-provider-fold > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; width: 100%; padding: 12px 0; font-weight: 400; }
 .settings .simple-provider-fold[open] { padding-bottom: 14px; }
 .settings .simple-provider-fold > :not(summary) { margin-left: 22px; }
 .simple-order { min-width: 1em; color: var(--muted); font: 12.5px var(--mono); font-variant-numeric: tabular-nums; }

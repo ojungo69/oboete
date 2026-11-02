@@ -6487,6 +6487,9 @@ function simpleFocus(key) {
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
   if (key === 'catalog.save' && simpleKeyName) keys.push(`key:${simpleKeyName}`);
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
+  // A control inside a closed fold cannot take the focus: open the folds around it first (decision
+  // 69; Codex, cubic and CodeRabbit on #801). Each fold's toggle keeps it open through redraws.
+  for (let fold = next?.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
   next?.focus({ preventScroll: true });
 }
 
@@ -6683,7 +6686,8 @@ function simpleCatalog(f) {
     choose.addEventListener('click', () => {
       if (listed) {
         const row = [...$('panel').querySelectorAll('.simple-provider')].find(row => row.dataset.providerName === entry.name);
-        row?.scrollIntoView?.({ block: 'center' }); simpleFocus(`on:${entry.name}`); return;
+        // Opened before it is scrolled to: an AI turned off waits in a closed fold.
+        simpleFocus(`on:${entry.name}`); row?.scrollIntoView?.({ block: 'center' }); return;
       }
       f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0] });
       f.simpleCatalog = entry;

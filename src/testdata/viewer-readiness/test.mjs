@@ -1536,6 +1536,15 @@ assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later en
   assert.equal(unused.open,false,'folded until opened');
   assert(!panel.querySelectorAll('button').some(node=>node.dataset.simpleFocus?.startsWith('move:groq-20b')),'an AI turned off has no place to move');
   assert.deepEqual(panel.querySelectorAll('.simple-order').map(text),['1','2'],'the AI in use are numbered in their order');
+  // The catalog's "find it in the list" opens the folds around an AI turned off and focuses its
+  // switch (Codex, cubic and CodeRabbit on #801).
+  const listed=panel.querySelector('.simple-catalog').querySelectorAll('li').find(li=>text(li.querySelector('strong'))==='Groq・GPT OSS 20B');
+  listed.querySelector('button').click();
+  const offRow=panel.querySelector('.simple-unused').querySelectorAll('.simple-provider').find(node=>node.dataset.providerName==='groq-20b');
+  assert.equal(panel.querySelector('.simple-unused').open,true,'the AI not in use open');
+  assert.equal(offRow.querySelector('details').open,true,'and the AI\'s own line');
+  assert.equal(document.activeElement?.dataset.simpleFocus,'on:groq-20b','its switch has the focus');
+  panel.querySelector('.simple-unused').open=false;offRow.querySelector('details').open=false;
   const places=panel.querySelector('.simple-places').parentElement;
   assert.equal(places.tagName,'DETAILS');assert(text(places.querySelector('summary')).includes('3 か所'));assert.equal(places.open,false);
   // Down from the first skips the AI turned off between them.
