@@ -1831,6 +1831,80 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.deepEqual([posted.at(-1).url,Boolean(receiptOf('never')),receiptOf('inject')],['/api/privacy/capture',true,''],
       'the place added says it is saved, and no other block still does');
+    // #807: a secret being typed stays in its field, its button enabled, through the page drawn
+    // again by the privacy read's answer and by a save's; it is in no form, storage or request but
+    // its own save's.
+    const keyed=(extra={})=>ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')],...extra});
+    settingsNow=keyed();
+    const stored=[];const setItem=ctx.localStorage.setItem;ctx.localStorage.setItem=(k,v)=>{stored.push(`${k}=${v}`);};
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    const lineKey=()=>simple('key:alpha');
+    const entryKey=selector=>more('ai').querySelectorAll('.provider-entry').find(n=>n.dataset.selector===selector)
+      ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
+    const buttonBy=input=>input.parentElement.querySelectorAll('button')[0];
+    const exactValue=()=>more('privacy').querySelectorAll('input').find(n=>n.type==='password');
+    const hashButton=()=>more('privacy').querySelectorAll('button').find(n=>text(n)===ctx.tier.text('redaction_hash_add','en'));
+    const secrets=['made-up-line-key-0001','made-up-entry-key-0002','made-up-exact-value-0003'];
+    typeIn(lineKey(),secrets[0]);typeIn(entryKey('config:1'),secrets[1]);typeIn(exactValue(),secrets[2]);
+    givePrivacy(json(privacy));await settled();
+    const kept=()=>[lineKey().value,entryKey('config:1').value,exactValue().value];
+    assert.deepEqual(kept(),secrets,'kept through the read\'s answer');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(keyed({version:'v2',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.length,kept()],[1,secrets],'kept through a save\'s answer, which drew the page again');
+    assert.deepEqual([buttonBy(lineKey()).disabled,buttonBy(entryKey('config:1')).disabled,hashButton().disabled],[false,false,false],
+      'their buttons enabled');
+    const seen=JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n');
+    assert(secrets.every(s=>!seen.includes(s)),'in no form, storage or request');
+    // An entry whose address changed (edited elsewhere) gets nothing back; the others keep theirs.
+    [privacyAnswer,givePrivacy]=later();
+    const readdressed=keyed({version:'v2b',inject:sized(4050)});
+    readdressed.providers[1]={...readdressed.providers[1],saved:{...readdressed.providers[1].saved,base_url:'http://127.0.0.1:9/elsewhere'}};
+    answers=[json(readdressed)];
+    typeIn(general('inject.session_start_chars'),'4050');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual(kept(),[secrets[0],'',secrets[2]],'nothing put into an entry whose address changed');
+    // An entry whose place now holds another entry, or whose address changed, gets nothing back:
+    // a key never goes where it was not typed for.
+    typeIn(entryKey('config:0'),'made-up-entry-key-0004');
+    [privacyAnswer,givePrivacy]=later();
+    const moved=keyed({version:'v3',inject:sized(4000)});
+    moved.providers=[{...moved.providers[1],selector:{source:'config',index:0}},{...moved.providers[0],selector:{source:'config',index:1},
+      saved:{...moved.providers[0].saved,base_url:'http://127.0.0.1:9/other'}}];
+    answers=[json(moved)];
+    typeIn(general('inject.session_start_chars'),'4100');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([lineKey().value,entryKey('config:0').value,entryKey('config:1').value],['','',''],
+      'nothing put into a field whose entry moved, changed its address or is another');
+    assert.equal(exactValue().value,secrets[2],'the exact value, which goes nowhere, stays');
+    // Its own save sends it, and nothing is kept once it is sent.
+    typeIn(lineKey(),secrets[0]);
+    answers=[json({...keyed({version:'v4',inject:sized(4100)}),key_saved:{durable:true}})];
+    buttonBy(lineKey()).click();await settled();
+    assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).key],['/api/providers/key',secrets[0]],'its own save sends it');
+    assert.equal(lineKey()?.value??'','','and the field is empty after');
+    // Search's Workers AI key and the judge's keep theirs too; the judge's goes with its destination:
+    // another destination chosen, its field is empty.
+    const judged={...judge,destinations:[...judge.destinations,{id:'d1',key:'missing',usd_per_mtok_in:0.01,local:false}]};
+    settingsNow=keyed({judge:judged});
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    const others=['made-up-workers-key-0005','made-up-judge-key-0006'];
+    typeIn(general('embedding.key'),others[0]);typeIn(general('judge.key'),others[1]);
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(keyed({judge:judged,version:'v5',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.length,general('embedding.key').value,general('judge.key').value],[1,...others],'search\'s and the judge\'s keys are kept');
+    const to=general('judge.destination');to.value='d1';for(const cb of to.listeners.change)cb({target:to});await settled();
+    assert.deepEqual([general('judge.key').value,general('embedding.key').value],['',others[0]],
+      'a judge key typed for one destination is not put into another\'s field');
+    assert(others.every(s=>!(JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')).includes(s)),'in no form, storage or request');
+    ctx.localStorage.setItem=setItem;
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;

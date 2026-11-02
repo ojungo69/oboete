@@ -3489,6 +3489,7 @@ function redactionSection(f) {
   hash.type = 'button';
   hash.disabled = true;
   exact.addEventListener('input', () => { hash.disabled = !exact.value; });
+  keepSecret(exact, 'redaction.exact', () => { hash.disabled = !exact.value; });
   exact.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!hash.disabled) hash.click(); }
   });
@@ -4574,6 +4575,15 @@ function judgeTest(j) {
   return el('div', 'judge-test', button, note(t('judge_test_desc')));
 }
 
+// #807: a secret being typed is kept only in its field and sent only by its own save. The page
+// drawn again puts it back into the field drawn for the same target (`drawSettings`), never into
+// `form`, storage or another request; a field whose target changed gets nothing. `sync` sets the
+// field's button as typing would.
+function keepSecret(i, target, sync) {
+  i.dataset.secret = target;
+  i.secretSync = sync;
+}
+
 // As a provider's key field: the token is only in the field and the one request that carries it.
 // `more` adds to the body what the route takes beside the key (the judge's destination).
 function keyField(route, field, label, more = () => ({})) {
@@ -4589,6 +4599,9 @@ function keyField(route, field, label, more = () => ({})) {
   save.type = 'button';
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
+  // Named by where its save sends it: the judge's destination too (a key typed for one is never put
+  // into another's field); not Cloudflare's account, typed beside it.
+  keepSecret(i, JSON.stringify([route, field, more().destination ?? null]), () => { save.disabled = !i.value; });
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
@@ -5728,6 +5741,9 @@ function providerKeyField(provider, simple = false) {
   save.dataset.simpleFocus = `key-save:${id}`;
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
+  // Named by where its save sends it: the entry's place, name, kind and address.
+  keepSecret(i, JSON.stringify([simple ? 'line' : 'entry', selectorKey(provider.selector), provider.name,
+    provider.saved?.kind ?? null, provider.saved?.base_url ?? null]), () => { save.disabled = !i.value; });
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
@@ -6941,6 +6957,9 @@ function myWorkEstimate(estimate) {
 
 function drawSettings() {
   const keep = focusKeep();
+  // The secrets being typed, by their target, for the fields drawn again (#807).
+  const typed = new Map([...$('panel').querySelectorAll('input')].filter((i) => i.dataset.secret && i.value)
+    .map((i) => [i.dataset.secret, i.value]));
   if (document.activeElement && document.activeElement !== document.body
     && !document.activeElement.closest('.embedding-choice')) embeddingDraft.focus = null;
   const pick = el('select', null, ...LANGS.map((l) => {
@@ -7160,6 +7179,12 @@ function drawSettings() {
         el('p', 'desc', t('backup_desc'))), save)),
     settingsGroup('maintenance', false, viewSection(f), hiddenSection(f), doctorSection(), maintenanceSection(f))]));
   drawIn(panel);
+  // Before the focus, which takes the caret after the value.
+  for (const i of panel.querySelectorAll('input')) {
+    if (!i.dataset.secret || !typed.has(i.dataset.secret)) continue;
+    i.value = typed.get(i.dataset.secret);
+    i.secretSync();
+  }
   focusBack(keep);
 }
 
