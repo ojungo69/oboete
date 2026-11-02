@@ -602,21 +602,6 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .settings > form > .warnings { margin: 16px 0 0; padding: 14px 18px; background: var(--yellow-bg); border: 0; border-radius: var(--radius-l); }
 .settings > form > .warnings ul { color: var(--text); }
 
-/* Save settings stays reachable while the form is on screen. */
-.save-bar {
-  position: sticky;
-  bottom: 12px;
-  z-index: 5;
-  display: flex;
-  justify-content: flex-end;
-  margin: 20px 0 28px;
-  padding: 10px 12px;
-  background: var(--surface);
-  border-radius: var(--radius-l);
-  box-shadow: var(--shadow-m);
-}
-.save-bar .save { min-width: 10rem; }
-
 /* A provider in the detailed view: a row between rules, its editor below. */
 .provider-entry {
   margin: 0;

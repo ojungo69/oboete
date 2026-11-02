@@ -603,7 +603,7 @@ const settings=(mode,extra={})=>({version:'v1',first_run:false,resident_supporte
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
     idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],retention_days:[1,36500],my_work_calls:[1,10000]},
   my_work:{curate:false,calls_a_day:100,estimate:null},view_runtime:{port:17373,mode},...extra});
-vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft};',ctx);
+vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft,providerOperation};',ctx);
 const {w6}=ctx;
 const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
 const posted=[];let answers=[];
@@ -654,7 +654,8 @@ ctx.location.port='17373';
 f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
 f.view.port='17400';
 answers=[json({code:'port_unavailable',field:'view.port'},409)];
-for(const cb of panel.querySelector('form').listeners.submit||[])cb({preventDefault(){}});
+// Decision 69: the port moves the page, so it saves with its own button.
+panel.querySelectorAll('button').find(node=>node.dataset.action==='port.move').click();
 await settle();
 assert(document.getElementById('status').textContent.includes('This port cannot be used'),'the refusal is shown, not a stale save');
 assert.equal(f.view.port,'17400','the port typed is kept');
@@ -731,6 +732,396 @@ ctx.ui.setLang('ja');ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(text(panel).includes('元の記録を残す期間')&&text(panel).includes('保存済み: 30 日'),'Japanese retention section');
 ctx.ui.setLang('en');
 console.log('PASS: the retention period');
+// Decision 69 (69b-1): the detailed page saves each change at once, with no Save bar. Nothing
+// unchanged is sent; an invalid value is marked and not sent; the port keeps its button; no
+// monthly cap, masking off and a saved masking rule removed wait for their confirmation; a new
+// masking rule waits until it has its id and pattern, and survives the saves meanwhile.
+{
+  const formEl=()=>panel.querySelector('form');
+  const fire=(name,ev)=>{for(const cb of formEl().listeners[name]||[])cb(ev);};
+  const sent=()=>posted.map(p=>JSON.parse(p.body));
+  const any=name=>panel.querySelectorAll('input, textarea').find(node=>node.dataset.field===name);
+  const action=name=>[...panel.querySelectorAll('button'),...document.getElementById('status').querySelectorAll('button')].filter(n=>n.dataset.action===name).at(-1);
+  // Leaving a field moves the focus where it went, as the browser does.
+  const leave=(node,next=null)=>{fire('change',{target:node});fire('focusout',{target:node,relatedTarget:next});if(next)next.focus();else document.activeElement=null;};
+  // markInvalid reads the document's controls: here, the page's.
+  const pageControls=document.querySelectorAll;document.querySelectorAll=sel=>panel.querySelectorAll(sel);
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  assert(!panel.querySelector('.save-bar'),'no Save bar');
+  answers=[json(settings('resident',{version:'v2',worker:{resident:false}}))];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(posted.length,1,'a switch saves when it changes');
+  assert.equal(sent()[0].worker.resident,false);assert.equal(sent()[0].view,undefined,'and sends no port');
+  fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(posted.length,1,'an unchanged form sends nothing');
+  const inject={...settings('resident').inject,session_start_chars:5000};
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},inject}))];
+  typeIn(field('inject.session_start_chars'),'5000');fire('change',{target:field('inject.session_start_chars')});
+  assert.equal(posted.length,1,'a number is not sent while focus is still on it');
+  fire('focusout',{target:field('inject.session_start_chars'),relatedTarget:field('inject.per_prompt_chars')});field('inject.per_prompt_chars').focus();await settle();
+  assert.equal(posted.length,2,'it is sent when left');assert.equal(sent()[1].inject.session_start_chars,5000);
+  assert.equal(document.activeElement?.dataset.field,'inject.per_prompt_chars','the focus goes back where it went');
+  // A later redraw (privacy read again after the save) keeps it there.
+  const before=document.activeElement;ctx.ui.drawSettings();
+  assert(document.activeElement!==before&&document.activeElement===field('inject.per_prompt_chars'),'a redraw keeps the focus on its field');
+  // Typing goes on while a save is on its way: the page stays usable, and what was typed then
+  // survives the save's answer and is saved when its field is left.
+  let answer;answers=[new Promise(resolve=>{answer=resolve;})];
+  typeIn(field('inject.session_start_chars'),'4500');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));
+  assert.equal(panel.querySelector('.settings').inert,false,'the page is not frozen by a save on its way');
+  typeIn(field('inject.per_prompt_chars'),'1200');
+  answer(json(settings('resident',{version:'v4',worker:{resident:false},inject:{...inject,session_start_chars:4500}})));await settle();await settle();
+  assert.equal(field('inject.per_prompt_chars').value,'1200','what was typed during the save stays');
+  assert.equal(field('inject.session_start_chars').value,'4500','the saved value shows');
+  answers=[json(settings('resident',{version:'v5',worker:{resident:false},inject:{...inject,session_start_chars:4500,per_prompt_chars:1200}}))];
+  leave(field('inject.per_prompt_chars'));await settle();
+  assert.equal(sent().at(-1).inject.per_prompt_chars,1200,'and is saved when left');
+  assert.equal(sent().at(-1).version,'v4','with the version the save answered');
+  typeIn(field('inject.session_start_chars'),'99999');leave(field('inject.session_start_chars'));await settle();
+  assert.equal(posted.length,4,'an out-of-range number is not sent');
+  assert.equal(field('inject.session_start_chars').attrs['aria-invalid'],'true','it is marked');
+  assert(document.getElementById('status').textContent.includes('out of range'),'and said');
+  // The port: leaving it sends nothing; its button saves it.
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('view.port'),'17400');leave(field('view.port'));await settle();
+  assert.equal(posted.length,0,'a port typed is not saved by leaving it');
+  answers=[json({code:'port_unavailable',field:'view.port'},409)];
+  action('port.move').click();await settle();
+  assert.equal(sent()[0].view.port,17400,'its button saves it');
+  // No monthly cap: asked first, saved once confirmed.
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const noCap=panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
+  tick(noCap,true);fire('change',{target:noCap});await settle();
+  assert.equal(posted.length,0,'no cap is not saved at once');
+  assert(document.getElementById('status').textContent.includes('does not stop paid calls'),'its warning asks first');
+  answers=[json(settings('resident',{version:'v2',paid_usd_per_month:null}))];
+  action('held.confirm').focus();action('held.confirm').click();await settle();
+  assert.equal(posted.length,1);assert.equal(sent()[0].paid_usd_per_month,null,'confirmed, it is saved');
+  assert.equal(document.activeElement?.dataset.field,'paid_usd_per_month.no_cap','the focus goes back to the switch confirmed');
+  // Masking off: asked first; Cancel goes back to what is saved.
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  tick(field('redaction.enabled'),false);fire('change',{target:field('redaction.enabled')});await settle();
+  assert.equal(posted.length,0,'masking off is not saved at once');
+  action('held.cancel').click();
+  assert.equal(field('redaction.enabled').checked,true,'cancelled, masking stays on');
+  // A new masking rule waits until it has its id and pattern, and survives a save meanwhile.
+  const rule={id:'acme-token',regex:'acme_[a-z0-9]{8}',keywords:[],entropy:null,secret_group:null};
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const add=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  add.click();fire('click',{target:add});await settle();
+  assert.equal(posted.length,0,'an empty new rule sends nothing');
+  typeIn(any('redaction.extra_rules.1.id'),'beta-key');leave(any('redaction.extra_rules.1.id'));await settle();
+  assert.equal(posted.length,0,'half a rule sends nothing, and no error');
+  answers=[json(settings('resident',{version:'v2',worker:{resident:false},redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}))];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(sent()[0].redaction.extra_rules.length,1,'another change saves without the unfinished rule');
+  assert.equal(any('redaction.extra_rules.1.id')?.value,'beta-key','which stays to be finished');
+  const beta={id:'beta-key',regex:'beta_[0-9]+',keywords:[],entropy:null,secret_group:null};
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},redaction:{enabled:true,extra_rules:[rule,beta],allowlist:[]}}))];
+  typeIn(any('redaction.extra_rules.1.regex'),'beta_[0-9]+');leave(any('redaction.extra_rules.1.regex'));await settle();
+  assert.deepEqual(sent()[1].redaction.extra_rules.map(r=>r.id),['acme-token','beta-key'],'finished, it is sent');
+  // A saved rule removed is asked first; an emptied saved rule is refused, never dropped.
+  posted.length=0;
+  typeIn(any('redaction.extra_rules.0.id'),'');leave(any('redaction.extra_rules.0.id'));await settle();
+  assert.equal(posted.length,0,'an emptied saved rule is not sent');
+  assert.equal(any('redaction.extra_rules.0.id').attrs['aria-invalid'],'true','it is marked');
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const remove=panel.querySelectorAll('button').find(n=>text(n)==='Remove this rule');
+  remove.click();fire('click',{target:remove});await settle();
+  assert.equal(posted.length,0,'a saved rule removed waits');
+  assert(document.getElementById('status').textContent.includes('acme-token'),'it names the rule');
+  answers=[json(settings('resident',{version:'v2',redaction:{enabled:true,extra_rules:[],allowlist:[]}}))];
+  action('held.confirm').click();await settle();
+  assert.equal(sent()[0].redaction.extra_rules.length,0,'confirmed, it is removed');
+  // Round 1 of #802. Saves go one at a time: a change made while one is on its way is sent after
+  // its answer, with that answer's version (Codex, cubic and CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let first;answers=[new Promise(resolve=>{first=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  tick(field('summary.curate'),true);fire('change',{target:field('summary.curate')});await settle();
+  assert.equal(posted.length,1,'a change made while a save is on its way waits for its answer');
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},summary:{...settings('resident').summary,curate:true}}))];
+  first(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,2,'and is sent after it');
+  assert.equal(sent()[1].version,'v2','with the version that answer gave');
+  assert.equal(sent()[1].summary.curate,true);assert.equal(sent()[1].worker.resident,false);
+  // A confirm left in the status line waits behind a save on its way as well (round 1's review).
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const noCapAgain=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
+  tick(noCapAgain(),true);fire('change',{target:noCapAgain()});await settle();
+  const staleConfirm=action('held.confirm');
+  tick(noCapAgain(),false);fire('change',{target:noCapAgain()});await settle();
+  let held;answers=[new Promise(resolve=>{held=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(posted.length,1);
+  staleConfirm.click();await settle();
+  assert.equal(posted.length,1,'a confirm clicked while a save is on its way sends nothing beside it');
+  held(json(settings('resident',{version:'v2',paid_usd_per_month:5,worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,1,'and after its answer, nothing is left to send');
+  // A port typed and not yet moved to stays typed through another change's save (Codex, cubic).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('view.port'),'17400');leave(field('view.port'));
+  answers=[json(settings('resident',{version:'v2',worker:{resident:false}}))];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(sent()[0].view,undefined,'another change sends no port');
+  assert.equal(field('view.port').value,'17400','and the port typed stays');
+  // The port's button asks first for what waits for a confirmation, as any save does (Codex, cubic
+  // and CodeRabbit), and every change waiting is said and confirmed together (CodeRabbit).
+  const capOff=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5,redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  tick(capOff(),true);fire('change',{target:capOff()});await settle();
+  tick(field('redaction.enabled'),false);fire('change',{target:field('redaction.enabled')});await settle();
+  typeIn(field('view.port'),'17400');
+  action('port.move').click();await settle();
+  assert.equal(posted.length,0,'the port button does not pass a change waiting for its confirmation');
+  const asked=document.getElementById('status').textContent;
+  assert(asked.includes('does not stop paid calls')&&asked.includes('With masking off'),'both changes waiting are said');
+  assert.equal(text(action('held.confirm')),'Confirm and save','and confirmed together');
+  answers=[json({code:'port_unavailable',field:'view.port'},409)];
+  action('held.confirm').click();await settle();
+  assert.equal(posted.length,1);
+  assert.equal(sent()[0].view.port,17400);assert.equal(sent()[0].paid_usd_per_month,null);
+  assert.equal(sent()[0].redaction.enabled,false,'confirmed, all are sent');
+  // The port's button keeps an unfinished new masking rule through its answer, as the other saves
+  // do (cubic).
+  f=w6.formOf(settings('foreground',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const addDraft=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  addDraft.click();fire('click',{target:addDraft});await settle();
+  typeIn(any('redaction.extra_rules.0.id'),'delta-key');leave(any('redaction.extra_rules.0.id'));await settle();
+  typeIn(field('view.port'),'17400');
+  answers=[json(settings('foreground',{version:'v2',view:{port:17400},view_runtime:{port:4323,mode:'foreground'},redaction:{enabled:true,extra_rules:[],allowlist:[]}}))];
+  action('port.move').click();await settle();await settle();
+  assert.equal(posted.length,1);assert.equal(sent()[0].view.port,17400);
+  assert.equal(any('redaction.extra_rules.0.id')?.value,'delta-key','an unfinished rule survives the port\'s save');
+  // A new rule saved while something else was typed is a saved rule from then on: emptied, it is
+  // refused, never dropped (cubic).
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const addRule=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  addRule.click();fire('click',{target:addRule});await settle();
+  typeIn(any('redaction.extra_rules.0.id'),'gamma-key');leave(any('redaction.extra_rules.0.id'));
+  let ruleAnswer;answers=[new Promise(resolve=>{ruleAnswer=resolve;})];
+  typeIn(any('redaction.extra_rules.0.regex'),'gamma_[0-9]+');leave(any('redaction.extra_rules.0.regex'));
+  assert.equal(posted.length,1,'finished, the rule is sent');
+  typeIn(field('inject.session_start_chars'),'4000');
+  const gamma={id:'gamma-key',regex:'gamma_[0-9]+',keywords:[],entropy:null,secret_group:null};
+  ruleAnswer(json(settings('resident',{version:'v2',redaction:{enabled:true,extra_rules:[gamma],allowlist:[]}})));await settle();await settle();
+  assert.equal(field('inject.session_start_chars').value,'4000','what was typed meanwhile stays');
+  typeIn(any('redaction.extra_rules.0.id'),'');leave(any('redaction.extra_rules.0.id'));await settle();
+  assert.equal(posted.length,1,'the saved rule emptied is not sent');
+  assert.equal(any('redaction.extra_rules.0.id').attrs['aria-invalid'],'true','it is refused as a saved rule');
+  // A field in a fold the save's redraw closes gets the focus by opening the fold (CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;document.activeElement=null;
+  answers=[json(settings('resident',{version:'v2',summary:{...settings('resident').summary,window_tokens:7000}}))];
+  typeIn(field('summary.window_tokens'),'7000');leave(field('summary.window_tokens'),field('summary.idle_minutes'));await settle();
+  assert.equal(posted.length,1);
+  assert.equal(document.activeElement,field('summary.idle_minutes'),'the focus goes to the field it went to');
+  assert.equal(field('summary.idle_minutes').parentElement.closest('details').open,true,'its fold opened');
+  // Enter saves a field; on a link or a button it keeps its own meaning (CodeRabbit).
+  let stopped=false;
+  fire('keydown',{key:'Enter',target:document.createElement('a'),preventDefault(){stopped=true;}});
+  assert.equal(stopped,false,'Enter on a link is left alone');
+  fire('keydown',{key:'Enter',target:field('inject.session_start_chars'),preventDefault(){stopped=true;}});
+  assert.equal(stopped,true,'Enter in a field is the field\'s');
+  // The guide points at no Save button: there is none (Codex).
+  assert.equal(panel.querySelectorAll('button').filter(n=>!n.hidden&&text(n)==='Save settings').length,0,'nothing points at a Save button');
+  // A hash is saved once it is made: the click's own save comes before it (Codex and cubic).
+  ctx.crypto.subtle=globalThis.crypto.subtle;
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const exact=panel.querySelectorAll('input').find(n=>n.type==='password');
+  const hashButton=panel.querySelectorAll('button').find(n=>text(n)==='Add its hash');
+  typeIn(exact,'a made-up secret');
+  answers=[json(settings('resident',{version:'v2'}))];
+  hashButton.click();fire('click',{target:hashButton});
+  for(let i=0;i<50&&!posted.length;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(posted.length,1,'the hash made is saved');
+  const made=(await globalThis.crypto.subtle.digest('SHA-256',new TextEncoder().encode('a made-up secret')));
+  assert.deepEqual(sent()[0].redaction.allowlist,[Buffer.from(made).toString('hex')],'with the hash of what was typed');
+  delete ctx.crypto.subtle;await settle();
+  // Round 2 of #802. A value sent only when it changed is compared with what the last answer
+  // saved: a period saved while another field was typed goes back to forever (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  tick(field('retention.forever'),false);fire('change',{target:field('retention.forever')});await settle();
+  assert.equal(posted.length,0,'a period not yet typed is not sent');
+  let periodAnswer;answers=[new Promise(resolve=>{periodAnswer=resolve;})];
+  typeIn(field('retention.days'),'30');leave(field('retention.days'),field('inject.session_start_chars'));
+  assert.deepEqual(sent()[0].retention,{days:30});
+  typeIn(field('inject.session_start_chars'),'4000');
+  periodAnswer(json(settings('resident',{version:'v2',retention:{days:30}})));await settle();await settle();
+  answers=[json(settings('resident',{version:'v3',inject:{...settings('resident').inject,session_start_chars:4000}}))];
+  tick(field('retention.forever'),true);fire('change',{target:field('retention.forever')});await settle();
+  assert.deepEqual(sent().at(-1).retention,{days:null},'forever again is sent');
+  // ...and a backup folder saved so goes back to the default when emptied (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let folderAnswer;answers=[new Promise(resolve=>{folderAnswer=resolve;})];
+  typeIn(field('backup.dir'),'/srv/made-up-backups');leave(field('backup.dir'),field('inject.session_start_chars'));
+  assert.deepEqual(sent()[0].backup,{dir:'/srv/made-up-backups'});
+  typeIn(field('inject.session_start_chars'),'4000');
+  folderAnswer(json(settings('resident',{version:'v2',backup:{dir:'/srv/made-up-backups'}})));await settle();await settle();
+  answers=[json(settings('resident',{version:'v3',inject:{...settings('resident').inject,session_start_chars:4000}}))];
+  typeIn(field('backup.dir'),'');leave(field('backup.dir'));await settle();
+  assert.deepEqual(sent().at(-1).backup,{dir:null},'emptied, the folder goes back to the default');
+  // ...and the judge's destination chosen back after one saved so is sent (Codex).
+  const judgeDests=[['jev',0.042],['clef',0.24]].map(([id,usd])=>({id,key:'ok',usd_per_mtok_in:usd,local:false}));
+  const judgeAt=destination=>({set:true,enabled:true,destination,destinations:judgeDests,key:'ok',key_file:'/home/made-up/.local/share/oboete/keys/k1',
+    cloudflare_account_id:null,daily_budget:300,calls_today:0,usd_this_month:0});
+  const to=()=>panel.querySelectorAll('select').find(n=>n.dataset.field==='judge.destination');
+  const choose=v=>{to().value=v;for(const cb of to().listeners.change||[])cb({target:to()});fire('change',{target:to()});};
+  f=w6.formOf(settings('resident',{judge:judgeAt('jev')}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let toAnswer;answers=[new Promise(resolve=>{toAnswer=resolve;})];
+  choose('clef');
+  assert.equal(sent()[0].judge.destination,'clef');
+  typeIn(field('inject.session_start_chars'),'4000');
+  toAnswer(json(settings('resident',{version:'v2',judge:judgeAt('clef')})));await settle();await settle();
+  answers=[json(settings('resident',{version:'v3',judge:judgeAt('jev')}))];
+  choose('jev');await settle();
+  assert.equal(sent().at(-1).judge?.destination,'jev','the destination chosen back is sent');
+  // ...and search's Cloudflare account typed back after another saved so is sent (Codex).
+  const searchAt=account=>({provider:'none',workers_ai:{account_id:account,key_file:'/home/made-up/CF_WORKERS_AI_KEY.md',key:'missing',
+    daily_requests:200,monthly_usd:1,usd_this_month:0,requests_today:0},local:{unavailable:null,files:'not_downloaded',dir:'/home/made-up/.oboete/models/bge-m3',held:0}});
+  const [first32,second32]=['a','b'].map(c=>c.repeat(32));
+  const searchRanges={...settings('resident').ranges,daily_requests:[1,1000000]};
+  f=w6.formOf(settings('resident',{embedding:searchAt(first32),ranges:searchRanges}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let accountAnswer;answers=[new Promise(resolve=>{accountAnswer=resolve;})];
+  typeIn(field('embedding.account_id'),second32);leave(field('embedding.account_id'),field('inject.session_start_chars'));
+  assert.equal(sent()[0].embedding.account_id,second32);
+  typeIn(field('inject.session_start_chars'),'4000');
+  accountAnswer(json(settings('resident',{version:'v2',embedding:searchAt(second32),ranges:searchRanges})));await settle();await settle();
+  answers=[json(settings('resident',{version:'v3',embedding:searchAt(first32),ranges:searchRanges}))];
+  typeIn(field('embedding.account_id'),first32);leave(field('embedding.account_id'));await settle();
+  assert.equal(sent().at(-1).embedding?.account_id,first32,'the account typed back is sent');
+  // A masking rule added and typed while a save is on its way stays (Codex), as do a place not yet
+  // added to those never recorded and the guide's phrase (CodeRabbit).
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let ruleLater;answers=[new Promise(resolve=>{ruleLater=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const addLater=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  addLater.click();fire('click',{target:addLater});
+  typeIn(any('redaction.extra_rules.0.id'),'epsilon-key');
+  Object.assign(f,{neverFolder:'/home/made-up/private',neverPattern:'made-up-*',testPhrase:'a made-up phrase'});
+  ruleLater(json(settings('resident',{version:'v2',worker:{resident:false},redaction:{enabled:true,extra_rules:[],allowlist:[]}})));await settle();await settle();
+  assert.notEqual(ctx.ui.getForm(),f,'the answer is the form now');
+  assert.equal(any('redaction.extra_rules.0.id')?.value,'epsilon-key','the rule added during the save stays');
+  const kept=ctx.ui.getForm();
+  assert.deepEqual([kept.neverFolder,kept.neverPattern,kept.testPhrase],['/home/made-up/private','made-up-*','a made-up phrase'],'and what no body carries');
+  assert.equal(posted.length,1,'and nothing more is sent for them');
+  // The focus moved on while a save was on its way stays where it was moved (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let moveAnswer;answers=[new Promise(resolve=>{moveAnswer=resolve;})];
+  typeIn(field('inject.session_start_chars'),'5000');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));
+  field('inject.correction_chars').focus();
+  moveAnswer(json(settings('resident',{version:'v2',inject:{...settings('resident').inject,session_start_chars:5000}})));await settle();await settle();
+  assert.equal(document.activeElement?.dataset.field,'inject.correction_chars','the focus stays where the owner moved it');
+  // The texts point at no Save button (CodeRabbit).
+  for(const key of ['onboarding_desc','provider_entries_desc'])
+    assert(!ctx.tier.text(key,'en').includes('Save settings')&&!ctx.tier.text(key,'ja').includes('「設定を保存」'),`${key} names no Save button`);
+  ctx.ui.setLang('en');
+  // Enter in the port's field, with a change waiting for its confirmation, moves the port once
+  // confirmed: the form's own save after it does not take the confirmation's place (CodeRabbit).
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  tick(capOff(),true);fire('change',{target:capOff()});await settle();
+  typeIn(field('view.port'),'17400');
+  const enter={key:'Enter',target:field('view.port'),preventDefault(){}};
+  for(const cb of field('view.port').listeners.keydown||[])cb(enter);
+  fire('click',{target:action('port.move')});fire('keydown',enter);await settle();
+  assert.equal(posted.length,0);
+  // Going to the confirm leaves the port's field: that saves nothing, and its confirmation stays.
+  const portAsk=action('held.confirm');
+  leave(field('view.port'),portAsk);await settle();
+  assert.equal(posted.length,0);assert.equal(action('held.confirm'),portAsk,'the port\'s confirmation stays');
+  answers=[json({code:'port_unavailable',field:'view.port'},409)];
+  action('held.confirm').click();await settle();
+  assert.equal(sent().at(-1)?.view?.port,17400,'confirmed, the port is sent');
+  // The Enter that ends an input method's composition is the input method's (CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('backup.dir'),'/srv/バックアップ');
+  for(const composing of [{isComposing:true},{keyCode:229}]){
+    let taken=false;fire('keydown',{key:'Enter',target:field('backup.dir'),preventDefault(){taken=true;},...composing});
+    assert.equal(taken,false,'the composition\'s Enter is left alone');
+  }
+  await settle();
+  assert.equal(posted.length,0,'and saves nothing');
+  // Round 3 of #802. A field the answer of a save drew again while it was typed in is saved when
+  // left, with no change of its own after the redraw (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let redrawn;answers=[new Promise(resolve=>{redrawn=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  field('inject.per_prompt_chars').focus();typeIn(field('inject.per_prompt_chars'),'1200');fire('input',{target:field('inject.per_prompt_chars')});
+  redrawn(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(field('inject.per_prompt_chars').value,'1200','what was typed is drawn again');
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},inject:{...settings('resident').inject,per_prompt_chars:1200}}))];
+  fire('focusout',{target:field('inject.per_prompt_chars'),relatedTarget:null});await settle();
+  assert.equal(sent().at(-1).inject?.per_prompt_chars,1200,'left with no change after the redraw, it is saved');
+  // A provider's write waits for a save on its way and sends that answer's version; a change made
+  // while the write is on its way waits for it and is saved after it (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let saving;answers=[new Promise(resolve=>{saving=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const write=w6.providerOperation({op:'enabled',selector:{source:'config',name:'made-up'},enabled:false},action('port.move'));
+  await settle();
+  assert.equal(posted.length,1,'a provider write waits for the save on its way');
+  let writing;answers=[new Promise(resolve=>{writing=resolve;})];
+  saving(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,2);assert.equal(posted[1].url,'/api/providers');
+  assert.equal(JSON.parse(posted[1].body).version,'v2','and sends with the version that save gave');
+  tick(field('summary.curate'),true);fire('change',{target:field('summary.curate')});await settle();
+  assert.equal(posted.length,2,'a change made while the provider write is on its way waits for it');
+  answers=[json(settings('resident',{version:'v4',worker:{resident:false},summary:{...settings('resident').summary,curate:true}}))];
+  writing(json(settings('resident',{version:'v3',worker:{resident:false}})));await write;await settle();
+  assert.equal(posted.length,3);assert.equal(sent().at(-1).summary?.curate,true);
+  assert.equal(sent().at(-1).version,'v3','and is saved after it, with the version it gave');
+  // Round 4 of #802. Waiting for a save on its way, the provider write's control and the page wait
+  // too, so no other write is chosen meanwhile; the page the save drew again waits for the write
+  // (Codex, cubic and CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let waitSave;answers=[new Promise(resolve=>{waitSave=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const control=action('port.move');
+  const queued=w6.providerOperation({op:'enabled',selector:{source:'config',name:'made-up'},enabled:false},control);
+  await settle();
+  assert.equal(control.disabled,true,'the control waits disabled');
+  assert.equal(panel.querySelector('.settings').inert,true,'and the page with it');
+  let writeDone;answers=[new Promise(resolve=>{writeDone=resolve;})];
+  waitSave(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,2);
+  assert.equal(panel.querySelector('.settings').inert,true,'the page the save drew again waits for the write');
+  writeDone(json(settings('resident',{version:'v3',worker:{resident:false}})));await queued;await settle();
+  assert(!panel.querySelector('.settings').inert,'and is usable after it');
+  // A write that waited while the AI entries changed sends nothing, and says so (Codex and cubic).
+  const entry=(name,index)=>({name,selector:{source:'config',index},saved:{enabled:true,kind:'openai',base_url:'http://127.0.0.1:9/v1',
+    model:'made-up',key:'none',timeout_s:60,limits:{}},effective:{on:true,order:index,model:'made-up',timeout_s:60}});
+  const listed=(names,extra={})=>settings('resident',{providers:names.map((name,index)=>entry(name,index)),...extra});
+  f=w6.formOf(listed(['made-up-a','made-up-b']));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let reordered;answers=[new Promise(resolve=>{reordered=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const stale=w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:false},action('port.move'));
+  await settle();
+  reordered(json(listed(['made-up-b','made-up-a'],{version:'v2',worker:{resident:false}})));await stale;await settle();
+  assert.equal(posted.length,1,'a write that waited while the list changed is not sent');
+  assert(document.getElementById('status').textContent.includes('changed while this waited'),'and the page says so');
+  assert(!panel.querySelector('.settings').inert,'and is usable');
+  // ...nor one whose entries changed places with the same names, as a write moves an entry from
+  // the built-in list into the file.
+  const filed=(names,extra={})=>settings('resident',{providers:names.map((name,index)=>({...entry(name,index),selector:{source:'file',index}})),...extra});
+  f=w6.formOf(listed(['made-up-a','made-up-b']));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let replaced;answers=[new Promise(resolve=>{replaced=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const restaged=w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:false},action('port.move'));
+  await settle();
+  replaced(json(filed(['made-up-a','made-up-b'],{version:'v2',worker:{resident:false}})));await restaged;await settle();
+  assert.equal(posted.length,1,'nor one whose entries changed places');
+  // The port's Enter that ends an input method's composition moves nothing (CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('view.port'),'17400');
+  for(const composing of [{isComposing:true},{keyCode:229}]){
+    let taken=false;const ev={key:'Enter',target:field('view.port'),preventDefault(){taken=true;},...composing};
+    for(const cb of field('view.port').listeners.keydown||[])cb(ev);
+    assert.equal(taken,false,'the port\'s composition Enter is left alone');
+  }
+  await settle();
+  assert.equal(posted.length,0,'and moves nothing');
+  document.querySelectorAll=pageControls;
+  console.log('PASS: decision 69 (69b-1): each change saves at once, the port by its button, three changes asked first');
+}
 // Decision 51: the memory list switch, below the terminal line's, follows it and is sent.
 f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.equal(field('inject.session_start_list').checked,true,'the list is on by default');

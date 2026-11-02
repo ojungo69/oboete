@@ -224,7 +224,7 @@ The viewer is served by `src/view.rs` from three files compiled into the binary:
 
 Decision 65 (2026-10-31): the viewer's arrangement follows claude-mem's viewer and its colours are Notion's: a header across the window with the views as a segmented control, one centred column with a line under each list view's heading saying what it holds, every record a bordered card with its kind as a tag and its agent as a pill, settings in groups that fold between rules, a session's summary edged in gold and a prompt in purple; white and near-black grounds, warm greys and one blue for actions and focus, each made darker or lighter where WCAG AA needs it; no cream ground, no orange accent, no gradient and no tinted card. The font stack stays the system's. This file replaces `docs/viewer-design.md`. As built, "no gradient" means no gradient used as colour: a few shapes are painted with flat single-stop gradients because the page may load no image (see Shapes).
 
-The page is a tool kept open beside an agent's work, read often and changed rarely. It is dense but not cramped: one 48rem column (82rem on My Work), 15px text at 1.65, cards 16-20px apart. The interaction that defines it is inside the card: facts and narrative open in place, with no navigation. On the simple settings page each change saves at once; on the detailed page the general form saves with one Save, and adding, editing or removing an AI entry saves on its own.
+The page is a tool kept open beside an agent's work, read often and changed rarely. It is dense but not cramped: one 48rem column (82rem on My Work), 15px text at 1.65, cards 16-20px apart. The interaction that defines it is inside the card: facts and narrative open in place, with no navigation. Settings save each change at once (decision 69): a switch or a choice when it changes, a number or a text when it is left or on Enter. Adding, editing or removing an AI entry, a key and the page's port have buttons of their own, and no monthly cap, masking off and a saved masking rule removed wait for a confirmation in the status line.
 
 Depth is a 1px border, not a shadow and not a fill. In light mode the card and the page are both white, so the edge alone separates them. Shadows exist only on what floats over the page.
 
@@ -250,7 +250,7 @@ Where the values come from: the white and near-black grounds are Notion's. The g
 
 ### Neutral
 - **Ground** (light `#ffffff`, dark `#191919`): the page and the header.
-- **Surface** (light `#ffffff`, dark `#252525`): cards, the save bar, the dialog, a pressed segment. In light it equals the ground; the card's edge carries the separation.
+- **Surface** (light `#ffffff`, dark `#252525`): cards, the dialog, a pressed segment. In light it equals the ground; the card's edge carries the separation.
 - **Quiet Surface** (light `#f9f8f7`, dark `#202020`): the segmented control's track, facts/narrative toggles at rest, the narrative block, details, the context text, disabled fields, the callout behind the start guide.
 - **Hover** (light `#211b170d`, dark `#ffffff0e`): translucent, so it also shows on a raised surface. It is the only hover fill for quiet controls.
 - **Ink** (light `#2c2c2b`, dark `#f0efed`): text. 13.98:1 on white and 13.18:1 on the quiet surface; 15.3:1 on `#191919`, 13.34:1 on `#252525`.
@@ -330,11 +330,11 @@ The system is flat. Cards, tags, rows and groups carry no shadow; a 1px edge or 
 
 ### Shadow Vocabulary
 - **Raised segment** (`--shadow-s`, light `0 1px 3px #0000001f`, dark `0 1px 3px #00000059`, after a 1px Line ring: `0 0 0 1px var(--line), var(--shadow-s)`): the pressed segment of every segmented control (the header's views, Settings' and My Work's switches).
-- **Floating bar** (`--shadow-m`, light `0 8px 12px #19191907, 0 2px 6px #19191907, 0 0 0 1px #2a1c0012`; dark `0 0 0 1px #383836, 0 4px 12px -2px #00000040`): the sticky status line on Settings and on an error, the save bar, My Work's banner.
+- **Floating bar** (`--shadow-m`, light `0 8px 12px #19191907, 0 2px 6px #19191907, 0 0 0 1px #2a1c0012`; dark `0 0 0 1px #383836, 0 4px 12px -2px #00000040`): the sticky status line on Settings and on an error, My Work's banner.
 - **Overlay** (`--shadow-l`, light `0 20px 24px #1919190d, 0 5px 8px #19191907, 0 0 0 1px #2a1c0012`; dark `0 0 0 1px #383836, 0 14px 28px -6px #00000059, 0 2px 4px -1px #0000003d`): the welcome dialog and My Focus's menu.
 
 ### Layers
-The header 10; the sticky status line, the save bar, My Work's banner and My Focus's menu 5; the welcome 50. A My Focus chip inside a My Work card is raised to 1 so it sits above the card's stretched opener.
+The header 10; the sticky status line, My Work's banner and My Focus's menu 5; the welcome 50. A My Focus chip inside a My Work card is raised to 1 so it sits above the card's stretched opener.
 
 ### Named Rules
 **The Flat Card Rule.** A card is a border, never a shadow. If something needs to look raised, it is floating over scrolled content, or it is the pressed segment.
@@ -392,7 +392,7 @@ The heading (26px), a search's query words in the accent, then the lede in muted
 - **Group:** a `details` between 1px Line rules, no box. Its summary is a grid: title (15px 600) and description (13px muted) at the left, a chevron (7px, 1.5px muted borders) at the right that turns from down to up when open (150ms). Sections inside a group are separated by Line rules with 20px above.
 - **Start guide:** the one group shown as a callout: Quiet Surface, no rules, 8px radius, 0 20px padding.
 - **Smaller disclosures:** inline, 14px 500, a 6px chevron before the words.
-- **Save bar:** sticky 12px from the bottom, Surface, 8px radius, the floating-bar shadow, Save at the right with a 10rem minimum.
+- **No Save bar** (decision 69, 2026-11-02): each change saves at once; the status line says so, and asks there before a change that weakens a protection.
 - **Warnings** after the form: Gold Fill callout, 8px radius.
 
 ### Fields
