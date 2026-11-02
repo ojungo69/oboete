@@ -1853,6 +1853,14 @@ let gets=settingsGets;
 await w4.refreshEmbedding();await settle();
 assert.equal(settingsGets,gets+1,'a watched run that ended reads the settings again');
 assert(!w4.embeddingDraft().watch);
+// Read again after a download, More settings' files line says the files are ready (decision 69,
+// 69b-2: it is drawn with the page, outside the choice the run redraws).
+f=w4.formOf(settings());ctx.ui.setForm(f);ctx.ui.drawSettings();
+settingsAnswer=Promise.resolve(json(settings({embedding:embedding({provider:'local',local:{...embedding().local,files:'ready',held:2283937811}})})));
+w4.embeddingDraft().watch=true;runStatus={active:null,held:0,last:{choice:'local',phase:'done',code:null,held:0,get:2283937811}};
+await w4.refreshEmbedding();await settle();await settle();
+assert(text(section().querySelector('.embedding-settings')).includes('files are ready'),'the files line is drawn again with the settings read');
+settingsAnswer=null;runStatus={active:null,held:0,last:{choice:'workers-ai',phase:'done',code:null,held:0,get:0}};
 // That read fails: the run stays watched, and the next poll reads the settings again.
 w4.embeddingDraft().watch=true;settingsAnswer=Promise.resolve(json({},503));
 await w4.refreshEmbedding();await settle();
