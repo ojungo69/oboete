@@ -96,6 +96,7 @@ assert.equal(simple.status({...row,key:'missing',on:false},['groq']),'missing','
 assert.equal(simple.status({...row,key:'not-on-path'},['groq']),'not-installed');
 assert.equal(simple.status({...row,on:false},['groq']),'stopped','an owner stop retains its resume path');
 assert.equal(simple.status({...row,on:false},[],[]),'off');
+assert.equal(simple.status({...row,on:false},[],[{name:'groq',until:Date.now()+3600000}]),'off','an AI turned off says Off, whatever rest its name has (#817)');
 assert.equal(simple.status({...row,key:'unknown'},[],[]),'unknown','unknown installation is never ready');
 assert.equal(simple.status(row,null),'unknown','unreadable stops are never reported as ready');
 const preset={savedSettings:{chain:[{...row,key:'none'}]},providers:[{name:'groq',saved:{enabled:true,base_url:'https://api.groq.com/openai/v1'}}]};
@@ -2824,6 +2825,22 @@ console.log('PASS: the caps\' No cap switches');
       give(json(ai(['alpha'],{version:'v2',inject:{...base.inject,session_start:start.checked}})));await settled();
       assert.equal(document.activeElement,document.body,'the focus stays where the other view left it');
       ctx.ui.setView('settings');
+    }
+    // The poll starts the rests read without waiting for it: one that does not answer leaves the
+    // version read each round (#817).
+    {
+      let versions=0;
+      ctx.fetch=url=>{
+        if(url.startsWith('/api/version?')){versions++;return Promise.resolve(json({v:vm.runInContext('version',ctx),waiting:0,held:0}));}
+        if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+        return new Promise(()=>{});
+      };
+      f=draw(ai(['alpha']));
+      vm.runInContext('reposLoaded=true',ctx);
+      document.visibilityState='visible';
+      for(let round=0;round<2;round++){void vm.runInContext('poll()',ctx);await settled();}
+      delete document.visibilityState;
+      assert.equal(versions,2,'each round reads the version though the rests read does not answer');
     }
     document.activeElement=null;
   }

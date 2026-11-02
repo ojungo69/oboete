@@ -135,13 +135,16 @@ fn rest_lists(
             uncredited,
             ..Default::default()
         };
-        // A name config.toml no longer has (an entry removed or renamed) is not listed: the
-        // routes answer config.toml's names, past the stores' gate (Codex's review of 69b-3c-1b).
-        let named = providers.iter().any(|p| p.name() == name);
-        let holds = (providers.iter())
+        // Listed while config.toml has an entry of the name in use and the state holds every one:
+        // a name removed or renamed is not (the routes answer config.toml's names, past the
+        // stores' gate; Codex's review of 69b-3c-1b), nor one whose entries are all turned off
+        // (#817).
+        let mut enabled = (providers.iter())
             .filter(|p| p.name() == name && p.enabled())
-            .all(|p| crate::provider::rest_holds(&state, p));
-        if !named || !holds {
+            .peekable();
+        let holds = enabled.peek().is_some()
+            && enabled.all(|p| crate::provider::rest_holds(&state, p));
+        if !holds {
         } else if until == crate::providers_db::OWNER_HOLD {
             stopped.push(name);
         } else {
@@ -4260,6 +4263,15 @@ mod tests {
             ),
             json!({"stopped": [], "resting": []})
         );
+        // A name whose entries are all turned off is not in use: neither its rest nor its stop is
+        // listed (#817; cubic and CodeRabbit on #816).
+        for until in [later, hold] {
+            assert_eq!(
+                lists(&codex(false, false), &[("codex", until, false)]),
+                json!({"stopped": [], "resting": []}),
+                "{until}"
+            );
+        }
     }
 
     /// #800 item 3 (69b-3c): a name is capped while any of its entries stops at a calls a day, in

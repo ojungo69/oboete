@@ -6570,8 +6570,9 @@ function simpleProviderStatus(row, stopped, resting) {
   if (row.key === 'missing') return 'missing';
   if (row.key === 'not-on-path') return 'not-installed';
   if (Array.isArray(stopped) && stopped.includes(row.name)) return 'stopped';
-  if (Array.isArray(resting) && resting.some((rest) => rest.name === row.name)) return 'resting';
+  // An AI turned off is not used when its rest ends (#817).
   if (row.on === false) return 'off';
+  if (Array.isArray(resting) && resting.some((rest) => rest.name === row.name)) return 'resting';
   if (row.on !== true || !Array.isArray(stopped) || !Array.isArray(resting) || !['ok', 'none', 'on-path'].includes(row.key)) return 'unknown';
   return 'ready';
 }
@@ -9864,7 +9865,8 @@ function drawQueue() {
 
 async function pollMaintenance() {
   if(view==='settings' && form?.maintenance)await refreshMaintenance(form.maintenance);
-  if (view === 'settings' && form) await refreshRests();
+  // Started, not waited for: a read that does not answer stops no other read of the poll (#817).
+  if (view === 'settings' && form) void refreshRests();
   const d = embeddingDraft;
   if (view === 'settings' && form?.embedding && (d.busy || d.watch || d.status?.active)) await refreshEmbedding();
 }
