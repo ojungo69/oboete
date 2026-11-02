@@ -2368,6 +2368,31 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(one({},{version:'v2'}))];
     simple('model-remove:alpha').click();await settled();
     assert.equal(sent()[0].chain[0].model,null,'an any rule\'s model set for its name has the button too');
+    // Typed on after an Enter that changed nothing, another model's field stays open with its text.
+    f=draw(one({model:'pinned-model',effective_model:'pinned-model'}));
+    pickModel('__other');enterLine(typedModel());await settled();
+    typeIn(typedModel(),'pinned-model-2');ctx.ui.drawSettings();
+    assert.deepEqual([posted.length,typedModel()?.value],[0,'pinned-model-2'],'typed on after an Enter that changed nothing, it stays open');
+    // An AI the guide's Apply turns on or off in the form keeps that through a line's answer, its own
+    // line's included, and the general save after it sends it (Codex's review of 69b-3c-1a).
+    f=draw(lineAi([row('alpha'),row('beta')]));
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    for(const r of ctx.ui.getForm().chain)r.edit.on=false;
+    give(json(lineAi([row('alpha',{timeout_s:120,effective_timeout_s:120}),row('beta')],{version:'v2'})));await settled();
+    assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody(true).body.chain.map(r=>[r.name,r.on]))),[['alpha',false],['beta',false]],
+      'the AI turned off in the form stay off through a line\'s answer');
+    // A judge's key saved while a line's save is on its way waits for it, then sends with the version
+    // its answer gave.
+    f=draw(one({},{judge,key_input:true}));
+    [answer,give]=later();answers=[answer,json({...one({},{version:'v3',judge,key_input:true}),key_saved:{durable:true}})];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    const judgeKey=general('judge.key');
+    typeIn(judgeKey,'made-up-judge-key-0078');judgeKey.parentElement.querySelectorAll('button')[0].click();await settled();
+    assert.equal(posted.length,1,'the judge\'s key waits for the line\'s save on its way');
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2',judge,key_input:true})));await settled();
+    assert.deepEqual([posted.length,posted[1]?.url,JSON.parse(posted[1]?.body??'{}').version],[2,'/api/judge/key','v2'],
+      'then it is sent with the version the line\'s answer gave');
     vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
   }
   ctx.fetch=w6fetch;

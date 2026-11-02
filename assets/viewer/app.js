@@ -4609,7 +4609,30 @@ function keyField(route, field, label, more = () => ({}), { kept = false } = {})
   return el('div', 'key-input', i, save);
 }
 
+// One settings write at a time, as a provider's write: an AI line's field or a change saved at once
+// may be on its way, neither holding the page, and this then sends with the version its answer gave
+// (Codex's review of 69b-3c-1a).
 async function keySave(route, button, body) {
+  if (saveRun) {
+    button.disabled = true;
+    const waiting = $('panel').querySelector('.settings');
+    if (waiting) waiting.inert = true;
+    while (saveRun) await saveRun;
+    if (view !== 'settings' || !form) return;
+    body = { ...body, version: form.version };
+  }
+  let done;
+  saveRun = new Promise((resolve) => { done = resolve; });
+  try {
+    return await keyWrite(route, button, body);
+  } finally {
+    saveRun = null;
+    done();
+    saveNext();
+  }
+}
+
+async function keyWrite(route, button, body) {
   const mine = form;
   const fields = button.closest('.settings');
   button.disabled = true;
@@ -5504,8 +5527,11 @@ function preserveSettingsDrafts(next, mine) {
     Object.assign(next.judge, { budget: mine.judge.budget, noCap: mine.judge.noCap });
   }
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
-  // The chain rows are the answer's: no control edits them in the form (each AI line saves its own
-  // fields, 69b-3c), and a row carried from before would send its older values back.
+  // The chain rows are the answer's (each AI line saves its own fields, 69b-3c), but for an AI the
+  // guide's Apply turned on or off in the form (`applyOnboardingValues`), saved after this answer
+  // (Codex's review of 69b-3c-1a).
+  const turned = new Map(mine.chain.filter((r) => r.edit.on !== r.on).map((r) => [r.name, r.edit.on]));
+  for (const row of next.chain) if (turned.has(row.name)) row.edit = { ...row.edit, on: turned.get(row.name) };
 }
 
 function geminiInsertion(mine, action) {
@@ -6762,8 +6788,9 @@ function simpleProviderRow(f, row, index, chain, position) {
     select.setAttribute('aria-label', t('simple_model', { name: label }));
     let typed = null;
     if (typing) {
+      // Typed in, the field stays open, even after an Enter that changed nothing dropped its draft.
       const text = input('text', lineDrafts.get(modelKey).value, row.effective_model ?? '', `chain.${row.name}.model`,
-        (v) => lineType('model', row.name, v));
+        (v) => { lineType('model', row.name, v); lineDrafts.get(modelKey).open = true; });
       text.dataset.simpleFocus = `model-text:${row.name}`;
       text.setAttribute('aria-label', t('simple_model_typed_label', { name: label }));
       const ask = (again) => {
@@ -6879,7 +6906,8 @@ function lineAsk(control, field, name, value, saved, again = false) {
   }, (next, answer) => {
     const row = next.chain.find((entry) => entry.name === name);
     const fresh = answer.chain.find((entry) => entry.name === name);
-    if (row && fresh) row.edit = chainEditOf(fresh, answer.ranges);
+    // Its switch as the form has it: the guide's Apply may have turned it meanwhile.
+    if (row && fresh) row.edit = { ...chainEditOf(fresh, answer.ranges), on: row.edit.on };
     if (done()) lineDrafts.delete(key);
   }, { hold: false }).finally(() => {
     const left = (lineWaiting.get(key) ?? 1) - 1;
