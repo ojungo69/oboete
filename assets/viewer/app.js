@@ -5741,6 +5741,7 @@ async function providerWrite(action, button, body, path) {
     }
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
+    askHeldAgain();
     return true;
   } catch {
     if (currentSettings(mine)) {
@@ -6296,6 +6297,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
   let status = current ? 'stale' : simple ? 'simple_saved' : 'saved';
   if (moved) status = 'view_lost';
   setStatus(t(status), Boolean(current) || moved, lang);
+  askHeldAgain();
   if (form) void refreshPrivacy(form);
 }
 
@@ -7380,6 +7382,16 @@ async function commitSave(next, autosaved) {
   // back only when nothing on the page has it (Codex on #802).
   if (!$('panel').contains(document.activeElement)) focusBack(next ? { field: next } : null);
   saveNext();
+}
+
+// A change waiting for its confirmation outlives the other saves (decision 69, 69b-2): after any
+// answer it is worked out again from the drafts against what is saved now, and asked again.
+function askHeldAgain() {
+  if (!detailedShown()) return;
+  const at = saveBody(true);
+  if (!at.body || bodyKey(at.body) === form.savedKey) return;
+  const held = heldChange(form, at.body);
+  if (held.length) askHeld(held, () => void commitSave(null, true));
 }
 
 // Every change waiting for its confirmation, said together and confirmed together (CodeRabbit on
