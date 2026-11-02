@@ -5497,6 +5497,8 @@ function preserveSettingsDrafts(next, mine) {
   if (next.embedding && mine.embedding) next.embedding.edit = mine.embedding.edit;
   next.neverFolder = mine.neverFolder;
   next.neverPattern = mine.neverPattern;
+  // The guide's phrase too, as a simple save draws the page again (decision 69, 69b-2).
+  next.testPhrase = mine.testPhrase;
   // My Work's switch and bound as edited, with the estimate the answer brings (Codex on #671).
   if (next.my_work && mine.my_work) next.my_work = { ...next.my_work, curate: mine.my_work.curate, calls_a_day: mine.my_work.calls_a_day, noCap: mine.my_work.noCap };
   // The judge's switch as edited; one left as it was follows the answer (a key saved turns it on).
@@ -5597,6 +5599,12 @@ function mergeProviderSettings(answer, mine, action) {
   // is a change, and is saved next (Codex on #802).
   next.savedKey = savedKeyOf(next);
   if (action.op !== 'settings') preserveSettingsDrafts(next, mine);
+  // The simple page's inline confirmations stay open through an answer that is not theirs, and
+  // end once what is saved matches them (decision 69, 69b-2): masking saved off, no cap saved, a
+  // finite cap saved.
+  next.simpleMaskingOff = Boolean(mine.simpleMaskingOff) && answer.redaction?.enabled !== false;
+  next.simpleCapOff = Boolean(mine.simpleCapOff) && answer.paid_usd_per_month !== null;
+  next.simpleCapOn = Boolean(mine.simpleCapOn) && answer.paid_usd_per_month === null;
   next.privacy = mine.privacy;
   next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
