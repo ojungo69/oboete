@@ -6603,6 +6603,7 @@ function resumeButton(name) {
 // start, as the privacy reads are (69b-3a): only the last one started is drawn, and only when its
 // lists differ from the form's. A read that fails leaves every line's state not known.
 let restsAsked = 0;
+let restsPolled = null;
 async function refreshRests() {
   if (view !== 'settings' || !form) return;
   const asked = ++restsAsked;
@@ -6764,15 +6765,18 @@ function usdCents(v) {
 async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
   clearSimpleReceipt();
   const block = button.closest('.simple-block').dataset.simpleBlock;
+  // Only a save that holds the page while it waits for its turn releases that hold here: one that
+  // holds nothing takes no other write's focus with it (Codex's review of 69b-3c-1c).
+  const waitHeld = hold && Boolean(saveRun);
   if (saveRun) {
     const waiting = $('panel').querySelector('.settings');
-    if (hold) {
+    if (waitHeld) {
       button.disabled = true;
       holdSettings(waiting);
     }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { releaseSettings(null); return; }
+    if (view !== 'settings' || !form) { if (waitHeld) releaseSettings(null); return; }
     // The answer waited for drew the page again: the control as drawn now waits for this save, and
     // the page with it, as a provider's write does (#802).
     button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
@@ -6784,7 +6788,7 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
       timeout_s: row.timeout_s, model: row.model })) }));
   if (change(body, s) === false) {
     drawSettings();
-    releaseSettings(null);
+    if (waitHeld) releaseSettings(null);
     return;
   }
   let done;
@@ -9865,8 +9869,10 @@ function drawQueue() {
 
 async function pollMaintenance() {
   if(view==='settings' && form?.maintenance)await refreshMaintenance(form.maintenance);
-  // Started, not waited for: a read that does not answer stops no other read of the poll (#817).
-  if (view === 'settings' && form) void refreshRests();
+  // Started, not waited for, and one at a time: a read that does not answer stops no other read of
+  // the poll (#817), and one slower than the poll is not dropped for the next (Codex's review of
+  // 69b-3c-1c).
+  if (view === 'settings' && form && !restsPolled) restsPolled = refreshRests().finally(() => { restsPolled = null; });
   const d = embeddingDraft;
   if (view === 'settings' && form?.embedding && (d.busy || d.watch || d.status?.active)) await refreshEmbedding();
 }

@@ -2789,7 +2789,8 @@ console.log('PASS: the caps\' No cap switches');
     // Waiting for its turn behind an AI line's save, which holds nothing: a switch, a judge's key and an
     // AI line's key are held from the start, and the focus comes back once their own write is answered;
     // a key not sent because the settings were read meanwhile gives it to the key's field.
-    const lineDone=v=>json(ai(['alpha'],{version:v,key_input:true,judge,chain:[row('alpha',{timeout_s:120,effective_timeout_s:120,key:'missing'})]}));
+    const lineBody=v=>ai(['alpha'],{version:v,key_input:true,judge,chain:[row('alpha',{timeout_s:120,effective_timeout_s:120,key:'missing'})]});
+    const lineDone=v=>json(lineBody(v));
     for(const kind of ['switch','judge key','line key','key read again']){
       f=draw(ai(['alpha'],{key_input:true,judge,chain:[row('alpha',{key:'missing'})]}));
       const [lineAnswer,giveLine]=later();
@@ -2811,9 +2812,26 @@ console.log('PASS: the caps\' No cap switches');
         continue;
       }
       assert.deepEqual([posted.length,held()],[2,true],`${kind}: then sent, held`);
-      giveOwn(kind==='switch'?lineDone('v3'):json({...lineDone('v3'),key_saved:{durable:true}}));await settled();
+      giveOwn(kind==='switch'?lineDone('v3'):json({...lineBody('v3'),key_saved:{durable:true}}));await settled();
       const back={'switch':focused()==='inject.session_start','judge key':document.activeElement===general('judge.key'),'line key':focused()==='on:alpha'}[kind];
-      assert.deepEqual([held(),back],[false,true],`${kind}: answered, the focus is back`);
+      assert.deepEqual([held(),back,ctx.ui.getForm().version],[false,true,'v3'],`${kind}: answered, the focus is back`);
+      if(kind!=='switch')assert(status().startsWith('The key was registered'),`${kind}: saved, as its status says`);
+    }
+    // An AI line's field sent again unchanged while its first save is on its way, then a switch: the
+    // second ends with nothing to save and held nothing, so it takes none of the switch's focus
+    // (Codex's review of 69b-3c-1c).
+    {
+      f=draw(ai(['alpha'],{key_input:true,judge,chain:[row('alpha',{key:'missing'})]}));
+      const [lineAnswer,giveLine]=later();const [own,giveOwn]=later();answers=[lineAnswer,own];
+      const t=simple('timeout:alpha');typeIn(t,'120');
+      const enter=()=>{for(const cb of t.listeners.keydown||[])cb({key:'Enter',target:t,isComposing:false,keyCode:13,preventDefault(){}});};
+      enter();await settled();enter();await settled();
+      assert.equal(posted.length,1,'the second Enter waits for the first save');
+      const start=simple('inject.session_start');start.focus();flip(start,!start.checked);await settle();
+      giveLine(lineDone('v2'));await settled();
+      assert.deepEqual([posted.length,held()],[2,true],'the second has nothing to send; the switch is sent, held');
+      giveOwn(lineDone('v3'));await settled();
+      assert.deepEqual([held(),focused()],[false,'inject.session_start'],'answered, the focus is back on the switch');
     }
     // Another view opened while the save was on its way: its answer gives Settings' focus to nothing.
     {
@@ -2841,6 +2859,25 @@ console.log('PASS: the caps\' No cap switches');
       for(let round=0;round<2;round++){void vm.runInContext('poll()',ctx);await settled();}
       delete document.visibilityState;
       assert.equal(versions,2,'each round reads the version though the rests read does not answer');
+    }
+    // A rests read slower than the poll: no other starts while it is on its way, and its answer is
+    // drawn (Codex's review of 69b-3c-1c).
+    {
+      let rests=0,versions=0;const [slow,giveSlow]=later();
+      ctx.fetch=url=>{
+        if(url.startsWith('/api/version?')){versions++;return Promise.resolve(json({v:vm.runInContext('version',ctx),waiting:0,held:0}));}
+        if(url.startsWith('/api/rests?')){rests++;return slow;}
+        if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+        return new Promise(()=>{});
+      };
+      f=draw(ai(['alpha'],{stopped:[],resting:[]}));
+      vm.runInContext('restsPolled=null',ctx);
+      document.visibilityState='visible';
+      for(let round=0;round<2;round++){void vm.runInContext('poll()',ctx);await settled();}
+      assert.deepEqual([rests,versions],[1,2],'one rests read on its way across two rounds, the version read each');
+      giveSlow(json({stopped:[],resting:[{name:'alpha',until:Date.now()+3600000}]}));await settled();
+      delete document.visibilityState;
+      assert(text(all('.simple-provider')[0].querySelector('.simple-state')).startsWith('Resting until'),'its answer is drawn');
     }
     document.activeElement=null;
   }
