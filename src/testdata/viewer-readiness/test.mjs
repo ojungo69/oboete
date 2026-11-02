@@ -10,12 +10,16 @@ class Node {
     this.classList={toggle(){},add(){},remove(){},contains(){return false;}};
   }
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
-  // A browser moves the focus to the body when the focused element leaves the page (#810).
+  // A browser moves the focus to the body when the focused element leaves the page (#810), and
+  // Chrome blurs it as it goes, the element still in the page then (69b-3c).
   replaceChildren(...nodes){
-    if(this.children.some(c=>c&&typeof c==='object'&&!nodes.includes(c)&&c.contains(document.activeElement)))document.activeElement=document.body;
+    if(this.children.some(c=>c&&typeof c==='object'&&!nodes.includes(c)&&c.contains(document.activeElement)))blurOff();
     this.children=[];this.append(...nodes);
   }
-  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(node=>node!==this);this.parentElement=null;}
+  remove(){
+    if(document.activeElement&&document.activeElement!==document.body&&this.contains(document.activeElement))blurOff();
+    if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(node=>node!==this);this.parentElement=null;
+  }
   addEventListener(name,cb){(this.listeners[name]??=[]).push(cb);}
   setAttribute(name,value){this.attrs[name]=value;}
   removeAttribute(name){delete this.attrs[name];}
@@ -41,6 +45,12 @@ class Node {
   }
 }
 
+// The focus taken off the element leaving the page, its blur run as Chrome runs it (69b-3c).
+function blurOff(){
+  const gone=document.activeElement;
+  document.activeElement=document.body;
+  for(const cb of gone?.listeners?.blur||[])cb({target:gone,relatedTarget:null});
+}
 const ids=new Map();
 const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
   if(!ids.has(id))ids.set(id,new Node());return ids.get(id);
@@ -169,10 +179,10 @@ assert(shown.includes('Live use: Unknown')&&!shown.includes(privateMarker),'unre
 assert.equal(ctx.ui.getForm(),mine,'unknown report fields preserve the draft');
 assert.equal(posts,0,'passive and explicit inventory reads never POST');
 ctx.ui.setLang('en');
-assert.equal(text(vm.runInContext('keyState({key:"unknown"})[0]',ctx)),
+assert.equal(text(vm.runInContext('note(t("key_unknown"))',ctx)),
   'Installation could not be checked','unknown CLI status has an English label');
 ctx.ui.setLang('ja');
-assert.equal(text(vm.runInContext('keyState({key:"unknown"})[0]',ctx)),
+assert.equal(text(vm.runInContext('note(t("key_unknown"))',ctx)),
   'インストール状況は確認できません','unknown CLI status has a Japanese label');
 vm.runInContext('globalThis.doctorUi={runDoctor,redraw:renderDoctor};',ctx);
 ctx.ui.setLang('en');ctx.ui.setForm(null);ctx.ui.drawSettings();
@@ -1176,55 +1186,41 @@ assert.equal(w6.saveBody().body.paid_usd_per_month,5,'the month is sent as saved
 tick(off('my_work'),true);
 assert.deepEqual([field('my_work.calls_a_day').disabled,warned()],[true,2],'No cap sets the number aside and warns');
 assert.equal(w6.saveBody().body.my_work.calls_a_day,NO,'a day\'s no cap is sent as 4294967295');
-assert.deepEqual([off('chain.groq').checked,off('chain.claude').checked,off('chain.pro')],[false,true,undefined],
-  'an entry with no calls a day shows as off; a subscription has no switch');
-tick(off('chain.groq'),true);
-assert.deepEqual(JSON.parse(JSON.stringify(w6.saveBody().body.chain.map(r=>r.daily_budget))),[NO,null,null],
-  'an entry turned off is sent as 4294967295; one left as loaded, as config.toml has it');
-assert.equal(off('chain.groq').getAttribute?.('aria-label')??off('chain.groq').attrs['aria-label'],'No cap: Calls a day: groq');
-// Codex on #772: a row left as loaded is sent as config.toml has it and follows an answer whose
-// entry changed, so no save turns an entry's own calls a day into a [chain] value it did not ask for.
+// Each AI's calls a day is its line's (69b-3c): its No cap switch, no table. A general save sends
+// `[chain]` as saved, whatever the rows show.
+const lineOff=name=>panel.querySelectorAll('input').find(n=>n.dataset.simpleFocus===`budget-off:${name}`);
+const daily=()=>JSON.parse(JSON.stringify(w6.saveBody().body.chain.map(r=>r.daily_budget)));
+assert.deepEqual([lineOff('groq').checked,lineOff('claude').checked,lineOff('pro'),panel.querySelector('.chain')],[false,true,undefined,null],
+  'an entry with no calls a day shows as off; a subscription with none capped has no switch; no chain table');
+assert.deepEqual(daily(),[null,null,null],'the rows are sent as config.toml has them');
+assert(lineOff('groq').attrs['aria-label'].startsWith('No cap: Calls a day: '),'the switch names its AI');
+// Codex on #772 and #773: no control edits the rows in the form, so a general save after any
+// answer sends them as that answer saved them, and none turns an entry's own calls a day into a
+// [chain] value it did not ask for.
 vm.runInContext('globalThis.w6merge=mergeProviderSettings;',ctx);
 const edited={op:'edit',selector:{source:'file',index:0},entry:{kind:'openai',subscription:false}};
-const daily=()=>JSON.parse(JSON.stringify(w6.saveBody().body.chain.map(r=>r.daily_budget)));
 const loaded=extra=>w6.formOf(settings('resident',{ranges,chain:[row('p',extra)]}));
-// An entry with no calls a day of its own, given 7 in its editor: the answer's 7 shows and is kept.
+// An entry with no calls a day of its own, given 7 in its editor: the answer's 7 shows on its line.
 f=ctx.w6merge(settings('resident',{ranges,chain:[row('p',{effective_daily_budget:7})]}),loaded({effective_daily_budget:null}),edited);
 ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('chain.p').checked,field('chain.p.daily_budget').disabled,daily()],[false,false,[null]],
-  'a cap set in the entry\'s editor survives the next whole save');
-// Set back to no cap in its editor, the row left as loaded shows it so again (#773).
+assert.deepEqual([lineOff('p').checked,field('chain.p.daily_budget').disabled,field('chain.p.daily_budget').placeholder,daily()],[false,false,'7',[null]],
+  'a cap set in the entry\'s editor shows on its line, and the next whole save sends [chain] as saved');
+// Set back to no cap in its editor, the line shows it so again (#773).
 f=ctx.w6merge(settings('resident',{ranges,chain:[row('p',{effective_daily_budget:null})]}),f,edited);ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('chain.p').checked,daily()],[true,[null]],'the next answer is followed again');
-// Turned off before the operation, the switch stays off and is sent.
-f=loaded();ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),true);
-f=ctx.w6merge(settings('resident',{ranges,chain:[row('p')]}),f,edited);ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'a switch changed before an operation is kept and sent');
-// Two entries of one name, the first with no cap and the other with 7: a save keeps both.
-f=loaded({entries:2,differs:['daily_budget'],effective_daily_budget:null});ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('chain.p').checked,daily()],[true,[null]],'an unrelated save keeps mixed caps under one name');
-// #773: a change made against one answer stays a change through the next, whatever that answer's
-// row shows: two entries of one name, 7 and no cap, reordered to no cap and 7, and back.
+assert.deepEqual([lineOff('p').checked,daily()],[true,[null]],'the next answer is followed again');
+// Two entries of one name, reordered: each answer's rows are sent as they come.
 const moved={op:'move',selector:{source:'file',index:0},to:1};
-const two=effective=>settings('resident',{ranges,chain:[row('p',{entries:2,differs:['daily_budget'],effective_daily_budget:effective})]});
-f=w6.formOf(two(7));ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),true);
-f=ctx.w6merge(two(null),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'a pending No cap survives a reorder of entries of one name');
+const two=(effective,daily_budget=null)=>settings('resident',{ranges,chain:[row('p',{entries:2,differs:['daily_budget'],effective_daily_budget:effective,daily_budget})]});
+f=w6.formOf(two(7,NO));ctx.ui.setForm(f);ctx.ui.drawSettings();
+f=ctx.w6merge(two(null,NO),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
+assert.deepEqual([lineOff('p').checked,daily()],[true,[NO]],'a [chain] No cap is sent through a reorder of entries of one name');
 f=ctx.w6merge(two(7),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([off('chain.p').checked,daily()],[true,[NO]],'and the reorder back');
-// A number typed is sent; typed back to what it was, the row is as loaded again.
-f=loaded();ctx.ui.setForm(f);ctx.ui.drawSettings();typeIn(field('chain.p.daily_budget'),'50');
-assert.deepEqual(daily(),[50],'a number typed is sent');
-typeIn(field('chain.p.daily_budget'),'');
-assert.deepEqual(daily(),[null],'typed back, it is sent as config.toml has it');
-// A switch turned off and on again, with nothing else changed, is as loaded.
-f=w6.formOf(two(null));ctx.ui.setForm(f);ctx.ui.drawSettings();tick(off('chain.p'),false);tick(off('chain.p'),true);
-assert.deepEqual(daily(),[null],'a switch turned back is sent as config.toml has it');
-// A CLI entry's own calls a day lifted by a [chain] no cap: a subscription's row has no field, and a
-// save keeps it.
-f=w6.formOf(settings('resident',{ranges,chain:[row('cli',{subscription:true,daily_budget:NO,effective_daily_budget:null})]}));
+assert.deepEqual([lineOff('p').checked,daily()],[false,[null]],'and an answer without it is followed');
+// A CLI entry's own calls a day lifted by a [chain] no cap: a subscription's line has no field and,
+// with none capped, no switch; a save keeps it.
+f=w6.formOf(settings('resident',{ranges,chain:[row('cli',{subscription:true,daily_budget:NO,effective_daily_budget:null,capped:false})]}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([field('chain.cli.daily_budget'),daily()],[undefined,[NO]],'an unrelated save keeps a CLI entry\'s [chain] no cap');
+assert.deepEqual([field('chain.cli.daily_budget'),lineOff('cli'),daily()],[undefined,undefined,[NO]],'an unrelated save keeps a CLI entry\'s [chain] no cap');
 // Loaded off: ticked, its field empty and set aside, said as saved; turned on again, a number is due.
 f=w6.formOf(settings('resident',{ranges,paid_usd_per_month:null,
   my_work:{curate:false,calls_a_day:NO,estimate:{calls:[3,null],usd:[0.0123,null],priced:{name:'p',model:'m'}}}}));
@@ -1274,7 +1270,7 @@ console.log('PASS: the caps\' No cap switches');
   const leave=(node,next=null)=>{fire('change',{target:node});fire('focusout',{target:node,relatedTarget:next});if(next)next.focus();else document.activeElement=null;};
   const later=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return [promise,resolve];};
   const settled=async(n=4)=>{for(let i=0;i<n;i++)await settle();};
-  const draw=s=>{const g=w6.formOf(s);ctx.ui.setForm(g);ctx.ui.drawSettings();posted.length=0;return g;};
+  const draw=s=>{vm.runInContext('lineDrafts.clear()',ctx);const g=w6.formOf(s);ctx.ui.setForm(g);ctx.ui.drawSettings();posted.length=0;return g;};
   // What the general save would send is what is saved: nothing waits unseen for the next one.
   const clean=()=>w7.bodyKey(w6.saveBody(true).body)===ctx.ui.getForm().savedKey;
   const status=()=>document.getElementById('status').textContent;
@@ -1314,8 +1310,12 @@ console.log('PASS: the caps\' No cap switches');
   };
   holds('inject',['inject.session_start_chars','inject.session_start_note','inject.session_start_list','inject.per_prompt_chars',
     'inject.per_prompt_wait_ms','inject.correction_chars']);
-  holds('ai',['summary.language','summary.window_tokens','summary.idle_minutes','gemini','chain.alpha.model','chain.alpha.daily_budget',
-    'chain.alpha.timeout_s'],['.provider-entries','.stopped-state']);
+  holds('ai',['summary.language','summary.window_tokens','summary.idle_minutes','gemini'],['.provider-entries','.stopped-state']);
+  // Each AI's model, calls a day and timeout are its line's (69b-3c), outside More settings.
+  const alphaLine=panel.querySelectorAll('.simple-provider').find(n=>n.dataset.providerName==='alpha');
+  for(const name of ['chain.alpha.model','chain.alpha.daily_budget','chain.alpha.timeout_s']){
+    assert(fieldsIn(alphaLine).includes(name)&&!fieldsIn(more('ai')).includes(name),`the AI line holds ${name}, More settings does not`);
+  }
   holds('my_work',['my_work.calls_a_day','my_work.no_cap'],['.judge-settings']);
   holds('search',['embedding.account_id','embedding.daily_requests','embedding.monthly_usd'],['.workers-ai']);
   holds('privacy',['retention.forever','redaction.allowlist'],['.capture-settings','.never-more','.retention']);
@@ -1327,7 +1327,7 @@ console.log('PASS: the caps\' No cap switches');
   for(const name of ['worker.resident','view.port','backup.dir'])assert(fieldsIn(panel.querySelector('.group-computer')).includes(name),`This computer holds ${name}`);
   for(const cls of ['.view-address','.hidden-settings','.doctor-diagnostics','.maintenance'])assert(panel.querySelector('.group-maintenance').querySelector(cls),`Maintenance holds ${cls}`);
   assert(!more('ai').querySelectorAll('button').some(b=>text(b)==='Add provider'),'one way to add an AI: the catalog');
-  assert.equal(more('ai').querySelectorAll('th').length,4,'the chain table without its order and its switch');
+  assert.equal(more('ai').querySelectorAll('th').length,0,'no chain table: its fields are the lines\'');
   // What the simple controls own is theirs alone (decision 3); every control is drawn once, told
   // by its simple focus, or by its field and its AI entry, inside the general forms or not (4d).
   const generalFields=new Set(controls().filter(inGeneral).map(n=>n.dataset.field).filter(Boolean));
@@ -1493,17 +1493,21 @@ console.log('PASS: the caps\' No cap switches');
     }
   }
 
-  // The focus goes back where it was through a redraw: the model column, edited or emptied, with
-  // its caret; the AI line's model choice to its own.
+  // The focus goes back where it was through a redraw: the AI line's other model, typed or emptied,
+  // with its caret (69b-3c); the AI line's model choice to its own.
   f=draw(ai(['alpha']));
-  const column=()=>general('chain.alpha.model');
+  const pickModel=v=>{const s=simple('model:alpha');s.value=v;for(const cb of s.listeners.change||[])cb({target:s});};
+  pickModel('__other');
+  const typedModel=()=>simple('model-text:alpha');
+  assert.equal(document.activeElement,typedModel(),'another model opens its field, focused');
   for(const typed of ['other-model','']){
     const [start,end]=typed?[3,5]:[0,0];
-    column().focus();typeIn(column(),typed);column().setSelectionRange(start,end);
+    typedModel().focus();typeIn(typedModel(),typed);typedModel().setSelectionRange(start,end);
     ctx.ui.drawSettings();
-    assert.equal(document.activeElement,column(),`the model column (${typed||'emptied'}) has the focus back`);
-    assert.deepEqual([column().value,column().selectionStart,column().selectionEnd],[typed,start,end],'with its text and its caret');
+    assert.equal(document.activeElement,typedModel(),`the AI line's other model (${typed||'emptied'}) has the focus back`);
+    assert.deepEqual([typedModel().value,typedModel().selectionStart,typedModel().selectionEnd],[typed,start,end],'with its text and its caret');
   }
+  vm.runInContext('lineDrafts.clear()',ctx);ctx.ui.drawSettings();
   simple('model:alpha').focus();ctx.ui.drawSettings();
   assert.equal(document.activeElement,simple('model:alpha'),'the AI line\'s model choice keeps its own');
   // A field each AI entry repeats goes back to its own entry's, not to another's or the AI line's.
@@ -1588,19 +1592,20 @@ console.log('PASS: the caps\' No cap switches');
   for(const cb of preferences.listeners.submit||[])await cb({target:preferences,preventDefault(){}});
   await settle();
   assert.equal(posted.length,0,'the preferences\' submit sends no general save');
-  // The chain table keeps its model column, which clears a name's model.
+  // The AI line's "the entry's own" clears a name's model in `[chain]`, as the chain table's emptied
+  // column did (69b-3c).
   f=draw(ai(['alpha'],{chain:[row('alpha',{model:'pinned-model',effective_model:'pinned-model'})]}));
   answers=[json(ai(['alpha'],{version:'v2'}))];
-  typeIn(column(),'');leave(column());await settled();
-  assert.equal(sent()[0].chain[0].model,null,'emptied, the model column clears the name\'s model');
-  // A model a general save sent and the viewer refused is marked on the column it was typed in,
-  // not on the AI line's choice of the same field (Codex's review of 69b-2a).
+  pickModel('__own');await settled();
+  assert.equal(sent()[0].chain[0].model,null,'the entry\'s own clears the name\'s model');
+  // A model typed on the line and refused is marked on the field it was typed in, not on the line's
+  // choice (Codex's review of 69b-2a).
   f=draw(ai(['alpha']));
   answers=[json({code:'bad_request',field:'chain.alpha.model'},400)];
-  typeIn(column(),'bad model');leave(column());await settled();
-  assert.deepEqual([column().attrs['aria-invalid'],simple('model:alpha').attrs['aria-invalid'],document.activeElement===column()],['true',undefined,true],
+  pickModel('__other');typeIn(typedModel(),'bad model');for(const cb of typedModel().listeners.blur)cb();await settled();
+  assert.deepEqual([typedModel().attrs['aria-invalid'],simple('model:alpha').attrs['aria-invalid'],document.activeElement===typedModel()],['true',undefined,true],
     'the refused model is marked and focused where it was typed');
-  document.activeElement=null;
+  vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
 
   // #803: a new home shows the resident worker on, as recommended, unsaved. A simple save leaves
   // it so; the guide's tier, phrase, jumps and search send nothing; its Apply saves the resident
@@ -1960,6 +1965,16 @@ console.log('PASS: the caps\' No cap switches');
     assert.equal(general('judge.key').value,'made-up-cloudflare-key-0012','a Cloudflare key is kept for its account');
     typeIn(general('judge.account_id'),'fedcba9876543210fedcba9876543210');ctx.ui.drawSettings();
     assert.equal(general('judge.key').value,'','not put back once another account is typed');
+    // Named by the account typed when the key is typed, not the one its field was drawn with
+    // (Codex and CodeRabbit on #811).
+    typeIn(general('judge.account_id'),'00112233445566778899aabbccddeeff');
+    typeIn(general('judge.key'),'made-up-cloudflare-key-0034');ctx.ui.drawSettings();
+    assert.equal(general('judge.key').value,'made-up-cloudflare-key-0034','a key typed after its account, no redraw between, is kept for it');
+    typeIn(general('judge.account_id'),'ffeeddccbbaa99887766554433221100');
+    typeIn(general('judge.key'),'made-up-cloudflare-key-0056');
+    typeIn(general('judge.account_id'),'00112233445566778899aabbccddeeff');ctx.ui.drawSettings();
+    assert.equal(general('judge.key').value,'','a key typed for another account is not put back for the one its field was drawn with');
+    others.push('made-up-cloudflare-key-0034','made-up-cloudflare-key-0056');
     assert(others.every(s=>!(JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')).includes(s)),'in no form, storage or request');
     ctx.localStorage.setItem=setItem;
     // #810: a privacy action pressed from the keyboard gives the focus back once its part is drawn
@@ -2052,6 +2067,206 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json({},503));await settled();
     assert.deepEqual([simple('never.folder'),document.activeElement===refreshButton()],[undefined,true],'Refresh takes it when the state is not read again');
     document.activeElement=null;
+  }
+  // 69b-3c-1a: each AI line's calls a day, timeout and model are saved by leaving the field or Enter,
+  // one change in `[chain]`, without holding the page; what is typed meanwhile stays; a form read
+  // afresh and a name gone drop the drafts.
+  {
+    let reread=null;
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+      if(url.startsWith('/api/settings?')&&reread)return Promise.resolve(json(reread));
+      if(url.startsWith('/api/hidden?'))return Promise.resolve(json([]));
+      return new Promise(()=>{});
+    };
+    const NOCAP=4294967295;
+    const lineAi=(rows,extra={})=>ai(rows.map(r=>r.name),{ranges:{...base.ranges,daily_requests:[1,100000],no_cap:NOCAP},chain:rows,...extra});
+    const one=(extra={},more={})=>lineAi([row('alpha',extra)],more);
+    const leaveLine=node=>{for(const cb of node.listeners.blur||[])cb({target:node,relatedTarget:null});};
+    const enterLine=node=>{for(const cb of node.listeners.keydown||[])cb({key:'Enter',target:node,isComposing:false,keyCode:13,preventDefault(){}});};
+    const calls=(name='alpha')=>simple(`budget:${name}`);
+    const timeout=(name='alpha')=>simple(`timeout:${name}`);
+    const lineOff=(name='alpha')=>simple(`budget-off:${name}`);
+    const lineOf=(name='alpha')=>all('.simple-provider').find(n=>n.dataset.providerName===name);
+    const warned=()=>!lineOf().querySelector('.no-cap-warning').hidden;
+    const edit=()=>JSON.parse(JSON.stringify(ctx.ui.getForm().chain.find(r=>r.name==='alpha').edit));
+    const freshEdit=s=>JSON.parse(JSON.stringify(w6.formOf(s).chain.find(r=>r.name==='alpha').edit));
+    const wholeChain=()=>{const r=w6.saveBody(true).body.chain[0];return [r.daily_budget,r.timeout_s,r.model];};
+    // In this realm's arrays, as the expected values are.
+    const drafts=()=>[...vm.runInContext('[...lineDrafts.keys()]',ctx)];
+    const inert=()=>Boolean(panel.querySelector('.settings').inert);
+    // Saved on leaving the field, one change in `[chain]`; the row's edit then is a fresh load's, and
+    // the next general save sends what is saved: a number, back to the entries' own, No cap.
+    f=draw(one());
+    typeIn(calls(),'20');await settled();
+    assert.equal(posted.length,0,'typing sends nothing');
+    let answer=one({daily_budget:20,effective_daily_budget:20},{version:'v2'});
+    answers=[json(answer)];
+    leaveLine(calls());await settled();
+    assert.deepEqual(sent().map(b=>b.chain),[[{name:'alpha',on:true,daily_budget:20,timeout_s:null,model:null}]],'leaving it saves one change in [chain]');
+    assert.deepEqual([edit(),wholeChain(),calls().value,drafts()],[freshEdit(answer),[20,null,null],'20',[]],
+      'its row as a fresh load makes it, a general save sends it, and no draft is left');
+    answers=[json(one({daily_budget:20,effective_daily_budget:20},{version:'v3',summary:{...base.summary,idle_minutes:11}}))];
+    typeIn(general('summary.idle_minutes'),'11');leave(general('summary.idle_minutes'));await settled();
+    assert.equal(sent()[1].chain[0].daily_budget,20,'a general save after the line\'s answer sends the line\'s value');
+    f=draw(one({daily_budget:20,effective_daily_budget:20}));
+    answer=one({},{version:'v2'});answers=[json(answer)];
+    calls().focus();typeIn(calls(),'');enterLine(calls());await settled();
+    assert.equal(document.activeElement,calls(),'after Enter the field has the focus back');
+    leaveLine(calls());await settled();
+    assert.deepEqual([posted.length,sent()[0].chain[0].daily_budget,edit(),wholeChain()[0]],[1,null,freshEdit(answer),null],
+      'emptied, Enter sends null once, the blur after it nothing');
+    f=draw(one());
+    answer=one({daily_budget:NOCAP,effective_daily_budget:null},{version:'v2'});answers=[json(answer)];
+    assert.deepEqual([lineOff().checked,warned()],[false,false],'a cap in effect: No cap off, no warning');
+    flip(lineOff(),true);await settled();
+    assert.deepEqual([sent()[0].chain[0].daily_budget,lineOff().checked,calls().disabled,warned(),edit(),wholeChain()[0]],
+      [NOCAP,true,true,true,freshEdit(answer),NOCAP],'No cap on sends no_cap, its warning shown, the field set aside');
+    // Invalid or unchanged sends nothing.
+    f=draw(one());
+    typeIn(calls(),'0');leaveLine(calls());typeIn(timeout(),'');leaveLine(timeout());await settled();
+    assert.deepEqual([posted.length,calls().attrs['aria-invalid'],drafts().length],[0,'true',1],
+      'out of range is marked and sent not; the saved value sends nothing and keeps no draft');
+    // No cap turned off with no number: the field opens, focused, nothing sent; through another
+    // answer and a language change it stays open; a number left is saved; empty, or the switch back
+    // on, turns No cap on again with nothing sent.
+    const unlimited=()=>one({daily_budget:NOCAP,effective_daily_budget:null});
+    f=draw(unlimited());
+    flip(lineOff(),false);await settled();
+    assert.deepEqual([posted.length,calls().disabled,lineOff().checked,warned(),document.activeElement===calls()],[0,false,false,false,true],
+      'turned off with no number, the field opens for one');
+    answers=[json(lineAi([row('alpha',{daily_budget:NOCAP,effective_daily_budget:null,timeout_s:120,effective_timeout_s:120})],{version:'v2'}))];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();ctx.ui.setLang('en');ctx.ui.drawSettings();
+    assert.deepEqual([posted.length,calls().disabled,lineOff().checked],[1,false,false],'it stays open through another answer and a language change');
+    answers=[json(lineAi([row('alpha',{daily_budget:30,effective_daily_budget:30,timeout_s:120,effective_timeout_s:120})],{version:'v3'}))];
+    typeIn(calls(),'30');leaveLine(calls());await settled();
+    assert.deepEqual([sent()[1].chain[0].daily_budget,lineOff().checked,calls().value],[30,false,'30'],'a number left in it is saved');
+    for(const how of ['left','Enter','switch']){
+      f=draw(unlimited());
+      flip(lineOff(),false);await settled();
+      if(how==='left')leaveLine(calls());else if(how==='Enter')enterLine(calls());else flip(lineOff(),true);
+      await settled();
+      assert.deepEqual([posted.length,lineOff().checked,calls().disabled,drafts()],[0,true,true,[]],`${how} empty, No cap is on again, nothing sent`);
+      if(how!=='left')assert.equal(document.activeElement,lineOff(),'the switch has the focus');
+    }
+    // A line's save holds nothing: the page is usable, the field enabled, and what is typed in
+    // another field meanwhile stays, unsent, with its caret, through the answer and a language
+    // change; a redraw's blur is no leaving. Left, it is saved on what the answer saved.
+    f=draw(one());
+    let give;[answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    assert.deepEqual([posted.length,inert(),timeout().disabled],[1,false,false],'the page is not held while a line saves');
+    calls().focus();typeIn(calls(),'2');calls().setSelectionRange(1,1);
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2'})));await settled();
+    assert.deepEqual([posted.length,calls().value,document.activeElement===calls(),calls().selectionStart],[1,'2',true,1],
+      'a draft typed during another save\'s answer stays unsent, focused, its caret kept');
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();ctx.ui.setLang('en');ctx.ui.drawSettings();
+    assert.deepEqual([posted.length,calls().value],[1,'2'],'and through a language change');
+    answers=[json(one({daily_budget:2,effective_daily_budget:2,timeout_s:120,effective_timeout_s:120},{version:'v3'}))];
+    leaveLine(calls());await settled();
+    assert.deepEqual([sent()[1].version,sent()[1].chain[0].daily_budget,sent()[1].chain[0].timeout_s],['v2',2,120],'left, it is saved on the answer\'s values');
+    // Enter then blur, and a blur after a 409, a refusal or a failure: one POST each; a 409 reloads
+    // and drops the draft; Enter again sends again.
+    for(const outcome of ['saved','stale','refused','failed']){
+      f=draw(one());
+      reread=one({},{version:'v9'});
+      answers=[{saved:()=>json(one({daily_budget:25,effective_daily_budget:25},{version:'v2'})),stale:()=>json({code:'stale'},409),
+        refused:()=>json({code:'bad_request',field:'chain.alpha.daily_budget'},400),failed:()=>Promise.reject(new Error('down'))}[outcome]()];
+      typeIn(calls(),'25');enterLine(calls());await settled();leaveLine(calls());await settled();
+      assert.equal(posted.length,1,`${outcome}: Enter then the blur send one POST`);
+      if(outcome==='stale')assert.deepEqual([calls().value,drafts()],['',[]],'a stale reload drops the draft');
+      if(outcome==='refused'){
+        assert.equal(calls().attrs['aria-invalid'],'true','the refused field is marked');
+        answers=[json(one({daily_budget:25,effective_daily_budget:25},{version:'v2'}))];
+        enterLine(calls());await settled();
+        assert.equal(posted.length,2,'Enter again sends again');
+      }
+    }
+    reread=null;
+    // Typed back before the answer: what is typed stays, unsent, and its blur saves it; asked while
+    // another save waits, then typed back to the saved value, the older value is never sent.
+    for(const back of ['10','30']){
+      f=draw(one({daily_budget:10,effective_daily_budget:10}));
+      [answer,give]=later();answers=[answer];
+      typeIn(calls(),'20');enterLine(calls());await settled();typeIn(calls(),back);
+      give(json(one({daily_budget:20,effective_daily_budget:20},{version:'v2'})));await settled();
+      assert.deepEqual([posted.length,calls().value],[1,back],`typed back to ${back} before the answer, it stays unsent`);
+      answers=[json(one({daily_budget:Number(back),effective_daily_budget:Number(back)},{version:'v3'}))];
+      leaveLine(calls());await settled();
+      assert.deepEqual([posted.length,sent()[1].chain[0].daily_budget],[2,Number(back)],'its blur saves it');
+    }
+    f=draw(one({daily_budget:10,effective_daily_budget:10}));
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(calls(),'20');enterLine(calls());typeIn(calls(),'10');leaveLine(calls());await settled();
+    give(json(one({daily_budget:10,effective_daily_budget:10,timeout_s:120,effective_timeout_s:120},{version:'v2'})));await settled();
+    assert.deepEqual([posted.length,calls().value,drafts()],[1,'10',[]],'20 asked behind another save, then 10 left: 20 is never sent, 10 stays saved');
+    // While 20 is on its way, typed back to the 10 saved before it and left: 10 is sent after it.
+    f=draw(one({daily_budget:10,effective_daily_budget:10}));
+    [answer,give]=later();answers=[answer];
+    typeIn(calls(),'20');enterLine(calls());await settled();
+    typeIn(calls(),'10');leaveLine(calls());await settled();
+    answers=[json(one({daily_budget:10,effective_daily_budget:10},{version:'v3'}))];
+    give(json(one({daily_budget:20,effective_daily_budget:20},{version:'v2'})));await settled();
+    assert.deepEqual([posted.length,sent()[1]?.version,sent()[1]?.chain[0].daily_budget],[2,'v2',10],
+      'typed back to the value saved before and left while 20 is on its way: 10 is sent after it');
+    // A request asked before its draft was dropped never passes for one asked after (requests are
+    // numbered across drafts).
+    f=draw(one());
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(calls(),'20');enterLine(calls());await settled();
+    reread=one({},{version:'v5'});
+    (await ctx.ui.showSettings())();await settled();
+    answers=[json(one({daily_budget:30,effective_daily_budget:30},{version:'v6'}))];
+    typeIn(calls(),'30');enterLine(calls());await settled();
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2'})));await settled();
+    assert.deepEqual(sent().map(b=>b.chain[0].daily_budget),[null,30],'the 20 asked before Settings was entered again is never sent');
+    reread=null;
+    // A switch pressed alone keeps no text: a redraw before its answer shows the field as saved.
+    f=draw(one({daily_budget:20,effective_daily_budget:20}));
+    [answer,give]=later();answers=[answer];
+    flip(lineOff(),true);await settled();
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();ctx.ui.setLang('en');ctx.ui.drawSettings();
+    assert.equal(calls().value,'20','a switch pressed alone leaves the field as saved through a redraw');
+    give(json(one({daily_budget:NOCAP,effective_daily_budget:null},{version:'v2'})));await settled();
+    // Entering Settings and a name gone drop the drafts.
+    f=draw(lineAi([row('alpha'),row('beta')]));
+    typeIn(calls('beta'),'44');typeIn(calls(),'33');
+    reread=lineAi([row('alpha'),row('beta')]);
+    (await ctx.ui.showSettings())();await settled();
+    assert.deepEqual([drafts(),calls().value,calls('beta').value],[[],'',''],'entering Settings drops them');
+    typeIn(calls('beta'),'44');
+    answers=[json(lineAi([row('alpha',{timeout_s:120,effective_timeout_s:120})],{version:'v2'}))];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    assert.deepEqual([drafts(),calls('beta')],[[],undefined],'a name gone takes its draft');
+    reread=null;
+    // A subscription says its calls a day and has the switch only while an entry of its name is
+    // capped (#800 item 3); several entries are said.
+    for(const [extra,said,switched] of [[{capped:true,effective_daily_budget:50},'Calls a day: 50',true],
+      [{capped:true,effective_daily_budget:null,differs:['daily_budget']},'Calls a day: its entries differ',true],
+      [{capped:false,effective_daily_budget:null},null,false]]){
+      f=draw(one({subscription:true,entries:2,...extra}));
+      assert.deepEqual([calls(),Boolean(lineOff()),said===null||text(lineOf()).includes(said)],[undefined,switched,true],
+        `a subscription ${switched?'capped':'not capped'}: no field, ${switched?'its switch':'no switch'}`);
+      assert(text(lineOf()).includes('These settings apply to all 2 entries of this name.'),'its entries are said');
+    }
+    // The model: another saved to `[chain]` by Enter; a free rule's needs :free; a fixed rule's
+    // model set for its name removed.
+    f=draw(one());
+    answers=[json(one({model:'other-model',effective_model:'other-model'},{version:'v2'}))];
+    pickModel('__other');typeIn(typedModel(),'other-model');enterLine(typedModel());await settled();
+    assert.equal(sent()[0].chain[0].model,'other-model','another model is saved to [chain]');
+    f=draw(one({model_rule:'free'}));
+    pickModel('__other');typeIn(typedModel(),'some-model');leaveLine(typedModel());await settled();
+    assert.deepEqual([posted.length,typedModel().attrs['aria-invalid']],[0,'true'],'a free rule\'s model without :free is marked, not sent');
+    f=draw(one({model_rule:'fixed',model:'old-model',model_applied:false}));
+    assert(text(lineOf()).includes('The model set for this name, old-model, is not used by every entry of it.'),'a model not every entry takes is said');
+    answers=[json(one({model_rule:'fixed'},{version:'v2'}))];
+    simple('model-remove:alpha').click();await settled();
+    assert.equal(sent()[0].chain[0].model,null,'and removed');
+    vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;

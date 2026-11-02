@@ -518,6 +518,9 @@ fn entry(
         "model_rule": rule,
         "daily_budget": chain.daily_budget.get(name),
         "effective_daily_budget": (budget != config::no_daily_cap()).then_some(budget),
+        // Whether any entry of the name stops at a calls a day, where `effective_daily_budget` is the
+        // first entry's: a subscription's No cap switch shows while one does (#800 item 3, 69b-3c).
+        "capped": same.iter().any(|q| budget_of(q) != config::no_daily_cap()),
         "budget_from_key": p.budget_from_key(),
         "timeout_s": chain.timeout_s.get(name),
         "effective_timeout_s": timeout_s,
@@ -4119,6 +4122,29 @@ mod tests {
             (&row["effective_daily_budget"], &row["differs"]),
             (&json!(200), &json!(["key_file", "daily_budget"]))
         );
+    }
+
+    /// #800 item 3 (69b-3c): a name is capped while any of its entries stops at a calls a day, in
+    /// either order, though the row's effective calls a day is the first entry's.
+    #[test]
+    fn a_name_is_capped_while_any_entry_has_a_calls_a_day() {
+        let entry = |budget: &str| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"sub\"\nsubscription = true\n\
+                 base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n{budget}"
+            )
+        };
+        let row = |text: String| show(home_with(Some(&text)).path())["chain"][0].clone();
+        let open = entry("");
+        let capped = entry("daily_budget = 50\n");
+        for text in [open.clone() + &capped, capped.clone() + &open] {
+            let row = row(text);
+            assert_eq!(
+                (&row["subscription"], &row["capped"]),
+                (&json!(true), &json!(true))
+            );
+        }
+        assert_eq!(row(open.clone() + &open)["capped"], json!(false));
     }
 
     /// #274 item 3: the row shows the first entry's values, and says where entries of its name
