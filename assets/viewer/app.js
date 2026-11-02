@@ -1520,6 +1520,7 @@ const TEXT = {
   privacy_recorded: ['The send exclusion was recorded.', '送信除外を記録しました。'],
   privacy_undone: ['The exclusion was undone. Future sends may resume.', '除外を解除しました。今後の送信を再開できる状態です。'],
   privacy_readback_failed: ['{receipt} The updated privacy state could not be read. Refresh privacy state to confirm it; do not repeat the write.', '{receipt} 更新後のプライバシー状態を読み込めませんでした。書き込みは繰り返さず、「プライバシーの状態を更新」で確認してください。'],
+  privacy_reading: ['Reading the repositories recorded…', '記録しているリポジトリを読み込んでいます…'],
   privacy_unavailable: ['Privacy state could not be read or changed. Nothing is reported as complete.', 'プライバシーの状態を読み込み・変更できませんでした。完了したとは判定していません。'],
   privacy_selector: ['This repository selection is invalid. Reload its state.', 'リポジトリの選択が無効です。状態を再読み込みしてください。'],
   repo_not_found: ['This repository is no longer in the stored list. Reload its state.', 'このリポジトリは保存済み一覧にありません。状態を再読み込みしてください。'],
@@ -4161,16 +4162,19 @@ async function runDoctor() {
 
 async function showSettings() {
   void refreshAgentInventory();
-  const [s, privacy, hidden] = await Promise.all([api('settings'), api('privacy').catch(privacyUnavailable),
-    api('hidden').catch(() => null)]);
-  s.privacy = privacy;
+  // The privacy state is read once the page is drawn: on a large store its read of raw.db takes
+  // most of a second, the rest of Settings a few hundredths (decision 69, 69b-2b).
+  const [s, hidden] = await Promise.all([api('settings'), api('hidden').catch(() => null)]);
   s.hidden = hidden;
   return () => {
     recoveryDraft.preview=null;
     recoveryDraft.confirmed=false;
     form = formOf(s);
+    // Being read, on the form only: what is saved never says so (cubic and CodeRabbit on #806).
+    if (form) form.privacy = privacyPending();
     drawSettings();
     setStatus('');
+    void refreshPrivacy(form);
     if (form?.embedding) void refreshEmbedding();
   };
 }
@@ -4712,6 +4716,11 @@ function privacyUnavailable() {
   return { available: false, repositories: [], folders: [], rescan: { state: 'unavailable', processed: null, total: null } };
 }
 
+// While the privacy state is read (69b-2b): said as being read, not as unreadable.
+function privacyPending() {
+  return { ...privacyUnavailable(), pending: true };
+}
+
 async function memoryWrite(path, body) {
   const res = await fetch(`/api/${path}`, {
     method: 'POST', headers: { 'X-Oboete-Token': token, 'Content-Type': 'application/json' },
@@ -4938,14 +4947,25 @@ function hiddenSection(f) {
   return el('section', 'hidden-settings', word('h3', null, 'hidden_h'), word('p', 'desc', 'hidden_desc'), listing);
 }
 
+// The page's reads of the privacy state, numbered as they start: only the last one started is
+// drawn, whichever form it reaches (Codex and CodeRabbit on #806).
+let privacyReads = 0;
+
 async function refreshPrivacy(f) {
   if (!f) return false;
-  const mine = f.privacyRead = (f.privacyRead || 0) + 1;
+  const mine = ++privacyReads;
+  const asked = f.privacy;
   const state = await api('privacy').catch(privacyUnavailable);
-  if (!currentSettings(f) || f.privacyRead !== mine) return false;
-  f.privacy = state;
-  if (!f.hashing) drawSettings();
-  return state.available === true;
+  if (mine !== privacyReads) return false;
+  // A form drawn from this one since (a provider's write, search read again, a confirmation
+  // cancelled) shows the state this read was for while it is on its way, and takes the read
+  // (Codex and cubic on #806).
+  const to = currentSettings(f) ? f : view === 'settings' && asked?.pending && form?.privacy === asked ? form : null;
+  if (!to) return false;
+  to.privacy = state;
+  if (!to.hashing) drawSettings();
+  // Read for another form, it says nothing about this one's (cubic on #806).
+  return to === f && state.available === true;
 }
 
 function privacySection(f) {
@@ -4983,12 +5003,12 @@ function privacySection(f) {
   });
   const scan = state.rescan;
   const scanKey = `rescan_${scan.state}`;
-  let listing = el('p', 'desc', t('privacy_unavailable'));
+  let listing = el('p', 'desc', t(state.pending ? 'privacy_reading' : 'privacy_unavailable'));
   if (state.available) listing = rows.length ? el('ul', null, ...rows) : el('p', 'desc', t('privacy_none'));
   return el('section', null, el('h3', null, t('privacy_h')), el('p', 'desc', t('privacy_desc')),
     listing,
-    el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
-    scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null, refresh);
+    ...(state.pending ? [] : [el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
+      scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null]), refresh);
 }
 
 // Slice 4b (spec 6.1): never record a repository or a folder of this device, or record it again,
@@ -4997,7 +5017,7 @@ function captureSection(f, simple = false) {
   const state = f.privacy;
   if (!state.available) {
     if (!simple) return null;
-    const section = simpleBlock('never', el('p', 'desc', t('privacy_unavailable')));
+    const section = simpleBlock('never', el('p', 'desc', t(state.pending ? 'privacy_reading' : 'privacy_unavailable')));
     section.className += ' never-record';
     return section;
   }
@@ -5558,8 +5578,10 @@ function currentSettings(mine) {
 
 function reloadProviderSettings(current) {
   form = formOf(current);
+  if (form) form.privacy = privacyPending();
   drawSettings();
   setStatus(t('stale'), true, lang);
+  if (form) void refreshPrivacy(form);
 }
 
 function providerSuccessKey(action, path, answer) {
@@ -6170,7 +6192,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
     simple.adopt(form, answer);
     simpleReceipt = simple.block;
   }
-  if (form) form.privacy = privacyUnavailable();
+  if (form) form.privacy = privacyPending();
   drawSettings();
   let status = current ? 'stale' : simple ? 'simple_saved' : 'saved';
   if (moved) status = 'view_lost';
@@ -7254,7 +7276,14 @@ function askHeld(held, confirmed) {
   no.type = 'button';
   no.dataset.action = 'held.cancel';
   // Cancelled, the form goes back to what is saved.
-  no.addEventListener('click', () => { if (form !== mine) return; form = formOf(mine.savedSettings); drawSettings(); setStatus(''); });
+  no.addEventListener('click', () => {
+    if (form !== mine) return;
+    // What is saved holds no privacy state: the one read stays (cubic and CodeRabbit on #806).
+    form = formOf(mine.savedSettings);
+    form.privacy = mine.privacy;
+    drawSettings();
+    setStatus('');
+  });
   setStatus(held.map((h) => t(h.key, { id: h.id ?? '' })).join(' '), true, lang, 0, el('span', 'actions', yes, no));
 }
 

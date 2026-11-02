@@ -1660,6 +1660,97 @@ console.log('PASS: the caps\' No cap switches');
       assert(clean(),`after ${label}, the general save has nothing to send`);
     }
   }
+  // 69b-2b: Settings is drawn before the privacy state is read, which on a large store takes most
+  // of a second; until it is, and while it is read again after a save, the privacy blocks say it is
+  // being read, not that it cannot be.
+  {
+    const [reading,unreadable]=['privacy_reading','privacy_unavailable'].map(key=>ctx.tier.text(key,'en'));
+    ctx.ui.setLang('en');
+    let [privacyAnswer,givePrivacy]=later();
+    let settingsNow=ai(['alpha']);
+    // The saves are answered from `answers`, as in the rest of this block.
+    const mock=w6fetch;
+    ctx.fetch=(url,options)=>{
+      if(!options?.method&&url.startsWith('/api/settings?'))return Promise.resolve(json(settingsNow));
+      if(!options?.method&&url.startsWith('/api/hidden'))return Promise.resolve(json({items:[]}));
+      if(!options?.method&&url.startsWith('/api/privacy?'))return privacyAnswer;
+      return mock(url,options);
+    };
+    ctx.ui.setView('settings');
+    const render=await ctx.ui.showSettings();render();posted.length=0;
+    const group=()=>panel.querySelector('.group-s-privacy');
+    assert(text(group()).includes(reading)&&!text(group()).includes(unreadable),'drawn before the privacy read, which is said as being read');
+    assert.equal(ctx.ui.getForm().savedSettings.privacy,undefined,'what is saved, the viewer\'s answer, carries no privacy state');
+    givePrivacy(json(privacy));await settled();
+    assert(!text(group()).includes(reading)&&text(more('privacy').querySelector('.never-more')).includes('github.com/acme/live'),'then drawn with it');
+    assert(text(group().querySelector('.group-desc')).includes('1 place'),'its heading counts the places never recorded');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(ai(['alpha'],{version:'v2',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    assert.equal(posted.length,1);
+    assert(text(group()).includes(reading)&&!text(group()).includes(unreadable),'read again after a save, said as being read meanwhile');
+    givePrivacy(json({},503));await settled();
+    assert(text(group()).includes(unreadable)&&!text(group()).includes(reading),'a read that fails says so');
+    const counted=()=>!text(group()).includes(reading)&&!text(group()).includes(unreadable)&&text(group().querySelector('.group-desc')).includes('1 place');
+    // A provider's write answered while the first read is on its way: the form it draws takes that
+    // read when it comes (Codex and cubic on #806).
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    answers=[json(ai(['alpha'],{version:'v2'}))];
+    await w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:true},action('port.move'));await settled();
+    assert.deepEqual([posted.map(p=>p.url),text(group()).includes(reading)],[['/api/providers'],true],'still being read after the write');
+    givePrivacy(json(privacy));await settled();
+    assert(counted(),'the form the write drew takes the read');
+    // A confirmation cancelled keeps the privacy state read; one cancelled while the first read is
+    // on its way takes the read when it comes (cubic and CodeRabbit on #806).
+    settingsNow=ai(['alpha'],{redaction:masked([rule])});
+    const removeAndCancel=async()=>{
+      const remove=all('button').find(n=>text(n)==='Remove this rule');
+      remove.click();fire('click',{target:remove});await settle();
+      assert(status().includes('acme-token'),'a saved rule removed waits');
+      action('held.cancel').click();await settle();
+    };
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    await removeAndCancel();
+    assert(counted(),'a confirmation cancelled keeps the privacy state read');
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    await removeAndCancel();
+    assert(text(group()).includes(reading),'cancelled while it is read, it is still being read');
+    givePrivacy(json(privacy));await settled();
+    assert(counted(),'and the form the cancel drew takes the read');
+    assert.equal(posted.length,0,'nothing was sent');
+    // Two reads on their way (the first, and Refresh pressed meanwhile), then a confirmation
+    // cancelled: only the later read is drawn, whichever comes first (Codex and CodeRabbit on #806).
+    const refreshButton=()=>all('button').find(n=>text(n)==='Refresh privacy state');
+    let giveFirst;[privacyAnswer,giveFirst]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();
+    await removeAndCancel();
+    giveFirst(json({},503));await settled();
+    assert(text(group()).includes(reading)&&!text(group()).includes(unreadable),'the earlier read, come first, is not drawn');
+    givePrivacy(json(privacy));await settled();
+    assert(counted(),'the later one is');
+    // Refresh pressed while the first read is on its way, then a provider's write and a saved rule
+    // removed: the read the write's form takes leaves that form's confirmation in the status line
+    // (cubic on #806).
+    [privacyAnswer,giveFirst]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();
+    answers=[json(ai(['alpha'],{version:'v2',redaction:masked([rule])}))];
+    await w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:true},action('port.move'));await settled();
+    const remove=all('button').find(n=>text(n)==='Remove this rule');
+    remove.click();fire('click',{target:remove});await settle();
+    assert(status().includes('acme-token'),'a saved rule removed waits');
+    givePrivacy(json(privacy));await settled();
+    assert(counted()&&status().includes('acme-token'),'the read the write\'s form took leaves its confirmation');
+    giveFirst(json(privacy));await settled();
+    action('held.cancel').click();await settle();
+  }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;
   ctx.ui.setForm(null);
