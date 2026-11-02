@@ -5011,14 +5011,14 @@ function privacySection(f) {
   refresh.type = 'button';
   refresh.dataset.simpleFocus = 'privacy.refresh';
   refresh.addEventListener('click', async () => {
-    const had = document.activeElement === refresh;
+    const was = document.activeElement;
     refresh.disabled = true;
     // The status line is cleared only when nothing was said on it since the click: a confirmation
     // asked meanwhile stays (CodeRabbit on #806).
     const said = statusWrites;
     try { if (await refreshPrivacy(f) && statusWrites === said) setStatus(''); } finally {
       refresh.disabled = false;
-      if (had && currentSettings(f)) focusAgain(refresh, 'privacy.refresh', 'privacy.refresh');
+      if (currentSettings(f)) focusAgain(was, 'privacy.refresh');
     }
   });
   const rows = (state.repositories || []).map((repo) => {
@@ -5029,7 +5029,7 @@ function privacySection(f) {
     action.dataset.selector = repo.selector;
     action.dataset.simpleFocus = `exclude:${repo.selector}`;
     action.addEventListener('click', async () => {
-      const had = document.activeElement === action;
+      const was = document.activeElement;
       const fields = action.closest('.settings');
       fields.inert = true;
       action.disabled = true;
@@ -5047,7 +5047,7 @@ function privacySection(f) {
       } finally {
         fields.inert = false;
         action.disabled = false;
-        if (had && currentSettings(f)) focusAgain(action, action.dataset.simpleFocus, 'privacy.refresh');
+        if (currentSettings(f)) focusAgain(was, 'privacy.refresh');
       }
     });
     return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t(repo.excluded ? 'privacy_excluded' : 'privacy_allowed')), action);
@@ -5078,7 +5078,7 @@ function captureSection(f, simple = false) {
     return section;
   }
   const write = async (button, body, receipt) => {
-    const had = document.activeElement === button;
+    const was = document.activeElement;
     const fields = button.closest('.settings');
     fields.inert = true;
     button.disabled = true;
@@ -5101,7 +5101,7 @@ function captureSection(f, simple = false) {
     } finally {
       fields.inert = false;
       button.disabled = false;
-      if (had && currentSettings(f)) focusAgain(button, button.dataset.simpleFocus, simple ? 'never.folder' : 'never.pattern.add');
+      if (currentSettings(f)) focusAgain(was, simple ? 'never.folder' : 'never.pattern.add');
     }
   };
   const row = (label, never, onClick, key) => {
@@ -6561,12 +6561,14 @@ function simpleFocus(key) {
   next?.focus({ preventScroll: true });
 }
 
-// #810: a control the browser took the focus off, disabled or made inert while its read or write was
-// on its way, gives it back once its part is drawn again in place: to the control of the same
-// name, or to `fallback` when it is gone (a row that left its list). Not when the focus went
-// elsewhere meanwhile; `was`, the control as pressed, still holds it where nothing moves it off.
-function focusAgain(was, key, fallback) {
-  if (![null, document.body, was].includes(document.activeElement)) return;
+// #810: the control that had the focus when a read or write started (the button pressed, or the
+// field whose Enter pressed it), which the browser took the focus off as the page was disabled or
+// made inert, gets it back once its part is drawn again in place: the control of the same name, or
+// `fallback` when it is gone (a row that left its list). Not when the focus went elsewhere meanwhile;
+// `was` itself still holds it where nothing moved it off.
+function focusAgain(was, fallback) {
+  const key = was?.dataset?.simpleFocus;
+  if (!key || ![null, document.body, was].includes(document.activeElement)) return;
   const drawn = [...$('panel').querySelectorAll('button, input, select')].some((n) => n.dataset.simpleFocus === key && !n.disabled);
   simpleFocus(drawn ? key : fallback);
 }

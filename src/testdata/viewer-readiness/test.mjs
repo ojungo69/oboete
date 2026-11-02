@@ -1975,6 +1975,15 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>({...r,never_recorded:false}))}));await settled();
     assert.deepEqual([posted.at(-1).url,simple('never:repo:r1'),Boolean(simple('never-more:repo:r1')),document.activeElement===simple('never.folder')],
       ['/api/privacy/capture',undefined,true,true],'a place undone, whose row moved to the list in More settings, gives it to the folder field');
+    // A folder added by Enter in its field gives the focus back to the field, emptied for the next.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    simple('never.folder').focus();typeIn(simple('never.folder'),'made-up-folder');
+    for(const cb of simple('never.folder').listeners.keydown)cb({key:'Enter',target:simple('never.folder'),preventDefault(){}});
+    blur();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.at(-1).url,document.activeElement===simple('never.folder'),simple('never.folder').value],['/api/privacy/capture',true,''],
+      'a folder added by Enter gives the focus back to its field');
     document.activeElement=null;
   }
   ctx.fetch=w6fetch;
