@@ -1,0 +1,23 @@
+docs/settings-redo.md
+  s_f7d8663ba9ca22::t_adda667cf51e0d 64,66
+DESIGN.md
+  s_f7d8663ba9ca22::t_adda667cf51e0d 227,391,395
+docs/spec.md
+  s_f7d8663ba9ca22::t_adda667cf51e0d 96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "24d82cd170d703caec17c10281c290d8d0ba2afc",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
