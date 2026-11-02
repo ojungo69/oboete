@@ -224,7 +224,7 @@ The viewer is served by `src/view.rs` from three files compiled into the binary:
 
 Decision 65 (2026-10-31): the viewer's arrangement follows claude-mem's viewer and its colours are Notion's: a header across the window with the views as a segmented control, one centred column with a line under each list view's heading saying what it holds, every record a bordered card with its kind as a tag and its agent as a pill, settings in groups that fold between rules, a session's summary edged in gold and a prompt in purple; white and near-black grounds, warm greys and one blue for actions and focus, each made darker or lighter where WCAG AA needs it; no cream ground, no orange accent, no gradient and no tinted card. The font stack stays the system's. This file replaces `docs/viewer-design.md`. As built, "no gradient" means no gradient used as colour: a few shapes are painted with flat single-stop gradients because the page may load no image (see Shapes).
 
-The page is a tool kept open beside an agent's work, read often and changed rarely. It is dense but not cramped: one 48rem column (82rem on My Work), 15px text at 1.65, cards 16-20px apart. The interaction that defines it is inside the card: facts and narrative open in place, with no navigation. Settings change with one Save.
+The page is a tool kept open beside an agent's work, read often and changed rarely. It is dense but not cramped: one 48rem column (82rem on My Work), 15px text at 1.65, cards 16-20px apart. The interaction that defines it is inside the card: facts and narrative open in place, with no navigation. On the simple settings page each change saves at once; the detailed page saves with one Save.
 
 Depth is a 1px border, not a shadow and not a fill. In light mode the card and the page are both white, so the edge alone separates them. Shadows exist only on what floats over the page.
 
@@ -388,6 +388,7 @@ The heading (26px), a search's query words in the accent, then the lede in muted
 
 ### Settings
 - **Language** row first, then groups.
+- **Simple page (decision 69):** the same groups as the detailed page, What agents are given and AI for summaries open first. A closed group's description line says what it holds now ("2 in use, tried in this order · $0.39 used this month"). Each AI is a line: its place in muted mono numerals, its name (14.5px 600), its model in muted 13px, its state at the right; open, its controls sit 22px in. The AI turned off and the places never recorded are smaller disclosures closed at first, labelled with their count. Spend is shown in cents.
 - **Group:** a `details` between 1px Line rules, no box. Its summary is a grid: title (15px 600) and description (13px muted) at the left, a chevron (7px, 1.5px muted borders) at the right that turns from down to up when open (150ms). Sections inside a group are separated by Line rules with 20px above.
 - **Start guide:** the one group shown as a callout: Quiet Surface, no rules, 8px radius, 0 20px padding.
 - **Smaller disclosures:** inline, 14px 500, a 6px chevron before the words.
