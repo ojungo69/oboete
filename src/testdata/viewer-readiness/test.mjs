@@ -2130,6 +2130,16 @@ console.log('PASS: the caps\' No cap switches');
     flip(lineOff(),true);await settled();
     assert.deepEqual([sent()[0].chain[0].daily_budget,lineOff().checked,calls().disabled,warned(),edit(),wholeChain()[0]],
       [NOCAP,true,true,true,freshEdit(answer),NOCAP],'No cap on sends no_cap, its warning shown, the field set aside');
+    // The Enter that ends an input method's composition saves nothing (a model name typed in Japanese
+    // input would be saved half converted).
+    f=draw(one());
+    pickModel('__other');typeIn(typedModel(),'some-model');
+    for(const composing of [{isComposing:true},{keyCode:229}])
+      for(const cb of typedModel().listeners.keydown)cb({key:'Enter',target:typedModel(),preventDefault(){},...composing});
+    typeIn(calls(),'20');
+    for(const cb of calls().listeners.keydown)cb({key:'Enter',target:calls(),preventDefault(){},isComposing:true});
+    await settled();
+    assert.equal(posted.length,0,'an Enter ending a composition saves nothing');
     // Invalid or unchanged sends nothing.
     f=draw(one());
     typeIn(calls(),'0');leaveLine(calls());typeIn(timeout(),'');leaveLine(timeout());await settled();

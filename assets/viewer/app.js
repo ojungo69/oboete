@@ -1772,7 +1772,6 @@ const TEXT = {
   provider_usd_per_mtok_in: ['Input price (USD / million tokens)', '入力料金(米ドル / 100 万トークン)'],
   provider_usd_per_mtok_out: ['Output price (USD / million tokens)', '出力料金(米ドル / 100 万トークン)'],
   provider_max_output_tokens: ['Maximum output tokens', '出力トークン数の上限'],
-  provider_key_manage: ['Register a key on the selected individual provider above.', 'キーは上の個別の要約役で登録してください。'],
   provider_key_none: ['No key registered; a local server may not require one.', 'キーは未登録です。ローカルサーバーでは不要な場合があります。'],
   provider_key_desc: ['Paste a provider-issued API key. oboete chooses private storage; the saved value is never shown. Registration sends no inference request.', 'サービスで発行した API キーを貼り付けます。専用の保存先は oboete が選び、保存した値は表示しません。登録では AI への送信を行いません。'],
   provider_key_unsupported: ['Key registration is currently available on Linux and WSL. This platform’s managed storage is not available yet.', 'キーの登録は現在 Linux と WSL に対応しています。この環境の専用の保存先はまだ利用できません。'],
@@ -6257,7 +6256,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
   // 69) leaves the page usable instead, and keeps what is typed meanwhile (`applySavedSettings`),
   // as an AI line's field does (`hold: false`, 69b-3c).
   const held = !autosaved && simple?.hold !== false;
-  const fields = button.closest('.settings') ?? $('panel').querySelector('.settings');
+  const fields = button.closest('.settings');
   if (held) {
     button.disabled = true;
     fields.inert = true;
