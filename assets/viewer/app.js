@@ -971,6 +971,8 @@ const TEXT = {
   simple_status_missing: ['Needs an API key', 'API キーの登録が必要です'],
   simple_status_not_installed: ['Not installed', 'インストールされていません'],
   simple_status_stopped: ['Stopped', '停止しています'],
+  simple_status_resting: ['Resting until {time}', '{time} まで休止中です'],
+  simple_status_rest: ['Resting', '休止中です'],
   simple_status_off: ['Off', 'オフです'],
   simple_status_ready: ['Ready to use', '利用できます'],
   simple_status_unknown: ['Could not check availability', '利用できるか確認できません'],
@@ -3392,6 +3394,7 @@ function formOf(s) {
     usd_this_month: s.usd_this_month,
     prompt_side: s.prompt_side ?? null,
     stopped: s.stopped,
+    resting: s.resting,
     inject: { ...s.inject, ...Object.fromEntries(SIZES.map((k) => [k, String(s.inject[k])])) },
     capture: { ...s.capture },
     backup: { dir: s.backup?.dir ?? null, edit: text(s.backup?.dir), reset: false },
@@ -4635,6 +4638,10 @@ async function keySave(route, button, body) {
     // (search's endpoint is config.toml's): it is not sent, and is typed again (Codex's review of
     // 69b-3c-1a).
     if (formLoads !== loads) {
+      // The page it held is drawn again, as a provider's write does: the save it waited for may have
+      // ended without drawing it (#814).
+      button.disabled = false;
+      drawSettings();
       setStatus(t('key_again'), true, lang);
       return;
     }
@@ -5425,6 +5432,7 @@ async function resumeProvider(name, button) {
       simpleReceipt = 'ai';
       drawSettings();
       setStatus(t(answer.resumed ? 'resumed' : 'not_stopped'), false, lang);
+      void refreshRests();
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
@@ -5634,6 +5642,8 @@ function mergeProviderSettings(answer, mine, action) {
   next.simpleCapOff = Boolean(mine.simpleCapOff) && answer.paid_usd_per_month !== null;
   next.simpleCapOn = Boolean(mine.simpleCapOn) && answer.paid_usd_per_month === null;
   next.privacy = mine.privacy;
+  // The rests shown are the last read's (69b-3c-1b), not the older lists an answer carries.
+  Object.assign(next, { stopped: mine.stopped, resting: mine.resting });
   next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
@@ -5685,11 +5695,14 @@ function currentSettings(mine) {
 }
 
 function reloadProviderSettings(current) {
+  const shown = form;
   form = loadedForm(current);
+  if (form && shown) Object.assign(form, { stopped: shown.stopped, resting: shown.resting });
   if (form) form.privacy = privacyPending();
   drawSettings();
   setStatus(t('stale'), true, lang);
   if (form) void refreshPrivacy(form);
+  void refreshRests();
 }
 
 function providerSuccessKey(action, path, answer) {
@@ -6254,6 +6267,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
   const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
   if (moved && movePage(runtime.url || '')) return;
   form = current ? loadedForm(current) : mergeProviderSettings(answer, mine, { op: simple ? 'simple' : 'settings' });
+  if (current && form) Object.assign(form, { stopped: mine.stopped, resting: mine.resting });
   // Decision 69: the owner went on typing while a change saved at once was on its way. The drafts
   // stay, with the answer's saved values, version and key, and are saved when their field is left.
   if (sent !== null && !current && form) {
@@ -6298,6 +6312,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
   setStatus(t(status), Boolean(current) || moved, lang);
   askHeldAgain();
   if (form) void refreshPrivacy(form);
+  void refreshRests();
 }
 
 async function saveSettings(button, simple = null, autosaved = false) {
@@ -6539,13 +6554,82 @@ const AI_CATALOG = [
     key_file: null, subscription: false, models: [] },
 ];
 
-function simpleProviderStatus(row, stopped) {
+// A rest until a time (69b-3c-1b) after a key missing, not installed and the owner's hold, before
+// off and ready; a list not read (`null`) leaves the state not known.
+function simpleProviderStatus(row, stopped, resting) {
   if (row.key === 'missing') return 'missing';
   if (row.key === 'not-on-path') return 'not-installed';
   if (Array.isArray(stopped) && stopped.includes(row.name)) return 'stopped';
+  if (Array.isArray(resting) && resting.some((rest) => rest.name === row.name)) return 'resting';
   if (row.on === false) return 'off';
-  if (row.on !== true || !Array.isArray(stopped) || !['ok', 'none', 'on-path'].includes(row.key)) return 'unknown';
+  if (row.on !== true || !Array.isArray(stopped) || !Array.isArray(resting) || !['ok', 'none', 'on-path'].includes(row.key)) return 'unknown';
   return 'ready';
+}
+
+// A line's state in words: a rest with its end, in the page's language, the date too when it is
+// not today (69b-3c-1b).
+function simpleStatusText(row, status, f) {
+  if (status !== 'resting') return t(`simple_status_${status.replaceAll('-', '_')}`);
+  const at = new Date(f.resting.find((rest) => rest.name === row.name)?.until);
+  if (!Number.isFinite(at.getTime())) return t('simple_status_rest');
+  const today = at.toDateString() === new Date().toDateString();
+  const time = new Intl.DateTimeFormat(lang === 'ja' ? 'ja-JP' : 'en-US', {
+    ...(today ? {} : { month: 'short', day: 'numeric' }), hour: '2-digit', minute: '2-digit',
+  }).format(at);
+  return t('simple_status_resting', { time });
+}
+
+function resumeButton(name) {
+  const resume = el('button', 'quiet small', t('resume'));
+  resume.type = 'button';
+  resume.setAttribute('aria-label', t('resume_label', { name: simpleLabel(name) }));
+  resume.dataset.simpleFocus = `resume:${name}`;
+  resume.addEventListener('click', () => void resumeProvider(name, resume));
+  return resume;
+}
+
+// 69b-3c-1b: the chain's rests read alone while Settings is shown (`/api/rests`), numbered as they
+// start, as the privacy reads are (69b-3a): only the last one started is drawn, and only when its
+// lists differ from the form's. A read that fails leaves every line's state not known.
+let restsAsked = 0;
+async function refreshRests() {
+  if (view !== 'settings' || !form) return;
+  const asked = ++restsAsked;
+  const lists = await api('rests').catch(() => ({}));
+  if (asked !== restsAsked || view !== 'settings' || !form) return;
+  const f = form;
+  const [stopped, resting] = [lists.stopped ?? null, lists.resting ?? null];
+  if (JSON.stringify([f.stopped, f.resting]) === JSON.stringify([stopped, resting])) return;
+  Object.assign(f, { stopped, resting });
+  renderRests(f);
+}
+
+// The rests drawn in place: each AI line's state and its Resume (its fold opened for a hold only the
+// owner ends, as a new draw opens it), and the stopped list in More settings. Nothing else of a line
+// is drawn again, so what is typed, a draft, a confirmation, a write's hold and the focus stay.
+function renderRests(f) {
+  if (view !== 'settings' || form !== f) return;
+  const keep = focusKeep();
+  const chain = simpleSavedChain(f);
+  for (const item of $('panel').querySelectorAll('.simple-provider')) {
+    const row = chain.find((r) => r.name === item.dataset.providerName);
+    if (!row) continue;
+    const status = simpleProviderStatus(row, f.stopped, f.resting);
+    const state = item.querySelector('.simple-state');
+    if (state) {
+      state.className = `simple-state ${status}`;
+      state.replaceChildren(simpleStatusText(row, status, f));
+    }
+    const slot = item.querySelector('.simple-resume');
+    const stopped = Boolean(f.stopped?.includes(row.name));
+    if (slot && stopped !== Boolean(slot.querySelector('button'))) {
+      slot.replaceChildren(...(stopped ? [resumeButton(row.name)] : []));
+      const fold = item.querySelector('.simple-provider-fold');
+      if (stopped && fold && groupOpen.get(`ai:${row.name}`) === undefined) fold.open = true;
+    }
+  }
+  $('panel').querySelector('.stopped-state')?.replaceChildren(...[...stoppedState().childNodes]);
+  if ([null, document.body].includes(document.activeElement)) focusBack(keep);
 }
 
 function simpleProviderModels(row, models) {
@@ -6742,7 +6826,7 @@ function simpleProviderRow(f, row, index, chain, position) {
   const providers = f.providers.filter(provider => provider.name === row.name);
   const provider = providers[0];
   const on = row.on;
-  const status = simpleProviderStatus({ ...row, on }, f.stopped);
+  const status = simpleProviderStatus({ ...row, on }, f.stopped, f.resting);
   const arrows = position === null ? [] : [-1, 1].map(direction => {
     const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
     button.type = 'button';
@@ -6846,17 +6930,11 @@ function simpleProviderRow(f, row, index, chain, position) {
   const timeoutDiffers = row.differs?.includes('timeout_s') && (savedRow.timeout_s ?? null) === null;
   const timeout = lineNumber(f, row, savedRow, 'timeout_s', `timeout:${row.name}`, t('simple_timeout'), label, f.ranges.timeout_s,
     timeoutDiffers ? '' : String(row.effective_timeout_s));
-  let resume = null;
-  if (f.stopped?.includes(row.name)) {
-    resume = el('button', 'quiet small', t('resume'));
-    resume.type = 'button'; resume.setAttribute('aria-label', t('resume_label', { name: label }));
-    resume.dataset.simpleFocus = `resume:${row.name}`;
-    resume.addEventListener('click', () => void resumeProvider(row.name, resume));
-  }
+  const resume = f.stopped?.includes(row.name) ? resumeButton(row.name) : null;
   const needs = row.key === 'missing' || simpleKeyName === row.name || Boolean(resume);
   const line = el('summary', 'simple-provider-line', position === null ? null : el('span', 'simple-order', String(position)),
     el('span', 'simple-provider-name', label), el('span', 'simple-provider-model', row.effective_model ?? t('simple_model_default')),
-    el('span', `simple-state ${status}`, t(`simple_status_${status.replaceAll('-', '_')}`)));
+    el('span', `simple-state ${status}`, simpleStatusText(row, status, f)));
   const fold = el('details', 'simple-provider-fold', line,
     el('div', 'simple-provider-controls',
       simpleToggle(on, `on:${row.name}`, t('simple_ai_on', { name: label }),
@@ -6868,7 +6946,7 @@ function simpleProviderRow(f, row, index, chain, position) {
       ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
       : provider && (row.key === 'missing' || simpleKeyName === row.name)
         ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
-    resume, provider ? providerTest(provider, true) : null, detail());
+    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, detail());
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
   fold.open = groupOpen.get(key) ?? needs;
@@ -7149,7 +7227,7 @@ function simpleGroups(f, more) {
   const myWork = simpleToggle(f.savedSettings.my_work.curate, 'my_work.curate', t('simple_my_work'), (button, value) =>
     void simpleSettingsSave(button, (body, saved) => { body.my_work = { curate: value, calls_a_day: saved.my_work.calls_a_day }; },
       (next, answer) => { next.my_work = { ...next.my_work, curate: answer.my_work.curate }; }));
-  const ready = chain.some(row => simpleProviderStatus(row, f.stopped) === 'ready');
+  const ready = chain.some(row => simpleProviderStatus(row, f.stopped, f.resting) === 'ready');
   // Decision 64: with no cap saved the limit is set aside until No cap is turned off, and turning
   // it on waits for its confirmation, as turning masking off does.
   const capOff = f.savedSettings.paid_usd_per_month === null;
@@ -7659,6 +7737,7 @@ function askHeld(held, confirmed) {
     // What is saved holds no privacy state: the one read stays (cubic and CodeRabbit on #806).
     form = formOf(mine.savedSettings);
     form.privacy = mine.privacy;
+    Object.assign(form, { stopped: mine.stopped, resting: mine.resting });
     drawSettings();
     setStatus('');
   });
@@ -9739,6 +9818,7 @@ function drawQueue() {
 
 async function pollMaintenance() {
   if(view==='settings' && form?.maintenance)await refreshMaintenance(form.maintenance);
+  if (view === 'settings' && form) await refreshRests();
   const d = embeddingDraft;
   if (view === 'settings' && form?.embedding && (d.busy || d.watch || d.status?.active)) await refreshEmbedding();
 }

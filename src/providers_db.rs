@@ -279,6 +279,27 @@ pub fn stopped(conn: &Connection) -> Result<Vec<(String, i64)>> {
     Ok(rows)
 }
 
+/// Providers resting now, from one query (69b-3c-1b): each with the time it is used again
+/// (`OWNER_HOLD`: when the owner acts) and whether codex's allowance read set the rest without
+/// counting the account's credits (`State::uncredited`). An older ledger, read and not upgraded, has
+/// no such rest.
+pub fn rests(conn: &Connection) -> Result<Vec<(String, i64, bool)>> {
+    let uncredited = conn
+        .prepare("SELECT 1 FROM pragma_table_info('provider_state') WHERE name = 'uncredited'")?
+        .exists([])?;
+    let sql = if uncredited {
+        "SELECT provider, down_until, COALESCE(uncredited, 0) FROM provider_state
+         WHERE down_until > ?1 ORDER BY provider"
+    } else {
+        "SELECT provider, down_until, 0 FROM provider_state WHERE down_until > ?1 ORDER BY provider"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map([now_ms()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 /// Clear `provider`'s cooldown and breaker: the owner says it can be used again. Whether it had
 /// any state. A window that waited on the owner is tried at the worker's next run, not an hour
 /// later.
