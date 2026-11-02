@@ -1855,10 +1855,15 @@ console.log('PASS: the caps\' No cap switches');
     typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
     givePrivacy(json(privacy));await settled();
     assert.deepEqual([posted.length,kept()],[1,secrets],'kept through a save\'s answer, which drew the page again');
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();
+    assert.deepEqual(kept(),secrets,'and through the page drawn in another language');
+    ctx.ui.setLang('en');ctx.ui.drawSettings();
     assert.deepEqual([buttonBy(lineKey()).disabled,buttonBy(entryKey('config:1')).disabled,hashButton().disabled],[false,false,false],
       'their buttons enabled');
-    const seen=JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n');
-    assert(secrets.every(s=>!seen.includes(s)),'in no form, storage or request');
+    const walk=n=>[n,...n.children.filter(c=>c&&typeof c==='object').flatMap(walk)];
+    const attributes=()=>JSON.stringify(walk(panel).map(n=>[n.attrs,n.dataset]));
+    const seen=JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')+attributes();
+    assert(secrets.every(s=>!seen.includes(s)),'in no form, storage, request or attribute');
     // An entry whose address changed (edited elsewhere) gets nothing back; the others keep theirs.
     [privacyAnswer,givePrivacy]=later();
     const readdressed=keyed({version:'v2b',inject:sized(4050)});
@@ -1867,6 +1872,15 @@ console.log('PASS: the caps\' No cap switches');
     typeIn(general('inject.session_start_chars'),'4050');leave(general('inject.session_start_chars'));await settled();
     givePrivacy(json(privacy));await settled();
     assert.deepEqual(kept(),[secrets[0],'',secrets[2]],'nothing put into an entry whose address changed');
+    // Or whose API changed: a key typed for one API's server is not offered to another's.
+    typeIn(entryKey('config:1'),'made-up-entry-key-0009');
+    [privacyAnswer,givePrivacy]=later();
+    const reapi=keyed({version:'v2c',inject:sized(4060)});
+    reapi.providers[1]={...reapi.providers[1],saved:{...reapi.providers[1].saved,base_url:'http://127.0.0.1:9/elsewhere',api:'anthropic'}};
+    answers=[json(reapi)];
+    typeIn(general('inject.session_start_chars'),'4060');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.equal(entryKey('config:1').value,'','nothing put into an entry whose API changed');
     // An entry whose place now holds another entry, or whose address changed, gets nothing back:
     // a key never goes where it was not typed for.
     typeIn(entryKey('config:0'),'made-up-entry-key-0004');
@@ -1886,6 +1900,22 @@ console.log('PASS: the caps\' No cap switches');
     buttonBy(lineKey()).click();await settled();
     assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).key],['/api/providers/key',secrets[0]],'its own save sends it');
     assert.equal(lineKey()?.value??'','','and the field is empty after');
+    // Two entries of one name whose address the viewer does not show cannot be told apart: neither
+    // keeps a key through the page drawn again, so one typed for the first never reaches the
+    // second's field (Codex's security review of #807).
+    const unshown=n=>({...entry('alpha',n),saved:{...entry('alpha',n).saved,base_url:null,endpoint_supported:false}});
+    const twins=(extra={})=>keyed({chain:[row('alpha',{entries:2})],providers:[unshown(0),unshown(1)],...extra});
+    settingsNow=twins();
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    typeIn(entryKey('config:0'),'made-up-twin-key-0008');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(twins({version:'v6',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.length,entryKey('config:0').value,entryKey('config:1').value],[1,'',''],
+      'an entry whose address is not shown keeps no key');
     // Search's Workers AI key and the judge's keep theirs too; the judge's goes with its destination:
     // another destination chosen, its field is empty.
     const judged={...judge,destinations:[...judge.destinations,{id:'d1',key:'missing',usd_per_mtok_in:0.01,local:false}]};

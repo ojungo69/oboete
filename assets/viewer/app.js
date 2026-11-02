@@ -5722,7 +5722,8 @@ async function providerWrite(action, button, body, path) {
 }
 
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
-// form state; redraws clear them and the selected field is emptied before fetch is called.
+// form state; a redraw puts one being typed back into the field drawn for the same entry
+// (`keepSecret`), and the selected field is emptied before fetch is called.
 // The AI line's field and its entry's in More settings are told apart, so a redraw gives the focus
 // back to the one it was on (decision 69, 69b-2).
 function providerKeyField(provider, simple = false) {
@@ -5741,9 +5742,13 @@ function providerKeyField(provider, simple = false) {
   save.dataset.simpleFocus = `key-save:${id}`;
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
-  // Named by where its save sends it: the entry's place, name, kind and address.
-  keepSecret(i, JSON.stringify([simple ? 'line' : 'entry', selectorKey(provider.selector), provider.name,
-    provider.saved?.kind ?? null, provider.saved?.base_url ?? null]), () => { save.disabled = !i.value; });
+  // Named by where its save sends it: the entry's place, name, kind, API and address. An entry whose
+  // address the viewer does not show cannot be told from another: it keeps nothing (Codex's
+  // security review of #807).
+  if (provider.saved?.base_url) {
+    keepSecret(i, JSON.stringify([simple ? 'line' : 'entry', selectorKey(provider.selector), provider.name,
+      provider.saved.kind, provider.saved.api ?? null, provider.saved.base_url]), () => { save.disabled = !i.value; });
+  }
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
