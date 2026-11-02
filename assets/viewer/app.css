@@ -484,8 +484,7 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 .settings > .lead { font-size: 14px; }
 
 .settings-group, .settings > section, .settings > details { margin: 0; border-top: 1px solid var(--line); }
-.settings > :is(.settings-group, section, details):last-child,
-.settings > form > :is(.settings-group, section, details):last-of-type { border-bottom: 1px solid var(--line); }
+.settings > :is(.settings-group, section, details):last-child { border-bottom: 1px solid var(--line); }
 .settings > section, .settings > details:not(.settings-group) { padding: 20px 0 24px; }
 .settings-group > summary {
   display: grid;
@@ -588,9 +587,7 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 .chain th { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap; }
 .chain td input[type="number"] { width: 5.5rem; }
 .chain td input[type="text"] { width: 11rem; }
-.chain td:nth-child(3) { min-width: 10rem; }
-.chain .move { display: inline-flex; gap: 4px; }
-.chain .move button { min-width: 30px; padding: 4px 6px; }
+.chain td:first-child { min-width: 10rem; }
 .chain .entry-name { font-weight: 600; }
 .chain .key-input { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
 /* Masks the key as it is typed (Chromium, Safari, Firefox 114 and later). */
@@ -627,14 +624,8 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .test-preview pre { max-height: 10rem; overflow: auto; }
 .provider-entry .error, .settings .error { color: var(--red); }
 
-/* Simple and detailed: a segmented control, as claude-mem's view tabs. */
-.settings-view-switch { display: inline-flex; flex-wrap: wrap; gap: 2px; margin: 16px 0; padding: 3px; background: var(--surface-2); border: 1px solid var(--edge); border-radius: var(--radius-l); }
-.settings-view-switch button { min-height: 30px; padding: 4px 14px; border: 0; border-radius: var(--radius-m); background: transparent; color: var(--muted); font-size: 13px; }
-.settings-view-switch button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
-.settings-view-switch button[aria-pressed="true"],
-.settings-view-switch button[aria-pressed="true"]:hover:not(:disabled) {
-  background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--line), var(--shadow-s);
-}
+/* A group's More settings (decision 69, 69b-2): its sections parted as the group's own are. */
+.more-settings > .general-form > * + section, .more-settings > * + section { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
 .simple-block-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 .simple-saved { color: var(--green); font-size: 12.5px; }
 .simple-empty { padding: 12px 16px; background: var(--blue-bg); border-radius: var(--radius-l); }

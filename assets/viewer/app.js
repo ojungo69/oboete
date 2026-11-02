@@ -952,10 +952,8 @@ async function showStats() {
 const LANGS = ['en', 'ja'];
 // Each string in the languages of LANGS, in that order.
 const TEXT = {
-  simple_view: ['Simple settings', 'かんたん設定'],
-  simple_detailed: ['Detailed settings', '詳しい設定'],
-  simple_mode_label: ['Settings view', '設定の表示方法'],
-  simple_intro: ['Changes save automatically, and actions that send data or remove it ask you to confirm first.', '変更は自動で保存され、データの送信や削除を伴う操作では先に確認します。'],
+  simple_intro: ['Changes save at once. Actions that send or remove data ask first.', '変えた設定はすぐ保存されます。データを送る・消す操作は、先に確認します。'],
+  more_settings: ['More settings', '細かい設定'],
   simple_saved: ['Saved', '保存しました'],
   simple_use: ['Use', '使う'],
   simple_model_short: ['Model', 'モデル'],
@@ -974,7 +972,7 @@ const TEXT = {
   simple_model: ['Model for {name}', '{name} のモデル'],
   simple_model_default: ['The app’s default model', 'アプリの標準モデル'],
   simple_other_model: ['Another model…', 'ほかのモデルを選ぶ…'],
-  simple_entry_detail: ['Details for {name}', '{name} の詳しい設定'],
+  simple_entry_detail: ['More settings for {name}', '{name} の細かい設定'],
   simple_differs: ['These entries have different settings; check their details.', '同じ名前の接続先で設定が異なるため、詳しい設定をご確認ください。'],
   simple_add_ai: ['Add AI', 'AI を追加する'],
   simple_catalog_choose: ['Choose {name}', '{name} を選ぶ'],
@@ -1016,7 +1014,7 @@ const TEXT = {
   simple_never_h: ['Places never recorded', '記録しない場所'],
   simple_never_desc: ['New activity in these repositories and folders is not recorded, while existing memories remain.', '指定したリポジトリやフォルダーでの新しい作業を記録せず、以前の記憶はそのまま残します。'],
   simple_never_empty: ['No places are excluded from recording.', '記録しない場所は指定されていません。'],
-  simple_never_more: ['Choose a repository in detailed settings', '詳しい設定でリポジトリを選ぶ'],
+  simple_never_more: ['Repositories and name patterns: More settings', 'リポジトリと名前のパターンは細かい設定で'],
   simple_mask_h: ['Masking of secrets', '機密情報のマスキング'],
   simple_mask_desc: ['Hide API keys and passwords in records, outgoing text and this page.', '記録や送信する内容、この画面に含まれる API キーやパスワードを隠します。'],
   simple_mask_on: ['Mask secrets', '機密情報を隠す'],
@@ -1343,33 +1341,14 @@ const TEXT = {
   port_unavailable: ['This port cannot be used: another program may hold it. Choose another.', 'このポートは使えません。別のプログラムが使っている可能性があります。別のポートを選んでください。'],
   token_replaced: ['The settings were not saved, but the resident page’s token was already replaced. Run oboete view in a terminal to see its address.', '設定は保存されませんでしたが、常駐の画面のトークンはすでに新しくなっています。ターミナルで oboete view を実行すると、その画面のアドレスが表示されます。'],
   language: ['Language', '言語'],
-  lead: [
-    'Choose the settings below. Each change saves at once: a switch or a choice when it changes, a number or a text when you leave it or press Enter. Adding or removing an AI, a key and the port of this page have buttons of their own. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
-    'ここで設定を選べます。変更はすぐに保存されます。スイッチや選択は変えたとき、数字や文字は欄を離れたときか Enter を押したときです。AI の追加や削除、キー、画面のポートには専用のボタンがあります。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
-  ],
   group_start_h: ['Getting started', 'はじめに'],
   group_start_desc: ['Choose how much AI to use, then check that an agent records and finds a test phrase.', 'AI をどこまで使うかを選び、エージェントで記録と検索ができることを確かめます。'],
-  group_everyday_h: ['Everyday settings', 'よく使う設定'],
-  group_everyday_desc: ['Summaries, the limit for paid calls, what agents are given and what is recorded.', '要約、有料の呼び出しの上限、エージェントに渡す記憶、記録する内容です。'],
-  group_providers_h: ['AI providers', '要約役'],
-  group_providers_desc: ['The AI services that write summaries: their order, keys and connection tests.', '要約を書く AI の接続先と、その順番、キー、接続テストです。'],
-  group_privacy_h: ['Privacy', 'プライバシー'],
-  group_privacy_desc: ['Masking sensitive values, repositories whose records are not sent out, and repositories and folders never recorded.', '機密値のマスキング、記録を外部に送らないリポジトリ、記録しないリポジトリとフォルダーの指定です。'],
   group_computer_h: ['This computer', 'このパソコン'],
   group_computer_desc: ['Running between sessions, the page’s address and where backups go.', 'セッション間の常駐、画面のアドレス、バックアップの保存先です。'],
-  group_agents_h: ['Agents', 'エージェント'],
-  group_agents_desc: ['A preference for every agent, which agents are registered, and connecting agents.', 'すべてのエージェントに伝える好み、登録状況の確認、エージェントの接続です。'],
   group_maintenance_h: ['Diagnostics and maintenance', '診断と保守'],
   group_maintenance_desc: ['Diagnostics, importing and rebuilding history, and other occasional tasks.', '診断、履歴の取り込みや再構築など、ときどき使う操作です。'],
   summary_h: ['Summarizing recorded activity', '記録の要約'],
-  summary_desc: [
-    'When enabled, the background summarizer may send recorded text to the providers below. Paid calls can cost money. Turning it off keeps existing memories and stops new summaries at the next run.',
-    '有効にすると、バックグラウンドの要約処理が記録した本文を下の要約役へ送ることがあります。有料の呼び出しには費用がかかります。無効にしても既存の記憶は残り、次の処理で設定を読み直すと、新しい要約を止めます。',
-  ],
-  curate_on: ['Summarize recorded activity (default: off)', '記録を要約する(既定: 切)'],
   my_work_h: ['My Work, written by AI', 'AI が書く My Work'],
-  my_work_desc: ['When on, the AI for summaries also groups your conversations into requests and writes their progress, your goals and suggested rules for the My Work page. It runs only while summaries are on.', 'オンにすると、要約に使う AI が会話を依頼ごとにまとめ、進み具合・目標・ルールの提案を書いて My Work の画面に出します。要約がオンのときだけ動きます。'],
-  my_work_on: ['Write My Work with AI (default: off)', 'My Work を AI で書く(既定: 切)'],
   my_work_calls: ['Calls a day, at most ({min} to {max})', '1 日の呼び出しの上限({min}〜{max} 回)'],
   my_work_calls_desc: ['At the limit, the work waits for the next day. The monthly limit on paid calls applies too.', '上限に達すると翌日まで待ちます。有料の AI の月額上限もそのまま効きます。'],
   my_work_estimate: ['Calls a day with it on: about {calls}, at most {most}. At {name} ({model}) prices: about {usd} a day, at most {most_usd}.', 'オンのときの 1 日の呼び出し: およそ {calls} 回、多くても {most} 回。{name}({model})の料金で 1 日およそ {usd}、多くても {most_usd} です。'],
@@ -1431,7 +1410,6 @@ const TEXT = {
     'Write the language you want, such as English. Default: Japanese. Changing the language does not start a call.',
     '要約を書いてほしい言語を自由に入力します。例: English。既定は Japanese(日本語)です。言語を変えても呼び出しは始まりません。',
   ],
-  summary_advanced: ['Text size and waiting time', '一度に送る大きさと待ち時間'],
   window_tokens: ['Text per request ({min} to {max} estimated tokens)', '一度に送る大きさ(推定トークン数、{min}〜{max})'],
   window_tokens_desc: [
     'Default: 5,000. Tokens are small pieces of text counted by a model. Larger requests can send more text and cost more. Saving does not send a request.',
@@ -1445,14 +1423,6 @@ const TEXT = {
   saved_value: ['Saved: {value}', '保存済み: {value}'],
   value_on: ['On', '入'],
   value_off: ['Off', '切'],
-  spending_h: ['Paid calls and spending', '有料の呼び出しと利用額'],
-  paid_cap: ['Monthly limit for paid calls (USD)', '有料の呼び出しの月額上限(米ドル)'],
-  paid_cap_desc: [
-    'Default: USD 5 per calendar month (UTC). Zero stops paid calls; free and subscription providers can still be used. This limit covers the paid calls recorded by oboete. Search embeddings have their own limit. Saving the limit costs nothing.',
-    '既定は暦月ごとに 5 米ドル(UTC)です。0 では有料の呼び出しを止め、無料・サブスクリプションの要約役は引き続き使えます。oboete が記録する有料の呼び出しが対象で、検索用の処理には別の上限があります。上限を保存するだけでは費用はかかりません。',
-  ],
-  month_spend: ['Recorded spending this month (UTC): {usd}', '今月の記録された利用額(UTC): {usd}'],
-  no_spend: ['Nothing has been spent this month (UTC).', '今月(UTC)の利用額はありません。'],
   spend_unavailable: ['This month\'s spending could not be read.', '今月の利用額を読み込めませんでした。'],
   gemini_label: ['Where to add Gemini', 'Gemini を加える場所'],
   gemini_none: ['Do not add automatically (default)', '自動では加えない(既定)'],
@@ -1475,21 +1445,11 @@ const TEXT = {
   providers_unavailable: ['Provider stops could not be read or changed. Please try again.', '要約役の停止状態を読み込み・変更できませんでした。もう一度お試しください。'],
   resume_failed: ['The provider could not be resumed ({status}).', '要約役を再開できませんでした({status})。'],
   network_failed: ['The viewer could not be reached. Please try again.', 'ビューアーに接続できませんでした。もう一度お試しください。'],
-  inject_h: ['Handing memory to agents', '記憶の受け渡し'],
-  inject_desc: [
-    'The summary of your memory that an agent is given when a session starts.',
-    'セッションの開始時に、エージェントへ渡す記憶のまとめです。',
-  ],
-  inject_on: ['Give agents the summary of your memory', 'エージェントに記憶のまとめを渡す'],
   session_note_on: ['Show a status line in the terminal when a session starts', 'セッション開始時に端末へ状態を表示する'],
   session_note_desc: ['A short status line. This changes at the next session start.', '短い状態の 1 行です。次のセッション開始から反映されます。'],
   session_list_on: ['Also show the list of memories handed over, as claude-mem does', '渡した記憶の一覧も表示する (claude-mem と同じ表示)'],
   session_list_desc: ['The list shows the titles and summaries from your memory that the agent gets. Off, only the status line is shown.', '一覧には、AI に渡したのと同じ記憶の題名や要約が表示されます。オフにすると、状態の 1 行だけを表示します。'],
   inject_chars: ['Size in characters ({min} to {max})', '大きさ(文字数、{min}〜{max})'],
-  per_prompt_on: [
-    'Also give the decisions, cards and session summaries that match each prompt in words or meaning, and the imported history and notes that match it in meaning (off until it has been measured)',
-    'プロンプトごとに、言葉や意味が近い決定・カード・セッションの要約と、意味が近い取り込み履歴・メモも渡す(測定が済むまでは切)',
-  ],
   per_prompt_chars: ['Their size in characters ({min} to {max})', 'その大きさ(文字数、{min}〜{max})'],
   per_prompt_wait_ms: ['How long each prompt waits for search by meaning, in milliseconds ({min} to {max}); past it, what its words match is used', '各プロンプトで意味の検索を待つ上限(ミリ秒、{min}〜{max})。過ぎたら言葉の一致だけを使います'],
   prompt_side_meaning: ['The last prompt ({time}) also took search by meaning.', '直近のプロンプト({time})は意味の検索も使いました。'],
@@ -1533,7 +1493,6 @@ const TEXT = {
   backup_desc: ['An empty field uses the default. Relative paths start at the memory home; absolute paths stay absolute. The next backup uses this location. Saving creates no directory and moves no existing backups or forget logs.', '空欄では既定の場所を使います。相対パスは記憶の保存先を基準とし、絶対パスはそのまま使います。次のバックアップから反映されます。保存してもディレクトリは作らず、既存のバックアップや忘却のログは移動しません。'],
   redaction_h: ['Masking sensitive values', '機密値のマスキング'],
   redaction_desc: ['Masking replaces secrets such as API keys with [REDACTED] before text is stored, sent or shown, using the built-in rules and the rules you add. Saved changes apply at the next recording, send or display. The worker rescans this device’s stored records at its next run; a saved change does not start the worker. This does not erase backups or cover other devices.', 'マスキングは、本文を保存・送信・表示する前に、組み込みのルールと追加したルールで API キーなどの機密値を [REDACTED] に置き換えます。保存した変更は、次の記録・送信・表示から使われます。ワーカーは次回の処理で、この端末の保存済み記録を再検査します。保存だけではワーカーは起動しません。バックアップの削除や他の端末の検査は含みません。'],
-  redaction_enabled: ['Mask secrets such as API keys and passwords', 'API キーやパスワードなどの機密値をマスクする'],
   redaction_off_warning: ['With masking off, secrets are stored as typed on this device and in its backups, sent to the AI services set up here for summaries and search, and shown to your agents. What has been sent cannot be called back. Turning masking on again masks what was stored meanwhile from the worker’s next run on, but not what was sent.', 'マスキングがオフの間は、機密値が入力どおりにこの端末とバックアップに保存され、要約や検索のために設定した AI サービスへ送られ、エージェントにもそのまま渡ります。送信したものは取り消せません。マスキングをオンに戻すと、それまでに保存された分はワーカーの次回の処理からマスクされますが、送信したものは戻りません。'],
   redaction_rule: ['Additional rule {number}', '追加ルール {number}'],
   redaction_add: ['Add a masking rule', 'マスキングのルールを追加'],
@@ -1569,9 +1528,8 @@ const TEXT = {
   privacy_never_recorded: ['Never recorded, so never sent', '記録しないため送信もしません'],
   never_h: ['Never record', '記録しない'],
   never_desc: ['Nothing that happens in these repositories and folders is written from now on: no prompt, tool call or reply. A repository that is never recorded is never sent out either. What was already recorded stays; for a repository, `oboete forget --repo <a folder in it>` removes it. Recording again starts from then on, and nothing from while it was excluded comes back. A repository can also stop its own recording with `capture = false` in its `.oboete.toml`.', 'ここに挙げたリポジトリとフォルダーで起きたことを、今後は書き込みません。プロンプト・ツールの実行・返答のどれも記録しません。記録しないリポジトリは外部にも送りません。すでに記録した分は残ります。リポジトリの分は `oboete forget --repo <そのリポジトリ内のフォルダー>` で消せます。記録を再開すると、その時点から記録します。除外していた間の記録は戻りません。リポジトリ側でも `.oboete.toml` に `capture = false` と書くと記録を止められます。'],
-  never_repos_h: ['Repositories', 'リポジトリ'],
-  never_folders_h: ['Folders on this device', 'この端末のフォルダー'],
-  never_folders_none: ['No folder is excluded.', '除外しているフォルダーはありません。'],
+  never_repos_h: ['Repositories recorded', '記録しているリポジトリ'],
+  never_recorded_none: ['No repository is being recorded.', '記録しているリポジトリはありません。'],
   never_on: ['Never recorded', '記録しない'],
   never_off: ['Not excluded', '除外していません'],
   never_exclude: ['Never record from now on', '今後は記録しない'],
@@ -1589,7 +1547,6 @@ const TEXT = {
   pattern_not_found: ['This name or pattern is no longer in the list. Reload its state.', 'この名前やパターンは一覧にありません。状態を再読み込みしてください。'],
   never_patterns_h: ['Folder names and patterns', 'フォルダー名とパターン'],
   never_patterns_desc: ['A name such as my-secret-project stops recording in every folder of that name and inside one. A pattern works as in claude-mem: * stands for any characters within one folder name, ** for any folders, ? for one character, and a leading ~ for your home folder.', 'my-secret-project のような名前を入れると、その名前のフォルダーとその中では記録しません。パターンは claude-mem と同じ書き方です。* はフォルダー名の中の任意の文字、** は任意の階層、? は 1 文字、先頭の ~ はホームフォルダーを表します。'],
-  never_patterns_none: ['No folder name or pattern is excluded.', '除外しているフォルダー名やパターンはありません。'],
   never_pattern_input: ['Folder name or pattern to never record', '記録しないフォルダー名またはパターン'],
   never_pattern_add: ['Never record the folders it names', '当てはまるフォルダーを記録しない'],
   never_pattern_stopped: ['Recording in the folders it names stopped. What was recorded before stays.', '当てはまるフォルダーの記録を止めました。これまでの記録は残ります。'],
@@ -1639,8 +1596,6 @@ const TEXT = {
   hide_not_found: ['It is no longer there. Reload the page.', 'すでにありません。ページを読み込み直してください。'],
   hide_unavailable: ['The memory is busy. Try again in a moment.', '記憶が使用中です。少し待ってからもう一度お試しください。'],
   hidden_h: ['Removed from the page', 'ページから外したもの'],
-  simple_hidden_h: ['Removed from the page', 'ページから外したもの'],
-  simple_hidden_desc: ['Cards and summaries removed from the page, left out of session start, search and what agents are given until brought back.', 'ページから外したカードと要約です。戻すまで、会話の開始時・検索・エージェントに渡す内容にも出ません。'],
   hidden_desc: ['Cards and summaries removed from the page. Until brought back, they are left out of the page, session start, search and what agents are given. To erase one, forget its conversation or the prompt it came from.', 'ページから外したカードと要約です。戻すまで、ページ・会話の開始時・検索・エージェントに渡す内容に出ません。完全に消すには、その会話か、もとになったプロンプトを忘れてください。'],
   hidden_none: ['Nothing is removed.', '外したものはありません。'],
   hidden_restore: ['Bring back', '戻す'],
@@ -1679,8 +1634,6 @@ const TEXT = {
     'These controls apply to every entry with each name, including duplicates. This group order takes priority over the individual order above. An empty field follows the entry’s saved value, shown in grey.',
     'ここでの設定は、同じ名前のすべての要約役に反映されます。この名前ごとの順番が、上の個別の順番より優先されます。空欄は、各要約役の保存済みの値(灰色で表示)に従います。',
   ],
-  col_order: ['Order', '順番'],
-  col_on: ['Use', '使う'],
   col_name: ['Curator', '要約役'],
   col_model: ['Model', 'モデル'],
   col_budget: ['Calls a day', '1 日の回数'],
@@ -2435,17 +2388,7 @@ const TEXT = {
   maintenance_key: ["The preview is invalid. Prepare it again.", "プレビューが不正です。作成し直してください。"],
   maintenance_id: ["The operation identifier is invalid. Prepare a fresh operation.", "処理の識別情報が不正です。新しい処理を準備してください。"],
   maintenance_id_changed: ["That operation identifier belongs to another confirmed request. Inspect status.", "その識別情報は別の確認済み処理のものです。状況を確認してください。"],
-  group_search_h: ['Search by meaning', '意味での検索'],
-  group_search_desc: ['How memories are also found by what they mean, and where that work runs.', '記憶を意味でも探すための処理と、その処理を行う場所です。'],
-  embedding_h: ['Search by meaning (embeddings)', '意味での検索（埋め込み）'],
-  embedding_desc: ['oboete turns each memory into numbers (a vector), so a search also finds memories close in meaning. Full-text search works with every method.', 'oboete は各記憶を数値（ベクトル）に変換し、意味の近い記憶も検索で見つかるようにします。どの方法を選んでも全文検索は使えます。'],
-  embedding_choice: ['Method', '方法'],
-  embedding_none: ['Off (full-text search only)', '使わない（全文検索のみ）'],
-  embedding_local: ['On this computer (bge-m3)', 'このパソコンで処理（bge-m3）'],
-  embedding_workers_ai: ['Cloudflare Workers AI (bge-m3)', 'Cloudflare Workers AI（bge-m3）'],
   embedding_none_desc: ['Nothing is sent anywhere to be turned into vectors. The vectors made so far stay stored.', 'ベクトルへの変換のための送信は行いません。これまでに作ったベクトルは保存したままにします。'],
-  embedding_local_desc: ['bge-m3 runs on this computer. It needs a one-time download of about 2.3 GB; after that, no text or search leaves this computer to be turned into vectors.', 'bge-m3 をこのパソコンで動かします。最初に一度だけ約 2.3 GB のダウンロードが必要です。その後は、ベクトルへの変換のために文章や検索語が外部へ送られることはありません。'],
-  embedding_workers_ai_desc: ['Each memory’s text (after masking) and each search query are sent to Cloudflare Workers AI under your account, within the limits set below.', '各記憶の文章（マスキング後）と検索語を、あなたのアカウントの Cloudflare Workers AI に送ります。送信は下で設定する上限の範囲内で行います。'],
   embedding_files_ready: ['The model’s files are ready in {dir} ({size}).', 'モデルのファイルは {dir} に準備できています（{size}）。'],
   embedding_files_not_downloaded: ['The model has not been downloaded yet.', 'モデルはまだダウンロードしていません。'],
   embedding_files_incomplete: ['The model’s download is incomplete ({size} so far, in {dir}). Choosing this method again resumes it.', 'モデルのダウンロードが途中です（{dir} に {size}）。もう一度この方法を選ぶと続きから再開します。'],
@@ -3571,13 +3514,8 @@ function redactionSection(f) {
       if (fields) fields.inert = false;
     }
   });
-  // Owner decision 43: off stops every rule; the warning shows before the save, without a redraw.
-  const warning = el('p', 'desc error', t('redaction_off_warning'));
-  warning.hidden = f.redaction.enabled;
-  const mask = checkbox(f.redaction.enabled, (v) => { f.redaction.enabled = v; warning.hidden = v; });
-  mask.dataset.field = 'redaction.enabled';
-  const enabled = el('label', 'check', mask, t('redaction_enabled'));
-  return el('section', null, el('h3', null, t('redaction_h')), el('p', 'desc', t('redaction_desc')), enabled, warning,
+  // Masking on or off is the Privacy group's own switch, with its confirmation (decision 69, 69b-2).
+  return el('section', null, el('h3', null, t('redaction_h')), el('p', 'desc', t('redaction_desc')),
     ...rows, add, el('h4', null, t('redaction_allow_h')), el('p', 'desc', t('redaction_allow_desc')),
     el('label', 'field', el('span', null, t('redaction_value')), exact), hash,
     el('details', null, el('summary', null, t('redaction_hashes')),
@@ -4381,7 +4319,6 @@ async function recoveryAction(action) {
 
 // --- Search by meaning (W4): the embedder's choice is reviewed, then taken once agreed --------
 
-const EMBEDDING_CHOICES = { none: 'embedding_none', local: 'embedding_local', 'workers-ai': 'embedding_workers_ai' };
 const EMBEDDING_REFUSALS = { no_account: 'embedding_no_account', no_key: 'embedding_no_key',
   local_unavailable: 'embedding_local_unavailable', stale: 'embedding_stale', file_invalid: 'file_error' };
 // `status` is the viewer's GET /api/embedding; `watch` keeps reading it after a start whose answer
@@ -4436,25 +4373,10 @@ function embeddingRun(d) {
 
 // The part the poll redraws: the choice, its review and the run. The Workers AI fields stay, so a
 // token being typed is not cleared.
-function embeddingChoice(f, simple = false) {
-  const d = embeddingDraft, e = f.embedding;
+function embeddingChoice(f) {
+  const d = embeddingDraft;
   const locked = d.busy || Boolean(d.status?.active);
-  const choice = d.choice ?? e.provider;
-  const pick = el('select', null, ...Object.entries(EMBEDDING_CHOICES).map(([value, key]) => {
-    const option = el('option', null, t(key));
-    option.value = value;
-    return option;
-  }));
-  pick.value = choice;
-  pick.dataset.field = 'embedding.choice';
-  pick.disabled = locked;
-  pick.addEventListener('change', () => {
-    d.choice = pick.value;
-    d.preview = null;
-    d.confirmed = false;
-    d.error = null;
-    renderEmbedding();
-  });
+  const choice = d.choice ?? f.embedding.provider;
   const reviewed = d.preview?.choice === choice;
   const preview = el('button', 'quiet', t('embedding_preview'));
   preview.type = 'button';
@@ -4469,20 +4391,15 @@ function embeddingChoice(f, simple = false) {
   const consent = checkbox(d.confirmed, (value) => { d.confirmed = value; start.disabled = !value || locked; });
   consent.dataset.field = 'embedding.confirmed';
   consent.disabled = locked;
-  const local = e.local;
-  const files = local.unavailable ? t(`embedding_unavailable_${local.unavailable}`)
-    : t(`embedding_files_${local.files}`, { dir: local.dir, size: bytesText(local.held) });
-  if (simple) return simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, consent });
-  return el('div', 'embedding-choice',
-    el('label', 'field', el('span', null, t('embedding_choice')), pick,
-      note(t('saved_value', { value: t(EMBEDDING_CHOICES[e.provider] || 'embedding_none') }))),
-    el('p', 'desc', t(`${EMBEDDING_CHOICES[choice]}_desc`)),
-    choice === 'local' ? el('p', 'desc', files) : null,
-    reviewed ? embeddingConsent(d.preview.consent) : null,
-    reviewed ? el('label', 'check', consent, t('embedding_confirm')) : null,
-    reviewed ? start : preview,
-    embeddingRun(d),
-    d.error ? el('p', 'error', embeddingMessage(d.error)) : null);
+  return simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, consent });
+}
+
+// Where the local model's files are and what they hold, or why there are none (search's More
+// settings).
+function embeddingFiles(f) {
+  const local = f.embedding.local;
+  return el('p', 'desc', local.unavailable ? t(`embedding_unavailable_${local.unavailable}`)
+    : t(`embedding_files_${local.files}`, { dir: local.dir, size: bytesText(local.held) }));
 }
 
 function renderEmbedding() {
@@ -4490,18 +4407,13 @@ function renderEmbedding() {
   const block = $('panel').querySelector('.embedding-choice');
   if (!block) return;
   const focused = block.contains(document.activeElement) ? document.activeElement : null;
-  const simple = settingsMode === 'simple';
   const unclaimed = !document.activeElement || document.activeElement === document.body;
-  const restore = simple ? focused?.dataset.simpleFocus || (unclaimed ? embeddingDraft.focus : null) : null;
+  const restore = focused?.dataset.simpleFocus || (unclaimed ? embeddingDraft.focus : null);
   // Keep focus through a disabled redraw only while this request owns it. A later poll or a
   // user working in another block must not pull the keyboard back to the search choices.
-  if (simple) embeddingDraft.focus = embeddingDraft.busy || embeddingDraft.status?.active ? restore : null;
-  const key = focused?.dataset.action ? ['action', focused.dataset.action]
-    : focused?.dataset.field ? ['field', focused.dataset.field] : null;
-  block.replaceChildren(...embeddingChoice(form, simple).childNodes);
-  if (simple) { simpleFocus(restore); return; }
-  const next = key && block.querySelector(`[data-${key[0]}="${key[1]}"]`);
-  if (next && !next.disabled) next.focus({ preventScroll: true });
+  embeddingDraft.focus = embeddingDraft.busy || embeddingDraft.status?.active ? restore : null;
+  block.replaceChildren(...embeddingChoice(form).childNodes);
+  simpleFocus(restore);
 }
 
 function workersAiSettings(f) {
@@ -4656,16 +4568,6 @@ function judgeTest(j) {
     }
   });
   return el('div', 'judge-test', button, note(t('judge_test_desc')));
-}
-
-function embeddingSection(f) {
-  if (!f.embedding) return null;
-  return el('section', 'embedding-settings',
-    el('h3', null, t('embedding_h')),
-    el('p', 'desc', t('embedding_desc')),
-    embeddingChoice(f),
-    el('p', 'desc', t('embedding_index')),
-    workersAiSettings(f));
 }
 
 // As a provider's key field: the token is only in the field and the one request that carries it.
@@ -5005,7 +4907,7 @@ async function moreHidden(f, button) {
   drawSettings();
 }
 
-function hiddenSection(f, simple = false) {
+function hiddenSection(f) {
   const listed = f.hidden;
   const rows = (listed?.items || []).map((item) => {
     const back = word('button', 'quiet small', 'hidden_restore');
@@ -5033,7 +4935,6 @@ function hiddenSection(f, simple = false) {
     more.addEventListener('click', () => void moreHidden(f, more));
     listing = el('div', null, listing, more);
   }
-  if (simple) return simpleBlock('hidden', listing);
   return el('section', 'hidden-settings', word('h3', null, 'hidden_h'), word('p', 'desc', 'hidden_desc'), listing);
 }
 
@@ -5095,8 +4996,8 @@ function privacySection(f) {
 function captureSection(f, simple = false) {
   const state = f.privacy;
   if (!state.available) {
-    const section = simple ? simpleBlock('never', el('p', 'desc', t('privacy_unavailable')))
-      : el('section', null, el('h3', null, t('never_h')), el('p', 'desc', t('privacy_unavailable')));
+    if (!simple) return null;
+    const section = simpleBlock('never', el('p', 'desc', t('privacy_unavailable')));
     section.className += ' never-record';
     return section;
   }
@@ -5127,7 +5028,7 @@ function captureSection(f, simple = false) {
     action.addEventListener('click', () => onClick(action));
     return el('li', null, el('p', 'text', label), el('p', 'desc', t(never ? 'never_on' : 'never_off')), action);
   };
-  const repos = (state.repositories || []).filter(repo => !simple || repo.never_recorded).map((repo) => row(repo.label, repo.never_recorded, (action) =>
+  const repos = (state.repositories || []).filter(repo => Boolean(repo.never_recorded) === simple).map((repo) => row(repo.label, repo.never_recorded, (action) =>
     write(action, { selector: repo.selector, undo: !!repo.never_recorded },
       t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label }))));
   const folders = (state.folders || []).map((folder) => row(folder.label, true, (action) =>
@@ -5135,16 +5036,16 @@ function captureSection(f, simple = false) {
   // Parity row 14: folder names and claude-mem's patterns.
   const patterns = (state.patterns || []).map((pattern) => row(pattern.label, true, (action) =>
     write(action, { pattern_selector: pattern.selector, undo: true }, t('never_undone'))));
-  const folder = input('text', f.neverFolder || '', '', 'never.folder', (v) => { f.neverFolder = v; });
-  const add = el('button', 'quiet small', t('never_folder_add'));
-  add.type = 'button';
-  add.addEventListener('click', () => {
-    if (add.disabled) return;
-    // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
-    if (!folder.value.trim()) { setStatus(t('capture_folder'), true, lang); return; }
-    void write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
-  });
   if (simple) {
+    const folder = input('text', f.neverFolder || '', '', 'never.folder', (v) => { f.neverFolder = v; });
+    const add = el('button', 'quiet small', t('never_folder_add'));
+    add.type = 'button';
+    add.addEventListener('click', () => {
+      if (add.disabled) return;
+      // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
+      if (!folder.value.trim()) { setStatus(t('capture_folder'), true, lang); return; }
+      void write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
+    });
     folder.dataset.simpleFocus = 'never.folder';
     folder.addEventListener('blur', () => { if (folder.value.trim() && !add.disabled) add.click(); });
     folder.addEventListener('keydown', event => {
@@ -5156,7 +5057,7 @@ function captureSection(f, simple = false) {
       placed ? smallFold('s-places', 'simple-places-fold', t('simple_never_count', { n: placed }),
         el('ul', 'simple-places', ...repos, ...folders, ...patterns)) : el('p', 'desc', t('simple_never_empty')),
       el('label', 'field', el('span', null, t('never_folder_input')), folder), add,
-      detailedSettingsLink('simple_never_more', '.never-record'));
+      detailedSettingsLink('simple_never_more', '.never-more'));
     section.className += ' never-record';
     return section;
   }
@@ -5168,12 +5069,11 @@ function captureSection(f, simple = false) {
     if (!pattern.value.trim()) { setStatus(t('capture_pattern'), true, lang); return; }
     void write(addPattern, { pattern: pattern.value, undo: false }, t('never_pattern_stopped'));
   });
-  return el('section', 'never-record', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
-    el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('privacy_none')),
-    el('h4', null, t('never_folders_h')), folders.length ? el('ul', null, ...folders) : el('p', 'desc', t('never_folders_none')),
-    el('label', 'field', el('span', null, t('never_folder_input')), folder), add,
+  // More settings: the repositories still recorded, each to stop, and a pattern to add (decision
+  // 69, 69b-2); the places never recorded, and a folder to add, are the Privacy group's own.
+  return el('section', 'never-more', el('h3', null, t('never_h')), el('p', 'desc', t('never_desc')),
+    el('h4', null, t('never_repos_h')), repos.length ? el('ul', null, ...repos) : el('p', 'desc', t('never_recorded_none')),
     el('h4', null, t('never_patterns_h')), el('p', 'desc', t('never_patterns_desc')),
-    patterns.length ? el('ul', null, ...patterns) : el('p', 'desc', t('never_patterns_none')),
     el('label', 'field', el('span', null, t('never_pattern_input')), pattern), addPattern);
 }
 
@@ -5384,8 +5284,8 @@ async function resumeProvider(name, button) {
     if (view !== 'settings' || form !== mine) return;
     if (res.ok) {
       mine.stopped = mine.stopped.filter((provider) => provider !== answer.provider);
-      if (settingsMode === 'simple') { simpleReceipt = 'ai'; drawSettings(); }
-      else state.replaceWith(stoppedState());
+      simpleReceipt = 'ai';
+      drawSettings();
       setStatus(t(answer.resumed ? 'resumed' : 'not_stopped'), false, lang);
       return;
     }
@@ -5719,7 +5619,7 @@ function providerOrder(f) {
 
 async function providerWrite(action, button, body, path) {
   const mine = form;
-  if (settingsMode === 'simple') clearSimpleReceipt();
+  clearSimpleReceipt();
   // The page and the entry as drawn now: a save waited for may have drawn them again (CodeRabbit
   // on #802).
   const fields = $('panel').querySelector('.settings');
@@ -5734,11 +5634,9 @@ async function providerWrite(action, button, body, path) {
     if (current) return reloadProviderSettings(current);
     if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
     form = mergeProviderSettings(answer, mine, action);
-    if (settingsMode === 'simple') {
-      simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
-      if (path === '/key') simpleKeyName = null;
-      if (action.op === 'create' && action.entry.kind === 'openai') simpleKeyName = action.entry.name;
-    }
+    simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
+    if (path === '/key') simpleKeyName = null;
+    if (action.op === 'create' && action.entry.kind === 'openai') simpleKeyName = action.entry.name;
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
     askHeldAgain();
@@ -6064,42 +5962,12 @@ function providersSection() {
     });
     card.append(el('label', 'field', el('span', null, t('provider_type')), type), providerEditor(draft, null, card));
     section.append(card);
-  } else {
-    const add = el('button', 'quiet small', t('provider_add'));
-    add.type = 'button';
-    add.addEventListener('click', () => { form.newProvider = providerEdit(); drawSettings(); });
-    section.append(add);
   }
   return section;
 }
 
-function chainRow(r, i, redraw) {
+function chainRow(r) {
   const tr = el('tr', r.edit.on ? null : 'off');
-  const move = (d) => {
-    const to = i + d;
-    [form.chain[i], form.chain[to]] = [form.chain[to], form.chain[i]];
-    redraw();
-    // Keep the keyboard on the row that moved. At the top or the bottom its arrow this way is
-    // disabled and takes no focus, so the other one does.
-    const same = document.querySelector(`[data-move="${to}:${d}"]`);
-    (same && !same.disabled ? same : document.querySelector(`[data-move="${to}:${-d}"]`))?.focus();
-  };
-  const arrow = (d, glyph, label) => {
-    const b = el('button', 'quiet small', glyph);
-    b.type = 'button';
-    b.title = label;
-    b.setAttribute('aria-label', `${label}: ${r.name}`);
-    b.dataset.move = `${i}:${d}`;
-    b.disabled = i + d < 0 || i + d >= form.chain.length;
-    b.addEventListener('click', () => move(d));
-    return b;
-  };
-  const on = checkbox(r.edit.on, (v) => {
-    r.edit.on = v;
-    tr.classList.toggle('off', !v);
-  });
-  on.setAttribute('aria-label', `${t('col_on')}: ${r.name}`);
-  on.dataset.field=`chain.${r.name}.on`;
   const model = input('text', r.edit.model, r.effective_model ?? '', `chain.${r.name}.model`, (v) => { r.edit.model = v; });
   model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
   // A curator with prices keeps its model; a model config.toml sets already can still be emptied.
@@ -6116,8 +5984,6 @@ function chainRow(r, i, redraw) {
   timeout.setAttribute('aria-label', `${t('col_timeout')}: ${r.name}`);
   const modelNote = { fixed: t('model_fixed'), free: t('model_free') }[r.model_rule];
   tr.append(
-    el('td', null, el('span', 'move', arrow(-1, '↑', t('up')), arrow(1, '↓', t('down')))),
-    el('td', null, on),
     el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null,
       r.differs.length ? note(t('differs', { what: r.differs.map((d) => t(`differs_${d}`)).join(lang === 'ja' ? '、' : ', ') })) : null),
     el('td', null, model, modelNote ? note(modelNote) : null, r.model !== null && !r.model_applied ? note(t('model_unapplied')) : null),
@@ -6414,20 +6280,6 @@ function applyOnboardingValues(f,plan) {
   if(plan.available){f.paidNoCap=plan.cap===null;if(plan.cap!==null)f.paid_usd_per_month=plan.cap;}
   if(plan.names){const enabled=new Set(plan.names);for(const row of f.chain)row.edit.on=enabled.has(row.name);}
 }
-function syncOnboardingControls(f) {
-  const section=$('panel').querySelector('.settings');
-  if(!section)return;
-  const fields=[...section.querySelectorAll('[data-field]')];
-  const field=name=>fields.find(node=>node.dataset.field===name);
-  const curate=field('summary.curate');if(curate)curate.checked=f.summary.curate;
-  const cap=field('paid_usd_per_month');if(cap)cap.value=f.paid_usd_per_month;
-  const off=field('paid_usd_per_month.no_cap');
-  if(off&&off.checked!==f.paidNoCap){off.checked=f.paidNoCap;off.dispatchEvent(new Event('change'));}
-  for(const row of f.chain){
-    const control=field(`chain.${row.name}.on`);
-    if(control){control.checked=row.edit.on;control.closest('tr')?.classList.toggle('off',!row.edit.on);}
-  }
-}
 function renderOnboarding(f) {
   if(view!=='settings'||form!==f)return;
   const section=$('panel').querySelector('.onboarding');
@@ -6448,13 +6300,15 @@ function onboardingSection(f) {
   const plan=onboardingPlan(f,onboardingTier);
   const effect=plan?.cap===null?'onboarding_effect_no_cap':'onboarding_effect';
   const apply=el('button','quiet small',t('onboarding_copy'));
-  apply.type='button';apply.dataset.action='onboarding.copy';apply.disabled=!plan;
+  apply.type='button';apply.dataset.action='onboarding.copy';apply.dataset.simpleFocus='onboarding.copy';apply.disabled=!plan;
   apply.addEventListener('click',()=>{
     if(form!==f)return;
     applyOnboardingValues(f,onboardingPlan(f,onboardingTier));
-    syncOnboardingControls(f);onboardingApplied=true;renderOnboarding(f);
-    // The chain's on/off it changed is to be reviewed before saving.
-    const providers=$('panel').querySelector('.group-providers');if(providers)providers.open=true;
+    onboardingApplied=true;renderOnboarding(f);
+    // Saved at once with the resident choice shown (#803); the AI it turned on or off are reviewed
+    // in their group.
+    const ai=$('panel').querySelector('.group-s-ai');if(ai)ai.open=true;
+    autoSave(null);
   });
   // A target in a folded settings group is opened before it is scrolled to.
   const jump=(selector,key)=>{
@@ -6574,7 +6428,6 @@ function simpleSavedChain(f) {
   });
 }
 
-let settingsMode = recall('oboete-settings-view', 'simple') === 'detailed' ? 'detailed' : 'simple';
 // The monthly limit as typed, kept across redraws until it is saved (Codex on #512).
 let simpleReceipt = null, simpleKeyName = null, simpleCapDraft = null;
 
@@ -6601,33 +6454,13 @@ function simpleFocus(key) {
   next?.focus({ preventScroll: true });
 }
 
-function settingsViewSwitch() {
-  const buttons = ['simple', 'detailed'].map(mode => {
-    const button = el('button', 'quiet', t(mode === 'simple' ? 'simple_view' : 'simple_detailed'));
-    button.type = 'button';
-    button.setAttribute('aria-pressed', String(settingsMode === mode));
-    button.dataset.simpleFocus = `mode:${mode}`;
-    button.addEventListener('click', () => {
-      settingsMode = mode;
-      remember('oboete-settings-view', mode);
-      drawSettings();
-      simpleFocus(`mode:${mode}`);
-    });
-    return button;
-  });
-  const group = el('div', 'settings-view-switch', ...buttons);
-  group.setAttribute('role', 'group');
-  group.setAttribute('aria-label', t('simple_mode_label'));
-  return group;
-}
-
+// A link to a detailed control: the folds around it opened, its group's More settings among them,
+// and the control focused (decision 69, 69b-2).
 function detailedSettingsLink(key, selector, vars = {}, provider = null) {
   const button = el('button', 'quiet small simple-link', t(key, vars));
   button.type = 'button';
   button.addEventListener('click', () => {
-    if (provider) { provider.editing = true; groupOpen.set('providers', true); }
-    settingsMode = 'detailed';
-    remember('oboete-settings-view', settingsMode);
+    if (provider) provider.editing = true;
     drawSettings();
     const target = provider ? [...$('panel').querySelectorAll('.provider-entry')]
       .find(node => node.dataset.selector === selectorKey(provider.selector)) : $('panel').querySelector(selector);
@@ -6833,7 +6666,7 @@ function simpleCatalog(f) {
       }
       f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0] });
       f.simpleCatalog = entry;
-      if (!entry.name) { detailedSettingsLink('simple_detailed', '.new-provider').click(); return; }
+      if (!entry.name) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
       drawSettings(); simpleFocus('catalog.save');
     });
     return el('li', null, el('strong', null, t(entry.label)), listed ? note(t('simple_catalog_listed')) : null, choose);
@@ -6844,7 +6677,7 @@ function simpleCatalog(f) {
   const save = el('button', 'small', t('simple_add_save'));
   save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
   save.addEventListener('click', () => {
-    if (providerValidation(draft)) { detailedSettingsLink('simple_detailed', '.new-provider').click(); return; }
+    if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
     void providerOperation({ op: 'create', entry: providerBody(draft) }, save);
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));
@@ -6885,7 +6718,7 @@ function simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, co
     reviewed ? el('label', 'check', consent, t('embedding_confirm')) : null,
     reviewed ? el('div', 'actions', start, cancel) : null,
     !reviewed && choice !== f.embedding.provider ? el('div', 'actions', preview, cancel) : null,
-    choice === 'workers-ai' ? detailedSettingsLink('simple_detailed', '.workers-ai') : null,
+    choice === 'workers-ai' ? detailedSettingsLink('more_settings', '.workers-ai') : null,
     embeddingRun(embeddingDraft), embeddingDraft.error ? el('p', 'error', embeddingMessage(embeddingDraft.error)) : null);
 }
 
@@ -6905,7 +6738,9 @@ function simpleAgents() {
   return el('ul', 'simple-agents', ...rows);
 }
 
-function drawSimpleSettings(panel, f) {
+// Decision 69 (69b-2): the groups of the one settings page, each closing on its More settings
+// (`more`, by the group's key).
+function simpleGroups(f, more) {
   const chain = simpleSavedChain(f);
   const curate = simpleToggle(f.savedSettings.summary.curate, 'summary.curate', t('simple_curate'), (button, value) =>
     void simpleSettingsSave(button, body => { body.summary.curate = value; },
@@ -6988,10 +6823,10 @@ function drawSimpleSettings(panel, f) {
   const mask = state(s.redaction?.enabled !== false);
   const searchKey = { none: 'none', local: 'local', 'workers-ai': 'workers' }[f.embedding?.provider] ?? 'none';
   // `append` writes an absent part as the text "null": leave it out, as the detailed page does.
-  panel.append(...present([el('p', 'lead', t('simple_intro')),
-    !ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
+  return present([!ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
     foldGroup('s-inject', true, t('simple_inject_h'),
-      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }), simpleBody('inject', ...inject)),
+      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }), simpleBody('inject', ...inject),
+      more.inject),
     foldGroup('s-ai', true, t('simple_ai_h'), aiState,
       simpleBody('ai', el('p', 'desc', t('simple_ai_desc')), curate,
         el('ol', 'simple-providers', ...used.map((row, i) => simpleProviderRow(f, row, chain.indexOf(row), chain, i + 1))),
@@ -7000,20 +6835,19 @@ function drawSimpleSettings(panel, f) {
         simpleCatalog(f)),
       simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
         el('p', 'spend', spent === null ? t('spend_unavailable') : t('simple_spent', { usd: spent }))),
-      noCap, capWarning)),
+      noCap, capWarning), more.ai),
     foldGroup('s-my_work', false, t('simple_my_work_h'), t('simple_state_my_work', { state: state(s.my_work.curate) }),
-      simpleBody('my_work', myWorkEstimate(f.my_work.estimate), myWork)),
+      simpleBody('my_work', myWorkEstimate(f.my_work.estimate), myWork), more.my_work),
     f.embedding ? foldGroup('s-search', false, t('simple_search_h'), t(`simple_search_${searchKey}`),
-      simpleBody('search', el('p', 'desc', t('simple_search_desc')), embeddingChoice(f, true))) : null,
+      simpleBody('search', el('p', 'desc', t('simple_search_desc')), embeddingChoice(f)), more.search) : null,
     foldGroup('s-privacy', false, t('simple_privacy_h'),
       places === null ? t('simple_state_privacy_mask', { mask }) : t('simple_state_privacy', { n: places, mask }),
       captureSection(f, true),
       simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
         el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
-      // Only while something is removed, to bring it back from here too.
-      f.hidden?.items?.length ? hiddenSection(f, true) : null),
+      more.privacy),
     foldGroup('s-agents', false, t('simple_agents_h'), t('simple_agents_desc'),
-      simpleBody('agents', el('div', 'simple-agent-inventory', simpleAgents())))]));
+      simpleBody('agents', el('div', 'simple-agent-inventory', simpleAgents())), more.agents)]);
 }
 
 // docs/my-work-model.md A6: what My Work's jobs would cost, before the switch is turned on.
@@ -7030,8 +6864,7 @@ function myWorkEstimate(estimate) {
 }
 
 function drawSettings() {
-  const focused = document.activeElement?.dataset.simpleFocus;
-  const keep = settingsMode === 'detailed' ? focusKeep() : null;
+  const keep = focusKeep();
   if (document.activeElement && document.activeElement !== document.body
     && !document.activeElement.closest('.embedding-choice')) embeddingDraft.focus = null;
   const pick = el('select', null, ...LANGS.map((l) => {
@@ -7055,23 +6888,12 @@ function drawSettings() {
     return;
   }
   const f = form;
-  panel.append(settingsViewSwitch());
-  if (settingsMode === 'simple') {
-    drawSimpleSettings(panel, f);
-    drawIn(panel);
-    if (focused) simpleFocus(focused);
-    return;
-  }
   const saved = (value) => note(t('saved_value', { value }));
   const resident = checkbox(f.worker.resident, (v) => { f.worker.resident = v; });
   resident.dataset.field = 'worker.resident';
   resident.disabled = !f.residentSupported;
   const pagePort = input('number', f.view.port, '', 'view.port', (v) => { f.view.port = v; });
   [pagePort.min, pagePort.max] = f.ranges.view_port;
-  const curate=checkbox(f.summary.curate,(v)=>{f.summary.curate=v;});
-  curate.dataset.field='summary.curate';
-  const myWorkCurate = checkbox(f.my_work.curate, (v) => { f.my_work.curate = v; });
-  myWorkCurate.dataset.field = 'my_work.curate';
   const myWorkCalls = input('number', f.my_work.calls_a_day, '', 'my_work.calls_a_day', (v) => { f.my_work.calls_a_day = v; });
   [myWorkCalls.min, myWorkCalls.max] = f.ranges.my_work_calls;
   const myWorkOff = noCapSwitch(f.my_work.noCap, 'my_work', t('my_work_h'), myWorkCalls, 'no_cap_calls_warning', (v) => { f.my_work.noCap = v; });
@@ -7085,17 +6907,6 @@ function drawSettings() {
     return el('label', 'field', el('span', null, t(key, { min: min.toLocaleString(lang), max: max.toLocaleString(lang) })),
       i, saved(f.saved.summary[key]), note(t(`${key}_desc`)));
   };
-  const cap = input('number', f.paid_usd_per_month, '', 'paid_usd_per_month', (v) => { f.paid_usd_per_month = v; });
-  cap.min = f.ranges.paid_usd_per_month[0];
-  if (f.ranges.paid_usd_per_month[1] !== null) cap.max = f.ranges.paid_usd_per_month[1];
-  cap.step = 'any';
-  cap.inputMode = 'decimal';
-  const capOff = noCapSwitch(f.paidNoCap, 'paid_usd_per_month', t('paid_cap'), cap, 'no_cap_paid_warning', (v) => { f.paidNoCap = v; });
-  const usd = (v) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', maximumFractionDigits: 6 }).format(v);
-  let spending;
-  if (f.usd_this_month === null) spending = t('spend_unavailable');
-  else if (f.usd_this_month === 0) spending = t('no_spend');
-  else spending = t('month_spend', { usd: usdValue(f.usd_this_month) });
   const geminiOptions = { none: 'gemini_none', 'before-subscriptions': 'gemini_before', 'after-subscriptions': 'gemini_after' };
   const gemini = el('select', null, ...Object.entries(geminiOptions).map(([value, key]) => {
     const option = el('option', null, t(key));
@@ -7132,10 +6943,9 @@ function drawSettings() {
   }));
   tool.value = f.capture.tool_output;
   tool.addEventListener('change', () => { f.capture.tool_output = tool.value; });
-  const rows = el('tbody');
-  const redraw = () => rows.replaceChildren(...f.chain.map((r, i) => chainRow(r, i, redraw)));
-  redraw();
-  const head = el('tr', null, ...['col_order', 'col_on', 'col_name', 'col_model', 'col_budget', 'col_timeout'].map((k) => {
+  // Each AI's line has its switch and its arrows (decision 69, 69b-2); the table keeps the rest.
+  const rows = el('tbody', null, ...f.chain.map((r) => chainRow(r)));
+  const head = el('tr', null, ...['col_name', 'col_model', 'col_budget', 'col_timeout'].map((k) => {
     const th = el('th', null, t(k));
     th.scope = 'col';
     return th;
@@ -7153,65 +6963,106 @@ function drawSettings() {
   pagePort.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); portMove.click(); }
   });
-  // The common settings first and open; the rest folded (DESIGN.md). A new home opens
-  // its guide and the resident choice it is to save, and a waiting provider its group.
-  const formEl = el('form', null,
-    settingsGroup('start', f.firstRun, onboardingSection(f)),
-    settingsGroup('everyday', true,
+  // Decision 69 (69b-2): one page. The simple page's groups, each closing on its More settings: a
+  // form of its own holding the detailed controls that belong to the group, with the listeners of
+  // the saves made at once (69b-1), so only those controls start a general save. The guide, the
+  // simple controls, the preferences (a form of their own) and the agents' and maintenance's
+  // actions stay outside every general form (the plan review of 69b-2).
+  const textual = (c) => c.tagName === 'TEXTAREA' || (c.tagName === 'INPUT' && !['checkbox', 'radio'].includes(c.type));
+  const generalForm = (...children) => {
+    const formEl = el('form', 'general-form', ...children);
+    formEl.noValidate = true;
+    // What is typed is known by its field, so a field the answer of a save drew again while it was
+    // typed in is saved when left, with no change of its own after the redraw (Codex on #802).
+    formEl.addEventListener('input', (event) => { if (textual(event.target)) typedField = event.target.dataset?.field ?? null; });
+    formEl.addEventListener('change', (event) => {
+      const c = event.target;
+      if (textual(c)) { typedField = c.dataset?.field ?? null; return; }
+      autoSave(c.dataset?.field);
+    });
+    formEl.addEventListener('focusout', (event) => {
+      if (!typedField || typedField !== event.target.dataset?.field) return;
+      typedField = null;
+      // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
+      // owner goes to answer it.
+      if (event.target === pagePort) return;
+      autoSave(event.relatedTarget?.dataset?.field);
+    });
+    // The port's button and Enter in its field save through `portSave` alone: the form's own save
+    // after them would take its confirmation's place (CodeRabbit on #802).
+    formEl.addEventListener('click', (event) => {
+      const button = event.target.closest?.('button');
+      if (button && button !== portMove) autoSave(null);
+    });
+    // Enter in a field saves it; a link, a button or a text area keeps its own Enter, and so does
+    // the Enter that ends an input method's composition (CodeRabbit on #802).
+    formEl.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+      if (event.target === pagePort || !['INPUT', 'SELECT'].includes(event.target.tagName)) return;
+      event.preventDefault();
+      if (event.target.closest('.provider-entry')) return;
+      typedField = null;
+      autoSave(event.target.dataset?.field);
+    });
+    formEl.addEventListener('submit', (e) => e.preventDefault());
+    return formEl;
+  };
+  const more = (key, ...sections) => smallFold(`more-${key}`, 'more-settings', t('more_settings'), ...sections);
+  // The detailed controls, without those the simple controls own: summaries on, My Work on and
+  // its estimate, the monthly cap with its no cap and the month's spend, session start and each
+  // prompt, masking, an AI on or its place (decision 69, 69b-2).
+  const groups = simpleGroups(f, {
+    inject: more('inject', generalForm(el('section', null,
+      size('session_start_chars', 'inject_chars'),
+      el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
+      el('label', 'check', terminalList, t('session_list_on')), note(t('session_list_desc')),
+      size('per_prompt_chars', 'per_prompt_chars'), size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
+      flag('memory_lookup', 'memory_lookup_on'),
+      flag('memory_instructions', 'memory_instructions_on'),
+      flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')))),
+    ai: more('ai', generalForm(
       el('section', null,
-        el('h3', null, t('summary_h')), el('p', 'desc', t('summary_desc')),
-        el('label', 'check', curate, t('curate_on')),
-        saved(t(f.saved.summary.curate ? 'value_on' : 'value_off')),
+        el('h3', null, t('summary_h')),
         el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
           saved(f.saved.summary.language), note(t('summary_language_desc'))),
-        el('details', null, el('summary', null, t('summary_advanced')),
-          el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes')))),
+        el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes'))),
       el('section', null,
-        el('h3', null, t('my_work_h')), el('p', 'desc', t('my_work_desc')),
-        myWorkEstimate(f.my_work.estimate),
-        el('label', 'check', myWorkCurate, t('my_work_on')),
-        saved(t(f.saved.my_work.curate ? 'value_on' : 'value_off')),
-        el('label', 'field', el('span', null, t('my_work_calls', { min: f.ranges.my_work_calls[0].toLocaleString(lang), max: f.ranges.my_work_calls[1].toLocaleString(lang) })),
-          myWorkCalls, saved(savedCalls), note(t('my_work_calls_desc'))),
-        ...myWorkOff),
-      judgeSection(f),
-      el('section', null,
-        el('h3', null, t('spending_h')),
-        el('div', 'spending-cap',
-          el('label', 'field', el('span', null, t('paid_cap')), cap,
-            saved(f.saved.paid_usd_per_month === null ? t('no_cap') : usd(f.saved.paid_usd_per_month))),
-          el('p', 'spend', spending)),
-        ...capOff,
-        el('p', 'desc', t('paid_cap_desc')),
         el('label', 'field', el('span', null, t('gemini_label')), gemini,
           saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),
-      el('section', null,
-        el('h3', null, t('inject_h')),
-        el('p', 'desc', t('inject_desc')),
-        flag('session_start', 'inject_on'), size('session_start_chars', 'inject_chars'),
-        el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
-        el('label', 'check', terminalList, t('session_list_on')), note(t('session_list_desc')),
-        flag('per_prompt', 'per_prompt_on'), size('per_prompt_chars', 'per_prompt_chars'),
-        size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
-        flag('memory_lookup', 'memory_lookup_on'),
-        flag('memory_instructions', 'memory_instructions_on'),
-        flag('correction', 'correction_on'), size('correction_chars', 'correction_chars')),
-      el('section', 'capture-settings',
-        el('h3', null, t('capture_h')),
-        el('p', 'desc', t('capture_desc')),
-        el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
-        el('label', 'field', el('span', null, t('tool_output')), tool))),
-    settingsGroup('providers', Boolean(f.stopped?.length),
       providersSection(),
       el('section', null,
         el('h3', null, t('chain_h')),
         el('p', 'desc', t('chain_desc')),
         el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
       el('section', null,
-        el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState())),
-    settingsGroup('search', Boolean(embeddingDraft.status?.active), embeddingSection(f)),
-    settingsGroup('privacy', false, redactionSection(f), privacySection(f), captureSection(f), retentionSection(f)),
-    settingsGroup('computer', f.firstRun,
+        el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState()))),
+    my_work: more('my_work', generalForm(
+      el('section', null,
+        el('label', 'field', el('span', null, t('my_work_calls', { min: f.ranges.my_work_calls[0].toLocaleString(lang), max: f.ranges.my_work_calls[1].toLocaleString(lang) })),
+          myWorkCalls, saved(savedCalls), note(t('my_work_calls_desc'))),
+        ...myWorkOff),
+      judgeSection(f))),
+    search: f.embedding ? more('search', generalForm(el('section', 'embedding-settings',
+      embeddingFiles(f), el('p', 'desc', t('embedding_index')), workersAiSettings(f)))) : null,
+    privacy: more('privacy', generalForm(
+      el('section', 'capture-settings',
+        el('h3', null, t('capture_h')),
+        el('p', 'desc', t('capture_desc')),
+        el('label', 'check', checkbox(f.capture.store_prompts, (v) => { f.capture.store_prompts = v; }), t('store_prompts')),
+        el('label', 'field', el('span', null, t('tool_output')), tool)),
+      redactionSection(f), privacySection(f), captureSection(f), retentionSection(f))),
+    // The preferences have a form of their own, and the agents' setup its own actions: no general
+    // form around them.
+    agents: more('agents', preferenceSection(f), agentInventorySection(), agentSetupSection()),
+  });
+  panel.append(...present([recoverySection(), el('p', 'lead', t('simple_intro')),
+    // A new home opens its guide, and This computer with the resident choice it is to save.
+    settingsGroup('start', f.firstRun, onboardingSection(f)),
+    f.warnings.length
+      ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
+      : null,
+    ...groups,
+    settingsGroup('computer', f.firstRun, generalForm(
       el('section', null,
         el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
         el('label', 'check', resident, t('resident_on')),
@@ -7228,70 +7079,34 @@ function drawSettings() {
           input('text', f.backup.edit, t('backup_default'), 'backup.dir', (v) => { f.backup.edit = v; f.backup.reset = false; }),
           saved(f.backup.dir === '' ? t('backup_home') : f.backup.dir ?? t('backup_default'))),
         backupReset,
-        el('p', 'desc', t('backup_desc')))),
-    f.warnings.length
-      ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
-      : null,
-    save);
-  formEl.noValidate = true;
-  // Decision 69: each change saves at once. A switch or a choice saves when it changes; a text
-  // or number when focus leaves it (so the focus can go back to where it went after the
-  // redraw) or on Enter; a button that edits the form (a rule removed, the backup folder reset)
-  // after its own click. What does not change the form's body sends nothing.
-  const textual = (c) => c.tagName === 'TEXTAREA' || (c.tagName === 'INPUT' && !['checkbox', 'radio'].includes(c.type));
-  // What is typed is known by its field, so a field the answer of a save drew again while it was
-  // typed in is saved when left, with no change of its own after the redraw (Codex on #802).
-  formEl.addEventListener('input', (event) => { if (textual(event.target)) typedField = event.target.dataset?.field ?? null; });
-  formEl.addEventListener('change', (event) => {
-    const c = event.target;
-    if (textual(c)) { typedField = c.dataset?.field ?? null; return; }
-    autoSave(c.dataset?.field);
-  });
-  formEl.addEventListener('focusout', (event) => {
-    if (!typedField || typedField !== event.target.dataset?.field) return;
-    typedField = null;
-    // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
-    // owner goes to answer it.
-    if (event.target === pagePort) return;
-    autoSave(event.relatedTarget?.dataset?.field);
-  });
-  // The port's button and Enter in its field save through `portSave` alone: the form's own save
-  // after them would take its confirmation's place (CodeRabbit on #802).
-  formEl.addEventListener('click', (event) => {
-    const button = event.target.closest?.('button');
-    if (button && button !== save && button !== portMove) autoSave(null);
-  });
-  // Enter in a field saves it; a link, a button or a text area keeps its own Enter, and so does
-  // the Enter that ends an input method's composition (CodeRabbit on #802).
-  formEl.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
-    if (event.target === pagePort || !['INPUT', 'SELECT'].includes(event.target.tagName)) return;
-    event.preventDefault();
-    if (event.target.closest('.provider-entry')) return;
-    typedField = null;
-    autoSave(event.target.dataset?.field);
-  });
-  formEl.addEventListener('submit', (e) => e.preventDefault());
-  const recovered=recoverySection();
-  if(recovered)panel.append(recovered);
-  panel.append(...present([el('p', 'lead', t('lead')), formEl,
-    settingsGroup('agents', false, preferenceSection(f), agentInventorySection(), agentSetupSection()),
+        el('p', 'desc', t('backup_desc'))), save)),
     settingsGroup('maintenance', false, viewSection(f), hiddenSection(f), doctorSection(), maintenanceSection(f))]));
   drawIn(panel);
   focusBack(keep);
 }
 
-// The detailed page keeps the focus through a redraw (a save's answer, privacy read again after
-// it), as the simple page does with `simpleFocus` (decision 69): its field, and the caret in it.
+// One rule keeps the focus through a redraw (a save's answer, privacy read again after it): a
+// simple control by its `data-simple-focus`; any other by its field, its AI entry and its side,
+// inside the general forms or outside them, with the caret in it (decision 69, 69b-2).
 function focusKeep() {
   const a = document.activeElement;
+  if (a?.dataset?.simpleFocus) return { simple: a.dataset.simpleFocus };
   if (!a?.dataset?.field) return null;
-  return { field: a.dataset.field, start: a.selectionStart, end: a.selectionEnd };
+  return { field: a.dataset.field, entry: entryOf(a), general: Boolean(a.closest('.general-form')),
+    start: a.selectionStart, end: a.selectionEnd };
+}
+
+function entryOf(control) {
+  return control.closest('.provider-entry')?.dataset.selector ?? null;
 }
 
 function focusBack(keep) {
+  if (keep?.simple) { simpleFocus(keep.simple); return; }
   if (!keep) return;
-  const c = [...$('panel').querySelectorAll('input, select, textarea')].find((x) => x.dataset.field === keep.field && !x.disabled);
+  // Without `entry` and `general` (the field a save's focus went to), any of the field's places.
+  const c = [...$('panel').querySelectorAll('input, select, textarea')].find((x) => x.dataset.field === keep.field
+    && !x.disabled && !x.dataset.simpleFocus && (keep.entry === undefined || entryOf(x) === keep.entry)
+    && (keep.general === undefined || Boolean(x.closest('.general-form')) === keep.general));
   if (!c) return;
   // A field in a fold the redraw closed is reached by opening it (CodeRabbit on #802).
   for (let fold = c.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
@@ -7306,9 +7121,11 @@ function bodyKey(body) {
   return JSON.stringify(rest);
 }
 
+// The key of what is saved, the resident worker as saved: a new home shows it on, as recommended,
+// while it is saved off (#803).
 function savedKeyOf(f) {
   const was = form;
-  form = f;
+  form = { ...f, worker: { ...f.worker, resident: f.saved.worker.resident } };
   try {
     const at = saveBody(true);
     return at.body ? bodyKey(at.body) : null;
@@ -7317,7 +7134,7 @@ function savedKeyOf(f) {
   }
 }
 
-// The detailed form's anchor for its saves (its hidden Save button), the one drawn last. Saves
+// The page's anchor for its general saves (its hidden Save button), the one drawn last. Saves
 // run one at a time: a change made while one is on its way waits for its answer and then sends
 // that answer's version (Codex, cubic and CodeRabbit on #802).
 let formAnchor = null, saveRun = null, saveAgain = null, typedField = null;
@@ -7330,8 +7147,8 @@ function saveNext() {
   else if (again) autoSave(document.activeElement?.dataset?.field ?? null);
 }
 
-function detailedShown() {
-  return Boolean(form && formAnchor && view === 'settings' && settingsMode === 'detailed');
+function settingsShown() {
+  return Boolean(form && formAnchor && view === 'settings');
 }
 
 // Decision 69 (69b-1): a change of the detailed page's general form saves at once, as its Save did.
@@ -7340,7 +7157,7 @@ function detailedShown() {
 // its confirmation in the status line. `next`: the field focus went to, given it back after the
 // save's redraw.
 function autoSave(next) {
-  if (!detailedShown()) return;
+  if (!settingsShown()) return;
   if (saveRun) { saveAgain = { port: saveAgain?.port }; return; }
   const mine = form;
   const at = saveBody(true);
@@ -7358,7 +7175,7 @@ function autoSave(next) {
 // The page's port moves the page: saved by its button, the whole form with it, after the same
 // confirmations as any other save (Codex, cubic and CodeRabbit on #802).
 function portSave() {
-  if (!detailedShown()) return;
+  if (!settingsShown()) return;
   if (saveRun) { saveAgain = { port: true }; return; }
   const at = saveBody(false);
   if (!at.body) {
@@ -7387,7 +7204,7 @@ async function commitSave(next, autosaved) {
 // A change waiting for its confirmation outlives the other saves (decision 69, 69b-2): after any
 // answer it is worked out again from the drafts against what is saved now, and asked again.
 function askHeldAgain() {
-  if (!detailedShown()) return;
+  if (!settingsShown()) return;
   const at = saveBody(true);
   if (!at.body || bodyKey(at.body) === form.savedKey) return;
   const held = heldChange(form, at.body);
