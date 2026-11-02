@@ -135,10 +135,13 @@ fn rest_lists(
             uncredited,
             ..Default::default()
         };
+        // A name config.toml no longer has (an entry removed or renamed) is not listed: the
+        // routes answer config.toml's names, past the stores' gate (Codex's review of 69b-3c-1b).
+        let named = providers.iter().any(|p| p.name() == name);
         let holds = (providers.iter())
             .filter(|p| p.name() == name && p.enabled())
             .all(|p| crate::provider::rest_holds(&state, p));
-        if !holds {
+        if !named || !holds {
         } else if until == crate::providers_db::OWNER_HOLD {
             stopped.push(name);
         } else {
@@ -3032,7 +3035,9 @@ mod tests {
         );
         assert!(!empty.path().join("providers.db").exists());
 
-        let home = home_with(Some("providers = []\n"));
+        let names = "[[providers]]\nkind = \"cli\"\nname = \"owner-stopped\"\ncli = \"claude\"\n\
+                     [[providers]]\nkind = \"cli\"\nname = \"time-stopped\"\ncli = \"claude\"\n";
+        let home = home_with(Some(names));
         let db = Connection::open(home.path().join("providers.db")).unwrap();
         // An older ledger needs no schema upgrade to read its spend and stops.
         db.execute_batch(
@@ -3070,7 +3075,14 @@ mod tests {
             before
         );
         assert!(!home.path().join("providers.db-wal").exists());
-        assert_eq!(file(&home).as_deref(), Some("providers = []\n"));
+        assert_eq!(file(&home).as_deref(), Some(names));
+        // A name the ledger keeps that config.toml no longer has is not listed (69b-3c-1b).
+        std::fs::write(home.path().join("config.toml"), "providers = []\n").unwrap();
+        let shown = show(home.path());
+        assert_eq!(
+            (&shown["stopped"], &shown["resting"]),
+            (&json!([]), &json!([]))
+        );
 
         let damaged = home_with(Some("providers = []\n"));
         std::fs::write(

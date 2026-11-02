@@ -4678,6 +4678,7 @@ async function keyWrite(route, button, body) {
     }
     form = mergeProviderSettings(answer, mine, { op: 'key' });
     drawSettings();
+    void refreshRests();
     setStatus(t(answer.key_saved?.durable ? 'key_saved' : 'key_not_durable'), !answer.key_saved?.durable, lang);
   } catch {
     if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
@@ -5405,6 +5406,7 @@ function stoppedState() {
     const button = el('button', 'quiet small', t('resume'));
     button.type = 'button';
     button.setAttribute('aria-label', t('resume_label', { name }));
+    button.dataset.simpleFocus = `resume-more:${name}`;
     button.addEventListener('click', () => void resumeProvider(name, button));
     return el('li', null, el('span', 'entry-name', name), button);
   })));
@@ -5428,7 +5430,8 @@ async function resumeProvider(name, button) {
     const answer = (res.headers.get('content-type') || '').startsWith('application/json') ? await res.json() : {};
     if (view !== 'settings' || form !== mine) return;
     if (res.ok) {
-      mine.stopped = mine.stopped.filter((provider) => provider !== answer.provider);
+      // Not known meanwhile (a rests read failed), the lists stay so until the next read.
+      if (mine.stopped) mine.stopped = mine.stopped.filter((provider) => provider !== answer.provider);
       simpleReceipt = 'ai';
       drawSettings();
       setStatus(t(answer.resumed ? 'resumed' : 'not_stopped'), false, lang);
@@ -5796,6 +5799,7 @@ async function providerWrite(action, button, body, path) {
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
     askHeldAgain();
+    void refreshRests();
     return true;
   } catch {
     if (currentSettings(mine)) {
@@ -6600,14 +6604,15 @@ async function refreshRests() {
   const f = form;
   const [stopped, resting] = [lists.stopped ?? null, lists.resting ?? null];
   if (JSON.stringify([f.stopped, f.resting]) === JSON.stringify([stopped, resting])) return;
+  const was = f.stopped;
   Object.assign(f, { stopped, resting });
-  renderRests(f);
+  renderRests(f, JSON.stringify(was) !== JSON.stringify(stopped));
 }
 
 // The rests drawn in place: each AI line's state and its Resume (its fold opened for a hold only the
 // owner ends, as a new draw opens it), and the stopped list in More settings. Nothing else of a line
 // is drawn again, so what is typed, a draft, a confirmation, a write's hold and the focus stay.
-function renderRests(f) {
+function renderRests(f, stoppedChanged) {
   if (view !== 'settings' || form !== f) return;
   const keep = focusKeep();
   const chain = simpleSavedChain(f);
@@ -6628,7 +6633,8 @@ function renderRests(f) {
       if (stopped && fold && groupOpen.get(`ai:${row.name}`) === undefined) fold.open = true;
     }
   }
-  $('panel').querySelector('.stopped-state')?.replaceChildren(...[...stoppedState().childNodes]);
+  // The stopped list only when the owner's holds changed: its Resume keeps the focus otherwise.
+  if (stoppedChanged) $('panel').querySelector('.stopped-state')?.replaceChildren(...[...stoppedState().childNodes]);
   if ([null, document.body].includes(document.activeElement)) focusBack(keep);
 }
 
@@ -6666,7 +6672,7 @@ function simpleFocus(key) {
   const controls = $('panel').querySelectorAll('button, input, select');
   const keys = [key];
   if (key?.startsWith('move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
-  if (/^(resume|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
+  if (/^(resume|resume-more|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
   if (key?.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
   // A model name saved closes its field: the line's model choice takes the focus.
   if (key?.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
@@ -7738,6 +7744,7 @@ function askHeld(held, confirmed) {
     form = formOf(mine.savedSettings);
     form.privacy = mine.privacy;
     Object.assign(form, { stopped: mine.stopped, resting: mine.resting });
+    void refreshRests();
     drawSettings();
     setStatus('');
   });

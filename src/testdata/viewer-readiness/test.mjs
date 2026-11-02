@@ -2574,6 +2574,38 @@ console.log('PASS: the caps\' No cap switches');
     assert.equal(panel.querySelector('.settings').inert,true,'a write\'s hold stays');
     giveHeld(json({code:'bad_key',field:'providers.key'},422));await settled();
     assert.equal(simple('key:alpha').attrs['aria-invalid'],'true','the key refused is marked on the field shown');
+    // A Resume answered after a rests read that failed meanwhile succeeds, draws the page and reads
+    // the rests again (Codex's review of 69b-3c-1b).
+    f=draw(ai(['alpha','beta'],{stopped:['alpha'],resting:[]}));
+    const [resumed,giveResumed]=later();answers=[resumed];
+    simple('resume:alpha').click();await settled();
+    await read(()=>Promise.reject(new Error('down')));
+    restsRead=0;giveResumed(json({provider:'alpha',resumed:true}));await settled();
+    assert.deepEqual([document.getElementById('status').textContent.includes('network'),restsRead],[false,1],
+      'a Resume after a failed read is shown as done, and the rests are read again');
+    // A key's write, a provider's write and a confirmation cancelled read the rests again too.
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha',{key:'missing'}),row('beta')]}));
+    restsAnswer=null;restsRead=0;
+    answers=[json({...ai(['alpha','beta'],{version:'v2',stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha'),row('beta')]}),key_saved:{durable:true}})];
+    typeIn(simple('key:alpha'),'made-up-line-key-0092');simple('key-save:alpha').click();await settled();
+    assert.equal(restsRead,1,'a provider\'s key saved reads the rests again');
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],judge,key_input:true}));
+    restsRead=0;answers=[json({...ai(['alpha','beta'],{version:'v2',stopped:[],resting:[],judge,key_input:true}),key_saved:{durable:true}})];
+    typeIn(general('judge.key'),'made-up-judge-key-0093');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    assert.equal(restsRead,1,'a judge\'s key saved reads the rests again');
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha',{key:'missing'}),row('beta')]}));
+    restsRead=0;
+    vm.runInContext("askHeld([{key:'stale',confirm:'held_confirm_all'}],()=>{})",ctx);
+    action('held.cancel').click();await settled();
+    assert.equal(restsRead,1,'a confirmation cancelled reads the rests again');
+    // The stopped list in More settings keeps its Resume, and its focus, when only another AI's
+    // timed rest changes.
+    f=draw(ai(['alpha','beta'],{stopped:['alpha'],resting:[]}));
+    const moreResume=()=>all('button').find(n=>n.dataset.simpleFocus==='resume-more:alpha');
+    const kept=moreResume();kept.focus();
+    await read(lists(['alpha'],[{name:'beta',until:noon.getTime()}]));
+    assert.deepEqual([moreResume()===kept,document.activeElement===kept],[true,true],'the stopped list and its focus stay');
+    restsAnswer=null;document.activeElement=null;
     restsAnswer=null;document.activeElement=null;
   }
   ctx.fetch=w6fetch;

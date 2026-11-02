@@ -6297,6 +6297,14 @@ curate = false
             get(&v, "/api/settings")["resting"],
             get(&v, "/api/rests")["resting"]
         );
+        // A name removed from config.toml, though a masking rule matches it, is not given back.
+        let db = crate::providers_db::open(home.path()).unwrap();
+        crate::providers_db::set_state(&db, "acme-gone", rest).unwrap();
+        drop(db);
+        assert_eq!(
+            get(&v, "/api/rests"),
+            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}]})
+        );
         for side in ["providers.db-wal", "providers.db-shm"] {
             let _ = std::fs::remove_file(home.path().join(side));
         }
