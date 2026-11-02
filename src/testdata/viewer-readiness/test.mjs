@@ -2347,6 +2347,15 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(one({model:'other-model',effective_model:'other-model'},{version:'v2'}))];
     pickModel('__other');typeIn(typedModel(),'other-model');enterLine(typedModel());await settled();
     assert.equal(sent()[0].chain[0].model,'other-model','another model is saved to [chain]');
+    assert.deepEqual([typedModel(),document.activeElement===simple('model:alpha')],[undefined,true],
+      'the model name saved by Enter closes its field, the focus on the model choice');
+    // Another model opened while a model chosen is on its way stays open through its answer.
+    f=draw(one());
+    [answer,give]=later();answers=[answer];
+    pickModel('model-alpha2');await settled();
+    pickModel('__other');
+    give(json(one({model:'model-alpha2',effective_model:'model-alpha2'},{version:'v2'})));await settled();
+    assert.deepEqual([posted.length,Boolean(typedModel())],[1,true],'another model opened meanwhile stays open');
     f=draw(one({model_rule:'free'}));
     pickModel('__other');typeIn(typedModel(),'some-model');leaveLine(typedModel());await settled();
     assert.deepEqual([posted.length,typedModel().attrs['aria-invalid']],[0,'true'],'a free rule\'s model without :free is marked, not sent');

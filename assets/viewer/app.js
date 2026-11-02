@@ -6527,6 +6527,8 @@ function simpleFocus(key) {
   if (key?.startsWith('move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
   if (/^(resume|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
   if (key?.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
+  // A model name saved closes its field: the line's model choice takes the focus.
+  if (key?.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
   if (key === 'mask.confirm') keys.push('redaction.enabled');
   if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
@@ -6747,7 +6749,10 @@ function simpleProviderRow(f, row, index, chain, position) {
     select.dataset.simpleFocus = `model:${row.name}`;
     select.addEventListener('change', () => {
       if (select.value === '__other') {
-        lineDrafts.set(modelKey, { ...lineDraft(modelKey), value: savedRow.model ?? '', open: true });
+        // Opened, counted as typing: the answer to a model chosen before it does not close it (Codex's
+        // review of 69b-3c-1a).
+        const d = lineDraft(modelKey);
+        lineDrafts.set(modelKey, { ...d, value: savedRow.model ?? '', open: true, typed: d.typed + 1 });
         drawSettings();
         simpleFocus(`model-text:${row.name}`);
         return;
