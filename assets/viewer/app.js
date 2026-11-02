@@ -4602,9 +4602,12 @@ function keyField(route, field, label, more = () => ({}), { kept = false } = {})
   save.type = 'button';
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
-  // Named by where its save sends it: the judge's destination too (a key typed for one is never put
-  // into another's field); not Cloudflare's account, typed beside it.
-  if (kept) keepSecret(i, JSON.stringify([route, field, more().destination ?? null]), () => { save.disabled = !i.value; });
+  // Named by where its save sends it: the judge's destination and Cloudflare's account too (a key
+  // typed for one is never put into another's field; cubic on #811).
+  if (kept) {
+    const to = more();
+    keepSecret(i, JSON.stringify([route, field, to.destination ?? null, to.account_id ?? null]), () => { save.disabled = !i.value; });
+  }
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });

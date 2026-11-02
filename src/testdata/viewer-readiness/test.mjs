@@ -1938,7 +1938,8 @@ console.log('PASS: the caps\' No cap switches');
     // The judge's key is kept too, with its destination: another destination chosen, its field is
     // empty. Search's Workers AI key is not kept: its endpoint may be set in config.toml beyond what
     // the page shows (Codex's security review of #807).
-    const judged={...judge,destinations:[...judge.destinations,{id:'d1',key:'missing',usd_per_mtok_in:0.01,local:false}]};
+    const judged={...judge,destinations:[...judge.destinations,{id:'d1',key:'missing',usd_per_mtok_in:0.01,local:false},
+      {id:'clef',key:'missing',usd_per_mtok_in:0.02,local:false}]};
     settingsNow=keyed({judge:judged});
     [privacyAnswer,givePrivacy]=later();
     (await ctx.ui.showSettings())();posted.length=0;
@@ -1952,6 +1953,13 @@ console.log('PASS: the caps\' No cap switches');
     assert.deepEqual([posted.length,general('embedding.key').value,general('judge.key').value],[1,'',others[1]],'the judge\'s key is kept, search\'s is not');
     const to=general('judge.destination');to.value='d1';for(const cb of to.listeners.change)cb({target:to});await settled();
     assert.equal(general('judge.key').value,'','a judge key typed for one destination is not put into another\'s field');
+    // Cloudflare's: kept for the account typed beside it, not put back once another is typed (cubic on #811).
+    to.value='clef';for(const cb of to.listeners.change)cb({target:to});await settled();
+    typeIn(general('judge.account_id'),'0123456789abcdef0123456789abcdef');ctx.ui.drawSettings();
+    typeIn(general('judge.key'),'made-up-cloudflare-key-0012');ctx.ui.drawSettings();
+    assert.equal(general('judge.key').value,'made-up-cloudflare-key-0012','a Cloudflare key is kept for its account');
+    typeIn(general('judge.account_id'),'fedcba9876543210fedcba9876543210');ctx.ui.drawSettings();
+    assert.equal(general('judge.key').value,'','not put back once another account is typed');
     assert(others.every(s=>!(JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')).includes(s)),'in no form, storage or request');
     ctx.localStorage.setItem=setItem;
     // #810: a privacy action pressed from the keyboard gives the focus back once its part is drawn
