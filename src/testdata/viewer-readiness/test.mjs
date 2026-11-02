@@ -1831,9 +1831,9 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.deepEqual([posted.at(-1).url,Boolean(receiptOf('never')),receiptOf('inject')],['/api/privacy/capture',true,''],
       'the place added says it is saved, and no other block still does');
-    // #807: a secret being typed stays in its field, its button enabled, through the page drawn
-    // again by the privacy read's answer and by a save's; it is in no form, storage or request but
-    // its own save's.
+    // #807: a secret being typed stays in its field, its button enabled, through the privacy read's
+    // answer (drawn in place) and the page drawn again by a save's; it is in no form, storage,
+    // request or attribute but its own save's.
     const keyed=(extra={})=>ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')],...extra});
     settingsNow=keyed();
     const stored=[];const setItem=ctx.localStorage.setItem;ctx.localStorage.setItem=(k,v)=>{stored.push(`${k}=${v}`);};
