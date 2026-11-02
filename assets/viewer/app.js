@@ -4995,14 +4995,20 @@ function renderPrivacy(f) {
   if (!panel) return;
   const parts = [['never-record', () => captureSection(f, true)], ['never-more', () => captureSection(f)],
     ['privacy-state', () => privacySection(f)]].map(([part, make]) => [panel.querySelector(`.${part}`), make]).filter(([node]) => node);
-  const keep = parts.some(([node]) => node.contains(document.activeElement)) ? focusKeep() : null;
+  // The focus in a part drawn again goes back by the focus rule, or, on a control with no name (a
+  // fold's heading, a link), to the control at the same place in it (Codex's review of #810).
+  const focusables = (node) => [...node.querySelectorAll('button, input, select, textarea, summary')];
+  const at = parts.find(([node]) => node.contains(document.activeElement))?.[0];
+  const keep = at ? focusKeep() : null;
+  const place = at && !keep ? focusables(at).indexOf(document.activeElement) : -1;
   for (const [node, make] of parts) {
     const drawn = make();
     node.hidden = drawn.hidden;
     node.replaceChildren(...drawn.childNodes);
   }
   panel.querySelector('.group-s-privacy')?.querySelector('.group-desc')?.replaceChildren(privacyGroupState(f));
-  focusBack(keep);
+  if (keep) focusBack(keep);
+  else if (place >= 0) focusables(at)[place]?.focus({ preventScroll: true });
 }
 
 function privacySection(f) {
@@ -6564,13 +6570,15 @@ function simpleFocus(key) {
 // #810: the control that had the focus when a read or write started (the button pressed, or the
 // field whose Enter pressed it), which the browser took the focus off as the page was disabled or
 // made inert, gets it back once its part is drawn again in place: the control of the same name, or
-// `fallback` when it is gone (a row that left its list). Not when the focus went elsewhere meanwhile;
-// `was` itself still holds it where nothing moved it off.
+// `fallback` when it is gone (a row that left its list), or Refresh when neither is drawn (the state
+// not read again). Not when the focus went elsewhere meanwhile; `was` itself still holds it where
+// nothing moved it off.
 function focusAgain(was, fallback) {
   const key = was?.dataset?.simpleFocus;
   if (!key || ![null, document.body, was].includes(document.activeElement)) return;
-  const drawn = [...$('panel').querySelectorAll('button, input, select')].some((n) => n.dataset.simpleFocus === key && !n.disabled);
-  simpleFocus(drawn ? key : fallback);
+  const drawn = (name) => [...$('panel').querySelectorAll('button, input, select')].some((n) => n.dataset.simpleFocus === name && !n.disabled);
+  // Refresh is drawn even when the state could not be read again.
+  simpleFocus([key, fallback].find(drawn) ?? 'privacy.refresh');
 }
 
 // A link to a detailed control: the folds around it opened, its group's More settings among them,

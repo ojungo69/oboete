@@ -10,7 +10,11 @@ class Node {
     this.classList={toggle(){},add(){},remove(){},contains(){return false;}};
   }
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
-  replaceChildren(...nodes){this.children=[];this.append(...nodes);}
+  // A browser moves the focus to the body when the focused element leaves the page (#810).
+  replaceChildren(...nodes){
+    if(this.children.some(c=>c&&typeof c==='object'&&!nodes.includes(c)&&c.contains(document.activeElement)))document.activeElement=null;
+    this.children=[];this.append(...nodes);
+  }
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(node=>node!==this);this.parentElement=null;}
   addEventListener(name,cb){(this.listeners[name]??=[]).push(cb);}
   setAttribute(name,value){this.attrs[name]=value;}
@@ -1984,6 +1988,46 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.deepEqual([posted.at(-1).url,document.activeElement===simple('never.folder'),simple('never.folder').value],['/api/privacy/capture',true,''],
       'a folder added by Enter gives the focus back to its field');
+    // The focus moved meanwhile to a control with no name in a part drawn again (the places' fold
+    // heading) stays on it, at its place, and Refresh takes nothing (Codex's review of #810).
+    const neverBlock=()=>panel.querySelector('.never-record');
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();
+    neverBlock().querySelectorAll('summary')[0].focus();
+    givePrivacy(json(privacy));await settled();
+    assert(document.activeElement===neverBlock().querySelectorAll('summary')[0]&&document.activeElement!==refreshButton(),
+      'a fold heading the focus moved to keeps it, drawn again');
+    // The folder's own button gives it back to itself; a place whose row left the list, to the folder
+    // field; in More settings, to the pattern's button.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    typeIn(simple('never.folder'),'/home/made-up-user/made-up-folder');
+    simple('never.folder.add').focus();simple('never.folder.add').click();blur();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,simple('never.folder.add'),'the folder\'s button has it back');
+    const patterned={...privacy,patterns:[{label:'made-up-pattern-*',selector:'p1'}]};
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();givePrivacy(json(patterned));await settled();
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({})];
+    simple('never:pattern:p1').focus();simple('never:pattern:p1').click();blur();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([simple('never:pattern:p1'),document.activeElement===simple('never.folder')],[undefined,true],
+      'a pattern undone, its row gone, gives it to the folder field');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    simple('never-more:repo:r2').focus();simple('never-more:repo:r2').click();blur();await settled();
+    givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>({...r,never_recorded:true}))}));await settled();
+    assert.deepEqual([simple('never-more:repo:r2'),document.activeElement===simple('never.pattern.add')],[undefined,true],
+      'a repository no longer recorded, its row gone from More settings, gives it to the pattern\'s button');
+    // A write whose read after it fails draws no field to give the focus to: Refresh takes it.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    simple('never.folder').focus();typeIn(simple('never.folder'),'/home/made-up-user/another-folder');
+    for(const cb of simple('never.folder').listeners.keydown)cb({key:'Enter',target:simple('never.folder'),preventDefault(){}});
+    blur();await settled();
+    givePrivacy(json({},503));await settled();
+    assert.deepEqual([simple('never.folder'),document.activeElement===refreshButton()],[undefined,true],'Refresh takes it when the state is not read again');
     document.activeElement=null;
   }
   ctx.fetch=w6fetch;
