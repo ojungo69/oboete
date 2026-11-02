@@ -6561,7 +6561,8 @@ const AI_CATALOG = [
 ];
 
 // A rest until a time (69b-3c-1b) after a key missing, not installed and the owner's hold, before
-// off and ready; a list not read (`null`) leaves the state not known.
+// off and ready; a list not read (`null`) leaves the state not known, but a key missing, not
+// installed or off, which the lists do not decide.
 function simpleProviderStatus(row, stopped, resting) {
   if (row.key === 'missing') return 'missing';
   if (row.key === 'not-on-path') return 'not-installed';
@@ -6635,6 +6636,8 @@ function renderRests(f, stoppedChanged) {
       if (stopped && fold && groupOpen.get(`ai:${row.name}`) === undefined) fold.open = true;
     }
   }
+  const empty = $('panel').querySelector('.simple-empty');
+  if (empty) empty.hidden = chain.some((r) => simpleProviderStatus(r, f.stopped, f.resting) === 'ready');
   // The stopped list only when the owner's holds changed: its Resume keeps the focus otherwise.
   if (stoppedChanged) $('panel').querySelector('.stopped-state')?.replaceChildren(...[...stoppedState().childNodes]);
   if ([null, document.body].includes(document.activeElement)) focusBack(keep);
@@ -7306,7 +7309,10 @@ function simpleGroups(f, more) {
   if (s.summary.curate) aiState = spent === null ? t('simple_state_ai_no_spend', { n: used.length }) : t('simple_state_ai', { n: used.length, usd: spent });
   const searchKey = { none: 'none', local: 'local', 'workers-ai': 'workers' }[f.embedding?.provider] ?? 'none';
   // `append` writes an absent part as the text "null": leave it out, as the detailed page does.
-  return present([!ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
+  // Drawn always, shown while no AI can be used: a rests read changes it in place (`renderRests`).
+  const empty = el('p', 'simple-empty', t('simple_no_ai'));
+  empty.hidden = ready;
+  return present([empty,
     foldGroup('s-inject', true, t('simple_inject_h'),
       t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }), simpleBody('inject', ...inject),
       more.inject),

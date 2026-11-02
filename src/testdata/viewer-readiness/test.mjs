@@ -2611,6 +2611,18 @@ console.log('PASS: the caps\' No cap switches');
       giveOld(json({stopped:[],resting:[]}));await pending;await settled();
       assert.deepEqual([said('alpha'),Boolean(simple('resume:alpha'))],['Stopped',true],'a read from before Settings was opened again is not drawn');
     }
+    // The notice that no AI can be used yet follows the rests in place; a list not read leaves a
+    // key missing or an AI off as they are (Codex's review of 69b-3c-1b).
+    f=draw(ai(['alpha'],{stopped:[],resting:[{name:'alpha',until:noon.getTime()}]}));
+    const empty=()=>panel.querySelector('.simple-empty');
+    assert.equal(empty().hidden,false,'the only AI resting: the notice is shown');
+    await read(lists([],[]));
+    assert.equal(empty().hidden,true,'its rest ended: the notice goes');
+    await read(lists([],[{name:'alpha',until:noon.getTime()}]));
+    assert.equal(empty().hidden,false,'resting again: shown again');
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],chain:[row('alpha',{key:'missing'}),row('beta',{on:false})]}));
+    await read(lists(null,null));
+    assert.deepEqual([said('alpha'),said('beta')],['Needs an API key','Off'],'a list not read leaves a key missing and an AI off as they are');
     // The stopped list in More settings keeps its Resume, and its focus, when only another AI's
     // timed rest changes.
     f=draw(ai(['alpha','beta'],{stopped:['alpha'],resting:[]}));
