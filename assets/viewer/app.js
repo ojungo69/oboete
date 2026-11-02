@@ -5654,7 +5654,10 @@ async function providerWrite(action, button, body, path) {
 
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
 // form state; redraws clear them and the selected field is emptied before fetch is called.
-function providerKeyField(provider) {
+// The AI line's field and its entry's in More settings are told apart, so a redraw gives the focus
+// back to the one it was on (decision 69, 69b-2).
+function providerKeyField(provider, simple = false) {
+  const id = simple ? provider.name : `entry:${selectorKey(provider.selector)}`;
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
@@ -5662,11 +5665,11 @@ function providerKeyField(provider) {
   i.autocapitalize = 'off';
   i.placeholder = t('key_placeholder');
   i.dataset.field = 'providers.key';
-  i.dataset.simpleFocus = `key:${provider.name}`;
+  i.dataset.simpleFocus = `key:${id}`;
   i.setAttribute('aria-label', t('key_label', { name: provider.name }));
   const save = el('button', 'small', t('key_save'));
   save.type = 'button';
-  save.dataset.simpleFocus = `key-save:${provider.name}`;
+  save.dataset.simpleFocus = `key-save:${id}`;
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
   i.addEventListener('keydown', (event) => {
@@ -6642,7 +6645,7 @@ function simpleProviderRow(f, row, index, chain, position) {
     keyOwner && keyOwner.name !== row.name && row.key === 'missing'
       ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
       : provider && (row.key === 'missing' || simpleKeyName === row.name)
-        ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported'))) : null,
+        ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
     resume, provider ? providerTest(provider, true) : null, detail());
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
@@ -7062,7 +7065,9 @@ function drawSettings() {
       ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
       : null,
     ...groups,
-    settingsGroup('computer', f.firstRun, generalForm(
+    // Open while the resident choice shown is not saved: a new home's, which a simple save leaves
+    // as it is (#803).
+    settingsGroup('computer', f.firstRun || f.worker.resident !== f.saved.worker.resident, generalForm(
       el('section', null,
         el('h3', null, t('resident_h')), el('p', 'desc', t('resident_desc')),
         el('label', 'check', resident, t('resident_on')),
@@ -7086,14 +7091,14 @@ function drawSettings() {
 }
 
 // One rule keeps the focus through a redraw (a save's answer, privacy read again after it): a
-// simple control by its `data-simple-focus`; any other by its field, its AI entry and its side,
-// inside the general forms or outside them, with the caret in it (decision 69, 69b-2).
+// simple control by its `data-simple-focus`; any other by its field and its AI entry, with the
+// caret in it (decision 69, 69b-2). A field is drawn once, inside the general forms or outside them
+// (the page's tests count them), so its field says which.
 function focusKeep() {
   const a = document.activeElement;
   if (a?.dataset?.simpleFocus) return { simple: a.dataset.simpleFocus };
   if (!a?.dataset?.field) return null;
-  return { field: a.dataset.field, entry: entryOf(a), general: Boolean(a.closest('.general-form')),
-    start: a.selectionStart, end: a.selectionEnd };
+  return { field: a.dataset.field, entry: entryOf(a), start: a.selectionStart, end: a.selectionEnd };
 }
 
 function entryOf(control) {
@@ -7103,10 +7108,9 @@ function entryOf(control) {
 function focusBack(keep) {
   if (keep?.simple) { simpleFocus(keep.simple); return; }
   if (!keep) return;
-  // Without `entry` and `general` (the field a save's focus went to), any of the field's places.
+  // Without `entry` (the field a save's focus went to), the field in any entry.
   const c = [...$('panel').querySelectorAll('input, select, textarea')].find((x) => x.dataset.field === keep.field
-    && !x.disabled && !x.dataset.simpleFocus && (keep.entry === undefined || entryOf(x) === keep.entry)
-    && (keep.general === undefined || Boolean(x.closest('.general-form')) === keep.general));
+    && !x.disabled && !x.dataset.simpleFocus && (keep.entry === undefined || entryOf(x) === keep.entry));
   if (!c) return;
   // A field in a fold the redraw closed is reached by opening it (CodeRabbit on #802).
   for (let fold = c.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
