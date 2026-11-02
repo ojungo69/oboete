@@ -1,0 +1,24 @@
+assets/viewer/app.js
+  s_f7d8663ba9ca22::t_40d3c6f086f9b4 4605-4610
+docs/settings-redo.md
+  s_f7d8663ba9ca22::t_40d3c6f086f9b4 84,86
+  s_f7d8663ba9ca22::t_20139dbc20fc60 87
+src/testdata/viewer-readiness/test.mjs
+  s_f7d8663ba9ca22::t_93bbf34ac6dd7e 1941-1942,1956-1962
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "84a7183a42b56b75ba18f82e1784c1c4e6930ee5",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
