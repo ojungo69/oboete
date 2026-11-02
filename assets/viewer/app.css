@@ -662,6 +662,8 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .simple-toggle input[role="switch"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .settings .simple-model { max-width: 100%; margin: 8px 0; }
 .simple-model select { width: 100%; min-width: 0; }
+/* A model name typed is as wide as the model choice above it. */
+.simple-model input { width: 100%; max-width: 22rem; min-width: 0; }
 .simple-provider .provider-test { display: inline-block; margin: 0 8px 0 0; }
 .simple-provider .provider-test:has(.test-preview), .simple-provider .provider-test:has(.test-result) { display: block; }
 .simple-provider .provider-key .key-input { display: flex; flex-wrap: wrap; }

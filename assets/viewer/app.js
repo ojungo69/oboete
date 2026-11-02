@@ -6778,7 +6778,7 @@ function simpleProviderRow(f, row, index, chain, position) {
         lineAsk(text, 'model', row.name, value || null, savedRow.model ?? null, again);
       };
       lineField(text, ask);
-      typed = el('label', 'field', el('span', null, t('simple_model_typed')), text);
+      typed = el('label', 'field simple-model', el('span', null, t('simple_model_typed')), text);
     }
     model = el('div', 'simple-line-model', el('label', 'field simple-model', el('span', null, t('simple_model_short')), select), typed,
       overlay, remove);
