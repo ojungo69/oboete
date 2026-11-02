@@ -1,0 +1,21 @@
+assets/viewer/app.js
+  s_9097865eb5506d::t_d369ee4dede4c9 6781
+assets/viewer/app.css
+  s_9097865eb5506d::t_d369ee4dede4c9 665-666
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3d66dd512dbdc034142a76de9ecab14fa6f9b4e",
+  "prompts": {},
+  "sessions": {
+    "s_9097865eb5506d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19e34-8028-72f2-9f6e-199d81f1c47d",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
