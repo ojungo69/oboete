@@ -3481,6 +3481,8 @@ function redactionSection(f) {
   // Plaintext exists only in this live field and the digest call, never in form/localStorage.
   const exact = el('input');
   exact.type = 'password';
+  // Named, so a hash's hold gives the focus back to it (#815).
+  exact.dataset.simpleFocus = 'redaction.exact';
   exact.autocomplete = 'off';
   exact.spellcheck = false;
   exact.autocapitalize = 'off';
@@ -3497,7 +3499,7 @@ function redactionSection(f) {
     exact.value = '';
     hash.disabled = true;
     const fields = hash.closest('.settings');
-    if (fields) fields.inert = true;
+    holdSettings(fields, { simple: 'redaction.exact' });
     try {
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       if (!currentSettings(f)) return;
@@ -3512,7 +3514,7 @@ function redactionSection(f) {
       if (currentSettings(f)) setStatus(t('redaction_hash_failed'), true, lang);
     } finally {
       bytes.fill(0);
-      if (fields) fields.inert = false;
+      releaseSettings(fields);
     }
   });
   // Masking on or off is the Privacy group's own switch, with its confirmation (decision 69, 69b-2).
@@ -4631,10 +4633,9 @@ async function keySave(route, button, body) {
     const loads = formLoads;
     const field = button.parentElement?.querySelector('input')?.dataset.field;
     button.disabled = true;
-    const waiting = $('panel').querySelector('.settings');
-    if (waiting) waiting.inert = true;
+    holdSettings($('panel').querySelector('.settings'));
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) return;
+    if (view !== 'settings' || !form) { releaseSettings(null); return; }
     // Settings read meanwhile (a stale save, Settings entered again, a recovery, search's state or a
     // judge's test read again) may send the key elsewhere than the page showed as it was typed
     // (search's endpoint is config.toml's): it is not sent, and is typed again (Codex's review of
@@ -4644,6 +4645,7 @@ async function keySave(route, button, body) {
       // ended without drawing it (#814).
       button.disabled = false;
       drawSettings();
+      releaseSettings(null);
       setStatus(t('key_again'), true, lang);
       return;
     }
@@ -4667,7 +4669,7 @@ async function keyWrite(route, button, body) {
   const mine = form;
   const fields = button.closest('.settings');
   button.disabled = true;
-  fields.inert = true;
+  holdSettings(fields);
   try {
     const { res, answer } = await memoryWrite(route, body);
     if (!currentSettings(mine)) return;
@@ -4686,7 +4688,7 @@ async function keyWrite(route, button, body) {
     if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
   } finally {
     button.disabled = false;
-    fields.inert = false;
+    releaseSettings(fields);
   }
 }
 
@@ -5270,7 +5272,7 @@ function preferenceSection(f) {
     const fields = action.closest('.settings');
     draft.sending = true;
     draft.result = null;
-    fields.inert = true;
+    holdSettings(fields, { field: 'preference.text' });
     save.disabled = true;
     try {
       const { res, answer } = await memoryWrite('preferences', { text: draft.text, apply_to_all_repos: true });
@@ -5288,7 +5290,7 @@ function preferenceSection(f) {
       draft.result = { state: 'unknown' };
       draft.confirmed = false;
       if (renderPreference(draft)) setStatus(t('memory_result_unknown'), true, lang);
-    } finally { draft.sending = false; fields.inert = false; save.disabled = preferenceBlocked(draft); }
+    } finally { draft.sending = false; save.disabled = preferenceBlocked(draft); releaseSettings(fields); }
   });
   const next = el('button', 'quiet small', t('preference_new'));
   next.type = 'button';
@@ -5420,7 +5422,7 @@ async function resumeProvider(name, button) {
   const fields = button.closest('.settings');
   const state = button.closest('.stopped-state');
   button.disabled = true;
-  fields.inert = true;
+  holdSettings(fields);
   try {
     const res = await fetch('/api/resume', {
       method: 'POST',
@@ -5446,7 +5448,7 @@ async function resumeProvider(name, button) {
     if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
   } finally {
     button.disabled = false;
-    fields.inert = false;
+    releaseSettings(fields);
   }
 }
 
@@ -5735,23 +5737,24 @@ async function providerOperation(action, button, body = null, path = '') {
     // The page waits with it, so no other write is chosen by a list this one may change; and a
     // list that changed meanwhile sends nothing (Codex and cubic on #802).
     button.disabled = true;
-    const waiting = $('panel').querySelector('.settings');
-    if (waiting) waiting.inert = true;
+    holdSettings($('panel').querySelector('.settings'));
     const order = providerOrder(form);
     const loads = formLoads;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) return;
+    if (view !== 'settings' || !form) { releaseSettings(null); return; }
     // Settings read meanwhile may have brought config.toml changed elsewhere: a write made against
     // the page as it was, a key's above all, is not sent (as `keySave`; Codex's review of 69b-3c-1a).
     if (formLoads !== loads) {
       button.disabled = false;
       drawSettings();
+      releaseSettings(null);
       setStatus(t(path === '/key' ? 'key_again' : 'write_again'), true, lang);
       return;
     }
     if (action.selector && providerOrder(form) !== order) {
       button.disabled = false;
       drawSettings();
+      releaseSettings(null);
       setStatus(t('provider_list_moved'), true, lang);
       return;
     }
@@ -5788,7 +5791,7 @@ async function providerWrite(action, button, body, path) {
     ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
     : fields.querySelector('.new-provider'));
   button.disabled = true;
-  fields.inert = true;
+  holdSettings(fields);
   try {
     const { res, answer, current } = await providerRequest(path, body || JSON.stringify({ version: mine.version, action }));
     if (!currentSettings(mine)) return;
@@ -5810,7 +5813,7 @@ async function providerWrite(action, button, body, path) {
     }
   } finally {
     button.disabled = false;
-    fields.inert = false;
+    releaseSettings(fields);
   }
 }
 
@@ -5870,7 +5873,7 @@ async function previewProvider(provider, button, run = false) {
   const preview = provider.preview;
   if (run && (!preview?.ready || !providerPreviewMatches(preview, provider, mine.version))) return;
   const body = JSON.stringify({ version: mine.version, selector: provider.selector, ...(run ? { confirmed: true } : {}) });
-  fields.inert = true;
+  holdSettings(fields);
   button.disabled = true;
   try {
     const { res, answer, current } = await providerRequest(run ? '/test' : '/test/preview', body);
@@ -5895,7 +5898,7 @@ async function previewProvider(provider, button, run = false) {
   } catch {
     if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
   } finally {
-    fields.inert = false;
+    releaseSettings(fields);
     button.disabled = false;
   }
 }
@@ -6337,7 +6340,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
   const fields = button.closest('.settings');
   if (held) {
     button.disabled = true;
-    fields.inert = true;
+    holdSettings(fields);
   } else if (autosaved) fields.inert = false;
   try {
     // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
@@ -6370,7 +6373,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
     // What holds nothing releases nothing: another write may hold the page now.
     if (held) {
       button.disabled = false;
-      fields.inert = false;
+      releaseSettings(fields);
     }
     if (simple && simple.hold === false && currentSettings(mine)) clearSimpleReceipt();
     else if (simple && currentSettings(mine)) {
@@ -6764,11 +6767,11 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
     const waiting = $('panel').querySelector('.settings');
     if (hold) {
       button.disabled = true;
-      if (waiting) waiting.inert = true;
+      holdSettings(waiting);
     }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) return;
+    if (view !== 'settings' || !form) { releaseSettings(null); return; }
     // The answer waited for drew the page again: the control as drawn now waits for this save, and
     // the page with it, as a provider's write does (#802).
     button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
@@ -6780,6 +6783,7 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
       timeout_s: row.timeout_s, model: row.model })) }));
   if (change(body, s) === false) {
     drawSettings();
+    releaseSettings(null);
     return;
   }
   let done;
@@ -7586,6 +7590,33 @@ function drawSettings() {
     i.secretSync();
   }
   focusBack(keep);
+}
+
+// A write that holds Settings (#815): Chrome takes the focus off a page made inert at the next frame
+// and leaves it on the body, where no redraw finds it. A hold records what has the focus; its
+// release, after the rest of it (its button enabled again) and the redraw it makes, gives a focus
+// still on the body back to that control, or to the one drawn in its place.
+let heldFocus = null;
+// `fallback`: where the focus goes when its control has no name a redraw finds.
+function holdSettings(fields, fallback = null) {
+  if (!fields) return;
+  const a = document.activeElement;
+  if (a && a !== document.body && $('panel').contains(a)) {
+    // A key's button is drawn again disabled, its field emptied: the field takes the focus.
+    const field = a.closest('.key-input')?.querySelector('input')?.dataset.field;
+    heldFocus = { control: a, keep: focusKeep() ?? (field ? { field } : fallback) };
+  }
+  fields.inert = true;
+}
+function releaseSettings(fields) {
+  if (fields) fields.inert = false;
+  void Promise.resolve().then(() => {
+    const held = heldFocus;
+    heldFocus = null;
+    if (!held || view !== 'settings' || ![null, document.body].includes(document.activeElement)) return;
+    if ($('panel').contains(held.control) && !held.control.disabled) held.control.focus();
+    else focusBack(held.keep);
+  });
 }
 
 // One rule keeps the focus through a redraw (a save's answer, privacy read again after it): a
