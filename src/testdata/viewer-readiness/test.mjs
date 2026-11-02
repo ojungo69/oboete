@@ -12,7 +12,7 @@ class Node {
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
   // A browser moves the focus to the body when the focused element leaves the page (#810).
   replaceChildren(...nodes){
-    if(this.children.some(c=>c&&typeof c==='object'&&!nodes.includes(c)&&c.contains(document.activeElement)))document.activeElement=null;
+    if(this.children.some(c=>c&&typeof c==='object'&&!nodes.includes(c)&&c.contains(document.activeElement)))document.activeElement=document.body;
     this.children=[];this.append(...nodes);
   }
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(node=>node!==this);this.parentElement=null;}
@@ -45,6 +45,8 @@ const ids=new Map();
 const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
   if(!ids.has(id))ids.set(id,new Node());return ids.get(id);
 }};
+// Where a browser puts the focus taken off an element (#810).
+document.body=new Node('body');
 const ctx=vm.createContext({document,location:{hash:'#t=0123456789abcdef0123456789abcdef',port:'17373',
   replaced:[],replace(url){this.replaced.push(url);}},URL,URLSearchParams,navigator:{language:'en'},
   localStorage:{getItem(){return null;},setItem(){}},window:{addEventListener(){}},
@@ -1956,7 +1958,7 @@ console.log('PASS: the caps\' No cap switches');
     // again in place: Refresh to Refresh, an exclusion to its row's button, a place undone whose
     // row left its list to the folder field; not when the focus went elsewhere meanwhile. A browser
     // takes the focus off a control disabled or made inert under it: `blur` does so here.
-    const blur=()=>{document.activeElement=null;};
+    const blur=()=>{document.activeElement=document.body;};
     settingsNow=ai(['alpha']);
     [privacyAnswer,givePrivacy]=later();
     (await ctx.ui.showSettings())();posted.length=0;
