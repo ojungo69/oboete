@@ -1375,11 +1375,15 @@ console.log('PASS: the caps\' No cap switches');
   const myWork=simple('my_work.curate');flip(myWork,true);await settle();
   assert.equal(posted.length,1,'a simple switch clicked meanwhile waits');
   assert.deepEqual([myWork.disabled,panel.querySelector('.settings').inert],[true,true],'disabled, with the page');
-  answers=[json(ai(['alpha'],{version:'v3',my_work:{curate:true,calls_a_day:200,estimate:null}}))];
+  let [simpleAnswer,giveSimple]=later();answers=[simpleAnswer];
   give(json(ai(['alpha'],{version:'v2',my_work:{curate:false,calls_a_day:200,estimate:null}})));await settled();
   assert.equal(posted.length,2,'then it is sent');
   assert.equal(sent()[1].version,'v2','with the version the save gave');
   assert.deepEqual(sent()[1].my_work,{curate:true,calls_a_day:200},'and the calls a day it saved');
+  assert.deepEqual([simple('my_work.curate').disabled,panel.querySelector('.settings').inert],[true,true],
+    'the page the answer drew again waits for it, its switch too');
+  giveSimple(json(ai(['alpha'],{version:'v3',my_work:{curate:true,calls_a_day:200,estimate:null}})));await settled();
+  assert.deepEqual([simple('my_work.curate').disabled,Boolean(panel.querySelector('.settings').inert)],[false,false],'and is usable after it');
   assert(clean(),'nothing is left to save');
   // ...and masking off confirmed meanwhile keeps the rule the save changed.
   f=draw(ai(['alpha'],{redaction:masked([rule])}));

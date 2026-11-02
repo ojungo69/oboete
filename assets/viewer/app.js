@@ -1014,7 +1014,7 @@ const TEXT = {
   simple_never_h: ['Places never recorded', '記録しない場所'],
   simple_never_desc: ['New activity in these repositories and folders is not recorded, while existing memories remain.', '指定したリポジトリやフォルダーでの新しい作業を記録せず、以前の記憶はそのまま残します。'],
   simple_never_empty: ['No places are excluded from recording.', '記録しない場所は指定されていません。'],
-  simple_never_more: ['Repositories and name patterns: More settings', 'リポジトリと名前のパターンは細かい設定で'],
+  simple_never_more: ['Choose repositories and name patterns in More settings', 'リポジトリと名前のパターンを細かい設定で選ぶ'],
   simple_mask_h: ['Masking of secrets', '機密情報のマスキング'],
   simple_mask_desc: ['Hide API keys and passwords in records, outgoing text and this page.', '記録や送信する内容、この画面に含まれる API キーやパスワードを隠します。'],
   simple_mask_on: ['Mask secrets', '機密情報を隠す'],
@@ -6511,8 +6511,12 @@ async function simpleSettingsSave(button, change, adopt) {
     button.disabled = true;
     const waiting = $('panel').querySelector('.settings');
     if (waiting) waiting.inert = true;
+    const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
     if (view !== 'settings' || !form) return;
+    // The answer waited for drew the page again: the control as drawn now waits for this save, and
+    // the page with it, as a provider's write does (#802).
+    button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
   }
   const s = form.savedSettings;
   const body = JSON.parse(JSON.stringify({ version: form.version, summary: s.summary,
