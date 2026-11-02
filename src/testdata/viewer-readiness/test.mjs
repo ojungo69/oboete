@@ -831,6 +831,110 @@ console.log('PASS: the retention period');
   answers=[json(settings('resident',{version:'v2',redaction:{enabled:true,extra_rules:[],allowlist:[]}}))];
   action('held.confirm').click();await settle();
   assert.equal(sent()[0].redaction.extra_rules.length,0,'confirmed, it is removed');
+  // Round 1 of #802. Saves go one at a time: a change made while one is on its way is sent after
+  // its answer, with that answer's version (Codex, cubic and CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let first;answers=[new Promise(resolve=>{first=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  tick(field('summary.curate'),true);fire('change',{target:field('summary.curate')});await settle();
+  assert.equal(posted.length,1,'a change made while a save is on its way waits for its answer');
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},summary:{...settings('resident').summary,curate:true}}))];
+  first(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,2,'and is sent after it');
+  assert.equal(sent()[1].version,'v2','with the version that answer gave');
+  assert.equal(sent()[1].summary.curate,true);assert.equal(sent()[1].worker.resident,false);
+  // A confirm left in the status line waits behind a save on its way as well (round 1's review).
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const noCapAgain=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
+  tick(noCapAgain(),true);fire('change',{target:noCapAgain()});await settle();
+  const staleConfirm=action('held.confirm');
+  tick(noCapAgain(),false);fire('change',{target:noCapAgain()});await settle();
+  let held;answers=[new Promise(resolve=>{held=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(posted.length,1);
+  staleConfirm.click();await settle();
+  assert.equal(posted.length,1,'a confirm clicked while a save is on its way sends nothing beside it');
+  held(json(settings('resident',{version:'v2',paid_usd_per_month:5,worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,1,'and after its answer, nothing is left to send');
+  // A port typed and not yet moved to stays typed through another change's save (Codex, cubic).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('view.port'),'17400');leave(field('view.port'));
+  answers=[json(settings('resident',{version:'v2',worker:{resident:false}}))];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(sent()[0].view,undefined,'another change sends no port');
+  assert.equal(field('view.port').value,'17400','and the port typed stays');
+  // The port's button asks first for what waits for a confirmation, as any save does (Codex, cubic
+  // and CodeRabbit), and every change waiting is said and confirmed together (CodeRabbit).
+  const capOff=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5,redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  tick(capOff(),true);fire('change',{target:capOff()});await settle();
+  tick(field('redaction.enabled'),false);fire('change',{target:field('redaction.enabled')});await settle();
+  typeIn(field('view.port'),'17400');
+  action('port.move').click();await settle();
+  assert.equal(posted.length,0,'the port button does not pass a change waiting for its confirmation');
+  const asked=document.getElementById('status').textContent;
+  assert(asked.includes('does not stop paid calls')&&asked.includes('With masking off'),'both changes waiting are said');
+  assert.equal(text(action('held.confirm')),'Confirm and save','and confirmed together');
+  answers=[json({code:'port_unavailable',field:'view.port'},409)];
+  action('held.confirm').click();await settle();
+  assert.equal(posted.length,1);
+  assert.equal(sent()[0].view.port,17400);assert.equal(sent()[0].paid_usd_per_month,null);
+  assert.equal(sent()[0].redaction.enabled,false,'confirmed, all are sent');
+  // The port's button keeps an unfinished new masking rule through its answer, as the other saves
+  // do (cubic).
+  f=w6.formOf(settings('foreground',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const addDraft=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  addDraft.click();fire('click',{target:addDraft});await settle();
+  typeIn(any('redaction.extra_rules.0.id'),'delta-key');leave(any('redaction.extra_rules.0.id'));await settle();
+  typeIn(field('view.port'),'17400');
+  answers=[json(settings('foreground',{version:'v2',view:{port:17400},view_runtime:{port:4323,mode:'foreground'},redaction:{enabled:true,extra_rules:[],allowlist:[]}}))];
+  action('port.move').click();await settle();await settle();
+  assert.equal(posted.length,1);assert.equal(sent()[0].view.port,17400);
+  assert.equal(any('redaction.extra_rules.0.id')?.value,'delta-key','an unfinished rule survives the port\'s save');
+  // A new rule saved while something else was typed is a saved rule from then on: emptied, it is
+  // refused, never dropped (cubic).
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const addRule=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  addRule.click();fire('click',{target:addRule});await settle();
+  typeIn(any('redaction.extra_rules.0.id'),'gamma-key');leave(any('redaction.extra_rules.0.id'));
+  let ruleAnswer;answers=[new Promise(resolve=>{ruleAnswer=resolve;})];
+  typeIn(any('redaction.extra_rules.0.regex'),'gamma_[0-9]+');leave(any('redaction.extra_rules.0.regex'));
+  assert.equal(posted.length,1,'finished, the rule is sent');
+  typeIn(field('inject.session_start_chars'),'4000');
+  const gamma={id:'gamma-key',regex:'gamma_[0-9]+',keywords:[],entropy:null,secret_group:null};
+  ruleAnswer(json(settings('resident',{version:'v2',redaction:{enabled:true,extra_rules:[gamma],allowlist:[]}})));await settle();await settle();
+  assert.equal(field('inject.session_start_chars').value,'4000','what was typed meanwhile stays');
+  typeIn(any('redaction.extra_rules.0.id'),'');leave(any('redaction.extra_rules.0.id'));await settle();
+  assert.equal(posted.length,1,'the saved rule emptied is not sent');
+  assert.equal(any('redaction.extra_rules.0.id').attrs['aria-invalid'],'true','it is refused as a saved rule');
+  // A field in a fold the save's redraw closes gets the focus by opening the fold (CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;document.activeElement=null;
+  answers=[json(settings('resident',{version:'v2',summary:{...settings('resident').summary,window_tokens:7000}}))];
+  typeIn(field('summary.window_tokens'),'7000');leave(field('summary.window_tokens'),field('summary.idle_minutes'));await settle();
+  assert.equal(posted.length,1);
+  assert.equal(document.activeElement,field('summary.idle_minutes'),'the focus goes to the field it went to');
+  assert.equal(field('summary.idle_minutes').parentElement.closest('details').open,true,'its fold opened');
+  // Enter saves a field; on a link or a button it keeps its own meaning (CodeRabbit).
+  let stopped=false;
+  fire('keydown',{key:'Enter',target:document.createElement('a'),preventDefault(){stopped=true;}});
+  assert.equal(stopped,false,'Enter on a link is left alone');
+  fire('keydown',{key:'Enter',target:field('inject.session_start_chars'),preventDefault(){stopped=true;}});
+  assert.equal(stopped,true,'Enter in a field is the field\'s');
+  // The guide points at no Save button: there is none (Codex).
+  assert.equal(panel.querySelectorAll('button').filter(n=>!n.hidden&&text(n)==='Save settings').length,0,'nothing points at a Save button');
+  // A hash is saved once it is made: the click's own save comes before it (Codex and cubic).
+  ctx.crypto.subtle=globalThis.crypto.subtle;
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const exact=panel.querySelectorAll('input').find(n=>n.type==='password');
+  const hashButton=panel.querySelectorAll('button').find(n=>text(n)==='Add its hash');
+  typeIn(exact,'a made-up secret');
+  answers=[json(settings('resident',{version:'v2'}))];
+  hashButton.click();fire('click',{target:hashButton});
+  for(let i=0;i<50&&!posted.length;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(posted.length,1,'the hash made is saved');
+  const made=(await globalThis.crypto.subtle.digest('SHA-256',new TextEncoder().encode('a made-up secret')));
+  assert.deepEqual(sent()[0].redaction.allowlist,[Buffer.from(made).toString('hex')],'with the hash of what was typed');
+  delete ctx.crypto.subtle;await settle();
   document.querySelectorAll=pageControls;
   console.log('PASS: decision 69 (69b-1): each change saves at once, the port by its button, three changes asked first');
 }

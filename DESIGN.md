@@ -392,7 +392,7 @@ The heading (26px), a search's query words in the accent, then the lede in muted
 - **Group:** a `details` between 1px Line rules, no box. Its summary is a grid: title (15px 600) and description (13px muted) at the left, a chevron (7px, 1.5px muted borders) at the right that turns from down to up when open (150ms). Sections inside a group are separated by Line rules with 20px above.
 - **Start guide:** the one group shown as a callout: Quiet Surface, no rules, 8px radius, 0 20px padding.
 - **Smaller disclosures:** inline, 14px 500, a 6px chevron before the words.
-- **No Save bar** (decision 69): each change saves at once; the status line says so, and asks there before a change that weakens a protection.
+- **No Save bar** (decision 69, 2026-11-02): each change saves at once; the status line says so, and asks there before a change that weakens a protection.
 - **Warnings** after the form: Gold Fill callout, 8px radius.
 
 ### Fields
