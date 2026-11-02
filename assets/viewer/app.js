@@ -3343,6 +3343,8 @@ function promptSide(side) {
 function loadedForm(s) {
   lineDrafts.clear();
   formLoads += 1;
+  // A rests read started before is older than this form's lists (Codex's review of 69b-3c-1b).
+  restsAsked += 1;
   return formOf(s);
 }
 // How many times the settings were read, or a form was made from a recovery's answer: a key waiting

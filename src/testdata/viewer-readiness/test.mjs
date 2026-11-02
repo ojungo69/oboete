@@ -2598,6 +2598,19 @@ console.log('PASS: the caps\' No cap switches');
     vm.runInContext("askHeld([{key:'stale',confirm:'held_confirm_all'}],()=>{})",ctx);
     action('held.cancel').click();await settled();
     assert.equal(restsRead,1,'a confirmation cancelled reads the rests again');
+    // A rests read started before Settings is opened again does not draw over its first lists.
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[]}));
+    {
+      const [old,giveOld]=later();restsAnswer=()=>old;
+      const pending=vm.runInContext('refreshRests()',ctx);
+      const opened=ai(['alpha','beta'],{stopped:['alpha'],resting:[]});
+      ctx.fetch=((inner)=>(url,options)=>url.startsWith('/api/settings?')?Promise.resolve(json(opened))
+        :url.startsWith('/api/hidden?')?Promise.resolve(json([])):inner(url,options))(ctx.fetch);
+      restsAnswer=null;
+      (await ctx.ui.showSettings())();await settled();
+      giveOld(json({stopped:[],resting:[]}));await pending;await settled();
+      assert.deepEqual([said('alpha'),Boolean(simple('resume:alpha'))],['Stopped',true],'a read from before Settings was opened again is not drawn');
+    }
     // The stopped list in More settings keeps its Resume, and its focus, when only another AI's
     // timed rest changes.
     f=draw(ai(['alpha','beta'],{stopped:['alpha'],resting:[]}));
