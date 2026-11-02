@@ -7446,7 +7446,10 @@ curate = false
     #[test]
     fn resume_passes_the_save_guards_and_only_clears_the_stop() {
         let (dir, v) = viewer("w1-resume");
-        let config = "providers = []\n[summary]\ncurate = false # invented settings\n";
+        // Both names are config.toml's: a name it does not have is not listed (69b-3c-1b).
+        let config = "[[providers]]\nkind = \"cli\"\nname = \"owner-stopped\"\ncli = \"claude\"\n\
+                      [[providers]]\nkind = \"cli\"\nname = \"other-stopped\"\ncli = \"claude\"\n\
+                      [summary]\ncurate = false # invented settings\n";
         std::fs::write(dir.join("config.toml"), config).unwrap();
         let db = crate::providers_db::open(&dir).unwrap();
         for provider in ["owner-stopped", "other-stopped"] {
