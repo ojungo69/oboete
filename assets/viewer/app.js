@@ -6909,7 +6909,7 @@ function simpleProviderRow(f, row, index, chain, position) {
         simpleFocus(`model-text:${row.name}`);
         return;
       }
-      lineAsk(select, 'model', row.name, select.value === '__own' ? null : select.value, savedRow.model ?? null, true);
+      void lineAsk(select, 'model', row.name, select.value === '__own' ? null : select.value, savedRow.model ?? null, true);
     });
     select.setAttribute('aria-label', t('simple_model', { name: label }));
     let typed = null;
@@ -6928,7 +6928,7 @@ function simpleProviderRow(f, row, index, chain, position) {
           setStatus(t('model_free'), true, lang);
           return;
         }
-        lineAsk(text, 'model', row.name, value || null, savedRow.model ?? null, again);
+        void lineAsk(text, 'model', row.name, value || null, savedRow.model ?? null, again);
       };
       lineField(text, ask);
       typed = el('label', 'field simple-model', el('span', null, t('simple_model_typed')), text);
@@ -7075,7 +7075,7 @@ function lineNumber(f, row, savedRow, field, focus, label, subject, [min, max], 
       setStatus(t('range'), true, lang);
       return;
     }
-    lineAsk(i, field, row.name, value, saved, again);
+    void lineAsk(i, field, row.name, value, saved, again);
   });
   return el('label', 'field simple-line-field', el('span', null, label), i);
 }
@@ -7106,20 +7106,20 @@ function lineCalls(f, row, savedRow, label) {
         simpleFocus(`budget-off:${row.name}`);
         return;
       }
-      lineAsk(control, 'daily_budget', row.name, f.ranges.no_cap, saved, true);
+      void lineAsk(control, 'daily_budget', row.name, f.ranges.no_cap, saved, true);
       return;
     }
     if (row.subscription) {
-      lineAsk(control, 'daily_budget', row.name, null, saved, true);
+      void lineAsk(control, 'daily_budget', row.name, null, saved, true);
       return;
     }
     const text = (now && (now.typed > 0 || now.open) ? now.value : noCapText(saved, f.ranges)).trim();
     const typed = /^\d+$/.test(text) ? Number(text) : null;
     if (typed !== null && typed >= f.ranges.daily_budget[0] && typed <= f.ranges.daily_budget[1]) {
-      lineAsk(control, 'daily_budget', row.name, typed, saved, true);
+      void lineAsk(control, 'daily_budget', row.name, typed, saved, true);
       return;
     }
-    if (lifted || waiting) lineAsk(control, 'daily_budget', row.name, null, saved, true);
+    if (lifted || waiting) void lineAsk(control, 'daily_budget', row.name, null, saved, true);
     // Opened after any request just made, and counted as typing: no answer closes it.
     const d = lineDraft(key);
     lineDrafts.set(key, { ...d, open: true, typed: d.typed + 1 });
