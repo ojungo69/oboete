@@ -4947,19 +4947,25 @@ function hiddenSection(f) {
   return el('section', 'hidden-settings', word('h3', null, 'hidden_h'), word('p', 'desc', 'hidden_desc'), listing);
 }
 
+// The page's reads of the privacy state, numbered as they start: only the last one started is
+// drawn, whichever form it reaches (Codex and CodeRabbit on #806).
+let privacyReads = 0;
+
 async function refreshPrivacy(f) {
   if (!f) return false;
-  const mine = f.privacyRead = (f.privacyRead || 0) + 1;
+  const mine = ++privacyReads;
   const asked = f.privacy;
   const state = await api('privacy').catch(privacyUnavailable);
+  if (mine !== privacyReads) return false;
   // A form drawn from this one since (a provider's write, search read again, a confirmation
   // cancelled) shows the state this read was for while it is on its way, and takes the read
   // (Codex and cubic on #806).
   const to = currentSettings(f) ? f : view === 'settings' && asked?.pending && form?.privacy === asked ? form : null;
-  if (!to || (to === f && f.privacyRead !== mine)) return false;
+  if (!to) return false;
   to.privacy = state;
   if (!to.hashing) drawSettings();
-  return state.available === true;
+  // Read for another form, it says nothing about this one's (cubic on #806).
+  return to === f && state.available === true;
 }
 
 function privacySection(f) {
