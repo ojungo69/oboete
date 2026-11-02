@@ -1900,6 +1900,19 @@ console.log('PASS: the caps\' No cap switches');
     buttonBy(lineKey()).click();await settled();
     assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).key],['/api/providers/key',secrets[0]],'its own save sends it');
     assert.equal(lineKey()?.value??'','','and the field is empty after');
+    // A key its own save sent is not put back by the redraw a stale answer brings, nor the field
+    // refilled after a refusal.
+    typeIn(lineKey(),'made-up-stale-key-0010');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({code:'stale'},409)];
+    buttonBy(lineKey()).click();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.at(-1).url,lineKey()?.value??''],['/api/providers/key',''],'not put back after a stale reload');
+    typeIn(lineKey(),'made-up-refused-key-0011');
+    answers=[json({code:'bad_key',field:'providers.key'},422)];
+    buttonBy(lineKey()).click();await settled();
+    ctx.ui.drawSettings();
+    assert.equal(lineKey()?.value??'','','nor after a refusal and a redraw');
     // Two entries of one name whose address the viewer does not show cannot be told apart: neither
     // keeps a key through the page drawn again, so one typed for the first never reaches the
     // second's field (Codex's security review of #807).
