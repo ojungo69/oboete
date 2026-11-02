@@ -35,7 +35,11 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;document.activeElement=this;}
-  setSelectionRange(start,end,direction){Object.assign(this,{selectionStart:start,selectionEnd:end,selectionDirection:direction});}
+  // A number field has no selection: a browser throws, and reads none (69b-3c).
+  setSelectionRange(start,end,direction){
+    if(this.type==='number')throw new Error('InvalidStateError');
+    Object.assign(this,{selectionStart:start,selectionEnd:end,selectionDirection:direction});
+  }
   select(){this.selected=true;}
   closest(selector){
     for(let node=this;node;node=node.parentElement){
@@ -1219,11 +1223,12 @@ f=ctx.w6merge(two(null,NO),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.deepEqual([lineOff('p').checked,daily()],[true,[NO]],'a [chain] No cap is sent through a reorder of entries of one name');
 f=ctx.w6merge(two(7),f,moved);ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.deepEqual([lineOff('p').checked,daily()],[false,[null]],'and an answer without it is followed');
-// A CLI entry's own calls a day lifted by a [chain] no cap: a subscription's line has no field and,
-// with none capped, no switch; a save keeps it.
+// A CLI entry's own calls a day lifted by a [chain] no cap: a subscription's line has no field, and
+// its switch shows on, so it can be turned off again; a save keeps it.
 f=w6.formOf(settings('resident',{ranges,chain:[row('cli',{subscription:true,daily_budget:NO,effective_daily_budget:null,capped:false})]}));
 ctx.ui.setForm(f);ctx.ui.drawSettings();
-assert.deepEqual([field('chain.cli.daily_budget'),lineOff('cli'),daily()],[undefined,undefined,[NO]],'an unrelated save keeps a CLI entry\'s [chain] no cap');
+assert.deepEqual([field('chain.cli.daily_budget'),lineOff('cli')?.checked,daily()],[undefined,true,[NO]],
+  'a subscription lifted by [chain] shows its switch on; an unrelated save keeps its [chain] no cap');
 // Loaded off: ticked, its field empty and set aside, said as saved; turned on again, a number is due.
 f=w6.formOf(settings('resident',{ranges,paid_usd_per_month:null,
   my_work:{curate:false,calls_a_day:NO,estimate:{calls:[3,null],usd:[0.0123,null],priced:{name:'p',model:'m'}}}}));
@@ -2130,15 +2135,16 @@ console.log('PASS: the caps\' No cap switches');
     typeIn(calls(),'0');leaveLine(calls());typeIn(timeout(),'');leaveLine(timeout());await settled();
     assert.deepEqual([posted.length,calls().attrs['aria-invalid'],drafts().length],[0,'true',1],
       'out of range is marked and sent not; the saved value sends nothing and keeps no draft');
-    // No cap turned off with no number: the field opens, focused, nothing sent; through another
-    // answer and a language change it stays open; a number left is saved; left empty, by Tab or
-    // Enter, it stays open, nothing sent; the switch turns No cap on again, nothing sent.
-    const unlimited=()=>one({daily_budget:NOCAP,effective_daily_budget:null});
+    // No cap turned off with no number, the entries' own having none: the field opens, focused,
+    // nothing sent; through another answer and a language change it stays open; a number left is
+    // saved; left empty, by Tab or Enter, it stays open, nothing sent; the switch turns No cap on
+    // again, nothing sent.
+    const unlimited=()=>one({daily_budget:null,effective_daily_budget:null});
     f=draw(unlimited());
     flip(lineOff(),false);await settled();
     assert.deepEqual([posted.length,calls().disabled,lineOff().checked,warned(),document.activeElement===calls()],[0,false,false,false,true],
       'turned off with no number, the field opens for one');
-    answers=[json(lineAi([row('alpha',{daily_budget:NOCAP,effective_daily_budget:null,timeout_s:120,effective_timeout_s:120})],{version:'v2'}))];
+    answers=[json(lineAi([row('alpha',{daily_budget:null,effective_daily_budget:null,timeout_s:120,effective_timeout_s:120})],{version:'v2'}))];
     typeIn(timeout(),'120');enterLine(timeout());await settled();
     ctx.ui.setLang('ja');ctx.ui.drawSettings();ctx.ui.setLang('en');ctx.ui.drawSettings();
     assert.deepEqual([posted.length,calls().disabled,lineOff().checked],[1,false,false],'it stays open through another answer and a language change');
@@ -2155,17 +2161,59 @@ console.log('PASS: the caps\' No cap switches');
     flip(lineOff(),true);await settled();
     assert.deepEqual([posted.length,lineOff().checked,calls().disabled,drafts(),document.activeElement===lineOff()],[0,true,true,[],true],
       'the switch turns No cap on again, nothing sent, the focus on it');
+    // `[chain]` lifting the entries' calls a day: turned off with no number, it sets none again, back
+    // to the entries' own, and the field opens, the answer's value in effect as its placeholder.
+    f=draw(one({daily_budget:NOCAP,effective_daily_budget:null}));
+    answers=[json(one({daily_budget:null,effective_daily_budget:200},{version:'v2'}))];
+    flip(lineOff(),false);await settled();
+    assert.deepEqual([sent().map(b=>b.chain[0].daily_budget),lineOff().checked,calls().disabled,calls().value,calls().placeholder],
+      [[null],false,false,'','200'],'turned off, [chain] sets none: the entries\' own 200 is in effect, the field open');
+    // The entries' own having none, the answer leaves No cap in effect: the field stays open for a
+    // number, the switch off, the focus on the field.
+    f=draw(one({daily_budget:NOCAP,effective_daily_budget:null}));
+    answers=[json(one({daily_budget:null,effective_daily_budget:null},{version:'v2'}))];
+    flip(lineOff(),false);await settled();
+    assert.deepEqual([sent().map(b=>b.chain[0].daily_budget),lineOff().checked,calls().disabled,document.activeElement===calls()],
+      [[null],false,false,true],'with none of their own, the field stays open for a number after the answer');
+    let give;
+    // The switch acts on the requests as they are when it is pressed: the last change made is what
+    // is saved (Codex's review of 69b-3c-1a). Off, a number asked, then on again before the answers.
+    f=draw(one({daily_budget:NOCAP,effective_daily_budget:null}));
+    [answer,give]=later();answers=[answer,json(one({daily_budget:NOCAP,effective_daily_budget:null},{version:'v3'}))];
+    flip(lineOff(),false);await settled();
+    typeIn(calls(),'30');enterLine(calls());await settled();
+    flip(lineOff(),true);await settled();
+    give(json(one({daily_budget:null,effective_daily_budget:null},{version:'v2'})));await settled();
+    assert.deepEqual([sent().map(b=>b.chain[0].daily_budget),lineOff().checked,drafts()],[[null,NOCAP],true,[]],
+      'off, 30 asked, then on: 30 is never sent, No cap is saved last');
+    // On asked, then off before its answer: the number shown is saved after it.
+    f=draw(one({daily_budget:50,effective_daily_budget:50}));
+    [answer,give]=later();answers=[answer,json(one({daily_budget:50,effective_daily_budget:50},{version:'v3'}))];
+    flip(lineOff(),true);await settled();
+    flip(lineOff(),false);await settled();
+    give(json(one({daily_budget:NOCAP,effective_daily_budget:null},{version:'v2'})));await settled();
+    assert.deepEqual([sent().map(b=>b.chain[0].daily_budget),lineOff().checked,calls().value],[[NOCAP,50],false,'50'],
+      'on, then off before its answer: 50 is saved after it');
+    // On asked, then off with no number before its answer: `[chain]` sets none after it, and the
+    // field stays open through both answers.
+    f=draw(one({daily_budget:null,effective_daily_budget:200}));
+    [answer,give]=later();answers=[answer,json(one({daily_budget:null,effective_daily_budget:200},{version:'v3'}))];
+    flip(lineOff(),true);await settled();
+    flip(lineOff(),false);await settled();
+    give(json(one({daily_budget:NOCAP,effective_daily_budget:null},{version:'v2'})));await settled();
+    assert.deepEqual([sent().map(b=>b.chain[0].daily_budget),lineOff().checked,calls().disabled,calls().placeholder],[[NOCAP,null],false,false,'200'],
+      'on, then off with no number before its answer: back to the entries\' own after it, the field open');
     // A line's save holds nothing: the page is usable, the field enabled, and what is typed in
     // another field meanwhile stays, unsent, with its caret, through the answer and a language
     // change; a redraw's blur is no leaving. Left, it is saved on what the answer saved.
     f=draw(one());
-    let give;[answer,give]=later();answers=[answer];
+    [answer,give]=later();answers=[answer];
     typeIn(timeout(),'120');enterLine(timeout());await settled();
     assert.deepEqual([posted.length,inert(),timeout().disabled],[1,false,false],'the page is not held while a line saves');
-    calls().focus();typeIn(calls(),'2');calls().setSelectionRange(1,1);
+    calls().focus();typeIn(calls(),'2');
     give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2'})));await settled();
-    assert.deepEqual([posted.length,calls().value,document.activeElement===calls(),calls().selectionStart],[1,'2',true,1],
-      'a draft typed during another save\'s answer stays unsent, focused, its caret kept');
+    assert.deepEqual([posted.length,calls().value,document.activeElement===calls()],[1,'2',true],
+      'a draft typed during another save\'s answer stays unsent and focused');
     ctx.ui.setLang('ja');ctx.ui.drawSettings();ctx.ui.setLang('en');ctx.ui.drawSettings();
     assert.deepEqual([posted.length,calls().value],[1,'2'],'and through a language change');
     answers=[json(one({daily_budget:2,effective_daily_budget:2,timeout_s:120,effective_timeout_s:120},{version:'v3'}))];
@@ -2271,6 +2319,18 @@ console.log('PASS: the caps\' No cap switches');
         `a subscription ${switched?'capped':'not capped'}: no field, ${switched?'its switch':'no switch'}`);
       assert(text(lineOf()).includes('These settings apply to all 2 entries of this name.'),'its entries are said');
     }
+    // A subscription lifted by `[chain]`: its switch shows on, and off sets none, back to its entries'.
+    f=draw(one({subscription:true,daily_budget:NOCAP,effective_daily_budget:null,capped:false}));
+    assert.equal(lineOff()?.checked,true,'a subscription lifted by [chain] shows its switch on');
+    answers=[json(one({subscription:true,daily_budget:null,effective_daily_budget:50,capped:true},{version:'v2'}))];
+    flip(lineOff(),false);await settled();
+    assert.deepEqual([sent()[0].chain[0].daily_budget,lineOff()?.checked,text(lineOf()).includes('Calls a day: 50')],[null,false,true],
+      'off sets none, back to its entries\' 50');
+    // Calls a day and a timeout its entries differ in, none set for the name, are said, not shown as
+    // No cap or as the first entry's (Codex's review of 69b-3c-1a).
+    f=draw(one({entries:2,differs:['daily_budget','timeout_s'],effective_daily_budget:null}));
+    assert.deepEqual([lineOff().checked,calls().disabled,calls().placeholder,timeout().placeholder,text(lineOf()).includes('Calls a day: its entries differ')],
+      [false,false,'','',true],'calls a day and timeout its entries differ in are said, not shown as one');
     // The model: another saved to `[chain]` by Enter; a free rule's needs :free; a fixed rule's
     // model set for its name removed.
     f=draw(one());
@@ -2285,6 +2345,10 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(one({model_rule:'fixed'},{version:'v2'}))];
     simple('model-remove:alpha').click();await settled();
     assert.equal(sent()[0].chain[0].model,null,'and removed');
+    f=draw(one({model:'over-model',model_applied:false}));
+    answers=[json(one({},{version:'v2'}))];
+    simple('model-remove:alpha').click();await settled();
+    assert.equal(sent()[0].chain[0].model,null,'an any rule\'s model set for its name has the button too');
     vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
   }
   ctx.fetch=w6fetch;

@@ -6723,6 +6723,13 @@ function simpleProviderRow(f, row, index, chain, position) {
   const typing = lineDrafts.get(modelKey)?.open === true;
   const overlay = savedRow.model !== null && savedRow.model !== undefined && (!row.model_applied || row.differs?.includes('model'))
     ? el('p', 'desc', t('simple_model_overlay', { model: savedRow.model })) : null;
+  let remove = null;
+  if (overlay) {
+    remove = el('button', 'quiet small', t('simple_model_overlay_remove'));
+    remove.type = 'button';
+    remove.dataset.simpleFocus = `model-remove:${row.name}`;
+    remove.addEventListener('click', () => lineAsk(remove, 'model', row.name, null, savedRow.model, true));
+  }
   let model = null;
   if (row.model_rule !== 'fixed') {
     const select = el('select', null, ...models.map(model => {
@@ -6769,17 +6776,14 @@ function simpleProviderRow(f, row, index, chain, position) {
       lineField(text, ask);
       typed = el('label', 'field', el('span', null, t('simple_model_typed')), text);
     }
-    model = el('div', 'simple-line-model', el('label', 'field simple-model', el('span', null, t('simple_model_short')), select), typed, overlay);
-  } else if (overlay) {
-    const remove = el('button', 'quiet small', t('simple_model_overlay_remove'));
-    remove.type = 'button';
-    remove.dataset.simpleFocus = `model-remove:${row.name}`;
-    remove.addEventListener('click', () => lineAsk(remove, 'model', row.name, null, savedRow.model, true));
-    model = el('div', 'simple-line-model', overlay, remove);
-  }
+    model = el('div', 'simple-line-model', el('label', 'field simple-model', el('span', null, t('simple_model_short')), select), typed,
+      overlay, remove);
+  } else if (overlay) model = el('div', 'simple-line-model', overlay, remove);
   const calls = lineCalls(f, row, savedRow, label);
+  // A timeout its entries differ in, with none set for the name, is not shown as the first entry's.
+  const timeoutDiffers = row.differs?.includes('timeout_s') && (savedRow.timeout_s ?? null) === null;
   const timeout = lineNumber(f, row, savedRow, 'timeout_s', `timeout:${row.name}`, t('simple_timeout'), label, f.ranges.timeout_s,
-    String(row.effective_timeout_s));
+    timeoutDiffers ? '' : String(row.effective_timeout_s));
   let resume = null;
   if (f.stopped?.includes(row.name)) {
     resume = el('button', 'quiet small', t('resume'));
@@ -6924,47 +6928,64 @@ function lineNumber(f, row, savedRow, field, focus, label, subject, [min, max], 
   return el('label', 'field simple-line-field', el('span', null, label), i);
 }
 
-// A line's calls a day with its No cap switch (decision 64: its warning, no confirmation). Turned
-// off with no number, the field opens for one, saved when it is left; left empty, it follows the
-// entries' own value again. A subscription says its calls a day and has the switch only while an
-// entry of its name stops at one (#800 item 3).
+// A line's calls a day with its No cap switch (decision 64: its warning, no confirmation). The
+// switch acts on the field and its requests as they are when it is pressed, so the last change made
+// is what is saved (Codex's review of 69b-3c-1a). Turned off with no number, `[chain]` sets none
+// again where it lifted the entries' calls a day (or a request to lift them waits), and the field
+// opens for a number. Calls a day its entries differ in, with none set for the name, are said, not
+// shown as No cap. A subscription says its calls a day; its switch shows while an entry of its name
+// stops at one (#800 item 3) or `[chain]` lifts them, and turned off it sets none.
 function lineCalls(f, row, savedRow, label) {
   const key = lineKey('daily_budget', row.name);
-  const d = lineDrafts.get(key);
-  const open = d?.open === true;
-  const noCap = !open && row.effective_daily_budget === null && !row.subscription;
+  const saved = savedRow.daily_budget ?? null;
+  const lifted = saved === f.ranges.no_cap;
+  const differs = Boolean(row.differs?.includes('daily_budget')) && saved === null;
+  const noCap = row.subscription ? lifted : lineDrafts.get(key)?.open !== true && !differs && row.effective_daily_budget === null;
   const say = el('span', 'note no-cap-warning', t('no_cap_row'));
   say.hidden = !noCap;
   const off = simpleToggle(noCap, `budget-off:${row.name}`, `${t('no_cap')}: ${t('col_budget')}: ${label}`, (control, value) => {
-    // Back on before a number was saved: no cap is what is in effect, nothing is to save.
-    if (value && open && row.effective_daily_budget === null) {
-      lineDrafts.delete(key);
-      drawSettings();
-      simpleFocus(`budget-off:${row.name}`);
+    const now = lineDrafts.get(key);
+    const waiting = lineWaiting.get(key) ?? 0;
+    if (value) {
+      // Back on with nothing asked since it was opened: no cap is what is in effect.
+      if (now?.open && !waiting && !differs && row.effective_daily_budget === null) {
+        lineDrafts.delete(key);
+        drawSettings();
+        simpleFocus(`budget-off:${row.name}`);
+        return;
+      }
+      lineAsk(control, 'daily_budget', row.name, f.ranges.no_cap, saved, true);
       return;
     }
-    if (value) { lineAsk(control, 'daily_budget', row.name, f.ranges.no_cap, savedRow.daily_budget ?? null, true); return; }
-    const typed = d && /^\d+$/.test(d.value.trim()) ? Number(d.value.trim()) : null;
+    if (row.subscription) {
+      lineAsk(control, 'daily_budget', row.name, null, saved, true);
+      return;
+    }
+    const text = (now && (now.typed > 0 || now.open) ? now.value : noCapText(saved, f.ranges)).trim();
+    const typed = /^\d+$/.test(text) ? Number(text) : null;
     if (typed !== null && typed >= f.ranges.daily_budget[0] && typed <= f.ranges.daily_budget[1]) {
-      lineAsk(control, 'daily_budget', row.name, typed, savedRow.daily_budget ?? null, true);
+      lineAsk(control, 'daily_budget', row.name, typed, saved, true);
       return;
     }
-    lineDrafts.set(key, { ...lineDraft(key), value: d?.value ?? '', open: true });
+    if (lifted || waiting) lineAsk(control, 'daily_budget', row.name, null, saved, true);
+    // Opened after any request just made, and counted as typing: no answer closes it.
+    const d = lineDraft(key);
+    lineDrafts.set(key, { ...d, open: true, typed: d.typed + 1 });
     drawSettings();
     simpleFocus(`budget:${row.name}`);
   }, t('no_cap'));
   if (row.subscription) {
-    if (!row.capped) return null;
-    const said = row.differs?.includes('daily_budget') || row.effective_daily_budget === null
+    if (!row.capped && !lifted) return null;
+    const said = lifted ? null : row.differs?.includes('daily_budget') || row.effective_daily_budget === null
       ? t('simple_calls_differ') : t('simple_calls_subscription', { n: row.effective_daily_budget });
-    return el('div', 'simple-line-calls', el('p', 'desc', said), off);
+    return el('div', 'simple-line-calls', said ? el('p', 'desc', said) : null, off, say);
   }
-  const placeholder = row.effective_daily_budget === null ? t('no_cap') : String(row.effective_daily_budget);
+  const placeholder = differs ? '' : row.effective_daily_budget === null ? t('no_cap') : String(row.effective_daily_budget);
   const field = lineNumber(f, row, savedRow, 'daily_budget', `budget:${row.name}`, t('col_budget'), label, f.ranges.daily_budget,
     placeholder, noCap);
-  const fromKey = row.budget_from_key && (savedRow.daily_budget ?? null) === null && !noCap
+  const fromKey = row.budget_from_key && saved === null && !noCap && !differs
     ? note(t('from_key', { n: row.effective_daily_budget })) : null;
-  return el('div', 'simple-line-calls', field, off, say, fromKey);
+  return el('div', 'simple-line-calls', field, off, say, differs ? note(t('simple_calls_differ')) : null, fromKey);
 }
 
 function simpleCatalog(f) {
