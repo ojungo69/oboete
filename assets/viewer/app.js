@@ -23,8 +23,11 @@ function el(tag, cls, ...children) {
 // that many ms, through the redraws that clear it: a forget's result outlives the live view's next
 // redraw, which the forget itself brings (parity row 3).
 let statusHeld = null;
+// How many times the line was written: what clears it once a read ends clears nothing said since.
+let statusWrites = 0;
 // `action`, a button after the text (a removal's Undo), is held with it.
 function setStatus(text, isError = false, textLang = null, hold = 0, action = null) {
+  statusWrites += 1;
   if (!text && statusHeld && Date.now() < statusHeld.until) ({ text, isError, textLang, action } = statusHeld);
   else statusHeld = text && hold ? { text, isError, textLang, action, until: Date.now() + hold } : null;
   $('status').textContent = text;
@@ -3494,7 +3497,6 @@ function redactionSection(f) {
     exact.value = '';
     hash.disabled = true;
     const fields = hash.closest('.settings');
-    f.hashing = true;
     if (fields) fields.inert = true;
     try {
       const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -3502,7 +3504,6 @@ function redactionSection(f) {
       const hex = [...new Uint8Array(digest)].map((v) => v.toString(16).padStart(2, '0')).join('');
       const values = f.redaction.hashes.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
       if (!values.some((v) => v.toLowerCase() === hex)) f.redaction.hashes += `${f.redaction.hashes ? '\n' : ''}${hex}`;
-      f.hashing = false;
       drawSettings();
       // Decision 69: saved once hashed; the click's own save came before the hash (Codex and
       // cubic on #802).
@@ -3511,7 +3512,6 @@ function redactionSection(f) {
       if (currentSettings(f)) setStatus(t('redaction_hash_failed'), true, lang);
     } finally {
       bytes.fill(0);
-      f.hashing = false;
       if (fields) fields.inert = false;
     }
   });
@@ -4960,12 +4960,33 @@ async function refreshPrivacy(f) {
   // A form drawn from this one since (a provider's write, search read again, a confirmation
   // cancelled) shows the state this read was for while it is on its way, and takes the read
   // (Codex and cubic on #806).
-  const to = currentSettings(f) ? f : view === 'settings' && asked?.pending && form?.privacy === asked ? form : null;
+  let to = null;
+  if (currentSettings(f)) to = f;
+  else if (view === 'settings' && asked?.pending && form?.privacy === asked) to = form;
   if (!to) return false;
   to.privacy = state;
-  if (!to.hashing) drawSettings();
+  renderPrivacy(to);
   // Read for another form, it says nothing about this one's (cubic on #806).
   return to === f && state.available === true;
+}
+
+// The privacy state read is drawn in place, as search's state and the agents' are: the page is not
+// drawn again, so a write on its way keeps its hold on it, and a field the write refuses is marked
+// where it is shown (#808).
+function renderPrivacy(f) {
+  if (view !== 'settings' || form !== f) return;
+  const panel = $('panel').querySelector('.settings');
+  if (!panel) return;
+  const parts = [['never-record', () => captureSection(f, true)], ['never-more', () => captureSection(f)],
+    ['privacy-state', () => privacySection(f)]].map(([part, make]) => [panel.querySelector(`.${part}`), make]).filter(([node]) => node);
+  const keep = parts.some(([node]) => node.contains(document.activeElement)) ? focusKeep() : null;
+  for (const [node, make] of parts) {
+    const drawn = make();
+    node.hidden = drawn.hidden;
+    node.replaceChildren(...drawn.childNodes);
+  }
+  panel.querySelector('.group-s-privacy')?.querySelector('.group-desc')?.replaceChildren(privacyGroupState(f));
+  focusBack(keep);
 }
 
 function privacySection(f) {
@@ -4974,7 +4995,10 @@ function privacySection(f) {
   refresh.type = 'button';
   refresh.addEventListener('click', async () => {
     refresh.disabled = true;
-    try { if (await refreshPrivacy(f)) setStatus(''); } finally { refresh.disabled = false; }
+    // The status line is cleared only when nothing was said on it since the click: a confirmation
+    // asked meanwhile stays (CodeRabbit on #806).
+    const said = statusWrites;
+    try { if (await refreshPrivacy(f) && statusWrites === said) setStatus(''); } finally { refresh.disabled = false; }
   });
   const rows = (state.repositories || []).map((repo) => {
     // A repository never recorded is never sent: its own row takes that back first.
@@ -5005,7 +5029,7 @@ function privacySection(f) {
   const scanKey = `rescan_${scan.state}`;
   let listing = el('p', 'desc', t(state.pending ? 'privacy_reading' : 'privacy_unavailable'));
   if (state.available) listing = rows.length ? el('ul', null, ...rows) : el('p', 'desc', t('privacy_none'));
-  return el('section', null, el('h3', null, t('privacy_h')), el('p', 'desc', t('privacy_desc')),
+  return el('section', 'privacy-state', el('h3', null, t('privacy_h')), el('p', 'desc', t('privacy_desc')),
     listing,
     ...(state.pending ? [] : [el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
       scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null]), refresh);
@@ -5016,7 +5040,12 @@ function privacySection(f) {
 function captureSection(f, simple = false) {
   const state = f.privacy;
   if (!state.available) {
-    if (!simple) return null;
+    // Drawn hidden, for the read to fill in place (`renderPrivacy`).
+    if (!simple) {
+      const section = el('section', 'never-more');
+      section.hidden = true;
+      return section;
+    }
     const section = simpleBlock('never', el('p', 'desc', t(state.pending ? 'privacy_reading' : 'privacy_unavailable')));
     section.className += ' never-record';
     return section;
@@ -5035,7 +5064,8 @@ function captureSection(f, simple = false) {
       // CodeRabbit on #491).
       if (body.folder_selector && answer.never_recorded === true) receipt = t('never_undone_covered');
       if (body.selector && body.undo && answer.never_recorded === true) receipt = t('never_undone_repo_covered');
-      if (simple) simpleReceipt = 'never';
+      // The block is drawn again in place (`renderPrivacy`): another block's receipt goes first.
+      if (simple) { clearSimpleReceipt(); simpleReceipt = 'never'; }
       const refreshed = await refreshPrivacy(f);
       if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
     } catch {
@@ -6858,10 +6888,6 @@ function simpleGroups(f, more) {
   const spent = f.usd_this_month === null ? null : usdCents(f.usd_this_month);
   let aiState = t('simple_state_ai_off');
   if (s.summary.curate) aiState = spent === null ? t('simple_state_ai_no_spend', { n: used.length }) : t('simple_state_ai', { n: used.length, usd: spent });
-  const privacy = f.privacy;
-  const places = privacy?.available ? (privacy.repositories || []).filter(repo => repo.never_recorded).length
-    + (privacy.folders || []).length + (privacy.patterns || []).length : null;
-  const mask = state(s.redaction?.enabled !== false);
   const searchKey = { none: 'none', local: 'local', 'workers-ai': 'workers' }[f.embedding?.provider] ?? 'none';
   // `append` writes an absent part as the text "null": leave it out, as the detailed page does.
   return present([!ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
@@ -6881,14 +6907,23 @@ function simpleGroups(f, more) {
       simpleBody('my_work', myWorkEstimate(f.my_work.estimate), myWork), more.my_work),
     f.embedding ? foldGroup('s-search', false, t('simple_search_h'), t(`simple_search_${searchKey}`),
       simpleBody('search', el('p', 'desc', t('simple_search_desc')), embeddingChoice(f)), more.search) : null,
-    foldGroup('s-privacy', false, t('simple_privacy_h'),
-      places === null ? t('simple_state_privacy_mask', { mask }) : t('simple_state_privacy', { n: places, mask }),
+    foldGroup('s-privacy', false, t('simple_privacy_h'), privacyGroupState(f),
       captureSection(f, true),
       simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
         el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
       more.privacy),
     foldGroup('s-agents', false, t('simple_agents_h'), t('simple_agents_desc'),
       simpleBody('agents', el('div', 'simple-agent-inventory', simpleAgents())), more.agents)]);
+}
+
+// The Privacy group's heading as it reads closed: the places never recorded, once read, and masking.
+function privacyGroupState(f) {
+  const privacy = f.privacy;
+  const mask = t(f.savedSettings.redaction?.enabled === false ? 'simple_state_off' : 'simple_state_on');
+  if (!privacy?.available) return t('simple_state_privacy_mask', { mask });
+  const places = (privacy.repositories || []).filter(repo => repo.never_recorded).length
+    + (privacy.folders || []).length + (privacy.patterns || []).length;
+  return t('simple_state_privacy', { n: places, mask });
 }
 
 // docs/my-work-model.md A6: what My Work's jobs would cost, before the switch is turned on.

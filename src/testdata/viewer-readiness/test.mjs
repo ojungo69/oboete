@@ -1681,8 +1681,10 @@ console.log('PASS: the caps\' No cap switches');
     const group=()=>panel.querySelector('.group-s-privacy');
     assert(text(group()).includes(reading)&&!text(group()).includes(unreadable),'drawn before the privacy read, which is said as being read');
     assert.equal(ctx.ui.getForm().savedSettings.privacy,undefined,'what is saved, the viewer\'s answer, carries no privacy state');
+    assert(more('privacy').querySelector('.never-more').hidden,'its More settings part waits hidden');
     givePrivacy(json(privacy));await settled();
-    assert(!text(group()).includes(reading)&&text(more('privacy').querySelector('.never-more')).includes('github.com/acme/live'),'then drawn with it');
+    assert(!text(group()).includes(reading)&&text(more('privacy').querySelector('.never-more')).includes('github.com/acme/live')
+      &&!more('privacy').querySelector('.never-more').hidden,'then drawn with it');
     assert(text(group().querySelector('.group-desc')).includes('1 place'),'its heading counts the places never recorded');
     [privacyAnswer,givePrivacy]=later();
     answers=[json(ai(['alpha'],{version:'v2',inject:sized(4000)}))];
@@ -1750,6 +1752,85 @@ console.log('PASS: the caps\' No cap switches');
     assert(counted()&&status().includes('acme-token'),'the read the write\'s form took leaves its confirmation');
     giveFirst(json(privacy));await settled();
     action('held.cancel').click();await settle();
+    // #808: a write that holds the page, started while the read is on its way, keeps its hold when
+    // the read comes first: the state read is drawn in place, and a field the write refuses is
+    // marked on the page shown (Codex on #806).
+    settingsNow=ai(['alpha']);
+    const held=()=>panel.querySelector('.settings').inert===true;
+    const timeoutField=()=>panel.querySelectorAll('.provider-entry').find(n=>n.dataset.selector==='config:0')
+      .querySelectorAll('input').find(n=>n.dataset.field==='providers.timeout_s');
+    for(const how of ['ok','refused','failed']){
+      [privacyAnswer,givePrivacy]=later();
+      (await ctx.ui.showSettings())();posted.length=0;
+      const [written,giveWrite]=later();
+      answers=[written];
+      const write=w6.providerOperation({op:'move',selector:{source:'config',index:0},to:0},action('port.move'));
+      await settled();
+      assert(held()&&text(group()).includes(reading),`${how}: the write holds the page while the read is on its way`);
+      givePrivacy(json(privacy));await settled();
+      assert(held()&&counted(),`${how}: the read come first is drawn, the page still held`);
+      if(how==='ok')giveWrite(json(ai(['alpha'],{version:'v2'})));
+      else if(how==='refused')giveWrite(json({field:'providers.timeout_s'},400));
+      else giveWrite(Promise.reject(new TypeError('made-up network failure')));
+      await write;await settled();
+      assert(!held()&&counted(),`${how}: once the write has ended the page is usable and shows the state read`);
+      if(how==='refused')assert.equal(timeoutField().attrs['aria-invalid'],'true','the refused field is marked on the page shown');
+    }
+    // A simple change saved while the read is on its way holds the page through the read too.
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    let [written,giveWrite]=later();
+    answers=[written];
+    flip(simple('inject.session_start'),false);await settled();
+    assert.equal(posted.length,1);
+    givePrivacy(json(privacy));await settled();
+    assert(held()&&counted(),'a simple change keeps its hold when the read comes first');
+    [privacyAnswer,givePrivacy]=later();
+    giveWrite(json(ai(['alpha'],{version:'v2',inject:{...ai(['alpha']).inject,session_start:false}})));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert(!held()&&counted(),'its answer draws the page, which reads the state again');
+    // A confirmation asked while Refresh reads stays, with its buttons, when the read ends; a
+    // Refresh with nothing said meanwhile clears the status line (CodeRabbit on #806).
+    settingsNow=ai(['alpha'],{redaction:masked([rule])});
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();
+    const removeRule=all('button').find(n=>text(n)==='Remove this rule');
+    removeRule.click();fire('click',{target:removeRule});await settle();
+    assert(status().includes('acme-token'),'a saved rule removed waits');
+    givePrivacy(json(privacy));await settled();
+    assert(status().includes('acme-token')&&action('held.cancel'),'the read\'s end leaves the confirmation and its buttons');
+    action('held.cancel').click();await settle();
+    vm.runInContext("setStatus('A made-up note.')",ctx);
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();givePrivacy(json(privacy));await settled();
+    assert.equal(status(),'','a Refresh with nothing said meanwhile clears the status line');
+    // A field of a part drawn again keeps the focus and what is typed in it.
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();
+    simple('never.folder').focus();typeIn(simple('never.folder'),'made-up-folder');
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([document.activeElement===simple('never.folder'),simple('never.folder').value],[true,'made-up-folder'],
+      'the folder being typed keeps the focus and its text');
+    document.activeElement=null;
+    assert.equal(posted.length,0,'nothing was sent');
+    // A place never recorded, added: its block, drawn in place, says it is saved, and no other
+    // block still does, as when the page was drawn again.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(ai(['alpha'],{version:'v2',inject:{...ai(['alpha']).inject,session_start:false}}))];
+    flip(simple('inject.session_start'),false);await settled();
+    givePrivacy(json(privacy));await settled();
+    const receiptOf=name=>text(panel.querySelectorAll('.simple-block').find(n=>n.dataset.simpleBlock===name).querySelector('.simple-saved')).trim();
+    assert(receiptOf('inject'),'a simple change says it is saved');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    typeIn(simple('never.folder'),'made-up-folder');
+    all('button').find(n=>text(n)===ctx.tier.text('never_folder_add','en')).click();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.at(-1).url,Boolean(receiptOf('never')),receiptOf('inject')],['/api/privacy/capture',true,''],
+      'the place added says it is saved, and no other block still does');
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;
