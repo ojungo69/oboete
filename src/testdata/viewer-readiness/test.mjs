@@ -45,11 +45,14 @@ class Node {
   }
 }
 
-// The focus taken off the element leaving the page, its blur run as Chrome runs it (69b-3c).
+// The focus taken off the element leaving the page, its blur and focusout run as Chrome runs them,
+// the focusout up through its ancestors (69b-3c).
 function blurOff(){
   const gone=document.activeElement;
   document.activeElement=document.body;
   for(const cb of gone?.listeners?.blur||[])cb({target:gone,relatedTarget:null});
+  for(let node=gone;node&&node!==document.body;node=node.parentElement)
+    for(const cb of node.listeners?.focusout||[])cb({target:gone,relatedTarget:null});
 }
 const ids=new Map();
 const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
@@ -773,7 +776,7 @@ console.log('PASS: the retention period');
   // Typing goes on while a save is on its way: the page stays usable, and what was typed then
   // survives the save's answer and is saved when its field is left.
   let answer;answers=[new Promise(resolve=>{answer=resolve;})];
-  typeIn(field('inject.session_start_chars'),'4500');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));
+  typeIn(field('inject.session_start_chars'),'4500');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));await settle();
   assert.equal(panel.querySelector('.settings').inert,false,'the page is not frozen by a save on its way');
   typeIn(field('inject.per_prompt_chars'),'1200');
   answer(json(settings('resident',{version:'v4',worker:{resident:false},inject:{...inject,session_start_chars:4500}})));await settle();await settle();
@@ -868,7 +871,7 @@ console.log('PASS: the retention period');
   assert.equal(posted.length,1,'and after its answer, nothing is left to send');
   // A port typed and not yet moved to stays typed through another change's save (Codex, cubic).
   f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
-  typeIn(field('view.port'),'17400');leave(field('view.port'));
+  typeIn(field('view.port'),'17400');leave(field('view.port'));await settle();
   answers=[json(settings('resident',{version:'v2',worker:{resident:false}}))];
   tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
   assert.equal(sent()[0].view,undefined,'another change sends no port');
@@ -904,9 +907,9 @@ console.log('PASS: the retention period');
   f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
   const addRule=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
   addRule.click();fire('click',{target:addRule});await settle();
-  typeIn(any('redaction.extra_rules.0.id'),'gamma-key');leave(any('redaction.extra_rules.0.id'));
+  typeIn(any('redaction.extra_rules.0.id'),'gamma-key');leave(any('redaction.extra_rules.0.id'));await settle();
   let ruleAnswer;answers=[new Promise(resolve=>{ruleAnswer=resolve;})];
-  typeIn(any('redaction.extra_rules.0.regex'),'gamma_[0-9]+');leave(any('redaction.extra_rules.0.regex'));
+  typeIn(any('redaction.extra_rules.0.regex'),'gamma_[0-9]+');leave(any('redaction.extra_rules.0.regex'));await settle();
   assert.equal(posted.length,1,'finished, the rule is sent');
   typeIn(field('inject.session_start_chars'),'4000');
   const gamma={id:'gamma-key',regex:'gamma_[0-9]+',keywords:[],entropy:null,secret_group:null};
@@ -950,7 +953,7 @@ console.log('PASS: the retention period');
   tick(field('retention.forever'),false);fire('change',{target:field('retention.forever')});await settle();
   assert.equal(posted.length,0,'a period not yet typed is not sent');
   let periodAnswer;answers=[new Promise(resolve=>{periodAnswer=resolve;})];
-  typeIn(field('retention.days'),'30');leave(field('retention.days'),field('inject.session_start_chars'));
+  typeIn(field('retention.days'),'30');leave(field('retention.days'),field('inject.session_start_chars'));await settle();
   assert.deepEqual(sent()[0].retention,{days:30});
   typeIn(field('inject.session_start_chars'),'4000');
   periodAnswer(json(settings('resident',{version:'v2',retention:{days:30}})));await settle();await settle();
@@ -960,7 +963,7 @@ console.log('PASS: the retention period');
   // ...and a backup folder saved so goes back to the default when emptied (Codex).
   f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
   let folderAnswer;answers=[new Promise(resolve=>{folderAnswer=resolve;})];
-  typeIn(field('backup.dir'),'/srv/made-up-backups');leave(field('backup.dir'),field('inject.session_start_chars'));
+  typeIn(field('backup.dir'),'/srv/made-up-backups');leave(field('backup.dir'),field('inject.session_start_chars'));await settle();
   assert.deepEqual(sent()[0].backup,{dir:'/srv/made-up-backups'});
   typeIn(field('inject.session_start_chars'),'4000');
   folderAnswer(json(settings('resident',{version:'v2',backup:{dir:'/srv/made-up-backups'}})));await settle();await settle();
@@ -989,7 +992,7 @@ console.log('PASS: the retention period');
   const searchRanges={...settings('resident').ranges,daily_requests:[1,1000000]};
   f=w6.formOf(settings('resident',{embedding:searchAt(first32),ranges:searchRanges}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
   let accountAnswer;answers=[new Promise(resolve=>{accountAnswer=resolve;})];
-  typeIn(field('embedding.account_id'),second32);leave(field('embedding.account_id'),field('inject.session_start_chars'));
+  typeIn(field('embedding.account_id'),second32);leave(field('embedding.account_id'),field('inject.session_start_chars'));await settle();
   assert.equal(sent()[0].embedding.account_id,second32);
   typeIn(field('inject.session_start_chars'),'4000');
   accountAnswer(json(settings('resident',{version:'v2',embedding:searchAt(second32),ranges:searchRanges})));await settle();await settle();
@@ -1014,7 +1017,7 @@ console.log('PASS: the retention period');
   // The focus moved on while a save was on its way stays where it was moved (Codex).
   f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
   let moveAnswer;answers=[new Promise(resolve=>{moveAnswer=resolve;})];
-  typeIn(field('inject.session_start_chars'),'5000');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));
+  typeIn(field('inject.session_start_chars'),'5000');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));await settle();
   field('inject.correction_chars').focus();
   moveAnswer(json(settings('resident',{version:'v2',inject:{...settings('resident').inject,session_start_chars:5000}})));await settle();await settle();
   assert.equal(document.activeElement?.dataset.field,'inject.correction_chars','the focus stays where the owner moved it');
@@ -1375,7 +1378,7 @@ console.log('PASS: the caps\' No cap switches');
   // with the page inert, then sends with that answer's version and what it saved.
   f=draw(ai(['alpha']));
   let [answer,give]=later();answers=[answer];
-  typeIn(general('my_work.calls_a_day'),'200');leave(general('my_work.calls_a_day'));
+  typeIn(general('my_work.calls_a_day'),'200');leave(general('my_work.calls_a_day'));await settle();
   assert.equal(posted.length,1,'the calls a day are sent');
   const myWork=simple('my_work.curate');flip(myWork,true);await settle();
   assert.equal(posted.length,1,'a simple switch clicked meanwhile waits');
@@ -1394,7 +1397,7 @@ console.log('PASS: the caps\' No cap switches');
   f=draw(ai(['alpha'],{redaction:masked([rule])}));
   [answer,give]=later();answers=[answer];
   const regex=()=>general('redaction.extra_rules.0.regex');
-  typeIn(regex(),'acme_[a-z0-9]{12}');leave(regex());
+  typeIn(regex(),'acme_[a-z0-9]{12}');leave(regex());await settle();
   assert.equal(posted.length,1);
   flip(simple('redaction.enabled'),false);simple('mask.confirm').click();await settle();
   assert.equal(posted.length,1,'masking off confirmed meanwhile waits');
@@ -1419,7 +1422,7 @@ console.log('PASS: the caps\' No cap switches');
   // A general save refused as stale reads the settings again; a simple save waiting sends what was read.
   f=draw(ai(['alpha']));
   [answer,give]=later();answers=[answer];
-  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settle();
   flip(simple('summary.curate'),true);await settle();
   assert.equal(posted.length,1);
   reread=ai(['alpha'],{version:'v9',inject:sized(5000)});
@@ -1431,7 +1434,7 @@ console.log('PASS: the caps\' No cap switches');
 
   // What no body carries outlives a simple save: the guide's phrase is in no body and stays.
   f=draw(ai(['alpha']));
-  typeIn(phrase(),'a made-up phrase');fire('input',{target:phrase()});leave(phrase());
+  typeIn(phrase(),'a made-up phrase');fire('input',{target:phrase()});leave(phrase());await settle();
   assert.equal(posted.length,0,'the guide\'s phrase starts no save');
   answers=[json(ai(['alpha'],{version:'v2',summary:curated}))];
   flip(simple('summary.curate'),true);await settled();
@@ -1539,14 +1542,14 @@ console.log('PASS: the caps\' No cap switches');
   // their text, focus and caret through its answer, and start no save.
   f=draw(ai(['alpha']));
   [answer,give]=later();answers=[answer];
-  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settle();
   phrase().focus();typeIn(phrase(),'made-up words');phrase().setSelectionRange(4,4);fire('input',{target:phrase()});
   give(json(ai(['alpha'],{version:'v2',inject:sized(4000)})));await settled();
   assert.deepEqual([document.activeElement===phrase(),phrase().value,phrase().selectionStart],[true,'made-up words',4],
     'the guide\'s phrase keeps its text, focus and caret');
   const preference=()=>general('preference.text');
   [answer,give]=later();answers=[answer];
-  typeIn(general('inject.session_start_chars'),'4500');leave(general('inject.session_start_chars'));
+  typeIn(general('inject.session_start_chars'),'4500');leave(general('inject.session_start_chars'));await settle();
   preference().focus();typeIn(preference(),'made-up preference');preference().setSelectionRange(6,6);fire('input',{target:preference()});
   give(json(ai(['alpha'],{version:'v3',inject:sized(4500)})));await settled();
   assert.deepEqual([document.activeElement===preference(),preference().value,preference().selectionStart],[true,'made-up preference',6],
@@ -1558,7 +1561,7 @@ console.log('PASS: the caps\' No cap switches');
   // when its turn comes; an AI gone meanwhile moves nothing.
   f=draw(ai(['alpha','beta','gamma']));
   [answer,give]=later();answers=[answer];
-  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settle();
   simple('move:beta:1').click();await settle();
   assert.equal(posted.length,1);
   answers=[json(ai(['alpha','beta','gamma'],{version:'v3',inject:sized(4000)}))];
@@ -1567,7 +1570,7 @@ console.log('PASS: the caps\' No cap switches');
   assert.deepEqual(sent()[1].chain.map(r=>r.name),['alpha','beta','gamma'],'beta moves past alpha, and nothing else moves');
   f=draw(ai(['alpha','beta','gamma']));
   [answer,give]=later();answers=[answer];
-  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));
+  typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settle();
   simple('move:beta:1').click();await settle();
   give(json(ai(['alpha','gamma'],{version:'v2',inject:sized(4000)})));await settled();
   assert.equal(posted.length,1,'an AI gone meanwhile moves nothing');
@@ -1625,7 +1628,7 @@ console.log('PASS: the caps\' No cap switches');
   assert.equal(panel.querySelector('.group-computer').open,true,'This computer stays open while it is');
   const tier=controls().find(n=>n.dataset.field==='onboarding.tier');
   tier.value='free';for(const cb of tier.listeners.change||[])cb({target:tier});fire('change',{target:tier});
-  typeIn(phrase(),'made-up');fire('input',{target:phrase()});leave(phrase());
+  typeIn(phrase(),'made-up');fire('input',{target:phrase()});leave(phrase());await settle();
   for(const b of panel.querySelector('.onboarding').querySelectorAll('button')){if(!b.dataset.action)b.click();fire('click',{target:b});}
   await settle();
   assert.equal(posted.length,1,'the guide\'s tier, phrase, jumps and search send nothing');
@@ -2128,8 +2131,8 @@ console.log('PASS: the caps\' No cap switches');
     assert.deepEqual([posted.length,calls().attrs['aria-invalid'],drafts().length],[0,'true',1],
       'out of range is marked and sent not; the saved value sends nothing and keeps no draft');
     // No cap turned off with no number: the field opens, focused, nothing sent; through another
-    // answer and a language change it stays open; a number left is saved; empty, or the switch back
-    // on, turns No cap on again with nothing sent.
+    // answer and a language change it stays open; a number left is saved; left empty, by Tab or
+    // Enter, it stays open, nothing sent; the switch turns No cap on again, nothing sent.
     const unlimited=()=>one({daily_budget:NOCAP,effective_daily_budget:null});
     f=draw(unlimited());
     flip(lineOff(),false);await settled();
@@ -2142,14 +2145,16 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(lineAi([row('alpha',{daily_budget:30,effective_daily_budget:30,timeout_s:120,effective_timeout_s:120})],{version:'v3'}))];
     typeIn(calls(),'30');leaveLine(calls());await settled();
     assert.deepEqual([sent()[1].chain[0].daily_budget,lineOff().checked,calls().value],[30,false,'30'],'a number left in it is saved');
-    for(const how of ['left','Enter','switch']){
+    for(const how of ['left','Enter']){
       f=draw(unlimited());
       flip(lineOff(),false);await settled();
-      if(how==='left')leaveLine(calls());else if(how==='Enter')enterLine(calls());else flip(lineOff(),true);
+      if(how==='left')leaveLine(calls());else enterLine(calls());
       await settled();
-      assert.deepEqual([posted.length,lineOff().checked,calls().disabled,drafts()],[0,true,true,[]],`${how} empty, No cap is on again, nothing sent`);
-      if(how!=='left')assert.equal(document.activeElement,lineOff(),'the switch has the focus');
+      assert.deepEqual([posted.length,lineOff().checked,calls().disabled,drafts().length],[0,false,false,1],`${how} empty, it stays open, nothing sent`);
     }
+    flip(lineOff(),true);await settled();
+    assert.deepEqual([posted.length,lineOff().checked,calls().disabled,drafts(),document.activeElement===lineOff()],[0,true,true,[],true],
+      'the switch turns No cap on again, nothing sent, the focus on it');
     // A line's save holds nothing: the page is usable, the field enabled, and what is typed in
     // another field meanwhile stays, unsent, with its caret, through the answer and a language
     // change; a redraw's blur is no leaving. Left, it is saved on what the answer saved.
@@ -2166,6 +2171,20 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(one({daily_budget:2,effective_daily_budget:2,timeout_s:120,effective_timeout_s:120},{version:'v3'}))];
     leaveLine(calls());await settled();
     assert.deepEqual([sent()[1].version,sent()[1].chain[0].daily_budget,sent()[1].chain[0].timeout_s],['v2',2,120],'left, it is saved on the answer\'s values');
+    // A general field typed in during a line's save is not saved by the redraw of its answer, only
+    // when it is left (Chrome runs a focusout there too).
+    f=draw(one());
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    const size=general('inject.session_start_chars');
+    size.focus();typeIn(size,'4');fire('input',{target:size});
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2'})));await settled();
+    assert.deepEqual([posted.length,general('inject.session_start_chars').value,document.activeElement===general('inject.session_start_chars')],[1,'4',true],
+      'a general field being typed is not saved by the answer\'s redraw');
+    answers=[json(one({timeout_s:120,effective_timeout_s:120},{version:'v3',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');fire('input',{target:general('inject.session_start_chars')});
+    leave(general('inject.session_start_chars'));await settled();
+    assert.deepEqual([posted.length,sent()[1].inject.session_start_chars],[2,4000],'left, it is saved');
     // Enter then blur, and a blur after a 409, a refusal or a failure: one POST each; a 409 reloads
     // and drops the draft; Enter again sends again.
     for(const outcome of ['saved','stale','refused','failed']){

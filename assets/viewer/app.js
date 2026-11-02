@@ -6909,13 +6909,10 @@ function lineNumber(f, row, savedRow, field, focus, label, subject, [min, max], 
     const d = lineDrafts.get(key);
     if (!d || i.disabled) return;
     const text = d.value.trim();
-    // No cap turned off, the field left empty: No cap is back on, and nothing is sent.
-    if (text === '' && d.open) {
-      lineDrafts.delete(key);
-      drawSettings();
-      if (again) simpleFocus(`budget-off:${row.name}`);
-      return;
-    }
+    // No cap turned off, the field left empty: nothing is sent and it stays open, as the month's cap
+    // does; its switch turns No cap on again. Drawn again here, the page would take the focus a Tab
+    // or a click is moving (Chrome).
+    if (text === '' && d.open) return;
     const value = text === '' ? null : /^\d+$/.test(text) && Number(text) >= min && Number(text) <= max ? Number(text) : Number.NaN;
     if (Number.isNaN(value)) {
       markInvalid(`chain.${row.name}.${field}`, document, false);
@@ -7302,12 +7299,17 @@ function drawSettings() {
       autoSave(c.dataset?.field);
     });
     formEl.addEventListener('focusout', (event) => {
-      if (!typedField || typedField !== event.target.dataset?.field) return;
-      typedField = null;
-      // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
-      // owner goes to answer it.
-      if (event.target === pagePort) return;
-      autoSave(event.relatedTarget?.dataset?.field);
+      const c = event.target;
+      if (!typedField || typedField !== c.dataset?.field) return;
+      // A redraw's focusout is no leaving (`onLeave`): the field is saved when it is left on the page.
+      void Promise.resolve().then(() => {
+        if (!$('panel').contains(c) || typedField !== c.dataset?.field) return;
+        typedField = null;
+        // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
+        // owner goes to answer it.
+        if (c === pagePort) return;
+        autoSave(event.relatedTarget?.dataset?.field);
+      });
     });
     // The port's button and Enter in its field save through `portSave` alone: the form's own save
     // after them would take its confirmation's place (CodeRabbit on #802).
