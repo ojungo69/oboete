@@ -1296,7 +1296,7 @@ const TEXT = {
   onboarding_free: ['Configured free-plan and local candidates', '無料枠候補とローカル設定'],
   onboarding_subscription: ['Plus my subscription entries', 'サブスクリプションも使う'],
   onboarding_paid: ['Plus priced APIs with a monthly cap', '月額上限内で有料APIも使う'],
-  onboarding_copy: ['Use this tier in draft', 'この段階を編集中の設定へ反映'],
+  onboarding_copy: ['Apply this tier', 'この段階を設定に反映'],
   onboarding_effect: ['New curation through: {names}. Monthly paid cap: USD {cap}.', '新しい要約に使う要約役：{names}。有料利用の月額上限：USD {cap}。'],
   onboarding_effect_no_cap: ['New curation through: {names}. Monthly paid cap: none.', '新しい要約に使う要約役：{names}。有料利用の月額上限：なし。'],
   onboarding_no_names: ['none', 'なし'],
