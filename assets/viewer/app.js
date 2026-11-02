@@ -1790,6 +1790,7 @@ const TEXT = {
   provider_entries_h: ['Individual providers', '要約役の個別設定'],
   provider_entries_desc: ['Add an API or a local OpenAI-compatible server, or use an installed Claude/Codex CLI. Each Save provider changes only that entry. The other settings save as each one changes, checkboxes and arrows included. A save sends no test request.', 'API・ローカルの OpenAI 互換サーバー、またはインストール済みの Claude/Codex CLI を登録できます。「要約役を保存」はその項目だけを変更します。ほかの設定は、チェックや矢印も含めて、変えるたびにすぐ保存されます。保存では接続テストを行いません。'],
   provider_add: ['Add provider', '要約役を追加'],
+  provider_list_moved: ['The AI entries changed while this waited, so nothing was sent. Choose again.', '待っている間に要約役の一覧が変わったため、送っていません。もう一度選んでください。'],
   provider_create: ['Create provider', '要約役を登録'],
   provider_save: ['Save provider', '要約役を保存'],
   provider_cancel: ['Cancel', 'キャンセル'],
@@ -5675,7 +5676,20 @@ function providerOperationFailure(action, path, res, answer, fields, scope) {
 // sends with the version that save's answer gave; a change made meanwhile waits for this one.
 async function providerOperation(action, button, body = null, path = '') {
   if (saveRun) {
+    // The page waits with it, so no other write is chosen by a list this one may change; and a
+    // list that changed meanwhile sends nothing (Codex and cubic on #802).
+    button.disabled = true;
+    const waiting = $('panel').querySelector('.settings');
+    if (waiting) waiting.inert = true;
+    const order = providerOrder(form);
     while (saveRun) await saveRun;
+    if (view !== 'settings' || !form) return;
+    if (action.selector && providerOrder(form) !== order) {
+      button.disabled = false;
+      drawSettings();
+      setStatus(t('provider_list_moved'), true, lang);
+      return;
+    }
     if (body) body = JSON.stringify({ ...JSON.parse(body), version: form.version });
   }
   let done;
@@ -5689,11 +5703,21 @@ async function providerOperation(action, button, body = null, path = '') {
   }
 }
 
+// The entries by name and place: a write moves an entry from the built-in list into the file,
+// and so changes the places a selector names.
+function providerOrder(f) {
+  return f?.providers.map((p) => `${p.name} ${selectorKey(p.selector)}`).join('\n');
+}
+
 async function providerWrite(action, button, body, path) {
   const mine = form;
   if (settingsMode === 'simple') clearSimpleReceipt();
-  const fields = button.closest('.settings');
-  const scope = button.closest('.provider-entry');
+  // The page and the entry as drawn now: a save waited for may have drawn them again (CodeRabbit
+  // on #802).
+  const fields = $('panel').querySelector('.settings');
+  const scope = action.selector
+    ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
+    : fields.querySelector('.new-provider');
   button.disabled = true;
   fields.inert = true;
   try {

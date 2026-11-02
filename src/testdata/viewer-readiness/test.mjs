@@ -1069,6 +1069,46 @@ console.log('PASS: the retention period');
   writing(json(settings('resident',{version:'v3',worker:{resident:false}})));await write;await settle();
   assert.equal(posted.length,3);assert.equal(sent().at(-1).summary?.curate,true);
   assert.equal(sent().at(-1).version,'v3','and is saved after it, with the version it gave');
+  // Round 4 of #802. Waiting for a save on its way, the provider write's control and the page wait
+  // too, so no other write is chosen meanwhile; the page the save drew again waits for the write
+  // (Codex, cubic and CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let waitSave;answers=[new Promise(resolve=>{waitSave=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const control=action('port.move');
+  const queued=w6.providerOperation({op:'enabled',selector:{source:'config',name:'made-up'},enabled:false},control);
+  await settle();
+  assert.equal(control.disabled,true,'the control waits disabled');
+  assert.equal(panel.querySelector('.settings').inert,true,'and the page with it');
+  let writeDone;answers=[new Promise(resolve=>{writeDone=resolve;})];
+  waitSave(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,2);
+  assert.equal(panel.querySelector('.settings').inert,true,'the page the save drew again waits for the write');
+  writeDone(json(settings('resident',{version:'v3',worker:{resident:false}})));await queued;await settle();
+  assert(!panel.querySelector('.settings').inert,'and is usable after it');
+  // A write that waited while the AI entries changed sends nothing, and says so (Codex and cubic).
+  const entry=(name,index)=>({name,selector:{source:'config',index},saved:{enabled:true,kind:'openai',base_url:'http://127.0.0.1:9/v1',
+    model:'made-up',key:'none',timeout_s:60,limits:{}},effective:{on:true,order:index,model:'made-up',timeout_s:60}});
+  const listed=(names,extra={})=>settings('resident',{providers:names.map((name,index)=>entry(name,index)),...extra});
+  f=w6.formOf(listed(['made-up-a','made-up-b']));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let reordered;answers=[new Promise(resolve=>{reordered=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const stale=w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:false},action('port.move'));
+  await settle();
+  reordered(json(listed(['made-up-b','made-up-a'],{version:'v2',worker:{resident:false}})));await stale;await settle();
+  assert.equal(posted.length,1,'a write that waited while the list changed is not sent');
+  assert(document.getElementById('status').textContent.includes('changed while this waited'),'and the page says so');
+  assert(!panel.querySelector('.settings').inert,'and is usable');
+  // ...nor one whose entries changed places with the same names, as a write moves an entry from
+  // the built-in list into the file.
+  const filed=(names,extra={})=>settings('resident',{providers:names.map((name,index)=>({...entry(name,index),selector:{source:'file',index}})),...extra});
+  f=w6.formOf(listed(['made-up-a','made-up-b']));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let replaced;answers=[new Promise(resolve=>{replaced=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const restaged=w6.providerOperation({op:'enabled',selector:{source:'config',index:0},enabled:false},action('port.move'));
+  await settle();
+  replaced(json(filed(['made-up-a','made-up-b'],{version:'v2',worker:{resident:false}})));await restaged;await settle();
+  assert.equal(posted.length,1,'nor one whose entries changed places');
   // The port's Enter that ends an input method's composition moves nothing (CodeRabbit).
   f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
   typeIn(field('view.port'),'17400');
