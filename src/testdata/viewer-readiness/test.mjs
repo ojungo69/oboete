@@ -1916,8 +1916,9 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.deepEqual([posted.length,entryKey('config:0').value,entryKey('config:1').value],[1,'',''],
       'an entry whose address is not shown keeps no key');
-    // Search's Workers AI key and the judge's keep theirs too; the judge's goes with its destination:
-    // another destination chosen, its field is empty.
+    // The judge's key is kept too, with its destination: another destination chosen, its field is
+    // empty. Search's Workers AI key is not kept: its endpoint may be set in config.toml beyond what
+    // the page shows (Codex's security review of #807).
     const judged={...judge,destinations:[...judge.destinations,{id:'d1',key:'missing',usd_per_mtok_in:0.01,local:false}]};
     settingsNow=keyed({judge:judged});
     [privacyAnswer,givePrivacy]=later();
@@ -1929,10 +1930,9 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(keyed({judge:judged,version:'v5',inject:sized(4000)}))];
     typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
     givePrivacy(json(privacy));await settled();
-    assert.deepEqual([posted.length,general('embedding.key').value,general('judge.key').value],[1,...others],'search\'s and the judge\'s keys are kept');
+    assert.deepEqual([posted.length,general('embedding.key').value,general('judge.key').value],[1,'',others[1]],'the judge\'s key is kept, search\'s is not');
     const to=general('judge.destination');to.value='d1';for(const cb of to.listeners.change)cb({target:to});await settled();
-    assert.deepEqual([general('judge.key').value,general('embedding.key').value],['',others[0]],
-      'a judge key typed for one destination is not put into another\'s field');
+    assert.equal(general('judge.key').value,'','a judge key typed for one destination is not put into another\'s field');
     assert(others.every(s=>!(JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')).includes(s)),'in no form, storage or request');
     ctx.localStorage.setItem=setItem;
   }

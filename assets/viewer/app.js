@@ -4514,7 +4514,7 @@ function judgeKey(f, j, chosen) {
     parts.push(el('label', 'field', el('span', null, t('judge_account')), account, note(t('judge_account_desc'))));
   }
   const more = () => ({ destination: chosen.id, ...(cloudflare ? { account_id: j.account.trim().toLowerCase() } : {}) });
-  parts.push(keyField('judge/key', 'judge.key', t(service ? `judge_key_label_${service}` : 'judge_key_label'), more));
+  parts.push(keyField('judge/key', 'judge.key', t(service ? `judge_key_label_${service}` : 'judge_key_label'), more, { kept: true }));
   return parts;
 }
 
@@ -4586,7 +4586,10 @@ function keepSecret(i, target, sync) {
 
 // As a provider's key field: the token is only in the field and the one request that carries it.
 // `more` adds to the body what the route takes beside the key (the judge's destination).
-function keyField(route, field, label, more = () => ({})) {
+// `kept`: whether a value being typed is put back after a redraw (`keepSecret`): only where the page
+// knows where its save sends it, as the judge's destinations, fixed in the code. Search's Workers AI
+// endpoint may be set in config.toml beyond what the page shows (Codex's security review of #807).
+function keyField(route, field, label, more = () => ({}), { kept = false } = {}) {
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
@@ -4601,7 +4604,7 @@ function keyField(route, field, label, more = () => ({})) {
   i.addEventListener('input', () => { save.disabled = !i.value; });
   // Named by where its save sends it: the judge's destination too (a key typed for one is never put
   // into another's field); not Cloudflare's account, typed beside it.
-  keepSecret(i, JSON.stringify([route, field, more().destination ?? null]), () => { save.disabled = !i.value; });
+  if (kept) keepSecret(i, JSON.stringify([route, field, more().destination ?? null]), () => { save.disabled = !i.value; });
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
