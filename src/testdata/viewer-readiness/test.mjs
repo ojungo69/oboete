@@ -654,7 +654,8 @@ ctx.location.port='17373';
 f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
 f.view.port='17400';
 answers=[json({code:'port_unavailable',field:'view.port'},409)];
-for(const cb of panel.querySelector('form').listeners.submit||[])cb({preventDefault(){}});
+// Decision 69: the port moves the page, so it saves with its own button.
+panel.querySelectorAll('button').find(node=>node.dataset.action==='port.move').click();
 await settle();
 assert(document.getElementById('status').textContent.includes('This port cannot be used'),'the refusal is shown, not a stale save');
 assert.equal(f.view.port,'17400','the port typed is kept');
@@ -731,6 +732,108 @@ ctx.ui.setLang('ja');ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(text(panel).includes('元の記録を残す期間')&&text(panel).includes('保存済み: 30 日'),'Japanese retention section');
 ctx.ui.setLang('en');
 console.log('PASS: the retention period');
+// Decision 69 (69b-1): the detailed page saves each change at once, with no Save bar. Nothing
+// unchanged is sent; an invalid value is marked and not sent; the port keeps its button; no
+// monthly cap, masking off and a saved masking rule removed wait for their confirmation; a new
+// masking rule waits until it has its id and pattern, and survives the saves meanwhile.
+{
+  const formEl=()=>panel.querySelector('form');
+  const fire=(name,ev)=>{for(const cb of formEl().listeners[name]||[])cb(ev);};
+  const sent=()=>posted.map(p=>JSON.parse(p.body));
+  const any=name=>panel.querySelectorAll('input, textarea').find(node=>node.dataset.field===name);
+  const action=name=>[...panel.querySelectorAll('button'),...document.getElementById('status').querySelectorAll('button')].filter(n=>n.dataset.action===name).at(-1);
+  const leave=(node,next=null)=>{fire('change',{target:node});fire('focusout',{target:node,relatedTarget:next});};
+  // markInvalid reads the document's controls: here, the page's.
+  const pageControls=document.querySelectorAll;document.querySelectorAll=sel=>panel.querySelectorAll(sel);
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  assert(!panel.querySelector('.save-bar'),'no Save bar');
+  answers=[json(settings('resident',{version:'v2',worker:{resident:false}}))];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(posted.length,1,'a switch saves when it changes');
+  assert.equal(sent()[0].worker.resident,false);assert.equal(sent()[0].view,undefined,'and sends no port');
+  fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(posted.length,1,'an unchanged form sends nothing');
+  const inject={...settings('resident').inject,session_start_chars:5000};
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},inject}))];
+  typeIn(field('inject.session_start_chars'),'5000');fire('change',{target:field('inject.session_start_chars')});
+  assert.equal(posted.length,1,'a number is not sent while focus is still on it');
+  fire('focusout',{target:field('inject.session_start_chars'),relatedTarget:field('inject.per_prompt_chars')});await settle();
+  assert.equal(posted.length,2,'it is sent when left');assert.equal(sent()[1].inject.session_start_chars,5000);
+  assert.equal(document.activeElement?.dataset.field,'inject.per_prompt_chars','the focus goes back where it went');
+  // A later redraw (privacy read again after the save) keeps it there.
+  const before=document.activeElement;ctx.ui.drawSettings();
+  assert(document.activeElement!==before&&document.activeElement===field('inject.per_prompt_chars'),'a redraw keeps the focus on its field');
+  // Typing goes on while a save is on its way: the page stays usable, and what was typed then
+  // survives the save's answer and is saved when its field is left.
+  let answer;answers=[new Promise(resolve=>{answer=resolve;})];
+  typeIn(field('inject.session_start_chars'),'4500');leave(field('inject.session_start_chars'),field('inject.per_prompt_chars'));
+  assert.equal(panel.querySelector('.settings').inert,false,'the page is not frozen by a save on its way');
+  typeIn(field('inject.per_prompt_chars'),'1200');
+  answer(json(settings('resident',{version:'v4',worker:{resident:false},inject:{...inject,session_start_chars:4500}})));await settle();await settle();
+  assert.equal(field('inject.per_prompt_chars').value,'1200','what was typed during the save stays');
+  assert.equal(field('inject.session_start_chars').value,'4500','the saved value shows');
+  answers=[json(settings('resident',{version:'v5',worker:{resident:false},inject:{...inject,session_start_chars:4500,per_prompt_chars:1200}}))];
+  leave(field('inject.per_prompt_chars'));await settle();
+  assert.equal(sent().at(-1).inject.per_prompt_chars,1200,'and is saved when left');
+  assert.equal(sent().at(-1).version,'v4','with the version the save answered');
+  typeIn(field('inject.session_start_chars'),'99999');leave(field('inject.session_start_chars'));await settle();
+  assert.equal(posted.length,4,'an out-of-range number is not sent');
+  assert.equal(field('inject.session_start_chars').attrs['aria-invalid'],'true','it is marked');
+  assert(document.getElementById('status').textContent.includes('out of range'),'and said');
+  // The port: leaving it sends nothing; its button saves it.
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('view.port'),'17400');leave(field('view.port'));await settle();
+  assert.equal(posted.length,0,'a port typed is not saved by leaving it');
+  answers=[json({code:'port_unavailable',field:'view.port'},409)];
+  action('port.move').click();await settle();
+  assert.equal(sent()[0].view.port,17400,'its button saves it');
+  // No monthly cap: asked first, saved once confirmed.
+  f=w6.formOf(settings('resident',{paid_usd_per_month:5}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const noCap=panel.querySelectorAll('input').find(n=>n.dataset.field==='paid_usd_per_month.no_cap');
+  tick(noCap,true);fire('change',{target:noCap});await settle();
+  assert.equal(posted.length,0,'no cap is not saved at once');
+  assert(document.getElementById('status').textContent.includes('does not stop paid calls'),'its warning asks first');
+  answers=[json(settings('resident',{version:'v2',paid_usd_per_month:null}))];
+  action('held.confirm').click();await settle();
+  assert.equal(posted.length,1);assert.equal(sent()[0].paid_usd_per_month,null,'confirmed, it is saved');
+  // Masking off: asked first; Cancel goes back to what is saved.
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  tick(field('redaction.enabled'),false);fire('change',{target:field('redaction.enabled')});await settle();
+  assert.equal(posted.length,0,'masking off is not saved at once');
+  action('held.cancel').click();
+  assert.equal(field('redaction.enabled').checked,true,'cancelled, masking stays on');
+  // A new masking rule waits until it has its id and pattern, and survives a save meanwhile.
+  const rule={id:'acme-token',regex:'acme_[a-z0-9]{8}',keywords:[],entropy:null,secret_group:null};
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const add=panel.querySelectorAll('button').find(n=>text(n)==='Add a masking rule');
+  add.click();fire('click',{target:add});await settle();
+  assert.equal(posted.length,0,'an empty new rule sends nothing');
+  typeIn(any('redaction.extra_rules.1.id'),'beta-key');leave(any('redaction.extra_rules.1.id'));await settle();
+  assert.equal(posted.length,0,'half a rule sends nothing, and no error');
+  answers=[json(settings('resident',{version:'v2',worker:{resident:false},redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}))];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});await settle();
+  assert.equal(sent()[0].redaction.extra_rules.length,1,'another change saves without the unfinished rule');
+  assert.equal(any('redaction.extra_rules.1.id')?.value,'beta-key','which stays to be finished');
+  const beta={id:'beta-key',regex:'beta_[0-9]+',keywords:[],entropy:null,secret_group:null};
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},redaction:{enabled:true,extra_rules:[rule,beta],allowlist:[]}}))];
+  typeIn(any('redaction.extra_rules.1.regex'),'beta_[0-9]+');leave(any('redaction.extra_rules.1.regex'));await settle();
+  assert.deepEqual(sent()[1].redaction.extra_rules.map(r=>r.id),['acme-token','beta-key'],'finished, it is sent');
+  // A saved rule removed is asked first; an emptied saved rule is refused, never dropped.
+  posted.length=0;
+  typeIn(any('redaction.extra_rules.0.id'),'');leave(any('redaction.extra_rules.0.id'));await settle();
+  assert.equal(posted.length,0,'an emptied saved rule is not sent');
+  assert.equal(any('redaction.extra_rules.0.id').attrs['aria-invalid'],'true','it is marked');
+  f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[rule],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  const remove=panel.querySelectorAll('button').find(n=>text(n)==='Remove this rule');
+  remove.click();fire('click',{target:remove});await settle();
+  assert.equal(posted.length,0,'a saved rule removed waits');
+  assert(document.getElementById('status').textContent.includes('acme-token'),'it names the rule');
+  answers=[json(settings('resident',{version:'v2',redaction:{enabled:true,extra_rules:[],allowlist:[]}}))];
+  action('held.confirm').click();await settle();
+  assert.equal(sent()[0].redaction.extra_rules.length,0,'confirmed, it is removed');
+  document.querySelectorAll=pageControls;
+  console.log('PASS: decision 69 (69b-1): each change saves at once, the port by its button, three changes asked first');
+}
 // Decision 51: the memory list switch, below the terminal line's, follows it and is sent.
 f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.equal(field('inject.session_start_list').checked,true,'the list is on by default');

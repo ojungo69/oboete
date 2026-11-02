@@ -1021,6 +1021,9 @@ const TEXT = {
   simple_mask_desc: ['Hide API keys and passwords in records, outgoing text and this page.', '記録や送信する内容、この画面に含まれる API キーやパスワードを隠します。'],
   simple_mask_on: ['Mask secrets', '機密情報を隠す'],
   simple_mask_confirm: ['Turn masking off', '確認してマスキングをオフにする'],
+  view_port_move: ['Move the page to this port', 'このポートに画面を移す'],
+  redaction_rule_remove_warning: ['Saving removes the masking rule {id}: what only it masked is no longer masked in new records.', '保存すると伏せ字の規則 {id} を消します。新しい記録では、この規則だけが伏せていた値が伏せられなくなります。'],
+  redaction_rule_remove_confirm: ['Remove the rule', '確認して規則を消す'],
   simple_agents_h: ['Agents', '接続するエージェント'],
   simple_privacy_h: ['Privacy', '記録しないものと秘密'],
   simple_state_on: ['on', 'オン'],
@@ -1341,8 +1344,8 @@ const TEXT = {
   token_replaced: ['The settings were not saved, but the resident page’s token was already replaced. Run oboete view in a terminal to see its address.', '設定は保存されませんでしたが、常駐の画面のトークンはすでに新しくなっています。ターミナルで oboete view を実行すると、その画面のアドレスが表示されます。'],
   language: ['Language', '言語'],
   lead: [
-    'Choose the settings below. Each save applies its own section; individual provider checkboxes and arrows save immediately. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
-    'ここで設定を選べます。それぞれの保存ボタンで対象の設定を反映します。要約役の個別のチェックと矢印はすぐに保存します。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
+    'Choose the settings below. Each change saves at once: a switch or a choice when it changes, a number or a text when you leave it or press Enter. Adding or removing an AI, a key and the port of this page have buttons of their own. Recording and memory delivery read them at their next use; the background summarizer reads them before its next window, even while it stays running. This page cannot tell which values a running request has loaded. Opening this page or saving sends nothing to a provider.',
+    'ここで設定を選べます。変更はすぐに保存されます。スイッチや選択は変えたとき、数字や文字は欄を離れたときか Enter を押したときです。AI の追加や削除、キー、画面のポートには専用のボタンがあります。記録・記憶の受け渡しには次の利用時から反映されます。要約の設定は、次のまとまりを処理する前に読み直すので、処理が動き続けていても反映されます。現在実行中の呼び出しが読み込んでいる値は、この画面では確認できません。画面を開いたり保存したりしても、要約役への送信は始まりません。',
   ],
   group_start_h: ['Getting started', 'はじめに'],
   group_start_desc: ['Choose how much AI to use, then check that an agent records and finds a test phrase.', 'AI をどこまで使うかを選び、エージェントで記録と検索ができることを確かめます。'],
@@ -3472,7 +3475,8 @@ function formOf(s) {
 }
 
 function redactionEdit(rule = {}) {
-  return { id: rule.id ?? '', regex: rule.regex ?? '', keywords: JSON.stringify(rule.keywords || []),
+  // `saved`: a rule config.toml has, whose emptied field is refused rather than left unsent.
+  return { saved: Boolean(rule.id), id: rule.id ?? '', regex: rule.regex ?? '', keywords: JSON.stringify(rule.keywords || []),
     entropy: rule.entropy === null || rule.entropy === undefined ? '' : String(rule.entropy),
     secret_group: rule.secret_group === null || rule.secret_group === undefined ? '' : String(rule.secret_group) };
 }
@@ -3490,9 +3494,18 @@ function redactionRuleBody(edit, field) {
   return { value: { id: edit.id, regex: edit.regex, keywords, entropy, secret_group } };
 }
 
+function unfinishedRule(edit) {
+  return !edit.id.trim() || !edit.regex.trim();
+}
+
 function redactionBody() {
   const extra_rules = [];
   for (const [index, edit] of form.redaction.rules.entries()) {
+    // Decision 69: a new rule is typed a field at a time and sent once it has its id and pattern;
+    // a saved rule whose id or pattern is emptied is refused, never dropped by a save.
+    if (!edit.saved && unfinishedRule(edit)) continue;
+    if (!edit.id.trim()) return { field: `redaction.extra_rules.${index}.id` };
+    if (!edit.regex.trim()) return { field: `redaction.extra_rules.${index}.regex` };
     const { value, field } = redactionRuleBody(edit, `redaction.extra_rules.${index}`);
     if (field) return { field };
     extra_rules.push(value);
@@ -3557,8 +3570,9 @@ function redactionSection(f) {
   // Owner decision 43: off stops every rule; the warning shows before the save, without a redraw.
   const warning = el('p', 'desc error', t('redaction_off_warning'));
   warning.hidden = f.redaction.enabled;
-  const enabled = el('label', 'check', checkbox(f.redaction.enabled, (v) => { f.redaction.enabled = v; warning.hidden = v; }),
-    t('redaction_enabled'));
+  const mask = checkbox(f.redaction.enabled, (v) => { f.redaction.enabled = v; warning.hidden = v; });
+  mask.dataset.field = 'redaction.enabled';
+  const enabled = el('label', 'check', mask, t('redaction_enabled'));
   return el('section', null, el('h3', null, t('redaction_h')), el('p', 'desc', t('redaction_desc')), enabled, warning,
     ...rows, add, el('h4', null, t('redaction_allow_h')), el('p', 'desc', t('redaction_allow_desc')),
     el('label', 'field', el('span', null, t('redaction_value')), exact), hash,
@@ -6056,11 +6070,13 @@ function chainRow(r, i, redraw) {
 }
 
 // The save's body, or the field a value is wrong in.
-function saveBody() {
+// `autosaved`: a change saved at once (decision 69) leaves the page's port as saved; only its
+// button moves the page.
+function saveBody(autosaved = false) {
   const redaction = redactionBody();
   if (!redaction.value) return { field: redaction.field };
   const whole = (v, min, max) => (/^\d+$/.test(v.trim()) && Number(v) >= min && Number(v) <= max ? Number(v) : Number.NaN);
-  const port = whole(form.view.port, ...form.ranges.view_port);
+  const port = autosaved ? form.saved.view.port : whole(form.view.port, ...form.ranges.view_port);
   if (Number.isNaN(port)) return { field: 'view.port' };
   // docs/retention.md: a day count in range, or null for forever; sent only when it changed.
   const period = form.retention;
@@ -6173,7 +6189,8 @@ function markInvalid(field, root = document) {
   i.focus();
 }
 
-function applySavedSettings(answer, mine, current, simple = null) {
+// `sent`: the body key a change saved at once sent; what was typed while it was on its way stays.
+function applySavedSettings(answer, mine, current, simple = null, sent = null) {
   // The resident viewer moved onto the saved port with a new token: the page goes on to the
   // address in the answer and reads nothing more from the old one, which no longer answers.
   const runtime = current ? null : answer.view_runtime;
@@ -6181,6 +6198,19 @@ function applySavedSettings(answer, mine, current, simple = null) {
   const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
   if (moved && movePage(runtime.url || '')) return;
   form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: simple ? 'simple' : 'settings' });
+  // Decision 69: the owner went on typing while a change saved at once was on its way. The drafts
+  // stay, with the answer's saved values, version and key, and are saved when their field is left.
+  if (sent !== null && !current && form) {
+    const fresh = form;
+    form = mine;
+    const now = saveBody(true);
+    if (!now.body || bodyKey(now.body) !== sent) {
+      form = fresh;
+      const at = saveBody(true);
+      form = mine;
+      Object.assign(mine, { version: fresh.version, saved: fresh.saved, savedSettings: fresh.savedSettings, savedKey: at.body ? bodyKey(at.body) : null });
+    } else form = fresh;
+  }
   if (simple && !current && form) {
     simple.adopt(form, answer);
     simpleReceipt = simple.block;
@@ -6193,8 +6223,8 @@ function applySavedSettings(answer, mine, current, simple = null) {
   if (form) void refreshPrivacy(form);
 }
 
-async function saveSettings(button, simple = null) {
-  const { body, field } = simple || saveBody();
+async function saveSettings(button, simple = null, autosaved = false) {
+  const { body, field } = simple || saveBody(autosaved);
   if (!body) {
     markInvalid(field);
     setStatus(t(field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
@@ -6202,10 +6232,11 @@ async function saveSettings(button, simple = null) {
   }
   const mine = form;
   // The whole panel, the language picker too: what is typed, or drawn again in another language,
-  // while the save is on its way would not survive its answer.
+  // while the save is on its way would not survive its answer. A change saved at once (decision
+  // 69) leaves the page usable instead, and keeps what is typed meanwhile (`applySavedSettings`).
   const fields = button.closest('.settings');
   button.disabled = true;
-  fields.inert = true;
+  fields.inert = !autosaved;
   try {
     // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
     // `Origin: null`, which the viewer refuses.
@@ -6222,7 +6253,7 @@ async function saveSettings(button, simple = null) {
     // Moved to another tab, or the values were loaded again, while saving: what is shown stays.
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
-      applySavedSettings(answer, mine, current, simple);
+      applySavedSettings(answer, mine, current, simple, autosaved ? bodyKey(body) : null);
       return;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
@@ -6889,6 +6920,7 @@ function myWorkEstimate(estimate) {
 
 function drawSettings() {
   const focused = document.activeElement?.dataset.simpleFocus;
+  const keep = settingsMode === 'detailed' ? focusKeep() : null;
   if (document.activeElement && document.activeElement !== document.body
     && !document.activeElement.closest('.embedding-choice')) embeddingDraft.focus = null;
   const pick = el('select', null, ...LANGS.map((l) => {
@@ -6997,8 +7029,19 @@ function drawSettings() {
     th.scope = 'col';
     return th;
   }));
+  // Decision 69: each change saves at once; this button only anchors the saves (never shown).
   const save = el('button', 'save', t('settings_save'));
-  save.type = 'submit';
+  save.type = 'button';
+  save.hidden = true;
+  if (f.savedKey === undefined) {
+    const at = saveBody(true);
+    f.savedKey = at.body ? bodyKey(at.body) : null;
+  }
+  const portMove = el('button', 'quiet small', t('view_port_move'));
+  portMove.type = 'button';
+  portMove.dataset.action = 'port.move';
+  portMove.addEventListener('click', () => void saveSettings(portMove));
+  pagePort.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); portMove.click(); } });
   // The common settings first and open; the rest folded (DESIGN.md). A new home opens
   // its guide and the resident choice it is to save, and a waiting provider its group.
   const formEl = el('form', null,
@@ -7066,7 +7109,7 @@ function drawSettings() {
         el('p', 'desc', t(f.residentSupported ? 'resident_timing' : 'resident_unsupported'))),
       el('section', null,
         el('h3', null, t('view_h')),
-        el('label', 'field', el('span', null, t('view_port')), pagePort, saved(f.saved.view.port)),
+        el('label', 'field', el('span', null, t('view_port')), pagePort, saved(f.saved.view.port)), portMove,
         el('p', 'desc', t(f.viewRuntime?.mode === 'resident' ? 'view_port_resident' : 'view_port_foreground'))),
       el('section', null,
         el('h3', null, t('backup_h')),
@@ -7078,21 +7121,121 @@ function drawSettings() {
     f.warnings.length
       ? el('section', 'warnings', el('h3', null, t('warnings_h')), el('ul', null, ...f.warnings.map((w) => el('li', null, w))))
       : null,
-    el('div', 'save-bar', save));
+    save);
   formEl.noValidate = true;
+  // Decision 69: each change saves at once. A switch or a choice saves when it changes; a text
+  // or number when focus leaves it (so the focus can go back to where it went after the
+  // redraw) or on Enter; a button that edits the form (a rule removed, the backup folder reset)
+  // after its own click. What does not change the form's body sends nothing.
+  let typed = null;
+  formEl.addEventListener('change', (event) => {
+    const c = event.target;
+    if (c.tagName === 'TEXTAREA' || (c.tagName === 'INPUT' && !['checkbox', 'radio'].includes(c.type))) { typed = c; return; }
+    autoSave(save, c.dataset?.field);
+  });
+  formEl.addEventListener('focusout', (event) => {
+    if (typed !== event.target) return;
+    typed = null;
+    autoSave(save, event.relatedTarget?.dataset?.field);
+  });
+  formEl.addEventListener('click', (event) => {
+    const button = event.target.closest?.('button');
+    if (button && button !== save) autoSave(save, null);
+  });
   formEl.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && event.target.closest('.provider-entry') && event.target.tagName !== 'BUTTON' && event.target.tagName !== 'SUMMARY') event.preventDefault();
+    if (event.key !== 'Enter' || event.target.tagName === 'BUTTON' || event.target.tagName === 'SUMMARY' || event.target.tagName === 'TEXTAREA') return;
+    event.preventDefault();
+    if (event.target.closest('.provider-entry')) return;
+    typed = null;
+    autoSave(save, event.target.dataset?.field);
   });
-  formEl.addEventListener('submit', (e) => {
-    e.preventDefault();
-    void saveSettings(save);
-  });
+  formEl.addEventListener('submit', (e) => e.preventDefault());
   const recovered=recoverySection();
   if(recovered)panel.append(recovered);
   panel.append(...present([el('p', 'lead', t('lead')), formEl,
     settingsGroup('agents', false, preferenceSection(f), agentInventorySection(), agentSetupSection()),
     settingsGroup('maintenance', false, viewSection(f), hiddenSection(f), doctorSection(), maintenanceSection(f))]));
   drawIn(panel);
+  focusBack(keep);
+}
+
+// The detailed page keeps the focus through a redraw (a save's answer, privacy read again after
+// it), as the simple page does with `simpleFocus` (decision 69): its field, and the caret in it.
+function focusKeep() {
+  const a = document.activeElement;
+  if (!a?.dataset?.field) return null;
+  return { field: a.dataset.field, start: a.selectionStart, end: a.selectionEnd };
+}
+
+function focusBack(keep) {
+  if (!keep) return;
+  const c = [...$('panel').querySelectorAll('input, select, textarea')].find((x) => x.dataset.field === keep.field && !x.disabled);
+  if (!c) return;
+  c.focus({ preventScroll: true });
+  // A number or a switch has no caret.
+  try { if (typeof keep.start === 'number') c.setSelectionRange(keep.start, keep.end); } catch { /* none */ }
+}
+
+// The general form's body as a key, its version left out: a save is due only when it changed.
+function bodyKey(body) {
+  const { version, ...rest } = body;
+  return JSON.stringify(rest);
+}
+
+// Decision 69 (69b-1): a change of the detailed page's general form saves at once, as its Save did.
+// An unfinished new masking rule waits; an invalid value is marked and nothing is sent; a change
+// that weakens a protection (no monthly cap, masking off, a saved masking rule removed) waits for
+// its confirmation in the status line. `next`: the field focus went to, given it back after the
+// save's redraw.
+function autoSave(anchor, next) {
+  if (!form || view !== 'settings' || settingsMode !== 'detailed') return;
+  const mine = form;
+  const at = saveBody(true);
+  if (!at.body) {
+    markInvalid(at.field);
+    setStatus(t(at.field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
+    return;
+  }
+  if (bodyKey(at.body) === mine.savedKey) return;
+  const held = heldChange(mine, at.body);
+  if (held) { askHeld(anchor, held, next); return; }
+  void commitSave(anchor, next);
+}
+
+// The new masking rules still being typed survive the save's redraw, which draws the answer.
+async function commitSave(anchor, next) {
+  const mine = form;
+  const drafts = mine.redaction.rules.filter((rule) => !rule.saved && unfinishedRule(rule));
+  await saveSettings(anchor, null, true);
+  if (form && form !== mine && drafts.length) {
+    form.redaction.rules.push(...drafts);
+    drawSettings();
+  }
+  focusBack(next ? { field: next } : null);
+}
+
+function heldChange(f, body) {
+  const saved = f.savedSettings;
+  if (body.paid_usd_per_month === null && saved.paid_usd_per_month !== null) return { key: 'no_cap_paid_warning', confirm: 'simple_no_cap_confirm' };
+  if (body.redaction.enabled === false && saved.redaction?.enabled !== false) return { key: 'redaction_off_warning', confirm: 'simple_mask_confirm' };
+  const kept = new Set(body.redaction.extra_rules.map((rule) => rule.id));
+  const gone = (saved.redaction?.extra_rules || []).find((rule) => !kept.has(rule.id));
+  if (gone) return { key: 'redaction_rule_remove_warning', confirm: 'redaction_rule_remove_confirm', id: gone.id };
+  return null;
+}
+
+function askHeld(anchor, held, next) {
+  const mine = form;
+  const yes = el('button', 'quiet small', t(held.confirm));
+  yes.type = 'button';
+  yes.dataset.action = 'held.confirm';
+  yes.addEventListener('click', () => { if (form === mine) void commitSave(anchor, next); });
+  const no = el('button', 'quiet small', t('simple_cancel'));
+  no.type = 'button';
+  no.dataset.action = 'held.cancel';
+  // Cancelled, the form goes back to what is saved.
+  no.addEventListener('click', () => { if (form !== mine) return; form = formOf(mine.savedSettings); drawSettings(); setStatus(''); });
+  setStatus(t(held.key, { id: held.id ?? '' }), true, lang, 0, el('span', 'actions', yes, no));
 }
 
 // Whether each settings group is open, kept across redraws as a provider's editor keeps its own.
