@@ -1,0 +1,34 @@
+src/testdata/viewer-readiness/test.mjs
+  s_f7d8663ba9ca22::t_c3490433bb90a8 2666-2674
+  s_f7d8663ba9ca22::t_c0e0957df8ecd9 2675-2688
+  s_f7d8663ba9ca22::t_213b0f0447ca9f 2721-2731
+  s_f7d8663ba9ca22::t_c95ba413161346 2645-2665,2828
+  s_f7d8663ba9ca22::t_4786e4e860eac3 2699-2709
+  s_f7d8663ba9ca22::t_755d6a41b2e9e9 2710-2720
+  s_f7d8663ba9ca22::t_8553101b7eb237 2689-2698
+  s_f7d8663ba9ca22::t_a7ee12602fc171 2749-2759
+  s_f7d8663ba9ca22::t_ef73ba8e6ef939 38-48
+  s_f7d8663ba9ca22::t_26e6e59ae64dcb 2732-2748,2760,2804
+  s_f7d8663ba9ca22::t_a041fd74a29e34 2763-2775
+  s_f7d8663ba9ca22::t_61bf54a1a270b0 2776-2787,2798
+  s_f7d8663ba9ca22::t_940016a7475d79 2816-2827
+  s_f7d8663ba9ca22::t_43599503c40afa 2761-2762,2788-2797,2799-2803,2805-2815
+assets/viewer/app.js
+  s_f7d8663ba9ca22::t_47632019833e1d 3484-3485,3502,3517,4636,4638,4648,4672,4691,5275,5293,5425,5451,5740,5744,5750,5757,5794,5816,5876,5901,6343,6376,6770,6774,6786,7595-7621
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d18df92f2140cbcc1df867e48f7af8b10956a5d3",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
