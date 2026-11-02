@@ -626,6 +626,7 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 
 /* A group's More settings (decision 69, 69b-2): its sections parted as the group's own are. */
 .more-settings > .general-form > * + section, .more-settings > * + section { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
+.more-settings[open] > summary { margin-bottom: 12px; }
 .simple-block-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 .simple-saved { color: var(--green); font-size: 12.5px; }
 .simple-empty { padding: 12px 16px; background: var(--blue-bg); border-radius: var(--radius-l); }
