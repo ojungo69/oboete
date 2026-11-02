@@ -1291,7 +1291,7 @@ const TEXT = {
   resident_first: ['Recommended for a new home. Save applies the choice shown here.', '新しい保存先ではオンを推奨します。保存すると、ここで選んだ設定が反映されます。'],
   onboarding_first_h: ['Choose a starting AI tier', '最初のAI利用段階を選ぶ'],
   onboarding_again_h: ['Adjust AI tier', 'AI利用段階を変更'],
-  onboarding_desc: ['Copy a tier into the unsaved settings below, review the named providers, then Save settings. Choosing a tier sends no request.', '利用段階を下の未保存の設定に反映し、対象の要約役を確認してから「設定を保存」を押します。段階の選択だけでは通信しません。'],
+  onboarding_desc: ['Apply a tier to the settings below, which save at once, then review the named providers. Choosing a tier sends no request.', '利用段階を下の設定に反映すると、すぐに保存されます。そのあと、対象の要約役を確認してください。段階を選ぶだけでは通信しません。'],
   onboarding_tier: ['AI tier', 'AI利用段階'],
   onboarding_choose: ['Choose a tier', '利用段階を選択'],
   onboarding_none: ['None: record and search, no new summaries', 'なし：記録と検索のみ、新しい要約はしない'],
@@ -1788,7 +1788,7 @@ const TEXT = {
   differs_daily_budget: ['calls a day', '1 日の回数'],
   differs_timeout_s: ['timeout', '待ち時間'],
   provider_entries_h: ['Individual providers', '要約役の個別設定'],
-  provider_entries_desc: ['Add an API or a local OpenAI-compatible server, or use an installed Claude/Codex CLI. Each Save provider changes only that entry. Other settings use Save settings below. Checkboxes and arrows save immediately. A save sends no test request.', 'API・ローカルの OpenAI 互換サーバー、またはインストール済みの Claude/Codex CLI を登録できます。「要約役を保存」はその項目だけを変更します。ほかの設定は下の「設定を保存」で反映します。個別のチェックと矢印はすぐに保存します。保存では接続テストを行いません。'],
+  provider_entries_desc: ['Add an API or a local OpenAI-compatible server, or use an installed Claude/Codex CLI. Each Save provider changes only that entry. The other settings save as each one changes, checkboxes and arrows included. A save sends no test request.', 'API・ローカルの OpenAI 互換サーバー、またはインストール済みの Claude/Codex CLI を登録できます。「要約役を保存」はその項目だけを変更します。ほかの設定は、チェックや矢印も含めて、変えるたびにすぐ保存されます。保存では接続テストを行いません。'],
   provider_add: ['Add provider', '要約役を追加'],
   provider_create: ['Create provider', '要約役を登録'],
   provider_save: ['Save provider', '要約役を保存'],
@@ -6212,6 +6212,15 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
       const at = saveBody(true);
       form = mine;
       Object.assign(mine, { version: fresh.version, saved: fresh.saved, savedSettings: fresh.savedSettings, savedKey: at.body ? bodyKey(at.body) : null });
+      // A value sent only when it changed is compared with what the answer saved, not with what was
+      // saved before it (Codex on #802): the period, the backup folder, the judge, search's numbers.
+      mine.retention.days = fresh.retention.days;
+      mine.backup.dir = fresh.backup.dir;
+      if (mine.judge && fresh.judge) {
+        const { enabled, to, account, budget, noCap } = mine.judge;
+        mine.judge = { ...fresh.judge, enabled, to, account, budget, noCap };
+      }
+      if (mine.embedding && fresh.embedding) mine.embedding.workers = fresh.embedding.workers;
       // A new rule the answer saved is a saved rule from now on (cubic on #802).
       const ids = new Set((fresh.savedSettings.redaction?.extra_rules || []).map((rule) => rule.id));
       for (const rule of mine.redaction.rules) if (ids.has(rule.id)) rule.saved = true;
@@ -6220,6 +6229,13 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
       // A port typed and not yet moved to stays typed (Codex and cubic on #802).
       if (String(mine.view.port) !== String(mine.saved.view.port)) fresh.view.port = mine.view.port;
     }
+  }
+  // What no body carries stays as typed through the answer: a new masking rule not yet finished,
+  // a place not yet added to those never recorded, the guide's phrase (Codex, cubic and
+  // CodeRabbit on #802).
+  if (!simple && !current && form && form !== mine) {
+    Object.assign(form, { neverFolder: mine.neverFolder, neverPattern: mine.neverPattern, testPhrase: mine.testPhrase });
+    form.redaction.rules.push(...mine.redaction.rules.filter((rule) => !rule.saved && unfinishedRule(rule)));
   }
   if (simple && !current && form) {
     simple.adopt(form, answer);
@@ -7146,16 +7162,22 @@ function drawSettings() {
   formEl.addEventListener('focusout', (event) => {
     if (typed !== event.target) return;
     typed = null;
+    // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
+    // owner goes to answer it.
+    if (event.target === pagePort) return;
     autoSave(event.relatedTarget?.dataset?.field);
   });
+  // The port's button and Enter in its field save through `portSave` alone: the form's own save
+  // after them would take its confirmation's place (CodeRabbit on #802).
   formEl.addEventListener('click', (event) => {
     const button = event.target.closest?.('button');
-    if (button && button !== save) autoSave(null);
+    if (button && button !== save && button !== portMove) autoSave(null);
   });
-  // Enter in a field saves it; a link, a button or a text area keeps its own Enter (CodeRabbit on
-  // #802).
+  // Enter in a field saves it; a link, a button or a text area keeps its own Enter, and so does
+  // the Enter that ends an input method's composition (CodeRabbit on #802).
   formEl.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' || !['INPUT', 'SELECT'].includes(event.target.tagName)) return;
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+    if (event.target === pagePort || !['INPUT', 'SELECT'].includes(event.target.tagName)) return;
     event.preventDefault();
     if (event.target.closest('.provider-entry')) return;
     typed = null;
@@ -7242,21 +7264,16 @@ function portSave() {
   void commitSave(null, false);
 }
 
-// The new masking rules still being typed survive the save's redraw, which draws the answer; a
-// change queued meanwhile is saved next.
+// A change queued while a save is on its way is saved next.
 async function commitSave(next, autosaved) {
   // The status line's confirm reaches here too: behind a save on its way it waits, as a change
   // does, and what still waits for a confirmation is asked again after that answer.
   if (saveRun) { saveAgain = { port: saveAgain?.port || !autosaved }; return; }
-  const mine = form;
-  const drafts = mine.redaction.rules.filter((rule) => !rule.saved && unfinishedRule(rule));
   saveRun = saveSettings(formAnchor, null, autosaved);
   try { await saveRun; } finally { saveRun = null; }
-  if (form && form !== mine && drafts.length) {
-    form.redaction.rules.push(...drafts);
-    drawSettings();
-  }
-  focusBack(next ? { field: next } : null);
+  // The save's redraw keeps the focus where the owner has it; the field it went to is given it
+  // back only when nothing on the page has it (Codex on #802).
+  if (!$('panel').contains(document.activeElement)) focusBack(next ? { field: next } : null);
   const again = saveAgain;
   saveAgain = null;
   if (again?.port) portSave();
