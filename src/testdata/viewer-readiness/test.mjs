@@ -2434,6 +2434,22 @@ console.log('PASS: the caps\' No cap switches');
     give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2',judge,key_input:true})));await settled();
     assert.deepEqual([posted.length,document.getElementById('status').textContent.includes('Type it again')],[1,true],
       'nor across a recovery\'s answer made into the form meanwhile');
+    // A provider's key, or another write of its, waiting across a read of the settings is not sent
+    // either.
+    const disabled={...entry('alpha',0),saved:{...entry('alpha',0).saved,enabled:false}};
+    for(const [what,extra,more,act,said] of [
+      ['key',{key:'missing'},{key_input:true},()=>{typeIn(simple('key:alpha'),'made-up-provider-key-0083');simple('key-save:alpha').click();},'Type it again'],
+      ['entry turned on',{on:false},{providers:[disabled]},()=>flip(simple('on:alpha'),true),'Make it again']]){
+      f=draw(one(extra,more));
+      reread=one(extra,{...more,version:'v9'});
+      [answer,give]=later();answers=[answer];
+      typeIn(timeout(),'120');enterLine(timeout());await settled();
+      act();await settled();
+      give(json({code:'stale'},409));await settled(6);
+      assert.deepEqual([posted.length,document.getElementById('status').textContent.includes(said)],[1,true],
+        `a provider's ${what} waiting across a stale reload is not sent, and is asked for again`);
+      reread=null;
+    }
     vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
   }
   ctx.fetch=w6fetch;

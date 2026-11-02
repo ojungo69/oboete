@@ -1662,6 +1662,7 @@ const TEXT = {
   key_save: ['Save key', 'キーを保存'],
   key_saved: ['The key was registered in private storage. It has not been tested yet.', 'キーを専用の保存先に登録しました。接続はまだ確認していません。'],
   key_again: ['The settings were read again while the key waited, so it was not saved. Type it again.', 'キーの保存を待つ間に設定が読み直されたため、保存していません。もう一度入力してください。'],
+  write_again: ['The settings were read again while this change waited, so it was not saved. Make it again.', '変更の保存を待つ間に設定が読み直されたため、保存していません。もう一度変更してください。'],
   key_not_durable: [
     'The key was registered, but the disk did not confirm the write. After an unexpected shutdown, register it again if it is missing.',
     'キーを登録しましたが、ディスクへの書き込みを確認できませんでした。予期しない終了の後、登録が失われていた場合は再登録してください。',
@@ -5719,8 +5720,17 @@ async function providerOperation(action, button, body = null, path = '') {
     const waiting = $('panel').querySelector('.settings');
     if (waiting) waiting.inert = true;
     const order = providerOrder(form);
+    const loads = formLoads;
     while (saveRun) await saveRun;
     if (view !== 'settings' || !form) return;
+    // Settings read meanwhile may have brought config.toml changed elsewhere: a write made against
+    // the page as it was, a key's above all, is not sent (as `keySave`; Codex's review of 69b-3c-1a).
+    if (formLoads !== loads) {
+      button.disabled = false;
+      drawSettings();
+      setStatus(t(path === '/key' ? 'key_again' : 'write_again'), true, lang);
+      return;
+    }
     if (action.selector && providerOrder(form) !== order) {
       button.disabled = false;
       drawSettings();
