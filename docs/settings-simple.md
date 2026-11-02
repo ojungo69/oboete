@@ -21,7 +21,8 @@ read easily:
 - the first-run tier is applied to the unsaved settings and then saved, two steps.
 
 So the settings tab opens on a simple view of the settings most homes need, and the current page
-stays whole as the detailed settings, one click away. Nothing a setting does changes; what changes is
+stays whole as the detailed settings, one click away. (Since decision 69's slice 69b-2a the two are one
+page, each group closing on its More settings: [settings-redo.md](settings-redo.md).) Nothing a setting does changes; what changes is
 what is shown first and how it is said.
 
 ## What the simple view holds

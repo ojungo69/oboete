@@ -2100,7 +2100,9 @@ console.log('PASS: the embedder is reviewed, agreed and run; its values and toke
     const none=await testSays('refused','no listener');
     assert(none.includes('Nothing was sent')&&none.includes('nothing waits')&&none.includes('Start Ollama'),'nothing listens');
     const untrusted=await testSays('refused','untrusted listener');
-    assert(untrusted.includes('Nothing was sent')&&untrusted.includes('Ollama\'s own account')&&!untrusted.includes('Start Ollama'),'another user\'s program');
+    // Words only this reason's text has (#794): mapped back to the general refusal, the test fails.
+    assert(untrusted.includes('Nothing was sent')&&untrusted.includes('Stop that program')&&!untrusted.includes('Check that Ollama is running'),
+      'another user\'s program');
     const unread=await testSays('refused','listeners unread');
     assert(unread.includes('Nothing was sent')&&unread.includes('could not read')&&!unread.includes('Ollama\'s own account'),'the tables unread');
     const older=await testSays('refused');
