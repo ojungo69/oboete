@@ -5592,6 +5592,9 @@ function preserveCreatedSubscriptionDraft(next, mine, action) {
 function mergeProviderSettings(answer, mine, action) {
   const next = formOf(answer);
   if (!next) return next;
+  // What is saved is the answer's, taken before the drafts carried into it: a change still waiting
+  // is a change, and is saved next (Codex on #802).
+  next.savedKey = savedKeyOf(next);
   if (action.op !== 'settings') preserveSettingsDrafts(next, mine);
   next.privacy = mine.privacy;
   next.preference = mine.preference;
@@ -5668,7 +5671,25 @@ function providerOperationFailure(action, path, res, answer, fields, scope) {
   if (action.op === 'enabled') drawSettings();
 }
 
+// One settings write at a time (Codex on #802): a save on its way goes first, and this write then
+// sends with the version that save's answer gave; a change made meanwhile waits for this one.
 async function providerOperation(action, button, body = null, path = '') {
+  if (saveRun) {
+    while (saveRun) await saveRun;
+    if (body) body = JSON.stringify({ ...JSON.parse(body), version: form.version });
+  }
+  let done;
+  saveRun = new Promise((resolve) => { done = resolve; });
+  try {
+    return await providerWrite(action, button, body, path);
+  } finally {
+    saveRun = null;
+    done();
+    saveNext();
+  }
+}
+
+async function providerWrite(action, button, body, path) {
   const mine = form;
   if (settingsMode === 'simple') clearSimpleReceipt();
   const fields = button.closest('.settings');
@@ -6208,10 +6229,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
     form = mine;
     const now = saveBody(true);
     if (!now.body || bodyKey(now.body) !== sent) {
-      form = fresh;
-      const at = saveBody(true);
-      form = mine;
-      Object.assign(mine, { version: fresh.version, saved: fresh.saved, savedSettings: fresh.savedSettings, savedKey: at.body ? bodyKey(at.body) : null });
+      Object.assign(mine, { version: fresh.version, saved: fresh.saved, savedSettings: fresh.savedSettings, savedKey: fresh.savedKey });
       // A value sent only when it changed is compared with what the answer saved, not with what was
       // saved before it (Codex on #802): the period, the backup folder, the judge, search's numbers.
       mine.retention.days = fresh.retention.days;
@@ -7059,15 +7077,14 @@ function drawSettings() {
   save.type = 'button';
   save.hidden = true;
   formAnchor = save;
-  if (f.savedKey === undefined) {
-    const at = saveBody(true);
-    f.savedKey = at.body ? bodyKey(at.body) : null;
-  }
+  if (f.savedKey === undefined) f.savedKey = savedKeyOf(f);
   const portMove = el('button', 'quiet small', t('view_port_move'));
   portMove.type = 'button';
   portMove.dataset.action = 'port.move';
   portMove.addEventListener('click', () => portSave());
-  pagePort.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); portMove.click(); } });
+  pagePort.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); portMove.click(); }
+  });
   // The common settings first and open; the rest folded (DESIGN.md). A new home opens
   // its guide and the resident choice it is to save, and a waiting provider its group.
   const formEl = el('form', null,
@@ -7153,15 +7170,18 @@ function drawSettings() {
   // or number when focus leaves it (so the focus can go back to where it went after the
   // redraw) or on Enter; a button that edits the form (a rule removed, the backup folder reset)
   // after its own click. What does not change the form's body sends nothing.
-  let typed = null;
+  const textual = (c) => c.tagName === 'TEXTAREA' || (c.tagName === 'INPUT' && !['checkbox', 'radio'].includes(c.type));
+  // What is typed is known by its field, so a field the answer of a save drew again while it was
+  // typed in is saved when left, with no change of its own after the redraw (Codex on #802).
+  formEl.addEventListener('input', (event) => { if (textual(event.target)) typedField = event.target.dataset?.field ?? null; });
   formEl.addEventListener('change', (event) => {
     const c = event.target;
-    if (c.tagName === 'TEXTAREA' || (c.tagName === 'INPUT' && !['checkbox', 'radio'].includes(c.type))) { typed = c; return; }
+    if (textual(c)) { typedField = c.dataset?.field ?? null; return; }
     autoSave(c.dataset?.field);
   });
   formEl.addEventListener('focusout', (event) => {
-    if (typed !== event.target) return;
-    typed = null;
+    if (!typedField || typedField !== event.target.dataset?.field) return;
+    typedField = null;
     // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
     // owner goes to answer it.
     if (event.target === pagePort) return;
@@ -7180,7 +7200,7 @@ function drawSettings() {
     if (event.target === pagePort || !['INPUT', 'SELECT'].includes(event.target.tagName)) return;
     event.preventDefault();
     if (event.target.closest('.provider-entry')) return;
-    typed = null;
+    typedField = null;
     autoSave(event.target.dataset?.field);
   });
   formEl.addEventListener('submit', (e) => e.preventDefault());
@@ -7218,10 +7238,29 @@ function bodyKey(body) {
   return JSON.stringify(rest);
 }
 
+function savedKeyOf(f) {
+  const was = form;
+  form = f;
+  try {
+    const at = saveBody(true);
+    return at.body ? bodyKey(at.body) : null;
+  } finally {
+    form = was;
+  }
+}
+
 // The detailed form's anchor for its saves (its hidden Save button), the one drawn last. Saves
 // run one at a time: a change made while one is on its way waits for its answer and then sends
 // that answer's version (Codex, cubic and CodeRabbit on #802).
-let formAnchor = null, saveRun = null, saveAgain = null;
+let formAnchor = null, saveRun = null, saveAgain = null, typedField = null;
+
+// The change that waited for a write on its way is saved now.
+function saveNext() {
+  const again = saveAgain;
+  saveAgain = null;
+  if (again?.port) portSave();
+  else if (again) autoSave(document.activeElement?.dataset?.field ?? null);
+}
 
 function detailedShown() {
   return Boolean(form && formAnchor && view === 'settings' && settingsMode === 'detailed');
@@ -7274,10 +7313,7 @@ async function commitSave(next, autosaved) {
   // The save's redraw keeps the focus where the owner has it; the field it went to is given it
   // back only when nothing on the page has it (Codex on #802).
   if (!$('panel').contains(document.activeElement)) focusBack(next ? { field: next } : null);
-  const again = saveAgain;
-  saveAgain = null;
-  if (again?.port) portSave();
-  else if (again) autoSave(document.activeElement?.dataset?.field ?? null);
+  saveNext();
 }
 
 // Every change waiting for its confirmation, said together and confirmed together (CodeRabbit on

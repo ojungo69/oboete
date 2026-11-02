@@ -603,7 +603,7 @@ const settings=(mode,extra={})=>({version:'v1',first_run:false,resident_supporte
   ranges:{session_start_chars:[0,20000],per_prompt_chars:[0,5000],per_prompt_wait_ms:[100,3000],correction_chars:[0,2000],window_tokens:[1000,100000],
     idle_minutes:[1,120],paid_usd_per_month:[0,null],daily_budget:[1,1000],timeout_s:[1,600],view_port:[1,65535],retention_days:[1,36500],my_work_calls:[1,10000]},
   my_work:{curate:false,calls_a_day:100,estimate:null},view_runtime:{port:17373,mode},...extra});
-vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft};',ctx);
+vm.runInContext('globalThis.w6={formOf,saveBody,applySavedSettings,viewDraft:()=>viewDraft,providerOperation};',ctx);
 const {w6}=ctx;
 const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
 const posted=[];let answers=[];
@@ -1040,6 +1040,45 @@ console.log('PASS: the retention period');
   }
   await settle();
   assert.equal(posted.length,0,'and saves nothing');
+  // Round 3 of #802. A field the answer of a save drew again while it was typed in is saved when
+  // left, with no change of its own after the redraw (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let redrawn;answers=[new Promise(resolve=>{redrawn=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  field('inject.per_prompt_chars').focus();typeIn(field('inject.per_prompt_chars'),'1200');fire('input',{target:field('inject.per_prompt_chars')});
+  redrawn(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(field('inject.per_prompt_chars').value,'1200','what was typed is drawn again');
+  answers=[json(settings('resident',{version:'v3',worker:{resident:false},inject:{...settings('resident').inject,per_prompt_chars:1200}}))];
+  fire('focusout',{target:field('inject.per_prompt_chars'),relatedTarget:null});await settle();
+  assert.equal(sent().at(-1).inject?.per_prompt_chars,1200,'left with no change after the redraw, it is saved');
+  // A provider's write waits for a save on its way and sends that answer's version; a change made
+  // while the write is on its way waits for it and is saved after it (Codex).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  let saving;answers=[new Promise(resolve=>{saving=resolve;})];
+  tick(field('worker.resident'),false);fire('change',{target:field('worker.resident')});
+  const write=w6.providerOperation({op:'enabled',selector:{source:'config',name:'made-up'},enabled:false},action('port.move'));
+  await settle();
+  assert.equal(posted.length,1,'a provider write waits for the save on its way');
+  let writing;answers=[new Promise(resolve=>{writing=resolve;})];
+  saving(json(settings('resident',{version:'v2',worker:{resident:false}})));await settle();await settle();
+  assert.equal(posted.length,2);assert.equal(posted[1].url,'/api/providers');
+  assert.equal(JSON.parse(posted[1].body).version,'v2','and sends with the version that save gave');
+  tick(field('summary.curate'),true);fire('change',{target:field('summary.curate')});await settle();
+  assert.equal(posted.length,2,'a change made while the provider write is on its way waits for it');
+  answers=[json(settings('resident',{version:'v4',worker:{resident:false},summary:{...settings('resident').summary,curate:true}}))];
+  writing(json(settings('resident',{version:'v3',worker:{resident:false}})));await write;await settle();
+  assert.equal(posted.length,3);assert.equal(sent().at(-1).summary?.curate,true);
+  assert.equal(sent().at(-1).version,'v3','and is saved after it, with the version it gave');
+  // The port's Enter that ends an input method's composition moves nothing (CodeRabbit).
+  f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;
+  typeIn(field('view.port'),'17400');
+  for(const composing of [{isComposing:true},{keyCode:229}]){
+    let taken=false;const ev={key:'Enter',target:field('view.port'),preventDefault(){taken=true;},...composing};
+    for(const cb of field('view.port').listeners.keydown||[])cb(ev);
+    assert.equal(taken,false,'the port\'s composition Enter is left alone');
+  }
+  await settle();
+  assert.equal(posted.length,0,'and moves nothing');
   document.querySelectorAll=pageControls;
   console.log('PASS: decision 69 (69b-1): each change saves at once, the port by its button, three changes asked first');
 }
