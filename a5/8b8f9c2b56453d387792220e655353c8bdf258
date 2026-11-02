@@ -1,0 +1,29 @@
+assets/viewer/app.js
+  s_f7d8663ba9ca22::t_016d9ce8f8873f 974-975,3397,4641-4644,5435,5645-5646,5698,5700,5705,6270,6315,6557-6559,6563,6565,6569-6634,6829,6933,6937,6949,7230,7740,9821
+docs/settings-redo.md
+  s_f7d8663ba9ca22::t_55186be2cc8fd3 34-35,101-108
+src/providers_db.rs
+  s_f7d8663ba9ca22::t_3e1dc2dafe5f8e 279-299
+src/settings.rs
+  s_f7d8663ba9ca22::t_c148bd4a9f8e38 112-160,196-199,201,257,3029-3032,3063-3067,3084-3087,4181-4252
+src/testdata/viewer-readiness/test.mjs
+  s_f7d8663ba9ca22::t_ee0ad52037fd73 83,87-88,96,2427-2439,2468-2578
+src/view.rs
+  s_f7d8663ba9ca22::t_31a1c25f8c3899 1943-1951,6245,6269-6309
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a58b8f9c2b56453d387792220e655353c8bdf258",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
