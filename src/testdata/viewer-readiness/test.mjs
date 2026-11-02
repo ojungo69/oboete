@@ -1948,6 +1948,34 @@ console.log('PASS: the caps\' No cap switches');
     assert.equal(general('judge.key').value,'','a judge key typed for one destination is not put into another\'s field');
     assert(others.every(s=>!(JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')).includes(s)),'in no form, storage or request');
     ctx.localStorage.setItem=setItem;
+    // #810: a privacy action pressed from the keyboard gives the focus back once its part is drawn
+    // again in place: Refresh to Refresh, an exclusion to its row's button, a place undone whose
+    // row left its list to the folder field; not when the focus went elsewhere meanwhile. A browser
+    // takes the focus off a control disabled or made inert under it: `blur` does so here.
+    const blur=()=>{document.activeElement=null;};
+    settingsNow=ai(['alpha']);
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,refreshButton(),'Refresh has the focus back, drawn again');
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();simple('never.folder').focus();givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,simple('never.folder'),'the focus moved meanwhile stays where it went');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({ok:true})];
+    simple('exclude:r2').focus();simple('exclude:r2').click();blur();await settled();
+    givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>r.selector==='r2'?{...r,excluded:true}:r)}));await settled();
+    assert.deepEqual([posted.at(-1).url,document.activeElement===simple('exclude:r2')],['/api/privacy/exclude',true],
+      'an exclusion has it back on its row, drawn again');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:false})];
+    simple('never:repo:r1').focus();simple('never:repo:r1').click();blur();await settled();
+    givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>({...r,never_recorded:false}))}));await settled();
+    assert.deepEqual([posted.at(-1).url,simple('never:repo:r1'),Boolean(simple('never-more:repo:r1')),document.activeElement===simple('never.folder')],
+      ['/api/privacy/capture',undefined,true,true],'a place undone, whose row moved to the list in More settings, gives it to the folder field');
+    document.activeElement=null;
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;

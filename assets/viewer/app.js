@@ -5009,12 +5009,17 @@ function privacySection(f) {
   const state = f.privacy;
   const refresh = el('button', 'quiet small', t('privacy_refresh'));
   refresh.type = 'button';
+  refresh.dataset.simpleFocus = 'privacy.refresh';
   refresh.addEventListener('click', async () => {
+    const had = document.activeElement === refresh;
     refresh.disabled = true;
     // The status line is cleared only when nothing was said on it since the click: a confirmation
     // asked meanwhile stays (CodeRabbit on #806).
     const said = statusWrites;
-    try { if (await refreshPrivacy(f) && statusWrites === said) setStatus(''); } finally { refresh.disabled = false; }
+    try { if (await refreshPrivacy(f) && statusWrites === said) setStatus(''); } finally {
+      refresh.disabled = false;
+      if (had && currentSettings(f)) focusAgain(refresh, 'privacy.refresh', 'privacy.refresh');
+    }
   });
   const rows = (state.repositories || []).map((repo) => {
     // A repository never recorded is never sent: its own row takes that back first.
@@ -5022,7 +5027,9 @@ function privacySection(f) {
     const action = el('button', 'quiet small', t(repo.excluded ? 'privacy_undo' : 'privacy_exclude'));
     action.type = 'button';
     action.dataset.selector = repo.selector;
+    action.dataset.simpleFocus = `exclude:${repo.selector}`;
     action.addEventListener('click', async () => {
+      const had = document.activeElement === action;
       const fields = action.closest('.settings');
       fields.inert = true;
       action.disabled = true;
@@ -5037,7 +5044,11 @@ function privacySection(f) {
         }
       } catch {
         if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
-      } finally { fields.inert = false; action.disabled = false; }
+      } finally {
+        fields.inert = false;
+        action.disabled = false;
+        if (had && currentSettings(f)) focusAgain(action, action.dataset.simpleFocus, 'privacy.refresh');
+      }
     });
     return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t(repo.excluded ? 'privacy_excluded' : 'privacy_allowed')), action);
   });
@@ -5067,6 +5078,7 @@ function captureSection(f, simple = false) {
     return section;
   }
   const write = async (button, body, receipt) => {
+    const had = document.activeElement === button;
     const fields = button.closest('.settings');
     fields.inert = true;
     button.disabled = true;
@@ -5086,26 +5098,32 @@ function captureSection(f, simple = false) {
       if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
     } catch {
       if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
-    } finally { fields.inert = false; button.disabled = false; }
+    } finally {
+      fields.inert = false;
+      button.disabled = false;
+      if (had && currentSettings(f)) focusAgain(button, button.dataset.simpleFocus, simple ? 'never.folder' : 'never.pattern.add');
+    }
   };
-  const row = (label, never, onClick) => {
+  const row = (label, never, onClick, key) => {
     const action = el('button', 'quiet small', t(never ? 'never_undo' : 'never_exclude'));
     action.type = 'button';
+    action.dataset.simpleFocus = key;
     action.addEventListener('click', () => onClick(action));
     return el('li', null, el('p', 'text', label), el('p', 'desc', t(never ? 'never_on' : 'never_off')), action);
   };
   const repos = (state.repositories || []).filter(repo => Boolean(repo.never_recorded) === simple).map((repo) => row(repo.label, repo.never_recorded, (action) =>
     write(action, { selector: repo.selector, undo: !!repo.never_recorded },
-      t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label }))));
+      t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label })), `${simple ? 'never' : 'never-more'}:repo:${repo.selector}`));
   const folders = (state.folders || []).map((folder) => row(folder.label, true, (action) =>
-    write(action, { folder_selector: folder.selector, undo: true }, t('never_undone'))));
+    write(action, { folder_selector: folder.selector, undo: true }, t('never_undone')), `never:folder:${folder.selector}`));
   // Parity row 14: folder names and claude-mem's patterns.
   const patterns = (state.patterns || []).map((pattern) => row(pattern.label, true, (action) =>
-    write(action, { pattern_selector: pattern.selector, undo: true }, t('never_undone'))));
+    write(action, { pattern_selector: pattern.selector, undo: true }, t('never_undone')), `never:pattern:${pattern.selector}`));
   if (simple) {
     const folder = input('text', f.neverFolder || '', '', 'never.folder', (v) => { f.neverFolder = v; });
     const add = el('button', 'quiet small', t('never_folder_add'));
     add.type = 'button';
+    add.dataset.simpleFocus = 'never.folder.add';
     add.addEventListener('click', () => {
       if (add.disabled) return;
       // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
@@ -5130,6 +5148,7 @@ function captureSection(f, simple = false) {
   const pattern = input('text', f.neverPattern || '', '', 'never.pattern', (v) => { f.neverPattern = v; });
   const addPattern = el('button', 'quiet small', t('never_pattern_add'));
   addPattern.type = 'button';
+  addPattern.dataset.simpleFocus = 'never.pattern.add';
   addPattern.addEventListener('click', () => {
     if (addPattern.disabled) return;
     if (!pattern.value.trim()) { setStatus(t('capture_pattern'), true, lang); return; }
@@ -6540,6 +6559,16 @@ function simpleFocus(key) {
   // 69; Codex, cubic and CodeRabbit on #801). Each fold's toggle keeps it open through redraws.
   for (let fold = next?.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
   next?.focus({ preventScroll: true });
+}
+
+// #810: a control the browser took the focus off, disabled or made inert while its read or write was
+// on its way, gives it back once its part is drawn again in place: to the control of the same
+// name, or to `fallback` when it is gone (a row that left its list). Not when the focus went
+// elsewhere meanwhile; `was`, the control as pressed, still holds it where nothing moves it off.
+function focusAgain(was, key, fallback) {
+  if (![null, document.body, was].includes(document.activeElement)) return;
+  const drawn = [...$('panel').querySelectorAll('button, input, select')].some((n) => n.dataset.simpleFocus === key && !n.disabled);
+  simpleFocus(drawn ? key : fallback);
 }
 
 // A link to a detailed control: the folds around it opened, its group's More settings among them,
