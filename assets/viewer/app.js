@@ -4165,12 +4165,13 @@ async function showSettings() {
   // The privacy state is read once the page is drawn: on a large store its read of raw.db takes
   // most of a second, the rest of Settings a few hundredths (decision 69, 69b-2b).
   const [s, hidden] = await Promise.all([api('settings'), api('hidden').catch(() => null)]);
-  s.privacy = privacyPending();
   s.hidden = hidden;
   return () => {
     recoveryDraft.preview=null;
     recoveryDraft.confirmed=false;
     form = formOf(s);
+    // Being read, on the form only: what is saved never says so (cubic and CodeRabbit on #806).
+    if (form) form.privacy = privacyPending();
     drawSettings();
     setStatus('');
     void refreshPrivacy(form);
@@ -4949,10 +4950,15 @@ function hiddenSection(f) {
 async function refreshPrivacy(f) {
   if (!f) return false;
   const mine = f.privacyRead = (f.privacyRead || 0) + 1;
+  const asked = f.privacy;
   const state = await api('privacy').catch(privacyUnavailable);
-  if (!currentSettings(f) || f.privacyRead !== mine) return false;
-  f.privacy = state;
-  if (!f.hashing) drawSettings();
+  // A form drawn from this one since (a provider's write, search read again, a confirmation
+  // cancelled) shows the state this read was for while it is on its way, and takes the read
+  // (Codex and cubic on #806).
+  const to = currentSettings(f) ? f : view === 'settings' && asked?.pending && form?.privacy === asked ? form : null;
+  if (!to || (to === f && f.privacyRead !== mine)) return false;
+  to.privacy = state;
+  if (!to.hashing) drawSettings();
   return state.available === true;
 }
 
@@ -7264,7 +7270,14 @@ function askHeld(held, confirmed) {
   no.type = 'button';
   no.dataset.action = 'held.cancel';
   // Cancelled, the form goes back to what is saved.
-  no.addEventListener('click', () => { if (form !== mine) return; form = formOf(mine.savedSettings); drawSettings(); setStatus(''); });
+  no.addEventListener('click', () => {
+    if (form !== mine) return;
+    // What is saved holds no privacy state: the one read stays (cubic and CodeRabbit on #806).
+    form = formOf(mine.savedSettings);
+    form.privacy = mine.privacy;
+    drawSettings();
+    setStatus('');
+  });
   setStatus(held.map((h) => t(h.key, { id: h.id ?? '' })).join(' '), true, lang, 0, el('span', 'actions', yes, no));
 }
 
