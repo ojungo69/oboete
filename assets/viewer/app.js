@@ -4995,12 +4995,12 @@ function renderPrivacy(f) {
   if (!panel) return;
   const parts = [['never-record', () => captureSection(f, true)], ['never-more', () => captureSection(f)],
     ['privacy-state', () => privacySection(f)]].map(([part, make]) => [panel.querySelector(`.${part}`), make]).filter(([node]) => node);
-  // The focus in a part drawn again goes back by the focus rule, or, on a control with no name (a
-  // fold's heading, a link), to the control at the same place in it (Codex's review of #810).
-  const focusables = (node) => [...node.querySelectorAll('button, input, select, textarea, summary')];
+  // The focus in a part drawn again goes back by the focus rule, or, on a fold's heading, to the
+  // heading of the same fold: each of the parts' controls has a name, and a place in a list whose
+  // length the read changes would name another control (Codex's review of #810).
   const at = parts.find(([node]) => node.contains(document.activeElement))?.[0];
   const keep = at ? focusKeep() : null;
-  const place = at && !keep ? focusables(at).indexOf(document.activeElement) : -1;
+  const fold = at && !keep && document.activeElement.tagName === 'SUMMARY' ? document.activeElement.parentElement?.className : null;
   for (const [node, make] of parts) {
     const drawn = make();
     node.hidden = drawn.hidden;
@@ -5008,7 +5008,7 @@ function renderPrivacy(f) {
   }
   panel.querySelector('.group-s-privacy')?.querySelector('.group-desc')?.replaceChildren(privacyGroupState(f));
   if (keep) focusBack(keep);
-  else if (place >= 0) focusables(at)[place]?.focus({ preventScroll: true });
+  else if (fold) [...at.querySelectorAll('summary')].find((n) => n.parentElement?.className === fold)?.focus({ preventScroll: true });
 }
 
 function privacySection(f) {
@@ -6586,6 +6586,8 @@ function focusAgain(was, fallback) {
 function detailedSettingsLink(key, selector, vars = {}, provider = null) {
   const button = el('button', 'quiet small simple-link', t(key, vars));
   button.type = 'button';
+  // Named, so a redraw gives the focus back to it (#810): by its entry, or by the name it says.
+  button.dataset.simpleFocus = `link:${key}:${provider ? selectorKey(provider.selector) : vars.name ?? ''}`;
   button.addEventListener('click', () => {
     if (provider) provider.editing = true;
     drawSettings();

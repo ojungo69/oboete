@@ -1997,6 +1997,19 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert(document.activeElement===neverBlock().querySelectorAll('summary')[0]&&document.activeElement!==refreshButton(),
       'a fold heading the focus moved to keeps it, drawn again');
+    // So do the fold's heading and the link after it, when the read changes how many rows come
+    // before them (Codex's review of #810).
+    const twoPlaces={...privacy,folders:[{label:'/home/made-up-user/kept-folder',selector:'f9'}]};
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();
+    simple('link:simple_never_more:').focus();
+    givePrivacy(json(twoPlaces));await settled();
+    assert.equal(document.activeElement,simple('link:simple_never_more:'),'the link the focus moved to keeps it, the rows before it grown');
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();
+    neverBlock().querySelectorAll('summary')[0].focus();
+    givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,neverBlock().querySelectorAll('summary')[0],'and the fold\'s heading, the rows shrunk');
     // The folder's own button gives it back to itself; a place whose row left the list, to the folder
     // field; in More settings, to the pattern's button.
     [privacyAnswer,givePrivacy]=later();
