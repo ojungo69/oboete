@@ -1503,6 +1503,63 @@ assert(text(rowOf('groq-20b')).includes('と同じキーを使います'),'a lat
 f=ctx.simpleUi.formOf(plain(saved));f.chain.reverse();ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert(keyInput(rowOf('groq')),'the first saved entry keeps the key field under a pending detailed order');
 assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later entry no key field');
+// Decision 69: the simple page's groups fold as claude-mem's settings do. What agents are given
+// and the AI for summaries open first; each closed group says on its heading what it holds now.
+// The AI in use are one line each, in the order they are tried; those turned off fold together.
+{
+  const row=(name,on)=>({name,on,key:'ok',effective_model:'model-'+name,model_rule:'any',model:null,daily_budget:null,timeout_s:null,differs:[]});
+  const provider=(name,index)=>({...saved.providers[0],name,selector:{source:'builtin',index}});
+  saved={...plain(saved),usd_this_month:0.385626,summary:{...saved.summary,curate:true},
+    inject:{...saved.inject,session_start:true,per_prompt:false},redaction:{...saved.redaction,enabled:true},
+    my_work:{...saved.my_work,curate:false},
+    privacy:{available:true,repositories:[{label:'github.com/acme/old',selector:'r1',never_recorded:true},
+      {label:'github.com/acme/live',selector:'r2',never_recorded:false}],folders:[{label:'scratch',selector:'f1'}],
+      patterns:[{label:'tmp-*',selector:'p1'}],rescan:{state:'idle',processed:null,total:null}},
+    chain:[row('groq',true),row('groq-20b',false),row('openrouter',true)],
+    providers:[provider('groq',0),provider('groq-20b',1),provider('openrouter',2)]};
+  ctx.ui.setForm(ctx.simpleUi.formOf(plain(saved)));ctx.ui.setLang('ja');ctx.ui.drawSettings();
+  const groups=()=>panel.querySelectorAll('.settings-group');
+  const titleOf=g=>text(g.querySelector('.group-title')),stateOf=g=>text(g.querySelector('.group-desc'));
+  assert.deepEqual(groups().map(titleOf),['エージェントに渡す記憶','要約に使う AI','AI が書く My Work','意味で記憶を探す',
+    '記録しないものと秘密','接続するエージェント'],'what is given first, then the AI, as the owner asked');
+  assert.deepEqual(groups().map(g=>g.open),[true,true,false,false,false,false],'two groups open, the rest closed');
+  assert(stateOf(groups()[0]).includes('セッション開始時：オン')&&stateOf(groups()[0]).includes('依頼ごと：オフ'),stateOf(groups()[0]));
+  assert(stateOf(groups()[1]).includes('2 個')&&stateOf(groups()[1]).includes('$0.39'),stateOf(groups()[1]));
+  assert(stateOf(groups()[2]).includes('オフ'),'My Work says it is off');
+  assert(stateOf(groups()[4]).includes('3 か所')&&stateOf(groups()[4]).includes('オン'),stateOf(groups()[4]));
+  assert(text(panel).includes('$0.39')&&!text(panel).includes('0.385626'),'the month\'s spend in cents');
+  assert.deepEqual(panel.querySelectorAll('.simple-provider').map(node=>node.dataset.providerName),['groq','openrouter','groq-20b'],
+    'the AI in use first, in their order; the one turned off after them');
+  const unused=panel.querySelector('.simple-unused');
+  assert(text(unused.querySelector('summary')).includes('使っていない AI (1)'),text(unused.querySelector('summary')));
+  assert.deepEqual(unused.querySelectorAll('.simple-provider').map(node=>node.dataset.providerName),['groq-20b']);
+  assert.equal(unused.open,false,'folded until opened');
+  assert(!panel.querySelectorAll('button').some(node=>node.dataset.simpleFocus?.startsWith('move:groq-20b')),'an AI turned off has no place to move');
+  assert.deepEqual(panel.querySelectorAll('.simple-order').map(text),['1','2'],'the AI in use are numbered in their order');
+  // The catalog's "find it in the list" opens the folds around an AI turned off and focuses its
+  // switch (Codex, cubic and CodeRabbit on #801).
+  const listed=panel.querySelector('.simple-catalog').querySelectorAll('li').find(li=>text(li.querySelector('strong'))==='Groq・GPT OSS 20B');
+  listed.querySelector('button').click();
+  const offRow=panel.querySelector('.simple-unused').querySelectorAll('.simple-provider').find(node=>node.dataset.providerName==='groq-20b');
+  assert.equal(panel.querySelector('.simple-unused').open,true,'the AI not in use open');
+  assert.equal(offRow.querySelector('details').open,true,'and the AI\'s own line');
+  assert.equal(document.activeElement?.dataset.simpleFocus,'on:groq-20b','its switch has the focus');
+  panel.querySelector('.simple-unused').open=false;offRow.querySelector('details').open=false;
+  const places=panel.querySelector('.simple-places').parentElement;
+  assert.equal(places.tagName,'DETAILS');assert(text(places.querySelector('summary')).includes('3 か所'));assert.equal(places.open,false);
+  // Down from the first skips the AI turned off between them.
+  panel.querySelectorAll('button').find(node=>node.dataset.simpleFocus==='move:groq:1').click();await settle();
+  assert.deepEqual(requests.at(-1).body.chain.map(entry=>entry.name),['openrouter','groq-20b','groq'],'the next AI in use takes its place');
+  // A group opened stays open through the redraws that a poll or a save brings.
+  const myWorkGroup=groups()[2];myWorkGroup.open=true;myWorkGroup.isConnected=true;
+  for(const cb of myWorkGroup.listeners.toggle||[])cb({target:myWorkGroup});
+  ctx.ui.drawSettings();
+  assert.equal(groups()[2].open,true,'opened, it stays open');
+  ctx.ui.setLang('en');ctx.ui.drawSettings();
+  assert.deepEqual(groups().map(titleOf),['What agents are given','AI for summaries','My Work, written by AI','Search by meaning',
+    'Privacy','Agents']);
+  assert(stateOf(groups()[1]).includes('2 in use')&&stateOf(groups()[1]).includes('$0.39'),stateOf(groups()[1]));
+}
 vm.runInContext("settingsMode='detailed';",ctx);
 console.log('PASS: simple status/models/catalog, remembered view, seven JA/EN blocks, isolated autosaves and masking confirmation');
 }

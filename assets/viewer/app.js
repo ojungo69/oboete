@@ -1022,6 +1022,18 @@ const TEXT = {
   simple_mask_on: ['Mask secrets', '機密情報を隠す'],
   simple_mask_confirm: ['Turn masking off', '確認してマスキングをオフにする'],
   simple_agents_h: ['Agents', '接続するエージェント'],
+  simple_privacy_h: ['Privacy', '記録しないものと秘密'],
+  simple_state_on: ['on', 'オン'],
+  simple_state_off: ['off', 'オフ'],
+  simple_state_inject: ['At session start: {start} · With each prompt: {prompt}', 'セッション開始時：{start} · 依頼ごと：{prompt}'],
+  simple_state_ai: ['{n} in use, tried in this order · {usd} used this month', 'オンの AI {n} 個を順に使います · 今月 {usd}'],
+  simple_state_ai_no_spend: ['{n} in use, tried in this order', 'オンの AI {n} 個を順に使います'],
+  simple_state_ai_off: ['No summaries are written', '要約は作りません'],
+  simple_state_my_work: ['Written with AI: {state}', 'AI で書く：{state}'],
+  simple_state_privacy: ['{n} places never recorded · Masking of secrets: {mask}', '記録しない場所 {n} か所 · 機密情報のマスキング：{mask}'],
+  simple_state_privacy_mask: ['Masking of secrets: {mask}', '機密情報のマスキング：{mask}'],
+  simple_unused: ['AI not in use ({n})', '使っていない AI ({n})'],
+  simple_never_count: ['{n} places', '{n} か所'],
   simple_agents_desc: ['Check whether each agent is connected to record activity and receive memories.', '作業の記録と記憶の受け渡しのために、各エージェントが接続されているか確認できます。'],
   simple_agent_connected: ['Connected', '接続されています'],
   simple_agent_disconnected: ['Not connected', '接続されていません'],
@@ -5120,8 +5132,11 @@ function captureSection(f, simple = false) {
     folder.addEventListener('keydown', event => {
       if (event.key === 'Enter') { event.preventDefault(); if (!add.disabled) add.click(); }
     });
+    // Decision 69: the places fold under their count; a long list made most of the page's height.
+    const placed = repos.length + folders.length + patterns.length;
     const section = simpleBlock('never',
-      repos.length || folders.length || patterns.length ? el('ul', 'simple-places', ...repos, ...folders, ...patterns) : el('p', 'desc', t('simple_never_empty')),
+      placed ? smallFold('s-places', 'simple-places-fold', t('simple_never_count', { n: placed }),
+        el('ul', 'simple-places', ...repos, ...folders, ...patterns)) : el('p', 'desc', t('simple_never_empty')),
       el('label', 'field', el('span', null, t('never_folder_input')), folder), add,
       detailedSettingsLink('simple_never_more', '.never-record'));
     section.className += ' never-record';
@@ -6472,6 +6487,9 @@ function simpleFocus(key) {
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
   if (key === 'catalog.save' && simpleKeyName) keys.push(`key:${simpleKeyName}`);
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
+  // A control inside a closed fold cannot take the focus: open the folds around it first (decision
+  // 69; Codex, cubic and CodeRabbit on #801). Each fold's toggle keeps it open through redraws.
+  for (let fold = next?.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
   next?.focus({ preventScroll: true });
 }
 
@@ -6512,12 +6530,27 @@ function detailedSettingsLink(key, selector, vars = {}, provider = null) {
 }
 
 function simpleBlock(name, ...children) {
+  return simpleSection(name, true, children);
+}
+
+// A block that is its group's whole body: the group's heading names it (decision 69).
+function simpleBody(name, ...children) {
+  return simpleSection(name, false, children);
+}
+
+function simpleSection(name, headed, children) {
   const receipt = el('span', 'simple-saved', simpleReceipt === name ? t('simple_saved') : '');
   receipt.setAttribute('role', 'status');
   const section = el('section', 'simple-block', el('div', 'simple-block-heading',
-    el('h3', null, t(`simple_${name}_h`)), receipt), el('p', 'desc', t(`simple_${name}_desc`)), ...children);
+    headed ? el('h3', null, t(`simple_${name}_h`)) : null, receipt), headed ? el('p', 'desc', t(`simple_${name}_desc`)) : null, ...children);
   section.dataset.simpleBlock = name;
   return section;
+}
+
+// The month's spend as the simple page says it: in cents, and under a cent as less than one.
+function usdCents(v) {
+  const money = (x) => new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x);
+  return v > 0 && v < 0.01 ? `<${money(0.01)}` : money(v);
 }
 
 // Required whole-settings fields come from the saved response. A simple change must not also
@@ -6562,7 +6595,9 @@ function simpleLabel(name) {
   return catalog ? t(catalog.label) : name;
 }
 
-function simpleProviderRow(f, row, index) {
+// One AI of the chain: a line that opens on what to change (decision 69). `position` is its place
+// among the AI in use, null for one turned off, which has no place to move to.
+function simpleProviderRow(f, row, index, chain, position) {
   const label = simpleLabel(row.name);
   const catalog = AI_CATALOG.find(entry => entry.name === row.name);
   // Entries that read one key file (Groq's three) take the key on the first of them.
@@ -6572,13 +6607,15 @@ function simpleProviderRow(f, row, index) {
   const provider = providers[0];
   const on = row.on;
   const status = simpleProviderStatus({ ...row, on }, f.stopped);
-  const arrows = [-1, 1].map(direction => {
+  const arrows = position === null ? [] : [-1, 1].map(direction => {
     const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
     button.type = 'button';
     button.setAttribute('aria-label', `${t(direction < 0 ? 'up' : 'down')}: ${label}`);
     button.dataset.simpleFocus = `move:${row.name}:${direction}`;
-    const to = index + direction;
-    button.disabled = to < 0 || to >= f.chain.length;
+    // The next AI in use that way: one turned off between them is not shown among them.
+    let to = index + direction;
+    while (to >= 0 && to < chain.length && !chain[to].on) to += direction;
+    button.disabled = to < 0 || to >= chain.length;
     button.addEventListener('click', () => void simpleSettingsSave(button, body => {
       [body.chain[index], body.chain[to]] = [body.chain[to], body.chain[index]];
     }, (next, answer) => {
@@ -6589,7 +6626,8 @@ function simpleProviderRow(f, row, index) {
   });
   const detail = () => detailedSettingsLink('simple_entry_detail', '.provider-entries', { name: label }, provider);
   const models = simpleProviderModels(row, catalog?.models || []);
-  let model = el('p', 'simple-model', row.effective_model ?? t('simple_model_default'));
+  // A model the entry fixes is named on its line alone (decision 69).
+  let model = null;
   if (row.model_rule !== 'fixed') {
     const select = el('select', null, ...models.map(model => {
       const option = el('option', null, model); option.value = model; return option;
@@ -6616,9 +6654,11 @@ function simpleProviderRow(f, row, index) {
     resume.dataset.simpleFocus = `resume:${row.name}`;
     resume.addEventListener('click', () => void resumeProvider(row.name, resume));
   }
-  const item = el('li', 'simple-provider',
-    el('div', 'simple-provider-heading', el('h4', null, label),
-      el('span', `simple-state ${status}`, t(`simple_status_${status.replaceAll('-', '_')}`))),
+  const needs = row.key === 'missing' || simpleKeyName === row.name || Boolean(resume);
+  const line = el('summary', 'simple-provider-line', position === null ? null : el('span', 'simple-order', String(position)),
+    el('span', 'simple-provider-name', label), el('span', 'simple-provider-model', row.effective_model ?? t('simple_model_default')),
+    el('span', `simple-state ${status}`, t(`simple_status_${status.replaceAll('-', '_')}`)));
+  const fold = el('details', 'simple-provider-fold', line,
     el('div', 'simple-provider-controls',
       simpleToggle(on, `on:${row.name}`, t('simple_ai_on', { name: label }),
         (button, value) => void simpleProviderToggle(row.name, value, button), t('simple_use')),
@@ -6629,6 +6669,11 @@ function simpleProviderRow(f, row, index) {
       : provider && (row.key === 'missing' || simpleKeyName === row.name)
         ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported'))) : null,
     resume, provider ? providerTest(provider, true) : null, detail());
+  // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
+  const key = `ai:${row.name}`;
+  fold.open = groupOpen.get(key) ?? needs;
+  fold.addEventListener('toggle', () => { if (fold.isConnected) groupOpen.set(key, fold.open); });
+  const item = el('li', 'simple-provider', fold);
   item.dataset.providerName = row.name;
   return item;
 }
@@ -6641,7 +6686,8 @@ function simpleCatalog(f) {
     choose.addEventListener('click', () => {
       if (listed) {
         const row = [...$('panel').querySelectorAll('.simple-provider')].find(row => row.dataset.providerName === entry.name);
-        row?.scrollIntoView?.({ block: 'center' }); simpleFocus(`on:${entry.name}`); return;
+        // Opened before it is scrolled to: an AI turned off waits in a closed fold.
+        simpleFocus(`on:${entry.name}`); row?.scrollIntoView?.({ block: 'center' }); return;
       }
       f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0] });
       f.simpleCatalog = entry;
@@ -6785,21 +6831,47 @@ function drawSimpleSettings(panel, f) {
   confirm.addEventListener('click', () => saveMask(confirm, false));
   const cancel = el('button', 'quiet', t('simple_cancel'));
   cancel.type = 'button'; cancel.addEventListener('click', () => { f.simpleMaskingOff = false; drawSettings(); simpleFocus('redaction.enabled'); });
+  // Decision 69: the groups fold as claude-mem's settings do, what agents are given and the AI
+  // for summaries open first; a closed group's heading says what it holds now. The AI in use
+  // are one line each in the order they are tried, those turned off folded together.
+  const s = f.savedSettings;
+  const state = (on) => t(on ? 'simple_state_on' : 'simple_state_off');
+  const used = chain.filter(row => row.on), unused = chain.filter(row => !row.on);
+  const spent = f.usd_this_month === null ? null : usdCents(f.usd_this_month);
+  let aiState = t('simple_state_ai_off');
+  if (s.summary.curate) aiState = spent === null ? t('simple_state_ai_no_spend', { n: used.length }) : t('simple_state_ai', { n: used.length, usd: spent });
+  const privacy = f.privacy;
+  const places = privacy?.available ? (privacy.repositories || []).filter(repo => repo.never_recorded).length
+    + (privacy.folders || []).length + (privacy.patterns || []).length : null;
+  const mask = state(s.redaction?.enabled !== false);
+  const searchKey = { none: 'none', local: 'local', 'workers-ai': 'workers' }[f.embedding?.provider] ?? 'none';
   // `append` writes an absent part as the text "null": leave it out, as the detailed page does.
   panel.append(...present([el('p', 'lead', t('simple_intro')),
     !ready ? el('p', 'simple-empty', t('simple_no_ai')) : null,
-    simpleBlock('ai', curate, el('ol', 'simple-providers', ...chain.map((row, i) => simpleProviderRow(f, row, i))), simpleCatalog(f)),
-    simpleBlock('my_work', myWorkEstimate(f.my_work.estimate), myWork),
-    simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
-      el('p', 'spend', f.usd_this_month === null ? t('spend_unavailable') : t('simple_spent', { usd: usdValue(f.usd_this_month) }))),
-    noCap, capWarning),
-    f.embedding ? simpleBlock('search', embeddingChoice(f, true)) : null,
-    simpleBlock('inject', ...inject), captureSection(f, true),
-    simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
-      el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
-    simpleBlock('agents', el('div', 'simple-agent-inventory', simpleAgents())),
-    // Only while something is removed, to bring it back from here too.
-    f.hidden?.items?.length ? hiddenSection(f, true) : null]));
+    foldGroup('s-inject', true, t('simple_inject_h'),
+      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }), simpleBody('inject', ...inject)),
+    foldGroup('s-ai', true, t('simple_ai_h'), aiState,
+      simpleBody('ai', el('p', 'desc', t('simple_ai_desc')), curate,
+        el('ol', 'simple-providers', ...used.map((row, i) => simpleProviderRow(f, row, chain.indexOf(row), chain, i + 1))),
+        unused.length ? smallFold('s-unused', 'simple-unused', t('simple_unused', { n: unused.length }),
+          el('ul', 'simple-providers', ...unused.map(row => simpleProviderRow(f, row, chain.indexOf(row), chain, null)))) : null,
+        simpleCatalog(f)),
+      simpleBlock('spending', el('div', 'spending-cap', el('label', 'field', el('span', null, t('simple_limit')), cap),
+        el('p', 'spend', spent === null ? t('spend_unavailable') : t('simple_spent', { usd: spent }))),
+      noCap, capWarning)),
+    foldGroup('s-my_work', false, t('simple_my_work_h'), t('simple_state_my_work', { state: state(s.my_work.curate) }),
+      simpleBody('my_work', myWorkEstimate(f.my_work.estimate), myWork)),
+    f.embedding ? foldGroup('s-search', false, t('simple_search_h'), t(`simple_search_${searchKey}`),
+      simpleBody('search', el('p', 'desc', t('simple_search_desc')), embeddingChoice(f, true))) : null,
+    foldGroup('s-privacy', false, t('simple_privacy_h'),
+      places === null ? t('simple_state_privacy_mask', { mask }) : t('simple_state_privacy', { n: places, mask }),
+      captureSection(f, true),
+      simpleBlock('mask', masking, f.simpleMaskingOff ? el('div', 'simple-warning',
+        el('p', 'desc error', t('redaction_off_warning')), el('div', 'actions', confirm, cancel)) : null),
+      // Only while something is removed, to bring it back from here too.
+      f.hidden?.items?.length ? hiddenSection(f, true) : null),
+    foldGroup('s-agents', false, t('simple_agents_h'), t('simple_agents_desc'),
+      simpleBody('agents', el('div', 'simple-agent-inventory', simpleAgents())))]));
 }
 
 // docs/my-work-model.md A6: what My Work's jobs would cost, before the switch is turned on.
@@ -7027,12 +7099,25 @@ function drawSettings() {
 const groupOpen = new Map();
 
 function settingsGroup(key, open, ...sections) {
+  return foldGroup(key, open, t(`group_${key}_h`), t(`group_${key}_desc`), ...sections);
+}
+
+// A group that folds, its heading and the line under it given: the simple page says there what
+// the group holds now, so a closed group need not be opened to be read (decision 69).
+function foldGroup(key, open, title, desc, ...sections) {
   const group = el('details', `settings-group group-${key}`,
-    el('summary', null, el('span', 'group-title', t(`group_${key}_h`)), el('span', 'group-desc', t(`group_${key}_desc`))),
-    ...sections);
+    el('summary', null, el('span', 'group-title', title), el('span', 'group-desc', desc)), ...sections);
   group.open = groupOpen.get(key) ?? open;
   group.addEventListener('toggle', () => { if (group.isConnected) groupOpen.set(key, group.open); });
   return group;
+}
+
+// A smaller fold inside a group (the AI not in use, the places never recorded), closed at first.
+function smallFold(key, cls, label, ...children) {
+  const fold = el('details', cls, el('summary', null, label), ...children);
+  fold.open = groupOpen.get(key) ?? false;
+  fold.addEventListener('toggle', () => { if (fold.isConnected) groupOpen.set(key, fold.open); });
+  return fold;
 }
 
 // The settings view in its own language, its heading included (#274).
