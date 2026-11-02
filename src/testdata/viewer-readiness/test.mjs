@@ -2413,6 +2413,27 @@ console.log('PASS: the caps\' No cap switches');
     assert.deepEqual([posted.length,document.getElementById('status').textContent.includes('Type it again')],[1,true],
       'a key waiting across a stale reload is not sent, and is to be typed again');
     reread=null;
+    // ...nor across any other read of the settings meanwhile: search's state read again.
+    f=draw(one({},{judge,key_input:true}));
+    reread=one({},{version:'v8',judge,key_input:true});
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(general('judge.key'),'made-up-judge-key-0081');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    await vm.runInContext('reloadEmbedding()',ctx);await settled();
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2',judge,key_input:true})));await settled();
+    assert.deepEqual([posted.length,document.getElementById('status').textContent.includes('Type it again')],[1,true],
+      'nor across search\'s state read again meanwhile');
+    reread=null;
+    // ...nor across a recovery's answer made into the form meanwhile.
+    f=draw(one({},{judge,key_input:true}));
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(general('judge.key'),'made-up-judge-key-0082');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    ctx.recovered=one({},{version:'v7',judge,key_input:true});
+    vm.runInContext(`receiveRecoveryStart(recoveryDraft,{phase:'complete',backup:'config.toml.recovery-${'a'.repeat(32)}.bak',settings:recovered},form,generation)`,ctx);
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2',judge,key_input:true})));await settled();
+    assert.deepEqual([posted.length,document.getElementById('status').textContent.includes('Type it again')],[1,true],
+      'nor across a recovery\'s answer made into the form meanwhile');
     vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
   }
   ctx.fetch=w6fetch;

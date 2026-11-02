@@ -64,6 +64,9 @@ function failureMessage(error) {
 }
 
 async function api(name, params = {}) {
+  // Any read of the settings may bring config.toml changed elsewhere: a key waiting for its turn is
+  // not sent across one (`keySave`; Codex's review of 69b-3c-1a).
+  if (name === 'settings') formLoads += 1;
   const res = await fetch(`/api/${name}?${new URLSearchParams(params)}`, {
     headers: { 'X-Oboete-Token': token },
   });
@@ -3339,7 +3342,8 @@ function loadedForm(s) {
   formLoads += 1;
   return formOf(s);
 }
-// How many forms were read afresh: a key waiting for its turn is not sent across one (`keySave`).
+// How many times the settings were read, or a form was made from a recovery's answer: a key waiting
+// for its turn is not sent across one (`keySave`).
 let formLoads = 0;
 
 function formOf(s) {
@@ -4625,9 +4629,10 @@ async function keySave(route, button, body) {
     if (waiting) waiting.inert = true;
     while (saveRun) await saveRun;
     if (view !== 'settings' || !form) return;
-    // A form read afresh meanwhile (a stale save, Settings entered again, a recovery) may send the
-    // key elsewhere than the page showed as it was typed (search's endpoint is config.toml's): it is
-    // not sent, and is typed again (Codex's review of 69b-3c-1a).
+    // Settings read meanwhile (a stale save, Settings entered again, a recovery, search's state or a
+    // judge's test read again) may send the key elsewhere than the page showed as it was typed
+    // (search's endpoint is config.toml's): it is not sent, and is typed again (Codex's review of
+    // 69b-3c-1a).
     if (formLoads !== loads) {
       setStatus(t('key_again'), true, lang);
       return;
