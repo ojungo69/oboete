@@ -582,17 +582,6 @@ main:has(.settings) #status:not(:empty), #status.error:not(:empty) {
 .settings .agent-readiness li h4 { margin: 0 0 4px; }
 .settings .agent-readiness li .desc { margin: 0; font-size: 12.5px; }
 
-.chain { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-.chain th, .chain td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-.chain th { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap; }
-.chain td input[type="number"] { width: 5.5rem; }
-.chain td input[type="text"] { width: 11rem; }
-.chain td:first-child { min-width: 10rem; }
-.chain .entry-name { font-weight: 600; }
-.chain .key-input { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-/* Masks the key as it is typed (Chromium, Safari, Firefox 114 and later). */
-.chain .key-input input { -webkit-text-security: disc; }
-.chain tr.off .entry-name { color: var(--muted); text-decoration: line-through; }
 input.invalid, select.invalid, textarea.invalid { border-color: var(--red); }
 input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focus-visible { border-color: var(--red); box-shadow: 0 0 0 1px var(--red); }
 .warnings ul { margin: 4px 0 0; padding-left: 18px; color: var(--yellow); }
@@ -673,6 +662,8 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .simple-toggle input[role="switch"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .settings .simple-model { max-width: 100%; margin: 8px 0; }
 .simple-model select { width: 100%; min-width: 0; }
+/* A model name typed is as wide as the model choice above it. */
+.simple-model input { width: 100%; max-width: 22rem; min-width: 0; }
 .simple-provider .provider-test { display: inline-block; margin: 0 8px 0 0; }
 .simple-provider .provider-test:has(.test-preview), .simple-provider .provider-test:has(.test-result) { display: block; }
 .simple-provider .provider-key .key-input { display: flex; flex-wrap: wrap; }

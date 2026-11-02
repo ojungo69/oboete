@@ -64,6 +64,9 @@ function failureMessage(error) {
 }
 
 async function api(name, params = {}) {
+  // Any read of the settings may bring config.toml changed elsewhere: a key waiting for its turn is
+  // not sent across one (`keySave`; Codex's review of 69b-3c-1a).
+  if (name === 'settings') formLoads += 1;
   const res = await fetch(`/api/${name}?${new URLSearchParams(params)}`, {
     headers: { 'X-Oboete-Token': token },
   });
@@ -975,6 +978,15 @@ const TEXT = {
   simple_model: ['Model for {name}', '{name} のモデル'],
   simple_model_default: ['The app’s default model', 'アプリの標準モデル'],
   simple_other_model: ['Another model…', 'ほかのモデルを選ぶ…'],
+  simple_model_own: ['The entry’s own model', '項目のモデル'],
+  simple_model_typed: ['Model name', 'モデル名'],
+  simple_model_typed_label: ['Model name for {name}', '{name} のモデル名'],
+  simple_model_overlay: ['The model set for this name, {model}, is not used by every entry of it.', 'この名前に設定したモデル ({model}) を使わない項目があります。'],
+  simple_model_overlay_remove: ['Remove the model set for this name', 'この名前に設定したモデルを外す'],
+  simple_timeout: ['Timeout (s)', '待ち時間(秒)'],
+  simple_calls_subscription: ['Calls a day: {n}', '1 日の回数: {n}'],
+  simple_calls_differ: ['Calls a day: its entries differ', '1 日の回数: 項目ごとに違います'],
+  simple_for_entries: ['These settings apply to all {n} entries of this name.', 'この設定は、この名前の {n} 個の項目すべてに使います。'],
   simple_entry_detail: ['More settings for {name}', '{name} の細かい設定'],
   simple_differs: ['These entries have different settings; check their details.', '同じ名前の接続先で設定が異なるため、詳しい設定をご確認ください。'],
   simple_add_ai: ['Add AI', 'AI を追加する'],
@@ -1633,12 +1645,6 @@ const TEXT = {
   claim_unmuted_state: ['Not muted. Normal memory eligibility applies.', 'ミュートしていません。通常の条件に従って記憶を渡します。'],
   claim_refresh: ['Reload this claim', 'この記憶を再読み込み'],
   claim_refresh_hint: ['Reload this claim to see its stored state.', '保存済みの状態は、この記憶の再読み込みで確認してください。'],
-  chain_h: ['Controls for every entry with the same name', '同じ名前のすべての要約役への設定'],
-  chain_desc: [
-    'These controls apply to every entry with each name, including duplicates. This group order takes priority over the individual order above. An empty field follows the entry’s saved value, shown in grey.',
-    'ここでの設定は、同じ名前のすべての要約役に反映されます。この名前ごとの順番が、上の個別の順番より優先されます。空欄は、各要約役の保存済みの値(灰色で表示)に従います。',
-  ],
-  col_name: ['Curator', '要約役'],
   col_model: ['Model', 'モデル'],
   col_budget: ['Calls a day', '1 日の回数'],
   col_timeout: ['Timeout (s)', '待ち時間(秒)'],
@@ -1655,6 +1661,8 @@ const TEXT = {
   key_placeholder: ['Paste a new key', '新しいキーを貼り付け'],
   key_save: ['Save key', 'キーを保存'],
   key_saved: ['The key was registered in private storage. It has not been tested yet.', 'キーを専用の保存先に登録しました。接続はまだ確認していません。'],
+  key_again: ['The settings were read again while the key waited, so it was not saved. Type it again.', 'キーの保存を待つ間に設定が読み直されたため、保存していません。もう一度入力してください。'],
+  write_again: ['The settings were read again while this change waited, so it was not saved. Make it again.', '変更の保存を待つ間に設定が読み直されたため、保存していません。もう一度変更してください。'],
   key_not_durable: [
     'The key was registered, but the disk did not confirm the write. After an unexpected shutdown, register it again if it is missing.',
     'キーを登録しましたが、ディスクへの書き込みを確認できませんでした。予期しない終了の後、登録が失われていた場合は再登録してください。',
@@ -1713,10 +1721,6 @@ const TEXT = {
     'このコンピューターでは、キーはファイルを直接編集して設定してください。',
   ],
   failed: ['The key file could not be written. It is as it was.', 'キーのファイルに書き込めませんでした。ファイルは元のままです。'],
-  entries: [
-    '{n} curators share this name in config.toml, and these settings change all of them.',
-    'config.toml でこの名前の要約役が {n} つあり、ここでの設定はすべてに反映されます。',
-  ],
   from_key: [
     'From its key: a fifth of the key\'s daily limit ({n} now)',
     'キーから決まります: キーの 1 日の上限の 5 分の 1(現在 {n} 回)',
@@ -1727,23 +1731,7 @@ const TEXT = {
   no_cap_calls_warning: ['With no cap, oboete does not stop these calls by their number a day. The monthly limit on paid calls and each service\'s own limits still apply.', '上限なしにすると、oboete はこの呼び出しを 1 日の回数では止めません。有料の呼び出しの月額上限と、各サービス側の上限は、そのまま効きます。'],
   no_cap_row: ['Not stopped by its calls a day', '1 日の回数では止めません'],
   simple_no_cap_confirm: ['Remove the monthly limit', '確認して月額上限をなくす'],
-  model_fixed: [
-    'This entry has model prices. Edit its model and prices in the individual provider above.',
-    'この要約役にはモデルの料金があります。上の個別設定で、モデルと料金を一緒に変更してください。',
-  ],
   model_free: ['Only models whose names end in :free.', '名前が :free で終わるモデルだけ設定できます。'],
-  model_unapplied: [
-    'config.toml sets this model, but this curator cannot use it, so it is not applied.',
-    'config.toml でこのモデルが設定されていますが、この要約役では使えないため、適用されていません。',
-  ],
-  differs: [
-    'The curators of this name use different values for: {what}. This row shows the first one\'s.',
-    'この名前の要約役は、使う値が次の点で異なります: {what}。この行には最初の要約役の値を表示しています。',
-  ],
-  differs_key_file: ['key file', 'キーのファイル'],
-  differs_model: ['model', 'モデル'],
-  differs_daily_budget: ['calls a day', '1 日の回数'],
-  differs_timeout_s: ['timeout', '待ち時間'],
   provider_entries_h: ['Individual providers', '要約役の個別設定'],
   provider_entries_desc: ['Add an API or a local OpenAI-compatible server, or use an installed Claude/Codex CLI. Each Save provider changes only that entry. The other settings save as each one changes, checkboxes and arrows included. A save sends no test request.', 'API・ローカルの OpenAI 互換サーバー、またはインストール済みの Claude/Codex CLI を登録できます。「要約役を保存」はその項目だけを変更します。ほかの設定は、チェックや矢印も含めて、変えるたびにすぐ保存されます。保存では接続テストを行いません。'],
   provider_add: ['Add provider', '要約役を追加'],
@@ -1789,7 +1777,6 @@ const TEXT = {
   provider_usd_per_mtok_in: ['Input price (USD / million tokens)', '入力料金(米ドル / 100 万トークン)'],
   provider_usd_per_mtok_out: ['Output price (USD / million tokens)', '出力料金(米ドル / 100 万トークン)'],
   provider_max_output_tokens: ['Maximum output tokens', '出力トークン数の上限'],
-  provider_key_manage: ['Register a key on the selected individual provider above.', 'キーは上の個別の要約役で登録してください。'],
   provider_key_none: ['No key registered; a local server may not require one.', 'キーは未登録です。ローカルサーバーでは不要な場合があります。'],
   provider_key_desc: ['Paste a provider-issued API key. oboete chooses private storage; the saved value is never shown. Registration sends no inference request.', 'サービスで発行した API キーを貼り付けます。専用の保存先は oboete が選び、保存した値は表示しません。登録では AI への送信を行いません。'],
   provider_key_unsupported: ['Key registration is currently available on Linux and WSL. This platform’s managed storage is not available yet.', 'キーの登録は現在 Linux と WSL に対応しています。この環境の専用の保存先はまだ利用できません。'],
@@ -3349,6 +3336,17 @@ function promptSide(side) {
   return note(key ? t(key, { time }) : t('prompt_side_other', { time, why: side.side }));
 }
 
+// A form read afresh (Settings entered, a stale reload, a recovery): the AI lines' drafts, typed
+// against what was saved before, go with it (69b-3c).
+function loadedForm(s) {
+  lineDrafts.clear();
+  formLoads += 1;
+  return formOf(s);
+}
+// How many times the settings were read, or a form was made from a recovery's answer: a key waiting
+// for its turn is not sent across one (`keySave`).
+let formLoads = 0;
+
 function formOf(s) {
   if (s.error) return null;
   // Saved settings invalidate consent and cached display text. Keep known effects and unknown
@@ -3404,11 +3402,7 @@ function formOf(s) {
     hidden: 'hidden' in s ? s.hidden : form?.hidden ?? null,
     preference: preferenceDraft,
     maintenance: maintenanceDraft,
-    chain: s.chain.map((e) => {
-      const loaded = chainDailyAsLoaded(e, s.ranges);
-      return { ...e, edit: { on: e.on, daily_budget: loaded.daily_budget, timeout_s: text(e.timeout_s), model: text(e.model),
-        noCap: loaded.noCap, loaded } };
-    }),
+    chain: s.chain.map((e) => ({ ...e, edit: chainEditOf(e, s.ranges) })),
     providers: (s.providers || []).map((p) => ({ ...p, edit: providerEdit(p.name, p.saved), editing: false })),
     newProvider: null,
     warnings: s.warnings,
@@ -4170,7 +4164,7 @@ async function showSettings() {
   return () => {
     recoveryDraft.preview=null;
     recoveryDraft.confirmed=false;
-    form = formOf(s);
+    form = loadedForm(s);
     // Being read, on the form only: what is saved never says so (cubic and CodeRabbit on #806).
     if (form) form.privacy = privacyPending();
     drawSettings();
@@ -4271,7 +4265,7 @@ function receiveRecoveryStart(d,answer,mine,mineGeneration) {
   if(answer.phase==='complete' && copyKnown
     && answer.settings && !answer.settings.error) {
     d.receipt=answer.backup;d.unknown=false;
-    if(view==='settings' && form===mine && generation===mineGeneration)form=formOf(answer.settings);
+    if(view==='settings' && form===mine && generation===mineGeneration)form=loadedForm(answer.settings);
   } else d.unknown=true;
 }
 
@@ -4306,7 +4300,7 @@ async function recoveryAction(action) {
   try {
     if(action==='inspect') {
       const settings=await api('settings');
-      if(view==='settings' && form===mine && generation===mineGeneration)form=formOf(settings);
+      if(view==='settings' && form===mine && generation===mineGeneration)form=loadedForm(settings);
       // This reads current configuration, without claiming the previous request succeeded.
       d.unknown=false;
       return;
@@ -4602,11 +4596,16 @@ function keyField(route, field, label, more = () => ({}), { kept = false } = {})
   save.type = 'button';
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
-  // Named by where its save sends it: the judge's destination and Cloudflare's account too (a key
-  // typed for one is never put into another's field; cubic on #811).
+  // Named by where its save sends it as it is typed: the judge's destination and the Cloudflare
+  // account typed beside it then, which the field drawn before it does not know (a key typed for one
+  // is never put into another's field; cubic, Codex and CodeRabbit on #811).
   if (kept) {
-    const to = more();
-    keepSecret(i, JSON.stringify([route, field, to.destination ?? null, to.account_id ?? null]), () => { save.disabled = !i.value; });
+    const target = () => {
+      const to = more();
+      return JSON.stringify([route, field, to.destination ?? null, to.account_id ?? null]);
+    };
+    keepSecret(i, target(), () => { save.disabled = !i.value; });
+    i.addEventListener('input', () => { i.dataset.secret = target(); });
   }
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
@@ -4619,7 +4618,43 @@ function keyField(route, field, label, more = () => ({}), { kept = false } = {})
   return el('div', 'key-input', i, save);
 }
 
+// One settings write at a time, as a provider's write: an AI line's field or a change saved at once
+// may be on its way, neither holding the page, and this then sends with the version its answer gave
+// (Codex's review of 69b-3c-1a).
 async function keySave(route, button, body) {
+  if (saveRun) {
+    const loads = formLoads;
+    const field = button.parentElement?.querySelector('input')?.dataset.field;
+    button.disabled = true;
+    const waiting = $('panel').querySelector('.settings');
+    if (waiting) waiting.inert = true;
+    while (saveRun) await saveRun;
+    if (view !== 'settings' || !form) return;
+    // Settings read meanwhile (a stale save, Settings entered again, a recovery, search's state or a
+    // judge's test read again) may send the key elsewhere than the page showed as it was typed
+    // (search's endpoint is config.toml's): it is not sent, and is typed again (Codex's review of
+    // 69b-3c-1a).
+    if (formLoads !== loads) {
+      setStatus(t('key_again'), true, lang);
+      return;
+    }
+    body = { ...body, version: form.version };
+    // The page the answer drew again holds this write and is marked by its refusal.
+    const now = [...$('panel').querySelectorAll('input')].find((i) => i.dataset.field === field);
+    button = now?.parentElement?.querySelector('button') ?? button;
+  }
+  let done;
+  saveRun = new Promise((resolve) => { done = resolve; });
+  try {
+    return await keyWrite(route, button, body);
+  } finally {
+    saveRun = null;
+    done();
+    saveNext();
+  }
+}
+
+async function keyWrite(route, button, body) {
   const mine = form;
   const fields = button.closest('.settings');
   button.disabled = true;
@@ -5140,7 +5175,7 @@ function captureSection(f, simple = false) {
       void write(add, { folder: folder.value, undo: false }, t('never_folder_stopped'));
     });
     folder.dataset.simpleFocus = 'never.folder';
-    folder.addEventListener('blur', () => { if (folder.value.trim() && !add.disabled) add.click(); });
+    onLeave(folder, () => { if (folder.value.trim() && !add.disabled) add.click(); });
     folder.addEventListener('keydown', event => {
       if (event.key === 'Enter') { event.preventDefault(); if (!add.disabled) add.click(); }
     });
@@ -5306,6 +5341,15 @@ function chainDailyUntouched(r) {
   return r.edit.daily_budget === r.edit.loaded.daily_budget && r.edit.noCap === r.edit.loaded.noCap;
 }
 
+// A chain row's edit as a fresh load makes it from a settings answer's row, strings as typed, its No
+// cap and what it was loaded as: an AI line's save leaves its row so, and the next general save sends
+// what is saved (69b-3c).
+function chainEditOf(e, ranges) {
+  const loaded = chainDailyAsLoaded(e, ranges);
+  return { on: e.on, daily_budget: loaded.daily_budget, timeout_s: providerText(e.timeout_s), model: providerText(e.model),
+    noCap: loaded.noCap, loaded };
+}
+
 // Decision 64: a cap's No cap switch beside its number. On, the number is set aside (kept, to turn
 // the cap on again) and `warning` says what still stops those calls.
 function noCapSwitch(on, field, subject, number, warning, set) {
@@ -5391,11 +5435,6 @@ async function resumeProvider(name, button) {
     button.disabled = false;
     fields.inert = false;
   }
-}
-
-function keyState(r) {
-  const state = note(t(`key_${r.key.replaceAll('-', '_')}`));
-  return [state, r.key_file ? note(t('provider_key_manage')) : null];
 }
 
 const LIMIT_FIELDS = ['max_request_tokens', 'daily_tokens', 'usd_per_mtok_in', 'usd_per_mtok_out', 'max_output_tokens'];
@@ -5510,16 +5549,11 @@ function preserveSettingsDrafts(next, mine) {
     Object.assign(next.judge, { budget: mine.judge.budget, noCap: mine.judge.noCap });
   }
   next.gemini = mine.gemini === (mine.saved.gemini ?? 'none') ? next.gemini : mine.gemini;
-  const groups = new Map(next.chain.map((r) => [r.name, r]));
-  next.chain = [...mine.chain.filter((r) => groups.has(r.name)).map((r) => {
-    const row = groups.get(r.name);
-    // A calls a day left as it was follows the answer, whose entry may have changed.
-    const fresh = row.edit;
-    row.edit = { ...r.edit };
-    if (chainDailyUntouched(r)) Object.assign(row.edit, { daily_budget: fresh.daily_budget, noCap: fresh.noCap, loaded: fresh.loaded });
-    groups.delete(r.name);
-    return row;
-  }), ...groups.values()];
+  // The chain rows are the answer's (each AI line saves its own fields, 69b-3c), but for an AI the
+  // guide's Apply turned on or off in the form (`applyOnboardingValues`), saved after this answer
+  // (Codex's review of 69b-3c-1a).
+  const turned = new Map(mine.chain.filter((r) => r.edit.on !== r.on).map((r) => [r.name, r.edit.on]));
+  for (const row of next.chain) if (turned.has(row.name)) row.edit = { ...row.edit, on: turned.get(row.name) };
 }
 
 function geminiInsertion(mine, action) {
@@ -5651,7 +5685,7 @@ function currentSettings(mine) {
 }
 
 function reloadProviderSettings(current) {
-  form = formOf(current);
+  form = loadedForm(current);
   if (form) form.privacy = privacyPending();
   drawSettings();
   setStatus(t('stale'), true, lang);
@@ -5686,8 +5720,17 @@ async function providerOperation(action, button, body = null, path = '') {
     const waiting = $('panel').querySelector('.settings');
     if (waiting) waiting.inert = true;
     const order = providerOrder(form);
+    const loads = formLoads;
     while (saveRun) await saveRun;
     if (view !== 'settings' || !form) return;
+    // Settings read meanwhile may have brought config.toml changed elsewhere: a write made against
+    // the page as it was, a key's above all, is not sent (as `keySave`; Codex's review of 69b-3c-1a).
+    if (formLoads !== loads) {
+      button.disabled = false;
+      drawSettings();
+      setStatus(t(path === '/key' ? 'key_again' : 'write_again'), true, lang);
+      return;
+    }
     if (action.selector && providerOrder(form) !== order) {
       button.disabled = false;
       drawSettings();
@@ -6077,32 +6120,6 @@ function providersSection() {
   return section;
 }
 
-function chainRow(r) {
-  const tr = el('tr', r.edit.on ? null : 'off');
-  const model = input('text', r.edit.model, r.effective_model ?? '', `chain.${r.name}.model`, (v) => { r.edit.model = v; });
-  model.setAttribute('aria-label', `${t('col_model')}: ${r.name}`);
-  // A curator with prices keeps its model; a model config.toml sets already can still be emptied.
-  model.disabled = r.model_rule === 'fixed' && !r.model;
-  const budget = input('number', r.edit.daily_budget, r.effective_daily_budget === null ? t('no_cap') : String(r.effective_daily_budget), `chain.${r.name}.daily_budget`, (v) => { r.edit.daily_budget = v; });
-  [budget.min, budget.max] = form.ranges.daily_budget;
-  budget.setAttribute('aria-label', `${t('col_budget')}: ${r.name}`);
-  const fromKey = !r.subscription && r.budget_from_key && !r.edit.daily_budget ? note(t('from_key', { n: r.effective_daily_budget })) : null;
-  const budgetOff = r.subscription ? [] : noCapSwitch(r.edit.noCap, `chain.${r.name}`, `${t('col_budget')}: ${r.name}`, budget, 'no_cap_row',
-    (v) => { r.edit.noCap = v; if (fromKey) fromKey.hidden = v; });
-  if (fromKey) fromKey.hidden = r.edit.noCap;
-  const timeout = input('number', r.edit.timeout_s, String(r.effective_timeout_s), `chain.${r.name}.timeout_s`, (v) => { r.edit.timeout_s = v; });
-  [timeout.min, timeout.max] = form.ranges.timeout_s;
-  timeout.setAttribute('aria-label', `${t('col_timeout')}: ${r.name}`);
-  const modelNote = { fixed: t('model_fixed'), free: t('model_free') }[r.model_rule];
-  tr.append(
-    el('td', null, el('span', 'entry-name', r.name), ...keyState(r), r.entries > 1 ? note(t('entries', { n: r.entries })) : null,
-      r.differs.length ? note(t('differs', { what: r.differs.map((d) => t(`differs_${d}`)).join(lang === 'ja' ? '、' : ', ') })) : null),
-    el('td', null, model, modelNote ? note(modelNote) : null, r.model !== null && !r.model_applied ? note(t('model_unapplied')) : null),
-    el('td', null, r.subscription ? note(t('provider_subscription')) : budget, ...budgetOff, fromKey),
-    el('td', null, timeout));
-  return tr;
-}
-
 // The save's body, or the field a value is wrong in.
 // `autosaved`: a change saved at once (decision 69) leaves the page's port as saved; only its
 // button moves the page.
@@ -6236,7 +6253,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
   // An address on port 80 shows no port.
   const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
   if (moved && movePage(runtime.url || '')) return;
-  form = current ? formOf(current) : mergeProviderSettings(answer, mine, { op: simple ? 'simple' : 'settings' });
+  form = current ? loadedForm(current) : mergeProviderSettings(answer, mine, { op: simple ? 'simple' : 'settings' });
   // Decision 69: the owner went on typing while a change saved at once was on its way. The drafts
   // stay, with the answer's saved values, version and key, and are saved when their field is left.
   if (sent !== null && !current && form) {
@@ -6293,10 +6310,14 @@ async function saveSettings(button, simple = null, autosaved = false) {
   const mine = form;
   // The whole panel, the language picker too: what is typed, or drawn again in another language,
   // while the save is on its way would not survive its answer. A change saved at once (decision
-  // 69) leaves the page usable instead, and keeps what is typed meanwhile (`applySavedSettings`).
+  // 69) leaves the page usable instead, and keeps what is typed meanwhile (`applySavedSettings`),
+  // as an AI line's field does (`hold: false`, 69b-3c).
+  const held = !autosaved && simple?.hold !== false;
   const fields = button.closest('.settings');
-  button.disabled = true;
-  fields.inert = !autosaved;
+  if (held) {
+    button.disabled = true;
+    fields.inert = true;
+  } else if (autosaved) fields.inert = false;
   try {
     // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
     // `Origin: null`, which the viewer refuses.
@@ -6319,15 +6340,19 @@ async function saveSettings(button, simple = null, autosaved = false) {
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
     const code = answer.code || byStatus[res.status] || 'other';
     // An inert form takes no focus, and the refused field is to be reached.
-    fields.inert = false;
+    if (held) fields.inert = false;
     if (answer.field) markInvalid(answer.field, document, !simple);
     setStatus(t(code, { status: res.status }), true, lang);
   } catch {
     if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
   } finally {
-    button.disabled = false;
-    fields.inert = false;
-    if (simple && currentSettings(mine)) {
+    // What holds nothing releases nothing: another write may hold the page now.
+    if (held) {
+      button.disabled = false;
+      fields.inert = false;
+    }
+    if (simple && simple.hold === false && currentSettings(mine)) clearSimpleReceipt();
+    else if (simple && currentSettings(mine)) {
       clearSimpleReceipt();
       // Keep a refused amount available to correct; switches, models and arrows show the last
       // saved state again, especially when masking could not be enabled.
@@ -6559,6 +6584,8 @@ function simpleFocus(key) {
   if (key?.startsWith('move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
   if (/^(resume|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
   if (key?.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
+  // A model name saved closes its field: the line's model choice takes the focus.
+  if (key?.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
   if (key === 'mask.confirm') keys.push('redaction.enabled');
   if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
@@ -6632,14 +6659,18 @@ function usdCents(v) {
 // way as a provider's does (its control and the page wait with it), then builds its body from
 // what is saved when its turn comes: `change(body, saved)` reads that, never what was saved when
 // the page was drawn, and names its target (an AI by its name). With nothing left to do it
-// returns false: nothing is sent, and the page is drawn again.
-async function simpleSettingsSave(button, change, adopt) {
+// returns false: nothing is sent, and the page is drawn again. `hold: false` (an AI line's field,
+// 69b-3c) neither disables its control nor makes the page inert while it waits or is on its way, as a
+// general change saved at once does not: Tab moves on, and what is typed meanwhile is kept.
+async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
   clearSimpleReceipt();
   const block = button.closest('.simple-block').dataset.simpleBlock;
   if (saveRun) {
-    button.disabled = true;
     const waiting = $('panel').querySelector('.settings');
-    if (waiting) waiting.inert = true;
+    if (hold) {
+      button.disabled = true;
+      if (waiting) waiting.inert = true;
+    }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
     if (view !== 'settings' || !form) return;
@@ -6659,7 +6690,7 @@ async function simpleSettingsSave(button, change, adopt) {
   let done;
   saveRun = new Promise((resolve) => { done = resolve; });
   try {
-    return await saveSettings(button, { body, adopt, block });
+    return await saveSettings(button, { body, adopt, block, hold });
   } finally {
     saveRun = null;
     done();
@@ -6740,7 +6771,23 @@ function simpleProviderRow(f, row, index, chain, position) {
   });
   const detail = () => detailedSettingsLink('simple_entry_detail', '.provider-entries', { name: label }, provider);
   const models = simpleProviderModels(row, catalog?.models || []);
-  // A model the entry fixes is named on its line alone (decision 69).
+  // What `[chain]` saves for this name, which the line's fields set (69b-3c).
+  const savedRow = f.savedSettings.chain.find((entry) => entry.name === row.name) ?? row;
+  // The model: a list for an any or free rule, the entry's own (`[chain]` back to none), or another
+  // typed and saved to `[chain]`, as the chain table's field did; a fixed model is named on its line
+  // alone (decision 69). A `[chain]` model not every entry takes is said so (Codex's reviews of the
+  // 69b-3c plan).
+  const modelKey = lineKey('model', row.name);
+  const typing = lineDrafts.get(modelKey)?.open === true;
+  const overlay = savedRow.model !== null && savedRow.model !== undefined && (!row.model_applied || row.differs?.includes('model'))
+    ? el('p', 'desc', t('simple_model_overlay', { model: savedRow.model })) : null;
+  let remove = null;
+  if (overlay) {
+    remove = el('button', 'quiet small', t('simple_model_overlay_remove'));
+    remove.type = 'button';
+    remove.dataset.simpleFocus = `model-remove:${row.name}`;
+    remove.addEventListener('click', () => lineAsk(remove, 'model', row.name, null, savedRow.model, true));
+  }
   let model = null;
   if (row.model_rule !== 'fixed') {
     const select = el('select', null, ...models.map(model => {
@@ -6750,17 +6797,55 @@ function simpleProviderRow(f, row, index, chain, position) {
       const current = el('option', null, row.effective_model ?? t('simple_model_default'));
       current.value = ''; current.disabled = true; select.append(current);
     }
+    if (savedRow.model !== null && savedRow.model !== undefined) {
+      const own = el('option', null, t('simple_model_own')); own.value = '__own'; select.append(own);
+    }
     const other = el('option', null, t('simple_other_model')); other.value = '__other'; select.append(other);
-    select.value = models.includes(row.effective_model) ? row.effective_model : '';
-    select.dataset.field = `chain.${row.name}.model`;
+    select.value = typing ? '__other' : models.includes(row.effective_model) ? row.effective_model : '';
+    if (!typing) select.dataset.field = `chain.${row.name}.model`;
     select.dataset.simpleFocus = `model:${row.name}`;
     select.addEventListener('change', () => {
-      if (select.value === '__other') detail().click();
-      else void simpleChainSave(select, row.name, 'model', select.value);
+      if (select.value === '__other') {
+        // Opened, counted as typing: the answer to a model chosen before it does not close it (Codex's
+        // review of 69b-3c-1a).
+        const d = lineDraft(modelKey);
+        lineDrafts.set(modelKey, { ...d, value: savedRow.model ?? '', open: true, typed: d.typed + 1 });
+        drawSettings();
+        simpleFocus(`model-text:${row.name}`);
+        return;
+      }
+      lineAsk(select, 'model', row.name, select.value === '__own' ? null : select.value, savedRow.model ?? null, true);
     });
     select.setAttribute('aria-label', t('simple_model', { name: label }));
-    model = el('label', 'field simple-model', el('span', null, t('simple_model_short')), select);
-  }
+    let typed = null;
+    if (typing) {
+      // Typed in, the field stays open, even after an Enter that changed nothing dropped its draft.
+      const text = input('text', lineDrafts.get(modelKey).value, row.effective_model ?? '', `chain.${row.name}.model`,
+        (v) => { lineType('model', row.name, v); lineDrafts.get(modelKey).open = true; });
+      text.dataset.simpleFocus = `model-text:${row.name}`;
+      text.setAttribute('aria-label', t('simple_model_typed_label', { name: label }));
+      const ask = (again) => {
+        if (!lineDrafts.has(modelKey)) return;
+        const value = lineDrafts.get(modelKey).value.trim();
+        // As the server refuses it: a free rule's model ends in :free.
+        if (value && row.model_rule === 'free' && !value.endsWith(':free')) {
+          markInvalid(`chain.${row.name}.model`, document, false);
+          setStatus(t('model_free'), true, lang);
+          return;
+        }
+        lineAsk(text, 'model', row.name, value || null, savedRow.model ?? null, again);
+      };
+      lineField(text, ask);
+      typed = el('label', 'field simple-model', el('span', null, t('simple_model_typed')), text);
+    }
+    model = el('div', 'simple-line-model', el('label', 'field simple-model', el('span', null, t('simple_model_short')), select), typed,
+      overlay, remove);
+  } else if (overlay) model = el('div', 'simple-line-model', overlay, remove);
+  const calls = lineCalls(f, row, savedRow, label);
+  // A timeout its entries differ in, with none set for the name, is not shown as the first entry's.
+  const timeoutDiffers = row.differs?.includes('timeout_s') && (savedRow.timeout_s ?? null) === null;
+  const timeout = lineNumber(f, row, savedRow, 'timeout_s', `timeout:${row.name}`, t('simple_timeout'), label, f.ranges.timeout_s,
+    timeoutDiffers ? '' : String(row.effective_timeout_s));
   let resume = null;
   if (f.stopped?.includes(row.name)) {
     resume = el('button', 'quiet small', t('resume'));
@@ -6777,7 +6862,8 @@ function simpleProviderRow(f, row, index, chain, position) {
       simpleToggle(on, `on:${row.name}`, t('simple_ai_on', { name: label }),
         (button, value) => void simpleProviderToggle(row.name, value, button), t('simple_use')),
       el('div', 'move', ...arrows)),
-    model, row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
+    model, calls, timeout, row.entries > 1 ? el('p', 'desc', t('simple_for_entries', { n: row.entries })) : null,
+    row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
     keyOwner && keyOwner.name !== row.name && row.key === 'missing'
       ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
       : provider && (row.key === 'missing' || simpleKeyName === row.name)
@@ -6790,6 +6876,179 @@ function simpleProviderRow(f, row, index, chain, position) {
   const item = el('li', 'simple-provider', fold);
   item.dataset.providerName = row.name;
   return item;
+}
+
+// A field saved when it is left. A browser blurs the focused control a redraw takes away (Chrome
+// does, as it goes, the control still in the page then): that is no leaving, so what was typed is
+// saved only when the control is still on the page once the redraw is over (69b-3c).
+function onLeave(control, leave) {
+  control.addEventListener('blur', () => {
+    void Promise.resolve().then(() => { if ($('panel').contains(control)) leave(); });
+  });
+}
+
+// 69b-3c: what an AI line's field holds while it is typed, by field and name, so no answer drawn
+// meanwhile takes it (as `simpleCapDraft` holds the month's cap): `value` (as typed), `typed` (typing
+// counted), `sent` (the value it last asked to save), `asked` (its newest request), `open` (No cap
+// turned off with no number yet, or another model chosen). A form read afresh drops them all
+// (`loadedForm`), and a name gone from the chain its own (`simpleGroups`). Requests are numbered
+// across all drafts, so one asked before a draft was dropped never passes for a later one's; the
+// field's requests not yet answered are counted apart (`lineWaiting`), which no drop forgets.
+const lineDrafts = new Map();
+const lineWaiting = new Map();
+let lineAsked = 0;
+
+function lineKey(field, name) {
+  return JSON.stringify([field, name]);
+}
+
+function lineDraft(key) {
+  return lineDrafts.get(key) ?? { value: '', typed: 0, sent: undefined, asked: 0, open: false };
+}
+
+function lineType(field, name, value) {
+  const key = lineKey(field, name);
+  const d = lineDraft(key);
+  lineDrafts.set(key, { ...d, value, typed: d.typed + 1 });
+}
+
+// Leaving a line's field, or Enter (`again`), asks to save `value`: once for the same value, whatever
+// its answer, unless Enter asks again; nothing when it is what is saved and none of the field's
+// requests waits. At its turn only the field's newest request sends, and only what is not saved
+// then; its answer clears the draft when nothing was typed since (Codex's reviews of the 69b-3c plan).
+function lineAsk(control, field, name, value, saved, again = false) {
+  const key = lineKey(field, name);
+  const d = lineDraft(key);
+  if (!again && d.sent !== undefined && value === d.sent) return;
+  const waiting = lineWaiting.get(key) ?? 0;
+  if (value === saved && !waiting) { lineDrafts.delete(key); return; }
+  const asked = ++lineAsked, typed = d.typed;
+  lineDrafts.set(key, { ...d, sent: value, asked });
+  lineWaiting.set(key, waiting + 1);
+  const done = () => { const now = lineDrafts.get(key); return now?.asked === asked && now.typed === typed; };
+  return simpleSettingsSave(control, (body) => {
+    if (lineDrafts.get(key)?.asked !== asked) return false;
+    const row = body.chain.find((entry) => entry.name === name);
+    if (!row || row[field] === value) {
+      if (done()) lineDrafts.delete(key);
+      return false;
+    }
+    row[field] = value;
+  }, (next, answer) => {
+    const row = next.chain.find((entry) => entry.name === name);
+    const fresh = answer.chain.find((entry) => entry.name === name);
+    // Its switch as the form has it: the guide's Apply may have turned it meanwhile.
+    if (row && fresh) row.edit = { ...chainEditOf(fresh, answer.ranges), on: row.edit.on };
+    if (done()) lineDrafts.delete(key);
+  }, { hold: false }).finally(() => {
+    const left = (lineWaiting.get(key) ?? 1) - 1;
+    if (left > 0) lineWaiting.set(key, left);
+    else lineWaiting.delete(key);
+  });
+}
+
+// A line's text or number field: saved when it is left or by Enter, not the Enter that ends an
+// input method's composition.
+function lineField(control, ask) {
+  onLeave(control, () => ask(false));
+  control.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    ask(true);
+  });
+}
+
+// A line's number (`[chain]`'s calls a day or timeout): empty follows the entries' own value
+// (`null`), a whole number in range is saved, anything else is marked and sends nothing.
+function lineNumber(f, row, savedRow, field, focus, label, subject, [min, max], placeholder, disabled = false) {
+  const key = lineKey(field, row.name);
+  const saved = savedRow[field] ?? null;
+  const shown = field === 'daily_budget' ? noCapText(saved, f.ranges) : providerText(saved);
+  // A draft a switch alone made (no typing, not opened) holds no text of its own.
+  const draft = lineDrafts.get(key);
+  const i = input('number', draft && (draft.typed > 0 || draft.open) ? draft.value : shown, placeholder, `chain.${row.name}.${field}`,
+    (v) => lineType(field, row.name, v));
+  [i.min, i.max] = [min, max];
+  i.disabled = disabled;
+  i.dataset.simpleFocus = focus;
+  i.setAttribute('aria-label', `${label}: ${subject}`);
+  lineField(i, (again) => {
+    const d = lineDrafts.get(key);
+    if (!d || i.disabled) return;
+    const text = d.value.trim();
+    // No cap turned off, the field left empty: nothing is sent and it stays open, as the month's cap
+    // does; its switch turns No cap on again. Drawn again here, the page would take the focus a Tab
+    // or a click is moving (Chrome).
+    if (text === '' && d.open) return;
+    const value = text === '' ? null : /^\d+$/.test(text) && Number(text) >= min && Number(text) <= max ? Number(text) : Number.NaN;
+    if (Number.isNaN(value)) {
+      markInvalid(`chain.${row.name}.${field}`, document, false);
+      setStatus(t('range'), true, lang);
+      return;
+    }
+    lineAsk(i, field, row.name, value, saved, again);
+  });
+  return el('label', 'field simple-line-field', el('span', null, label), i);
+}
+
+// A line's calls a day with its No cap switch (decision 64: its warning, no confirmation). The
+// switch acts on the field and its requests as they are when it is pressed, so the last change made
+// is what is saved (Codex's review of 69b-3c-1a). Turned off with no number, `[chain]` sets none
+// again where it lifted the entries' calls a day (or a request to lift them waits), and the field
+// opens for a number. Calls a day its entries differ in, with none set for the name, are said, not
+// shown as No cap. A subscription says its calls a day; its switch shows while an entry of its name
+// stops at one (#800 item 3) or `[chain]` lifts them, and turned off it sets none.
+function lineCalls(f, row, savedRow, label) {
+  const key = lineKey('daily_budget', row.name);
+  const saved = savedRow.daily_budget ?? null;
+  const lifted = saved === f.ranges.no_cap;
+  const differs = Boolean(row.differs?.includes('daily_budget')) && saved === null;
+  const noCap = row.subscription ? lifted : lineDrafts.get(key)?.open !== true && !differs && row.effective_daily_budget === null;
+  const say = el('span', 'note no-cap-warning', t('no_cap_row'));
+  say.hidden = !noCap;
+  const off = simpleToggle(noCap, `budget-off:${row.name}`, `${t('no_cap')}: ${t('col_budget')}: ${label}`, (control, value) => {
+    const now = lineDrafts.get(key);
+    const waiting = lineWaiting.get(key) ?? 0;
+    if (value) {
+      // Back on with nothing asked since it was opened: no cap is what is in effect.
+      if (now?.open && !waiting && !differs && row.effective_daily_budget === null) {
+        lineDrafts.delete(key);
+        drawSettings();
+        simpleFocus(`budget-off:${row.name}`);
+        return;
+      }
+      lineAsk(control, 'daily_budget', row.name, f.ranges.no_cap, saved, true);
+      return;
+    }
+    if (row.subscription) {
+      lineAsk(control, 'daily_budget', row.name, null, saved, true);
+      return;
+    }
+    const text = (now && (now.typed > 0 || now.open) ? now.value : noCapText(saved, f.ranges)).trim();
+    const typed = /^\d+$/.test(text) ? Number(text) : null;
+    if (typed !== null && typed >= f.ranges.daily_budget[0] && typed <= f.ranges.daily_budget[1]) {
+      lineAsk(control, 'daily_budget', row.name, typed, saved, true);
+      return;
+    }
+    if (lifted || waiting) lineAsk(control, 'daily_budget', row.name, null, saved, true);
+    // Opened after any request just made, and counted as typing: no answer closes it.
+    const d = lineDraft(key);
+    lineDrafts.set(key, { ...d, open: true, typed: d.typed + 1 });
+    drawSettings();
+    simpleFocus(`budget:${row.name}`);
+  }, t('no_cap'));
+  if (row.subscription) {
+    if (!row.capped && !lifted) return null;
+    const said = lifted ? null : row.differs?.includes('daily_budget') || row.effective_daily_budget === null
+      ? t('simple_calls_differ') : t('simple_calls_subscription', { n: row.effective_daily_budget });
+    return el('div', 'simple-line-calls', said ? el('p', 'desc', said) : null, off, say);
+  }
+  const placeholder = differs ? '' : row.effective_daily_budget === null ? t('no_cap') : String(row.effective_daily_budget);
+  const field = lineNumber(f, row, savedRow, 'daily_budget', `budget:${row.name}`, t('col_budget'), label, f.ranges.daily_budget,
+    placeholder, noCap);
+  const fromKey = row.budget_from_key && saved === null && !noCap && !differs
+    ? note(t('from_key', { n: row.effective_daily_budget })) : null;
+  return el('div', 'simple-line-calls', field, off, say, differs ? note(t('simple_calls_differ')) : null, fromKey);
 }
 
 function simpleCatalog(f) {
@@ -6881,6 +7140,9 @@ function simpleAgents() {
 // (`more`, by the group's key).
 function simpleGroups(f, more) {
   const chain = simpleSavedChain(f);
+  // A name gone from the chain takes its lines' drafts with it (69b-3c).
+  const names = new Set(chain.map((row) => row.name));
+  for (const key of lineDrafts.keys()) if (!names.has(JSON.parse(key)[1])) lineDrafts.delete(key);
   const curate = simpleToggle(f.savedSettings.summary.curate, 'summary.curate', t('simple_curate'), (button, value) =>
     void simpleSettingsSave(button, body => { body.summary.curate = value; },
       (next, answer) => { next.summary = { ...next.summary, curate: answer.summary.curate }; }));
@@ -6928,7 +7190,7 @@ function simpleGroups(f, more) {
       if (Number(simpleCapDraft) === answer.paid_usd_per_month) simpleCapDraft = null;
     });
   };
-  cap.addEventListener('blur', saveCap);
+  onLeave(cap, saveCap);
   cap.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); saveCap(); } });
   const inject = ['session_start', 'per_prompt'].map(key => simpleToggle(f.savedSettings.inject[key], `inject.${key}`,
     t(key === 'session_start' ? 'simple_session' : 'simple_prompt'), (button, value) =>
@@ -7090,13 +7352,6 @@ function drawSettings() {
   }));
   tool.value = f.capture.tool_output;
   tool.addEventListener('change', () => { f.capture.tool_output = tool.value; });
-  // Each AI's line has its switch and its arrows (decision 69, 69b-2); the table keeps the rest.
-  const rows = el('tbody', null, ...f.chain.map((r) => chainRow(r)));
-  const head = el('tr', null, ...['col_name', 'col_model', 'col_budget', 'col_timeout'].map((k) => {
-    const th = el('th', null, t(k));
-    th.scope = 'col';
-    return th;
-  }));
   // Decision 69: each change saves at once; this button only anchors the saves (never shown).
   const save = el('button', 'save', t('settings_save'));
   save.type = 'button';
@@ -7128,12 +7383,17 @@ function drawSettings() {
       autoSave(c.dataset?.field);
     });
     formEl.addEventListener('focusout', (event) => {
-      if (!typedField || typedField !== event.target.dataset?.field) return;
-      typedField = null;
-      // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
-      // owner goes to answer it.
-      if (event.target === pagePort) return;
-      autoSave(event.relatedTarget?.dataset?.field);
+      const c = event.target;
+      if (!typedField || typedField !== c.dataset?.field) return;
+      // A redraw's focusout is no leaving (`onLeave`): the field is saved when it is left on the page.
+      void Promise.resolve().then(() => {
+        if (!$('panel').contains(c) || typedField !== c.dataset?.field) return;
+        typedField = null;
+        // Leaving the port's field saves nothing: a confirmation its Enter asked for stays when the
+        // owner goes to answer it.
+        if (c === pagePort) return;
+        autoSave(event.relatedTarget?.dataset?.field);
+      });
     });
     // The port's button and Enter in its field save through `portSave` alone: the form's own save
     // after them would take its confirmation's place (CodeRabbit on #802).
@@ -7177,10 +7437,6 @@ function drawSettings() {
         el('label', 'field', el('span', null, t('gemini_label')), gemini,
           saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),
       providersSection(),
-      el('section', null,
-        el('h3', null, t('chain_h')),
-        el('p', 'desc', t('chain_desc')),
-        el('div', 'scroll', el('table', 'chain', el('thead', null, head), rows))),
       el('section', null,
         el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState()))),
     my_work: more('my_work', generalForm(
@@ -7241,14 +7497,20 @@ function drawSettings() {
 }
 
 // One rule keeps the focus through a redraw (a save's answer, privacy read again after it): a
-// simple control by its `data-simple-focus`; any other by its field and its AI entry, with the
-// caret in it (decision 69, 69b-2). A field is drawn once, inside the general forms or outside them
-// (the page's tests count them), so its field says which.
+// simple control by its `data-simple-focus`; any other by its field and its AI entry; either with
+// the caret in it (decision 69, 69b-2; an AI line's text, 69b-3c). A field is drawn once, inside the
+// general forms or outside them (the page's tests count them), so its field says which.
 function focusKeep() {
   const a = document.activeElement;
-  if (a?.dataset?.simpleFocus) return { simple: a.dataset.simpleFocus };
+  const caret = { start: a?.selectionStart, end: a?.selectionEnd };
+  if (a?.dataset?.simpleFocus) return { simple: a.dataset.simpleFocus, ...caret };
   if (!a?.dataset?.field) return null;
-  return { field: a.dataset.field, entry: entryOf(a), start: a.selectionStart, end: a.selectionEnd };
+  return { field: a.dataset.field, entry: entryOf(a), ...caret };
+}
+
+// A number or a switch has no caret.
+function caretBack(control, { start, end }) {
+  try { if (typeof start === 'number') control.setSelectionRange(start, end); } catch { /* none */ }
 }
 
 function entryOf(control) {
@@ -7256,7 +7518,12 @@ function entryOf(control) {
 }
 
 function focusBack(keep) {
-  if (keep?.simple) { simpleFocus(keep.simple); return; }
+  if (keep?.simple) {
+    simpleFocus(keep.simple);
+    const c = document.activeElement;
+    if (c?.dataset?.simpleFocus === keep.simple) caretBack(c, keep);
+    return;
+  }
   if (!keep) return;
   // Without `entry` (the field a save's focus went to), the field in any entry.
   const c = [...$('panel').querySelectorAll('input, select, textarea')].find((x) => x.dataset.field === keep.field
@@ -7265,8 +7532,7 @@ function focusBack(keep) {
   // A field in a fold the redraw closed is reached by opening it (CodeRabbit on #802).
   for (let fold = c.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
   c.focus({ preventScroll: true });
-  // A number or a switch has no caret.
-  try { if (typeof keep.start === 'number') c.setSelectionRange(keep.start, keep.end); } catch { /* none */ }
+  caretBack(c, keep);
 }
 
 // The general form's body as a key, its version left out: a save is due only when it changed.
