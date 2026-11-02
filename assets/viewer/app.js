@@ -3489,6 +3489,7 @@ function redactionSection(f) {
   hash.type = 'button';
   hash.disabled = true;
   exact.addEventListener('input', () => { hash.disabled = !exact.value; });
+  keepSecret(exact, 'redaction.exact', () => { hash.disabled = !exact.value; });
   exact.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!hash.disabled) hash.click(); }
   });
@@ -4513,7 +4514,7 @@ function judgeKey(f, j, chosen) {
     parts.push(el('label', 'field', el('span', null, t('judge_account')), account, note(t('judge_account_desc'))));
   }
   const more = () => ({ destination: chosen.id, ...(cloudflare ? { account_id: j.account.trim().toLowerCase() } : {}) });
-  parts.push(keyField('judge/key', 'judge.key', t(service ? `judge_key_label_${service}` : 'judge_key_label'), more));
+  parts.push(keyField('judge/key', 'judge.key', t(service ? `judge_key_label_${service}` : 'judge_key_label'), more, { kept: true }));
   return parts;
 }
 
@@ -4574,9 +4575,21 @@ function judgeTest(j) {
   return el('div', 'judge-test', button, note(t('judge_test_desc')));
 }
 
+// #807: a secret being typed is kept only in its field and sent only by its own save. The page
+// drawn again puts it back into the field drawn for the same target (`drawSettings`), never into
+// `form`, storage or another request; a field whose target changed gets nothing. `sync` sets the
+// field's button as typing would.
+function keepSecret(i, target, sync) {
+  i.dataset.secret = target;
+  i.secretSync = sync;
+}
+
 // As a provider's key field: the token is only in the field and the one request that carries it.
 // `more` adds to the body what the route takes beside the key (the judge's destination).
-function keyField(route, field, label, more = () => ({})) {
+// `kept`: whether a value being typed is put back after a redraw (`keepSecret`): only where the page
+// knows where its save sends it, as the judge's destinations, fixed in the code. Search's Workers AI
+// endpoint may be set in config.toml beyond what the page shows (Codex's security review of #807).
+function keyField(route, field, label, more = () => ({}), { kept = false } = {}) {
   const i = el('input');
   i.type = 'text';
   i.autocomplete = 'off';
@@ -4589,6 +4602,12 @@ function keyField(route, field, label, more = () => ({})) {
   save.type = 'button';
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
+  // Named by where its save sends it: the judge's destination and Cloudflare's account too (a key
+  // typed for one is never put into another's field; cubic on #811).
+  if (kept) {
+    const to = more();
+    keepSecret(i, JSON.stringify([route, field, to.destination ?? null, to.account_id ?? null]), () => { save.disabled = !i.value; });
+  }
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
@@ -4979,26 +4998,37 @@ function renderPrivacy(f) {
   if (!panel) return;
   const parts = [['never-record', () => captureSection(f, true)], ['never-more', () => captureSection(f)],
     ['privacy-state', () => privacySection(f)]].map(([part, make]) => [panel.querySelector(`.${part}`), make]).filter(([node]) => node);
-  const keep = parts.some(([node]) => node.contains(document.activeElement)) ? focusKeep() : null;
+  // The focus in a part drawn again goes back by the focus rule, or, on a fold's heading, to the
+  // heading of the same fold: each of the parts' controls has a name, and a place in a list whose
+  // length the read changes would name another control (Codex's review of #810).
+  const at = parts.find(([node]) => node.contains(document.activeElement))?.[0];
+  const keep = at ? focusKeep() : null;
+  const fold = at && !keep && document.activeElement.tagName === 'SUMMARY' ? document.activeElement.parentElement?.className : null;
   for (const [node, make] of parts) {
     const drawn = make();
     node.hidden = drawn.hidden;
     node.replaceChildren(...drawn.childNodes);
   }
   panel.querySelector('.group-s-privacy')?.querySelector('.group-desc')?.replaceChildren(privacyGroupState(f));
-  focusBack(keep);
+  if (keep) focusBack(keep);
+  else if (fold) [...at.querySelectorAll('summary')].find((n) => n.parentElement?.className === fold)?.focus({ preventScroll: true });
 }
 
 function privacySection(f) {
   const state = f.privacy;
   const refresh = el('button', 'quiet small', t('privacy_refresh'));
   refresh.type = 'button';
+  refresh.dataset.simpleFocus = 'privacy.refresh';
   refresh.addEventListener('click', async () => {
+    const was = document.activeElement;
     refresh.disabled = true;
     // The status line is cleared only when nothing was said on it since the click: a confirmation
     // asked meanwhile stays (CodeRabbit on #806).
     const said = statusWrites;
-    try { if (await refreshPrivacy(f) && statusWrites === said) setStatus(''); } finally { refresh.disabled = false; }
+    try { if (await refreshPrivacy(f) && statusWrites === said) setStatus(''); } finally {
+      refresh.disabled = false;
+      if (currentSettings(f)) focusAgain(was, 'privacy.refresh');
+    }
   });
   const rows = (state.repositories || []).map((repo) => {
     // A repository never recorded is never sent: its own row takes that back first.
@@ -5006,7 +5036,9 @@ function privacySection(f) {
     const action = el('button', 'quiet small', t(repo.excluded ? 'privacy_undo' : 'privacy_exclude'));
     action.type = 'button';
     action.dataset.selector = repo.selector;
+    action.dataset.simpleFocus = `exclude:${repo.selector}`;
     action.addEventListener('click', async () => {
+      const was = document.activeElement;
       const fields = action.closest('.settings');
       fields.inert = true;
       action.disabled = true;
@@ -5021,7 +5053,11 @@ function privacySection(f) {
         }
       } catch {
         if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
-      } finally { fields.inert = false; action.disabled = false; }
+      } finally {
+        fields.inert = false;
+        action.disabled = false;
+        if (currentSettings(f)) focusAgain(was, 'privacy.refresh');
+      }
     });
     return el('li', null, el('p', 'text', repo.label), el('p', 'desc', t(repo.excluded ? 'privacy_excluded' : 'privacy_allowed')), action);
   });
@@ -5051,6 +5087,7 @@ function captureSection(f, simple = false) {
     return section;
   }
   const write = async (button, body, receipt) => {
+    const was = document.activeElement;
     const fields = button.closest('.settings');
     fields.inert = true;
     button.disabled = true;
@@ -5070,26 +5107,32 @@ function captureSection(f, simple = false) {
       if (currentSettings(f)) setStatus(refreshed ? receipt : t('privacy_readback_failed', { receipt }), !refreshed, lang);
     } catch {
       if (currentSettings(f)) setStatus(t('memory_result_unknown'), true, lang);
-    } finally { fields.inert = false; button.disabled = false; }
+    } finally {
+      fields.inert = false;
+      button.disabled = false;
+      if (currentSettings(f)) focusAgain(was, simple ? 'never.folder' : 'never.pattern.add');
+    }
   };
-  const row = (label, never, onClick) => {
+  const row = (label, never, onClick, key) => {
     const action = el('button', 'quiet small', t(never ? 'never_undo' : 'never_exclude'));
     action.type = 'button';
+    action.dataset.simpleFocus = key;
     action.addEventListener('click', () => onClick(action));
     return el('li', null, el('p', 'text', label), el('p', 'desc', t(never ? 'never_on' : 'never_off')), action);
   };
   const repos = (state.repositories || []).filter(repo => Boolean(repo.never_recorded) === simple).map((repo) => row(repo.label, repo.never_recorded, (action) =>
     write(action, { selector: repo.selector, undo: !!repo.never_recorded },
-      t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label }))));
+      t(repo.never_recorded ? 'never_undone' : 'never_repo_stopped', { label: repo.label })), `${simple ? 'never' : 'never-more'}:repo:${repo.selector}`));
   const folders = (state.folders || []).map((folder) => row(folder.label, true, (action) =>
-    write(action, { folder_selector: folder.selector, undo: true }, t('never_undone'))));
+    write(action, { folder_selector: folder.selector, undo: true }, t('never_undone')), `never:folder:${folder.selector}`));
   // Parity row 14: folder names and claude-mem's patterns.
   const patterns = (state.patterns || []).map((pattern) => row(pattern.label, true, (action) =>
-    write(action, { pattern_selector: pattern.selector, undo: true }, t('never_undone'))));
+    write(action, { pattern_selector: pattern.selector, undo: true }, t('never_undone')), `never:pattern:${pattern.selector}`));
   if (simple) {
     const folder = input('text', f.neverFolder || '', '', 'never.folder', (v) => { f.neverFolder = v; });
     const add = el('button', 'quiet small', t('never_folder_add'));
     add.type = 'button';
+    add.dataset.simpleFocus = 'never.folder.add';
     add.addEventListener('click', () => {
       if (add.disabled) return;
       // Sent as typed, as the CLI takes it: a folder's name may end in a space (Codex on #491).
@@ -5114,6 +5157,7 @@ function captureSection(f, simple = false) {
   const pattern = input('text', f.neverPattern || '', '', 'never.pattern', (v) => { f.neverPattern = v; });
   const addPattern = el('button', 'quiet small', t('never_pattern_add'));
   addPattern.type = 'button';
+  addPattern.dataset.simpleFocus = 'never.pattern.add';
   addPattern.addEventListener('click', () => {
     if (addPattern.disabled) return;
     if (!pattern.value.trim()) { setStatus(t('capture_pattern'), true, lang); return; }
@@ -5709,7 +5753,8 @@ async function providerWrite(action, button, body, path) {
 }
 
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
-// form state; redraws clear them and the selected field is emptied before fetch is called.
+// form state; a redraw puts one being typed back into the field drawn for the same entry
+// (`keepSecret`), and the selected field is emptied before fetch is called.
 // The AI line's field and its entry's in More settings are told apart, so a redraw gives the focus
 // back to the one it was on (decision 69, 69b-2).
 function providerKeyField(provider, simple = false) {
@@ -5728,6 +5773,13 @@ function providerKeyField(provider, simple = false) {
   save.dataset.simpleFocus = `key-save:${id}`;
   save.disabled = true;
   i.addEventListener('input', () => { save.disabled = !i.value; });
+  // Named by where its save sends it: the entry's place, name, kind, API and address. An entry whose
+  // address the viewer does not show cannot be told from another: it keeps nothing (Codex's
+  // security review of #807).
+  if (provider.saved?.base_url) {
+    keepSecret(i, JSON.stringify([simple ? 'line' : 'entry', selectorKey(provider.selector), provider.name,
+      provider.saved.kind, provider.saved.api ?? null, provider.saved.base_url]), () => { save.disabled = !i.value; });
+  }
   i.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); if (!save.disabled) save.click(); }
   });
@@ -6518,11 +6570,27 @@ function simpleFocus(key) {
   next?.focus({ preventScroll: true });
 }
 
+// #810: the control that had the focus when a read or write started (the button pressed, or the
+// field whose Enter pressed it), which the browser took the focus off as the page was disabled or
+// made inert, gets it back once its part is drawn again in place: the control of the same name, or
+// `fallback` when it is gone (a row that left its list), or Refresh when neither is drawn (the state
+// not read again). Not when the focus went elsewhere meanwhile; `was` itself still holds it where
+// nothing moved it off.
+function focusAgain(was, fallback) {
+  const key = was?.dataset?.simpleFocus;
+  if (!key || ![null, document.body, was].includes(document.activeElement)) return;
+  const drawn = (name) => [...$('panel').querySelectorAll('button, input, select')].some((n) => n.dataset.simpleFocus === name && !n.disabled);
+  // Refresh is drawn even when the state could not be read again.
+  simpleFocus([key, fallback].find(drawn) ?? 'privacy.refresh');
+}
+
 // A link to a detailed control: the folds around it opened, its group's More settings among them,
 // and the control focused (decision 69, 69b-2).
 function detailedSettingsLink(key, selector, vars = {}, provider = null) {
   const button = el('button', 'quiet small simple-link', t(key, vars));
   button.type = 'button';
+  // Named, so a redraw gives the focus back to it (#810): by its entry, or by the name it says.
+  button.dataset.simpleFocus = `link:${key}:${provider ? selectorKey(provider.selector) : vars.name ?? ''}`;
   button.addEventListener('click', () => {
     if (provider) provider.editing = true;
     drawSettings();
@@ -6941,6 +7009,9 @@ function myWorkEstimate(estimate) {
 
 function drawSettings() {
   const keep = focusKeep();
+  // The secrets being typed, by their target, for the fields drawn again (#807).
+  const typed = new Map([...$('panel').querySelectorAll('input')].filter((i) => i.dataset.secret && i.value)
+    .map((i) => [i.dataset.secret, i.value]));
   if (document.activeElement && document.activeElement !== document.body
     && !document.activeElement.closest('.embedding-choice')) embeddingDraft.focus = null;
   const pick = el('select', null, ...LANGS.map((l) => {
@@ -7160,6 +7231,12 @@ function drawSettings() {
         el('p', 'desc', t('backup_desc'))), save)),
     settingsGroup('maintenance', false, viewSection(f), hiddenSection(f), doctorSection(), maintenanceSection(f))]));
   drawIn(panel);
+  // Before the focus, which takes the caret after the value.
+  for (const i of panel.querySelectorAll('input')) {
+    if (!i.dataset.secret || !typed.has(i.dataset.secret)) continue;
+    i.value = typed.get(i.dataset.secret);
+    i.secretSync();
+  }
   focusBack(keep);
 }
 

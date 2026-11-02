@@ -10,7 +10,11 @@ class Node {
     this.classList={toggle(){},add(){},remove(){},contains(){return false;}};
   }
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
-  replaceChildren(...nodes){this.children=[];this.append(...nodes);}
+  // A browser moves the focus to the body when the focused element leaves the page (#810).
+  replaceChildren(...nodes){
+    if(this.children.some(c=>c&&typeof c==='object'&&!nodes.includes(c)&&c.contains(document.activeElement)))document.activeElement=document.body;
+    this.children=[];this.append(...nodes);
+  }
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(node=>node!==this);this.parentElement=null;}
   addEventListener(name,cb){(this.listeners[name]??=[]).push(cb);}
   setAttribute(name,value){this.attrs[name]=value;}
@@ -41,6 +45,8 @@ const ids=new Map();
 const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
   if(!ids.has(id))ids.set(id,new Node());return ids.get(id);
 }};
+// Where a browser puts the focus taken off an element (#810).
+document.body=new Node('body');
 const ctx=vm.createContext({document,location:{hash:'#t=0123456789abcdef0123456789abcdef',port:'17373',
   replaced:[],replace(url){this.replaced.push(url);}},URL,URLSearchParams,navigator:{language:'en'},
   localStorage:{getItem(){return null;},setItem(){}},window:{addEventListener(){}},
@@ -1831,6 +1837,221 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.deepEqual([posted.at(-1).url,Boolean(receiptOf('never')),receiptOf('inject')],['/api/privacy/capture',true,''],
       'the place added says it is saved, and no other block still does');
+    // #807: a secret being typed stays in its field, its button enabled, through the privacy read's
+    // answer (drawn in place) and the page drawn again by a save's; it is in no form, storage,
+    // request or attribute but its own save's.
+    const keyed=(extra={})=>ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')],...extra});
+    settingsNow=keyed();
+    const stored=[];const setItem=ctx.localStorage.setItem;ctx.localStorage.setItem=(k,v)=>{stored.push(`${k}=${v}`);};
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    const lineKey=()=>simple('key:alpha');
+    const entryKey=selector=>more('ai').querySelectorAll('.provider-entry').find(n=>n.dataset.selector===selector)
+      ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
+    const buttonBy=input=>input.parentElement.querySelectorAll('button')[0];
+    const exactValue=()=>more('privacy').querySelectorAll('input').find(n=>n.type==='password');
+    const hashButton=()=>more('privacy').querySelectorAll('button').find(n=>text(n)===ctx.tier.text('redaction_hash_add','en'));
+    const secrets=['made-up-line-key-0001','made-up-entry-key-0002','made-up-exact-value-0003'];
+    typeIn(lineKey(),secrets[0]);typeIn(entryKey('config:1'),secrets[1]);typeIn(exactValue(),secrets[2]);
+    givePrivacy(json(privacy));await settled();
+    const kept=()=>[lineKey().value,entryKey('config:1').value,exactValue().value];
+    assert.deepEqual(kept(),secrets,'kept through the read\'s answer');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(keyed({version:'v2',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.length,kept()],[1,secrets],'kept through a save\'s answer, which drew the page again');
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();
+    assert.deepEqual(kept(),secrets,'and through the page drawn in another language');
+    ctx.ui.setLang('en');ctx.ui.drawSettings();
+    assert.deepEqual([buttonBy(lineKey()).disabled,buttonBy(entryKey('config:1')).disabled,hashButton().disabled],[false,false,false],
+      'their buttons enabled');
+    const walk=n=>[n,...n.children.filter(c=>c&&typeof c==='object').flatMap(walk)];
+    const attributes=()=>JSON.stringify(walk(panel).map(n=>[n.attrs,n.dataset]));
+    const seen=JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')+attributes();
+    assert(secrets.every(s=>!seen.includes(s)),'in no form, storage, request or attribute');
+    // An entry whose address changed (edited elsewhere) gets nothing back; the others keep theirs.
+    [privacyAnswer,givePrivacy]=later();
+    const readdressed=keyed({version:'v2b',inject:sized(4050)});
+    readdressed.providers[1]={...readdressed.providers[1],saved:{...readdressed.providers[1].saved,base_url:'http://127.0.0.1:9/elsewhere'}};
+    answers=[json(readdressed)];
+    typeIn(general('inject.session_start_chars'),'4050');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual(kept(),[secrets[0],'',secrets[2]],'nothing put into an entry whose address changed');
+    // Or whose API changed: a key typed for one API's server is not offered to another's.
+    typeIn(entryKey('config:1'),'made-up-entry-key-0009');
+    [privacyAnswer,givePrivacy]=later();
+    const reapi=keyed({version:'v2c',inject:sized(4060)});
+    reapi.providers[1]={...reapi.providers[1],saved:{...reapi.providers[1].saved,base_url:'http://127.0.0.1:9/elsewhere',api:'anthropic'}};
+    answers=[json(reapi)];
+    typeIn(general('inject.session_start_chars'),'4060');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.equal(entryKey('config:1').value,'','nothing put into an entry whose API changed');
+    // An entry whose place now holds another entry, or whose address changed, gets nothing back:
+    // a key never goes where it was not typed for.
+    typeIn(entryKey('config:0'),'made-up-entry-key-0004');
+    [privacyAnswer,givePrivacy]=later();
+    const moved=keyed({version:'v3',inject:sized(4000)});
+    moved.providers=[{...moved.providers[1],selector:{source:'config',index:0}},{...moved.providers[0],selector:{source:'config',index:1},
+      saved:{...moved.providers[0].saved,base_url:'http://127.0.0.1:9/other'}}];
+    answers=[json(moved)];
+    typeIn(general('inject.session_start_chars'),'4100');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([lineKey().value,entryKey('config:0').value,entryKey('config:1').value],['','',''],
+      'nothing put into a field whose entry moved, changed its address or is another');
+    assert.equal(exactValue().value,secrets[2],'the exact value, which goes nowhere, stays');
+    // Its own save sends it, and nothing is kept once it is sent.
+    typeIn(lineKey(),secrets[0]);
+    answers=[json({...keyed({version:'v4',inject:sized(4100)}),key_saved:{durable:true}})];
+    buttonBy(lineKey()).click();await settled();
+    assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).key],['/api/providers/key',secrets[0]],'its own save sends it');
+    assert.equal(lineKey()?.value??'','','and the field is empty after');
+    // A key its own save sent is not put back by the redraw a stale answer brings, nor the field
+    // refilled after a refusal.
+    typeIn(lineKey(),'made-up-stale-key-0010');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({code:'stale'},409)];
+    buttonBy(lineKey()).click();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.at(-1).url,lineKey()?.value??''],['/api/providers/key',''],'not put back after a stale reload');
+    typeIn(lineKey(),'made-up-refused-key-0011');
+    answers=[json({code:'bad_key',field:'providers.key'},422)];
+    buttonBy(lineKey()).click();await settled();
+    ctx.ui.drawSettings();
+    assert.equal(lineKey()?.value??'','','nor after a refusal and a redraw');
+    // Two entries of one name whose address the viewer does not show cannot be told apart: neither
+    // keeps a key through the page drawn again, so one typed for the first never reaches the
+    // second's field (Codex's security review of #807).
+    const unshown=n=>({...entry('alpha',n),saved:{...entry('alpha',n).saved,base_url:null,endpoint_supported:false}});
+    const twins=(extra={})=>keyed({chain:[row('alpha',{entries:2})],providers:[unshown(0),unshown(1)],...extra});
+    settingsNow=twins();
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    typeIn(entryKey('config:0'),'made-up-twin-key-0008');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(twins({version:'v6',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.length,entryKey('config:0').value,entryKey('config:1').value],[1,'',''],
+      'an entry whose address is not shown keeps no key');
+    // The judge's key is kept too, with its destination: another destination chosen, its field is
+    // empty. Search's Workers AI key is not kept: its endpoint may be set in config.toml beyond what
+    // the page shows (Codex's security review of #807).
+    const judged={...judge,destinations:[...judge.destinations,{id:'d1',key:'missing',usd_per_mtok_in:0.01,local:false},
+      {id:'clef',key:'missing',usd_per_mtok_in:0.02,local:false}]};
+    settingsNow=keyed({judge:judged});
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    const others=['made-up-workers-key-0005','made-up-judge-key-0006'];
+    typeIn(general('embedding.key'),others[0]);typeIn(general('judge.key'),others[1]);
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json(keyed({judge:judged,version:'v5',inject:sized(4000)}))];
+    typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.length,general('embedding.key').value,general('judge.key').value],[1,'',others[1]],'the judge\'s key is kept, search\'s is not');
+    const to=general('judge.destination');to.value='d1';for(const cb of to.listeners.change)cb({target:to});await settled();
+    assert.equal(general('judge.key').value,'','a judge key typed for one destination is not put into another\'s field');
+    // Cloudflare's: kept for the account typed beside it, not put back once another is typed (cubic on #811).
+    to.value='clef';for(const cb of to.listeners.change)cb({target:to});await settled();
+    typeIn(general('judge.account_id'),'0123456789abcdef0123456789abcdef');ctx.ui.drawSettings();
+    typeIn(general('judge.key'),'made-up-cloudflare-key-0012');ctx.ui.drawSettings();
+    assert.equal(general('judge.key').value,'made-up-cloudflare-key-0012','a Cloudflare key is kept for its account');
+    typeIn(general('judge.account_id'),'fedcba9876543210fedcba9876543210');ctx.ui.drawSettings();
+    assert.equal(general('judge.key').value,'','not put back once another account is typed');
+    assert(others.every(s=>!(JSON.stringify(ctx.ui.getForm())+JSON.stringify(posted)+stored.join('\n')).includes(s)),'in no form, storage or request');
+    ctx.localStorage.setItem=setItem;
+    // #810: a privacy action pressed from the keyboard gives the focus back once its part is drawn
+    // again in place: Refresh to Refresh, an exclusion to its row's button, a place undone whose
+    // row left its list to the folder field; not when the focus went elsewhere meanwhile. A browser
+    // takes the focus off a control disabled or made inert under it: `blur` does so here.
+    const blur=()=>{document.activeElement=document.body;};
+    settingsNow=ai(['alpha']);
+    [privacyAnswer,givePrivacy]=later();
+    (await ctx.ui.showSettings())();posted.length=0;
+    givePrivacy(json(privacy));await settled();
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,refreshButton(),'Refresh has the focus back, drawn again');
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();simple('never.folder').focus();givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,simple('never.folder'),'the focus moved meanwhile stays where it went');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({ok:true})];
+    simple('exclude:r2').focus();simple('exclude:r2').click();blur();await settled();
+    givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>r.selector==='r2'?{...r,excluded:true}:r)}));await settled();
+    assert.deepEqual([posted.at(-1).url,document.activeElement===simple('exclude:r2')],['/api/privacy/exclude',true],
+      'an exclusion has it back on its row, drawn again');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:false})];
+    simple('never:repo:r1').focus();simple('never:repo:r1').click();blur();await settled();
+    givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>({...r,never_recorded:false}))}));await settled();
+    assert.deepEqual([posted.at(-1).url,simple('never:repo:r1'),Boolean(simple('never-more:repo:r1')),document.activeElement===simple('never.folder')],
+      ['/api/privacy/capture',undefined,true,true],'a place undone, whose row moved to the list in More settings, gives it to the folder field');
+    // A folder added by Enter in its field gives the focus back to the field, emptied for the next.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    simple('never.folder').focus();typeIn(simple('never.folder'),'made-up-folder');
+    for(const cb of simple('never.folder').listeners.keydown)cb({key:'Enter',target:simple('never.folder'),preventDefault(){}});
+    blur();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([posted.at(-1).url,document.activeElement===simple('never.folder'),simple('never.folder').value],['/api/privacy/capture',true,''],
+      'a folder added by Enter gives the focus back to its field');
+    // The focus moved meanwhile to a control with no name in a part drawn again (the places' fold
+    // heading) stays on it, at its place, and Refresh takes nothing (Codex's review of #810).
+    const neverBlock=()=>panel.querySelector('.never-record');
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();
+    neverBlock().querySelectorAll('summary')[0].focus();
+    givePrivacy(json(privacy));await settled();
+    assert(document.activeElement===neverBlock().querySelectorAll('summary')[0]&&document.activeElement!==refreshButton(),
+      'a fold heading the focus moved to keeps it, drawn again');
+    // So do the fold's heading and the link after it, when the read changes how many rows come
+    // before them (Codex's review of #810).
+    const twoPlaces={...privacy,folders:[{label:'/home/made-up-user/kept-folder',selector:'f9'}]};
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();
+    simple('link:simple_never_more:').focus();
+    givePrivacy(json(twoPlaces));await settled();
+    assert.equal(document.activeElement,simple('link:simple_never_more:'),'the link the focus moved to keeps it, the rows before it grown');
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().focus();refreshButton().click();blur();
+    neverBlock().querySelectorAll('summary')[0].focus();
+    givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,neverBlock().querySelectorAll('summary')[0],'and the fold\'s heading, the rows shrunk');
+    // The folder's own button gives it back to itself; a place whose row left the list, to the folder
+    // field; in More settings, to the pattern's button.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    typeIn(simple('never.folder'),'/home/made-up-user/made-up-folder');
+    simple('never.folder.add').focus();simple('never.folder.add').click();blur();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.equal(document.activeElement,simple('never.folder.add'),'the folder\'s button has it back');
+    const patterned={...privacy,patterns:[{label:'made-up-pattern-*',selector:'p1'}]};
+    [privacyAnswer,givePrivacy]=later();
+    refreshButton().click();givePrivacy(json(patterned));await settled();
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({})];
+    simple('never:pattern:p1').focus();simple('never:pattern:p1').click();blur();await settled();
+    givePrivacy(json(privacy));await settled();
+    assert.deepEqual([simple('never:pattern:p1'),document.activeElement===simple('never.folder')],[undefined,true],
+      'a pattern undone, its row gone, gives it to the folder field');
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    simple('never-more:repo:r2').focus();simple('never-more:repo:r2').click();blur();await settled();
+    givePrivacy(json({...privacy,repositories:privacy.repositories.map(r=>({...r,never_recorded:true}))}));await settled();
+    assert.deepEqual([simple('never-more:repo:r2'),document.activeElement===simple('never.pattern.add')],[undefined,true],
+      'a repository no longer recorded, its row gone from More settings, gives it to the pattern\'s button');
+    // A write whose read after it fails draws no field to give the focus to: Refresh takes it.
+    [privacyAnswer,givePrivacy]=later();
+    answers=[json({never_recorded:true})];
+    simple('never.folder').focus();typeIn(simple('never.folder'),'/home/made-up-user/another-folder');
+    for(const cb of simple('never.folder').listeners.keydown)cb({key:'Enter',target:simple('never.folder'),preventDefault(){}});
+    blur();await settled();
+    givePrivacy(json({},503));await settled();
+    assert.deepEqual([simple('never.folder'),document.activeElement===refreshButton()],[undefined,true],'Refresh takes it when the state is not read again');
+    document.activeElement=null;
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;
