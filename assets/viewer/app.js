@@ -5621,11 +5621,15 @@ async function providerWrite(action, button, body, path) {
   const mine = form;
   clearSimpleReceipt();
   // The page and the entry as drawn now: a save waited for may have drawn them again (CodeRabbit
-  // on #802).
+  // on #802). A write from an AI line is answered on that line as drawn now, one from More
+  // settings on its entry (Codex's review of 69b-2a).
   const fields = $('panel').querySelector('.settings');
-  const scope = action.selector
+  const focus = button.closest('.provider-entry') ? null : button.dataset.simpleFocus;
+  const line = focus ? [...fields.querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === focus)
+    ?.closest('.simple-provider') : null;
+  const scope = line ?? (action.selector
     ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
-    : fields.querySelector('.new-provider');
+    : fields.querySelector('.new-provider'));
   button.disabled = true;
   fields.inert = true;
   try {

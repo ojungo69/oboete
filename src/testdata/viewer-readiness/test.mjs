@@ -1510,6 +1510,18 @@ console.log('PASS: the caps\' No cap switches');
   assert.equal(document.activeElement,keyOf('beta'),'the second entry\'s key field has the focus back');
   const modelOf=name=>more('ai').querySelectorAll('.provider-entry').find(n=>text(n).includes(name))
     ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
+  // A key refused is marked on the field it was typed in: the AI line's, not its entry's in More
+  // settings (Codex's review of 69b-2a).
+  answers=[json({code:'bad_key',field:'providers.key'},422)];
+  const lineKey=()=>simple('key:alpha');
+  typeIn(lineKey(),'a made-up wrong key');simple('key-save:alpha').click();await settled();
+  assert.equal(posted.at(-1).url,'/api/providers/key');
+  assert.deepEqual([lineKey().attrs['aria-invalid'],keyOf('alpha').attrs['aria-invalid'],document.activeElement===lineKey()],['true',undefined,true],
+    'the AI line\'s key field is marked and focused');
+  answers=[json({code:'bad_key',field:'providers.key'},422)];
+  typeIn(keyOf('alpha'),'another made-up key');more('ai').querySelectorAll('button').find(b=>b.dataset.simpleFocus?.startsWith('key-save:entry:')&&b.closest('.provider-entry')===keyOf('alpha').closest('.provider-entry')).click();await settled();
+  assert.deepEqual([keyOf('alpha').attrs['aria-invalid'],document.activeElement===keyOf('alpha')],['true',true],'and an entry\'s on the entry');
+  posted.length=0;document.activeElement=null;
   modelOf('beta').focus();modelOf('beta').setSelectionRange(2,4);ctx.ui.drawSettings();
   assert.deepEqual([document.activeElement===modelOf('beta'),modelOf('beta').selectionStart],[true,2],
     'and so does its editor\'s model, which each entry repeats');
