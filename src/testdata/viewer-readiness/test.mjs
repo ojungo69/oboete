@@ -16,12 +16,11 @@ class Node {
   setAttribute(name,value){this.attrs[name]=value;}
   removeAttribute(name){delete this.attrs[name];}
   querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+  // In document order, as a browser gives them, a list of selectors too (Codex's review of 69b-2a).
   querySelectorAll(selector){
-    if(selector.includes(','))return selector.split(',').flatMap(part=>this.querySelectorAll(part.trim()));
-    const tag=selector.toUpperCase();
-    return this.children.filter(node=>node&&typeof node==='object').flatMap(node=>[
-      ...(node.tagName===tag||selector.startsWith('.')&&node.className.split(' ').includes(selector.slice(1))?[node]:[]),
-      ...node.querySelectorAll(selector)]);
+    const parts=selector.split(',').map(part=>part.trim());
+    const matches=node=>parts.some(part=>node.tagName===part.toUpperCase()||part.startsWith('.')&&node.className.split(' ').includes(part.slice(1)));
+    return this.children.filter(node=>node&&typeof node==='object').flatMap(node=>[...(matches(node)?[node]:[]),...node.querySelectorAll(selector)]);
   }
   contains(node){return this===node||this.children.some(child=>child&&typeof child==='object'&&child.contains(node));}
   get childNodes(){return this.children;}
@@ -1550,6 +1549,16 @@ console.log('PASS: the caps\' No cap switches');
   simple('move:beta:1').click();await settle();
   give(json(ai(['alpha','gamma'],{version:'v2',inject:sized(4000)})));await settled();
   assert.equal(posted.length,1,'an AI gone meanwhile moves nothing');
+  // An AI whose entries are all off is not in use, though its name's switch is on: an arrow moves
+  // past it, as the lines show it (Codex's review of 69b-2a).
+  const offEntry={...entry('beta',1),saved:{...entry('beta',1).saved,enabled:false}};
+  const offBeta=(order,extra={})=>ai(order,{providers:[entry('alpha',0),offEntry,entry('gamma',2)],...extra});
+  f=draw(offBeta(['alpha','beta','gamma']));
+  assert.deepEqual(panel.querySelector('.simple-providers').querySelectorAll('.simple-provider').map(n=>n.dataset.providerName),['alpha','gamma'],
+    'beta, its entry off, is not in use');
+  answers=[json(offBeta(['gamma','beta','alpha'],{version:'v2'}))];
+  simple('move:gamma:-1').click();await settled();
+  assert.deepEqual(sent()[0].chain.map(r=>r.name),['gamma','beta','alpha'],'gamma moves past alpha, the AI in use above it');
 
   // Nothing outside the general forms starts a general save: the preferences have their own form,
   // in no other; the maintenance actions and the agents' setup are in none.
@@ -1566,6 +1575,14 @@ console.log('PASS: the caps\' No cap switches');
   answers=[json(ai(['alpha'],{version:'v2'}))];
   typeIn(column(),'');leave(column());await settled();
   assert.equal(sent()[0].chain[0].model,null,'emptied, the model column clears the name\'s model');
+  // A model a general save sent and the viewer refused is marked on the column it was typed in,
+  // not on the AI line's choice of the same field (Codex's review of 69b-2a).
+  f=draw(ai(['alpha']));
+  answers=[json({code:'bad_request',field:'chain.alpha.model'},400)];
+  typeIn(column(),'bad model');leave(column());await settled();
+  assert.deepEqual([column().attrs['aria-invalid'],simple('model:alpha').attrs['aria-invalid'],document.activeElement===column()],['true',undefined,true],
+    'the refused model is marked and focused where it was typed');
+  document.activeElement=null;
 
   // #803: a new home shows the resident worker on, as recommended, unsaved. A simple save leaves
   // it so; the guide's tier, phrase, jumps and search send nothing; its Apply saves the resident

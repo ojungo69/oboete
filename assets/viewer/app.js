@@ -6105,9 +6105,14 @@ function saveBody(autosaved = false) {
   };
 }
 
-function markInvalid(field, root = document) {
+// `general`: whether the refused save was a general one. A field both sides draw (an AI's model:
+// its line's choice and the chain table's column) is marked on the side that sent it, then on
+// either (Codex's review of 69b-2a).
+function markInvalid(field, root = document, general = null) {
   const controls = [...root.querySelectorAll('input, select, textarea')];
-  const i = controls.find((x) => x.dataset.field === field) || controls.find((x) => x.dataset.field?.startsWith(`${field}.`));
+  const sent = general === null ? controls : controls.filter((x) => Boolean(x.closest('.general-form')) === general);
+  const named = (list) => list.find((x) => x.dataset.field === field) || list.find((x) => x.dataset.field?.startsWith(`${field}.`));
+  const i = named(sent) || named(controls);
   if (!i) return;
   i.classList.add('invalid');
   i.setAttribute('aria-invalid', 'true');
@@ -6173,7 +6178,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
 async function saveSettings(button, simple = null, autosaved = false) {
   const { body, field } = simple || saveBody(autosaved);
   if (!body) {
-    markInvalid(field);
+    markInvalid(field, document, true);
     setStatus(t(field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
     return;
   }
@@ -6207,7 +6212,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
     const code = answer.code || byStatus[res.status] || 'other';
     // An inert form takes no focus, and the refused field is to be reached.
     fields.inert = false;
-    if (answer.field) markInvalid(answer.field);
+    if (answer.field) markInvalid(answer.field, document, !simple);
     setStatus(t(code, { status: res.status }), true, lang);
   } catch {
     if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
@@ -6595,9 +6600,12 @@ function simpleProviderRow(f, row, index, chain, position) {
     // Found by its name in the order saved when its turn comes, past the next AI in use that way
     // then (Codex's review of the 69b-2 plan): a place taken at draw may name another AI by then.
     button.addEventListener('click', () => void simpleSettingsSave(button, body => {
+      // In use as the lines show it then: the name's switch on and an entry of it on (Codex's
+      // review of 69b-2a; `simpleSavedChain`).
+      const inUse = new Map(simpleSavedChain(form).map((entry) => [entry.name, entry.on]));
       const at = body.chain.findIndex(entry => entry.name === row.name);
       let past = at + direction;
-      while (past >= 0 && past < body.chain.length && !body.chain[past].on) past += direction;
+      while (past >= 0 && past < body.chain.length && !inUse.get(body.chain[past].name)) past += direction;
       if (at < 0 || past < 0 || past >= body.chain.length) return false;
       [body.chain[at], body.chain[past]] = [body.chain[past], body.chain[at]];
     }, (next, answer) => {
@@ -7170,7 +7178,7 @@ function autoSave(next) {
   const mine = form;
   const at = saveBody(true);
   if (!at.body) {
-    markInvalid(at.field);
+    markInvalid(at.field, document, true);
     setStatus(t(at.field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
     return;
   }
@@ -7187,7 +7195,7 @@ function portSave() {
   if (saveRun) { saveAgain = { port: true }; return; }
   const at = saveBody(false);
   if (!at.body) {
-    markInvalid(at.field);
+    markInvalid(at.field, document, true);
     setStatus(t(at.field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
     return;
   }
