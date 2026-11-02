@@ -1,0 +1,31 @@
+docs/settings-redo.md
+  s_f7d8663ba9ca22::t_e7844f05de8a80 1-32
+DESIGN.md
+  s_f7d8663ba9ca22::t_9885631afc200e 227,391
+assets/viewer/app.css
+  s_f7d8663ba9ca22::t_00365a2bd7318d 657-669
+assets/viewer/app.js
+  s_f7d8663ba9ca22::t_31202b4f6bb8da 1025-1036,5135-5136,5138-5139,6530-6538,6542,6547-6552,6595-6597,6607,6612-6615,6626-6627,6654-6658,6669-6673,6830-6843,6847-6870,7098-7103,7105,7111-7118
+docs/claude-mem-parity.md
+  s_f7d8663ba9ca22::t_e273c151137f38 40
+docs/spec.md
+  s_f7d8663ba9ca22::t_ab7180902eb175 96
+src/testdata/viewer-readiness/test.mjs
+  s_f7d8663ba9ca22::t_223b704382dd6b 1506-1553
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "62dca4893261c697bdf289e6716018cca5a12c75",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
