@@ -2393,6 +2393,26 @@ console.log('PASS: the caps\' No cap switches');
     give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2',judge,key_input:true})));await settled();
     assert.deepEqual([posted.length,posted[1]?.url,JSON.parse(posted[1]?.body??'{}').version],[2,'/api/judge/key','v2'],
       'then it is sent with the version the line\'s answer gave');
+    // The page drawn again by that answer is held while the key is on its way, and its field is marked
+    // when the key is refused.
+    f=draw(one({},{judge,key_input:true}));
+    [answer,give]=later();const [keyAnswer,giveKey]=later();answers=[answer,keyAnswer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(general('judge.key'),'made-up-judge-key-0079');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    give(json(one({timeout_s:120,effective_timeout_s:120},{version:'v2',judge,key_input:true})));await settled();
+    assert.deepEqual([posted.length,inert()],[2,true],'the page drawn again is held while the key is on its way');
+    giveKey(json({code:'bad_key',field:'judge.key'},422));await settled();
+    assert.deepEqual([general('judge.key').attrs['aria-invalid'],inert()],['true',false],'a refused key is marked on the field shown');
+    // A key waiting across a form read afresh (the line's save stale) is not sent: it is typed again.
+    f=draw(one({},{judge,key_input:true}));
+    reread=one({},{version:'v9',judge,key_input:true});
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(general('judge.key'),'made-up-judge-key-0080');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    give(json({code:'stale'},409));await settled(6);
+    assert.deepEqual([posted.length,document.getElementById('status').textContent.includes('Type it again')],[1,true],
+      'a key waiting across a stale reload is not sent, and is to be typed again');
+    reread=null;
     vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
   }
   ctx.fetch=w6fetch;

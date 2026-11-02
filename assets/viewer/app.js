@@ -1658,6 +1658,7 @@ const TEXT = {
   key_placeholder: ['Paste a new key', '新しいキーを貼り付け'],
   key_save: ['Save key', 'キーを保存'],
   key_saved: ['The key was registered in private storage. It has not been tested yet.', 'キーを専用の保存先に登録しました。接続はまだ確認していません。'],
+  key_again: ['The settings were read again while the key waited, so it was not saved. Type it again.', 'キーの保存を待つ間に設定が読み直されたため、保存していません。もう一度入力してください。'],
   key_not_durable: [
     'The key was registered, but the disk did not confirm the write. After an unexpected shutdown, register it again if it is missing.',
     'キーを登録しましたが、ディスクへの書き込みを確認できませんでした。予期しない終了の後、登録が失われていた場合は再登録してください。',
@@ -3335,8 +3336,11 @@ function promptSide(side) {
 // against what was saved before, go with it (69b-3c).
 function loadedForm(s) {
   lineDrafts.clear();
+  formLoads += 1;
   return formOf(s);
 }
+// How many forms were read afresh: a key waiting for its turn is not sent across one (`keySave`).
+let formLoads = 0;
 
 function formOf(s) {
   if (s.error) return null;
@@ -4614,12 +4618,24 @@ function keyField(route, field, label, more = () => ({}), { kept = false } = {})
 // (Codex's review of 69b-3c-1a).
 async function keySave(route, button, body) {
   if (saveRun) {
+    const loads = formLoads;
+    const field = button.parentElement?.querySelector('input')?.dataset.field;
     button.disabled = true;
     const waiting = $('panel').querySelector('.settings');
     if (waiting) waiting.inert = true;
     while (saveRun) await saveRun;
     if (view !== 'settings' || !form) return;
+    // A form read afresh meanwhile (a stale save, Settings entered again, a recovery) may send the
+    // key elsewhere than the page showed as it was typed (search's endpoint is config.toml's): it is
+    // not sent, and is typed again (Codex's review of 69b-3c-1a).
+    if (formLoads !== loads) {
+      setStatus(t('key_again'), true, lang);
+      return;
+    }
     body = { ...body, version: form.version };
+    // The page the answer drew again holds this write and is marked by its refusal.
+    const now = [...$('panel').querySelectorAll('input')].find((i) => i.dataset.field === field);
+    button = now?.parentElement?.querySelector('button') ?? button;
   }
   let done;
   saveRun = new Promise((resolve) => { done = resolve; });
