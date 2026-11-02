@@ -6653,15 +6653,39 @@ function usdCents(v) {
 
 // Required whole-settings fields come from the saved response. A simple change must not also
 // commit a detailed draft, or a fresh home's suggested resident choice.
-function simpleSettingsSave(button, change, adopt) {
+// Decision 69 (69b-2): one page, one write at a time. A simple change waits for a write on its
+// way as a provider's does (its control and the page wait with it), then builds its body from
+// what is saved when its turn comes: `change(body, saved)` reads that, never what was saved when
+// the page was drawn, and names its target (an AI by its name). With nothing left to do it
+// returns false: nothing is sent, and the page is drawn again.
+async function simpleSettingsSave(button, change, adopt) {
   clearSimpleReceipt();
+  const block = button.closest('.simple-block').dataset.simpleBlock;
+  if (saveRun) {
+    button.disabled = true;
+    const waiting = $('panel').querySelector('.settings');
+    if (waiting) waiting.inert = true;
+    while (saveRun) await saveRun;
+    if (view !== 'settings' || !form) return;
+  }
   const s = form.savedSettings;
   const body = JSON.parse(JSON.stringify({ version: form.version, summary: s.summary,
     paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini, inject: s.inject, capture: s.capture,
     chain: s.chain.map(row => ({ name: row.name, on: row.on, daily_budget: row.daily_budget,
       timeout_s: row.timeout_s, model: row.model })) }));
-  change(body);
-  return saveSettings(button, { body, adopt, block: button.closest('.simple-block').dataset.simpleBlock });
+  if (change(body, s) === false) {
+    drawSettings();
+    return;
+  }
+  let done;
+  saveRun = new Promise((resolve) => { done = resolve; });
+  try {
+    return await saveSettings(button, { body, adopt, block });
+  } finally {
+    saveRun = null;
+    done();
+    saveNext();
+  }
 }
 
 function simpleToggle(value, key, label, save, visible = label) {
@@ -6673,7 +6697,11 @@ function simpleToggle(value, key, label, save, visible = label) {
 }
 
 function simpleChainSave(button, name, key, value) {
-  return simpleSettingsSave(button, body => { body.chain.find(row => row.name === name)[key] = value; },
+  return simpleSettingsSave(button, body => {
+    const row = body.chain.find(entry => entry.name === name);
+    if (!row || row[key] === value) return false;
+    row[key] = value;
+  },
     (next, answer) => { next.chain.find(row => row.name === name).edit[key] = answer.chain.find(row => row.name === name)[key] ?? ''; });
 }
 
@@ -6714,8 +6742,14 @@ function simpleProviderRow(f, row, index, chain, position) {
     let to = index + direction;
     while (to >= 0 && to < chain.length && !chain[to].on) to += direction;
     button.disabled = to < 0 || to >= chain.length;
+    // Found by its name in the order saved when its turn comes, past the next AI in use that way
+    // then (Codex's review of the 69b-2 plan): a place taken at draw may name another AI by then.
     button.addEventListener('click', () => void simpleSettingsSave(button, body => {
-      [body.chain[index], body.chain[to]] = [body.chain[to], body.chain[index]];
+      const at = body.chain.findIndex(entry => entry.name === row.name);
+      let past = at + direction;
+      while (past >= 0 && past < body.chain.length && !body.chain[past].on) past += direction;
+      if (at < 0 || past < 0 || past >= body.chain.length) return false;
+      [body.chain[at], body.chain[past]] = [body.chain[past], body.chain[at]];
     }, (next, answer) => {
       const rows = new Map(next.chain.map(entry => [entry.name, entry]));
       next.chain = answer.chain.map(entry => rows.get(entry.name));
@@ -6867,7 +6901,7 @@ function drawSimpleSettings(panel, f) {
     void simpleSettingsSave(button, body => { body.summary.curate = value; },
       (next, answer) => { next.summary = { ...next.summary, curate: answer.summary.curate }; }));
   const myWork = simpleToggle(f.savedSettings.my_work.curate, 'my_work.curate', t('simple_my_work'), (button, value) =>
-    void simpleSettingsSave(button, body => { body.my_work = { curate: value, calls_a_day: f.savedSettings.my_work.calls_a_day }; },
+    void simpleSettingsSave(button, (body, saved) => { body.my_work = { curate: value, calls_a_day: saved.my_work.calls_a_day }; },
       (next, answer) => { next.my_work = { ...next.my_work, curate: answer.my_work.curate }; }));
   const ready = chain.some(row => simpleProviderStatus(row, f.stopped) === 'ready');
   // Decision 64: with no cap saved the limit is set aside until No cap is turned off, and turning
@@ -6921,8 +6955,8 @@ function drawSimpleSettings(panel, f) {
       if (!value) { f.simpleMaskingOff = true; drawSettings(); simpleFocus('mask.confirm'); }
       else { f.simpleMaskingOff = false; saveMask(button, true); }
     });
-  const saveMask = (button, enabled) => void simpleSettingsSave(button, body => {
-    body.redaction = { ...f.savedSettings.redaction, enabled };
+  const saveMask = (button, enabled) => void simpleSettingsSave(button, (body, saved) => {
+    body.redaction = { ...saved.redaction, enabled };
   }, (next, answer) => { next.redaction = { ...next.redaction, enabled: answer.redaction.enabled }; });
   const confirm = el('button', 'quiet', t('simple_mask_confirm'));
   confirm.type = 'button'; confirm.dataset.simpleFocus = 'mask.confirm';
