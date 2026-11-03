@@ -6256,6 +6256,36 @@ try{
   }finally{
     run(`reposLoaded=${wasLoaded};show=async()=>{};delete globalThis.__realShow`);
   }
+  // Forward to a request, or its address on load, lands on its page when it is drawn, as a click
+  // that opens it does; Back still gives the focus to its card (cubic on #829). The real `show`.
+  ctx.fetch=url=>String(url).startsWith('/api/my-work?')?Promise.resolve(json({requests:[r1],unlinked:0})):Promise.resolve(json({state:'none',products:[]}));
+  ctx.__realShow=saved.show;
+  run('reposLoaded=true;show=globalThis.__realShow');
+  try{
+    const onHeading=()=>run('document.activeElement===$("heading")');
+    at(page('?request=r1'));run('routeShow()');await settle();
+    assert.equal(onHeading(),true,'Forward lands on the request');
+    at(page(''));run('routeShow()');await settle();
+    assert.equal(card(),'r1','Back from it: the focus on its card');
+    run('mw.request=null;mw.area=null');
+    at(page('?request=r1'));run('routeStart()');await run('show()');await settle();
+    assert.equal(onHeading(),true,'a request\'s address on load lands on it');
+    // A landing whose draw was dropped (Back before Forward's read came) is not made later.
+    run('mw.land="r1";myWorkClose()');
+    assert.equal(run('mw.land'),null);
+    run('mw.land="r1";myWorkOpen("r1")');
+    assert.equal(run('mw.land'),null,'nor after a click, which gives its own');
+  }finally{
+    run(`reposLoaded=${wasLoaded};show=async()=>{};delete globalThis.__realShow`);
+  }
+  // Past focus's reads: Back and Forward may start one before the last lands, and only the latest
+  // keeps its answer (cubic on #829).
+  const pastReads=[];
+  ctx.fetch=url=>String(url).startsWith('/api/my-goals')?new Promise(resolve=>pastReads.push(resolve)):Promise.resolve(json({state:'none'}));
+  const older=run('myFocusReadPast()'),newer=run('myFocusReadPast()');
+  pastReads[1](json({current:null,months:[{month:'2026-11',headline:'newer'}],window:{days:31,prompts:0}}));await newer;
+  pastReads[0](json({current:null,months:[{month:'2026-10',headline:'older'}],window:{days:31,prompts:0}}));await older;
+  assert.equal(run('mw.past.months[0].headline'),'newer','an older read landing last is dropped');
   // A work product read still on its way when the request is shown again from the address is not
   // kept: the page reads it again.
   const productReads=[];

@@ -2237,7 +2237,8 @@ runs and leaves a run another live worker owns to it.
   「更新を始められませんでした。」 for a refusal, or "No answer came; the refresh may have started." /
   「応答がありませんでした。更新が始まっている可能性があります。」 when no answer comes (the viewer may
   have written the request before it was lost, #828). A `waiting` answer redraws the status
-  line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
+  line, which says why the work waits, and the note beside the button says "Not started: My Work is
+  waiting." / 「始められませんでした: 待機中です。」;
   an `off` or `summaries_off` one (My Work or its summaries turned off since the page read it)
   redraws the line and takes the button away, its focus going to the line's Open Settings, as a
   read of the line that says either does (#828). The note stays until the status line says

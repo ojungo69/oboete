@@ -372,6 +372,7 @@ function routeApply(route) {
     mw.unread.delete(route.request);
     mw.back = { id: route.request, scroll: null };
   }
+  mw.land = route.request;
   if (route.area === 'past-focus') void myFocusReadPast();
 }
 
@@ -8253,7 +8254,9 @@ const mw = {
   pageWords: [], editing: null, draft: '',
   // F7: the Suggested page's decisions on this visit (claude-mem keeps them until the page is
   // left), each with the area as it was; Past focus's months, once read.
-  decided: new Map(), past: null,
+  decided: new Map(), past: null, pastReads: 0,
+  // A request reached through the address, whose page takes the focus when it is drawn.
+  land: null,
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
@@ -8904,8 +8907,11 @@ function myFocusSuggested() {
 
 // Past focus's months: My Goals' answer, read when the page opens.
 async function myFocusReadPast() {
+  // Back and Forward may start a read before the last one lands: only the latest keeps its answer.
+  const read = ++mw.pastReads;
   try {
     const answer = await api('my-goals');
+    if (read !== mw.pastReads) return;
     mw.past = answer;
     if (view === 'my_work' && mw.area === 'past-focus') myWorkDraw(document.activeElement?.dataset?.myWork ?? null);
   } catch {
@@ -9408,6 +9414,8 @@ function myWorkFocus(focus) {
 }
 
 function myWorkOpen(id) {
+  // A click gives its own focus; a landing left from the address is not made later.
+  mw.land = null;
   // Its work product is read again: new records, expired ones and new rules change it without
   // changing the request's version (Codex on #650); a read still on its way is not kept.
   mw.products = null;
@@ -9429,6 +9437,8 @@ function myWorkOpenerOf(key, value) {
 // Closed by its back button, a move written into the address; by Back, the address says it already.
 function myWorkClose() {
   const back = mw.back;
+  // A landing a dropped draw never made is not made later over the list.
+  mw.land = null;
   mw.request = null;
   mw.work = null;
   mw.back = null;
@@ -9805,7 +9815,11 @@ async function showMyWork() {
       mw.taken = read;
       myWorkAccept(answer);
     }
-    myWorkDraw();
+    // A request reached through the address (Forward, a link) lands on its page when it is drawn,
+    // as a click that opens it does.
+    const land = mw.land !== null && mw.land === mw.request;
+    mw.land = null;
+    myWorkDraw(land ? 'heading' : undefined);
   };
 }
 
