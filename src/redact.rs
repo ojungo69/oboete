@@ -2003,6 +2003,14 @@ mod tests {
                 format!("tool --password ' {quoted} '{suffix}"),
                 suffix.clone(),
             ),
+            (
+                format!("tool --password '{quoted}'_{suffix}"),
+                suffix.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'-{suffix}.x9"),
+                suffix.clone(),
+            ),
             (format!("d={xoxd_raw} for the client"), xoxd_raw.clone()),
             (format!("d={xoxd_enc} for the client"), xoxd_enc.clone()),
             (
@@ -2072,6 +2080,8 @@ mod tests {
             "masked: [REDACTED] and [REDACTED].",
             "a short end [REDACTED]abc stays",
             "PUT /keys/[REDACTED]/rotate",
+            "key = '[REDACTED]'.strip()",
+            "{\"token\":\"[REDACTED]\",\"next\":1}",
             "curl --token [REDACTED] \"https://example.invalid/\"",
             "cargo run -- --token-file ./token.txt",
             "gh secret set --secret-name deploy",
