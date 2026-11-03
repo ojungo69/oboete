@@ -2228,15 +2228,17 @@ runs and leaves a run another live worker owns to it.
   stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
   since), stands no more and changes nothing; a done mark dated that far ahead marks nothing done.
   The bound and the holds stop the pass as they stop any.
-- **The page**: "Refresh now" / 「今すぐ更新」 beside My Work's status line while My Work is on (on
-  My Work, Suggested and Past focus, whose pages share the line; not on My Rules). It is marked busy
+- **The page**: "Refresh now" / 「今すぐ更新」 beside My Work's status line while My Work and its
+  summaries are on (on My Work, Suggested and Past focus, whose pages share the line; not on My
+  Rules). It is marked busy
   (`aria-disabled`, so the focus stays on it) while its request is on its way, and a click then
   sends nothing. The answer follows it: "Refreshing 3 now." / 「3 件の更新を始めました。」,
   "Nothing was due." / 「更新するものはありませんでした。」, or "The refresh could not start." /
   「更新を始められませんでした。」 for a refusal or no answer. A `waiting` answer redraws the status
   line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
   an `off` one (My Work turned off since the page read it) redraws the line and takes the button
-  away, its focus going to the line's Open Settings. The note stays until the status line says
+  away, its focus going to the line's Open Settings, as a read of the line that says My Work is off
+  does. The note stays until the status line says
   something new. A redraw of the page keeps the focus on the button, whatever place it names (a save
   that ends meanwhile), as the search field does. The status a refresh answers is a read of the
   line as the others are (#722): a read begun before it that lands later is dropped, and one begun

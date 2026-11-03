@@ -9743,7 +9743,11 @@ function myWorkRefreshControl() {
 function myWorkRefreshShow() {
   const parts = mw.refreshParts;
   if (!parts) return;
+  const focused = document.activeElement === parts.button;
   parts.wrap.hidden = !mw.status?.state || ['off', 'summaries_off'].includes(mw.status.state);
+  // Hidden with My Work off, by a refresh's answer or a read of the line, the button gives the
+  // focus to the line's way to Settings.
+  if (parts.wrap.hidden && focused) mw.lineText?.querySelector('button')?.focus();
   // Not `disabled`: the focus stays on the button while its request is on its way.
   parts.button.setAttribute('aria-disabled', String(mw.refreshing));
   parts.note.replaceChildren(...(mw.refreshNote ? [t(...mw.refreshNote)] : []));
@@ -9780,9 +9784,6 @@ async function myWorkRefresh() {
   mw.refreshing = false;
   mw.refreshNote = note;
   myWorkRefreshShow();
-  // Hidden with My Work off, the button gives the focus to the line's way to Settings.
-  const parts = mw.refreshParts;
-  if (parts?.wrap.hidden && document.activeElement === parts.button) mw.lineText?.querySelector('button')?.focus();
 }
 
 // V1: the status line of My Work and My Goals, as the reads say it, with no call: off or waiting

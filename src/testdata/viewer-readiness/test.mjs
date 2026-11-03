@@ -6075,6 +6075,12 @@ posts.length=0;parts=slot({state:'none'});parts.button.focus();parts.button.clic
 posts[0].resolve(json({state:'off'}));await settle();
 assert.equal(parts.wrap.hidden,true,'no Refresh now once off');
 assert.equal(run('document.activeElement').dataset.focus,'settings','the focus to Open Settings');
+// The same when a read of the status line says My Work is off (cubic on #827).
+parts=slot({state:'none'});parts.button.focus();
+ctx.fetch=()=>Promise.resolve(json({state:'off'}));
+await run('myWorkLineRead()');
+assert.equal(parts.wrap.hidden,true,'no Refresh now once a read says off');
+assert.equal(run('document.activeElement').dataset.focus,'settings','a read moves the focus to Open Settings too');
 // A note stays until the status line says something new.
 parts=slot({state:'written',at:day});
 run('mw.refreshNote=["my_work_refresh_nothing"];myWorkRefreshShow()');

@@ -939,8 +939,13 @@ fn refresh_with(
     }
     let path = refresh_path(home);
     std::fs::create_dir_all(path.parent().unwrap_or(home))?;
-    // The request is the file's time, set on a handle that writes (Windows refuses a read-only
-    // one); two at once each leave a request, the later time standing.
+    // One write at a time, so a request's time never goes back under a later one's (cubic on
+    // #827). The request is the file's time, set on a handle that writes (Windows refuses a
+    // read-only one).
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = WRITING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::fs::File::create(&path)?.set_modified(std::time::SystemTime::now())?;
     Ok(json!({"state": "started", "due": due}))
 }
