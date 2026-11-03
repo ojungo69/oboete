@@ -7830,7 +7830,8 @@ mod tests {
     }
 
     /// Decision 71: reading the warm set touches every table of it that is made and passes over
-    /// one that is not: a store with records reads, and a home with no knowledge.db reads nothing.
+    /// one that is not: a store with records reads, a knowledge.db with one of its tables reads that
+    /// one, and a home with no knowledge.db reads nothing and makes none.
     #[test]
     fn the_warm_set_reads_what_is_made() {
         let mut s = Store::new();
@@ -7843,6 +7844,12 @@ mod tests {
         )]);
         s.run();
         assert!(warm_pages(s.home.path()).is_ok());
+        let partial = tempfile::tempdir().unwrap();
+        Connection::open(partial.path().join("knowledge.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE imported(body TEXT)")
+            .unwrap();
+        assert!(warm_pages(partial.path()).is_ok(), "a store not made whole");
         let empty = tempfile::tempdir().unwrap();
         assert!(warm_pages(empty.path()).is_ok());
         assert!(!empty.path().join("knowledge.db").exists());
