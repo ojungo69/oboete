@@ -368,6 +368,7 @@ function routeApply(route) {
   // card is where its back button, or Back, returns.
   if (route.request !== null) {
     mw.products = null;
+    mw.productsAsk += 1;
     mw.unread.delete(route.request);
     mw.back = { id: route.request, scroll: null };
   }
@@ -410,6 +411,8 @@ function routeStart() {
 function routeShow() {
   const route = routeRead(location.search) ?? { view: 'my_work', area: null, request: null };
   if (view === 'my_work' && route.view === 'my_work' && mw.request !== null && route.request === null && route.area === mw.area) {
+    // A read still on its way for the place left draws nothing over the list (`show`'s guard).
+    generation += 1;
     myWorkClose();
     return;
   }
@@ -9405,8 +9408,9 @@ function myWorkFocus(focus) {
 
 function myWorkOpen(id) {
   // Its work product is read again: new records, expired ones and new rules change it without
-  // changing the request's version (Codex on #650).
+  // changing the request's version (Codex on #650); a read still on its way is not kept.
   mw.products = null;
+  mw.productsAsk += 1;
   mw.unread.delete(id);
   mw.back = { id, scroll: window.scrollY || 0 };
   mw.request = id;
@@ -9739,6 +9743,8 @@ function myWorkAccept(answer) {
       if (content.get(row.id) !== myWorkContent(row)) mw.unread.add(row.id);
     }
   }
+  // The request open on the page is being read: it is not new to the owner.
+  if (mw.request !== null) mw.unread.delete(mw.request);
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
   mw.story = answer.story ?? null;

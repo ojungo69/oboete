@@ -6216,10 +6216,11 @@ try{
   // Back, Forward and Back again from a request give the focus back to its card each time, and a
   // request shown again from the address reads its work product again (as myWorkOpen does).
   const H=3600000,now=Date.now();
-  ctx.__rows={requests:[{id:'r1',title:'Request r1',summary:'Summary r1',next:null,copy:'recorded',updating:false,
+  const r1={id:'r1',title:'Request r1',summary:'Summary r1',next:null,copy:'recorded',updating:false,
     status:'working',updated:now-H,started:now-5*H,agents:['claude'],sessions:[{agent:'claude',id:'c:claude:r1'}],
     projects:['alpha'],repos:['github.com/o/alpha'],ask:{id:'dev:1',ts:now-5*H,text:'Ask r1',from:'prompt'},
-    follow_ups:[],updates:[{ts:now-H,text:'Summary r1'}],work:[],summaries:[],cards:[],focus:null}],unlinked:0};
+    follow_ups:[],updates:[{ts:now-H,text:'Summary r1'}],work:[],summaries:[],cards:[],focus:null};
+  ctx.__rows={requests:[r1],unlinked:0};
   at(page(''));
   run('setView("my_work");Object.assign(mw,{rows:null,range:"all",area:null,request:null});myWorkAccept(globalThis.__rows);myWorkDraw()');
   run('myWorkOpen("r1")');
@@ -6232,6 +6233,40 @@ try{
   run('myWorkDraw("heading")');
   at(page(''));run('routeShow()');
   assert.equal(card(),'r1','Back again: the focus on its card');
+  // Forward's read of the requests still on its way when Back comes: it draws nothing over the list
+  // (the real `show`).
+  const held=[];
+  ctx.fetch=url=>String(url).startsWith('/api/my-work?')?new Promise(resolve=>held.push(resolve)):Promise.resolve(json({state:'none',products:[]}));
+  ctx.__realShow=saved.show;
+  const wasLoaded=run('reposLoaded');
+  run('reposLoaded=true;show=globalThis.__realShow');
+  try{
+    at(page('?request=r1'));run('routeShow()');
+    await settle();
+    assert.equal(held.length,1,'Forward reads the requests');
+    at(page(''));run('routeShow()');
+    assert.equal(card(),'r1');
+    for(const resolve of held)resolve(json({requests:[r1],unlinked:0}));
+    await settle();
+    assert.equal(card(),'r1','the late read drew nothing over the list');
+  }finally{
+    run(`reposLoaded=${wasLoaded};show=async()=>{};delete globalThis.__realShow`);
+  }
+  // A work product read still on its way when the request is shown again from the address is not
+  // kept: the page reads it again.
+  const productReads=[];
+  ctx.fetch=url=>String(url).startsWith('/api/my-work/product')?new Promise(resolve=>productReads.push(resolve)):Promise.resolve(json({state:'none'}));
+  run('myWorkOpen("r1")');
+  assert.equal(productReads.length,1,'the request page reads its work product');
+  at(page('?view=timeline'));run('routeShow()');
+  at(page('?request=r1'));run('routeShow()');
+  productReads[0](json({products:[{kind:'file',title:'Earlier'}]}));await settle();
+  assert.equal(run('mw.products'),null,'the earlier read is dropped');
+  // The request open on the page is not new to the owner when an answer changes it.
+  run('mw.unread.clear()');
+  ctx.__rows={requests:[{...r1,summary:'Changed r1',updates:[{ts:now,text:'Changed r1'}]}],unlinked:0};
+  run('myWorkAccept(globalThis.__rows)');
+  assert.equal(run('mw.unread.has("r1")'),false,'the open request is read');
   delete ctx.__rows;
   // The status line's way to Settings is a move.
   moves.length=0;

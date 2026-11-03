@@ -2284,8 +2284,10 @@ and remembers the list's view, filter and sort between visits (`create-store.ts`
 - **Back and Forward** (`popstate`, `routeShow`): the address is read and shown, nothing written.
   Leaving a request this way gives the focus back to its card, as its back button does. A request
   shown again from the address (Forward, a reload) is opened as `myWorkOpen` opens one: its work
-  product read again, its mark read, its card the place to return to, brought into view by the
-  focus as no scroll was kept.
+  product read again (a read of it still on its way is not kept), its mark read, its card the
+  place to return to, brought into view by the focus as no scroll was kept. Leaving a request by
+  Back while its read is on its way, that read draws nothing over the list (`show`'s guard). An
+  answer that changes the request open on the page does not mark it new.
 - **A place that is gone**: a request the answer does not have shows the page that says so, with its
   back button, as an open request that leaves does; an area not listed or dismissed shows all of My
   Work (`myFocusSelected`). The address keeps the choice, as claude-mem's keeps `focus`.
@@ -2298,9 +2300,10 @@ and remembers the list's view, filter and sort between visits (`create-store.ts`
   page named and none named; each move pushed once and the same place not again, with the token
   and another parameter kept; Back to a request and from it, to another tab and to all of My Work,
   writing nothing; Back, Forward and Back again from a request each returning the focus to its
-  card, and the work product read again; a merge's area replaced; the status line's way to
+  card, and the work product read again; a late read of the requests or of a work product
+  dropped; the open request not marked new; a merge's area replaced; the status line's way to
   Settings pushed; the status tab and the sort kept, and unknown ones read back as the defaults.
-  Twelve hand mutants of the page's code each fail a check.
+  Fifteen hand mutants of the page's code each fail a check.
 - **Then**: the speed of rows 54 and N5 (decision 70's order after the three gaps).
 
 ## Not built
