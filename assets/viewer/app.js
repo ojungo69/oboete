@@ -5856,9 +5856,11 @@ function providerKeyField(provider, simple = false) {
   i.addEventListener('input', () => { save.disabled = !i.value; });
   // Named by where its save sends it: the entry's place, name, kind, API and address. An entry whose
   // address the viewer does not show cannot be told from another: it keeps nothing (Codex's
-  // security review of #807).
+  // security review of #807). The AI line's field and its first entry's are one: only one of them is
+  // drawn, so a key typed in one goes to the other when the line takes its key field over or gives
+  // it back (Codex's review of 69b-3c-2).
   if (provider.saved?.base_url) {
-    keepSecret(i, JSON.stringify([simple ? 'line' : 'entry', selectorKey(provider.selector), provider.name,
+    keepSecret(i, JSON.stringify([selectorKey(provider.selector), provider.name,
       provider.saved.kind, provider.saved.api ?? null, provider.saved.base_url]), () => { save.disabled = !i.value; });
   }
   i.addEventListener('keydown', (event) => {
@@ -6064,9 +6066,9 @@ function providerEditor(draft, provider, card) {
       setStatus(t(message), true, lang);
       return;
     }
-    // Saved, its Edit summary at its place then, its editor closed (69b-3c-2).
+    // Saved, its Edit summary at its place then, its editor closed; created, its line (69b-3c-2).
     void providerOperation({ op: provider ? 'edit' : 'create', ...(provider ? { selector: provider.selector } : {}), entry: providerBody(draft) }, save,
-      null, '', provider ? (map) => ({ simple: `entry-edit:${selectorKey(map(provider.selector))}` }) : null);
+      null, '', provider ? (map) => ({ simple: `entry-edit:${selectorKey(map(provider.selector))}` }) : () => createdFocus(draft.name));
   });
   const cancel = el('button', 'quiet small', t('provider_cancel'));
   cancel.type = 'button';
@@ -6163,6 +6165,13 @@ function providerEntry(provider, line) {
     unsupported ? null : edit,
     at === 0 ? null : providerTest(provider)]));
   return card;
+}
+
+// Where the focus goes once a new entry is created (69b-3c-2): its line's key field, which the line
+// shows after an HTTP entry's creation; else its switch (`simpleFocus` tries `on:` after `key:`);
+// else Add AI.
+function createdFocus(name) {
+  return { simple: [`key:${name}`, 'catalog.open'] };
 }
 
 // An AI line's entries, in config order, in a fold at the line's end (69b-3c-2), open while one of
@@ -6753,7 +6762,6 @@ function simpleFocus(key) {
   if (key === 'mask.confirm') keys.push('redaction.enabled');
   if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
-  if (key === 'catalog.save' && simpleKeyName) keys.push(`key:${simpleKeyName}`);
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
   if (!next) return false;
   // A control inside a closed fold cannot take the focus: open the folds around it first (decision
@@ -6781,16 +6789,14 @@ function focusAgain(was, fallback) {
 
 // A link to a detailed control: the folds around it opened, its group's More settings among them,
 // and the control focused (decision 69, 69b-2).
-function detailedSettingsLink(key, selector, vars = {}, provider = null) {
+function detailedSettingsLink(key, selector, vars = {}) {
   const button = el('button', 'quiet small simple-link', t(key, vars));
   button.type = 'button';
-  // Named, so a redraw gives the focus back to it (#810): by its entry, or by the name it says.
-  button.dataset.simpleFocus = `link:${key}:${provider ? selectorKey(provider.selector) : vars.name ?? ''}`;
+  // Named, so a redraw gives the focus back to it (#810): by the name it says.
+  button.dataset.simpleFocus = `link:${key}:${vars.name ?? ''}`;
   button.addEventListener('click', () => {
-    if (provider) provider.editing = true;
     drawSettings();
-    const target = provider ? [...$('panel').querySelectorAll('.provider-entry')]
-      .find(node => node.dataset.selector === selectorKey(provider.selector)) : $('panel').querySelector(selector);
+    const target = $('panel').querySelector(selector);
     for (let details = target?.closest('details'); details; details = details.parentElement?.closest('details')) details.open = true;
     if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView?.({ block: 'start' }); }
   });
@@ -7245,7 +7251,7 @@ function simpleCatalog(f) {
   save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
   save.addEventListener('click', () => {
     if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
-    void providerOperation({ op: 'create', entry: providerBody(draft) }, save);
+    void providerOperation({ op: 'create', entry: providerBody(draft) }, save, null, '', () => createdFocus(draft.name));
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));
   cancel.type = 'button'; cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; drawSettings(); });

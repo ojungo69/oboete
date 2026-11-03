@@ -3090,6 +3090,53 @@ console.log('PASS: the caps\' No cap switches');
       let open=true;for(let d=panel.querySelector('.simple-providers').closest('details');d;d=d.parentElement?.closest('details'))open&&=d.open;
       assert(open,`the guide's button opens the AI lines (${names.length} AI)`);
     }
+    // A key being typed into the first entry's field goes to the line's field when the line takes it
+    // over (a new HTTP entry of its name created), never to the new entry, and back when the line
+    // gives it back (another key saved); it is never sent (Codex's review of 69b-3c-2).
+    {
+      const typed='made-up-moving-key-0821';
+      const two=v=>ai(['alpha'],{version:v,key_input:true,providers:[at('alpha',0),at('alpha',1)],chain:[row('alpha',{entries:2})]});
+      const createButton=()=>panel.querySelector('.new-provider').querySelectorAll('button').find(b=>text(b)===ctx.t('provider_create'));
+      f=draw(ai(['alpha'],{key_input:true}));
+      typeIn(named('key:entry:config:0'),typed);
+      vm.runInContext("form.newProvider=providerEdit('alpha',{kind:'openai',base_url:'http://127.0.0.1:9/v1',model:'model-alpha',limits:{}})",ctx);
+      ctx.ui.drawSettings();
+      assert.equal(named('key:entry:config:0').value,typed,'kept while the new entry\'s form opens');
+      [answer,give]=later();answers=[answer];
+      createButton().focus();createButton().click();await settle();
+      give(json(two('v2')));await settled();
+      assert.deepEqual([simple('key:alpha')?.value,named('key:entry:config:0'),named('key:entry:config:1')?.value],[typed,undefined,''],
+        'the line\'s field has it, the first entry draws none, the new entry\'s is empty');
+      assert.equal(focused(),'key:alpha','an HTTP entry created: its line\'s key field');
+      typeIn(named('key:entry:config:1'),'made-up-other-key-0822');
+      [answer,give]=later();answers=[answer];
+      named('key-save:entry:config:1').click();await settle();
+      give(json({...two('v3'),key_saved:{durable:true}}));await settled();
+      assert.deepEqual([simple('key:alpha'),named('key:entry:config:0')?.value],[undefined,typed],'back in the first entry\'s field');
+      assert(!posted.some(p=>p.body.includes(typed)),'never sent');
+      // A CLI entry created: no key field, its line's switch; one added from Add AI's list: its key field.
+      f=draw(ai(['alpha'],{key_input:true}));
+      vm.runInContext("form.newProvider=providerEdit('gamma',{kind:'cli',cli:'claude',limits:{}})",ctx);ctx.ui.drawSettings();
+      [answer,give]=later();answers=[answer];
+      createButton().focus();createButton().click();await settle();
+      give(json(ai(['alpha','gamma'],{version:'v2',key_input:true})));await settled();
+      assert.equal(focused(),'on:gamma','a CLI entry created: its line\'s switch');
+      f=draw(ai(['alpha'],{key_input:true}));
+      vm.runInContext("form.simpleCatalog=AI_CATALOG.find(e=>e.name==='groq');form.newProvider=providerEdit('groq',{...form.simpleCatalog,model:form.simpleCatalog.models[0]})",ctx);
+      ctx.ui.drawSettings();
+      [answer,give]=later();answers=[answer];
+      simple('catalog.save').focus();simple('catalog.save').click();await settle();
+      assert.equal(JSON.parse(posted.at(-1).body).action.op,'create','Add AI\'s save creates');
+      give(json(ai(['alpha','groq'],{version:'v2',key_input:true})));await settled();
+      assert.equal(focused(),'key:groq','added from Add AI: its line\'s key field');
+      f=draw(ai(['alpha'],{key_input:true}));
+      vm.runInContext("form.simpleCatalog=AI_CATALOG.find(e=>e.name==='claude');form.newProvider=providerEdit('claude',{...form.simpleCatalog,model:form.simpleCatalog.models[0]})",ctx);
+      ctx.ui.drawSettings();
+      [answer,give]=later();answers=[answer];
+      simple('catalog.save').focus();simple('catalog.save').click();await settle();
+      give(json(ai(['alpha','claude'],{version:'v2',key_input:true})));await settled();
+      assert.equal(focused(),'on:claude','a CLI added from Add AI: its line\'s switch');
+    }
     // #819. Two alpha entries, the line's key missing: its key field, each entry's switch and arrows.
     const page=(v,extra={})=>ai(['alpha'],{version:v,key_input:true,judge,providers:[at('alpha',0),at('alpha',1)],
       chain:[row('alpha',{key:'missing',entries:2})],...extra});
