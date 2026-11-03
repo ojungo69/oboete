@@ -2222,8 +2222,12 @@ runs and leaves a run another live worker owns to it.
 - **The runner**: while a request is under 30 minutes old (`REFRESH_MS`), the pass before the
   windows takes every subject due now, not only those due an hour or more (`OVERDUE_MS`). It is
   still one call a round, so a refresh of n subjects takes n rounds, each ahead of the windows. A
-  pass that finds no subject due now removes the request; one 30 minutes old or more is removed and
-  changes nothing. The bound and the holds stop the pass as they stop any.
+  pass that finds no subject due now marks the request it read done, in a file of its own
+  (`my-work-refresh-done`, its time the request's): the page only writes the request and the worker
+  only marks it, so neither removes what the other wrote, and a request the page leaves meanwhile
+  stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
+  since), stands no more and changes nothing. The bound and the holds stop the pass as they stop
+  any.
 - **The page**: "Refresh now" / 「今すぐ更新」 beside My Work's status line while My Work is on (on
   My Work, Suggested and Past focus, whose pages share the line; not on My Rules). It is marked busy
   (`aria-disabled`, so the focus stays on it) while its request is on its way, and a click then
@@ -2233,7 +2237,9 @@ runs and leaves a run another live worker owns to it.
   line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
   an `off` one (My Work turned off since the page read it) redraws the line and takes the button
   away, its focus going to the line's Open Settings. The note stays until the status line says
-  something new. A redraw of the page keeps the focus on the button. Whether My Work waits is
+  something new. A redraw of the page keeps the focus on the button. The status a refresh answers is
+  a read of the line as the others are (#722): a read begun before it that lands later is dropped,
+  and one begun after it keeps its answer. Whether My Work waits is
   decided by the jobs its status line speaks for (`line_jobs`): a hold of My Rules' or My Goals'
   job stops no refresh.
 - **Differences from claude-mem**: claude-mem's worker runs every due job at once; oboete's makes one
@@ -2241,11 +2247,13 @@ runs and leaves a run another live worker owns to it.
   runs; oboete's viewer has no such state, and a request made while the worker is stopped is taken
   when it starts, if under 30 minutes old. claude-mem's refresh model per agent is not built
   (decision 70: each entry has its model).
-- **Tests**: the runner's pass with a request, without one and with a stale one; the request's
+- **Tests**: the runner's pass with a request, without one, with a stale one and with one dated
+  ahead; a request left while a round finishes another standing; the request's
   answers (off, waiting, nothing due, started) and that only `started` writes it; the route's
   guards and its answer over an empty home; the page's button, its one request at a time, each
   answer's words in English and Japanese, the note's end, the focus through a redraw and to Open
-  Settings when off. Nine hand mutants of the page's code each fail a check.
+  Settings when off, and the refresh's status ordered with the line's reads. Eleven hand mutants
+  of the page's code each fail a check.
 - **Then**: parity row X10, the address that keeps My Work's place.
 
 ## Not built

@@ -6096,6 +6096,23 @@ const before=button();
 run('myWorkDraw()');
 assert.notEqual(button(),before,'drawn again');
 assert.equal(run('document.activeElement'),button(),'the focus on the new button');
+// The refresh's status is a read of the line as the others are (#722): an older read landing
+// after it is dropped, and a read begun after it keeps its own.
+const reads=[];
+ctx.fetch=(url,options={})=>new Promise((resolve,reject)=>(options.method==='POST'?posts:reads).push({url,resolve,reject}));
+posts.length=0;parts=slot({state:'written',at:day});
+const older=run('myWorkLineRead()');
+parts.button.click();
+posts[0].resolve(json({state:'off'}));await settle();
+reads[0].resolve(json({state:'written',at:day}));await older;
+assert.equal(run('mw.status.state'),'off','an older read does not undo the refresh\'s answer');
+assert.equal(parts.wrap.hidden,true);
+posts.length=0;reads.length=0;parts=slot({state:'written',at:day});
+parts.button.click();
+const newer=run('myWorkLineRead()');
+reads[0].resolve(json({state:'off'}));await newer;
+posts[0].resolve(json({state:'waiting',why:'resting',until:day}));await settle();
+assert.equal(run('mw.status.state'),'off','a read begun after the refresh keeps its answer');
 // In Japanese.
 run('lang="ja"');
 parts=slot({state:'none'});

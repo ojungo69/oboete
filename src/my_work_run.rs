@@ -28,14 +28,27 @@ pub(crate) fn refresh_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("state").join("my-work-refresh")
 }
 
-/// The refresh request standing at `now`, by its time (unix ms). One `REFRESH_MS` old or more is
-/// removed, and none stands.
+/// Where the worker marks the last request it finished, by the file's time. Only the page writes a
+/// request and only the worker marks one done: neither removes what the other wrote, so a request
+/// the page leaves while the worker finishes one stands.
+fn refresh_done_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("state").join("my-work-refresh-done")
+}
+
+fn modified_ms(path: &std::path::Path) -> Option<i64> {
+    let at = std::fs::metadata(path).ok()?.modified().ok()?;
+    i64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
+}
+
+/// The refresh request standing at `now`, by its time (unix ms): none once `REFRESH_MS` old, once
+/// marked done, or dated more than a minute ahead (a clock set back since, which would otherwise
+/// wake the worker at every look until it caught up).
 pub(crate) fn refresh_request(home: &std::path::Path, now: i64) -> Option<i64> {
-    let path = refresh_path(home);
-    let at = std::fs::metadata(&path).ok()?.modified().ok()?;
-    let at = i64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()?;
-    if now - at >= REFRESH_MS {
-        let _ = std::fs::remove_file(&path);
+    let at = modified_ms(&refresh_path(home))?;
+    if now - at >= REFRESH_MS || at - now > 60_000 {
+        return None;
+    }
+    if modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at) {
         return None;
     }
     Some(at)
@@ -187,8 +200,9 @@ pub(crate) struct Runner<'a> {
     called: Option<Phase>,
     /// J1: the judge and the month's paid cap, as the worker read them; none without `[judge]`.
     judge: Option<(&'a crate::config::Judge, f64)>,
-    /// Decision 70: the refresh request standing as the round began, by its file.
-    refresh: Option<std::path::PathBuf>,
+    /// Decision 70: the refresh request standing as the round began, by its time, and where its
+    /// end is marked.
+    refresh: Option<(std::path::PathBuf, i64)>,
 }
 
 impl<'a> Runner<'a> {
@@ -214,9 +228,10 @@ impl<'a> Runner<'a> {
 
     /// Decision 70 (Refresh now): with a request standing in `home`, the pass before the windows
     /// takes every subject due now, not only those due an hour or more; a pass that finds none due
-    /// now removes the request.
+    /// now marks the request done.
     pub(crate) fn refresh(mut self, home: &std::path::Path) -> Self {
-        self.refresh = refresh_request(home, crate::db::now_ms()).map(|_| refresh_path(home));
+        self.refresh =
+            refresh_request(home, crate::db::now_ms()).map(|at| (refresh_done_path(home), at));
         self
     }
 
@@ -304,11 +319,14 @@ impl<'a> Runner<'a> {
             }
             wait = crate::turns::sooner(wait, crate::turns::held(hold, *until, now));
         }
-        // Decision 70: a refresh request stands until no subject is due now.
+        // Decision 70: a refresh request stands until no subject is due now, the request this
+        // round read marked done by its time, so that one the page left since stands.
         if !due.iter().any(|d| d.0 <= now)
-            && let Some(path) = self.refresh.take()
+            && let Some((done, at)) = self.refresh.take()
         {
-            let _ = std::fs::remove_file(path);
+            let at = std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(u64::try_from(at).unwrap_or(0));
+            let _ = std::fs::File::create(done).and_then(|f| f.set_modified(at));
         }
         let refreshing = self.refresh.is_some();
         due.retain(|&(since, ..)| {
@@ -1894,12 +1912,14 @@ mod tests {
         assert!(asked.borrow().is_empty());
     }
 
-    /// One pass as `pass` makes it, with the refresh request the home holds (decision 70).
+    /// One pass as `pass` makes it, with the refresh request the home holds (decision 70), and
+    /// `meanwhile` run after the round read it.
     fn pass_refreshing(
         s: &mut Store,
         job: Echo,
         overdue: bool,
         asked: &RefCell<Vec<String>>,
+        meanwhile: &dyn Fn(&std::path::Path),
     ) -> Phase {
         let k = crate::knowledge::open(s.home.path()).unwrap();
         let db = crate::providers_db::open(s.home.path()).unwrap();
@@ -1920,6 +1940,7 @@ mod tests {
             (&rules, &summary, "chain"),
         )
         .refresh(s.home.path());
+        meanwhile(s.home.path());
         let phase = runner.pass(&mut s.raw, &k, &db, overdue).unwrap();
         s.run();
         phase
@@ -1936,8 +1957,8 @@ mod tests {
     }
 
     /// Decision 70 (Refresh now): with a request standing, the pass before the windows takes a
-    /// subject due minutes ago, as it takes one due an hour; once none is due now, a pass removes
-    /// the request.
+    /// subject due minutes ago, as it takes one due an hour; once none is due now, a pass marks the
+    /// request done, and a request the page left meanwhile stands.
     #[test]
     fn a_refresh_request_takes_a_job_due_now_before_a_window() {
         let mut s = Store::new();
@@ -1948,28 +1969,56 @@ mod tests {
             subjects: vec![("r1", now - 5 * MINUTE)],
             seq,
         };
-        let early = pass_refreshing(&mut s, echo(), true, &asked);
+        let none = |_: &std::path::Path| ();
+        let early = pass_refreshing(&mut s, echo(), true, &asked, &none);
         assert_eq!(
             (early, asked.borrow().len()),
             (Phase::Idle, 0),
             "no request"
         );
-        requested(s.home.path(), 0);
-        let early = pass_refreshing(&mut s, echo(), true, &asked);
+        requested(s.home.path(), 2_000);
+        let early = pass_refreshing(&mut s, echo(), true, &asked, &none);
         assert_eq!(
             (early, asked.borrow().len()),
             (Phase::Covered, 1),
             "a request"
         );
-        assert!(refresh_path(s.home.path()).exists(), "one call a round");
-        let done = pass_refreshing(&mut s, echo(), true, &asked);
+        let home = s.home.path().to_path_buf();
+        let standing = || refresh_request(&home, crate::db::now_ms());
+        assert!(standing().is_some(), "one call a round");
+        // The round finds none due now and marks the request it read done; the page's newer one,
+        // left after the round read the first, stands.
+        let left = |home: &std::path::Path| requested(home, 0);
+        let done = pass_refreshing(&mut s, echo(), true, &asked, &left);
         assert_eq!((done, asked.borrow().len()), (Phase::Idle, 1));
-        assert!(!refresh_path(s.home.path()).exists(), "nothing due now");
+        assert!(standing().is_some(), "the newer request stands");
+        let done = pass_refreshing(&mut s, echo(), true, &asked, &none);
+        assert_eq!((done, asked.borrow().len()), (Phase::Idle, 1));
+        assert!(standing().is_none(), "nothing due now: done");
     }
 
-    /// Decision 70: a request `REFRESH_MS` old is removed and changes nothing.
+    /// Decision 70: a request dated more than a minute ahead, after the clock was set back, stands
+    /// not, so that it does not wake the worker at every look.
     #[test]
-    fn a_stale_refresh_request_is_removed_and_changes_nothing() {
+    fn a_request_from_ahead_of_the_clock_stands_not() {
+        let home = tempfile::tempdir().unwrap();
+        let path = refresh_path(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_modified(ahead).unwrap();
+        assert_eq!(refresh_request(home.path(), crate::db::now_ms()), None);
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            refresh_request(home.path(), crate::db::now_ms()).is_some(),
+            "a few seconds ahead"
+        );
+    }
+
+    /// Decision 70: a request `REFRESH_MS` old stands no more and changes nothing.
+    #[test]
+    fn a_stale_refresh_request_changes_nothing() {
         let mut s = Store::new();
         let seq = s.said("s1", "r", 1_000, "Build the parser.");
         let now = crate::db::now_ms();
@@ -1979,9 +2028,9 @@ mod tests {
             subjects: vec![("r1", now - 5 * MINUTE)],
             seq,
         };
-        let early = pass_refreshing(&mut s, job, true, &asked);
+        let early = pass_refreshing(&mut s, job, true, &asked, &|_| ());
         assert_eq!((early, asked.borrow().len()), (Phase::Idle, 0));
-        assert!(!refresh_path(s.home.path()).exists());
+        assert_eq!(refresh_request(s.home.path(), crate::db::now_ms()), None);
     }
 
     /// Decision 70, the page's side: off, waiting on a hold, nothing due and some due, each with

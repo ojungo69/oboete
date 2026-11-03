@@ -9755,6 +9755,9 @@ async function myWorkRefresh() {
   mw.refreshing = true;
   mw.refreshNote = null;
   myWorkRefreshShow();
+  // A read of the status line as the others are (#722): an older read's answer is dropped, and
+  // this one's status when a read begins after it.
+  const read = ++mw.lineReads;
   let note = ['my_work_refresh_failed'];
   try {
     const { res, answer } = await memoryWrite('my-work/refresh', {});
@@ -9763,8 +9766,10 @@ async function myWorkRefresh() {
     else if (res.ok && answer.state) {
       // Waiting, or off since the page read it: the status line says why.
       note = answer.state === 'waiting' ? ['my_work_refresh_waiting'] : null;
-      mw.status = answer;
-      mw.lineText?.replaceChildren(...present([myWorkStatusLine(answer)]));
+      if (read === mw.lineReads) {
+        mw.status = answer;
+        mw.lineText?.replaceChildren(...present([myWorkStatusLine(answer)]));
+      }
     }
   } catch {
     // Said as not started.
