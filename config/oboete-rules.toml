@@ -54,9 +54,10 @@ keywords = ["basic"]
 
 [[rules]]
 id = "secret-assignment"
-description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
-regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
-keywords = ["secret", "token", "passw", "key", "credential"]
+description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=, MYSQL_PWD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|_pwd|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
+keywords = ["secret", "token", "passw", "pwd", "key", "credential"]
+# `_pwd` only as the end of a name (MYSQL_PWD, DB_PWD): `PWD` and `OLDPWD` hold a working directory.
 # A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
 # it left as written), however short. An unquoted one runs to a space, a quote or backtick, or a
 # backslash (an escape in a flattened tool field): a bracket, `;`, `,` or `$` inside it is the
@@ -85,3 +86,47 @@ description = "Credential in an Authorization header of any scheme, with or with
 regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}\s+([a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+))*)|(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}\s+)?([A-Za-z0-9_\-.=+/:~]{8,}))'''
 keywords = ["authorization"]
 entropy = 3.0
+
+[[rules]]
+id = "cli-flag-secret"
+description = "A value given after a space to a command-line flag that names a secret (--auth-token VALUE, --client-secret 'VALUE'); after `=` it is secret-assignment's"
+regex = '''(?i)(?:^|[\s"'])--(?:[a-z0-9]+[-_])*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)[ \t]+(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|([^\s"'`\\<>;,(){}\[\]$-][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
+keywords = ["secret", "token", "passw", "key", "credential"]
+# As secret-assignment: a quoted value whole, an unquoted one from 8 characters (shorter is mostly a
+# number, `--max-token 4096`); a value that starts with `-` is the next flag.
+
+[[rules]]
+id = "slack-token"
+description = "A Slack token of any length (xoxb-, xoxp-, xoxe- and the rest, xapp-), as claude-mem 15.5 masks one: gitleaks' rules take a refresh token only at 146 characters after xoxe-1-"
+regex = '''(?i)\b((?:xox[abeprs]|xapp)-[a-z0-9-]{10,})'''
+keywords = ["xox", "xapp-"]
+
+[[rules]]
+id = "slack-webhook-secret"
+description = "The secret of a Slack incoming, workflow or trigger webhook URL, whole: gitleaks' rule stops 56 characters into the path"
+regex = '''(?i)\bhooks\.slack\.com/(?:services|workflows|triggers)/t[a-z0-9]+/[a-z0-9]+/(?:[0-9]+/)?([a-z0-9]{20,})'''
+keywords = ["hooks.slack.com"]
+
+[[rules]]
+id = "discord-webhook-token"
+description = "The token of a Discord webhook URL (discord.com, discordapp.com and their ptb and canary hosts)"
+regex = '''(?i)\b(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/[0-9]{17,20}/([a-z0-9_-]{60,})'''
+keywords = ["discord"]
+
+[[rules]]
+id = "stripe-webhook-secret"
+description = "A Stripe webhook signing secret"
+regex = '''\b(whsec_[A-Za-z0-9]{32,})'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "dockerhub-pat"
+description = "A Docker Hub personal access token"
+regex = '''\b(dckr_pat_[A-Za-z0-9_-]{27,})'''
+keywords = ["dckr_pat_"]
+
+[[rules]]
+id = "pypi-token"
+description = "A PyPI API token of pypi.org or test.pypi.org: gitleaks' rule takes pypi.org's alone"
+regex = '''\b(pypi-AgE[A-Za-z0-9_-]{50,})'''
+keywords = ["pypi-"]

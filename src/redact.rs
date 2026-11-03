@@ -1927,6 +1927,80 @@ mod tests {
         assert!(stored.ends_with("\" https://x.invalid/"), "{stored}");
     }
 
+    /// The forms claude-mem 15.5 to 15.9 masks that the bundled rules left (decision 70): a Slack
+    /// token of any length, a Slack webhook's whole secret, a Discord webhook's token, a Stripe
+    /// webhook secret, a Docker Hub token, a test.pypi.org token, a `_PWD` value and a flag's value
+    /// after a space.
+    #[test]
+    fn the_forms_claude_mem_masks_are_masked_too() {
+        // Split literals: secret scanners flag whole ones in the repository.
+        let r20 = format!("Q7wE9rT2yU{}", "4iO6pA8sD1");
+        let slack = format!("xoxe-1-{r20}{}", "Zx3Cv5");
+        // Long enough that gitleaks' rule, which stops 56 characters into the path, leaves its end.
+        let hook = format!("{r20}{r20}{}", "Bn7M");
+        let discord = format!("{r20}{r20}{r20}{}", "Ab3dEf_h");
+        let whsec = format!("whsec_{r20}{}", "Lm4nOp6qRs8t");
+        let docker = format!("dckr_pat_{r20}{}", "Ab3-dE_");
+        let pypi = format!("pypi-AgENdGVzdC5weXBpLm9yZw{r20}{r20}{}", "Kj8hGf6dSa4q");
+        let pw = format!("Tr0ub4d{}", "or3xyz");
+        let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+        let cases = [
+            (format!("SLACK_REFRESH={slack}"), slack.clone()),
+            (
+                format!(
+                    "curl -X POST https://hooks.slack.com/workflows/T0AB1CD2E/A0FG3HI4J/{}/{hook}",
+                    "123456789012345678"
+                ),
+                hook.clone(),
+            ),
+            (
+                format!(
+                    "curl -X POST https://discord.com/api/webhooks/{}/{discord}",
+                    "123456789012345678"
+                ),
+                discord.clone(),
+            ),
+            (format!("STRIPE_WEBHOOK={whsec}"), whsec.clone()),
+            (
+                format!("echo {docker} | docker login -u me --password-stdin"),
+                docker.clone(),
+            ),
+            (format!("twine upload -p {pypi} dist/*"), pypi.clone()),
+            (format!("MYSQL_PWD={pw} mysql -u app"), pw.clone()),
+            (format!("{{\"DB_PWD\": \"{pw}\"}}"), pw.clone()),
+            (format!("tool --auth-token {tok} --verbose"), tok.clone()),
+            (format!("tool --client-secret '{tok}'"), tok.clone()),
+            (
+                format!("huggingface-cli login --hf-token {tok}"),
+                tok.clone(),
+            ),
+            (format!("tool --api-key {tok}"), tok.clone()),
+        ];
+        for (text, secret) in &cases {
+            let (stored, found) = scan(text, &Rules::default());
+            assert!(!found.is_empty(), "{text}: nothing found");
+            check(&stored, &found, secret);
+            // Masked whole: no end of it is left beside a mask.
+            let tail = &secret[secret.len() - 6..];
+            assert!(!stored.contains(tail), "{text}: {stored}");
+        }
+        // Not secrets: a working directory, a number after a flag, a flag that names a file or a
+        // name, the next flag where a value would be, and the prefixes named in prose.
+        for text in [
+            "PWD=/home/user/project",
+            "OLDPWD=/home/user",
+            "llm --max-token 4096 --stream",
+            "cargo run -- --token-file ./token.txt",
+            "gh secret set --secret-name deploy",
+            "tool --token --verbose",
+            "the whsec_ and dckr_pat_ prefixes mark Stripe's and Docker Hub's secrets",
+        ] {
+            let (stored, found) = scan(text, &Rules::default());
+            assert!(found.is_empty(), "{text}: {found:?}");
+            assert_eq!(stored, text);
+        }
+    }
+
     #[test]
     fn every_header_after_one_curl_is_masked() {
         // curl-auth-header's lazy `.*?` finds one header per `curl` per pass, and only within five
