@@ -109,6 +109,58 @@ pub(crate) fn parsed(
     ))
 }
 
+/// The chain's rests from one read of the ledger (69b-3c-1b): `stopped`, the names only the owner
+/// ends a stop of, and `resting`, those resting until a time (ms). A name is listed only while its
+/// state holds every enabled entry of it, as the curator decides (`provider::rest_holds`): a rest
+/// codex's allowance set without credits does not hold an entry that may draw on them, and a
+/// disabled entry is never tried, so it does not count. No ledger yet: both empty; one that does not
+/// read: both null.
+#[allow(clippy::type_complexity)]
+fn rest_lists(
+    ledger: &anyhow::Result<Option<rusqlite::Connection>>,
+    providers: &[Provider],
+) -> (Option<Vec<String>>, Option<Vec<Value>>) {
+    let rows = match ledger {
+        Ok(Some(db)) => match crate::providers_db::rests(db) {
+            Ok(rows) => rows,
+            Err(_) => return (None, None),
+        },
+        Ok(None) => return (Some(Vec::new()), Some(Vec::new())),
+        Err(_) => return (None, None),
+    };
+    let (mut stopped, mut resting) = (Vec::new(), Vec::new());
+    for (name, until, uncredited) in rows {
+        let state = crate::providers_db::State {
+            down_until: until,
+            uncredited,
+            ..Default::default()
+        };
+        // A name config.toml no longer has (an entry removed or renamed) is not listed: the
+        // routes answer config.toml's names, past the stores' gate (Codex's review of 69b-3c-1b).
+        let named = providers.iter().any(|p| p.name() == name);
+        let holds = (providers.iter())
+            .filter(|p| p.name() == name && p.enabled())
+            .all(|p| crate::provider::rest_holds(&state, p));
+        if !named || !holds {
+        } else if until == crate::providers_db::OWNER_HOLD {
+            stopped.push(name);
+        } else {
+            resting.push(json!({"name": name, "until": until}));
+        }
+    }
+    (Some(stopped), Some(resting))
+}
+
+/// `GET /api/rests` (69b-3c-1b): the chain's rests alone, which the page polls while Settings is
+/// shown. A config.toml that does not read gives both null, as a ledger that does not read.
+pub fn rests(home: &Path) -> Value {
+    let Ok(cfg) = config::load(home) else {
+        return json!({"stopped": null, "resting": null});
+    };
+    let (stopped, resting) = rest_lists(&crate::providers_db::read_only(home), &cfg.providers);
+    json!({"stopped": stopped, "resting": resting})
+}
+
 /// The page's GET: the values as they apply, and each chain entry's own state.
 pub fn show(home: &Path) -> Value {
     let path = home.join("config.toml");
@@ -144,19 +196,12 @@ pub fn show(home: &Path) -> Value {
     };
     let ledger = crate::providers_db::read_only(home);
     let db = ledger.as_ref().ok().and_then(Option::as_ref);
-    let (spend, stopped) = match &ledger {
-        Ok(Some(db)) => (
-            crate::providers_db::usd_this_month(db).ok(),
-            crate::providers_db::stopped(db).ok().map(|rows| {
-                rows.into_iter()
-                    .filter(|(_, until)| *until == crate::providers_db::OWNER_HOLD)
-                    .map(|(name, _)| name)
-                    .collect::<Vec<_>>()
-            }),
-        ),
-        Ok(None) => (Some(0.0), Some(Vec::new())),
-        Err(_) => (None, None),
+    let spend = match &ledger {
+        Ok(Some(db)) => crate::providers_db::usd_this_month(db).ok(),
+        Ok(None) => Some(0.0),
+        Err(_) => None,
     };
+    let (stopped, resting) = rest_lists(&ledger, &cfg.providers);
     // Workers AI's use as doctor counts it (W4).
     let (embed_usd, embed_requests) = match &ledger {
         Ok(Some(db)) => (
@@ -212,6 +257,7 @@ pub fn show(home: &Path) -> Value {
         // G23: how the last prompt that could ask the resident viewer took its block.
         "prompt_side": crate::hook::last_side(home).map(|(at, side)| json!({"at": at, "side": side})),
         "stopped": stopped,
+        "resting": resting,
         "inject": {
             "session_start": inject.session_start,
             "session_start_note": inject.session_start_note,
@@ -2983,10 +3029,15 @@ mod tests {
         let empty = home_with(None);
         let shown = show(empty.path());
         assert_eq!(shown["usd_this_month"], 0.0);
-        assert_eq!(shown["stopped"], json!([]));
+        assert_eq!(
+            (&shown["stopped"], &shown["resting"]),
+            (&json!([]), &json!([]))
+        );
         assert!(!empty.path().join("providers.db").exists());
 
-        let home = home_with(Some("providers = []\n"));
+        let names = "[[providers]]\nkind = \"cli\"\nname = \"owner-stopped\"\ncli = \"claude\"\n\
+                     [[providers]]\nkind = \"cli\"\nname = \"time-stopped\"\ncli = \"claude\"\n";
+        let home = home_with(Some(names));
         let db = Connection::open(home.path().join("providers.db")).unwrap();
         // An older ledger needs no schema upgrade to read its spend and stops.
         db.execute_batch(
@@ -3014,12 +3065,24 @@ mod tests {
         let shown = show(home.path());
         assert_eq!(shown["usd_this_month"], 0.75);
         assert_eq!(shown["stopped"], json!(["owner-stopped"]));
+        // The older ledger has no rest set without credits (69b-3c-1b).
+        assert_eq!(
+            shown["resting"],
+            json!([{"name": "time-stopped", "until": 9_223_372_036_854_775_806_i64}])
+        );
         assert_eq!(
             std::fs::read(home.path().join("providers.db")).unwrap(),
             before
         );
         assert!(!home.path().join("providers.db-wal").exists());
-        assert_eq!(file(&home).as_deref(), Some("providers = []\n"));
+        assert_eq!(file(&home).as_deref(), Some(names));
+        // A name the ledger keeps that config.toml no longer has is not listed (69b-3c-1b).
+        std::fs::write(home.path().join("config.toml"), "providers = []\n").unwrap();
+        let shown = show(home.path());
+        assert_eq!(
+            (&shown["stopped"], &shown["resting"]),
+            (&json!([]), &json!([]))
+        );
 
         let damaged = home_with(Some("providers = []\n"));
         std::fs::write(
@@ -3030,7 +3093,10 @@ mod tests {
         let shown = show(damaged.path());
         assert!(shown.get("error").is_none());
         assert_eq!(shown["usd_this_month"], Value::Null);
-        assert_eq!(shown["stopped"], Value::Null);
+        assert_eq!(
+            (&shown["stopped"], &shown["resting"]),
+            (&Value::Null, &Value::Null)
+        );
         assert_eq!(
             std::fs::read_to_string(damaged.path().join("providers.db")).unwrap(),
             "invented damaged ledger"
@@ -4121,6 +4187,78 @@ mod tests {
         assert_eq!(
             (&row["effective_daily_budget"], &row["differs"]),
             (&json!(200), &json!(["key_file", "daily_budget"]))
+        );
+    }
+
+    /// 69b-3c-1b: the rests from one read of the ledger, in the settings answer and alone.
+    /// `resting` is a future timed rest, neither an owner's hold nor a past one; a name is listed only
+    /// while its state holds every enabled entry of it, as the curator decides.
+    #[test]
+    fn a_name_rests_only_while_its_state_holds_every_enabled_entry() {
+        let codex = |credits: bool, enabled: bool| {
+            format!(
+                "[[providers]]\nkind = \"cli\"\nname = \"codex\"\ncli = \"codex\"\n\
+                 credits = {credits}\nenabled = {enabled}\n"
+            )
+        };
+        let cli = |name: &str| {
+            format!("[[providers]]\nkind = \"cli\"\nname = \"{name}\"\ncli = \"claude\"\n")
+        };
+        let lists = |text: &str, rows: &[(&str, i64, bool)]| {
+            let home = home_with(Some(text));
+            let db = crate::providers_db::open(home.path()).unwrap();
+            for &(p, down_until, uncredited) in rows {
+                let state = crate::providers_db::State {
+                    down_until,
+                    uncredited,
+                    ..Default::default()
+                };
+                crate::providers_db::set_state(&db, p, state).unwrap();
+            }
+            let shown = show(home.path());
+            let alone = rests(home.path());
+            assert_eq!(
+                (&shown["stopped"], &shown["resting"]),
+                (&alone["stopped"], &alone["resting"])
+            );
+            alone
+        };
+        let later = crate::db::now_ms() + 3_600_000;
+        let hold = crate::providers_db::OWNER_HOLD;
+        let text = cli("a") + &cli("b") + &cli("c");
+        assert_eq!(
+            lists(
+                &text,
+                &[("a", later, false), ("b", hold, false), ("c", 1, false)]
+            ),
+            json!({"stopped": ["b"], "resting": [{"name": "a", "until": later}]})
+        );
+        // A codex entry with credits under a rest set without them, alone and beside an entry of
+        // its name that the rest holds: the name can still run, and is not listed.
+        for text in [codex(true, true), codex(true, true) + &codex(false, true)] {
+            for until in [later, hold] {
+                assert_eq!(
+                    lists(&text, &[("codex", until, true)]),
+                    json!({"stopped": [], "resting": []}),
+                    "{text} {until}"
+                );
+            }
+        }
+        // A disabled entry with credits is never tried, so it hides no rest of its name; enabled,
+        // it does.
+        assert_eq!(
+            lists(
+                &(codex(true, false) + &codex(false, true)),
+                &[("codex", later, true)]
+            ),
+            json!({"stopped": [], "resting": [{"name": "codex", "until": later}]})
+        );
+        assert_eq!(
+            lists(
+                &(codex(true, true) + &codex(false, true)),
+                &[("codex", later, true)]
+            ),
+            json!({"stopped": [], "resting": []})
         );
     }
 

@@ -80,12 +80,12 @@ let validSettings=null;
 {
 const simple=vm.runInContext('({status:simpleProviderStatus,models:simpleProviderModels,listed:catalogHasProvider,chain:simpleSavedChain,catalog:AI_CATALOG})',ctx);
 const row={name:'groq',key:'ok',on:true,effective_model:'openai/gpt-oss-20b',model_rule:'any'};
-assert.equal(simple.status(row,[]),'ready');
+assert.equal(simple.status(row,[],[]),'ready');
 assert.equal(simple.status({...row,key:'missing',on:false},['groq']),'missing','a missing key is explained before other states');
 assert.equal(simple.status({...row,key:'not-on-path'},['groq']),'not-installed');
 assert.equal(simple.status({...row,on:false},['groq']),'stopped','an owner stop retains its resume path');
-assert.equal(simple.status({...row,on:false},[]),'off');
-assert.equal(simple.status({...row,key:'unknown'},[]),'unknown','unknown installation is never ready');
+assert.equal(simple.status({...row,on:false},[],[]),'off');
+assert.equal(simple.status({...row,key:'unknown'},[],[]),'unknown','unknown installation is never ready');
 assert.equal(simple.status(row,null),'unknown','unreadable stops are never reported as ready');
 const preset={savedSettings:{chain:[{...row,key:'none'}]},providers:[{name:'groq',saved:{enabled:true,base_url:'https://api.groq.com/openai/v1'}}]};
 assert.equal(simple.chain(preset)[0].key,'missing','a newly added keyed preset still needs its key after reload');
@@ -93,7 +93,7 @@ assert.equal(simple.status(simple.chain(preset)[0],[]),'missing');
 preset.providers[0].saved.base_url='http://127.0.0.1:11434/v1';
 assert.equal(simple.chain(preset)[0].key,'none','a custom keyless server stays keyless');
 preset.providers[0].saved.enabled=false;
-assert.equal(simple.status(simple.chain(preset)[0],[]),'off','native disabling remains distinct from a name overlay');
+assert.equal(simple.status(simple.chain(preset)[0],[],[]),'off','native disabling remains distinct from a name overlay');
 const models=(value)=>Array.from(simple.models(value,['openai/gpt-oss-120b','openai/gpt-oss-20b','openai/gpt-oss-120b']));
 assert.deepEqual(models(row),['openai/gpt-oss-20b','openai/gpt-oss-120b'],'the effective model comes first, without duplicates');
 assert.deepEqual(models({...row,effective_model:'custom-owned-model'}),['custom-owned-model','openai/gpt-oss-120b','openai/gpt-oss-20b']);
@@ -2424,6 +2424,19 @@ console.log('PASS: the caps\' No cap switches');
     assert.deepEqual([posted.length,document.getElementById('status').textContent.includes('Type it again')],[1,true],
       'nor across search\'s state read again meanwhile');
     reread=null;
+    // Not sent, it leaves the page usable, though the line's save it waited for was refused and drew
+    // nothing (#814).
+    f=draw(one({},{judge,key_input:true}));
+    reread=one({},{version:'v8',judge,key_input:true});
+    [answer,give]=later();answers=[answer];
+    typeIn(timeout(),'120');enterLine(timeout());await settled();
+    typeIn(general('judge.key'),'made-up-judge-key-0084');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    // A read that draws nothing, as a judge's test's while the page is held.
+    await vm.runInContext("api('settings')",ctx);await settled();
+    give(json({code:'bad_request',field:'chain.alpha.timeout_s'},400));await settled();
+    assert.deepEqual([posted.length,inert(),document.getElementById('status').textContent.includes('Type it again')],[1,false,true],
+      'a key not sent leaves the page usable, the save it waited for refused');
+    reread=null;
     // ...nor across a recovery's answer made into the form meanwhile.
     f=draw(one({},{judge,key_input:true}));
     [answer,give]=later();answers=[answer];
@@ -2451,6 +2464,174 @@ console.log('PASS: the caps\' No cap switches');
       reread=null;
     }
     vm.runInContext('lineDrafts.clear()',ctx);document.activeElement=null;
+  }
+  // 69b-3c-1b: the chain's rests, read alone while Settings is shown, drawn in place: each line's
+  // state and its Resume, and the stopped list in More settings; nothing else of the page.
+  {
+    let restsAnswer=null,restsRead=0;
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+      if(url.startsWith('/api/rests?')){restsRead++;return Promise.resolve(restsAnswer?restsAnswer():new Promise(()=>{}));}
+      // The poll's other read, ahead of the rests: maintenance's state, none running.
+      if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+      return new Promise(()=>{});
+    };
+    const lists=(stopped,resting)=>()=>json({stopped,resting});
+    const read=async answer=>{restsAnswer=answer;await vm.runInContext('refreshRests()',ctx);await settled();};
+    const lineOf=name=>all('.simple-provider').find(n=>n.dataset.providerName===name);
+    const said=name=>text(lineOf(name).querySelector('.simple-state'));
+    const kind=name=>lineOf(name).querySelector('.simple-state').className;
+    const noon=new Date();noon.setHours(12,0,0,0);
+    const another=new Date(noon);another.setDate(another.getDate()+3);
+    const page=()=>[...all('.simple-provider')].map(n=>n.querySelector('.simple-provider-fold'));
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[]}));
+    const folds=page();
+    assert.deepEqual([said('alpha'),said('beta')],['Ready to use','Ready to use'],'both ready');
+    // Begun, lengthened, ended: drawn in place, nothing else drawn again.
+    await read(lists([],[{name:'alpha',until:noon.getTime()}]));
+    assert.deepEqual([said('alpha'),kind('alpha'),said('beta')],['Resting until 12:00 PM','simple-state resting','Ready to use'],'a rest begun');
+    await read(lists([],[{name:'alpha',until:another.getTime()}]));
+    assert(said('alpha').startsWith('Resting until ')&&said('alpha').includes(String(another.getDate()))&&said('alpha').includes('12:00'),
+      `a rest lengthened to another day says its date: ${said('alpha')}`);
+    await read(lists([],[]));
+    assert.equal(said('alpha'),'Ready to use','a rest ended');
+    assert(page().every((fold,i)=>fold===folds[i]),'the lines are not drawn again');
+    // Timed, then the owner's hold (its Resume shown and its fold opened), resumed elsewhere, then
+    // timed again.
+    await read(lists([],[{name:'alpha',until:noon.getTime()}]));
+    await read(lists(['alpha'],[]));
+    assert.deepEqual([said('alpha'),Boolean(simple('resume:alpha')),lineOf('alpha').querySelector('.simple-provider-fold').open,
+      text(panel.querySelector('.stopped-state')).includes('alpha')],['Stopped',true,true,true],'the owner\'s hold: its Resume, its fold open, More settings lists it');
+    await read(lists([],[]));
+    assert.deepEqual([said('alpha'),Boolean(simple('resume:alpha')),text(panel.querySelector('.stopped-state')).includes('alpha')],['Ready to use',false,false],
+      'resumed elsewhere: its Resume goes');
+    // The focus on a Resume that goes goes to its AI's switch.
+    await read(lists(['alpha'],[]));
+    simple('resume:alpha').focus();
+    await read(lists([],[{name:'alpha',until:noon.getTime()}]));
+    assert.deepEqual([said('alpha'),Boolean(simple('resume:alpha')),document.activeElement===simple('on:alpha')],['Resting until 12:00 PM',false,true],
+      'the hold turned into a timed rest, the focus on its switch');
+    // The page's poll reads the rests while Settings is shown, and a Resume reads them after it.
+    restsRead=0;await vm.runInContext('pollMaintenance()',ctx);
+    assert.equal(restsRead,1,'the poll reads the rests');
+    await read(lists(['alpha'],[]));
+    restsRead=0;answers=[json({provider:'alpha',resumed:true})];
+    simple('resume:alpha').click();await settled();
+    assert.deepEqual([posted.at(-1).url,restsRead],['/api/resume',1],'a Resume reads them again');
+    // Not read: every state not known, never the last lists; the next readable answer draws them,
+    // a rest whose time is past included, as the page never decides from the time alone.
+    await read(lists(null,null));
+    assert.deepEqual([said('alpha'),said('beta')],['Could not check availability','Could not check availability'],'null: not known');
+    const past=Date.now()-60000;
+    await read(lists([],[{name:'beta',until:past}]));
+    assert.deepEqual([said('alpha'),said('beta').startsWith('Resting until ')],['Ready to use',true],'the next readable answer, a past time still a rest');
+    await read(()=>Promise.reject(new Error('down')));
+    assert.equal(said('beta'),'Could not check availability','a read that fails: not known');
+    // Both languages, today and another day.
+    await read(lists([],[{name:'alpha',until:noon.getTime()},{name:'beta',until:another.getTime()}]));
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();
+    assert.deepEqual([said('alpha'),said('beta').includes(`${another.getMonth()+1}月${another.getDate()}日`)],['12:00 まで休止中です',true],'in Japanese');
+    ctx.ui.setLang('en');ctx.ui.drawSettings();
+    // A save's answer and a stale reload keep the last read's lists, not the older ones they carry,
+    // while the read each starts after it is on its way.
+    restsAnswer=null;
+    answers=[json(ai(['alpha','beta'],{version:'v2',stopped:[],resting:[],summary:curated}))];
+    flip(simple('summary.curate'),true);await settled();
+    assert.equal(said('alpha'),'Resting until 12:00 PM','a save\'s answer keeps the lists read last');
+    ctx.fetch=((inner)=>(url,options)=>url.startsWith('/api/settings?')
+      ?Promise.resolve(json(ai(['alpha','beta'],{version:'v9',stopped:[],resting:[]}))):inner(url,options))(ctx.fetch);
+    answers=[json({code:'stale'},409)];
+    flip(simple('summary.curate'),false);await settled(6);
+    assert.equal(said('alpha'),'Resting until 12:00 PM','a stale reload keeps the lists read last');
+    assert.equal(vm.runInContext('simpleProviderStatus',ctx)({name:'groq',on:true,key:'ok'},[],null),'unknown',
+      'a rests list not read leaves the state not known');
+    // An earlier read answered after a later one is not drawn.
+    {
+      const [first,giveFirst]=later();const [second,giveSecond]=later();
+      restsAnswer=(()=>{const queue=[first,second];return ()=>queue.shift();})();
+      const one=vm.runInContext('refreshRests()',ctx),two=vm.runInContext('refreshRests()',ctx);
+      giveSecond(json({stopped:[],resting:[]}));await two;await settled();
+      giveFirst(json({stopped:['beta'],resting:[]}));await one;await settled();
+      assert.deepEqual([said('alpha'),said('beta')],['Ready to use','Ready to use'],'an earlier read answered later is not drawn');
+    }
+    // What is typed, its focus and caret, a confirmation asked and a write's hold stay through a
+    // rests change; a key refused after one is marked on the field shown.
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha',{key:'missing'}),row('beta')]}));
+    typeIn(simple('budget:alpha'),'25');
+    const key=simple('key:alpha');key.focus();typeIn(key,'made-up-line-key-0091');key.setSelectionRange(3,5);
+    await read(lists([],[{name:'beta',until:noon.getTime()}]));
+    await read(lists([],[{name:'alpha',until:noon.getTime()}]));
+    assert.deepEqual([simple('key:alpha')===key,key.value,document.activeElement===key,key.selectionStart,simple('key-save:alpha').disabled,simple('budget:alpha').value,posted.length],
+      [true,'made-up-line-key-0091',true,3,false,'25',0],'a key being typed, its save and caret, and a draft stay through rests changes');
+    flip(simple('redaction.enabled'),false);
+    await read(lists([],[]));
+    assert(simple('mask.confirm'),'a confirmation asked stays');
+    simple('mask.cancel')?.click();
+    const [held,giveHeld]=later();answers=[held];
+    simple('key-save:alpha').click();await settled();
+    assert.equal(posted.at(-1)?.url,'/api/providers/key');
+    await read(lists([],[{name:'beta',until:noon.getTime()}]));
+    assert.equal(panel.querySelector('.settings').inert,true,'a write\'s hold stays');
+    giveHeld(json({code:'bad_key',field:'providers.key'},422));await settled();
+    assert.equal(simple('key:alpha').attrs['aria-invalid'],'true','the key refused is marked on the field shown');
+    // A Resume answered after a rests read that failed meanwhile succeeds, draws the page and reads
+    // the rests again (Codex's review of 69b-3c-1b).
+    f=draw(ai(['alpha','beta'],{stopped:['alpha'],resting:[]}));
+    const [resumed,giveResumed]=later();answers=[resumed];
+    simple('resume:alpha').click();await settled();
+    await read(()=>Promise.reject(new Error('down')));
+    restsRead=0;giveResumed(json({provider:'alpha',resumed:true}));await settled();
+    assert.deepEqual([document.getElementById('status').textContent.includes('network'),restsRead],[false,1],
+      'a Resume after a failed read is shown as done, and the rests are read again');
+    // A key's write, a provider's write and a confirmation cancelled read the rests again too.
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha',{key:'missing'}),row('beta')]}));
+    restsAnswer=null;restsRead=0;
+    answers=[json({...ai(['alpha','beta'],{version:'v2',stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha'),row('beta')]}),key_saved:{durable:true}})];
+    typeIn(simple('key:alpha'),'made-up-line-key-0092');simple('key-save:alpha').click();await settled();
+    assert.equal(restsRead,1,'a provider\'s key saved reads the rests again');
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],judge,key_input:true}));
+    restsRead=0;answers=[json({...ai(['alpha','beta'],{version:'v2',stopped:[],resting:[],judge,key_input:true}),key_saved:{durable:true}})];
+    typeIn(general('judge.key'),'made-up-judge-key-0093');general('judge.key').parentElement.querySelectorAll('button')[0].click();await settled();
+    assert.equal(restsRead,1,'a judge\'s key saved reads the rests again');
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],key_input:true,redaction:masked([]),chain:[row('alpha',{key:'missing'}),row('beta')]}));
+    restsRead=0;
+    vm.runInContext("askHeld([{key:'stale',confirm:'held_confirm_all'}],()=>{})",ctx);
+    action('held.cancel').click();await settled();
+    assert.equal(restsRead,1,'a confirmation cancelled reads the rests again');
+    // A rests read started before Settings is opened again does not draw over its first lists.
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[]}));
+    {
+      const [old,giveOld]=later();restsAnswer=()=>old;
+      const pending=vm.runInContext('refreshRests()',ctx);
+      const opened=ai(['alpha','beta'],{stopped:['alpha'],resting:[]});
+      ctx.fetch=((inner)=>(url,options)=>url.startsWith('/api/settings?')?Promise.resolve(json(opened))
+        :url.startsWith('/api/hidden?')?Promise.resolve(json([])):inner(url,options))(ctx.fetch);
+      restsAnswer=null;
+      (await ctx.ui.showSettings())();await settled();
+      giveOld(json({stopped:[],resting:[]}));await pending;await settled();
+      assert.deepEqual([said('alpha'),Boolean(simple('resume:alpha'))],['Stopped',true],'a read from before Settings was opened again is not drawn');
+    }
+    // The notice that no AI can be used yet follows the rests in place; a list not read leaves a
+    // key missing or an AI off as they are (Codex's review of 69b-3c-1b).
+    f=draw(ai(['alpha'],{stopped:[],resting:[{name:'alpha',until:noon.getTime()}]}));
+    const empty=()=>panel.querySelector('.simple-empty');
+    assert.equal(empty().hidden,false,'the only AI resting: the notice is shown');
+    await read(lists([],[]));
+    assert.equal(empty().hidden,true,'its rest ended: the notice goes');
+    await read(lists([],[{name:'alpha',until:noon.getTime()}]));
+    assert.equal(empty().hidden,false,'resting again: shown again');
+    f=draw(ai(['alpha','beta'],{stopped:[],resting:[],chain:[row('alpha',{key:'missing'}),row('beta',{on:false})]}));
+    await read(lists(null,null));
+    assert.deepEqual([said('alpha'),said('beta')],['Needs an API key','Off'],'a list not read leaves a key missing and an AI off as they are');
+    // The stopped list in More settings keeps its Resume, and its focus, when only another AI's
+    // timed rest changes.
+    f=draw(ai(['alpha','beta'],{stopped:['alpha'],resting:[]}));
+    const moreResume=()=>all('button').find(n=>n.dataset.simpleFocus==='resume-more:alpha');
+    const kept=moreResume();kept.focus();
+    await read(lists(['alpha'],[{name:'beta',until:noon.getTime()}]));
+    assert.deepEqual([moreResume()===kept,document.activeElement===kept],[true,true],'the stopped list and its focus stay');
+    restsAnswer=null;document.activeElement=null;
+    restsAnswer=null;document.activeElement=null;
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;

@@ -1940,6 +1940,15 @@ impl Viewer {
         if name == "privacy" {
             return Response::json(&crate::settings::privacy::show(&self.home));
         }
+        // config.toml's names, not stored text: answered as the settings are, not through the
+        // stores' gate, whose masking rule could change a name that matches one (69b-3c-1b).
+        if name == "rests" {
+            return if query.is_empty() {
+                Response::json(&crate::settings::rests(&self.home))
+            } else {
+                Response::text(400, "rests carry no query")
+            };
+        }
         if name == "setup" {
             return if query.is_empty() {
                 Response::json(&json!(crate::setup::readiness(&self.home)))
@@ -6233,6 +6242,7 @@ curate = false
             "/api/stats".into(),
             "/api/settings".into(),
             "/api/privacy".into(),
+            "/api/rests".into(),
             "/api/setup".into(),
             "/api/setup/operation".into(),
             "/api/maintenance".into(),
@@ -6253,6 +6263,55 @@ curate = false
         assert_eq!(
             v.route("GET", "/api/doc?id=nope", &[HOST, TOKEN]).status,
             404
+        );
+    }
+
+    /// 69b-3c-1b: `/api/rests` gives the chain's rests alone, as the settings answer has them: none
+    /// without a ledger, null when it does not read, and a name a masking rule matches as config.toml
+    /// has it, not through the stores' gate.
+    #[test]
+    fn the_rests_route_answers_the_ledgers_rests_as_the_settings_do() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'acme', regex = 'acme-[a-z]+' }]\n\n\
+             [[providers]]\nkind = \"cli\"\nname = \"acme-rest\"\ncli = \"claude\"\n",
+        )
+        .unwrap();
+        let v = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
+        assert_eq!(v.route("GET", "/api/rests?x=1", &[HOST, TOKEN]).status, 400);
+        assert_eq!(get(&v, "/api/rests"), json!({"stopped": [], "resting": []}));
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let later = crate::db::now_ms() + 3_600_000;
+        let rest = crate::providers_db::State {
+            down_until: later,
+            ..Default::default()
+        };
+        crate::providers_db::set_state(&db, "acme-rest", rest).unwrap();
+        drop(db);
+        assert_eq!(
+            get(&v, "/api/rests"),
+            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}]})
+        );
+        assert_eq!(
+            get(&v, "/api/settings")["resting"],
+            get(&v, "/api/rests")["resting"]
+        );
+        // A name removed from config.toml, though a masking rule matches it, is not given back.
+        let db = crate::providers_db::open(home.path()).unwrap();
+        crate::providers_db::set_state(&db, "acme-gone", rest).unwrap();
+        drop(db);
+        assert_eq!(
+            get(&v, "/api/rests"),
+            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}]})
+        );
+        for side in ["providers.db-wal", "providers.db-shm"] {
+            let _ = std::fs::remove_file(home.path().join(side));
+        }
+        std::fs::write(home.path().join("providers.db"), "invented damaged ledger").unwrap();
+        assert_eq!(
+            get(&v, "/api/rests"),
+            json!({"stopped": null, "resting": null})
         );
     }
 
@@ -7387,7 +7446,10 @@ curate = false
     #[test]
     fn resume_passes_the_save_guards_and_only_clears_the_stop() {
         let (dir, v) = viewer("w1-resume");
-        let config = "providers = []\n[summary]\ncurate = false # invented settings\n";
+        // Both names are config.toml's: a name it does not have is not listed (69b-3c-1b).
+        let config = "[[providers]]\nkind = \"cli\"\nname = \"owner-stopped\"\ncli = \"claude\"\n\
+                      [[providers]]\nkind = \"cli\"\nname = \"other-stopped\"\ncli = \"claude\"\n\
+                      [summary]\ncurate = false # invented settings\n";
         std::fs::write(dir.join("config.toml"), config).unwrap();
         let db = crate::providers_db::open(&dir).unwrap();
         for provider in ["owner-stopped", "other-stopped"] {
