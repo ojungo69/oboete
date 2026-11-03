@@ -142,8 +142,8 @@ fn rest_lists(
         let mut enabled = (providers.iter())
             .filter(|p| p.name() == name && p.enabled())
             .peekable();
-        let holds = enabled.peek().is_some()
-            && enabled.all(|p| crate::provider::rest_holds(&state, p));
+        let holds =
+            enabled.peek().is_some() && enabled.all(|p| crate::provider::rest_holds(&state, p));
         if !holds {
         } else if until == crate::providers_db::OWNER_HOLD {
             stopped.push(name);
