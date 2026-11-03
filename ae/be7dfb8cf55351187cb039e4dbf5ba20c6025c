@@ -1,0 +1,23 @@
+docs/memory-lookup.md
+  s_f7d8663ba9ca22::t_5c1b72589d5244 44-46,155-158,175-176
+src/search/b.rs
+  s_f7d8663ba9ca22::t_c6890ffa328ac0 1221-1233,1235,1237-1263,1265-1292,1295-1301,7951-7986
+src/view.rs
+  s_f7d8663ba9ca22::t_c979f7fa88cca3 131,138-143,8239-8250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aebe7dfb8cf55351187cb039e4dbf5ba20c6025c",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
