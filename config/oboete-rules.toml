@@ -55,12 +55,13 @@ keywords = ["basic"]
 [[rules]]
 id = "secret-assignment"
 description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=, MYSQL_PWD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
-regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|_pwd|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|_pwd|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$](?:[^\s"'`\\]|\\[^\sA-Za-z0-9"'`\\]){6,}(?:[^\s"'`\\<>;,(){}\[\]$]|\\[^\sA-Za-z0-9"'`\\])))'''
 keywords = ["secret", "token", "passw", "pwd", "key", "credential"]
 # `_pwd` only as the end of a name (MYSQL_PWD, DB_PWD): `PWD` and `OLDPWD` hold a working directory.
 # A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
 # it left as written), however short. An unquoted one runs to a space, a quote or backtick, or a
-# backslash (an escape in a flattened tool field): a bracket, `;`, `,` or `$` inside it is the
+# backslash before a letter, a digit, a quote or a backslash (an escape in a flattened tool field);
+# a shell's escape of a sign (`\!`, `\$`) is the value's. A bracket, `;`, `,` or `$` inside it is the
 # value's, one at either end the code's (`max_output_tokens:10000}),`, `${API_KEY}`, a mask
 # already there). It is taken from 8 characters, the shortest password most systems take: shorter,
 # it is mostly a number or a type (`max_tokens: 4096`, `password: String`). No entropy gate and no
@@ -90,22 +91,38 @@ entropy = 3.0
 [[rules]]
 id = "cli-flag-secret"
 description = "A value given after a space to a command-line flag that names a secret (--auth-token VALUE, --client-secret 'VALUE'); after `=` it is secret-assignment's"
-regex = '''(?i)(?:^|[\s"'])--(?:[a-z0-9]+[-_])*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)[ \t]+(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|([^\s"'`\\<>;,(){}\[\]$-][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
+regex = '''(?i)(?:^|[\s"'])--(?:[a-z0-9]+[-_])*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)[ \t]+(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|([^\s"'`\\<>;,(){}\[\]$-](?:[^\s"'`\\]|\\[^\sA-Za-z0-9"'`\\]){6,}(?:[^\s"'`\\<>;,(){}\[\]$]|\\[^\sA-Za-z0-9"'`\\])))'''
 keywords = ["secret", "token", "passw", "key", "credential"]
 # As secret-assignment: a quoted value whole, an unquoted one from 8 characters (shorter is mostly a
-# number, `--max-token 4096`); a value that starts with `-` is the next flag.
+# number, `--max-token 4096`), a shell's escape of a sign inside it; a value that starts with `-` is
+# the next flag.
+[[rules.allowlists]]
+# A number given to a flag that only ends in "token" is a count (`--max-token 12345678`), as
+# claude-mem's rule takes no value without a letter; a bare `--token` and a password keep theirs.
+regexTarget = "match"
+regexes = ['''(?i)--(?:[a-z0-9]+[-_])+token[ \t]+["']?[0-9]+["']?$''']
 
 [[rules]]
 id = "slack-token"
-description = "A Slack token of any length (xoxb-, xoxp-, xoxe- and the rest, xapp-), as claude-mem 15.5 masks one: gitleaks' rules take a refresh token only at 146 characters after xoxe-1-"
-regex = '''(?i)\b((?:xox[abeprs]|xapp)-[a-z0-9-]{10,})'''
+description = "A Slack token of any length and kind (xoxb-, xoxp-, xoxe-, xoxc-, xoxd- and the rest, xapp-), as claude-mem 15.5 masks one and its client and cookie tokens too: gitleaks' rules take a refresh token only at 146 characters after xoxe-1-, and neither takes xoxc- or xoxd-"
+regex = '''(?i)\b((?:xox[a-z]|xapp)-[a-z0-9-]{10,})'''
 keywords = ["xox", "xapp-"]
 
 [[rules]]
 id = "slack-webhook-secret"
 description = "The secret of a Slack incoming, workflow or trigger webhook URL, whole: gitleaks' rule stops 56 characters into the path"
-regex = '''(?i)\bhooks\.slack\.com/(?:services|workflows|triggers)/t[a-z0-9]+/[a-z0-9]+/(?:[0-9]+/)?([a-z0-9]{20,})'''
+regex = '''(?i)\bhooks\.slack\.com/(?:services|workflows|triggers)/t[a-z0-9]+/[a-z0-9]+/(?:[0-9]+/)?([a-z0-9+]{20,})'''
 keywords = ["hooks.slack.com"]
+
+[[rules]]
+id = "masked-remainder"
+description = "What is glued to a mask already stored: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path, which a rescan finds no other way, the host being masked"
+regex = '''\[REDACTED\]([A-Za-z0-9]{4,})'''
+keywords = ["[redacted]"]
+# Letters and digits only, as a Slack secret is: after a mask a `/` is mostly a path's
+# (`/keys/[REDACTED]/rotate`). A mask followed by a space, a sign or the end is left; one to three
+# characters of a secret's end tell nothing of it. Each scan runs to a fixpoint over what it
+# masked, so this takes such an end in a new capture too.
 
 [[rules]]
 id = "discord-webhook-token"

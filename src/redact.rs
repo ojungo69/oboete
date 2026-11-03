@@ -1930,7 +1930,8 @@ mod tests {
     /// The forms claude-mem 15.5 to 15.9 masks that the bundled rules left (decision 70): a Slack
     /// token of any length, a Slack webhook's whole secret, a Discord webhook's token, a Stripe
     /// webhook secret, a Docker Hub token, a test.pypi.org token, a `_PWD` value and a flag's value
-    /// after a space.
+    /// after a space; and past claude-mem's (#826's review): Slack's client and cookie tokens, a
+    /// shell's escape inside a value, and the end of a secret glued to a mask stored before.
     #[test]
     fn the_forms_claude_mem_masks_are_masked_too() {
         // Split literals: secret scanners flag whole ones in the repository.
@@ -1944,8 +1945,37 @@ mod tests {
         let pypi = format!("pypi-AgENdGVzdC5weXBpLm9yZw{r20}{r20}{}", "Kj8hGf6dSa4q");
         let pw = format!("Tr0ub4d{}", "or3xyz");
         let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+        // A shell's escape inside a password, as typed and as a flattened tool field holds it.
+        let esc = format!("Q7wE9rT2\\!{}", "K4j8N6pL");
+        let esc_json = format!("Q7wE9rT2\\\\!{}", "K4j8N6pL");
+        let xoxc = format!("xoxc-{}-{r20}", "1234567890");
+        let xoxd = format!("xoxd-{r20}{}", "Hj5kL7");
+        // Past the 56 characters of path gitleaks' rule masks, so that only this rule's class
+        // reaches the end.
+        let plus = format!("{r20}{r20}+{}", "Bn7MqPz2");
+        let digits = format!("1234{}", "5678");
+        let tail = format!("Tq9v2{}", "LmX4wPz");
         let cases = [
             (format!("SLACK_REFRESH={slack}"), slack.clone()),
+            (format!("SLACK_CLIENT={xoxc}"), xoxc.clone()),
+            (format!("Cookie-less d={xoxd} for the client"), xoxd.clone()),
+            (
+                format!("https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{plus}"),
+                plus.clone(),
+            ),
+            (format!("tool --password {esc} --verbose"), esc.clone()),
+            (format!("DB_PASSWORD={esc}"), esc.clone()),
+            (
+                format!("{{\"command\": \"tool --password {esc_json}\"}}"),
+                esc_json.clone(),
+            ),
+            (format!("tool --token {digits}"), digits.clone()),
+            (format!("tool --password {digits}"), digits.clone()),
+            // The end gitleaks' slack-webhook-url left after its mask in a record stored before.
+            (
+                format!("curl -X POST https://[REDACTED]{tail}"),
+                tail.clone(),
+            ),
             (
                 format!(
                     "curl -X POST https://hooks.slack.com/workflows/T0AB1CD2E/A0FG3HI4J/{}/{hook}",
@@ -1984,12 +2014,23 @@ mod tests {
             let tail = &secret[secret.len() - 6..];
             assert!(!stored.contains(tail), "{text}: {stored}");
         }
+        // A secret whose end goes two characters past gitleaks' 56 characters of path, too short an
+        // end for masked-remainder: this rule masks it whole, and nothing follows the mask.
+        let near = format!("{r20}{}", "Mb2Xs7Kp4Q9wE1rTzY");
+        let (stored, _) = scan(
+            &format!("https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{near}"),
+            &Rules::default(),
+        );
+        assert!(stored.ends_with(MASK), "{stored}");
         // Not secrets: a working directory, a number after a flag, a flag that names a file or a
         // name, the next flag where a value would be, and the prefixes named in prose.
         for text in [
             "PWD=/home/user/project",
             "OLDPWD=/home/user",
             "llm --max-token 4096 --stream",
+            "llm --max-token 12345678 --stream",
+            "masked: [REDACTED] and [REDACTED].",
+            "a short end [REDACTED]abc stays",
             "cargo run -- --token-file ./token.txt",
             "gh secret set --secret-name deploy",
             "tool --token --verbose",
