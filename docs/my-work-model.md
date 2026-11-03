@@ -2260,6 +2260,45 @@ runs and leaves a run another live worker owns to it.
   mutants of the page's code, and five of the request's in the runner, each fail a check.
 - **Then**: parity row X10, the address that keeps My Work's place.
 
+### Slice 13: the address keeps My Work's place (2026-11-03)
+
+Decision 70, parity row X10: claude-mem 15.6 keeps where its page is in the address, so a reload and
+the browser's Back and Forward return there (`view-slice.ts` `readRoute`, `writeRoute`, `showUrl`),
+and remembers the list's view, filter and sort between visits (`create-store.ts`).
+
+- **The address**, in its query; the fragment, which holds the token (decision 66), is left as it
+  is, and any other parameter too:
+  - `view`: a tab other than My Work (`my_rules`, `timeline`, `sessions`, `records`, `context`,
+    `stats`, `settings`), or one of My Work's pages, `suggested` and `past-focus`;
+  - `focus`: My Work's area, an area's id or `other`, on My Work's list only;
+  - `request`: the request open on My Work.
+  An unknown `view` is none; `focus` and `request` count on My Work only.
+- **On load** (`routeStart`): the place the address names, else the tab last used (decision 55);
+  then the address says where the page is (`replaceState`), so that every entry of the history
+  does.
+- **Moves** write the address with `pushState` when it changes: a tab; the status line's way to
+  Settings, My Work's link to the timeline and the setup page's search; an area, Suggested, Past
+  focus or all of My Work; a request opened, and closed by its back button. A change the page makes
+  itself, a merge moving the choice to the area merged into or a join moving the open request, is
+  written with `replaceState` when My Work is drawn.
+- **Back and Forward** (`popstate`, `routeShow`): the address is read and shown, nothing written.
+  Leaving a request this way gives the focus back to its card, as its back button does.
+- **A place that is gone**: a request the answer does not have shows the page that says so, with its
+  back button, as an open request that leaves does; an area not listed or dismissed shows all of My
+  Work (`myFocusSelected`). The address keeps the choice, as claude-mem's keeps `focus`.
+- **Kept between visits**: the layout, as before, and the status tab and the sort
+  (`oboete-my-work-filter`, `oboete-my-work-sort`), each read back only when the page knows it. The
+  search, the project and the range are for the visit (claude-mem has none of them).
+- **Not in the address**: a session's page on Sessions, a work stream inside a request, Settings'
+  open groups, the scroll.
+- **Tests**: the address read (each `view`, `focus` and `request`, an unknown `view`); on load, a
+  page named and none named; each move pushed once and the same place not again, with the token
+  and another parameter kept; Back to a request and from it, to another tab and to all of My Work,
+  writing nothing; a merge's area replaced; the status line's way to Settings pushed; the status
+  tab and the sort kept, and unknown ones read back as the defaults. Ten hand mutants of the page's
+  code each fail a check.
+- **Then**: the speed of rows 54 and N5 (decision 70's order after the three gaps).
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's

@@ -6143,6 +6143,116 @@ run('lang="en"');
 console.log('PASS: Refresh now: shown while My Work is on, one request, each answer, the focus kept, JA/EN');
 }
 
+// X10 (decision 70, docs/my-work-model.md slice 13): the address keeps My Work's place, the tab or
+// page, the area and the open request, as claude-mem 15.6's does; Back and Forward show it; the
+// status tab and the sort are remembered between visits.
+{
+const run=code=>vm.runInContext(code,ctx);
+const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const settle=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,0));};
+const read=search=>JSON.parse(run(`JSON.stringify(routeRead(${JSON.stringify(search)}))`));
+assert.deepEqual(read('?view=past-focus'),{view:'my_work',area:'past-focus',request:null});
+assert.deepEqual(read('?view=suggested&focus=a1'),{view:'my_work',area:'suggested',request:null},'a page, not an area');
+assert.deepEqual(read('?focus=a1&request=r1'),{view:'my_work',area:'a1',request:'r1'});
+assert.deepEqual(read('?view=timeline&focus=a1&request=r1'),{view:'timeline',area:null,request:null},'My Work\'s place on My Work only');
+assert.deepEqual(read('?view=settings'),{view:'settings',area:null,request:null});
+assert.equal(read('?view=nowhere'),null,'an unknown view is none');
+assert.equal(read(''),null);
+// The page's address, Back and Forward, as a browser keeps them.
+const hash=ctx.location.hash;
+const saved={href:ctx.location.href,search:ctx.location.search,history:ctx.history,show:run('show'),fetch:ctx.fetch};
+const moves=[];
+const at=url=>{const u=new URL(url);Object.assign(ctx.location,{href:u.href,search:u.search,hash:u.hash});};
+const page=query=>`http://127.0.0.1:17373/${query}${hash}`;
+ctx.history={pushState:(_s,_t,url)=>{moves.push(['push',url]);at(url);},replaceState:(_s,_t,url)=>{moves.push(['replace',url]);at(url);}};
+let shown=0;
+run('show=async()=>{globalThis.shownCount=(globalThis.shownCount||0)+1;}');
+ctx.fetch=()=>Promise.resolve(json({current:null,months:[],window:{days:31,prompts:0},status:{state:'off'}}));
+try{
+  // On load: the place the address names; with none, the view last used, then written.
+  at(page('?view=past-focus'));
+  run('routeStart()');
+  assert.equal(run('view'),'my_work');
+  assert.equal(run('mw.area'),'past-focus');
+  assert.deepEqual(moves,[],'the address says it already');
+  at(page(''));
+  run('view="timeline";routeStart()');
+  assert.deepEqual(moves,[['replace',page('?view=timeline')]],'the view last used, written in place');
+  // Moves are pushed, once each: an area, a request, its back button; the token and another
+  // parameter stay.
+  moves.length=0;
+  at(page('?source=sample'));
+  run('setView("my_work");mw.area=null;mw.request=null;mw.rows=[];mw.areas=[{id:"a1",name:"Parser",status:"kept"}]');
+  run('myFocusChoose("a1")');
+  assert.deepEqual(moves,[['push',page('?source=sample&focus=a1')]]);
+  run('myFocusChoose("a1")');
+  assert.equal(moves.length,1,'the same place is not pushed again');
+  run('myWorkOpen("r1")');
+  assert.deepEqual(moves[1],['push',page('?source=sample&focus=a1&request=r1')]);
+  run('myWorkClose()');
+  assert.deepEqual(moves[2],['push',page('?source=sample&focus=a1')]);
+  // Back to the request, then Back again: shown, nothing written.
+  moves.length=0;
+  at(page('?source=sample&focus=a1&request=r1'));
+  run('routeShow()');
+  assert.equal(run('mw.request'),'r1');
+  run('myWorkDraw()');
+  at(page('?source=sample&focus=a1'));
+  run('routeShow()');
+  assert.equal(run('mw.request'),null,'Back from a request closes it');
+  assert.deepEqual(moves,[],'Back writes nothing');
+  // Back to another view, then to All of My Work.
+  at(page('?view=timeline'));
+  run('routeShow()');
+  assert.equal(run('view'),'timeline');
+  at(page(''));
+  run('routeShow()');
+  assert.equal(run('view'),'my_work');
+  assert.equal(run('mw.area'),null,'an address with none of them is all of My Work');
+  assert.deepEqual(moves,[]);
+  // What the page changes itself, a merge's area, replaces the address.
+  run('mw.area="a2";myWorkDraw()');
+  assert.deepEqual(moves,[['replace',page('?focus=a2')]]);
+  // The status line's way to Settings is a move.
+  moves.length=0;
+  run('mw.area=null;setView("my_work")');
+  at(page(''));
+  const open=run('myWorkStatusLine({state:"off"})').children.find(node=>node?.dataset?.focus==='settings');
+  open.click();
+  assert.deepEqual(moves,[['push',page('?view=settings')]]);
+}finally{
+  Object.assign(ctx.location,{href:saved.href,search:saved.search,hash});
+  ctx.history=saved.history;ctx.fetch=saved.fetch;
+  ctx.realShow=saved.show;run('show=realShow;delete globalThis.realShow;delete globalThis.shownCount');
+  run('setView("my_work");mw.area=null;mw.request=null');
+}
+// The status tab and the sort are kept for the next visit; a value this page does not know is the
+// default.
+const sets=[];
+const storage=ctx.localStorage;
+ctx.localStorage={getItem:()=>null,setItem:(k,v)=>sets.push([k,v]),removeItem(){}};
+try{
+  const tabs=run('myWorkTabs([])');
+  tabs.children.find(node=>node.dataset.myWork==='tab:needs').click();
+  const sort=run('myWorkSelect("sort","my_work_sort_label",MY_WORK_SORTS.map(s=>[s,s]),mw.sort,v=>{mw.sort=v;remember("oboete-my-work-sort",v);})');
+  sort.value='oldest';for(const cb of sort.listeners.change)cb({target:sort});
+  assert.deepEqual(sets.filter(([k])=>k.startsWith('oboete-my-work-')),[['oboete-my-work-filter','needs'],['oboete-my-work-sort','oldest']]);
+}finally{
+  ctx.localStorage=storage;run('mw.filter="all";mw.sort="attention"');
+}
+const visit=kept=>{
+  const store=new Map(Object.entries(kept));
+  const c=vm.createContext({document,location:{hash,port:'17373',replaced:[],replace(){}},URL,URLSearchParams,
+    navigator:{language:'en'},window:{addEventListener(){}},setInterval(){},TextEncoder,Uint8Array,console,
+    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,String(v)),removeItem:k=>store.delete(k)}});
+  vm.runInContext(source.replace('await start();',''),c,{filename:sourcePath});
+  return JSON.parse(vm.runInContext('JSON.stringify([mw.filter,mw.sort,mw.layout])',c));
+};
+assert.deepEqual(visit({'oboete-my-work-filter':'needs','oboete-my-work-sort':'oldest','oboete-my-work-layout':'list'}),['needs','oldest','list']);
+assert.deepEqual(visit({'oboete-my-work-filter':'nowhere','oboete-my-work-sort':'random'}),['all','attention','cards'],'an unknown value is the default');
+console.log('PASS: The address keeps My Work\'s place: read, written once a move, Back and Forward, the remembered tab and sort');
+}
+
 // Decision 57 slice 6b (docs/my-work-model.md V2): the status words an area's header shows, by
 // claude-mem's statusOf over My Work's states, and asked again by full dates in UTC; slice 7a's
 // build story.
