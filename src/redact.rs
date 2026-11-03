@@ -2130,6 +2130,58 @@ mod tests {
         check(&stored, &found, &tok);
         check(&stored, &found, &tok2);
         assert!(stored.contains("DEBUG_MODE=true"), "{stored}");
+        // A value on the indented line below its key (YAML, pretty-printed JSON) is still masked;
+        // short and plain, so that no generic rule takes it instead.
+        let pw = format!("Abcd{}", "1234");
+        for text in [
+            format!("password:\n  {pw}\nuser: app"),
+            format!("{{\"password\":\n  \"{pw}\"}}"),
+            format!("{{\"password\":\n\"{pw}\"}}"),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            check(&stored, &found, &pw);
+        }
+        // An empty value takes no unindented next line; a header's value no next line.
+        let b64 = format!("dXNyOnE5Wng4bUwy{}", "dkI0blI3dFl3");
+        let word = format!("Ab3dEfGh5jKlMn7p{}", "QrStUvWx");
+        for (text, secret, kept) in [
+            (
+                "API_KEY=\nDEBUG_MODE=true".to_owned(),
+                None,
+                "DEBUG_MODE=true".to_owned(),
+            ),
+            (
+                format!("Authorization: Bearer {tok}{tok2}\nX-Request-Id: {word}"),
+                Some(format!("{tok}{tok2}")),
+                format!("X-Request-Id: {word}"),
+            ),
+            (
+                format!("Bearer {tok}{tok2}\n{word} is the next line"),
+                Some(format!("{tok}{tok2}")),
+                format!("{word} is the next line"),
+            ),
+            (
+                format!("Authorization: Basic {b64}\nAccept: application/json"),
+                Some(b64.clone()),
+                "Accept: application/json".to_owned(),
+            ),
+            (
+                format!("Authorization: Token {tok}\n{word}"),
+                Some(tok.clone()),
+                word.clone(),
+            ),
+            (
+                format!("Set-Cookie: session={tok}\nnext=1"),
+                Some(tok.clone()),
+                "next=1".to_owned(),
+            ),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            if let Some(secret) = &secret {
+                check(&stored, &found, secret);
+            }
+            assert!(stored.contains(&kept), "{text}: {stored}");
+        }
     }
 
     #[test]
