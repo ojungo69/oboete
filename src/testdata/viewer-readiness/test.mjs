@@ -3287,6 +3287,181 @@ console.log('PASS: the caps\' No cap switches');
     delete ctx.window.confirm;
     document.activeElement=null;
   }
+  // Decision 69 (slice 69c): what the next session receives, behind a button in the first group: the
+  // Context view's parts for a repository chosen in the fold, read when it is due, never by a model.
+  {
+    const reads=[];let answer=()=>new Promise(()=>{});
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+      if(url.startsWith('/api/context?')){reads.push(new URLSearchParams(url.split('?')[1]).get('repo'));return answer(url);}
+      if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+      return new Promise(()=>{});
+    };
+    const said=(repo,words)=>json({repo,branch:'main',on:true,chars:words.length,text:words});
+    const repoSelect=document.getElementById('repo');
+    const option=(value,last)=>{const o=new ctx.Option(value,value);o.textContent=value;o.title=value;o.dataset.last=String(last);return o;};
+    const alpha='github.com/made-up/alpha',beta='github.com/made-up/beta';
+    repoSelect.replaceChildren(new ctx.Option('All repositories',''),option(alpha,100),option(beta,200));
+    repoSelect.value='';
+    vm.runInContext("currentRepo='';Object.assign(contextPreview,{repo:null,answer:null,read:null,pending:null,failed:false});groupOpen.delete('context-preview')",ctx);
+    const fold=()=>panel.querySelector('.context-preview');
+    const out=()=>fold().querySelector('.context-preview-out');
+    const open=()=>{fold().open=true;fold().isConnected=true;for(const cb of fold().listeners.toggle||[])cb({target:fold()});};
+    const choose=value=>{const s=fold().querySelectorAll('select')[0];s.value=value;for(const cb of s.listeners.change||[])cb({target:s});};
+    f=draw(ai(['alpha'],{version:'v1'}));await settled();
+    assert(fold()&&!fold().open&&panel.querySelector('.group-s-inject').contains(fold()),'a closed fold in What agents are given');
+    assert.equal(fold().closest('.simple-block')?.dataset.simpleBlock,'inject','beside its two switches, before More settings');
+    assert.equal(reads.length,0,'closed: nothing read');
+    // Opened: one read of the repository with the latest activity, as neither the header nor a
+    // checkout names one; the same parts as the Context view's for its answer.
+    let [first,giveFirst]=later();answer=()=>first;
+    open();await settle();
+    assert.deepEqual(reads,[beta],'opened: one read, the latest repository');
+    assert(text(out()).includes(ctx.t('context_reading')),'it says it is reading');
+    giveFirst(said(beta,'made-up handed text for beta'));await settled();
+    const parts=vm.runInContext('contextParts',ctx)({repo:beta,branch:'main',on:true,chars:28,text:'made-up handed text for beta'});
+    assert.equal(text(out()),parts.map(text).join(' '),'what the Context view shows for it');
+    const select=fold().querySelectorAll('select')[0];
+    assert.deepEqual([select.value,select.options.map(o=>o.value),select.dataset.simpleFocus],[beta,[alpha,beta],'context.repo'],
+      'its own choice of the header\'s repositories');
+    // Another repository chosen, then back: only the last read asked is drawn.
+    const [toAlpha,giveAlpha]=later();const [toBeta,giveBeta]=later();const queue=[toAlpha,toBeta];answer=()=>queue.shift();
+    choose(alpha);await settle();choose(beta);await settle();
+    giveBeta(said(beta,'beta read again'));await settled();
+    giveAlpha(said(alpha,'made-up alpha text'));await settled();
+    assert.deepEqual([reads.slice(1),text(out()).includes('beta read again'),text(out()).includes('made-up alpha text')],[[alpha,beta],true,false],
+      'an earlier read answering last is not drawn');
+    // Drawn again with what is saved unchanged: the last answer, no read.
+    reads.length=0;ctx.ui.drawSettings();await settled();
+    assert.deepEqual([reads.length,fold().open,text(out()).includes('beta read again')],[0,true,true],'drawn again: kept open, the last answer, no read');
+    // A save's answer changes what is saved: read once again.
+    answer=()=>Promise.resolve(said(beta,'after the save'));
+    answers=[json(ai(['alpha'],{version:'v2'}))];
+    flip(simple('inject.session_start'),false);await settled();
+    assert.deepEqual([reads,text(out()).includes('after the save')],[[beta],true],'a save\'s answer: read once again');
+    // A read on its way when a save's answer comes: the new read is drawn, nothing stays reading.
+    reads.length=0;
+    const [stale,giveStale]=later();const [fresh,giveFresh]=later();const turns=[stale,fresh];answer=()=>turns.shift();
+    choose(alpha);await settle();
+    answers=[json(ai(['alpha'],{version:'v3'}))];
+    flip(simple('inject.session_start'),true);await settled();
+    giveFresh(said(alpha,'alpha under v3'));await settled();
+    giveStale(said(alpha,'alpha under v2'));await settled();
+    assert.deepEqual([reads,text(out()).includes('alpha under v3'),text(out()).includes(ctx.t('context_reading'))],[[alpha,alpha],true,false],
+      'the read for what is saved now is drawn, the earlier one is not');
+    // Settings left while a read is on its way: shown again, it reads anew.
+    reads.length=0;
+    const [left,giveLeft]=later();answer=()=>left;
+    f=draw(ai(['alpha'],{version:'v4'}));await settle();
+    ctx.ui.setView('timeline');giveLeft(said(alpha,'read while away'));await settled();
+    ctx.ui.setView('settings');answer=()=>Promise.resolve(said(alpha,'read on return'));
+    ctx.ui.drawSettings();await settled();
+    assert.deepEqual([reads.length,text(out()).includes('read on return')],[2,true],'shown again: read anew');
+    // Settings shown again (a new form, the same version) before a read on its way answers: the new
+    // page reads anew; the old answer ends nothing and is not drawn (Codex's review of 69c).
+    reads.length=0;
+    const [old,giveOld]=later();const [renewed,giveRenewed]=later();const order=[old,renewed];answer=()=>order.shift();
+    f=draw(ai(['alpha'],{version:'v8'}));await settle();
+    ctx.ui.setView('timeline');ctx.ui.setView('settings');
+    f=draw(ai(['alpha'],{version:'v8'}));await settle();
+    giveOld(said(alpha,'stale on return'));await settled();
+    assert(text(out()).includes(ctx.t('context_reading')),'the new read still awaited');
+    giveRenewed(said(alpha,'fresh on return'));await settled();
+    assert.deepEqual([reads.length,text(out()).includes('fresh on return'),text(out()).includes('stale on return')],[2,true,false],
+      'Settings shown again before the old answer: the new read drawn');
+    // A general save gives the form a new version in place while a read is on its way: its answer is
+    // not taken for the new version, and the open fold reads again.
+    reads.length=0;
+    const [before,giveBefore]=later();const [after,giveAfter]=later();const pair=[before,after];answer=()=>pair.shift();
+    f=draw(ai(['alpha'],{version:'v9'}));await settle();
+    ctx.ui.getForm().version='v10';
+    giveBefore(said(alpha,'under v9'));await settled();
+    assert.equal(reads.length,2,'read again for the version the form has now');
+    giveAfter(said(alpha,'under v10'));await settled();
+    assert(text(out()).includes('under v10')&&!text(out()).includes('under v9'),'what is saved now');
+    reads.length=0;ctx.ui.drawSettings();await settled();
+    assert.equal(reads.length,0,'its answer kept for that version');
+    // The version changed in place with nothing on its way, then drawn: read for it.
+    answer=()=>Promise.resolve(said(alpha,'under v11'));
+    ctx.ui.getForm().version='v11';ctx.ui.drawSettings();await settled();
+    assert.deepEqual([reads.length,text(out()).includes('under v11')],[1,true],'a new version in place: read');
+    // Closed and opened again: read afresh, as the store may have changed what is given; the toggle a
+    // browser fires for the open state a redraw gives reads nothing.
+    reads.length=0;answer=()=>Promise.resolve(said(alpha,'reopened'));
+    const toggle=()=>{for(const cb of fold().listeners.toggle||[])cb({target:fold()});};
+    fold().isConnected=true;fold().open=false;toggle();fold().open=true;toggle();await settled();
+    assert.deepEqual([reads.length,text(out()).includes('reopened')],[1,true],'opened again: read afresh');
+    reads.length=0;ctx.ui.drawSettings();fold().isConnected=true;toggle();await settled();
+    assert.equal(reads.length,0,'a redraw\'s own toggle reads nothing');
+    // A failed read says so; Retry reads again, the focus on the fold's summary once Retry is gone.
+    answer=()=>Promise.resolve(json({code:'made_up_failure'},500));
+    f=draw(ai(['alpha'],{version:'v5'}));await settled();
+    assert(text(out()).includes(ctx.t('context_failed')),'a failed read says so');
+    reads.length=0;ctx.ui.drawSettings();await settled();
+    assert.deepEqual([reads.length,text(out()).includes(ctx.t('context_failed'))],[0,true],'drawn again: no read by itself, Retry still offered');
+    answer=()=>Promise.resolve(said(alpha,'after a retry'));
+    const again=fold().querySelectorAll('button').find(b=>b.dataset.simpleFocus==='context.again');
+    again.focus();again.click();await settled();
+    assert.deepEqual([text(out()).includes('after a retry'),document.activeElement?.tagName],[true,'SUMMARY'],'Retry reads again; the focus on the summary');
+    // A save's answer drawn while Retry has the focus: Retry gone for the read, the focus on the
+    // summary (Codex's review of 69c).
+    answer=()=>Promise.resolve(json({code:'made_up_failure'},500));
+    f=draw(ai(['alpha'],{version:'v5c'}));await settled();
+    fold().querySelectorAll('button').find(b=>b.dataset.simpleFocus==='context.again').focus();
+    const [hang]=later();answer=()=>hang;
+    answers=[json(ai(['alpha'],{version:'v5d'}))];
+    flip(simple('inject.session_start'),false);await settled();
+    assert.equal(document.activeElement?.dataset?.simpleFocus,'context.open','a save drawn while Retry had the focus: the summary');
+    // No repository known: no choice, and its own wording, not "above".
+    repoSelect.replaceChildren(new ctx.Option('All repositories',''));
+    vm.runInContext('contextPreview.repo=null',ctx);
+    answer=()=>Promise.resolve(json({repo:'',branch:'',on:true,chars:0,text:'',choose:true}));
+    f=draw(ai(['alpha'],{version:'v6'}));await settled();
+    assert.deepEqual([fold().querySelectorAll('select').length,text(out()).includes(ctx.t('context_preview_choose')),text(out()).includes(ctx.t('context_choose'))],
+      [0,true,false],'no repository: no choice, its own wording');
+    // Repositories known later: the choice is made then, and read.
+    repoSelect.replaceChildren(new ctx.Option('All repositories',''),option(alpha,100),option(beta,200));
+    reads.length=0;answer=()=>Promise.resolve(said(beta,'now known'));
+    ctx.ui.drawSettings();await settled();
+    assert.deepEqual([fold().querySelectorAll('select')[0]?.value,reads,text(out()).includes('now known')],[beta,[beta],true],
+      'the latest chosen once known, and read');
+    // The header's list read again while Settings is shown: the choice follows it in place; the
+    // repository chosen gone, the latest is chosen and read.
+    {
+      const gamma='github.com/made-up/gamma';
+      let listed=[alpha,beta,gamma].map((repo,i)=>({repo,claims:0,imported:0,records:1,last:100*(i+1)}));
+      const before=ctx.fetch,wasLoaded=vm.runInContext('reposLoaded',ctx);
+      ctx.fetch=(url,options)=>url.startsWith('/api/repos?')?Promise.resolve(json({current:'',repos:listed})):before(url,options);
+      reads.length=0;
+      await vm.runInContext('loadRepos()',ctx);await settled();
+      assert.deepEqual([fold().querySelectorAll('select')[0].options.map(o=>o.value),fold().querySelectorAll('select')[0].value,reads.length],
+        [[alpha,beta,gamma],beta,0],'a repository added: listed in place, the choice kept, nothing read');
+      listed=listed.filter(r=>r.repo!==beta);answer=()=>Promise.resolve(said(gamma,'gamma now'));
+      await vm.runInContext('loadRepos()',ctx);await settled();
+      assert.deepEqual([fold().querySelectorAll('select')[0].value,reads,text(out()).includes('gamma now')],[gamma,[gamma],true],
+        'the one chosen gone: the latest, read');
+      // Emptied while its choice has the focus: the fold's summary.
+      listed=[];fold().querySelectorAll('select')[0].focus();
+      await vm.runInContext('loadRepos()',ctx);await settled();
+      assert.deepEqual([fold().querySelectorAll('select').length,document.activeElement?.tagName],[0,'SUMMARY'],'the list emptied: the focus on the summary');
+      ctx.fetch=before;vm.runInContext(`reposLoaded=${wasLoaded}`,ctx);repoSelect.value='';
+    }
+    // The viewer's own checkout: chosen first after the header's, and read without its name, as the
+    // Context view reads it (its branch is the checkout's).
+    repoSelect.replaceChildren(new ctx.Option('All repositories',''),option(alpha,100),option(beta,200));
+    vm.runInContext(`currentRepo='${alpha}';contextPreview.repo=null`,ctx);
+    reads.length=0;answer=()=>Promise.resolve(said(alpha,'the checkout'));
+    f=draw(ai(['alpha'],{version:'v7'}));await settled();
+    assert.deepEqual([fold().querySelectorAll('select')[0].value,reads],[alpha,[null]],'the checkout first, read without its name');
+    vm.runInContext("currentRepo=''",ctx);
+    // Japanese.
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();await settled();
+    assert.equal(text(fold().querySelector('summary')),'渡す内容を見る','Japanese');
+    ctx.ui.setLang('en');
+    vm.runInContext("groupOpen.delete('context-preview')",ctx);
+    repoSelect.replaceChildren();
+    document.activeElement=null;
+  }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;
   ctx.ui.setForm(null);

@@ -904,13 +904,18 @@ async function showContext(repo) {
       return;
     }
     draw(word('span', null, 'context_heading'), [], [
-      !repo ? word('p', 'lead', 'context_checkout') : null,
-      el('dl', 'claim-meta', ...row('repository', c.repo), ...row('branch', c.branch || '–'),
-        ...row('session_start', t(c.on ? 'context_on' : 'context_off')), ...row('size', t('characters', { n: c.chars }))),
-      c.text ? el('pre', 'context', c.text) : word('p', 'text pending', 'context_empty'),
-    ]);
+      !repo ? word('p', 'lead', 'context_checkout') : null, ...contextParts(c)]);
     setStatus('');
   };
+}
+
+// What a context answer shows: Settings' preview draws the same (decision 69, slice 69c).
+function contextParts(c) {
+  return [
+    el('dl', 'claim-meta', ...row('repository', c.repo), ...row('branch', c.branch || '–'),
+      ...row('session_start', t(c.on ? 'context_on' : 'context_off')), ...row('size', t('characters', { n: c.chars }))),
+    c.text ? el('pre', 'context', c.text) : word('p', 'text pending', 'context_empty'),
+  ];
 }
 
 function row(term, value) {
@@ -1187,6 +1192,11 @@ const TEXT = {
   context_off: ['Off', '無効'],
   size: ['Size', '大きさ'],
   characters: ['{n} characters', '{n} 文字'],
+  context_preview: ['See what is given', '渡す内容を見る'],
+  context_preview_desc: ['What a new session in this repository is handed at its start, as the Context tab shows it. Reading it calls no AI.', 'このリポジトリで新しいセッションを始めたときに渡す内容です (コンテキスト画面と同じ)。表示に AI は使いません。'],
+  context_preview_choose: ['No repository is known yet: once an agent has worked in one, choose it here.', 'まだリポジトリがありません。エージェントがどこかで作業すると、ここで選べます。'],
+  context_reading: ['Reading what is given…', '渡す内容を読み込んでいます…'],
+  context_failed: ['What is given could not be read.', '渡す内容を読み込めませんでした。'],
   context_empty: ['Nothing is handed over for this checkout yet.', 'この作業場所で渡す記憶はまだありません。'],
   stats_heading: ['Stats (all repositories)', '統計(すべてのリポジトリ)'],
   records_per_device: ['Records per device', '端末ごとの記録数'],
@@ -5784,19 +5794,44 @@ function providerOrder(f) {
   return f?.providers.map((p) => `${p.name} ${selectorKey(p.selector)}`).join('\n');
 }
 
-async function providerWrite(action, button, body, path, target = null) {
-  const mine = form;
-  clearSimpleReceipt();
-  // The page and the entry as drawn now: a save waited for may have drawn them again (CodeRabbit
-  // on #802). A write from an AI line is answered on that line as drawn now, one from More
-  // settings on its entry (Codex's review of 69b-2a).
-  const fields = $('panel').querySelector('.settings');
+// What a provider's write marks a refused field in, as the page is drawn now (a save waited for may
+// have drawn it again, CodeRabbit on #802): an AI line's write on that line, an entry's on its block,
+// a new entry's on its form (Codex's review of 69b-2a).
+function providerScope(fields, button, action) {
   const focus = button.closest('.provider-entry') ? null : button.dataset.simpleFocus;
   const line = focus ? [...fields.querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === focus)
     ?.closest('.simple-provider') : null;
-  const scope = line ?? (action.selector
-    ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
-    : fields.querySelector('.new-provider'));
+  if (line) return line;
+  if (!action.selector) return fields.querySelector('.new-provider');
+  return [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null;
+}
+
+// Where the focus goes after a provider's write (69b-3c-2): the entry's control at its place now, on
+// the hold's record for its release. A focus the hold has not taken off yet goes off first, or the
+// redraw would give it back to the old control by name.
+function providerTarget(taken, target, mine, action) {
+  if (!target || !taken) return;
+  const inserted = geminiInsertion(mine, action);
+  const hasFiles = form.providers.some((p) => p.selector.source === 'file');
+  taken.keep = { ...target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted)), reveal: true };
+  if (document.activeElement === taken.control) taken.control.blur();
+}
+
+// Whether an AI line shows its key field after a provider's write: no longer after a key saved; after
+// a creation, for the created entry only when it is the first of its name, as the line's field is the
+// first entry's (CodeRabbit on #820). Each creation sets it anew.
+function providerKeyLine(action, path) {
+  if (path === '/key') simpleKeyName = null;
+  if (action.op !== 'create') return;
+  const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
+  simpleKeyName = first ? action.entry.name : null;
+}
+
+async function providerWrite(action, button, body, path, target = null) {
+  const mine = form;
+  clearSimpleReceipt();
+  const fields = $('panel').querySelector('.settings');
+  const scope = providerScope(fields, button, action);
   const taken = holdSettings(fields);
   button.disabled = true;
   try {
@@ -5805,25 +5840,12 @@ async function providerWrite(action, button, body, path, target = null) {
     if (current) return reloadProviderSettings(current);
     if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
     form = mergeProviderSettings(answer, mine, action);
-    // Where the focus goes after this write (69b-3c-2): the entry's control at its place now, on the
-    // hold's record for its release. A focus the hold has not taken off yet goes off first, or the
-    // redraw would give it back to the old control by name.
-    if (target && taken) {
-      const inserted = geminiInsertion(mine, action);
-      const hasFiles = form.providers.some((p) => p.selector.source === 'file');
-      taken.keep = { ...target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted)), reveal: true };
-      if (document.activeElement === taken.control) taken.control.blur();
-    }
-    simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
-    if (path === '/key') simpleKeyName = null;
-    // Its line shows the key field for it only when it is the first entry of its name: the line's
-    // field is the first entry's (CodeRabbit on #820). Each creation sets it anew.
-    if (action.op === 'create') {
-      simpleKeyName = action.entry.kind === 'openai'
-        && form.providers.filter((p) => p.name === action.entry.name).length === 1 ? action.entry.name : null;
-    }
+    providerTarget(taken, target, mine, action);
+    const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
+    simpleReceipt = kept ? 'ai' : null;
+    providerKeyLine(action, path);
     drawSettings();
-    setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
+    setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();
     void refreshRests();
     return true;
@@ -6117,28 +6139,8 @@ function providerEntry(provider, line) {
   // Where the focus goes once a write of this entry is answered: its control at its place then
   // (`mappedProviderSelector`), given to the write's hold (#815).
   const after = (prefix, suffix = '') => (map) => ({ simple: `${prefix}${selectorKey(map(provider.selector))}${suffix}` });
-  let enabled = null;
-  if (several) {
-    enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value }, enabled, null, '', after('entry-on:')));
-    enabled.dataset.simpleFocus = `entry-on:${sel}`;
-    enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
-    enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
-  }
-  const arrows = several ? [-1, 1].map((direction) => {
-    const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
-    button.type = 'button';
-    button.title = t(direction < 0 ? 'up' : 'down');
-    button.setAttribute('aria-label', `${button.title}: ${provider.name} (${position})`);
-    button.dataset.simpleFocus = `entry-move:${sel}:${direction}`;
-    // Swapped with the next entry of its name that way: the lower of the two goes to the upper's
-    // place, so every name keeps where it first appears in config and the names' order stays.
-    const other = entries[at + direction];
-    const [lower, upper] = direction < 0 ? [provider, other] : [other, provider];
-    button.disabled = !other || [provider, other].some((p) => p.selector.source === 'gemini');
-    button.addEventListener('click', () => void providerOperation({ op: 'move', selector: lower.selector, to: upper.selector.index },
-      button, null, '', after('entry-move:', `:${direction}`)));
-    return button;
-  }) : [];
+  const enabled = several ? entrySwitch(provider, position, unsupported, after) : null;
+  const arrows = several ? [-1, 1].map((direction) => entryArrow(provider, line, position, direction, after)) : [];
   const remove = el('button', 'quiet small', t('provider_remove'));
   remove.type = 'button';
   remove.dataset.simpleFocus = `entry-remove:${sel}`;
@@ -6153,19 +6155,12 @@ function providerEntry(provider, line) {
   edit.open = provider.editing;
   edit.addEventListener('toggle', () => { provider.editing = edit.open; });
   edit.append(providerEditor(provider.edit, provider, card));
-  const model = (value) => value ?? t('provider_default_model');
-  const key = saved.key === 'none' && saved.kind === 'openai' ? 'provider_key_none' : `key_${saved.key.replaceAll('-', '_')}`;
   card.append(...present([
     several ? el('h4', null, t('simple_entry_of', { n: at + 1, of: entries.length })) : null,
     several || provider.selector.source !== 'file' ? note(position) : null,
     el('div', 'provider-header', enabled ? el('label', 'check', enabled, t('provider_enabled')) : null,
       arrows.length ? el('div', 'move', ...arrows) : null, remove),
-    note(t('provider_saved_native', { on: t(saved.enabled ? 'value_on' : 'value_off'), model: model(saved.model), timeout: saved.timeout_s })),
-    note(t('provider_effective', { on: t(provider.effective.on ? 'value_on' : 'value_off'), order: provider.effective.order + 1,
-      model: model(provider.effective.model), timeout: provider.effective.timeout_s })),
-    saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
-    unsupported ? note(t('provider_unsupported_cli')) : null,
-    note(t(key)),
+    ...entryNotes(provider, unsupported),
     keyShown ? null : providerKeyPanel(provider),
     unsupported ? null : edit,
     at === 0 ? null : providerTest(provider)]));
@@ -6179,11 +6174,62 @@ function providerEntry(provider, line) {
 // switch, else Add AI.
 function createdFocus(name) {
   // Creation appends one native entry, even if it also materializes automatic Gemini.
-  const created = form.providers.filter((p) => p.selector.source !== 'gemini').at(-1);
+  const created = form.providers.findLast((p) => p.selector.source !== 'gemini');
   if (created?.name !== name) return { simple: [`on:${name}`, 'catalog.open'] };
   const own = `key:entry:${selectorKey(created.selector)}`;
   const first = form.providers.find((p) => p.name === name) === created;
   return { simple: first ? [`key:${name}`, own, 'catalog.open'] : [own, `on:${name}`, 'catalog.open'] };
+}
+
+// An AI line's key part: the note of a key file another AI reads first, or the key field for its
+// first entry while it needs one, or the note that keys cannot be typed here.
+function lineKeyPart(f, provider, { shared, keyShown, keyOwner }) {
+  if (shared) return el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }));
+  if (!keyShown) return null;
+  return el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported')));
+}
+
+// An entry's notes: what is saved, what is in effect, its address or command, and its key.
+function entryNotes(provider, unsupported) {
+  const saved = provider.saved;
+  const model = (value) => value ?? t('provider_default_model');
+  const key = saved.key === 'none' && saved.kind === 'openai' ? 'provider_key_none' : `key_${saved.key.replaceAll('-', '_')}`;
+  return [
+    note(t('provider_saved_native', { on: t(saved.enabled ? 'value_on' : 'value_off'), model: model(saved.model), timeout: saved.timeout_s })),
+    note(t('provider_effective', { on: t(provider.effective.on ? 'value_on' : 'value_off'), order: provider.effective.order + 1,
+      model: model(provider.effective.model), timeout: provider.effective.timeout_s })),
+    saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
+    unsupported ? note(t('provider_unsupported_cli')) : null,
+    note(t(key)),
+  ];
+}
+
+// An entry's own switch, beside other entries of its name (69b-3c-2).
+function entrySwitch(provider, position, unsupported, after) {
+  const saved = provider.saved;
+  const enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value },
+    enabled, null, '', after('entry-on:')));
+  enabled.dataset.simpleFocus = `entry-on:${selectorKey(provider.selector)}`;
+  enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
+  enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
+  return enabled;
+}
+
+// An entry's arrow: swapped with the next entry of its name that way, the lower of the two going to the
+// upper's place, so every name keeps where it first appears in config and the names' order stays
+// (69b-3c-2).
+function entryArrow(provider, { entries, at }, position, direction, after) {
+  const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
+  button.type = 'button';
+  button.title = t(direction < 0 ? 'up' : 'down');
+  button.setAttribute('aria-label', `${button.title}: ${provider.name} (${position})`);
+  button.dataset.simpleFocus = `entry-move:${selectorKey(provider.selector)}:${direction}`;
+  const other = entries[at + direction];
+  const [lower, upper] = direction < 0 ? [provider, other] : [other, provider];
+  button.disabled = !other || [provider, other].some((p) => p.selector.source === 'gemini');
+  button.addEventListener('click', () => void providerOperation({ op: 'move', selector: lower.selector, to: upper.selector.index },
+    button, null, '', after('entry-move:', `:${direction}`)));
+  return button;
 }
 
 // An AI line's entries, in config order, in a fold at the line's end (69b-3c-2), open while one of
@@ -6757,24 +6803,31 @@ function clearSimpleReceipt() {
   for (const receipt of $('panel').querySelectorAll('.simple-saved')) receipt.replaceChildren();
 }
 
+// Where the focus goes when the control a key names is not drawn, or is disabled: the names tried
+// after it, in this order (a table, not a chain of ifs: SonarCloud on #820).
+const FOCUS_FALLBACKS = [
+  // An arrow at its name's end: the other one.
+  [(key) => /^(entry-)?move:/.test(key), (key) => (key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'))],
+  // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
+  // cubic on #820).
+  [(key) => key.startsWith('key-save:'), (key) => key.replace('key-save:', 'key:')],
+  [(key) => /^(resume|resume-more|key|key-save):/.test(key), (key) => key.replace(/^[^:]+:/, 'on:')],
+  [(key) => key.startsWith('test-run:'), (key) => key.replace('test-run:', 'test:')],
+  [(key) => key === 'context.again' || key === 'context.repo', () => 'context.open'],
+  [(key) => key.startsWith('entry-test-run:'), (key) => key.replace('entry-test-run:', 'entry-test:')],
+  // A model name saved closes its field: the line's model choice takes the focus.
+  [(key) => key.startsWith('model-text:'), (key) => key.replace('model-text:', 'model:')],
+  [(key) => key === 'mask.confirm', () => 'redaction.enabled'],
+  [(key) => key === 'cap.confirm', () => 'paid_usd_per_month.no_cap'],
+  [(key) => key === 'embedding.start' || key === 'embedding.cancel', () => `embedding:${form?.embedding?.provider}`],
+];
+
 function simpleFocus(key) {
   // A list: the first of its keys found (69b-3c-2).
   if (Array.isArray(key)) return key.some((one) => simpleFocus(one));
   if (typeof key !== 'string' || !key) return false;
   const controls = $('panel').querySelectorAll('button, input, select, summary');
-  const keys = [key];
-  if (key.startsWith('move:') || key.startsWith('entry-move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
-  // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
-  // cubic on #820).
-  if (key.startsWith('key-save:')) keys.push(key.replace('key-save:', 'key:'));
-  if (/^(resume|resume-more|key|key-save):/.test(key)) keys.push(key.replace(/^[^:]+:/, 'on:'));
-  if (key.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
-  if (key.startsWith('entry-test-run:')) keys.push(key.replace('entry-test-run:', 'entry-test:'));
-  // A model name saved closes its field: the line's model choice takes the focus.
-  if (key.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
-  if (key === 'mask.confirm') keys.push('redaction.enabled');
-  if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
-  if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
+  const keys = [key, ...FOCUS_FALLBACKS.filter(([applies]) => applies(key)).map(([, to]) => to(key))];
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
   if (!next) return false;
   // A control inside a closed fold cannot take the focus: open the folds around it first (decision
@@ -6863,7 +6916,10 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
     }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { if (hold) releaseSettings(waiting, taken); return; }
+    if (view !== 'settings' || !form) {
+      if (hold) releaseSettings(waiting, taken);
+      return;
+    }
     // The answer waited for drew the page again: the control as drawn now waits for this save, and
     // the page with it, as a provider's write does (#802).
     button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
@@ -7053,8 +7109,7 @@ function simpleProviderRow(f, row, index, chain, position) {
       el('div', 'move', ...arrows)),
     model, calls, timeout, row.entries > 1 ? el('p', 'desc', t('simple_for_entries', { n: row.entries })) : null,
     row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
-    shared ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
-      : keyShown ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
+    lineKeyPart(f, provider, { shared, keyShown, keyOwner }),
     el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, lineEntries(row, providers, keyShown));
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
@@ -7414,8 +7469,8 @@ function simpleGroups(f, more) {
   empty.hidden = ready;
   return present([empty,
     foldGroup('s-inject', true, t('simple_inject_h'),
-      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }), simpleBody('inject', ...inject),
-      more.inject),
+      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }),
+      simpleBody('inject', ...inject, contextPreviewFold(f)), more.inject),
     foldGroup('s-ai', true, t('simple_ai_h'), aiState,
       simpleBody('ai', el('p', 'desc', t('simple_ai_desc')), curate,
         el('ol', 'simple-providers', ...used.map((row, i) => simpleProviderRow(f, row, chain.indexOf(row), chain, i + 1))),
@@ -7918,6 +7973,141 @@ function foldGroup(key, open, title, desc, ...sections) {
   group.open = groupOpen.get(key) ?? open;
   group.addEventListener('toggle', () => { if (group.isConnected) groupOpen.set(key, group.open); });
   return group;
+}
+
+// What the next session receives, behind a button (decision 69, slice 69c): the Context view's
+// parts for a repository chosen here, as the header's picker is hidden on Settings. Read when the
+// fold opens and when Settings is shown again, as the store may have changed what is given since,
+// when another repository is chosen, and after an answer that changed what is saved; a redraw of the
+// same form otherwise draws the last answer again. The context is built from the store: no AI.
+// `read`, `pending` and `failed`: the repository, version and form of the answer shown, of the read
+// on its way and of a read that failed (Codex's review of 69c).
+const contextPreview = { repo: null, asked: 0, answer: null, read: null, pending: null, failed: null };
+
+// The header's repositories (its picker is filled on every page, Settings' included).
+function contextRepos() {
+  return [...$('repo').options].filter((option) => option.value);
+}
+
+// The header's choice, else the viewer's checkout, else the one with the latest activity.
+function contextRepoDefault(options) {
+  const named = (value) => value && options.some((option) => option.value === value);
+  if (named($('repo').value)) return $('repo').value;
+  if (named(currentRepo)) return currentRepo;
+  return options.reduce((best, option) => (Number(option.dataset.last ?? 0) > Number(best?.dataset.last ?? -1) ? option : best), null)?.value ?? '';
+}
+
+// The fold's choice of the header's repositories, none when it lists none; a choice no longer listed
+// (or none yet) is made again.
+function contextRepoChoice(f) {
+  const options = contextRepos();
+  if (!options.some((option) => option.value === contextPreview.repo)) contextPreview.repo = contextRepoDefault(options);
+  if (!options.length) return null;
+  const select = el('select', null, ...options.map((option) => {
+    const o = new Option(option.textContent, option.value);
+    o.title = option.title;
+    return o;
+  }));
+  select.value = contextPreview.repo;
+  select.dataset.simpleFocus = 'context.repo';
+  select.addEventListener('change', () => { contextPreview.repo = select.value; void readContextPreview(f); });
+  return el('label', 'field', el('span', null, t('repository')), select);
+}
+
+function contextAsk(f) {
+  return { repo: contextPreview.repo, version: f.version, form: f };
+}
+
+function contextFor(mark, f) {
+  return mark?.repo === contextPreview.repo && mark?.version === f.version && mark?.form === f;
+}
+
+function contextPreviewFold(f) {
+  const out = el('div', 'context-preview-out');
+  const fold = smallFold('context-preview', 'context-preview', t('context_preview'), note(t('context_preview_desc')),
+    el('div', 'context-repo', contextRepoChoice(f)), out);
+  // Named, so a redraw that took Retry or the choice away gives the focus to it (Codex's review of 69c).
+  fold.querySelector('summary').dataset.simpleFocus = 'context.open';
+  // Opened by the owner: read afresh. A browser also fires `toggle` for the open state a redraw
+  // gives the fold, which is no opening.
+  let shown = fold.open;
+  fold.addEventListener('toggle', () => {
+    if (!fold.isConnected || fold.open === shown) return;
+    shown = fold.open;
+    if (fold.open) void readContextPreview(f);
+  });
+  // Open, and neither shown, asked nor failed for this form, its version and repository: read once
+  // the page is drawn.
+  if (fold.open && ![contextPreview.read, contextPreview.pending, contextPreview.failed].some((mark) => contextFor(mark, f))) {
+    contextPreview.pending = contextAsk(f);
+    void Promise.resolve().then(() => readContextPreview(f));
+  }
+  out.append(...contextPreviewParts());
+  return fold;
+}
+
+function contextPreviewParts() {
+  if (contextPreview.pending) return [note(t('context_reading'))];
+  if (contextPreview.failed) {
+    const again = el('button', 'quiet small', t('retry'));
+    again.type = 'button';
+    again.dataset.simpleFocus = 'context.again';
+    again.addEventListener('click', () => void readContextPreview(form));
+    return [note(t('context_failed')), again];
+  }
+  const c = contextPreview.answer;
+  if (!c) return [note(t('context_reading'))];
+  return c.choose ? [note(t('context_preview_choose'))] : contextParts(c);
+}
+
+// Drawn in place, so what is typed elsewhere and the focus stay; a focus in the part drawn again
+// goes to the fold's summary when its control is gone.
+function drawContextPreview() {
+  const out = $('panel').querySelector('.context-preview-out');
+  if (!out) return;
+  const had = out.contains(document.activeElement);
+  out.replaceChildren(...contextPreviewParts());
+  if (had && !out.contains(document.activeElement)) out.parentElement?.querySelector('summary')?.focus({ preventScroll: true });
+}
+
+// Only the last read asked ends the wait and is drawn, and only on the form it was asked for, under
+// the version it was asked under: a general save changes the version of the form in place, and the
+// read is then made again (Codex's review of 69c).
+async function readContextPreview(f) {
+  if (!f || form !== f) return;
+  const asked = ++contextPreview.asked;
+  const ask = contextAsk(f);
+  Object.assign(contextPreview, { pending: ask, failed: null });
+  drawContextPreview();
+  let c = null;
+  try {
+    c = await api('context', ask.repo && ask.repo !== currentRepo ? { repo: ask.repo } : {});
+  } catch { /* said below */ }
+  if (asked !== contextPreview.asked) return;
+  contextPreview.pending = null;
+  if (view !== 'settings' || form !== f) return;
+  if (f.version !== ask.version) {
+    if ($('panel').querySelector('.context-preview')?.open) void readContextPreview(f);
+    else drawContextPreview();
+    return;
+  }
+  if (c) Object.assign(contextPreview, { answer: c, read: ask });
+  else contextPreview.failed = ask;
+  drawContextPreview();
+}
+
+// The header's list read again while Settings is shown (`refresh` keeps the page): the fold's choice
+// follows it in place, and an open fold reads again when the repository chosen changed (Codex's
+// review of 69c).
+function syncContextRepos() {
+  const slot = view === 'settings' && form ? $('panel').querySelector('.context-repo') : null;
+  if (!slot) return;
+  const was = contextPreview.repo;
+  const had = slot.contains(document.activeElement);
+  slot.replaceChildren(...present([contextRepoChoice(form)]));
+  // Its choice gone with the list emptied: the fold's summary (Codex's review of 69c).
+  if (had) (slot.querySelector('select') ?? slot.parentElement?.querySelector('summary'))?.focus({ preventScroll: true });
+  if (contextPreview.repo !== was && slot.parentElement?.open) void readContextPreview(form);
 }
 
 // A smaller fold inside a group (the AI not in use, the places never recorded), closed at first.
@@ -9926,6 +10116,7 @@ async function loadRepos() {
   $('repo').replaceChildren(new Option(t('all_repositories'), ''), ...options);
   $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : '';
   reposLoaded = true;
+  syncContextRepos();
 }
 
 async function refresh(live, selectedRepo) {
