@@ -42,13 +42,15 @@ fn modified_ms(path: &std::path::Path) -> Option<i64> {
 
 /// The refresh request standing at `now`, by its time (unix ms): none once `REFRESH_MS` old, once
 /// marked done, or dated more than a minute ahead (a clock set back since, which would otherwise
-/// wake the worker at every look until it caught up).
+/// wake the worker at every look until it caught up). A done mark dated that far ahead marks
+/// nothing done, so that a request after the clock went back stands.
 pub(crate) fn refresh_request(home: &std::path::Path, now: i64) -> Option<i64> {
+    let ahead = |t: i64| t - now > 60_000;
     let at = modified_ms(&refresh_path(home))?;
-    if now - at >= REFRESH_MS || at - now > 60_000 {
+    if now - at >= REFRESH_MS || ahead(at) {
         return None;
     }
-    if modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at) {
+    if modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at && !ahead(done)) {
         return None;
     }
     Some(at)
@@ -2013,6 +2015,14 @@ mod tests {
         assert!(
             refresh_request(home.path(), crate::db::now_ms()).is_some(),
             "a few seconds ahead"
+        );
+        // A request finished at noon, the clock set back an hour, then a new request: it stands.
+        let done = std::fs::File::create(refresh_done_path(home.path())).unwrap();
+        done.set_modified(ahead).unwrap();
+        file.set_modified(std::time::SystemTime::now()).unwrap();
+        assert!(
+            refresh_request(home.path(), crate::db::now_ms()).is_some(),
+            "a done mark ahead"
         );
     }
 

@@ -9215,8 +9215,9 @@ function myWorkBanner() {
 
 function myWorkDraw(focus = null) {
   const typing = myWorkTyping();
-  // Refresh now keeps the focus through a redraw that names none (X14).
-  const back = focus ?? (document.activeElement === mw.refreshParts?.button ? 'refresh' : null);
+  // Refresh now keeps the focus through a redraw, whatever it names (a save that ends meanwhile
+  // names the place it started from), as the search field does (X14).
+  const back = document.activeElement === mw.refreshParts?.button ? 'refresh' : focus;
   if (mw.request !== null) {
     myWorkDrawRequest();
     mw.changed.clear();
@@ -9764,9 +9765,11 @@ async function myWorkRefresh() {
     if (res.ok && answer.state === 'started') note = ['my_work_refresh_started', { n: answer.due }];
     else if (res.ok && answer.state === 'nothing_due') note = ['my_work_refresh_nothing'];
     else if (res.ok && answer.state) {
-      // Waiting, or off since the page read it: the status line says why.
-      note = answer.state === 'waiting' ? ['my_work_refresh_waiting'] : null;
+      // Waiting, or off since the page read it: the status line says why, unless a read begun
+      // after this one says something newer, which this answer then says nothing against.
+      note = null;
       if (read === mw.lineReads) {
+        if (answer.state === 'waiting') note = ['my_work_refresh_waiting'];
         mw.status = answer;
         mw.lineText?.replaceChildren(...present([myWorkStatusLine(answer)]));
       }

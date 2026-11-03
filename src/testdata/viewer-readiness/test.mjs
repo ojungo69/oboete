@@ -6096,6 +6096,10 @@ const before=button();
 run('myWorkDraw()');
 assert.notEqual(button(),before,'drawn again');
 assert.equal(run('document.activeElement'),button(),'the focus on the new button');
+// A redraw that names a place (a save ending after the owner moved to the button) leaves it there.
+button().focus();
+run('myWorkDraw("current")');
+assert.equal(run('document.activeElement'),button(),'the focus stays on Refresh now');
 // The refresh's status is a read of the line as the others are (#722): an older read landing
 // after it is dropped, and a read begun after it keeps its own.
 const reads=[];
@@ -6113,6 +6117,14 @@ const newer=run('myWorkLineRead()');
 reads[0].resolve(json({state:'off'}));await newer;
 posts[0].resolve(json({state:'waiting',why:'resting',until:day}));await settle();
 assert.equal(run('mw.status.state'),'off','a read begun after the refresh keeps its answer');
+// Nor does the older answer leave words against the newer line: no "waiting" beside "Written".
+posts.length=0;reads.length=0;parts=slot({state:'none'});
+parts.button.click();
+const newest=run('myWorkLineRead()');
+reads[0].resolve(json({state:'written',at:day}));await newest;
+posts[0].resolve(json({state:'waiting',why:'resting',until:day}));await settle();
+assert.equal(run('mw.status.state'),'written');
+assert.equal(text(parts.note),'','no waiting note beside a newer line');
 // In Japanese.
 run('lang="ja"');
 parts=slot({state:'none'});

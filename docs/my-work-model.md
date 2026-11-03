@@ -2226,8 +2226,8 @@ runs and leaves a run another live worker owns to it.
   (`my-work-refresh-done`, its time the request's): the page only writes the request and the worker
   only marks it, so neither removes what the other wrote, and a request the page leaves meanwhile
   stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
-  since), stands no more and changes nothing. The bound and the holds stop the pass as they stop
-  any.
+  since), stands no more and changes nothing; a done mark dated that far ahead marks nothing done.
+  The bound and the holds stop the pass as they stop any.
 - **The page**: "Refresh now" / 「今すぐ更新」 beside My Work's status line while My Work is on (on
   My Work, Suggested and Past focus, whose pages share the line; not on My Rules). It is marked busy
   (`aria-disabled`, so the focus stays on it) while its request is on its way, and a click then
@@ -2237,9 +2237,10 @@ runs and leaves a run another live worker owns to it.
   line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
   an `off` one (My Work turned off since the page read it) redraws the line and takes the button
   away, its focus going to the line's Open Settings. The note stays until the status line says
-  something new. A redraw of the page keeps the focus on the button. The status a refresh answers is
-  a read of the line as the others are (#722): a read begun before it that lands later is dropped,
-  and one begun after it keeps its answer. Whether My Work waits is
+  something new. A redraw of the page keeps the focus on the button, whatever place it names (a save
+  that ends meanwhile), as the search field does. The status a refresh answers is a read of the
+  line as the others are (#722): a read begun before it that lands later is dropped, and one begun
+  after it keeps its answer, with no note against it. Whether My Work waits is
   decided by the jobs its status line speaks for (`line_jobs`): a hold of My Rules' or My Goals'
   job stops no refresh.
 - **Differences from claude-mem**: claude-mem's worker runs every due job at once; oboete's makes one
@@ -2248,12 +2249,13 @@ runs and leaves a run another live worker owns to it.
   when it starts, if under 30 minutes old. claude-mem's refresh model per agent is not built
   (decision 70: each entry has its model).
 - **Tests**: the runner's pass with a request, without one, with a stale one and with one dated
-  ahead; a request left while a round finishes another standing; the request's
+  ahead, and a done mark dated ahead; a request left while a round finishes another standing; the
+  request's
   answers (off, waiting, nothing due, started) and that only `started` writes it; the route's
   guards and its answer over an empty home; the page's button, its one request at a time, each
   answer's words in English and Japanese, the note's end, the focus through a redraw and to Open
-  Settings when off, and the refresh's status ordered with the line's reads. Eleven hand mutants
-  of the page's code each fail a check.
+  Settings when off, and the refresh's status and note ordered with the line's reads. Thirteen hand
+  mutants of the page's code, and five of the request's in the runner, each fail a check.
 - **Then**: parity row X10, the address that keeps My Work's place.
 
 ## Not built
