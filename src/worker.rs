@@ -1226,6 +1226,15 @@ fn serve(
         if again {
             continue;
         }
+        // The index a session's previous window is found by, built once in a pause of the
+        // owner's work: its first build takes seconds a hook's write would wait out. Not built
+        // now, it is tried again at the next pause; the seek works without it, only slower.
+        if !calling(phases)
+            && index_pause(raw.last_hook_ts()?, crate::db::now_ms())
+            && !raw.has_session_index()?
+        {
+            let _ = raw.ensure_session_index();
+        }
         if resident && !calling(phases) {
             if gone(home, holding) {
                 return Err(Gone.into());
@@ -1542,6 +1551,15 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             &mut |raw, k, db, overdue| runner.pass(raw, k, db, overdue),
         )
     })
+}
+
+/// How long no hook has recorded before the worker builds raw's session index.
+const INDEX_PAUSE_MS: i64 = 5 * 60_000;
+
+/// Whether the owner has paused long enough for the session index's build (no hook record for
+/// `INDEX_PAUSE_MS`, or none at all).
+fn index_pause(last_hook: Option<i64>, now: i64) -> bool {
+    last_hook.is_none_or(|ts| now - ts >= INDEX_PAUSE_MS)
 }
 
 /// A run's outcome until it ends.
@@ -2347,6 +2365,26 @@ mod tests {
     use super::*;
     use crate::knowledge;
     use crate::raw;
+
+    /// Decision 71's plan, slice 1: the worker builds raw's session index in a pause of the
+    /// owner's work, and not while hooks record (its first build takes seconds a hook's write
+    /// would wait out).
+    #[test]
+    fn the_session_index_is_built_in_a_pause_only() {
+        for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            let e = crate::raw::Event {
+                ts: crate::db::now_ms() - ago,
+                ..crate::raw::test_event("a step")
+            };
+            raw.append(&e).unwrap();
+            drop(raw);
+            run_with(home.path(), 0, vec![], || {}).unwrap();
+            let raw = crate::raw::open(home.path()).unwrap();
+            assert_eq!(raw.has_session_index().unwrap(), built, "{ago} ms ago");
+        }
+    }
 
     #[test]
     fn w5c_config_lock_failure_drains_records_captured_while_worker_held() {

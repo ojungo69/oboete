@@ -168,6 +168,20 @@ fn schema_for_file(conn: &Connection, path: &Path) -> Result<String> {
 const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
     ON records(ts DESC, device DESC, seq DESC) WHERE type = 'event' AND kind = 'prompt'";
 
+/// What `Raw::previous_window_ops` seeks a session's latest event by. Without it the seek walks
+/// the device's records down from the window, past every other session's, which for a session with
+/// no earlier event reads them all (1.2 s warm and about 12 s cold on 717,000 records, 2026-11-04).
+/// Only the worker creates it, in a pause of the owner's work (`ensure_session_index`), never
+/// `open` or a hook: its first build on such a store takes seconds, longer than a hook's write
+/// waits (`OPEN_WAIT`).
+const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_sessions
+    ON records(device, agent, session, seq)";
+
+/// A session's events before a window, newest first: the seek `SESSION_INDEX` serves.
+const SESSION_LATEST: &str = "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2
+       AND type = 'event' AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+     ORDER BY seq DESC";
+
 /// One agent event as captured, after redaction.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
@@ -6507,6 +6521,22 @@ impl Raw {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Whether `SESSION_INDEX` is built.
+    pub(crate) fn has_session_index(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+               WHERE type = 'index' AND name = 'records_sessions')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Builds `SESSION_INDEX`: the worker's, in a pause of the owner's work.
+    pub(crate) fn ensure_session_index(&self) -> Result<()> {
+        self.conn.execute_batch(SESSION_INDEX)?;
+        Ok(())
+    }
+
     /// D9: the time of this device's newest record a hook wrote, walking down from the top past
     /// tombstones, imports and replays, which never say the owner is at work.
     pub fn last_hook_ts(&self) -> Result<Option<i64>> {
@@ -6571,11 +6601,7 @@ impl Raw {
         let start = (from.0, from.1.unwrap_or(0));
         // Down the primary key from `before`: the session's latest event of a kind `read` takes
         // (a window's, milestone 4 D6) is usually close.
-        let mut latest = self.conn.prepare_cached(
-            "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
-               AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
-             ORDER BY seq DESC",
-        )?;
+        let mut latest = self.conn.prepare_cached(SESSION_LATEST)?;
         let mut rows = latest.query(params![self.device, before, agent, session])?;
         let mut seq = None;
         while let Some(r) = rows.next()? {
@@ -11770,6 +11796,51 @@ mod tests {
         raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "c"}))])
             .unwrap();
         assert_eq!(raw.curation_checkpoint(&dev).unwrap(), (7, Some(120)));
+    }
+
+    /// A session's latest event before a window is sought by `SESSION_INDEX` once the worker has
+    /// built it, and found the same either way; `open`, as a hook opens raw, builds none.
+    #[test]
+    fn a_sessions_latest_event_is_sought_by_its_index_once_built() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        for (session, body) in [("a", "one"), ("b", "two"), ("a", "three"), ("b", "four")] {
+            let e = Event {
+                session: session.into(),
+                ..test_event(body)
+            };
+            raw.append(&e).unwrap();
+        }
+        let plan = |raw: &Raw| -> String {
+            raw.conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {SESSION_LATEST}"))
+                .unwrap()
+                .query_map(params![raw.device, 5, "claude", "a"], |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(" ")
+        };
+        let latest = |raw: &Raw| -> Vec<i64> {
+            raw.conn
+                .prepare(SESSION_LATEST)
+                .unwrap()
+                .query_map(params![raw.device, 5, "claude", "a"], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert!(!raw.has_session_index().unwrap());
+        assert!(!plan(&raw).contains("records_sessions"), "{}", plan(&raw));
+        assert_eq!(latest(&raw), vec![3, 1]);
+        raw.ensure_session_index().unwrap();
+        assert!(raw.has_session_index().unwrap());
+        assert!(plan(&raw).contains("records_sessions"), "{}", plan(&raw));
+        assert_eq!(latest(&raw), vec![3, 1]);
+        drop(raw);
+        assert!(open(home.path()).unwrap().has_session_index().unwrap());
     }
 
     /// A session's previous window (#240) is the one the worker cut before the window at `from`,
