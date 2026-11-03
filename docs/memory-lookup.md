@@ -41,7 +41,9 @@ note (docs/file-note.md).
   oboete's claims, the search's own filter, which each leg applies before it takes its depth (a
   Codex review), by id, title, kind and time, of the checkout's repository
   (`Search::lookup_index`, docs/mem-search.md), with the meaning side of the resident viewer's
-  query vector when the viewer answers (from 2026-10-17 to decision 71 the hook asked the viewer
+  query vector when the viewer answers and made one within the prompt's wait, the words side alone
+  when it made none (an answer from the viewer is no proof of a vector; from 2026-10-17 to
+  decision 71 the hook asked the viewer
   for that vector, `POST /api/query-vector`, and searched itself), else the words side alone: the
   hook embeds nothing itself and calls no provider (decision 38). It comes after claude-mem 15.0's sentences (with oboete's names: go on with timeline around useful ids, then get only for the records chosen) inside the memory fence,
   through the egress gate, the whole within 9,500 UTF-16 units and cut at a line, as the file
@@ -150,9 +152,10 @@ indexes of claims, cards and imported observations, the rows they find, the card
 short for pieces matches, the bit index), reading it
 through every five minutes while the hooks have recorded within half an hour: each value whole
 (`length()` of a BLOB comes from the record's header and leaves its overflow pages unread, and the
-bit index's chunks are 128 KiB each), one table at a time under raw.lock's shared hold with a short
-read-only connection, so a forget's rebuild or a restore waits for one table at most and never
-sets knowledge.db aside under an open handle. A read that took more
+bit index's chunks are 128 KiB each), under raw.lock's shared hold with a short read-only
+connection, never set aside under an open handle; the hold is given back every half second for
+50 ms and the read goes on where it stopped, since a forget's or a restore's swap waits 10 s for
+the lock and a table read from the disk takes longer (imported's index 14 s). A read that took more
 than 5 s found the pages gone; a second such read in a row doubles the wait, up to an hour, so a
 box short of memory is not made to read them from the disk again and again; a read that failed
 keeps the wait, and a store gone before the set was read through (a rebuild setting knowledge.db
@@ -169,7 +172,8 @@ hook's, with no search of its own, asked the repository, words and room),
 answer over the same home, its room, the bodies refused),
 `search::b::tests::the_warm_set_is_read_while_the_hooks_record_and_less_when_slow`,
 `the_warm_set_reads_what_is_made`, `the_warm_read_reads_a_large_value_through` (a value's
-overflow chain broken: `length()` reads, the warm read fails);
+overflow chain broken: `length()` reads, the warm read fails), `a_slow_warm_read_lets_a_swap_through`
+(rows read slowly: a swap gets raw.lock within 2 s and the read goes on);
 `view::tests::the_lookup_route_waits_for_its_vector_no_longer_than_the_prompt_does` (the embedder
 held: the words side answers within the prompt's wait),
 `the_lookups_vectors_left_running_are_bounded` (a third held lookup makes no vector, each given

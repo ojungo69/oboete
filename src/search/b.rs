@@ -1218,26 +1218,87 @@ const WARM_SET: &[(&str, &str)] = &[
 /// yet, or knowledge.db set aside for a rebuild), so it is looked at again soon rather than counted
 /// as read (cubic on #830).
 pub(crate) fn warm_pages(home: &Path) -> Result<Option<Duration>> {
+    warm_pages_holding(home, WARM_HOLD)
+}
+
+/// How long the warm read holds raw.lock at a time. A forget's or a restore's swap waits for its
+/// exclusive hold 10 s, trying every 10 ms; a table read from the disk takes longer than that
+/// (imported's index, 14 s on this PC's store), so the read gives the lock back this often, for
+/// `WARM_GAP`, and goes on where it stopped (Codex on #830).
+const WARM_HOLD: Duration = Duration::from_millis(500);
+/// The time between two holds, longer than a swap's 10 ms between tries.
+const WARM_GAP: Duration = Duration::from_millis(50);
+
+/// `warm_pages`, the lock given back after each `hold`; the time it took without its gaps.
+fn warm_pages_holding(home: &Path, hold: Duration) -> Result<Option<Duration>> {
     let started = Instant::now();
+    let mut gaps = Duration::ZERO;
     for &(table, column) in WARM_SET {
-        // A store gone before the set is read through, a rebuild's setting it aside included, is
-        // no read: it is looked at again soon (CodeRabbit on #830).
-        let Some(_raw) = crate::raw::read_only(home)? else {
-            return Ok(None);
-        };
-        let path = home.join("knowledge.db");
-        if !path.exists() {
-            return Ok(None);
-        }
-        let k = Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        if crate::consumer::manifest::exists(&k, "table", table)? {
-            read_whole(&k, table, column)?;
+        let mut after = None;
+        loop {
+            // A store gone before the set is read through, a rebuild's setting it aside included,
+            // is no read: it is looked at again soon (CodeRabbit on #830).
+            let Some(_raw) = crate::raw::read_only(home)? else {
+                return Ok(None);
+            };
+            let path = home.join("knowledge.db");
+            if !path.exists() {
+                return Ok(None);
+            }
+            let k = Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            if !crate::consumer::manifest::exists(&k, "table", table)? {
+                break;
+            }
+            match read_for(&k, table, column, after, hold)? {
+                Some(last) => after = Some(last),
+                None => break,
+            }
+            drop(k);
+            drop(_raw);
+            std::thread::sleep(WARM_GAP);
+            gaps += WARM_GAP;
         }
     }
-    Ok(Some(started.elapsed()))
+    Ok(Some(started.elapsed().saturating_sub(gaps)))
+}
+
+/// `table`'s rows after rowid `after`, in rowid order, each `column` read through, until `hold`
+/// has passed: the rowid of the last row read when the time ran out first, none when the table was
+/// read through. A table with no rowid (a full-text index's `_idx`, small) is read whole at once.
+fn read_for(
+    k: &Connection,
+    table: &str,
+    column: &str,
+    after: Option<i64>,
+    hold: Duration,
+) -> Result<Option<i64>> {
+    if table.ends_with("_idx") {
+        read_whole(k, table, column)?;
+        return Ok(None);
+    }
+    let started = Instant::now();
+    let mut st = k.prepare(&format!(
+        "SELECT rowid, {column} <> x'' FROM {table} WHERE rowid > ?1 ORDER BY rowid"
+    ))?;
+    let mut rows = st.query([after.unwrap_or(i64::MIN)])?;
+    while let Some(row) = rows.next()? {
+        #[cfg(test)]
+        std::thread::sleep(WARM_ROW_DELAY.get());
+        if started.elapsed() > hold {
+            return Ok(Some(row.get(0)?));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A warm read's time for each row in a test, as a disk would take.
+    static WARM_ROW_DELAY: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
 }
 
 /// Every row's `column` read whole. `length()` of a BLOB comes from the record's header and leaves
@@ -7885,6 +7946,42 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(warm_pages(empty.path()).unwrap(), None);
         assert!(!empty.path().join("knowledge.db").exists());
+    }
+
+    /// Codex on #830: the warm read gives raw.lock back every `hold`, so a forget's or a restore's
+    /// swap, which waits 10 s for it, gets it while a slow read goes on, and the read goes on
+    /// after it.
+    #[test]
+    fn a_slow_warm_read_lets_a_swap_through() {
+        let mut s = Store::new();
+        s.imported_all(
+            (0..300)
+                .map(|n| {
+                    (
+                        format!("obs-{n}"),
+                        "import",
+                        "feature",
+                        1_000 + n,
+                        "Nebula".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let path = home.path().to_owned();
+        let reading = std::thread::spawn(move || {
+            WARM_ROW_DELAY.set(Duration::from_millis(10));
+            warm_pages_holding(&path, Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        let swap = crate::raw::lock_for_swap(home.path()).unwrap();
+        let waited = started.elapsed();
+        drop(swap);
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert!(reading.join().unwrap().unwrap().is_some());
     }
 
     /// Codex on #830: the warm read goes through a value's overflow pages, which `length()` of a

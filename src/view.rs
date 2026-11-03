@@ -128,13 +128,19 @@ fn vector_within(
     spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
 ) -> Option<Vec<f32>> {
     let making = Making::take(vectors)?;
+    let deadline = Instant::now() + wait;
     let (made, vector) = std::sync::mpsc::channel();
     spawn(Box::new(move || {
         let _making = making;
         let _ = made.send(make());
     }))
     .ok()?;
-    vector.recv_timeout(wait).ok().flatten()
+    let heard = vector
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .flatten();
+    // One heard past the wait, as by a request held up meanwhile, is not taken (Codex on #830).
+    heard.filter(|_| Instant::now() <= deadline)
 }
 
 /// What a request's `X-Oboete-Token` must be.
@@ -8230,6 +8236,18 @@ curate = false
             |work| std::thread::Builder::new().spawn(work).map(drop),
         );
         assert_eq!(made, Some(vec![1.0]));
+        // A vector heard past the wait (here its work ran before the wait began) is not taken.
+        let late = vector_within(
+            &vectors,
+            Duration::from_millis(50),
+            || Some(vec![1.0]),
+            |work| {
+                std::thread::sleep(Duration::from_millis(100));
+                work();
+                Ok(())
+            },
+        );
+        assert_eq!(late, None);
         let until = Instant::now() + Duration::from_secs(10);
         while vectors.load(Ordering::SeqCst) > 0 && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(10));
