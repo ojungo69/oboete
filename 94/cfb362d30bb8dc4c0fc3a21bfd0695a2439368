@@ -1,0 +1,23 @@
+config/oboete-rules.toml
+  s_f7d8663ba9ca22::t_6e35ebd8bd7b3d 58,63-64,94,97-103,107-108,114,117-126
+docs/claude-mem-parity.md
+  s_f7d8663ba9ca22::t_c20e3ea3fd9f2e 96,281
+src/redact.rs
+  s_f7d8663ba9ca22::t_976205b60eca4a 1933-1934,1948-1957,1960-1978,2017-2024,2031-2033
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "94cfb362d30bb8dc4c0fc3a21bfd0695a2439368",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
