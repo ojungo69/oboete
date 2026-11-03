@@ -3403,6 +3403,15 @@ console.log('PASS: the caps\' No cap switches');
     const again=fold().querySelectorAll('button').find(b=>b.dataset.simpleFocus==='context.again');
     again.focus();again.click();await settled();
     assert.deepEqual([text(out()).includes('after a retry'),document.activeElement?.tagName],[true,'SUMMARY'],'Retry reads again; the focus on the summary');
+    // A save's answer drawn while Retry has the focus: Retry gone for the read, the focus on the
+    // summary (Codex's review of 69c).
+    answer=()=>Promise.resolve(json({code:'made_up_failure'},500));
+    f=draw(ai(['alpha'],{version:'v5c'}));await settled();
+    fold().querySelectorAll('button').find(b=>b.dataset.simpleFocus==='context.again').focus();
+    const [hang]=later();answer=()=>hang;
+    answers=[json(ai(['alpha'],{version:'v5d'}))];
+    flip(simple('inject.session_start'),false);await settled();
+    assert.equal(document.activeElement?.dataset?.simpleFocus,'context.open','a save drawn while Retry had the focus: the summary');
     // No repository known: no choice, and its own wording, not "above".
     repoSelect.replaceChildren(new ctx.Option('All repositories',''));
     vm.runInContext('contextPreview.repo=null',ctx);

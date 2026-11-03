@@ -6779,6 +6779,7 @@ function simpleFocus(key) {
   if (key.startsWith('key-save:')) keys.push(key.replace('key-save:', 'key:'));
   if (/^(resume|resume-more|key|key-save):/.test(key)) keys.push(key.replace(/^[^:]+:/, 'on:'));
   if (key.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
+  if (key === 'context.again' || key === 'context.repo') keys.push('context.open');
   if (key.startsWith('entry-test-run:')) keys.push(key.replace('entry-test-run:', 'entry-test:'));
   // A model name saved closes its field: the line's model choice takes the focus.
   if (key.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
@@ -7981,6 +7982,8 @@ function contextPreviewFold(f) {
   const out = el('div', 'context-preview-out');
   const fold = smallFold('context-preview', 'context-preview', t('context_preview'), note(t('context_preview_desc')),
     el('div', 'context-repo', contextRepoChoice(f)), out);
+  // Named, so a redraw that took Retry or the choice away gives the focus to it (Codex's review of 69c).
+  fold.querySelector('summary').dataset.simpleFocus = 'context.open';
   // Opened by the owner: read afresh. A browser also fires `toggle` for the open state a redraw
   // gives the fold, which is no opening.
   let shown = fold.open;
