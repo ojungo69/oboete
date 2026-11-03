@@ -1177,6 +1177,182 @@ pub(crate) fn warm(home: &Path) {
     }
 }
 
+/// Decision 71 (docs/memory-lookup.md): what a memory lookup reads beside the fp32 vectors it
+/// scores, by table and a column whose length reads each row's pages whole: the full-text indexes
+/// of the kinds it asks (imported observations, cards, claims), the rows they find, and the bit
+/// index. Measured on this PC's store, 2026-11-03: the indexes took 14.2 s from the disk and
+/// 0.31 s cached, the rows 2.0 s and 0.24 s; read beforehand, a lookup took 0.68 to 0.87 s
+/// instead of 5.6 s.
+const WARM_SET: &[(&str, &str)] = &[
+    ("imported_fts_data", "block"),
+    ("imported_fts_docsize", "sz"),
+    ("cards_fts_data", "block"),
+    ("cards_fts_docsize", "sz"),
+    // A query too short for pieces matches the cards' text itself (`curated_fts`, CodeRabbit on
+    // #830).
+    ("cards_fts_content", "c0"),
+    ("claims_fts_data", "block"),
+    ("claims_fts_docsize", "sz"),
+    ("claims_fts_content", "c0"),
+    ("imported", "body"),
+    ("cards", "narrative"),
+    ("vec_index_chunks", "rowids"),
+    ("vec_index_rowids", "id"),
+    ("vec_index_vector_chunks00", "vectors"),
+    ("vec_index_metadatachunks00", "data"),
+    ("vec_index_metadatachunks01", "data"),
+    ("vec_index_metadatachunks02", "data"),
+    ("vec_index_metadatatext00", "data"),
+    ("vec_index_metadatatext02", "data"),
+];
+
+/// Decision 71: `WARM_SET` read through once, so the system keeps it in its page cache for the
+/// hooks' lookups, the MCP server's searches and the page's alike; a table not made yet is passed
+/// over. One table at a time under raw.lock's shared hold, as every reader of the stores takes it,
+/// so a forget's rebuild or a restore waits for one table's read at most and never sets
+/// knowledge.db aside under an open handle (Windows refuses to rename it then); a short read-only
+/// connection each time. How long it took, or none when there was no store to read (none made
+/// yet, or knowledge.db set aside for a rebuild), so it is looked at again soon rather than counted
+/// as read (cubic on #830).
+pub(crate) fn warm_pages(home: &Path) -> Result<Option<Duration>> {
+    warm_pages_holding(home, WARM_HOLD)
+}
+
+/// How long the warm read holds raw.lock at a time. A forget's or a restore's swap waits for its
+/// exclusive hold 10 s, trying every 10 ms; a table read from the disk takes longer than that
+/// (imported's full-text index data, `imported_fts_data`, 376 MB: 14 s on this PC's store), so the
+/// read gives the lock back this often, for
+/// `WARM_GAP`, and goes on where it stopped (Codex on #830).
+const WARM_HOLD: Duration = Duration::from_millis(500);
+/// The time between two holds, longer than a swap's 10 ms between tries.
+const WARM_GAP: Duration = Duration::from_millis(50);
+
+/// `warm_pages`, the lock given back after each `hold`; the time it took without its gaps.
+fn warm_pages_holding(home: &Path, hold: Duration) -> Result<Option<Duration>> {
+    let started = Instant::now();
+    let mut gaps = Duration::ZERO;
+    // The file read, the same through every hold: a rebuild's replacing it between two makes the
+    // place reached in the old one mean nothing in the new (cubic on #830).
+    let mut file = None;
+    for &(table, column) in WARM_SET {
+        let mut after = None;
+        loop {
+            // A store gone before the set is read through, a rebuild's setting it aside included,
+            // is no read: it is looked at again soon (CodeRabbit on #830).
+            let Some(_raw) = crate::raw::read_only(home)? else {
+                return Ok(None);
+            };
+            let path = home.join("knowledge.db");
+            let this = crate::db::store_file(&path);
+            if this.is_empty() || *file.get_or_insert_with(|| this.clone()) != this {
+                return Ok(None);
+            }
+            let k = Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            if !crate::consumer::manifest::exists(&k, "table", table)? {
+                break;
+            }
+            match read_for(&k, table, column, after, hold)? {
+                Some(last) => after = Some(last),
+                None => break,
+            }
+            drop(k);
+            drop(_raw);
+            std::thread::sleep(WARM_GAP);
+            gaps += WARM_GAP;
+        }
+    }
+    Ok(Some(started.elapsed().saturating_sub(gaps)))
+}
+
+/// `table`'s rows after rowid `after`, in rowid order, each `column` read through, until `hold`
+/// has passed: the rowid of the last row read when the time ran out first, none when the table was
+/// read through. `length()` of a BLOB comes from the record's header and leaves its overflow pages
+/// unread (the bit index's chunks are 128 KiB each, Codex on #830); a comparison reads the value
+/// through.
+fn read_for(
+    k: &Connection,
+    table: &str,
+    column: &str,
+    after: Option<i64>,
+    hold: Duration,
+) -> Result<Option<i64>> {
+    let started = Instant::now();
+    let mut st = k.prepare(&format!(
+        "SELECT rowid, {column} <> x'' FROM {table} WHERE rowid > ?1 ORDER BY rowid"
+    ))?;
+    let mut rows = st.query([after.unwrap_or(i64::MIN)])?;
+    while let Some(row) = rows.next()? {
+        #[cfg(test)]
+        std::thread::sleep(WARM_ROW_DELAY.get());
+        if started.elapsed() > hold {
+            return Ok(Some(row.get(0)?));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A warm read's time for each row in a test, as a disk would take.
+    static WARM_ROW_DELAY: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// Decision 71: when the resident viewer reads `WARM_SET` again. Only while the hooks record,
+/// as the model is kept (parity row 31), and every `WARM_PAGES_EVERY`; a read that took longer
+/// than `WARM_PAGES_SLOW` found the pages gone, and when the one before it did too, the system is
+/// short of memory: the next waits twice as long, up to `WARM_PAGES_MOST`, so a box short of
+/// memory is not made to read them from the disk again every few minutes. A read that failed
+/// (the store busy or damaged) says nothing of the memory: the wait stays as it was.
+#[derive(Debug, Default)]
+pub(crate) struct Warmth {
+    /// When the last read ended (Unix ms).
+    last: Option<i64>,
+    /// The wait after it; `WARM_PAGES_EVERY` until reads come slow.
+    every: Option<Duration>,
+    /// Whether the last read was slow.
+    slow: bool,
+}
+
+/// How often the warm set is read while the hooks record.
+const WARM_PAGES_EVERY: Duration = Duration::from_secs(5 * 60);
+/// The longest wait after slow reads.
+const WARM_PAGES_MOST: Duration = Duration::from_secs(60 * 60);
+/// A read slower than this found its pages gone (0.6 s when the system holds them).
+const WARM_PAGES_SLOW: Duration = Duration::from_secs(5);
+/// The hooks' last record this recent keeps the set warm.
+const WARM_PAGES_IDLE: Duration = Duration::from_secs(30 * 60);
+
+impl Warmth {
+    /// Whether to read the set now, the hooks' newest record at `hook` (Unix ms).
+    pub(crate) fn due(&self, now: i64, hook: Option<i64>) -> bool {
+        let every = self.every.unwrap_or(WARM_PAGES_EVERY).as_millis() as i64;
+        hook.is_some_and(|ts| now.saturating_sub(ts) < WARM_PAGES_IDLE.as_millis() as i64)
+            && self.last.is_none_or(|at| now.saturating_sub(at) >= every)
+    }
+
+    /// A read that ended at `now`, with how long it took, or none when it failed.
+    pub(crate) fn read(&mut self, now: i64, took: Option<Duration>) {
+        self.last = Some(now);
+        let Some(took) = took else {
+            return;
+        };
+        let slow = took > WARM_PAGES_SLOW;
+        let every = self.every.unwrap_or(WARM_PAGES_EVERY);
+        self.every = Some(if !slow {
+            WARM_PAGES_EVERY
+        } else if self.slow {
+            (every * 2).min(WARM_PAGES_MOST)
+        } else {
+            every
+        });
+        self.slow = slow;
+    }
+}
+
 /// This process's local model for searches (D14): started by the first search that needs it,
 /// gone after `READER_IDLE` without one (`WARM_IDLE` without one or a hook record where the hooks
 /// keep it warm). A load that failed is tried again only after `READER_IDLE`.
@@ -7682,6 +7858,183 @@ mod tests {
         assert!(!warms(None, (5, now - 241 * min), now));
         assert!(!warms(Some(5), (5, now), now));
         assert!(warms(Some(5), (6, now - 241 * min), now));
+    }
+
+    /// Decision 71: the warm set is read while the hooks record, first at once, then every five
+    /// minutes; not once they have been quiet half an hour, nor with none recorded. A slow read
+    /// keeps the wait, a second slow one in a row doubles it up to an hour, a quick one brings it
+    /// back to five minutes, and a failed one keeps the wait as it was.
+    #[test]
+    fn the_warm_set_is_read_while_the_hooks_record_and_less_when_slow() {
+        let min = 60 * 1_000;
+        let now = 100 * 60 * min;
+        let mut w = Warmth::default();
+        assert!(!w.due(now, None), "no hook record");
+        assert!(!w.due(now, Some(now - 31 * min)), "the hooks quiet");
+        assert!(
+            w.due(now, Some(now - 29 * min)),
+            "at once while they record"
+        );
+        let quick = Some(Duration::from_millis(600));
+        let slow = Some(Duration::from_secs(16));
+        w.read(now, quick);
+        assert!(!w.due(now + 4 * min, Some(now)));
+        assert!(w.due(now + 5 * min, Some(now)));
+        let wait = |w: &Warmth, from: i64| {
+            // The hooks recording all along.
+            (1..=120)
+                .find(|m| w.due(from + m * min, Some(from + m * min)))
+                .unwrap()
+        };
+        let mut at = now;
+        w.read(at, slow);
+        assert_eq!(wait(&w, at), 5, "one slow read keeps the wait");
+        for expected in [10, 20, 40, 60, 60] {
+            at += 60 * min;
+            w.read(at, slow);
+            assert_eq!(wait(&w, at), expected);
+        }
+        at += 60 * min;
+        w.read(at, quick);
+        assert_eq!(wait(&w, at), 5, "a quick read brings it back");
+        w.read(at, None);
+        assert_eq!(wait(&w, at), 5, "a failed read keeps the wait");
+        w.read(at, slow);
+        w.read(at, None);
+        w.read(at, slow);
+        assert_eq!(wait(&w, at), 10, "and comes between two slow reads unseen");
+    }
+
+    /// Decision 71: reading the warm set touches every table of it that is made and passes over
+    /// one that is not: a store with records reads, a knowledge.db with one of its tables reads that
+    /// one, and a home with no knowledge.db reads nothing, makes none and says it read none.
+    #[test]
+    fn the_warm_set_reads_what_is_made() {
+        let mut s = Store::new();
+        s.imported_all(vec![(
+            "obs-1".into(),
+            "import",
+            "feature",
+            1_000,
+            "Nebula".to_owned(),
+        )]);
+        s.run();
+        assert!(warm_pages(s.home.path()).unwrap().is_some());
+        let partial = Store::new();
+        Connection::open(partial.home.path().join("knowledge.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE imported(body TEXT)")
+            .unwrap();
+        assert!(
+            warm_pages(partial.home.path()).unwrap().is_some(),
+            "a store not made whole"
+        );
+        // No knowledge.db (as while a rebuild set it aside): nothing read, so looked at again soon.
+        assert_eq!(warm_pages(Store::new().home.path()).unwrap(), None);
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(warm_pages(empty.path()).unwrap(), None);
+        assert!(!empty.path().join("knowledge.db").exists());
+    }
+
+    /// Codex on #830: the warm read gives raw.lock back every `hold`, so a forget's or a restore's
+    /// swap, which waits 10 s for it, gets it while a slow read goes on, and the read goes on
+    /// after it.
+    #[test]
+    fn a_slow_warm_read_lets_a_swap_through() {
+        let mut s = Store::new();
+        s.imported_all(
+            (0..300)
+                .map(|n| {
+                    (
+                        format!("obs-{n}"),
+                        "import",
+                        "feature",
+                        1_000 + n,
+                        "Nebula".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let path = home.path().to_owned();
+        let reading = std::thread::spawn(move || {
+            WARM_ROW_DELAY.set(Duration::from_millis(10));
+            warm_pages_holding(&path, Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        let swap = crate::raw::lock_for_swap(home.path()).unwrap();
+        let waited = started.elapsed();
+        drop(swap);
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert!(reading.join().unwrap().unwrap().is_some());
+    }
+
+    /// cubic on #830: a knowledge.db replaced between two holds of the warm read (a rebuild's) makes
+    /// the read no read, since the place it reached in the old file means nothing in the new one.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_replaced_between_holds_is_no_read() {
+        let mut s = Store::new();
+        s.imported_all(
+            (0..300)
+                .map(|n| {
+                    (
+                        format!("obs-{n}"),
+                        "import",
+                        "feature",
+                        1_000 + n,
+                        "Nebula".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let path = home.path().to_owned();
+        let reading = std::thread::spawn(move || {
+            WARM_ROW_DELAY.set(Duration::from_millis(10));
+            warm_pages_holding(&path, Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let swap = crate::raw::lock_for_swap(home.path()).unwrap();
+        let k = home.path().join("knowledge.db");
+        let copy = home.path().join("knowledge.db.copy");
+        std::fs::copy(&k, &copy).unwrap();
+        std::fs::rename(&copy, &k).unwrap();
+        drop(swap);
+        assert_eq!(reading.join().unwrap().unwrap(), None);
+    }
+
+    /// Codex on #830: the warm read goes through a value's overflow pages, which `length()` of a
+    /// BLOB leaves unread: with the chain of a large value's overflow pages broken, the read fails
+    /// where `length()` does not.
+    #[test]
+    fn the_warm_read_reads_a_large_value_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA page_size = 4096; CREATE TABLE t(b BLOB);
+                 INSERT INTO t VALUES (randomblob(200000));",
+            )
+            .unwrap();
+        // Page 1 is the schema's, 2 the table's, and the value goes on through pages 3, 4 and
+        // on: the first four bytes of page 4 name the next, here one past the file's end.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[3 * 4096..3 * 4096 + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let c = Connection::open(&path).unwrap();
+        let length: i64 = c
+            .query_row("SELECT sum(length(b)) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(length, 200_000, "length() reads no overflow page");
+        let read = read_for(&c, "t", "b", None, Duration::MAX);
+        assert!(read.is_err(), "the warm read goes through them");
     }
 
     /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and

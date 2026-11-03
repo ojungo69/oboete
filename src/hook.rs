@@ -715,7 +715,7 @@ const FILE_NOTE: &str = "Recorded from earlier sessions about the file being rea
 
 /// The most of a read's answer the file notes may take, in UTF-16 units: Claude Code shows a
 /// context over 10,000 characters only as a preview (CodeRabbit on #388), and Grok clips one there.
-const NOTE_ROOM: usize = 9_500;
+pub(crate) const NOTE_ROOM: usize = 9_500;
 
 /// X5 (docs/file-note.md F1, F2, F5, F8): the notes on the files of an agent's read
 /// (`read_paths`), inside the memory fence and within `room` UTF-16 units, or none. It reads the
@@ -2335,21 +2335,24 @@ fn ask_resident(
     Some(answer)
 }
 
-/// N5 (docs/memory-lookup.md): the resident viewer asked for the query vector of `text` in `repo`,
-/// waited for until `deadline` at most; none when no resident viewer listens, it made none, or it
-/// came late. The viewer gates and cuts the text as it cuts a prompt.
-pub(crate) fn ask_vector(
+/// Decision 71 (docs/memory-lookup.md): the resident viewer asked to answer a memory lookup of
+/// `query` in `repo` within `room`, as claude-mem's hook asks its worker, waited for until
+/// `deadline`: `Some` of its answer (none when nothing is found), or `None` when no resident viewer
+/// listens, it refused, or it came late, so the hook searches itself with what time is left.
+pub(crate) fn ask_lookup(
     home: &Path,
     repo: &str,
-    text: &str,
+    query: &str,
+    room: usize,
     deadline: std::time::Instant,
-) -> Option<Vec<f32>> {
+) -> Option<Option<String>> {
     let (port, token) = crate::view::resident_answering(home)?;
-    let text: String = text.chars().take(2 * crate::embed::PROMPT_CHARS).collect();
-    let body = serde_json::to_vec(&json!({"repo": repo, "text": text})).ok()?;
-    let v = post_json(port, &token, "/api/query-vector", &body, deadline)?;
-    let vector: Vec<f32> = serde_json::from_value(v.get("vector")?.clone()).ok()?;
-    (vector.len() == crate::embed::DIM && vector.iter().all(|x| x.is_finite())).then_some(vector)
+    let body = serde_json::to_vec(&json!({"repo": repo, "query": query, "room": room})).ok()?;
+    match post_json(port, &token, "/api/lookup", &body, deadline)?.get("text")? {
+        Value::Null => Some(None),
+        Value::String(text) => Some(Some(text.clone())),
+        _ => None,
+    }
 }
 
 /// One `POST /api/prompt-context` to the viewer at 127.0.0.1:`port`, given up at `deadline`: whether
@@ -4933,12 +4936,13 @@ mod tests {
         assert_eq!(p.hook("PreToolUse", "s1", lookup), "");
     }
 
-    /// N5 (docs/memory-lookup.md): a native memory lookup takes the resident viewer's query
-    /// vector, so a document near it in meaning answers it though no word of the lookup is in it;
-    /// with no viewer listening, the words side alone, which finds nothing of it.
+    /// Decision 71 (Codex on #830): a viewer whose answer to a lookup holds no text (one whose own
+    /// search failed, or one from before the route) leaves the hook its own search of the words
+    /// side alone, asked for nothing more, so a lookup makes one query vector at most: a document
+    /// near in meaning that holds no word of the lookup is not found, as with no viewer.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_native_memory_lookup_takes_the_viewers_meaning_side() {
+    fn a_viewer_that_gives_no_answer_is_asked_for_no_vector_besides() {
         let mut p = Prompts::new(false);
         p.decided(1, "Parser caches stay in Redis.", &[]);
         p.s.run();
@@ -4953,12 +4957,81 @@ mod tests {
         let vector =
             crate::embed::stub::vector(crate::embed::EMBEDDER, "Parser caches stay in Redis.");
         let r = Resident::answering(&home, 2_000, json!({ "vector": vector }));
-        let meaning = p.hook("PreToolUse", "s1", lookup);
-        assert!(
-            meaning.contains("Parser caches stay in Redis."),
-            "{meaning}"
+        let again = p.hook("PreToolUse", "s1", lookup);
+        assert!(!again.contains("Parser caches"), "{again}");
+        assert_eq!(
+            r.asked(),
+            [json!({"repo": p.repo, "query": "zebra", "room": NOTE_ROOM})]
         );
-        assert_eq!(r.asked(), [json!({"repo": p.repo, "text": "zebra"})]);
+    }
+
+    /// Decision 71 (docs/memory-lookup.md): the resident viewer answers a memory lookup, as
+    /// claude-mem's hook asks its worker: its text is the hook's answer, and its "nothing" is the
+    /// hook's too, with no search of the hook's own (which would find the claim); it is asked the
+    /// lookup's repository, words and room, and nothing else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_memory_lookup_is_answered_by_the_resident_viewer() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let ask = || {
+            crate::memory_lookup::answer_within(&home, &payload, NOTE_ROOM, Duration::from_secs(30))
+                .unwrap()
+        };
+        let own = ask();
+        assert!(
+            own.as_deref().is_some_and(|t| t.contains("canary")),
+            "{own:?}"
+        );
+        let viewer = "<oboete-memory>from the viewer</oboete-memory>";
+        let r = Resident::answering(&home, 2_000, json!({ "text": viewer }));
+        assert_eq!(ask().as_deref(), Some(viewer));
+        assert_eq!(
+            r.asked(),
+            [json!({"repo": p.repo, "query": "canary deploys", "room": NOTE_ROOM})]
+        );
+        drop(r);
+        let r = Resident::answering(&home, 2_000, json!({ "text": null }));
+        assert_eq!(ask(), None);
+        assert_eq!(r.asked().len(), 1);
+    }
+
+    /// CodeRabbit on #830: a resident viewer that takes the lookup's whole wait leaves no search to
+    /// the hook, whose answer no one would hear: none, though the hook's own search finds the claim.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_viewer_past_the_lookups_wait_leaves_no_search_after_it() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let after = |wait| std::time::Instant::now() + wait;
+        let own = crate::memory_lookup::looked_up(
+            &home,
+            &payload,
+            after(Duration::from_secs(30)),
+            NOTE_ROOM,
+        );
+        assert!(own.unwrap().is_some());
+        let _r = Resident::serve(
+            &home,
+            2_000,
+            Some(json!({"text": "late"})),
+            Duration::from_secs(3),
+        );
+        let late = crate::memory_lookup::looked_up(
+            &home,
+            &payload,
+            after(Duration::from_millis(300)),
+            NOTE_ROOM,
+        );
+        assert_eq!(late.unwrap(), None);
     }
 
     /// N5 (docs/memory-lookup.md): a lookup whose search has not answered within its wait gives

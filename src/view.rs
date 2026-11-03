@@ -87,6 +87,60 @@ struct Viewer {
     /// Set while the resident viewer decides whether it leaves, and kept once it does: no
     /// connection is taken then.
     closing: AtomicBool,
+    /// Decision 71 (Codex on #830): the lookups' query vectors still being made, at most
+    /// `LOOKUP_VECTORS`; one a lookup stopped waiting for runs on, holding its reads, after the
+    /// lookup's connection is gone.
+    vectors: Arc<AtomicUsize>,
+}
+
+/// The query vectors lookups leave being made past their wait, at most; past them a lookup takes
+/// the words side alone, so a held embedder cannot gather threads beyond the connections' cap.
+const LOOKUP_VECTORS: usize = 2;
+
+/// One of the `LOOKUP_VECTORS` a lookup's query vector holds while it is made; given back however
+/// it ends, its thread's panic or a thread that could not start too (Codex on #830).
+struct Making(Arc<AtomicUsize>);
+
+impl Making {
+    fn take(vectors: &Arc<AtomicUsize>) -> Option<Self> {
+        vectors
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < LOOKUP_VECTORS).then_some(n + 1)
+            })
+            .ok()?;
+        Some(Making(Arc::clone(vectors)))
+    }
+}
+
+impl Drop for Making {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A lookup's query vector, made by `make` on a thread `spawn` starts while one of
+/// `LOOKUP_VECTORS` is free, and waited for no longer than `wait`: none when it came later, made
+/// none, or no permit or thread could be had (the permit, moved into the work, goes back with it).
+fn vector_within(
+    vectors: &Arc<AtomicUsize>,
+    wait: Duration,
+    make: impl FnOnce() -> Option<Vec<f32>> + Send + 'static,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) -> Option<Vec<f32>> {
+    let making = Making::take(vectors)?;
+    let deadline = Instant::now() + wait;
+    let (made, vector) = std::sync::mpsc::channel();
+    spawn(Box::new(move || {
+        let _making = making;
+        let _ = made.send(make());
+    }))
+    .ok()?;
+    let heard = vector
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .flatten();
+    // One heard past the wait, as by a request held up meanwhile, is not taken (Codex on #830).
+    heard.filter(|_| Instant::now() <= deadline)
 }
 
 /// What a request's `X-Oboete-Token` must be.
@@ -585,6 +639,7 @@ pub fn resident(home: &Path) -> Result<()> {
     let warming = viewer.home.clone();
     std::thread::spawn(move || {
         let mut seen = None;
+        let mut pages = crate::search::b::Warmth::default();
         loop {
             let newest = crate::raw::newest_hook(&warming).ok().flatten();
             if let Some((seq, ts)) = newest {
@@ -592,6 +647,17 @@ pub fn resident(home: &Path) -> Result<()> {
                     crate::search::b::warm(&warming);
                 }
                 seen = Some(seq);
+            }
+            // Decision 71: what an agent's memory lookup reads, kept in the page cache while the
+            // hooks record, so a lookup does not wait on the disk.
+            if pages.due(crate::db::now_ms(), newest.map(|(_, ts)| ts)) {
+                match crate::search::b::warm_pages(&warming) {
+                    Ok(Some(took)) => pages.read(crate::db::now_ms(), Some(took)),
+                    // No store to read (a rebuild set knowledge.db aside): looked at again at the
+                    // next tick, so the rebuilt one is read as soon as it is there (cubic on #830).
+                    Ok(None) => {}
+                    Err(_) => pages.read(crate::db::now_ms(), None),
+                }
             }
             std::thread::sleep(WARM_EVERY);
         }
@@ -1045,6 +1111,7 @@ impl Viewer {
             live: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
+            vectors: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1224,6 +1291,7 @@ impl Viewer {
             ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
             ("POST", "/api/prompt-context") => (PROMPT_BODY, |v, b, _| v.prompt_context(b)),
             ("POST", "/api/query-vector") => (PROMPT_BODY, |v, b, _| v.query_vector(b)),
+            ("POST", "/api/lookup") => (PROMPT_BODY, |v, b, _| v.lookup(b)),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -1234,7 +1302,10 @@ impl Viewer {
         // The prompt hook is no browser and sends no Origin: its request reads as the page's
         // search does, which needs none either, and the token header it carries is what a page of
         // another site cannot send (a custom header needs a preflight, and OPTIONS is 405).
-        let browser = !matches!(target, "/api/prompt-context" | "/api/query-vector");
+        let browser = !matches!(
+            target,
+            "/api/prompt-context" | "/api/query-vector" | "/api/lookup"
+        );
         match self.save_gate(headers, cap, browser) {
             Ok(len) => Head::Body(len, save, given.to_owned()),
             Err(r) => Head::Answer(r),
@@ -1395,6 +1466,63 @@ impl Viewer {
         match search::b::query_vector(&self.home, &asked.repo, &asked.text) {
             Ok(Ok(vector)) => Response::json(&json!({ "vector": vector })),
             Ok(Err(skip)) => Response::json(&json!({ "skip": skip })),
+            Err(e) => failed(&e),
+        }
+    }
+
+    /// Decision 71 (docs/memory-lookup.md): an agent's own memory lookup answered here, as
+    /// claude-mem's hook asks its worker: the answer the hook would give
+    /// (`memory_lookup::index_answer`), with this viewer's vector for its words when it makes one,
+    /// gated and within `room`; `{"text": null}` when nothing is found or fits. The hook decides
+    /// first that the call is a lookup it may answer.
+    fn lookup(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Asked {
+            repo: String,
+            query: String,
+            room: usize,
+        }
+        let asked = match serde_json::from_slice::<Asked>(body) {
+            // The hook's query is at most 1,024 bytes (`memory_lookup::bound`), its room the
+            // hook's note room.
+            Ok(a)
+                if !a.repo.is_empty()
+                    && !a.query.trim().is_empty()
+                    && a.query.len() <= 1024
+                    && a.room <= crate::hook::NOTE_ROOM =>
+            {
+                a
+            }
+            _ => return Response::text(400, "a lookup takes a repository, its words and a room"),
+        };
+        let rules = match crate::capture::Settings::load(&self.home) {
+            Ok(settings) => settings.rules,
+            Err(e) => return failed(&e),
+        };
+        let wait = match crate::config::inject(&self.home) {
+            Ok(inject) => Duration::from_millis(inject.per_prompt_wait_ms as u64),
+            Err(e) => return failed(&e),
+        };
+        // The meaning side within `[inject] per_prompt_wait_ms`, as the hook waits for the vector
+        // it asks (G23, Codex on #830); a vector later than that is not waited for, and the words
+        // side answers alone, as it does while `LOOKUP_VECTORS` are still being made.
+        let (home, repo, query) = (self.home.clone(), asked.repo.clone(), asked.query.clone());
+        let vector = vector_within(
+            &self.vectors,
+            wait,
+            move || search::b::query_vector(&home, &repo, &query).ok()?.ok(),
+            |work| std::thread::Builder::new().spawn(work).map(drop),
+        );
+        match crate::memory_lookup::index_answer(
+            &self.home,
+            &asked.repo,
+            &asked.query,
+            vector.as_deref(),
+            &rules,
+            asked.room,
+        ) {
+            Ok(text) => Response::json(&json!({ "text": text })),
             Err(e) => failed(&e),
         }
     }
@@ -7920,6 +8048,262 @@ curate = false
             json!({"skip": "no-vectors"})
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Decision 71 (docs/memory-lookup.md): an agent's memory lookup answered by the viewer, as
+    /// claude-mem's hook asks its worker: with the token and no origin, as the hook's other asks;
+    /// the answer the hook's own search gives over the same home; none when its room holds no
+    /// line or nothing holds the words; a body other than a repository, words of at most 1,024
+    /// bytes and a room within the hook's is refused.
+    #[test]
+    fn the_lookup_route_answers_as_the_hook_would() {
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let ask = |headers: &[(&str, &str)], body: &Value| {
+            let body = serde_json::to_vec(body).unwrap();
+            let len = body.len().to_string();
+            let mut h = headers.to_vec();
+            h.extend([
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ]);
+            request(&v, "POST", "/api/lookup", &h, &body)
+        };
+        let room = crate::hook::NOTE_ROOM;
+        let asked = json!({"repo": R, "query": "parser errors", "room": room});
+        assert_eq!(ask(&[HOST], &asked).status, 401);
+        for body in [
+            json!({"repo": "", "query": "parser", "room": room}),
+            json!({"repo": R, "query": " ", "room": room}),
+            json!({"repo": R, "query": "x".repeat(1025), "room": room}),
+            json!({"repo": R, "query": "parser", "room": room + 1}),
+            json!({"repo": R, "query": "parser", "room": room, "more": 1}),
+            json!({"repo": R, "query": "parser"}),
+        ] {
+            assert_eq!(ask(&[HOST, TOKEN], &body).status, 400, "{body}");
+        }
+        let rules = crate::capture::Settings::load(s.home.path()).unwrap().rules;
+        let own = crate::memory_lookup::index_answer(
+            s.home.path(),
+            R,
+            "parser errors",
+            None,
+            &rules,
+            room,
+        )
+        .unwrap();
+        assert!(
+            own.as_deref().is_some_and(|t| t.contains("Parser errors")),
+            "{own:?}"
+        );
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &asked)),
+            json!({ "text": own })
+        );
+        let narrow = json!({"repo": R, "query": "parser errors", "room": 10});
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &narrow)),
+            json!({ "text": null })
+        );
+        let none = json!({"repo": R, "query": "zebra quokka", "room": room});
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &none)),
+            json!({ "text": null })
+        );
+    }
+
+    /// Codex on #830: the viewer waits for a lookup's vector no longer than the prompt's wait
+    /// (`[inject] per_prompt_wait_ms`), as the hook does: with the embedder held past it, the words
+    /// side answers alone, long before the embedder's own timeout.
+    #[test]
+    fn the_lookup_route_waits_for_its_vector_no_longer_than_the_prompt_does() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let config = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            format!("{text}[inject]\nper_prompt_wait_ms = 100\n"),
+        )
+        .unwrap();
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let room = crate::hook::NOTE_ROOM;
+        let body = serde_json::to_vec(&json!({"repo": R, "query": "parser errors", "room": room}))
+            .unwrap();
+        let len = body.len().to_string();
+        let h = [
+            HOST,
+            TOKEN,
+            ("Content-Type", "application/json"),
+            ("Content-Length", len.as_str()),
+        ];
+        let rules = crate::capture::Settings::load(s.home.path()).unwrap().rules;
+        let words = crate::memory_lookup::index_answer(
+            s.home.path(),
+            R,
+            "parser errors",
+            None,
+            &rules,
+            room,
+        )
+        .unwrap();
+        assert!(words.is_some());
+        let _held = stub.hold();
+        let started = Instant::now();
+        let answer = json_of(&request(&v, "POST", "/api/lookup", &h, &body));
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(900), "{took:?}");
+        assert_eq!(answer, json!({ "text": words }));
+    }
+
+    /// Codex on #830: the lookups' vectors still being made past their wait are at most
+    /// `LOOKUP_VECTORS`: with the embedder held, a third lookup makes none and answers with the
+    /// words side as the others do, and each is given back once its embedder answers.
+    #[test]
+    fn the_lookups_vectors_left_running_are_bounded() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let config = s.home.path().join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            format!("{text}[inject]\nper_prompt_wait_ms = 100\n"),
+        )
+        .unwrap();
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let room = crate::hook::NOTE_ROOM;
+        let body = serde_json::to_vec(&json!({"repo": R, "query": "parser errors", "room": room}))
+            .unwrap();
+        let len = body.len().to_string();
+        let h = [
+            HOST,
+            TOKEN,
+            ("Content-Type", "application/json"),
+            ("Content-Length", len.as_str()),
+        ];
+        let rules = crate::capture::Settings::load(s.home.path()).unwrap().rules;
+        let words = crate::memory_lookup::index_answer(
+            s.home.path(),
+            R,
+            "parser errors",
+            None,
+            &rules,
+            room,
+        )
+        .unwrap();
+        let held = stub.hold();
+        for _ in 0..3 {
+            let answer = json_of(&request(&v, "POST", "/api/lookup", &h, &body));
+            assert_eq!(answer, json!({ "text": words }));
+        }
+        assert_eq!(v.vectors.load(Ordering::SeqCst), LOOKUP_VECTORS);
+        drop(held);
+        let until = Instant::now() + Duration::from_secs(20);
+        while v.vectors.load(Ordering::SeqCst) > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(v.vectors.load(Ordering::SeqCst), 0);
+    }
+
+    /// Codex on #830: a lookup's vector whose thread could not start gives its permit back at once,
+    /// and one made in time is the lookup's, its permit back once its thread ends.
+    #[test]
+    fn a_lookup_vector_gives_its_permit_back_when_its_thread_cannot_start() {
+        let vectors = Arc::new(AtomicUsize::new(0));
+        let wait = Duration::from_secs(5);
+        let failed = vector_within(
+            &vectors,
+            wait,
+            || Some(vec![1.0]),
+            |_| Err(std::io::Error::other("no thread")),
+        );
+        assert_eq!(failed, None);
+        assert_eq!(vectors.load(Ordering::SeqCst), 0);
+        let made = vector_within(
+            &vectors,
+            wait,
+            || Some(vec![1.0]),
+            |work| std::thread::Builder::new().spawn(work).map(drop),
+        );
+        assert_eq!(made, Some(vec![1.0]));
+        // A vector heard past the wait (here its work ran before the wait began) is not taken.
+        let late = vector_within(
+            &vectors,
+            Duration::from_millis(50),
+            || Some(vec![1.0]),
+            |work| {
+                std::thread::sleep(Duration::from_millis(100));
+                work();
+                Ok(())
+            },
+        );
+        assert_eq!(late, None);
+        let until = Instant::now() + Duration::from_secs(10);
+        while vectors.load(Ordering::SeqCst) > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(vectors.load(Ordering::SeqCst), 0);
+    }
+
+    /// CodeRabbit on #830: the route searches with its own vector for the words: a claim that no
+    /// three letters of the lookup are in, near it in meaning, is in its answer, and not in the words
+    /// side's alone.
+    #[test]
+    fn the_lookup_route_searches_with_its_own_vector() {
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser caches stay in Redis.", &[]);
+        s.run();
+        let home = s.home.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[embedding]\nprovider = \"local\"\n",
+        )
+        .unwrap();
+        crate::embed::stub::local(home, "0");
+        crate::embed_phase::fixture::embed_all(&s);
+        // A word the test embedder puts where it puts "redis", with no three letters of the claim.
+        let at = |w: &str| crate::embed::stub::vector(crate::embed::EMBEDDER, w);
+        let word = (0..1_000_000)
+            .map(|i| format!("zq{i}x"))
+            .find(|w| at(w) == at("redis"))
+            .unwrap();
+        let room = crate::hook::NOTE_ROOM;
+        let rules = crate::capture::Settings::load(home).unwrap().rules;
+        let words = crate::memory_lookup::index_answer(home, R, &word, None, &rules, room).unwrap();
+        assert_eq!(words, None, "no word of it in the claim");
+        // Loaded, as the resident viewer keeps its model while the hooks record (parity row 31).
+        let until = Instant::now() + Duration::from_secs(20);
+        while !matches!(search::b::query_vector(home, R, "redis"), Ok(Ok(_)))
+            && Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let v = Viewer::new(home, None, 4321, Token::Run("t0k".into()));
+        let body = serde_json::to_vec(&json!({"repo": R, "query": word, "room": room})).unwrap();
+        let len = body.len().to_string();
+        let h = [
+            HOST,
+            TOKEN,
+            ("Content-Type", "application/json"),
+            ("Content-Length", len.as_str()),
+        ];
+        let answer = json_of(&request(&v, "POST", "/api/lookup", &h, &body));
+        assert!(
+            answer["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("Parser caches")),
+            "{answer}"
+        );
     }
 
     /// G23 (Codex on #521): the viewer leaves out what the hook's session was shown by reading the

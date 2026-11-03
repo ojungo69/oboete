@@ -2,9 +2,10 @@
 //! Claude Code or Codex reads its own memory folder, or calls a native memory search, its
 //! PreToolUse searches oboete for the lookup's words and gives the index beside the native result,
 //! as claude-mem 15.0's gives (N4). The behaviour of record is claude-mem's
-//! `src/cli/handlers/memory-search.ts` at v15.0.1 (Apache-2.0; NOTICE). The hook embeds nothing
-//! and calls no provider: the search takes the words side, and the meaning side only from the
-//! resident viewer's vector (decision 38, N5).
+//! `src/cli/handlers/memory-search.ts` at v15.0.1 (Apache-2.0; NOTICE). The resident viewer
+//! answers it with the meaning side of its own vector, as claude-mem's hook asks its worker
+//! (decision 71, N5); with none, the hook searches itself on the words side alone, embedding
+//! nothing and calling no provider (decision 38).
 
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -276,7 +277,20 @@ pub(crate) fn answer_within(
         // No one hears an answer past the deadline.
         let _ = send.send(looked_up(&home, &payload, deadline, room));
     });
-    match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+    let heard = answered.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    in_time(heard, deadline, Instant::now(), wait)
+}
+
+/// What `answer_within` heard by `now`: an answer heard past the deadline spent the hook's time
+/// all the same, so it is late too and no file note follows it (Codex on #830).
+fn in_time(
+    heard: Result<anyhow::Result<Option<String>>, RecvTimeoutError>,
+    deadline: Instant,
+    now: Instant,
+    wait: Duration,
+) -> anyhow::Result<Option<String>> {
+    match heard {
+        Ok(_) if now > deadline => Err(Late(wait).into()),
         Ok(answer) => answer,
         Err(RecvTimeoutError::Timeout) => Err(Late(wait).into()),
         Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the search stopped"),
@@ -286,7 +300,7 @@ pub(crate) fn answer_within(
 /// `answer_within`'s answer, on its thread: none for a call that is no lookup, with
 /// `[inject] memory_lookup` off, before the stores are made, where nothing is recorded, when the
 /// search refuses it or when nothing of it fits `room`.
-fn looked_up(
+pub(crate) fn looked_up(
     home: &Path,
     payload: &Value,
     deadline: Instant,
@@ -319,32 +333,49 @@ fn looked_up(
         return Ok(None);
     }
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
-    // N5: the meaning side too, from the resident viewer within the prompt's wait (G23), as
-    // claude-mem's worker searches with its vectors; else the words side alone.
-    let prompt_wait = Duration::from_millis(inject.per_prompt_wait_ms as u64);
-    let vector = crate::hook::ask_vector(
-        home,
-        &repo,
-        &found.query,
-        (Instant::now() + prompt_wait).min(deadline),
-    );
+    // Decision 71: the resident viewer answers, as claude-mem's hook asks its worker, until the
+    // deadline, with the meaning side of its own vector; the hook searches itself only when none
+    // listens or it refuses.
+    if let Some(answer) = crate::hook::ask_lookup(home, &repo, &found.query, room, deadline) {
+        return Ok(answer);
+    }
+    // A viewer that took the whole wait left none: no search here that no one would hear, beside
+    // the viewer's (CodeRabbit on #830).
+    if Instant::now() >= deadline {
+        return Ok(None);
+    }
+    // The words side alone: a viewer that failed its lookup is asked for no vector besides, so a
+    // lookup makes one query vector at most, as before the route (Codex on #830).
+    index_answer(home, &repo, &found.query, None, &settings.rules, room)
+}
+
+/// The answer to a lookup of `query` in `repo`, the hook's and the resident viewer's alike
+/// (decision 71): the index of `Search::lookup_index`, with `vector` for the meaning side when
+/// there is one, through the egress gate whole, as the MCP server's `text` passes every answer
+/// (spec 6.4, 6.5), then in the fence within `room`; none when nothing is found or fits.
+pub(crate) fn index_answer(
+    home: &Path,
+    repo: &str,
+    query: &str,
+    vector: Option<&[f32]>,
+    rules: &crate::redact::Rules,
+    room: usize,
+) -> anyhow::Result<Option<String>> {
     let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
-    let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
+    let scope = |_: Option<&str>| Ok(Ok(Some(repo.to_owned())));
     let search = crate::mem_search::Search {
         home,
-        scope: repo.clone(),
+        scope: repo.to_owned(),
         cursors: &cursors,
         now: crate::db::now_ms(),
         repo: &scope,
-        rules: &settings.rules,
+        rules,
         hook: true,
-        vector: vector.as_deref(),
+        vector,
     };
-    // The egress gate over the whole answer, as the MCP server's `text` passes every answer through
-    // it, before the fence (spec 6.4, 6.5).
     Ok(search
-        .lookup_index(&found.query, 8)?
-        .and_then(|text| fitted(&crate::redact::outbound_with(&text, &settings.rules), room)))
+        .lookup_index(query, 8)?
+        .and_then(|text| fitted(&crate::redact::outbound_with(&text, rules), room)))
 }
 
 /// `text` in the memory fence after `LOOKUP`, its last lines left out until the whole is within
@@ -567,6 +598,30 @@ mod tests {
             codex_memories: "/h/.codex/memories".into(),
             custom: custom.iter().map(PathBuf::from).collect(),
         }
+    }
+
+    /// Codex on #830: an answer heard past the deadline is late, as one not heard by then is,
+    /// so no file note follows it; one heard in time is the answer.
+    #[test]
+    fn an_answer_heard_past_the_deadline_is_late() {
+        let deadline = Instant::now();
+        let wait = Duration::from_secs(3);
+        let answer = || Ok(Ok(Some("index".to_owned())));
+        let late = in_time(
+            answer(),
+            deadline,
+            deadline + Duration::from_millis(1),
+            wait,
+        );
+        assert!(late.is_err_and(|e| e.is::<Late>()));
+        assert_eq!(
+            in_time(answer(), deadline, deadline, wait)
+                .unwrap()
+                .as_deref(),
+            Some("index")
+        );
+        let none = in_time(Err(RecvTimeoutError::Timeout), deadline, deadline, wait);
+        assert!(none.is_err_and(|e| e.is::<Late>()));
     }
 
     fn query(tool: &str, args: Value) -> Option<String> {
