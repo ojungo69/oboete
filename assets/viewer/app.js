@@ -8058,7 +8058,8 @@ function syncContextRepos() {
   const was = contextPreview.repo;
   const had = slot.contains(document.activeElement);
   slot.replaceChildren(...present([contextRepoChoice(form)]));
-  if (had) slot.querySelector('select')?.focus({ preventScroll: true });
+  // Its choice gone with the list emptied: the fold's summary (Codex's review of 69c).
+  if (had) (slot.querySelector('select') ?? slot.parentElement?.querySelector('summary'))?.focus({ preventScroll: true });
   if (contextPreview.repo !== was && slot.parentElement?.open) void readContextPreview(form);
 }
 

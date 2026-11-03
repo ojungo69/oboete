@@ -3431,6 +3431,10 @@ console.log('PASS: the caps\' No cap switches');
       await vm.runInContext('loadRepos()',ctx);await settled();
       assert.deepEqual([fold().querySelectorAll('select')[0].value,reads,text(out()).includes('gamma now')],[gamma,[gamma],true],
         'the one chosen gone: the latest, read');
+      // Emptied while its choice has the focus: the fold's summary.
+      listed=[];fold().querySelectorAll('select')[0].focus();
+      await vm.runInContext('loadRepos()',ctx);await settled();
+      assert.deepEqual([fold().querySelectorAll('select').length,document.activeElement?.tagName],[0,'SUMMARY'],'the list emptied: the focus on the summary');
       ctx.fetch=before;vm.runInContext(`reposLoaded=${wasLoaded}`,ctx);repoSelect.value='';
     }
     // The viewer's own checkout: chosen first after the header's, and read without its name, as the
