@@ -2233,12 +2233,15 @@ runs and leaves a run another live worker owns to it.
   Rules). It is marked busy
   (`aria-disabled`, so the focus stays on it) while its request is on its way, and a click then
   sends nothing. The answer follows it: "Refreshing 3 now." / 「3 件の更新を始めました。」,
-  "Nothing was due." / 「更新するものはありませんでした。」, or "The refresh could not start." /
-  「更新を始められませんでした。」 for a refusal or no answer. A `waiting` answer redraws the status
-  line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
-  an `off` one (My Work turned off since the page read it) redraws the line and takes the button
-  away, its focus going to the line's Open Settings, as a read of the line that says My Work is off
-  does. The note stays until the status line says
+  "Nothing was due." / 「更新するものはありませんでした。」, "The refresh could not start." /
+  「更新を始められませんでした。」 for a refusal, or "No answer came; the refresh may have started." /
+  「応答がありませんでした。更新が始まっている可能性があります。」 when no answer comes (the viewer may
+  have written the request before it was lost, #828). A `waiting` answer redraws the status
+  line, which says why the work waits, and the note beside the button says "Not started: My Work is
+  waiting." / 「始められませんでした: 待機中です。」;
+  an `off` or `summaries_off` one (My Work or its summaries turned off since the page read it)
+  redraws the line and takes the button away, its focus going to the line's Open Settings, as a
+  read of the line that says either does (#828). The note stays until the status line says
   something new. A redraw of the page keeps the focus on the button, whatever place it names (a save
   that ends meanwhile), as the search field does. The status a refresh answers is a read of the
   line as the others are (#722): a read begun before it that lands later is dropped, and one begun
@@ -2259,6 +2262,52 @@ runs and leaves a run another live worker owns to it.
   Settings when off, and the refresh's status and note ordered with the line's reads. Thirteen hand
   mutants of the page's code, and five of the request's in the runner, each fail a check.
 - **Then**: parity row X10, the address that keeps My Work's place.
+
+### Slice 13: the address keeps My Work's place (2026-11-03)
+
+Decision 70, parity row X10: claude-mem 15.6 keeps where its page is in the address, so a reload and
+the browser's Back and Forward return there (`view-slice.ts` `readRoute`, `writeRoute`, `showUrl`),
+and remembers the list's view, filter and sort between visits (`create-store.ts`).
+
+- **The address**, in its query; the fragment, which holds the token (decision 66), is left as it
+  is, and any other parameter too:
+  - `view`: a tab other than My Work (`my_rules`, `timeline`, `sessions`, `records`, `context`,
+    `stats`, `settings`), or one of My Work's pages, `suggested` and `past-focus`;
+  - `focus`: My Work's area, an area's id or `other`, on My Work's list only;
+  - `request`: the request open on My Work.
+  An unknown `view` is none; `focus` and `request` count on My Work only.
+- **On load** (`routeStart`): the place the address names, else the tab last used (decision 55);
+  then the address says where the page is (`replaceState`), so that every entry of the history
+  does.
+- **Moves** write the address with `pushState` when it changes: a tab; the status line's way to
+  Settings, My Work's link to the timeline and the setup page's search; an area, Suggested, Past
+  focus or all of My Work; a request opened, and closed by its back button. A change the page makes
+  itself, a merge moving the choice to the area merged into or a join moving the open request, is
+  written with `replaceState` when My Work is drawn.
+- **Back and Forward** (`popstate`, `routeShow`): the address is read and shown, nothing written.
+  Leaving a request this way gives the focus back to its card, as its back button does. A request
+  shown again from the address (Forward, a reload) is opened as `myWorkOpen` opens one: its work
+  product read again (a read of it still on its way is not kept), its mark read, its card the
+  place to return to, brought into view by the focus as no scroll was kept. Leaving a request by
+  Back while its read is on its way, that read draws nothing over the list (`show`'s guard). An
+  answer that changes the request open on the page does not mark it new.
+- **A place that is gone**: a request the answer does not have shows the page that says so, with its
+  back button, as an open request that leaves does; an area not listed or dismissed shows all of My
+  Work (`myFocusSelected`). The address keeps the choice, as claude-mem's keeps `focus`.
+- **Kept between visits**: the layout, as before, and the status tab and the sort
+  (`oboete-my-work-filter`, `oboete-my-work-sort`), each read back only when the page knows it. The
+  search, the project and the range are for the visit (claude-mem has none of them).
+- **Not in the address**: a session's page on Sessions, a work stream inside a request, Settings'
+  open groups, the scroll.
+- **Tests**: the address read (each `view`, `focus` and `request`, an unknown `view`); on load, a
+  page named and none named; each move pushed once and the same place not again, with the token
+  and another parameter kept; Back to a request and from it, to another tab and to all of My Work,
+  writing nothing; Back, Forward and Back again from a request each returning the focus to its
+  card, and the work product read again; a late read of the requests or of a work product
+  dropped; the open request not marked new; a merge's area replaced; the status line's way to
+  Settings pushed; the status tab and the sort kept, and unknown ones read back as the defaults.
+  Fifteen hand mutants of the page's code each fail a check.
+- **Then**: the speed of rows 54 and N5 (decision 70's order after the three gaps).
 
 ## Not built
 

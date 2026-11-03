@@ -336,6 +336,92 @@ let view = !firstMyWork && VIEWS.includes(storedView) ? storedView : 'my_work';
 let currentRepo = '';
 let reposLoaded = false;
 
+// --- The address (X10, decision 70): where the page is, as claude-mem 15.6 keeps it ------------
+
+// My Work's own pages, as claude-mem's sections are; the page's other views are its tabs.
+const ROUTE_PAGES = ['suggested', 'past-focus'];
+
+// `?view=` a tab other than My Work, or one of My Work's pages; `?focus=` My Work's area;
+// `?request=` the request open on it (claude-mem's `readRoute`). None of them, null.
+function routeRead(search) {
+  const q = new URLSearchParams(search || '');
+  const name = q.get('view');
+  const page = ROUTE_PAGES.includes(name) ? name : null;
+  const tab = page ? 'my_work' : VIEWS.includes(name) ? name : null;
+  const focus = q.get('focus') || null;
+  const request = q.get('request') || null;
+  if (!tab && !focus && !request) return null;
+  const shown = tab ?? 'my_work';
+  return { view: shown, area: shown === 'my_work' ? page ?? focus : null, request: shown === 'my_work' ? request : null };
+}
+
+// The place a route names, as the page's state (claude-mem's `showUrl`); `show` draws it.
+function routeApply(route) {
+  setView(route.view);
+  if (route.view !== 'my_work') return;
+  // Leaving Suggested ends its visit (claude-mem's decided cards), as `myFocusChoose` does.
+  if (mw.area === 'suggested' && route.area !== 'suggested') mw.decided = new Map();
+  mw.area = route.area;
+  mw.editing = null;
+  mw.request = route.request;
+  // As `myWorkOpen`: the open request's work product is read again and its mark read, and its
+  // card is where its back button, or Back, returns.
+  if (route.request !== null) {
+    mw.products = null;
+    mw.productsAsk += 1;
+    mw.unread.delete(route.request);
+    mw.back = { id: route.request, scroll: null };
+  }
+  mw.land = route.request;
+  if (route.area === 'past-focus') void myFocusReadPast();
+}
+
+// The address of the place shown (claude-mem's `writeRoute`), its other parameters and its
+// fragment (the token) kept: pushed for a move the person made, replaced for one the page made.
+function routeWrite(push = false) {
+  let url;
+  try {
+    url = new URL(location.href);
+  } catch {
+    return;
+  }
+  const page = view === 'my_work' ? myFocusPage() : null;
+  const set = (name, value) => (value ? url.searchParams.set(name, value) : url.searchParams.delete(name));
+  set('view', view === 'my_work' ? page : view);
+  set('focus', view === 'my_work' && !page ? mw.area : null);
+  set('request', view === 'my_work' ? mw.request : null);
+  if (url.href === location.href) return;
+  try {
+    history[push ? 'pushState' : 'replaceState'](null, '', url.href);
+  } catch {
+    // The address stays as it was; the page is as shown.
+  }
+}
+
+// On load: the place the address names, else the view last used (decision 55); then the address
+// says where the page is, so that each entry of the history does.
+function routeStart() {
+  const route = routeRead(location.search);
+  if (route) routeApply(route);
+  else setView(view);
+  routeWrite();
+}
+
+// Back and Forward: the address read and shown, nothing written. Leaving a request this way gives
+// the focus back to its card, as its back button does.
+function routeShow() {
+  const route = routeRead(location.search) ?? { view: 'my_work', area: null, request: null };
+  if (view === 'my_work' && route.view === 'my_work' && mw.request !== null && route.request === null && route.area === mw.area) {
+    // A read still on its way for the place left draws nothing over the list (`show`'s guard).
+    generation += 1;
+    myWorkClose();
+    return;
+  }
+  if (route.view !== view) $('q').value = '';
+  routeApply(route);
+  void show();
+}
+
 function setView(name) {
   view = name;
   remember('oboete-view', name);
@@ -2537,6 +2623,7 @@ const TEXT = {
   my_work_refresh_started: ['Refreshing {n} now.', '{n} 件の更新を始めました。'],
   my_work_refresh_nothing: ['Nothing was due.', '更新するものはありませんでした。'],
   my_work_refresh_failed: ['The refresh could not start.', '更新を始められませんでした。'],
+  my_work_refresh_unknown: ['No answer came; the refresh may have started.', '応答がありませんでした。更新が始まっている可能性があります。'],
   my_work_refresh_waiting: ['Not started: My Work is waiting.', '始められませんでした: 待機中です。'],
   my_goals_tab_months: ['Month by month', '月ごと'],
   my_goals_asked_once: ['asked once', '1 回頼みました'],
@@ -6623,7 +6710,7 @@ function onboardingSection(f) {
   search.addEventListener('click',async()=>{
     $('q').value=phrase.value.trim();$('raw').value='only';
     $('since').value='';$('until').value='';$('history').checked=false;
-    setView('records');await refresh(false,'');
+    setView('records');routeWrite(true);await refresh(false,'');
   });
   const destinations=plan?.names?.flatMap(name=>f.providers.filter(row=>row.name===name && row.saved?.enabled)
     .map(row=>el('li',null,`${name}: ${row.saved.kind==='cli'?row.saved.cli:row.saved.base_url||t('agent_inventory_unknown')}`)));
@@ -8133,7 +8220,7 @@ function drawIn(panel) {
 // claude-mem 15.0.1's work view (`plugin/ui/work-view`) on the page: the API gives the requests
 // of all recorded work (`GET /api/my-work?range=all`), and the page scopes, sorts and draws them
 // as claude-mem's page draws its snapshot. A request opens within the page, and its back button
-// returns the focus to what opened it: the address holds the token (decision 55).
+// returns the focus to what opened it (decision 55); the address says which (X10, decision 70).
 
 // claude-mem's status tabs (`app.js` `labels`): the first six always, the rest with a count.
 const MY_WORK_TABS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked', 'shipped', 'blocked', 'todo', 'unknown', 'closed', 'other'];
@@ -8141,15 +8228,21 @@ const MY_WORK_ALWAYS = ['all', 'needs', 'working', 'quiet', 'ready', 'checked'];
 // `presentation.js` `attention`; a status it does not name ranks with `unknown`.
 const MY_WORK_ATTENTION = { needs: 0, blocked: 1, ready: 2, working: 3, quiet: 4, todo: 5, unknown: 6, closed: 7, checked: 8, shipped: 9 };
 const MY_WORK_LAYOUTS = ['cards', 'list', 'agents'];
+const MY_WORK_SORTS = ['attention', 'latest', 'oldest', 'title'];
+// The layout, the status tab and the sort are remembered between visits (claude-mem's preferences);
+// one this page does not know is the default.
+const myWorkRecalled = (key, known, fallback) => (known.includes(recall(key, fallback)) ? recall(key, fallback) : fallback);
 const MY_WORK_NEEDS = ['needs-you', 'needs-input', 'waiting-on-user', 'awaiting-approval', 'needs-approval'];
 const MY_WORK_REVIEW = new Set(['needs-review', 'review', 'in-review', 'awaiting-review', 'ready-for-review']);
 const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
-// The answer and the page's place in it. The filters live in the page, as claude-mem's live in
-// its address; the layout is remembered.
+// The answer and the page's place in it. The area and the open request live in the address
+// (X10); the search, the project and the range for the visit.
 const mw = {
   rows: null, unlinked: 0, goals: 0, story: null, storyOpen: false, signature: '', fetched: 0, pending: null, slot: null, results: null,
-  layout: MY_WORK_LAYOUTS.includes(recall('oboete-my-work-layout', 'cards')) ? recall('oboete-my-work-layout', 'cards') : 'cards',
-  filter: 'all', query: '', project: '', range: 'day', sort: 'attention',
+  layout: myWorkRecalled('oboete-my-work-layout', MY_WORK_LAYOUTS, 'cards'),
+  filter: myWorkRecalled('oboete-my-work-filter', MY_WORK_TABS, 'all'),
+  query: '', project: '', range: 'day',
+  sort: myWorkRecalled('oboete-my-work-sort', MY_WORK_SORTS, 'attention'),
   agent: null, request: null, work: null, back: null,
   // F7: the focus area chosen (an id or `other`), for this visit only, as claude-mem's; the areas;
   // a save in progress, and the last change with its Undo; the asks under no area, and the
@@ -8161,7 +8254,9 @@ const mw = {
   pageWords: [], editing: null, draft: '',
   // F7: the Suggested page's decisions on this visit (claude-mem keeps them until the page is
   // left), each with the area as it was; Past focus's months, once read.
-  decided: new Map(), past: null,
+  decided: new Map(), past: null, pastReads: 0,
+  // A request reached through the address, whose page takes the focus when it is drawn.
+  land: null,
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
@@ -8353,6 +8448,7 @@ function myFocusChoose(id, focus = 'heading') {
   if (id === 'past-focus') void myFocusReadPast();
   mw.request = null;
   mw.work = null;
+  routeWrite(true);
   myWorkDraw(focus);
 }
 
@@ -8811,8 +8907,11 @@ function myFocusSuggested() {
 
 // Past focus's months: My Goals' answer, read when the page opens.
 async function myFocusReadPast() {
+  // Back and Forward may start a read before the last one lands: only the latest keeps its answer.
+  const read = ++mw.pastReads;
   try {
     const answer = await api('my-goals');
+    if (read !== mw.pastReads) return;
     mw.past = answer;
     if (view === 'my_work' && mw.area === 'past-focus') myWorkDraw(document.activeElement?.dataset?.myWork ?? null);
   } catch {
@@ -9075,6 +9174,7 @@ function myWorkTimeline(key = 'my_work_to_timeline') {
   button.type = 'button';
   button.addEventListener('click', () => {
     setView('timeline');
+    routeWrite(true);
     void show();
   });
   return button;
@@ -9127,6 +9227,7 @@ function myWorkTabs(scoped) {
     button.dataset.myWork = `tab:${key}`;
     button.addEventListener('click', () => {
       mw.filter = key;
+      remember('oboete-my-work-filter', key);
       myWorkDraw(`tab:${key}`);
     });
     return button;
@@ -9186,7 +9287,10 @@ function myWorkControls() {
   const toolbar = el('div', 'my-work-toolbar', search,
     myWorkSelect('project', 'my_work_project_label', [['', t('my_work_all_projects')], ...projects.map((p) => [p, p])], mw.project, (v) => { mw.project = v; }),
     myWorkSelect('range', 'my_work_range_label', ['day', 'week', 'all'].map((r) => [r, t(`my_work_range_${r}`)]), mw.range, (v) => { mw.range = v; }),
-    myWorkSelect('sort', 'my_work_sort_label', ['attention', 'latest', 'oldest', 'title'].map((s) => [s, t(`my_work_sort_${s}`)]), mw.sort, (v) => { mw.sort = v; }));
+    myWorkSelect('sort', 'my_work_sort_label', MY_WORK_SORTS.map((s) => [s, t(`my_work_sort_${s}`)]), mw.sort, (v) => {
+      mw.sort = v;
+      remember('oboete-my-work-sort', v);
+    }));
   toolbar.setAttribute('role', 'search');
   return [switches, toolbar];
 }
@@ -9222,6 +9326,7 @@ function myWorkDraw(focus = null) {
     myWorkDrawRequest();
     mw.changed.clear();
     myWorkFocus(focus);
+    if (view === 'my_work') routeWrite();
     return;
   }
   const [switches, toolbar] = myWorkControls();
@@ -9242,6 +9347,8 @@ function myWorkDraw(focus = null) {
   // for: a save that ends meanwhile draws the page again (#777).
   if (typing && myWorkFocus('search')) document.activeElement.setSelectionRange?.(...typing);
   else myWorkFocus(back);
+  // What the page changed itself (a merge's area, a join's request) is replaced in the address.
+  if (view === 'my_work') routeWrite();
 }
 
 // The caret of the search field while the owner types in it, before a redraw replaces it.
@@ -9307,13 +9414,17 @@ function myWorkFocus(focus) {
 }
 
 function myWorkOpen(id) {
+  // A click gives its own focus; a landing left from the address is not made later.
+  mw.land = null;
   // Its work product is read again: new records, expired ones and new rules change it without
-  // changing the request's version (Codex on #650).
+  // changing the request's version (Codex on #650); a read still on its way is not kept.
   mw.products = null;
+  mw.productsAsk += 1;
   mw.unread.delete(id);
   mw.back = { id, scroll: window.scrollY || 0 };
   mw.request = id;
   mw.work = null;
+  routeWrite(true);
   myWorkDraw('heading');
   window.scrollTo?.(0, 0);
 }
@@ -9323,16 +9434,22 @@ function myWorkOpenerOf(key, value) {
   return [...$('panel').querySelectorAll('button')].find((node) => node.dataset[key] === value);
 }
 
+// Closed by its back button, a move written into the address; by Back, the address says it already.
 function myWorkClose() {
   const back = mw.back;
+  // A landing a dropped draw never made is not made later over the list.
+  mw.land = null;
   mw.request = null;
   mw.work = null;
   mw.back = null;
+  routeWrite(true);
   myWorkDraw();
   const opener = back && myWorkOpenerOf('id', back.id);
-  if (opener) opener.focus({ preventScroll: true });
+  // A request reached through the address kept no scroll: the focus brings its card into view.
+  const scroll = back?.scroll ?? null;
+  if (opener) opener.focus({ preventScroll: scroll !== null });
   else myWorkFocus('current');
-  window.scrollTo?.(0, back?.scroll || 0);
+  if (!opener || scroll !== null) window.scrollTo?.(0, scroll || 0);
 }
 
 function myWorkFact(term, ...value) {
@@ -9637,6 +9754,8 @@ function myWorkAccept(answer) {
       if (content.get(row.id) !== myWorkContent(row)) mw.unread.add(row.id);
     }
   }
+  // The request open on the page is being read: it is not new to the owner.
+  if (mw.request !== null) mw.unread.delete(mw.request);
   mw.rows = answer.requests;
   mw.unlinked = answer.unlinked;
   mw.story = answer.story ?? null;
@@ -9696,7 +9815,11 @@ async function showMyWork() {
       mw.taken = read;
       myWorkAccept(answer);
     }
-    myWorkDraw();
+    // A request reached through the address (Forward, a link) lands on its page when it is drawn,
+    // as a click that opens it does.
+    const land = mw.land !== null && mw.land === mw.request;
+    mw.land = null;
+    myWorkDraw(land ? 'heading' : undefined);
   };
 }
 
@@ -9779,7 +9902,8 @@ async function myWorkRefresh() {
       }
     }
   } catch {
-    // Said as not started.
+    // No answer: the viewer may have written the request before it was lost (#828).
+    note = ['my_work_refresh_unknown'];
   }
   mw.refreshing = false;
   mw.refreshNote = note;
@@ -9797,6 +9921,7 @@ function myWorkStatusLine(status) {
     open.dataset.focus = 'settings';
     open.addEventListener('click', () => {
       setView('settings');
+      routeWrite(true);
       void show();
     });
     parts = [word('span', null, `my_work_line_${status.state}`), ' ', open];
@@ -10300,7 +10425,7 @@ async function start() {
     history.replaceState(null, '', `#${arrived}`);
   }
   applyLanguage();
-  setView(view);
+  routeStart();
   $('help').addEventListener('click', openWelcome);
   $('welcome-close').addEventListener('click', closeWelcome);
   $('welcome').addEventListener('click', (event) => {
@@ -10330,6 +10455,7 @@ async function start() {
   for (const b of document.querySelectorAll('#tabs .tab')) {
     b.addEventListener('click', () => {
       setView(b.dataset.view);
+      routeWrite(true);
       $('q').value = '';
       void show();
     });
@@ -10345,4 +10471,5 @@ async function start() {
 
 // Pasting a restarted viewer's address changes its fragment without reloading the page.
 window.addEventListener('hashchange', () => location.reload());
+window.addEventListener('popstate', routeShow);
 await start();
