@@ -31,17 +31,19 @@ note (docs/file-note.md).
   gives the same answer the hook's own search would (`memory_lookup::index_answer`), waiting for
   its vector no longer than `[inject] per_prompt_wait_ms`, as the hook does, and making none while
   two vectors a lookup stopped waiting for are still being made (`LOOKUP_VECTORS`, so a held
-  embedder cannot gather threads); its "nothing" is the hook's too. With no resident viewer listening, or one that refuses (one from before the
-  route), the hook searches the stores itself in the time left, as below; a viewer that took the
-  whole wait leaves no search after it.
+  embedder cannot gather threads); its "nothing" is the hook's too. With no resident viewer
+  listening, or one that refuses (its search failed, or it is from before the route), the hook
+  searches the stores itself in the time left on the words side alone, asking for no vector
+  besides, so a lookup makes one query vector at most; a viewer that took the whole wait leaves
+  no search after it, and an answer heard past the wait counts as none heard.
 - **The answer**: the index of a search of its words, as claude-mem 15.0's bridge gives (N4): at
   most 8 rows of the kinds claude-mem calls observations (cards and imported observations) and
   oboete's claims, the search's own filter, which each leg applies before it takes its depth (a
   Codex review), by id, title, kind and time, of the checkout's repository
-  (`Search::lookup_index`, docs/mem-search.md), with the meaning side too when the resident viewer makes the lookup's
-  query vector within `[inject] per_prompt_wait_ms` (`POST /api/query-vector`, as the prompt asks
-  it for its block, G23), else the words side alone: the hook embeds nothing itself and calls no
-  provider (decision 38). Since 2026-10-17 (parity row N5). It comes after claude-mem 15.0's sentences (with oboete's names: go on with timeline around useful ids, then get only for the records chosen) inside the memory fence,
+  (`Search::lookup_index`, docs/mem-search.md), with the meaning side of the resident viewer's
+  query vector when the viewer answers (from 2026-10-17 to decision 71 the hook asked the viewer
+  for that vector, `POST /api/query-vector`, and searched itself), else the words side alone: the
+  hook embeds nothing itself and calls no provider (decision 38). It comes after claude-mem 15.0's sentences (with oboete's names: go on with timeline around useful ids, then get only for the records chosen) inside the memory fence,
   through the egress gate, the whole within 9,500 UTF-16 units and cut at a line, as the file
   note's room is. It holds no continuation (none would outlive the hook: claude-mem's hook and
   tool share one worker's store) and no muted claim, since it is injected (spec 6.1). When it
@@ -60,7 +62,7 @@ note (docs/file-note.md).
 |---|---|---|
 | The worker searches, through HTTP, waiting at most 3 s | the resident viewer searches, through HTTP, at most 3 s from the hook's start; with none listening or one that refuses, the hook searches the stores itself in the time left | as claude-mem's hook asks its worker (decision 71); the 3 s keep the hook within Claude Code's 5 s, as claude-mem's do |
 | The worker's process holds its vectors in memory (Chroma, 6.4 GB on this PC on 2026-11-03) | the resident viewer reads what a lookup reads through every five minutes while the hooks record, so the system keeps it in its page cache, and less often when the system keeps dropping it | the page cache, which the system takes back when it needs it, does what a held copy would without holding it (decision 71) |
-| Search with its vectors (Chroma) | with the resident viewer's query vector within the prompt's wait, else the words side alone | a hook embeds nothing itself (decision 38); the viewer holds the model, as for the prompt's block (G23) |
+| Search with its vectors (Chroma) | the resident viewer searches with its own query vector, made within the prompt's wait; the hook's own search, with no viewer, the words side alone | a hook embeds nothing itself (decision 38); the viewer holds the model, as for the prompt's block (G23) |
 | `<claude-mem-retrieved-data>`, its text cut at 10,000 characters and the sentence and tags added | oboete's fence, the whole within 9,500 UTF-16 units | Grok and Claude Code clip a context at 10,000 (docs/file-note.md F1) |
 | Folders of `CLAUDE_MEM_MEMORY_WATCH_ROOTS` too | not yet | claude-mem's folder watcher is parity row 44, after the switch |
 
@@ -152,7 +154,9 @@ bit index's chunks are 128 KiB each), one table at a time under raw.lock's share
 read-only connection, so a forget's rebuild or a restore waits for one table at most and never
 sets knowledge.db aside under an open handle. A read that took more
 than 5 s found the pages gone; a second such read in a row doubles the wait, up to an hour, so a
-box short of memory is not made to read them from the disk again and again. Not reached: claude-
+box short of memory is not made to read them from the disk again and again; a read that failed
+keeps the wait, and a store gone before the set was read through (a rebuild setting knowledge.db
+aside) counts as no read and is looked at again at the next tick. Not reached: claude-
 mem's 0.25 s with its worker warm, which would take a different search over the imported
 documents; the fp32 vectors a search scores (330,273 of them, 1.35 GB) stay on the disk, read ahead
 when cold (`prefetch_vectors`).
@@ -170,7 +174,7 @@ overflow chain broken: `length()` reads, the warm read fails);
 held: the words side answers within the prompt's wait),
 `the_lookups_vectors_left_running_are_bounded` (a third held lookup makes no vector, each given
 back), `the_lookup_route_searches_with_its_own_vector` (a claim no three letters of the words are
-in, found by the viewer's vector); `hook::tests::a_viewer_past_the_lookups_wait_leaves_no_search_after_it`;
+in, found by the viewer's vector); `hook::tests::a_viewer_past_the_lookups_wait_leaves_no_search_after_it`, `a_viewer_that_gives_no_answer_is_asked_for_no_vector_besides` (the words side alone, nothing more asked); `view::tests::a_lookup_vector_gives_its_permit_back_when_its_thread_cannot_start`; `memory_lookup::tests::an_answer_heard_past_the_deadline_is_late`;
 `hook::tests::a_memory_lookup_past_its_wait_gives_nothing` (a forget holding the search back: an
 error within the wait, as the hook reports a failure, the native lookup going on),
 `a_memory_lookups_wait_holds_the_viewers_vector_too` (a viewer slower than the wait costs no more),

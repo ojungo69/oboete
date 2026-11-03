@@ -97,6 +97,46 @@ struct Viewer {
 /// the words side alone, so a held embedder cannot gather threads beyond the connections' cap.
 const LOOKUP_VECTORS: usize = 2;
 
+/// One of the `LOOKUP_VECTORS` a lookup's query vector holds while it is made; given back however
+/// it ends, its thread's panic or a thread that could not start too (Codex on #830).
+struct Making(Arc<AtomicUsize>);
+
+impl Making {
+    fn take(vectors: &Arc<AtomicUsize>) -> Option<Self> {
+        vectors
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < LOOKUP_VECTORS).then_some(n + 1)
+            })
+            .ok()?;
+        Some(Making(Arc::clone(vectors)))
+    }
+}
+
+impl Drop for Making {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A lookup's query vector, made by `make` on a thread `spawn` starts while one of
+/// `LOOKUP_VECTORS` is free, and waited for no longer than `wait`: none when it came later, made
+/// none, or no permit or thread could be had (the permit, moved into the work, goes back with it).
+fn vector_within(
+    vectors: &Arc<AtomicUsize>,
+    wait: Duration,
+    make: impl FnOnce() -> Option<Vec<f32>> + Send + 'static,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) -> Option<Vec<f32>> {
+    let making = Making::take(vectors)?;
+    let (made, vector) = std::sync::mpsc::channel();
+    spawn(Box::new(move || {
+        let _making = making;
+        let _ = made.send(make());
+    }))
+    .ok()?;
+    vector.recv_timeout(wait).ok().flatten()
+}
+
 /// What a request's `X-Oboete-Token` must be.
 enum Token {
     /// This run's, made at its start: `oboete view` in the foreground.
@@ -1461,34 +1501,13 @@ impl Viewer {
         // The meaning side within `[inject] per_prompt_wait_ms`, as the hook waits for the vector
         // it asks (G23, Codex on #830); a vector later than that is not waited for, and the words
         // side answers alone, as it does while `LOOKUP_VECTORS` are still being made.
-        let taken = self
-            .vectors
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                (n < LOOKUP_VECTORS).then_some(n + 1)
-            })
-            .is_ok();
-        let vector = if taken {
-            let (made, vector) = std::sync::mpsc::channel();
-            let (home, repo, query) = (self.home.clone(), asked.repo.clone(), asked.query.clone());
-            let making = Arc::clone(&self.vectors);
-            std::thread::spawn(move || {
-                // Given back however the thread ends, a panic of the embedder's too.
-                struct Made(Arc<AtomicUsize>);
-                impl Drop for Made {
-                    fn drop(&mut self) {
-                        self.0.fetch_sub(1, Ordering::SeqCst);
-                    }
-                }
-                let _made = Made(making);
-                let _ = made.send(search::b::query_vector(&home, &repo, &query));
-            });
-            match vector.recv_timeout(wait) {
-                Ok(Ok(Ok(vector))) => Some(vector),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let (home, repo, query) = (self.home.clone(), asked.repo.clone(), asked.query.clone());
+        let vector = vector_within(
+            &self.vectors,
+            wait,
+            move || search::b::query_vector(&home, &repo, &query).ok()?.ok(),
+            |work| std::thread::Builder::new().spawn(work).map(drop),
+        );
         match crate::memory_lookup::index_answer(
             &self.home,
             &asked.repo,
@@ -8188,6 +8207,34 @@ curate = false
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(v.vectors.load(Ordering::SeqCst), 0);
+    }
+
+    /// Codex on #830: a lookup's vector whose thread could not start gives its permit back at once,
+    /// and one made in time is the lookup's, its permit back once its thread ends.
+    #[test]
+    fn a_lookup_vector_gives_its_permit_back_when_its_thread_cannot_start() {
+        let vectors = Arc::new(AtomicUsize::new(0));
+        let wait = Duration::from_secs(5);
+        let failed = vector_within(
+            &vectors,
+            wait,
+            || Some(vec![1.0]),
+            |_| Err(std::io::Error::other("no thread")),
+        );
+        assert_eq!(failed, None);
+        assert_eq!(vectors.load(Ordering::SeqCst), 0);
+        let made = vector_within(
+            &vectors,
+            wait,
+            || Some(vec![1.0]),
+            |work| std::thread::Builder::new().spawn(work).map(drop),
+        );
+        assert_eq!(made, Some(vec![1.0]));
+        let until = Instant::now() + Duration::from_secs(10);
+        while vectors.load(Ordering::SeqCst) > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(vectors.load(Ordering::SeqCst), 0);
     }
 
     /// CodeRabbit on #830: the route searches with its own vector for the words: a claim that no

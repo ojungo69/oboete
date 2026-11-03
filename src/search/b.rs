@@ -1219,16 +1219,16 @@ const WARM_SET: &[(&str, &str)] = &[
 /// as read (cubic on #830).
 pub(crate) fn warm_pages(home: &Path) -> Result<Option<Duration>> {
     let started = Instant::now();
-    let mut read = false;
     for &(table, column) in WARM_SET {
+        // A store gone before the set is read through, a rebuild's setting it aside included, is
+        // no read: it is looked at again soon (CodeRabbit on #830).
         let Some(_raw) = crate::raw::read_only(home)? else {
-            break;
+            return Ok(None);
         };
         let path = home.join("knowledge.db");
         if !path.exists() {
-            break;
+            return Ok(None);
         }
-        read = true;
         let k = Connection::open_with_flags(
             &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -1237,7 +1237,7 @@ pub(crate) fn warm_pages(home: &Path) -> Result<Option<Duration>> {
             read_whole(&k, table, column)?;
         }
     }
-    Ok(read.then(|| started.elapsed()))
+    Ok(Some(started.elapsed()))
 }
 
 /// Every row's `column` read whole. `length()` of a BLOB comes from the record's header and leaves
