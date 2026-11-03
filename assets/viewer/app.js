@@ -5811,7 +5811,7 @@ async function providerWrite(action, button, body, path, target = null) {
     if (target && taken) {
       const inserted = geminiInsertion(mine, action);
       const hasFiles = form.providers.some((p) => p.selector.source === 'file');
-      taken.keep = target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted));
+      taken.keep = { ...target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted)), reveal: true };
       if (document.activeElement === taken.control) taken.control.blur();
     }
     simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
@@ -7729,9 +7729,12 @@ function entryOf(control) {
 
 function focusBack(keep) {
   if (keep?.simple) {
-    simpleFocus(keep.simple);
+    const found = simpleFocus(keep.simple);
     const c = document.activeElement;
     if (c?.dataset?.simpleFocus === keep.simple) caretBack(c, keep);
+    // A write's target may be elsewhere than the control pressed (an entry moved, a line created or
+    // gone): shown, the page moving as little as it takes, below its header (69b-3c-2).
+    if (found && keep.reveal) c?.scrollIntoView?.({ block: 'nearest' });
     return;
   }
   if (!keep) return;

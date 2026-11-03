@@ -2985,6 +2985,9 @@ console.log('PASS: the caps\' No cap switches');
     // Moved, the focus on the pressed entry's arrow at its new place (the other one, at its name's
     // end); refused, on the arrow pressed.
     const swapped=(v)=>ai(['alpha','beta'],{version:v,providers:[at('alpha',0),at('alpha',1),at('beta',2)],chain:[row('alpha',{entries:2}),row('beta')]});
+    // The arrow at its new place is shown, the page moving as little as it takes; refused, nothing
+    // moves the page.
+    const scrolled=[];Node.prototype.scrollIntoView=function(o){scrolled.push([this.dataset?.simpleFocus,o?.block]);};
     for(const ok of [true,false]){
       f=draw(split());
       let [answer,give]=later();answers=[answer];
@@ -2992,7 +2995,9 @@ console.log('PASS: the caps\' No cap switches');
       assert.deepEqual([held(),document.activeElement],[true,document.body],'a move: held');
       give(ok?json(swapped('v2')):json({code:'bad_request'},400));await settled();
       assert.deepEqual([held(),focused()],[false,ok?'entry-move:config:1:-1':'entry-move:config:0:1'],`a move ${ok?'done':'refused'}: the focus`);
+      assert.deepEqual(scrolled.splice(0),ok?[['entry-move:config:1:-1','nearest']]:[],`a move ${ok?'done: its arrow shown':'refused: the page stays'}`);
     }
+    delete Node.prototype.scrollIntoView;
     // Its switch: the same switch at its place then.
     f=draw(split());
     let [answer,give]=later();answers=[answer];
