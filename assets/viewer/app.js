@@ -904,13 +904,18 @@ async function showContext(repo) {
       return;
     }
     draw(word('span', null, 'context_heading'), [], [
-      !repo ? word('p', 'lead', 'context_checkout') : null,
-      el('dl', 'claim-meta', ...row('repository', c.repo), ...row('branch', c.branch || '–'),
-        ...row('session_start', t(c.on ? 'context_on' : 'context_off')), ...row('size', t('characters', { n: c.chars }))),
-      c.text ? el('pre', 'context', c.text) : word('p', 'text pending', 'context_empty'),
-    ]);
+      !repo ? word('p', 'lead', 'context_checkout') : null, ...contextParts(c)]);
     setStatus('');
   };
+}
+
+// What a context answer shows: Settings' preview draws the same (decision 69, slice 69c).
+function contextParts(c) {
+  return [
+    el('dl', 'claim-meta', ...row('repository', c.repo), ...row('branch', c.branch || '–'),
+      ...row('session_start', t(c.on ? 'context_on' : 'context_off')), ...row('size', t('characters', { n: c.chars }))),
+    c.text ? el('pre', 'context', c.text) : word('p', 'text pending', 'context_empty'),
+  ];
 }
 
 function row(term, value) {
@@ -1187,6 +1192,11 @@ const TEXT = {
   context_off: ['Off', '無効'],
   size: ['Size', '大きさ'],
   characters: ['{n} characters', '{n} 文字'],
+  context_preview: ['See what is given', '渡す内容を見る'],
+  context_preview_desc: ['What a new session in this repository is handed at its start, as the Context tab shows it. Reading it calls no AI.', 'このリポジトリで新しいセッションを始めたときに渡す内容です (コンテキスト画面と同じ)。表示に AI は使いません。'],
+  context_preview_choose: ['No repository is known yet: once an agent has worked in one, choose it here.', 'まだリポジトリがありません。エージェントがどこかで作業すると、ここで選べます。'],
+  context_reading: ['Reading what is given…', '渡す内容を読み込んでいます…'],
+  context_failed: ['What is given could not be read.', '渡す内容を読み込めませんでした。'],
   context_empty: ['Nothing is handed over for this checkout yet.', 'この作業場所で渡す記憶はまだありません。'],
   stats_heading: ['Stats (all repositories)', '統計(すべてのリポジトリ)'],
   records_per_device: ['Records per device', '端末ごとの記録数'],
@@ -7414,8 +7424,8 @@ function simpleGroups(f, more) {
   empty.hidden = ready;
   return present([empty,
     foldGroup('s-inject', true, t('simple_inject_h'),
-      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }), simpleBody('inject', ...inject),
-      more.inject),
+      t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }),
+      simpleBody('inject', ...inject, contextPreviewFold(f)), more.inject),
     foldGroup('s-ai', true, t('simple_ai_h'), aiState,
       simpleBody('ai', el('p', 'desc', t('simple_ai_desc')), curate,
         el('ol', 'simple-providers', ...used.map((row, i) => simpleProviderRow(f, row, chain.indexOf(row), chain, i + 1))),
@@ -7918,6 +7928,101 @@ function foldGroup(key, open, title, desc, ...sections) {
   group.open = groupOpen.get(key) ?? open;
   group.addEventListener('toggle', () => { if (group.isConnected) groupOpen.set(key, group.open); });
   return group;
+}
+
+// What the next session receives, behind a button (decision 69, slice 69c): the Context view's
+// parts for a repository chosen here, as the header's picker is hidden on Settings. Read when the
+// fold opens, when another repository is chosen, and after an answer that changed what is saved;
+// a redraw otherwise draws the last answer again. The context is built from the store: no AI.
+const contextPreview = { repo: null, asked: 0, answer: null, read: null, pending: null, failed: false };
+
+// The header's repositories (its picker is filled on every page, Settings' included).
+function contextRepos() {
+  return [...$('repo').options].filter((option) => option.value);
+}
+
+// The header's choice, else the viewer's checkout, else the one with the latest activity.
+function contextRepoDefault(options) {
+  const named = (value) => value && options.some((option) => option.value === value);
+  if (named($('repo').value)) return $('repo').value;
+  if (named(currentRepo)) return currentRepo;
+  return options.reduce((best, option) => (Number(option.dataset.last ?? 0) > Number(best?.dataset.last ?? -1) ? option : best), null)?.value ?? '';
+}
+
+function contextPreviewFold(f) {
+  const options = contextRepos();
+  if (contextPreview.repo === null || (contextPreview.repo && !options.some((option) => option.value === contextPreview.repo))) {
+    contextPreview.repo = contextRepoDefault(options);
+  }
+  // Due when neither the answer shown nor the read on its way is for this repository and what is
+  // saved now.
+  const same = (a) => a?.repo === contextPreview.repo && a?.version === f.version;
+  const due = () => !same(contextPreview.read) && !same(contextPreview.pending);
+  const out = el('div', 'context-preview-out', ...contextPreviewParts());
+  let select = null;
+  if (options.length) {
+    select = el('select', null, ...options.map((option) => {
+      const o = new Option(option.textContent, option.value);
+      o.title = option.title;
+      return o;
+    }));
+    select.value = contextPreview.repo;
+    select.dataset.simpleFocus = 'context.repo';
+    select.addEventListener('change', () => { contextPreview.repo = select.value; void readContextPreview(f); });
+  }
+  const fold = smallFold('context-preview', 'context-preview', t('context_preview'), note(t('context_preview_desc')),
+    select ? el('label', 'field', el('span', null, t('repository')), select) : null, out);
+  fold.addEventListener('toggle', () => { if (fold.isConnected && fold.open && due()) void readContextPreview(f); });
+  // Open and not read for what is saved now: read once the page is drawn.
+  if (fold.open && due()) {
+    contextPreview.pending = { repo: contextPreview.repo, version: f.version };
+    out.replaceChildren(...contextPreviewParts());
+    void Promise.resolve().then(() => readContextPreview(f));
+  }
+  return fold;
+}
+
+function contextPreviewParts() {
+  if (contextPreview.failed) {
+    const again = el('button', 'quiet small', t('retry'));
+    again.type = 'button';
+    again.dataset.simpleFocus = 'context.again';
+    again.addEventListener('click', () => void readContextPreview(form));
+    return [note(t('context_failed')), again];
+  }
+  if (contextPreview.pending || !contextPreview.answer) return [note(t('context_reading'))];
+  const c = contextPreview.answer;
+  return c.choose ? [note(t('context_preview_choose'))] : contextParts(c);
+}
+
+// Drawn in place, so what is typed elsewhere and the focus stay; a focus in the part drawn again
+// goes to the fold's summary when its control is gone.
+function drawContextPreview() {
+  const out = $('panel').querySelector('.context-preview-out');
+  if (!out) return;
+  const had = out.contains(document.activeElement);
+  out.replaceChildren(...contextPreviewParts());
+  if (had && !out.contains(document.activeElement)) out.parentElement?.querySelector('summary')?.focus({ preventScroll: true });
+}
+
+// Only the last read asked ends the wait and is drawn, and only on the form it was asked for: a page
+// drawn again for another form, or Settings shown again, reads anew when it is due.
+async function readContextPreview(f) {
+  if (!f || form !== f) return;
+  const asked = ++contextPreview.asked;
+  const repo = contextPreview.repo;
+  Object.assign(contextPreview, { pending: { repo, version: f.version }, failed: false });
+  drawContextPreview();
+  let c = null;
+  try {
+    c = await api('context', repo && repo !== currentRepo ? { repo } : {});
+  } catch { /* said below */ }
+  if (asked !== contextPreview.asked) return;
+  contextPreview.pending = null;
+  if (view !== 'settings' || form !== f) return;
+  if (c) Object.assign(contextPreview, { answer: c, read: { repo, version: f.version } });
+  else contextPreview.failed = true;
+  drawContextPreview();
 }
 
 // A smaller fold inside a group (the AI not in use, the places never recorded), closed at first.
