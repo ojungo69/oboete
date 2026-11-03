@@ -2622,6 +2622,7 @@ const TEXT = {
   my_work_refresh_started: ['Refreshing {n} now.', '{n} 件の更新を始めました。'],
   my_work_refresh_nothing: ['Nothing was due.', '更新するものはありませんでした。'],
   my_work_refresh_failed: ['The refresh could not start.', '更新を始められませんでした。'],
+  my_work_refresh_unknown: ['No answer came; the refresh may have started.', '応答がありませんでした。更新が始まっている可能性があります。'],
   my_work_refresh_waiting: ['Not started: My Work is waiting.', '始められませんでした: 待機中です。'],
   my_goals_tab_months: ['Month by month', '月ごと'],
   my_goals_asked_once: ['asked once', '1 回頼みました'],
@@ -9887,7 +9888,8 @@ async function myWorkRefresh() {
       }
     }
   } catch {
-    // Said as not started.
+    // No answer: the viewer may have written the request before it was lost (#828).
+    note = ['my_work_refresh_unknown'];
   }
   mw.refreshing = false;
   mw.refreshNote = note;

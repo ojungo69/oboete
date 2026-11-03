@@ -6065,7 +6065,7 @@ assert.equal(text(parts.note),'Refreshing 3 now.');
 const answer=async(reply)=>{posts.length=0;parts=slot({state:'written',at:day});parts.button.click();reply(posts[0]);await settle();return text(run('mw.line'));};
 assert((await answer(p=>p.resolve(json({state:'nothing_due'})))).endsWith('Nothing was due.'),'nothing due');
 assert((await answer(p=>p.resolve(json({code:'internal'},500)))).endsWith('The refresh could not start.'),'a refusal');
-assert((await answer(p=>p.reject(new Error('offline')))).endsWith('The refresh could not start.'),'no answer');
+assert((await answer(p=>p.reject(new Error('offline')))).endsWith('No answer came; the refresh may have started.'),'no answer: it may have started (#828)');
 const waiting=await answer(p=>p.resolve(json({state:'waiting',why:'bound',until:day,calls_a_day:100})));
 assert(waiting.startsWith('Waiting: the daily limit of 100 calls is reached.'),'a waiting answer is the line\'s own words');
 assert.equal(text(run('mw.refreshParts.note')),'Not started: My Work is waiting.');
@@ -6075,12 +6075,14 @@ posts.length=0;parts=slot({state:'none'});parts.button.focus();parts.button.clic
 posts[0].resolve(json({state:'off'}));await settle();
 assert.equal(parts.wrap.hidden,true,'no Refresh now once off');
 assert.equal(run('document.activeElement').dataset.focus,'settings','the focus to Open Settings');
-// The same when a read of the status line says My Work is off (cubic on #827).
-parts=slot({state:'none'});parts.button.focus();
-ctx.fetch=()=>Promise.resolve(json({state:'off'}));
-await run('myWorkLineRead()');
-assert.equal(parts.wrap.hidden,true,'no Refresh now once a read says off');
-assert.equal(run('document.activeElement').dataset.focus,'settings','a read moves the focus to Open Settings too');
+// The same when a read of the status line says My Work or its summaries are off (cubic on #827, #828).
+for(const state of ['off','summaries_off']){
+  parts=slot({state:'none'});parts.button.focus();
+  ctx.fetch=()=>Promise.resolve(json({state}));
+  await run('myWorkLineRead()');
+  assert.equal(parts.wrap.hidden,true,`no Refresh now once a read says ${state}`);
+  assert.equal(run('document.activeElement').dataset.focus,'settings',`a read saying ${state} moves the focus to Open Settings too`);
+}
 // A note stays until the status line says something new.
 parts=slot({state:'written',at:day});
 run('mw.refreshNote=["my_work_refresh_nothing"];myWorkRefreshShow()');
@@ -6139,6 +6141,8 @@ posts.length=0;
 ctx.fetch=(url,options={})=>new Promise((resolve,reject)=>posts.push({url,options,resolve,reject}));
 parts.button.click();posts[0].resolve(json({state:'started',due:2}));await settle();
 assert.equal(text(parts.note),'2 件の更新を始めました。');
+posts.length=0;parts.button.click();posts[0].reject(new Error('offline'));await settle();
+assert.equal(text(parts.note),'応答がありませんでした。更新が始まっている可能性があります。');
 run('lang="en"');
 console.log('PASS: Refresh now: shown while My Work is on, one request, each answer, the focus kept, JA/EN');
 }

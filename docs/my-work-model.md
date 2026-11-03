@@ -2233,12 +2233,14 @@ runs and leaves a run another live worker owns to it.
   Rules). It is marked busy
   (`aria-disabled`, so the focus stays on it) while its request is on its way, and a click then
   sends nothing. The answer follows it: "Refreshing 3 now." / 「3 件の更新を始めました。」,
-  "Nothing was due." / 「更新するものはありませんでした。」, or "The refresh could not start." /
-  「更新を始められませんでした。」 for a refusal or no answer. A `waiting` answer redraws the status
+  "Nothing was due." / 「更新するものはありませんでした。」, "The refresh could not start." /
+  「更新を始められませんでした。」 for a refusal, or "No answer came; the refresh may have started." /
+  「応答がありませんでした。更新が始まっている可能性があります。」 when no answer comes (the viewer may
+  have written the request before it was lost, #828). A `waiting` answer redraws the status
   line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
-  an `off` one (My Work turned off since the page read it) redraws the line and takes the button
-  away, its focus going to the line's Open Settings, as a read of the line that says My Work is off
-  does. The note stays until the status line says
+  an `off` or `summaries_off` one (My Work or its summaries turned off since the page read it)
+  redraws the line and takes the button away, its focus going to the line's Open Settings, as a
+  read of the line that says either does (#828). The note stays until the status line says
   something new. A redraw of the page keeps the focus on the button, whatever place it names (a save
   that ends meanwhile), as the search field does. The status a refresh answers is a read of the
   line as the others are (#722): a read begun before it that lands later is dropped, and one begun
