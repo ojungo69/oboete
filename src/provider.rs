@@ -2752,7 +2752,16 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
 /// `additional_tools` items the probe reads (core/src/context/world_state/top_level_tools.rs);
 /// `mcp_oauth_refresh_coordination` has the MCP client refresh OAuth through codex's credential
 /// store (rmcp-client/src/oauth_refresh_mode.rs), and the curator loads no MCP server.
-pub(crate) const CODEX_ON: [&str; 58] = [
+/// Those of 0.166.0 (codex-rs/features/src/lib.rs at rust-v0.166.0), none of them a tool:
+/// `plugin_discovery_prefetch` has the app server fetch the plugin directory, featured plugins
+/// and recommendations when it starts, inside `if config.plugins_enabled`
+/// (core-plugins/src/manager.rs), which the curator's `plugins` off keeps false;
+/// `prediction_preserve_parent_tools` keeps a parent's tool declarations in a prediction fork or a
+/// thread sample that has MCP off, with a notice that MCP tools are unavailable
+/// (core/src/session/mod.rs), so a fork gets no tool its parent lacks;
+/// `reasoning_effort_override` records a configuration item in the history when the chosen
+/// reasoning effort changes (core/src/session/reasoning_effort.rs).
+pub(crate) const CODEX_ON: [&str; 61] = [
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
     "auth_elicitation",
@@ -2785,8 +2794,11 @@ pub(crate) const CODEX_ON: [&str; 58] = [
     "mentions_v2",
     "multi_agent",
     "personality",
+    "plugin_discovery_prefetch",
     "plugin_sharing",
+    "prediction_preserve_parent_tools",
     "realtime_conversation",
+    "reasoning_effort_override",
     "remote_plugin",
     "resize_all_images",
     "shell_snapshot",
