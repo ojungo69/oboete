@@ -989,7 +989,11 @@ const TEXT = {
   simple_calls_subscription: ['Calls a day: {n}', '1 日の回数: {n}'],
   simple_calls_differ: ['Calls a day: its entries differ', '1 日の回数: 項目ごとに違います'],
   simple_for_entries: ['These settings apply to all {n} entries of this name.', 'この設定は、この名前の {n} 個の項目すべてに使います。'],
-  simple_entry_detail: ['More settings for {name}', '{name} の細かい設定'],
+  simple_entry: ['Entry settings', '項目の設定'],
+  simple_entries: ['Its {n} entries', '{n} 件の項目'],
+  simple_entry_of: ['Entry {n} of {of}', '項目 {n}/{of}'],
+  simple_entries_desc: ['Each entry keeps its own settings; the fields above set every entry of this AI while they are set. “Save provider” changes only its entry and sends no test request.', '各項目は自分の設定を持ちます。上の欄は、設定している間、この AI のすべての項目に使われます。「要約役を保存」はその項目だけを変更し、接続テストは行いません。'],
+  simple_entries_order: ['The arrows set which of its entries is tried first.', '矢印で、どの項目を先に使うかを決めます。'],
   simple_differs: ['These entries have different settings; check their details.', '同じ名前の接続先で設定が異なるため、詳しい設定をご確認ください。'],
   simple_add_ai: ['Add AI', 'AI を追加する'],
   simple_catalog_choose: ['Choose {name}', '{name} を選ぶ'],
@@ -1320,7 +1324,7 @@ const TEXT = {
   onboarding_unavailable: ['No eligible provider is configured for this tier. Applying it would leave summarizing off; inspect or add a provider below.', 'この段階で利用できる要約役は設定されていません。反映すると要約はオフになります。下で要約役を確認・追加してください。'],
   onboarding_draft_ready: ['Applied to the settings below, which save at once; a change that weakens a protection asks first in the status line.', '下の設定に反映しました。すぐに保存されます。保護を弱める変更は、状態の行で先に確認します。'],
   onboarding_no_assurance: ['A key file or CLI on PATH does not prove login, a free allowance or a working connection. Test a supported provider explicitly if needed; that test may send a request and incur a charge.', '鍵ファイルやCLIが見つかっても、ログイン・無料枠・接続成功は確認できません。必要なら対応する要約役を明示的に接続確認してください。その確認では通信や料金が発生する場合があります。'],
-  onboarding_providers: ['Provider entries', '要約役の設定'],
+  onboarding_providers: ['AI for summaries', '要約に使う AI'],
   onboarding_agents: ['Agent connections', 'エージェントの接続'],
   onboarding_doctor: ['Run diagnostics', '診断を実行'],
   onboarding_never: ['If the work in some repositories or folders must never be stored, add them under “{section}” before their next session.', '記録したくないリポジトリやフォルダーがあれば、次のセッションの前に「{section}」で指定してください。'],
@@ -1734,8 +1738,6 @@ const TEXT = {
   no_cap_row: ['Not stopped by its calls a day', '1 日の回数では止めません'],
   simple_no_cap_confirm: ['Remove the monthly limit', '確認して月額上限をなくす'],
   model_free: ['Only models whose names end in :free.', '名前が :free で終わるモデルだけ設定できます。'],
-  provider_entries_h: ['Individual providers', '要約役の個別設定'],
-  provider_entries_desc: ['Add an API or a local OpenAI-compatible server, or use an installed Claude/Codex CLI. Each Save provider changes only that entry. The other settings save as each one changes, checkboxes and arrows included. A save sends no test request.', 'API・ローカルの OpenAI 互換サーバー、またはインストール済みの Claude/Codex CLI を登録できます。「要約役を保存」はその項目だけを変更します。ほかの設定は、チェックや矢印も含めて、変えるたびにすぐ保存されます。保存では接続テストを行いません。'],
   provider_add: ['Add provider', '要約役を追加'],
   provider_list_moved: ['The AI entries changed while this waited, so nothing was sent. Choose again.', '待っている間に要約役の一覧が変わったため、送っていません。もう一度選んでください。'],
   provider_create: ['Create provider', '要約役を登録'],
@@ -1768,7 +1770,6 @@ const TEXT = {
   provider_source_builtin: ['Built-in entry', '既定の項目'],
   provider_source_gemini: ['Automatic Gemini entry', '自動追加の Gemini'],
   provider_position: ['{source} #{index}', '{source} #{index}'],
-  provider_order_desc: ['Arrows save the original individual order, including disabled entries. The effective order below includes name-group overrides and automatic Gemini placement. Editing a built-in entry saves the native list.', '矢印は、無効な項目も含めた個別の元の順番を保存します。実際の順番には、名前ごとの設定と Gemini の自動追加が反映されます。既定の項目を編集すると、個別の一覧が保存されます。'],
   provider_effective: ['Effective: {on}; order {order}; model {model}; timeout {timeout} s', '実際の設定: {on}、順番 {order}、モデル {model}、待ち時間 {timeout} 秒'],
   provider_saved_native: ['Saved: {on}; model {model}; timeout {timeout} s', '個別の保存値: {on}、モデル {model}、待ち時間 {timeout} 秒'],
   provider_default_model: ['Adapter default', 'アダプターの既定'],
@@ -3499,9 +3500,9 @@ function redactionSection(f) {
   hash.addEventListener('click', async () => {
     const bytes = new TextEncoder().encode(exact.value);
     exact.value = '';
-    hash.disabled = true;
     const fields = hash.closest('.settings');
     const taken = holdSettings(fields, { simple: 'redaction.exact' });
+    hash.disabled = true;
     try {
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       if (!currentSettings(f)) return;
@@ -4634,10 +4635,11 @@ async function keySave(route, button, body) {
   if (saveRun) {
     const loads = formLoads;
     const field = button.parentElement?.querySelector('input')?.dataset.field;
+    const waiting = $('panel').querySelector('.settings');
+    const taken = holdSettings(waiting);
     button.disabled = true;
-    const taken = holdSettings($('panel').querySelector('.settings'));
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { releaseSettings(null, taken); return; }
+    if (view !== 'settings' || !form) { releaseSettings(waiting, taken); return; }
     // Settings read meanwhile (a stale save, Settings entered again, a recovery, search's state or a
     // judge's test read again) may send the key elsewhere than the page showed as it was typed
     // (search's endpoint is config.toml's): it is not sent, and is typed again (Codex's review of
@@ -4647,7 +4649,7 @@ async function keySave(route, button, body) {
       // ended without drawing it (#814).
       button.disabled = false;
       drawSettings();
-      releaseSettings(null, taken);
+      releaseSettings(waiting, taken);
       setStatus(t('key_again'), true, lang);
       return;
     }
@@ -4670,8 +4672,8 @@ async function keySave(route, button, body) {
 async function keyWrite(route, button, body) {
   const mine = form;
   const fields = button.closest('.settings');
-  button.disabled = true;
   const taken = holdSettings(fields);
+  button.disabled = true;
   try {
     const { res, answer } = await memoryWrite(route, body);
     if (!currentSettings(mine)) return;
@@ -5423,8 +5425,8 @@ async function resumeProvider(name, button) {
   const mine = form;
   const fields = button.closest('.settings');
   const state = button.closest('.stopped-state');
-  button.disabled = true;
   const taken = holdSettings(fields);
+  button.disabled = true;
   try {
     const res = await fetch('/api/resume', {
       method: 'POST',
@@ -5734,29 +5736,32 @@ function providerOperationFailure(action, path, res, answer, fields, scope) {
 
 // One settings write at a time (Codex on #802): a save on its way goes first, and this write then
 // sends with the version that save's answer gave; a change made meanwhile waits for this one.
-async function providerOperation(action, button, body = null, path = '') {
+// `target`: given the write's selector mapping, where the focus goes once it is written (69b-3c-2).
+async function providerOperation(action, button, body = null, path = '', target = null) {
   if (saveRun) {
     // The page waits with it, so no other write is chosen by a list this one may change; and a
-    // list that changed meanwhile sends nothing (Codex and cubic on #802).
+    // list that changed meanwhile sends nothing (Codex and cubic on #802). The focus is read before
+    // the button is disabled (#819).
+    const waiting = $('panel').querySelector('.settings');
+    const taken = holdSettings(waiting);
     button.disabled = true;
-    const taken = holdSettings($('panel').querySelector('.settings'));
     const order = providerOrder(form);
     const loads = formLoads;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { releaseSettings(null, taken); return; }
+    if (view !== 'settings' || !form) { releaseSettings(waiting, taken); return; }
     // Settings read meanwhile may have brought config.toml changed elsewhere: a write made against
     // the page as it was, a key's above all, is not sent (as `keySave`; Codex's review of 69b-3c-1a).
     if (formLoads !== loads) {
       button.disabled = false;
       drawSettings();
-      releaseSettings(null, taken);
+      releaseSettings(waiting, taken);
       setStatus(t(path === '/key' ? 'key_again' : 'write_again'), true, lang);
       return;
     }
     if (action.selector && providerOrder(form) !== order) {
       button.disabled = false;
       drawSettings();
-      releaseSettings(null, taken);
+      releaseSettings(waiting, taken);
       setStatus(t('provider_list_moved'), true, lang);
       return;
     }
@@ -5765,7 +5770,7 @@ async function providerOperation(action, button, body = null, path = '') {
   let done;
   saveRun = new Promise((resolve) => { done = resolve; });
   try {
-    return await providerWrite(action, button, body, path);
+    return await providerWrite(action, button, body, path, target);
   } finally {
     saveRun = null;
     done();
@@ -5779,7 +5784,7 @@ function providerOrder(f) {
   return f?.providers.map((p) => `${p.name} ${selectorKey(p.selector)}`).join('\n');
 }
 
-async function providerWrite(action, button, body, path) {
+async function providerWrite(action, button, body, path, target = null) {
   const mine = form;
   clearSimpleReceipt();
   // The page and the entry as drawn now: a save waited for may have drawn them again (CodeRabbit
@@ -5792,17 +5797,31 @@ async function providerWrite(action, button, body, path) {
   const scope = line ?? (action.selector
     ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
     : fields.querySelector('.new-provider'));
-  button.disabled = true;
   const taken = holdSettings(fields);
+  button.disabled = true;
   try {
     const { res, answer, current } = await providerRequest(path, body || JSON.stringify({ version: mine.version, action }));
     if (!currentSettings(mine)) return;
     if (current) return reloadProviderSettings(current);
     if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
     form = mergeProviderSettings(answer, mine, action);
+    // Where the focus goes after this write (69b-3c-2): the entry's control at its place now, on the
+    // hold's record for its release. A focus the hold has not taken off yet goes off first, or the
+    // redraw would give it back to the old control by name.
+    if (target && taken) {
+      const inserted = geminiInsertion(mine, action);
+      const hasFiles = form.providers.some((p) => p.selector.source === 'file');
+      taken.keep = { ...target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted)), reveal: true };
+      if (document.activeElement === taken.control) taken.control.blur();
+    }
     simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
     if (path === '/key') simpleKeyName = null;
-    if (action.op === 'create' && action.entry.kind === 'openai') simpleKeyName = action.entry.name;
+    // Its line shows the key field for it only when it is the first entry of its name: the line's
+    // field is the first entry's (CodeRabbit on #820). Each creation sets it anew.
+    if (action.op === 'create') {
+      simpleKeyName = action.entry.kind === 'openai'
+        && form.providers.filter((p) => p.name === action.entry.name).length === 1 ? action.entry.name : null;
+    }
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
     askHeldAgain();
@@ -5842,9 +5861,11 @@ function providerKeyField(provider, simple = false) {
   i.addEventListener('input', () => { save.disabled = !i.value; });
   // Named by where its save sends it: the entry's place, name, kind, API and address. An entry whose
   // address the viewer does not show cannot be told from another: it keeps nothing (Codex's
-  // security review of #807).
+  // security review of #807). The AI line's field and its first entry's are one: only one of them is
+  // drawn, so a key typed in one goes to the other when the line takes its key field over or gives
+  // it back (Codex's review of 69b-3c-2).
   if (provider.saved?.base_url) {
-    keepSecret(i, JSON.stringify([simple ? 'line' : 'entry', selectorKey(provider.selector), provider.name,
+    keepSecret(i, JSON.stringify([selectorKey(provider.selector), provider.name,
       provider.saved.kind, provider.saved.api ?? null, provider.saved.base_url]), () => { save.disabled = !i.value; });
   }
   i.addEventListener('keydown', (event) => {
@@ -5853,7 +5874,8 @@ function providerKeyField(provider, simple = false) {
   save.addEventListener('click', () => {
     const body = JSON.stringify({ version: form.version, selector: provider.selector, key: i.value });
     i.value = '';
-    void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key');
+    void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key',
+      simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` }));
   });
   return el('div', 'key-input', i, save);
 }
@@ -5908,7 +5930,7 @@ async function previewProvider(provider, button, run = false) {
 function providerTestPreview(provider, preview, simple = false) {
   const run = el('button', 'small', t('provider_test_run'));
   run.type = 'button';
-  if (simple) run.dataset.simpleFocus = `test-run:${provider.name}`;
+  run.dataset.simpleFocus = simple ? `test-run:${provider.name}` : `entry-test-run:${selectorKey(provider.selector)}`;
   run.disabled = !preview.ready;
   run.addEventListener('click', () => void previewProvider(provider, run, true));
   return el('div', 'test-preview',
@@ -5937,7 +5959,7 @@ function providerTestResult(result) {
 function providerTest(provider, simple = false) {
   const button = el('button', 'quiet small', t('provider_preview'));
   button.type = 'button';
-  if (simple) button.dataset.simpleFocus = `test:${provider.name}`;
+  button.dataset.simpleFocus = simple ? `test:${provider.name}` : `entry-test:${selectorKey(provider.selector)}`;
   button.addEventListener('click', () => void previewProvider(provider, button));
   const nodes = [simple ? null : note(t('provider_preview_desc')), button];
   if (provider.preview) nodes.push(providerTestPreview(provider, provider.preview, simple));
@@ -6027,6 +6049,7 @@ function providerEditor(draft, provider, card) {
     draft.subscription = value;
     daily.hidden = value;
   });
+  subscribe.dataset.field = 'providers.subscription';
   // Owner decision 41 (#164): codex alone can draw on the account's credits.
   let credits = null;
   if (draft.kind === 'cli' && draft.cli === 'codex') {
@@ -6038,6 +6061,7 @@ function providerEditor(draft, provider, card) {
   const save = el('button', 'small', t(provider ? 'provider_save' : 'provider_create'));
   save.type = 'button';
   save.disabled = Boolean(unsupported);
+  if (provider) save.dataset.simpleFocus = `entry-save:${selectorKey(provider.selector)}`;
   save.addEventListener('click', () => {
     const field = providerValidation(draft);
     if (field) {
@@ -6047,13 +6071,20 @@ function providerEditor(draft, provider, card) {
       setStatus(t(message), true, lang);
       return;
     }
-    void providerOperation({ op: provider ? 'edit' : 'create', ...(provider ? { selector: provider.selector } : {}), entry: providerBody(draft) }, save);
+    // Saved, its Edit summary at its place then, its editor closed; created, its line (69b-3c-2).
+    void providerOperation({ op: provider ? 'edit' : 'create', ...(provider ? { selector: provider.selector } : {}), entry: providerBody(draft) }, save,
+      null, '', provider ? (map) => ({ simple: `entry-edit:${selectorKey(map(provider.selector))}` }) : () => createdFocus(draft.name));
   });
   const cancel = el('button', 'quiet small', t('provider_cancel'));
   cancel.type = 'button';
+  if (provider) cancel.dataset.simpleFocus = `entry-cancel:${selectorKey(provider.selector)}`;
   cancel.addEventListener('click', () => {
-    if (provider) { provider.edit = providerEdit(provider.name, provider.saved); provider.editing = false; }
-    else form.newProvider = null;
+    if (provider) {
+      provider.edit = providerEdit(provider.name, provider.saved);
+      provider.editing = false;
+      // The redraw keeps the focused control by name: its Edit summary keeps it, its editor closed.
+      card?.querySelector('.provider-edit')?.querySelector('summary')?.focus();
+    } else form.newProvider = null;
     drawSettings();
   });
   return el('div', 'provider-editor', main,
@@ -6069,79 +6100,127 @@ function providerKeyPanel(provider) {
     form.keyInput ? providerKeyField(provider) : note(t('provider_key_unsupported')));
 }
 
-function providerEntry(provider, nativeCount) {
+// One entry's block in its line (69b-3c-2). Its controls are named by its selector, as its key
+// field's are; its switch and arrows show beside other entries of its name only (one entry's line
+// switch and arrows are its own); its key panel unless the line shows its key field; its test unless
+// it is the line's first entry, whose test is the line's.
+function providerEntry(provider, line) {
   const saved = provider.saved;
   const unsupported = saved.kind === 'cli' && !['claude', 'codex'].includes(saved.cli);
   const source = t(`provider_source_${provider.selector.source}`);
   const position = t('provider_position', { source, index: provider.selector.index + 1 });
+  const sel = selectorKey(provider.selector);
+  const { name, entries, at, keyShown } = line;
+  const several = entries.length > 1;
   const card = el('article', 'provider-entry');
-  card.dataset.selector = selectorKey(provider.selector);
-  const enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value }, enabled));
-  enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
-  enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
-  const arrows = [-1, 1].map((direction) => {
+  card.dataset.selector = sel;
+  // Where the focus goes once a write of this entry is answered: its control at its place then
+  // (`mappedProviderSelector`), given to the write's hold (#815).
+  const after = (prefix, suffix = '') => (map) => ({ simple: `${prefix}${selectorKey(map(provider.selector))}${suffix}` });
+  let enabled = null;
+  if (several) {
+    enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value }, enabled, null, '', after('entry-on:')));
+    enabled.dataset.simpleFocus = `entry-on:${sel}`;
+    enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
+    enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
+  }
+  const arrows = several ? [-1, 1].map((direction) => {
     const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
     button.type = 'button';
     button.title = t(direction < 0 ? 'up' : 'down');
     button.setAttribute('aria-label', `${button.title}: ${provider.name} (${position})`);
-    const to = provider.selector.index + direction;
-    button.disabled = provider.selector.source === 'gemini' || to < 0 || to >= nativeCount;
-    button.addEventListener('click', () => void providerOperation({ op: 'move', selector: provider.selector, to }, button));
+    button.dataset.simpleFocus = `entry-move:${sel}:${direction}`;
+    // Swapped with the next entry of its name that way: the lower of the two goes to the upper's
+    // place, so every name keeps where it first appears in config and the names' order stays.
+    const other = entries[at + direction];
+    const [lower, upper] = direction < 0 ? [provider, other] : [other, provider];
+    button.disabled = !other || [provider, other].some((p) => p.selector.source === 'gemini');
+    button.addEventListener('click', () => void providerOperation({ op: 'move', selector: lower.selector, to: upper.selector.index },
+      button, null, '', after('entry-move:', `:${direction}`)));
     return button;
-  });
+  }) : [];
   const remove = el('button', 'quiet small', t('provider_remove'));
   remove.type = 'button';
+  remove.dataset.simpleFocus = `entry-remove:${sel}`;
   remove.addEventListener('click', () => {
     if (window.confirm(t('provider_remove_confirm', { name: provider.name, source, index: provider.selector.index + 1 }))) {
-      void providerOperation({ op: 'remove', selector: provider.selector }, remove);
+      void providerOperation({ op: 'remove', selector: provider.selector }, remove, null, '', () => ({ simple: [`on:${name}`, 'catalog.open'] }));
     }
   });
-  const edit = el('details', 'provider-edit', el('summary', null, t('provider_edit')));
+  const summary = el('summary', null, t('provider_edit'));
+  summary.dataset.simpleFocus = `entry-edit:${sel}`;
+  const edit = el('details', 'provider-edit', summary);
   edit.open = provider.editing;
   edit.addEventListener('toggle', () => { provider.editing = edit.open; });
   edit.append(providerEditor(provider.edit, provider, card));
   const model = (value) => value ?? t('provider_default_model');
   const key = saved.key === 'none' && saved.kind === 'openai' ? 'provider_key_none' : `key_${saved.key.replaceAll('-', '_')}`;
-  card.append(...present([el('div', 'provider-header', el('h4', null, provider.name), note(position),
-      el('label', 'check', enabled, t('provider_enabled')), el('div', 'move', ...arrows), remove),
+  card.append(...present([
+    several ? el('h4', null, t('simple_entry_of', { n: at + 1, of: entries.length })) : null,
+    several || provider.selector.source !== 'file' ? note(position) : null,
+    el('div', 'provider-header', enabled ? el('label', 'check', enabled, t('provider_enabled')) : null,
+      arrows.length ? el('div', 'move', ...arrows) : null, remove),
     note(t('provider_saved_native', { on: t(saved.enabled ? 'value_on' : 'value_off'), model: model(saved.model), timeout: saved.timeout_s })),
     note(t('provider_effective', { on: t(provider.effective.on ? 'value_on' : 'value_off'), order: provider.effective.order + 1,
       model: model(provider.effective.model), timeout: provider.effective.timeout_s })),
     saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
     unsupported ? note(t('provider_unsupported_cli')) : null,
     note(t(key)),
-    providerKeyPanel(provider),
+    keyShown ? null : providerKeyPanel(provider),
     unsupported ? null : edit,
-    providerTest(provider)]));
+    at === 0 ? null : providerTest(provider)]));
   return card;
 }
 
-function providersSection() {
-  const section = el('section', 'provider-entries', el('h3', null, t('provider_entries_h')),
-    el('p', 'desc', t('provider_entries_desc')), note(t('provider_order_desc')));
-  const nativeCount = form.providers.filter((p) => p.selector.source !== 'gemini').length;
-  section.append(...form.providers.map((provider) => providerEntry(provider, nativeCount)));
-  if (form.newProvider) {
-    const draft = form.newProvider;
-    const card = el('article', 'provider-entry new-provider', el('h4', null, t('provider_add')));
-    const options = { openai: 'provider_http', claude: 'provider_cli_claude', codex: 'provider_cli_codex' };
-    const type = el('select', null, ...Object.entries(options).map(([value, key]) => {
-      const option = el('option', null, t(key)); option.value = value; return option;
-    }));
-    type.value = draft.kind === 'openai' ? 'openai' : draft.cli;
-    type.addEventListener('change', () => {
-      draft.kind = type.value === 'openai' ? 'openai' : 'cli';
-      if (draft.kind === 'cli') {
-        draft.cli = type.value;
-        draft.limits.usd_per_mtok_in = '0';
-        draft.limits.usd_per_mtok_out = '0';
-      }
-      drawSettings();
-    });
-    card.append(el('label', 'field', el('span', null, t('provider_type')), type), providerEditor(draft, null, card));
-    section.append(card);
-  }
-  return section;
+// Where the focus goes once a new entry is created (69b-3c-2), on the form its answer gave: the
+// created entry's own key field. The first entry of its name has it on its line, which shows it after
+// an HTTP entry's creation (`simpleKeyName`); a later one in its block, as the line's field is the
+// first entry's and a key typed there would go to that one (CodeRabbit on #820). Else its line's
+// switch, else Add AI.
+function createdFocus(name) {
+  // Creation appends one native entry, even if it also materializes automatic Gemini.
+  const created = form.providers.filter((p) => p.selector.source !== 'gemini').at(-1);
+  if (created?.name !== name) return { simple: [`on:${name}`, 'catalog.open'] };
+  const own = `key:entry:${selectorKey(created.selector)}`;
+  const first = form.providers.find((p) => p.name === name) === created;
+  return { simple: first ? [`key:${name}`, own, 'catalog.open'] : [own, `on:${name}`, 'catalog.open'] };
+}
+
+// An AI line's entries, in config order, in a fold at the line's end (69b-3c-2), open while one of
+// them is edited, or as last left.
+function lineEntries(row, providers, keyShown) {
+  if (!providers.length) return null;
+  const several = providers.length > 1;
+  const fold = el('details', 'simple-entries', el('summary', null, t(several ? 'simple_entries' : 'simple_entry', { n: providers.length })),
+    note(t('simple_entries_desc')), several ? note(t('simple_entries_order')) : null,
+    ...providers.map((provider, at) => providerEntry(provider, { name: row.name, entries: providers, at, keyShown: keyShown && at === 0 })));
+  const key = `entries:${row.name}`;
+  fold.open = providers.some((provider) => provider.editing) || (groupOpen.get(key) ?? false);
+  fold.addEventListener('toggle', () => { if (fold.isConnected) groupOpen.set(key, fold.open); });
+  return fold;
+}
+
+// The new entry's form, opened by "Add AI"'s own choice; each entry is edited in its line (69b-3c-2).
+function newProviderSection() {
+  if (!form.newProvider) return null;
+  const draft = form.newProvider;
+  const card = el('article', 'provider-entry new-provider', el('h4', null, t('provider_add')));
+  const options = { openai: 'provider_http', claude: 'provider_cli_claude', codex: 'provider_cli_codex' };
+  const type = el('select', null, ...Object.entries(options).map(([value, key]) => {
+    const option = el('option', null, t(key)); option.value = value; return option;
+  }));
+  type.value = draft.kind === 'openai' ? 'openai' : draft.cli;
+  type.addEventListener('change', () => {
+    draft.kind = type.value === 'openai' ? 'openai' : 'cli';
+    if (draft.kind === 'cli') {
+      draft.cli = type.value;
+      draft.limits.usd_per_mtok_in = '0';
+      draft.limits.usd_per_mtok_out = '0';
+    }
+    drawSettings();
+  });
+  card.append(el('label', 'field', el('span', null, t('provider_type')), type), providerEditor(draft, null, card));
+  return el('section', 'provider-new', card);
 }
 
 // The save's body, or the field a value is wrong in.
@@ -6520,7 +6599,7 @@ function onboardingSection(f) {
       link('OpenCode Go','https://opencode.ai/docs/go/'), ' · ',
       link('Terms','https://opencode.ai/legal/terms-of-service'), ' · ',
       link('Privacy','https://opencode.ai/legal/privacy-policy')),
-    el('div','actions',jump('.provider-entries','onboarding_providers'),
+    el('div','actions',jump('.simple-providers','onboarding_providers'),
       jump('.agent-setup','onboarding_agents'),
       jump('.doctor-diagnostics','onboarding_doctor')),
     el('p','desc',t('onboarding_never',{section:t('never_h')})),jump('.never-record','never_h'),
@@ -6679,23 +6758,32 @@ function clearSimpleReceipt() {
 }
 
 function simpleFocus(key) {
-  if (typeof key !== 'string' || !key) return;
-  const controls = $('panel').querySelectorAll('button, input, select');
+  // A list: the first of its keys found (69b-3c-2).
+  if (Array.isArray(key)) return key.some((one) => simpleFocus(one));
+  if (typeof key !== 'string' || !key) return false;
+  const controls = $('panel').querySelectorAll('button, input, select, summary');
   const keys = [key];
-  if (key?.startsWith('move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
-  if (/^(resume|resume-more|key|key-save):/.test(key || '')) keys.push(key.replace(/^[^:]+:/, 'on:'));
-  if (key?.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
+  if (key.startsWith('move:') || key.startsWith('entry-move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
+  // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
+  // cubic on #820).
+  if (key.startsWith('key-save:')) keys.push(key.replace('key-save:', 'key:'));
+  if (/^(resume|resume-more|key|key-save):/.test(key)) keys.push(key.replace(/^[^:]+:/, 'on:'));
+  if (key.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
+  if (key.startsWith('entry-test-run:')) keys.push(key.replace('entry-test-run:', 'entry-test:'));
   // A model name saved closes its field: the line's model choice takes the focus.
-  if (key?.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
+  if (key.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
   if (key === 'mask.confirm') keys.push('redaction.enabled');
   if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
   if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
-  if (key === 'catalog.save' && simpleKeyName) keys.push(`key:${simpleKeyName}`);
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
+  if (!next) return false;
   // A control inside a closed fold cannot take the focus: open the folds around it first (decision
-  // 69; Codex, cubic and CodeRabbit on #801). Each fold's toggle keeps it open through redraws.
-  for (let fold = next?.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
-  next?.focus({ preventScroll: true });
+  // 69; Codex, cubic and CodeRabbit on #801). Each fold's toggle keeps it open through redraws. A
+  // summary takes it with its own fold as it is: only the folds around that fold open (69b-3c-2).
+  const from = next.tagName === 'SUMMARY' ? next.parentElement?.parentElement : next.parentElement;
+  for (let fold = from?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
+  next.focus({ preventScroll: true });
+  return true;
 }
 
 // #810: the control that had the focus when a read or write started (the button pressed, or the
@@ -6714,16 +6802,14 @@ function focusAgain(was, fallback) {
 
 // A link to a detailed control: the folds around it opened, its group's More settings among them,
 // and the control focused (decision 69, 69b-2).
-function detailedSettingsLink(key, selector, vars = {}, provider = null) {
+function detailedSettingsLink(key, selector, vars = {}) {
   const button = el('button', 'quiet small simple-link', t(key, vars));
   button.type = 'button';
-  // Named, so a redraw gives the focus back to it (#810): by its entry, or by the name it says.
-  button.dataset.simpleFocus = `link:${key}:${provider ? selectorKey(provider.selector) : vars.name ?? ''}`;
+  // Named, so a redraw gives the focus back to it (#810): by the name it says.
+  button.dataset.simpleFocus = `link:${key}:${vars.name ?? ''}`;
   button.addEventListener('click', () => {
-    if (provider) provider.editing = true;
     drawSettings();
-    const target = provider ? [...$('panel').querySelectorAll('.provider-entry')]
-      .find(node => node.dataset.selector === selectorKey(provider.selector)) : $('panel').querySelector(selector);
+    const target = $('panel').querySelector(selector);
     for (let details = target?.closest('details'); details; details = details.parentElement?.closest('details')) details.open = true;
     if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView?.({ block: 'start' }); }
   });
@@ -6768,16 +6854,16 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
   const block = button.closest('.simple-block').dataset.simpleBlock;
   // A save that holds the page while it waits for its turn releases that hold here when it sends
   // nothing; one that holds nothing has nothing to release (Codex's review of 69b-3c-1c).
-  let taken = null;
+  let taken = null, waiting = null;
   if (saveRun) {
-    const waiting = $('panel').querySelector('.settings');
+    waiting = $('panel').querySelector('.settings');
     if (hold) {
-      button.disabled = true;
       taken = holdSettings(waiting);
+      button.disabled = true;
     }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { releaseSettings(null, taken); return; }
+    if (view !== 'settings' || !form) { if (hold) releaseSettings(waiting, taken); return; }
     // The answer waited for drew the page again: the control as drawn now waits for this save, and
     // the page with it, as a provider's write does (#802).
     button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
@@ -6789,7 +6875,7 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
       timeout_s: row.timeout_s, model: row.model })) }));
   if (change(body, s) === false) {
     drawSettings();
-    releaseSettings(null, taken);
+    if (hold) releaseSettings(waiting, taken);
     return;
   }
   let done;
@@ -6874,7 +6960,6 @@ function simpleProviderRow(f, row, index, chain, position) {
     }));
     return button;
   });
-  const detail = () => detailedSettingsLink('simple_entry_detail', '.provider-entries', { name: label }, provider);
   const models = simpleProviderModels(row, catalog?.models || []);
   // What `[chain]` saves for this name, which the line's fields set (69b-3c).
   const savedRow = f.savedSettings.chain.find((entry) => entry.name === row.name) ?? row;
@@ -6953,6 +7038,11 @@ function simpleProviderRow(f, row, index, chain, position) {
     timeoutDiffers ? '' : String(row.effective_timeout_s));
   const resume = f.stopped?.includes(row.name) ? resumeButton(row.name) : null;
   const needs = row.key === 'missing' || simpleKeyName === row.name || Boolean(resume);
+  // The line's key field, when it shows one, is its first entry's: that entry's block then shows no
+  // second one. A line whose key file is another line's shows none, and its entry keeps its own: a
+  // key saved through the other changes only the other's file (69b-3c-2).
+  const shared = Boolean(keyOwner) && keyOwner.name !== row.name && row.key === 'missing';
+  const keyShown = !shared && Boolean(provider) && (row.key === 'missing' || simpleKeyName === row.name);
   const line = el('summary', 'simple-provider-line', position === null ? null : el('span', 'simple-order', String(position)),
     el('span', 'simple-provider-name', label), el('span', 'simple-provider-model', row.effective_model ?? t('simple_model_default')),
     el('span', `simple-state ${status}`, simpleStatusText(row, status, f)));
@@ -6963,11 +7053,9 @@ function simpleProviderRow(f, row, index, chain, position) {
       el('div', 'move', ...arrows)),
     model, calls, timeout, row.entries > 1 ? el('p', 'desc', t('simple_for_entries', { n: row.entries })) : null,
     row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
-    keyOwner && keyOwner.name !== row.name && row.key === 'missing'
-      ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
-      : provider && (row.key === 'missing' || simpleKeyName === row.name)
-        ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
-    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, detail());
+    shared ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
+      : keyShown ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
+    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, lineEntries(row, providers, keyShown));
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
   fold.open = groupOpen.get(key) ?? needs;
@@ -7168,14 +7256,16 @@ function simpleCatalog(f) {
     });
     return el('li', null, el('strong', null, t(entry.label)), listed ? note(t('simple_catalog_listed')) : null, choose);
   });
-  const catalog = el('details', 'simple-catalog', el('summary', null, t('simple_add_ai')), el('ul', null, ...rows));
+  const add = el('summary', null, t('simple_add_ai'));
+  add.dataset.simpleFocus = 'catalog.open';
+  const catalog = el('details', 'simple-catalog', add, el('ul', null, ...rows));
   if (!f.newProvider || !f.simpleCatalog?.name) return catalog;
   const draft = f.newProvider, entry = f.simpleCatalog;
   const save = el('button', 'small', t('simple_add_save'));
   save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
   save.addEventListener('click', () => {
     if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
-    void providerOperation({ op: 'create', entry: providerBody(draft) }, save);
+    void providerOperation({ op: 'create', entry: providerBody(draft) }, save, null, '', () => createdFocus(draft.name));
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));
   cancel.type = 'button'; cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; drawSettings(); });
@@ -7538,7 +7628,7 @@ function drawSettings() {
       el('section', null,
         el('label', 'field', el('span', null, t('gemini_label')), gemini,
           saved(t(geminiOptions[f.saved.gemini ?? 'none'])), note(t('gemini_desc')))),
-      providersSection(),
+      newProviderSection(),
       el('section', null,
         el('h3', null, t('stopped_h')), el('p', 'desc', t('stopped_desc')), stoppedState()))),
     my_work: more('my_work', generalForm(
@@ -7650,11 +7740,24 @@ function entryOf(control) {
   return control.closest('.provider-entry')?.dataset.selector ?? null;
 }
 
+// A write's target may be elsewhere than the control pressed (an entry moved, a line created or
+// gone): brought to the middle of the window when it is out of it, or under the page's header or the
+// status line held below it on Settings; left where it is when it is in sight (69b-3c-2).
+function reveal(control) {
+  const r = control.getBoundingClientRect?.();
+  if (!r) return;
+  const status = $('status');
+  const covered = Math.max(document.querySelector?.('header.bar')?.getBoundingClientRect().bottom ?? 0,
+    status.textContent ? status.getBoundingClientRect?.().bottom ?? 0 : 0);
+  if (r.top < covered || r.bottom > window.innerHeight) control.scrollIntoView?.({ block: 'center' });
+}
+
 function focusBack(keep) {
   if (keep?.simple) {
-    simpleFocus(keep.simple);
+    const found = simpleFocus(keep.simple);
     const c = document.activeElement;
     if (c?.dataset?.simpleFocus === keep.simple) caretBack(c, keep);
+    if (found && keep.reveal) reveal(c);
     return;
   }
   if (!keep) return;
@@ -9878,7 +9981,7 @@ async function pollMaintenance() {
   // the poll (#817), and one slower than the poll is not dropped for the next (Codex's review of
   // 69b-3c-1c).
   if (view === 'settings' && form && !restsPolled) {
-    const read = refreshRests().finally(() => { if (restsPolled === read) restsPolled = null; });
+    const read = refreshRests().catch((error) => console.error(error)).finally(() => { if (restsPolled === read) restsPolled = null; });
     restsPolled = read;
   }
   const d = embeddingDraft;
