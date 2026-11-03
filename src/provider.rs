@@ -2859,7 +2859,7 @@ pub(crate) fn codex_exec_flags(profile: &str) -> Vec<String> {
 /// no thinking. On the dev labels a curator call without thinking took 16.6 s at the median against
 /// 101 s, refused no answer against 5 of 125, and recalled 24 decisions of 44 against 19
 /// (docs/milestone-3.md). The same settings serve the digest and the judge, which were not measured.
-const CLAUDE_SETTINGS: &str = r#"{"disableAllHooks":true,"alwaysThinkingEnabled":false,"enabledPlugins":{"agents-md@builtin":false,"telemetry@builtin":false,"cc-plugin-plugin-authoring@builtin":false}}"#;
+const CLAUDE_SETTINGS: &str = r#"{"disableAllHooks":true,"alwaysThinkingEnabled":false,"enabledPlugins":{"agents-md@builtin":false,"telemetry@builtin":false,"cc-plugin-plugin-authoring@builtin":false,"cc-plugin-privacy@builtin":false}}"#;
 
 fn headless_command(
     cli: &str,
@@ -4051,6 +4051,7 @@ pub(crate) mod tests {
             "agents-md@builtin",
             "telemetry@builtin",
             "cc-plugin-plugin-authoring@builtin",
+            "cc-plugin-privacy@builtin",
         ] {
             assert_eq!(settings["enabledPlugins"][builtin], false, "{builtin}");
         }
