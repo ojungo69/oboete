@@ -2708,6 +2708,27 @@ console.log('PASS: the caps\' No cap switches');
         :json({code:'bad_request'},400));await settled();
       assert.deepEqual([held(),focused(),Boolean(simple('test-run:alpha'))],[false,'test:alpha',ok],`a preview ${ok?'drawn':'refused'}: the focus on its button`);
     }
+    // A preview asked, Settings left and opened again, another asked, then the first answered: the
+    // first's end takes none of the second's focus (Codex's review of 69b-3c-1c).
+    {
+      f=draw(ai(['alpha']));
+      const [first,giveFirst]=later();const [second,giveSecond]=later();answers=[first,second];
+      const preview=v=>json({version:v,selector:{source:'config',index:0},ready:true,destination:'http://127.0.0.1:9/v1',model:'model-alpha',
+        fixture:'made-up fixture',estimated_input_tokens:10,max_output_tokens:5,possible_charge:false,estimated_usd:0,monthly_cap_usd:5});
+      const oldVersion=f.version;
+      simple('test:alpha').focus();simple('test:alpha').click();await settle();
+      const opened=ai(['alpha'],{version:'v7'});
+      const inner=ctx.fetch;
+      ctx.fetch=(url,options)=>url.startsWith('/api/settings?')?Promise.resolve(json(opened))
+        :url.startsWith('/api/hidden?')?Promise.resolve(json([])):inner(url,options);
+      ctx.ui.setView('timeline');ctx.ui.setView('settings');(await ctx.ui.showSettings())();await settled();
+      ctx.fetch=inner;
+      simple('test:alpha').focus();simple('test:alpha').click();await settle();
+      assert.deepEqual([posted.length,held(),document.activeElement],[2,true,document.body],'the second preview is held');
+      giveFirst(preview(oldVersion));await settled();
+      giveSecond(preview('v7'));await settled();
+      assert.deepEqual([held(),focused()],[false,'test:alpha'],'the second answered, the focus is on its button');
+    }
     // More settings' entry: its preview's button has no name a redraw finds, but refused, it stays
     // on the page and has the focus again.
     {

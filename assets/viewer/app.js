@@ -3501,7 +3501,7 @@ function redactionSection(f) {
     exact.value = '';
     hash.disabled = true;
     const fields = hash.closest('.settings');
-    holdSettings(fields, { simple: 'redaction.exact' });
+    const taken = holdSettings(fields, { simple: 'redaction.exact' });
     try {
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       if (!currentSettings(f)) return;
@@ -3516,7 +3516,7 @@ function redactionSection(f) {
       if (currentSettings(f)) setStatus(t('redaction_hash_failed'), true, lang);
     } finally {
       bytes.fill(0);
-      releaseSettings(fields);
+      releaseSettings(fields, taken);
     }
   });
   // Masking on or off is the Privacy group's own switch, with its confirmation (decision 69, 69b-2).
@@ -4635,9 +4635,9 @@ async function keySave(route, button, body) {
     const loads = formLoads;
     const field = button.parentElement?.querySelector('input')?.dataset.field;
     button.disabled = true;
-    holdSettings($('panel').querySelector('.settings'));
+    const taken = holdSettings($('panel').querySelector('.settings'));
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { releaseSettings(null); return; }
+    if (view !== 'settings' || !form) { releaseSettings(null, taken); return; }
     // Settings read meanwhile (a stale save, Settings entered again, a recovery, search's state or a
     // judge's test read again) may send the key elsewhere than the page showed as it was typed
     // (search's endpoint is config.toml's): it is not sent, and is typed again (Codex's review of
@@ -4647,7 +4647,7 @@ async function keySave(route, button, body) {
       // ended without drawing it (#814).
       button.disabled = false;
       drawSettings();
-      releaseSettings(null);
+      releaseSettings(null, taken);
       setStatus(t('key_again'), true, lang);
       return;
     }
@@ -4671,7 +4671,7 @@ async function keyWrite(route, button, body) {
   const mine = form;
   const fields = button.closest('.settings');
   button.disabled = true;
-  holdSettings(fields);
+  const taken = holdSettings(fields);
   try {
     const { res, answer } = await memoryWrite(route, body);
     if (!currentSettings(mine)) return;
@@ -4690,7 +4690,7 @@ async function keyWrite(route, button, body) {
     if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
   } finally {
     button.disabled = false;
-    releaseSettings(fields);
+    releaseSettings(fields, taken);
   }
 }
 
@@ -5274,7 +5274,7 @@ function preferenceSection(f) {
     const fields = action.closest('.settings');
     draft.sending = true;
     draft.result = null;
-    holdSettings(fields, { field: 'preference.text' });
+    const taken = holdSettings(fields, { field: 'preference.text' });
     save.disabled = true;
     try {
       const { res, answer } = await memoryWrite('preferences', { text: draft.text, apply_to_all_repos: true });
@@ -5292,7 +5292,7 @@ function preferenceSection(f) {
       draft.result = { state: 'unknown' };
       draft.confirmed = false;
       if (renderPreference(draft)) setStatus(t('memory_result_unknown'), true, lang);
-    } finally { draft.sending = false; save.disabled = preferenceBlocked(draft); releaseSettings(fields); }
+    } finally { draft.sending = false; save.disabled = preferenceBlocked(draft); releaseSettings(fields, taken); }
   });
   const next = el('button', 'quiet small', t('preference_new'));
   next.type = 'button';
@@ -5424,7 +5424,7 @@ async function resumeProvider(name, button) {
   const fields = button.closest('.settings');
   const state = button.closest('.stopped-state');
   button.disabled = true;
-  holdSettings(fields);
+  const taken = holdSettings(fields);
   try {
     const res = await fetch('/api/resume', {
       method: 'POST',
@@ -5450,7 +5450,7 @@ async function resumeProvider(name, button) {
     if (view === 'settings' && form === mine) setStatus(t('network_failed'), true, lang);
   } finally {
     button.disabled = false;
-    releaseSettings(fields);
+    releaseSettings(fields, taken);
   }
 }
 
@@ -5739,24 +5739,24 @@ async function providerOperation(action, button, body = null, path = '') {
     // The page waits with it, so no other write is chosen by a list this one may change; and a
     // list that changed meanwhile sends nothing (Codex and cubic on #802).
     button.disabled = true;
-    holdSettings($('panel').querySelector('.settings'));
+    const taken = holdSettings($('panel').querySelector('.settings'));
     const order = providerOrder(form);
     const loads = formLoads;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { releaseSettings(null); return; }
+    if (view !== 'settings' || !form) { releaseSettings(null, taken); return; }
     // Settings read meanwhile may have brought config.toml changed elsewhere: a write made against
     // the page as it was, a key's above all, is not sent (as `keySave`; Codex's review of 69b-3c-1a).
     if (formLoads !== loads) {
       button.disabled = false;
       drawSettings();
-      releaseSettings(null);
+      releaseSettings(null, taken);
       setStatus(t(path === '/key' ? 'key_again' : 'write_again'), true, lang);
       return;
     }
     if (action.selector && providerOrder(form) !== order) {
       button.disabled = false;
       drawSettings();
-      releaseSettings(null);
+      releaseSettings(null, taken);
       setStatus(t('provider_list_moved'), true, lang);
       return;
     }
@@ -5793,7 +5793,7 @@ async function providerWrite(action, button, body, path) {
     ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
     : fields.querySelector('.new-provider'));
   button.disabled = true;
-  holdSettings(fields);
+  const taken = holdSettings(fields);
   try {
     const { res, answer, current } = await providerRequest(path, body || JSON.stringify({ version: mine.version, action }));
     if (!currentSettings(mine)) return;
@@ -5815,7 +5815,7 @@ async function providerWrite(action, button, body, path) {
     }
   } finally {
     button.disabled = false;
-    releaseSettings(fields);
+    releaseSettings(fields, taken);
   }
 }
 
@@ -5875,7 +5875,7 @@ async function previewProvider(provider, button, run = false) {
   const preview = provider.preview;
   if (run && (!preview?.ready || !providerPreviewMatches(preview, provider, mine.version))) return;
   const body = JSON.stringify({ version: mine.version, selector: provider.selector, ...(run ? { confirmed: true } : {}) });
-  holdSettings(fields);
+  const taken = holdSettings(fields);
   button.disabled = true;
   try {
     const { res, answer, current } = await providerRequest(run ? '/test' : '/test/preview', body);
@@ -5900,7 +5900,7 @@ async function previewProvider(provider, button, run = false) {
   } catch {
     if (currentSettings(mine)) setStatus(t('network_failed'), true, lang);
   } finally {
-    releaseSettings(fields);
+    releaseSettings(fields, taken);
     button.disabled = false;
   }
 }
@@ -6340,10 +6340,9 @@ async function saveSettings(button, simple = null, autosaved = false) {
   // as an AI line's field does (`hold: false`, 69b-3c).
   const held = !autosaved && simple?.hold !== false;
   const fields = button.closest('.settings');
-  if (held) {
-    button.disabled = true;
-    holdSettings(fields);
-  } else if (autosaved) fields.inert = false;
+  const taken = held ? holdSettings(fields) : null;
+  if (held) button.disabled = true;
+  else if (autosaved) fields.inert = false;
   try {
     // 'same-origin': under the document's no-referrer policy a same-origin POST would carry
     // `Origin: null`, which the viewer refuses.
@@ -6375,7 +6374,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
     // What holds nothing releases nothing: another write may hold the page now.
     if (held) {
       button.disabled = false;
-      releaseSettings(fields);
+      releaseSettings(fields, taken);
     }
     if (simple && simple.hold === false && currentSettings(mine)) clearSimpleReceipt();
     else if (simple && currentSettings(mine)) {
@@ -6767,18 +6766,18 @@ function usdCents(v) {
 async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
   clearSimpleReceipt();
   const block = button.closest('.simple-block').dataset.simpleBlock;
-  // Only a save that holds the page while it waits for its turn releases that hold here: one that
-  // holds nothing takes no other write's focus with it (Codex's review of 69b-3c-1c).
-  const waitHeld = hold && Boolean(saveRun);
+  // A save that holds the page while it waits for its turn releases that hold here when it sends
+  // nothing; one that holds nothing has nothing to release (Codex's review of 69b-3c-1c).
+  let taken = null;
   if (saveRun) {
     const waiting = $('panel').querySelector('.settings');
-    if (waitHeld) {
+    if (hold) {
       button.disabled = true;
-      holdSettings(waiting);
+      taken = holdSettings(waiting);
     }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { if (waitHeld) releaseSettings(null); return; }
+    if (view !== 'settings' || !form) { releaseSettings(null, taken); return; }
     // The answer waited for drew the page again: the control as drawn now waits for this save, and
     // the page with it, as a provider's write does (#802).
     button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
@@ -6790,7 +6789,7 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
       timeout_s: row.timeout_s, model: row.model })) }));
   if (change(body, s) === false) {
     drawSettings();
-    if (waitHeld) releaseSettings(null);
+    releaseSettings(null, taken);
     return;
   }
   let done;
@@ -7600,13 +7599,16 @@ function drawSettings() {
 }
 
 // A write that holds Settings (#815): Chrome takes the focus off a page made inert at the next frame
-// and leaves it on the body, where no redraw finds it. A hold records what has the focus; its
-// release, after the rest of it (its button enabled again) and the redraw it makes, gives a focus
-// still on the body back to that control, or to the one drawn in its place.
+// and leaves it on the body, where no redraw finds it. A hold records what has the focus and returns
+// the record its release takes; one started with the focus on the body (a write after its wait for
+// its turn) carries on the record before it. The release, after the rest of it (its button enabled
+// again) and the redraw it makes, gives a focus still on the body back to that control, or to the
+// one drawn in its place; only while its record is the last one taken, so a write ending late takes
+// no newer hold's focus (Codex's review of 69b-3c-1c).
 let heldFocus = null;
 // `fallback`: where the focus goes when its control has no name a redraw finds.
 function holdSettings(fields, fallback = null) {
-  if (!fields) return;
+  if (!fields) return null;
   const a = document.activeElement;
   if (a && a !== document.body && $('panel').contains(a)) {
     // A key's button is drawn again disabled, its field emptied: the field takes the focus.
@@ -7614,13 +7616,14 @@ function holdSettings(fields, fallback = null) {
     heldFocus = { control: a, keep: focusKeep() ?? (field ? { field } : fallback) };
   }
   fields.inert = true;
+  return heldFocus;
 }
-function releaseSettings(fields) {
+function releaseSettings(fields, held) {
   if (fields) fields.inert = false;
   void Promise.resolve().then(() => {
-    const held = heldFocus;
+    if (!held || heldFocus !== held) return;
     heldFocus = null;
-    if (!held || view !== 'settings' || ![null, document.body].includes(document.activeElement)) return;
+    if (view !== 'settings' || ![null, document.body].includes(document.activeElement)) return;
     if ($('panel').contains(held.control) && !held.control.disabled) held.control.focus();
     else focusBack(held.keep);
   });
