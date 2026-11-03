@@ -5024,6 +5024,40 @@ mod tests {
         assert_eq!(r.asked().len(), 1);
     }
 
+    /// CodeRabbit on #830: a resident viewer that takes the lookup's whole wait leaves no search to
+    /// the hook, whose answer no one would hear: none, though the hook's own search finds the claim.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_viewer_past_the_lookups_wait_leaves_no_search_after_it() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let after = |wait| std::time::Instant::now() + wait;
+        let own = crate::memory_lookup::looked_up(
+            &home,
+            &payload,
+            after(Duration::from_secs(30)),
+            NOTE_ROOM,
+        );
+        assert!(own.unwrap().is_some());
+        let _r = Resident::serve(
+            &home,
+            2_000,
+            Some(json!({"text": "late"})),
+            Duration::from_secs(3),
+        );
+        let late = crate::memory_lookup::looked_up(
+            &home,
+            &payload,
+            after(Duration::from_millis(300)),
+            NOTE_ROOM,
+        );
+        assert_eq!(late.unwrap(), None);
+    }
+
     /// N5 (docs/memory-lookup.md): a lookup whose search has not answered within its wait gives
     /// nothing, as claude-mem's bridge gives up on its worker's search after 3 s, and the native
     /// lookup goes on. Here a forget committing holds the search back.

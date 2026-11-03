@@ -287,7 +287,7 @@ pub(crate) fn answer_within(
 /// `answer_within`'s answer, on its thread: none for a call that is no lookup, with
 /// `[inject] memory_lookup` off, before the stores are made, where nothing is recorded, when the
 /// search refuses it or when nothing of it fits `room`.
-fn looked_up(
+pub(crate) fn looked_up(
     home: &Path,
     payload: &Value,
     deadline: Instant,
@@ -324,6 +324,11 @@ fn looked_up(
     // deadline; the hook searches itself only when none listens or it refuses.
     if let Some(answer) = crate::hook::ask_lookup(home, &repo, &found.query, room, deadline) {
         return Ok(answer);
+    }
+    // A viewer that took the whole wait left none: no search here that no one would hear, beside
+    // the viewer's (CodeRabbit on #830).
+    if Instant::now() >= deadline {
+        return Ok(None);
     }
     // N5: the meaning side too, from the resident viewer within the prompt's wait (G23), as
     // claude-mem's worker searches with its vectors; else the words side alone.

@@ -28,9 +28,12 @@ note (docs/file-note.md).
   hook has found a lookup it may answer (the switch, a recorded checkout, the stores made), it
   asks `POST /api/lookup` with the checkout's repository, the words and its room, and waits for
   the answer until its 3 s are up. The viewer searches with its own query vector for the words and
-  gives the same answer the hook's own search would (`memory_lookup::index_answer`); its "nothing"
-  is the hook's too. With no resident viewer listening, or one that refuses (one from before the
-  route), the hook searches the stores itself in the time left, as below.
+  gives the same answer the hook's own search would (`memory_lookup::index_answer`), waiting for
+  its vector no longer than `[inject] per_prompt_wait_ms`, as the hook does, and making none while
+  two vectors a lookup stopped waiting for are still being made (`LOOKUP_VECTORS`, so a held
+  embedder cannot gather threads); its "nothing" is the hook's too. With no resident viewer listening, or one that refuses (one from before the
+  route), the hook searches the stores itself in the time left, as below; a viewer that took the
+  whole wait leaves no search after it.
 - **The answer**: the index of a search of its words, as claude-mem 15.0's bridge gives (N4): at
   most 8 rows of the kinds claude-mem calls observations (cards and imported observations) and
   oboete's claims, the search's own filter, which each leg applies before it takes its depth (a
@@ -141,9 +144,13 @@ Measured on this PC's store (263,213 imported documents, the imported full-text 
   candidates' text (21%), the claims' pages (10%) and their order (9%) (perf, ten searches).
 
 So the resident viewer keeps what a lookup reads warm (`search::b::WARM_SET`: the full-text
-indexes of claims, cards and imported observations, the rows they find, the bit index), reading it
-through every five minutes while the hooks have recorded within half an hour, with a short
-read-only connection each time (a forget's rebuild sets knowledge.db aside). A read that took more
+indexes of claims, cards and imported observations, the rows they find, the cards' text a query too
+short for pieces matches, the bit index), reading it
+through every five minutes while the hooks have recorded within half an hour: each value whole
+(`length()` of a BLOB comes from the record's header and leaves its overflow pages unread, and the
+bit index's chunks are 128 KiB each), one table at a time under raw.lock's shared hold with a short
+read-only connection, so a forget's rebuild or a restore waits for one table at most and never
+sets knowledge.db aside under an open handle. A read that took more
 than 5 s found the pages gone; a second such read in a row doubles the wait, up to an hour, so a
 box short of memory is not made to read them from the disk again and again. Not reached: claude-
 mem's 0.25 s with its worker warm, which would take a different search over the imported
@@ -157,7 +164,14 @@ hook's, with no search of its own, asked the repository, words and room),
 `view::tests::the_lookup_route_answers_as_the_hook_would` (the token, no origin, the hook's own
 answer over the same home, its room, the bodies refused),
 `search::b::tests::the_warm_set_is_read_while_the_hooks_record_and_less_when_slow`,
-`the_warm_set_reads_what_is_made`; `hook::tests::a_memory_lookup_past_its_wait_gives_nothing` (a forget holding the search back: an
+`the_warm_set_reads_what_is_made`, `the_warm_read_reads_a_large_value_through` (a value's
+overflow chain broken: `length()` reads, the warm read fails);
+`view::tests::the_lookup_route_waits_for_its_vector_no_longer_than_the_prompt_does` (the embedder
+held: the words side answers within the prompt's wait),
+`the_lookups_vectors_left_running_are_bounded` (a third held lookup makes no vector, each given
+back), `the_lookup_route_searches_with_its_own_vector` (a claim no three letters of the words are
+in, found by the viewer's vector); `hook::tests::a_viewer_past_the_lookups_wait_leaves_no_search_after_it`;
+`hook::tests::a_memory_lookup_past_its_wait_gives_nothing` (a forget holding the search back: an
 error within the wait, as the hook reports a failure, the native lookup going on),
 `a_memory_lookups_wait_holds_the_viewers_vector_too` (a viewer slower than the wait costs no more),
 `a_memory_lookup_past_its_wait_takes_no_file_note_after_it` (a forget holding the stores back costs

@@ -1190,6 +1190,9 @@ const WARM_SET: &[(&str, &str)] = &[
     ("cards_fts_data", "block"),
     ("cards_fts_idx", "term"),
     ("cards_fts_docsize", "sz"),
+    // A query too short for pieces matches the cards' text itself (`curated_fts`, CodeRabbit on
+    // #830).
+    ("cards_fts_content", "c0"),
     ("claims_fts_data", "block"),
     ("claims_fts_idx", "term"),
     ("claims_fts_docsize", "sz"),
@@ -1208,36 +1211,53 @@ const WARM_SET: &[(&str, &str)] = &[
 
 /// Decision 71: `WARM_SET` read through once, so the system keeps it in its page cache for the
 /// hooks' lookups, the MCP server's searches and the page's alike; a table not made yet is passed
-/// over. A short read-only connection each time: a forget's rebuild sets knowledge.db aside, and a
-/// held one would go on reading the file set aside. How long it took.
-pub(crate) fn warm_pages(home: &Path) -> Result<Duration> {
+/// over. One table at a time under raw.lock's shared hold, as every reader of the stores takes it,
+/// so a forget's rebuild or a restore waits for one table's read at most and never sets
+/// knowledge.db aside under an open handle (Windows refuses to rename it then); a short read-only
+/// connection each time. How long it took, or none when there was no store to read (none made
+/// yet, or knowledge.db set aside for a rebuild), so it is looked at again soon rather than counted
+/// as read (cubic on #830).
+pub(crate) fn warm_pages(home: &Path) -> Result<Option<Duration>> {
     let started = Instant::now();
-    let path = home.join("knowledge.db");
-    if !path.exists() {
-        return Ok(started.elapsed());
-    }
-    let k = Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    for (table, column) in WARM_SET {
-        if !crate::consumer::manifest::exists(&k, "table", table)? {
-            continue;
+    let mut read = false;
+    for &(table, column) in WARM_SET {
+        let Some(_raw) = crate::raw::read_only(home)? else {
+            break;
+        };
+        let path = home.join("knowledge.db");
+        if !path.exists() {
+            break;
         }
-        let _: Option<i64> = k.query_row(
-            &format!("SELECT sum(length({column})) FROM {table}"),
-            [],
-            |r| r.get(0),
+        read = true;
+        let k = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        if crate::consumer::manifest::exists(&k, "table", table)? {
+            read_whole(&k, table, column)?;
+        }
     }
-    Ok(started.elapsed())
+    Ok(read.then(|| started.elapsed()))
+}
+
+/// Every row's `column` read whole. `length()` of a BLOB comes from the record's header and leaves
+/// its overflow pages unread (the bit index's chunks are 128 KiB each, Codex on #830); a comparison
+/// reads the value through.
+fn read_whole(k: &Connection, table: &str, column: &str) -> Result<()> {
+    let _: i64 = k.query_row(
+        &format!("SELECT count({column} <> x'') FROM {table}"),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(())
 }
 
 /// Decision 71: when the resident viewer reads `WARM_SET` again. Only while the hooks record,
 /// as the model is kept (parity row 31), and every `WARM_PAGES_EVERY`; a read that took longer
 /// than `WARM_PAGES_SLOW` found the pages gone, and when the one before it did too, the system is
 /// short of memory: the next waits twice as long, up to `WARM_PAGES_MOST`, so a box short of
-/// memory is not made to read them from the disk again every few minutes.
+/// memory is not made to read them from the disk again every few minutes. A read that failed
+/// (the store busy or damaged) says nothing of the memory: the wait stays as it was.
 #[derive(Debug, Default)]
 pub(crate) struct Warmth {
     /// When the last read ended (Unix ms).
@@ -1267,17 +1287,20 @@ impl Warmth {
 
     /// A read that ended at `now`, with how long it took, or none when it failed.
     pub(crate) fn read(&mut self, now: i64, took: Option<Duration>) {
-        let slow = took.is_none_or(|t| t > WARM_PAGES_SLOW);
+        self.last = Some(now);
+        let Some(took) = took else {
+            return;
+        };
+        let slow = took > WARM_PAGES_SLOW;
         let every = self.every.unwrap_or(WARM_PAGES_EVERY);
         self.every = Some(if !slow {
             WARM_PAGES_EVERY
-        } else if self.slow || took.is_none() {
+        } else if self.slow {
             (every * 2).min(WARM_PAGES_MOST)
         } else {
             every
         });
         self.slow = slow;
-        self.last = Some(now);
     }
 }
 
@@ -7790,8 +7813,8 @@ mod tests {
 
     /// Decision 71: the warm set is read while the hooks record, first at once, then every five
     /// minutes; not once they have been quiet half an hour, nor with none recorded. A slow read
-    /// keeps the wait, a second slow one in a row doubles it up to an hour, a failed one doubles
-    /// it too, and a quick one brings it back to five minutes.
+    /// keeps the wait, a second slow one in a row doubles it up to an hour, a quick one brings it
+    /// back to five minutes, and a failed one keeps the wait as it was.
     #[test]
     fn the_warm_set_is_read_while_the_hooks_record_and_less_when_slow() {
         let min = 60 * 1_000;
@@ -7826,12 +7849,16 @@ mod tests {
         w.read(at, quick);
         assert_eq!(wait(&w, at), 5, "a quick read brings it back");
         w.read(at, None);
-        assert_eq!(wait(&w, at), 10, "a failed read doubles it");
+        assert_eq!(wait(&w, at), 5, "a failed read keeps the wait");
+        w.read(at, slow);
+        w.read(at, None);
+        w.read(at, slow);
+        assert_eq!(wait(&w, at), 10, "and comes between two slow reads unseen");
     }
 
     /// Decision 71: reading the warm set touches every table of it that is made and passes over
     /// one that is not: a store with records reads, a knowledge.db with one of its tables reads that
-    /// one, and a home with no knowledge.db reads nothing and makes none.
+    /// one, and a home with no knowledge.db reads nothing, makes none and says it read none.
     #[test]
     fn the_warm_set_reads_what_is_made() {
         let mut s = Store::new();
@@ -7843,16 +7870,51 @@ mod tests {
             "Nebula".to_owned(),
         )]);
         s.run();
-        assert!(warm_pages(s.home.path()).is_ok());
-        let partial = tempfile::tempdir().unwrap();
-        Connection::open(partial.path().join("knowledge.db"))
+        assert!(warm_pages(s.home.path()).unwrap().is_some());
+        let partial = Store::new();
+        Connection::open(partial.home.path().join("knowledge.db"))
             .unwrap()
             .execute_batch("CREATE TABLE imported(body TEXT)")
             .unwrap();
-        assert!(warm_pages(partial.path()).is_ok(), "a store not made whole");
+        assert!(
+            warm_pages(partial.home.path()).unwrap().is_some(),
+            "a store not made whole"
+        );
+        // No knowledge.db (as while a rebuild set it aside): nothing read, so looked at again soon.
+        assert_eq!(warm_pages(Store::new().home.path()).unwrap(), None);
         let empty = tempfile::tempdir().unwrap();
-        assert!(warm_pages(empty.path()).is_ok());
+        assert_eq!(warm_pages(empty.path()).unwrap(), None);
         assert!(!empty.path().join("knowledge.db").exists());
+    }
+
+    /// Codex on #830: the warm read goes through a value's overflow pages, which `length()` of a
+    /// BLOB leaves unread: with the chain of a large value's overflow pages broken, the read fails
+    /// where `length()` does not.
+    #[test]
+    fn the_warm_read_reads_a_large_value_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA page_size = 4096; CREATE TABLE t(b BLOB);
+                 INSERT INTO t VALUES (randomblob(200000));",
+            )
+            .unwrap();
+        // Page 1 is the schema's, 2 the table's, and the value goes on through pages 3, 4 and
+        // on: the first four bytes of page 4 name the next, here one past the file's end.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[3 * 4096..3 * 4096 + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let c = Connection::open(&path).unwrap();
+        let length: i64 = c
+            .query_row("SELECT sum(length(b)) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(length, 200_000, "length() reads no overflow page");
+        assert!(
+            read_whole(&c, "t", "b").is_err(),
+            "the warm read goes through them"
+        );
     }
 
     /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and
