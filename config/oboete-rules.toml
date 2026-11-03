@@ -97,10 +97,11 @@ keywords = ["secret", "token", "passw", "key", "credential"]
 # number, `--max-token 4096`), a shell's escape of a sign inside it; a value that starts with `-` is
 # the next flag.
 [[rules.allowlists]]
-# A number given to a flag that only ends in "token" is a count (`--max-token 12345678`), as
-# claude-mem's rule takes no value without a letter; a bare `--token` and a password keep theirs.
+# A number given to a flag that counts tokens is a count (`--max-token 12345678`,
+# `--num-output-token 512000`); a token's own flag (`--token`, `--auth-token`) and a password's
+# keep a value of digits masked.
 regexTarget = "match"
-regexes = ['''(?i)--(?:[a-z0-9]+[-_])+token[ \t]+["']?[0-9]+["']?$''']
+regexes = ['''(?i)--(?:max|min|num)[-_](?:[a-z0-9]+[-_])*token[ \t]+["']?[0-9]+["']?$''']
 
 [[rules]]
 id = "slack-token"
@@ -117,12 +118,12 @@ keywords = ["hooks.slack.com"]
 [[rules]]
 id = "masked-remainder"
 description = "What is glued to a mask already stored: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path, which a rescan finds no other way, the host being masked"
-regex = '''\[REDACTED\]([A-Za-z0-9]{4,})'''
+regex = '''\[REDACTED\]([A-Za-z0-9+]{4,})'''
 keywords = ["[redacted]"]
-# Letters and digits only, as a Slack secret is: after a mask a `/` is mostly a path's
-# (`/keys/[REDACTED]/rotate`). A mask followed by a space, a sign or the end is left; one to three
-# characters of a secret's end tell nothing of it. Each scan runs to a fixpoint over what it
-# masked, so this takes such an end in a new capture too.
+# Letters, digits and `+`, as slack-webhook-secret takes them; not `/`, which after a mask is mostly
+# a path's (`/keys/[REDACTED]/rotate`). A mask followed by a space, another sign or the end is
+# left; one to three characters of a secret's end tell nothing of it. Each scan runs to a fixpoint
+# over what it masked, so this takes such an end in a new capture too.
 
 [[rules]]
 id = "discord-webhook-token"

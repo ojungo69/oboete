@@ -1950,19 +1950,14 @@ mod tests {
         let esc_json = format!("Q7wE9rT2\\\\!{}", "K4j8N6pL");
         let xoxc = format!("xoxc-{}-{r20}", "1234567890");
         let xoxd = format!("xoxd-{r20}{}", "Hj5kL7");
-        // Past the 56 characters of path gitleaks' rule masks, so that only this rule's class
-        // reaches the end.
-        let plus = format!("{r20}{r20}+{}", "Bn7MqPz2");
+        // A stored end of a webhook's secret with a `+` in it, as gitleaks' rule left it.
+        let tail_plus = format!("8sD1+{}", "Bn7MqPz2");
         let digits = format!("1234{}", "5678");
         let tail = format!("Tq9v2{}", "LmX4wPz");
         let cases = [
             (format!("SLACK_REFRESH={slack}"), slack.clone()),
             (format!("SLACK_CLIENT={xoxc}"), xoxc.clone()),
             (format!("Cookie-less d={xoxd} for the client"), xoxd.clone()),
-            (
-                format!("https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{plus}"),
-                plus.clone(),
-            ),
             (format!("tool --password {esc} --verbose"), esc.clone()),
             (format!("DB_PASSWORD={esc}"), esc.clone()),
             (
@@ -1970,11 +1965,19 @@ mod tests {
                 esc_json.clone(),
             ),
             (format!("tool --token {digits}"), digits.clone()),
+            (
+                format!("tool --auth-token {digits}{digits}"),
+                format!("{digits}{digits}"),
+            ),
             (format!("tool --password {digits}"), digits.clone()),
             // The end gitleaks' slack-webhook-url left after its mask in a record stored before.
             (
                 format!("curl -X POST https://[REDACTED]{tail}"),
                 tail.clone(),
+            ),
+            (
+                format!("curl -X POST https://[REDACTED]{tail_plus}"),
+                tail_plus.clone(),
             ),
             (
                 format!(
@@ -2022,6 +2025,16 @@ mod tests {
             &Rules::default(),
         );
         assert!(stored.ends_with(MASK), "{stored}");
+        // A `+` in a secret two characters from its end, past those 56 characters: this rule's class
+        // reaches the end, where masked-remainder takes no end that short.
+        let (stored, _) = scan(
+            &format!(
+                "https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{r20}{r20}+{}",
+                "Bn"
+            ),
+            &Rules::default(),
+        );
+        assert!(stored.ends_with(MASK), "{stored}");
         // Not secrets: a working directory, a number after a flag, a flag that names a file or a
         // name, the next flag where a value would be, and the prefixes named in prose.
         for text in [
@@ -2029,6 +2042,7 @@ mod tests {
             "OLDPWD=/home/user",
             "llm --max-token 4096 --stream",
             "llm --max-token 12345678 --stream",
+            "llm --num-output-token 51200000",
             "masked: [REDACTED] and [REDACTED].",
             "a short end [REDACTED]abc stays",
             "cargo run -- --token-file ./token.txt",
