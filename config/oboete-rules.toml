@@ -55,9 +55,11 @@ keywords = ["basic"]
 [[rules]]
 id = "secret-assignment"
 description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=, MYSQL_PWD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
-regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|_pwd|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$](?:[^\s"'`\\]|\\[^\sA-Za-z0-9"'`\\]){6,}(?:[^\s"'`\\<>;,(){}\[\]$]|\\[^\sA-Za-z0-9"'`\\])))'''
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|_pwd|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=][ \t]*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$](?:[^\s"'`\\]|\\[^\sA-Za-z0-9"'`\\]){6,}(?:[^\s"'`\\<>;,(){}\[\]$]|\\[^\sA-Za-z0-9"'`\\])))'''
 keywords = ["secret", "token", "passw", "pwd", "key", "credential"]
 # `_pwd` only as the end of a name (MYSQL_PWD, DB_PWD): `PWD` and `OLDPWD` hold a working directory.
+# Spaces and tabs only between the `=` or `:` and the value: no line break, and no blank a value
+# already masked left (redact.rs `fixpoint`), so the next line or word is not taken for a value.
 # A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
 # it left as written), however short. An unquoted one runs to a space, a quote or backtick, or a
 # backslash before a letter, a digit, a quote or a backslash (an escape in a flattened tool field);

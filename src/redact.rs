@@ -839,10 +839,13 @@ fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
 /// Rule `rule` to its fixpoint, from what it `found` and `kept` in its first look. A rule finds
 /// one secret per context per look (curl-auth-user's greedy `.*` takes the last `-u` of a line,
 /// curl-auth-header's lazy `.*?` the first header after a `curl`), so each look is at a copy of
-/// `text` where what this rule found or kept before is blanked out with spaces of the same length:
-/// offsets stay those of `text`, and no other rule's finding is blanked, so no rule takes context
-/// another needs. Still finding after `MAX_PASSES`, the whole text is one span: a look never stops
-/// with a secret left unlooked-at.
+/// `text` where what this rule found or kept before is blanked out with vertical tabs of the same
+/// length: offsets stay those of `text`, and no other rule's finding is blanked, so no rule takes
+/// context another needs. A vertical tab is white space to `\s`, as a space was, but no space or
+/// tab: a rule's gap of those (`--token VALUE next`, `KEY=VALUE` and the next line) does not take
+/// the blank for its own and the word after it for another value (Codex on #826). Still finding
+/// after `MAX_PASSES`, the whole text is one span: a look never stops with a secret left
+/// unlooked-at.
 fn fixpoint(
     text: &str,
     rules: &Rules,
@@ -856,7 +859,7 @@ fn fixpoint(
     let mut new_kept = kept.to_vec();
     for _ in 0..=MAX_PASSES {
         for &(s, e, _) in new.iter().chain(&new_kept) {
-            work.replace_range(s..e, &" ".repeat(e - s));
+            work.replace_range(s..e, &"\u{b}".repeat(e - s));
             blank.push((s, e));
         }
         new_kept.clear();
@@ -2092,6 +2095,41 @@ mod tests {
             assert!(found.is_empty(), "{text}: {found:?}");
             assert_eq!(stored, text);
         }
+    }
+
+    /// A value masked takes no word after it: the next argument of a command line, the next line of
+    /// an env file; a second secret there is still masked (Codex on #826).
+    #[test]
+    fn a_masked_value_takes_no_word_after_it() {
+        let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+        let tok2 = format!("Hb3nM6qW9{}", "eR2tY5uI8oP");
+        for (text, kept) in [
+            (
+                format!("tool --token {tok} https://api.example.org/important-resource"),
+                "https://api.example.org/important-resource",
+            ),
+            (
+                format!("TOKEN={tok} https://api.example.org/important-resource"),
+                "https://api.example.org/important-resource",
+            ),
+            (
+                format!("API_KEY={tok}\nDEBUG_MODE=true\nPORT_NUMBER=8080\n"),
+                "DEBUG_MODE=true\nPORT_NUMBER=8080",
+            ),
+            (
+                format!("{{\"out\": \"API_KEY={tok}\\nDEBUG_MODE=true\"}}"),
+                "DEBUG_MODE=true",
+            ),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            check(&stored, &found, &tok);
+            assert!(stored.contains(kept), "{text}: {stored}");
+        }
+        let text = format!("API_KEY={tok}\nSECRET_KEY={tok2}\nDEBUG_MODE=true\n");
+        let (stored, found) = scan(&text, &Rules::default());
+        check(&stored, &found, &tok);
+        check(&stored, &found, &tok2);
+        assert!(stored.contains("DEBUG_MODE=true"), "{stored}");
     }
 
     #[test]
