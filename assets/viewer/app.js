@@ -5794,19 +5794,44 @@ function providerOrder(f) {
   return f?.providers.map((p) => `${p.name} ${selectorKey(p.selector)}`).join('\n');
 }
 
-async function providerWrite(action, button, body, path, target = null) {
-  const mine = form;
-  clearSimpleReceipt();
-  // The page and the entry as drawn now: a save waited for may have drawn them again (CodeRabbit
-  // on #802). A write from an AI line is answered on that line as drawn now, one from More
-  // settings on its entry (Codex's review of 69b-2a).
-  const fields = $('panel').querySelector('.settings');
+// What a provider's write marks a refused field in, as the page is drawn now (a save waited for may
+// have drawn it again, CodeRabbit on #802): an AI line's write on that line, an entry's on its block,
+// a new entry's on its form (Codex's review of 69b-2a).
+function providerScope(fields, button, action) {
   const focus = button.closest('.provider-entry') ? null : button.dataset.simpleFocus;
   const line = focus ? [...fields.querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === focus)
     ?.closest('.simple-provider') : null;
-  const scope = line ?? (action.selector
-    ? [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null
-    : fields.querySelector('.new-provider'));
+  if (line) return line;
+  if (!action.selector) return fields.querySelector('.new-provider');
+  return [...fields.querySelectorAll('.provider-entry')].find((n) => n.dataset.selector === selectorKey(action.selector)) ?? null;
+}
+
+// Where the focus goes after a provider's write (69b-3c-2): the entry's control at its place now, on
+// the hold's record for its release. A focus the hold has not taken off yet goes off first, or the
+// redraw would give it back to the old control by name.
+function providerTarget(taken, target, mine, action) {
+  if (!target || !taken) return;
+  const inserted = geminiInsertion(mine, action);
+  const hasFiles = form.providers.some((p) => p.selector.source === 'file');
+  taken.keep = { ...target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted)), reveal: true };
+  if (document.activeElement === taken.control) taken.control.blur();
+}
+
+// Whether an AI line shows its key field after a provider's write: no longer after a key saved; after
+// a creation, for the created entry only when it is the first of its name, as the line's field is the
+// first entry's (CodeRabbit on #820). Each creation sets it anew.
+function providerKeyLine(action, path) {
+  if (path === '/key') simpleKeyName = null;
+  if (action.op !== 'create') return;
+  const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
+  simpleKeyName = first ? action.entry.name : null;
+}
+
+async function providerWrite(action, button, body, path, target = null) {
+  const mine = form;
+  clearSimpleReceipt();
+  const fields = $('panel').querySelector('.settings');
+  const scope = providerScope(fields, button, action);
   const taken = holdSettings(fields);
   button.disabled = true;
   try {
@@ -5815,25 +5840,12 @@ async function providerWrite(action, button, body, path, target = null) {
     if (current) return reloadProviderSettings(current);
     if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
     form = mergeProviderSettings(answer, mine, action);
-    // Where the focus goes after this write (69b-3c-2): the entry's control at its place now, on the
-    // hold's record for its release. A focus the hold has not taken off yet goes off first, or the
-    // redraw would give it back to the old control by name.
-    if (target && taken) {
-      const inserted = geminiInsertion(mine, action);
-      const hasFiles = form.providers.some((p) => p.selector.source === 'file');
-      taken.keep = { ...target((selector) => mappedProviderSelector(selector, hasFiles, action, inserted)), reveal: true };
-      if (document.activeElement === taken.control) taken.control.blur();
-    }
-    simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
-    if (path === '/key') simpleKeyName = null;
-    // Its line shows the key field for it only when it is the first entry of its name: the line's
-    // field is the first entry's (CodeRabbit on #820). Each creation sets it anew.
-    if (action.op === 'create') {
-      simpleKeyName = action.entry.kind === 'openai'
-        && form.providers.filter((p) => p.name === action.entry.name).length === 1 ? action.entry.name : null;
-    }
+    providerTarget(taken, target, mine, action);
+    const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
+    simpleReceipt = kept ? 'ai' : null;
+    providerKeyLine(action, path);
     drawSettings();
-    setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
+    setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();
     void refreshRests();
     return true;
@@ -6127,28 +6139,8 @@ function providerEntry(provider, line) {
   // Where the focus goes once a write of this entry is answered: its control at its place then
   // (`mappedProviderSelector`), given to the write's hold (#815).
   const after = (prefix, suffix = '') => (map) => ({ simple: `${prefix}${selectorKey(map(provider.selector))}${suffix}` });
-  let enabled = null;
-  if (several) {
-    enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value }, enabled, null, '', after('entry-on:')));
-    enabled.dataset.simpleFocus = `entry-on:${sel}`;
-    enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
-    enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
-  }
-  const arrows = several ? [-1, 1].map((direction) => {
-    const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
-    button.type = 'button';
-    button.title = t(direction < 0 ? 'up' : 'down');
-    button.setAttribute('aria-label', `${button.title}: ${provider.name} (${position})`);
-    button.dataset.simpleFocus = `entry-move:${sel}:${direction}`;
-    // Swapped with the next entry of its name that way: the lower of the two goes to the upper's
-    // place, so every name keeps where it first appears in config and the names' order stays.
-    const other = entries[at + direction];
-    const [lower, upper] = direction < 0 ? [provider, other] : [other, provider];
-    button.disabled = !other || [provider, other].some((p) => p.selector.source === 'gemini');
-    button.addEventListener('click', () => void providerOperation({ op: 'move', selector: lower.selector, to: upper.selector.index },
-      button, null, '', after('entry-move:', `:${direction}`)));
-    return button;
-  }) : [];
+  const enabled = several ? entrySwitch(provider, position, unsupported, after) : null;
+  const arrows = several ? [-1, 1].map((direction) => entryArrow(provider, line, position, direction, after)) : [];
   const remove = el('button', 'quiet small', t('provider_remove'));
   remove.type = 'button';
   remove.dataset.simpleFocus = `entry-remove:${sel}`;
@@ -6163,19 +6155,12 @@ function providerEntry(provider, line) {
   edit.open = provider.editing;
   edit.addEventListener('toggle', () => { provider.editing = edit.open; });
   edit.append(providerEditor(provider.edit, provider, card));
-  const model = (value) => value ?? t('provider_default_model');
-  const key = saved.key === 'none' && saved.kind === 'openai' ? 'provider_key_none' : `key_${saved.key.replaceAll('-', '_')}`;
   card.append(...present([
     several ? el('h4', null, t('simple_entry_of', { n: at + 1, of: entries.length })) : null,
     several || provider.selector.source !== 'file' ? note(position) : null,
     el('div', 'provider-header', enabled ? el('label', 'check', enabled, t('provider_enabled')) : null,
       arrows.length ? el('div', 'move', ...arrows) : null, remove),
-    note(t('provider_saved_native', { on: t(saved.enabled ? 'value_on' : 'value_off'), model: model(saved.model), timeout: saved.timeout_s })),
-    note(t('provider_effective', { on: t(provider.effective.on ? 'value_on' : 'value_off'), order: provider.effective.order + 1,
-      model: model(provider.effective.model), timeout: provider.effective.timeout_s })),
-    saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
-    unsupported ? note(t('provider_unsupported_cli')) : null,
-    note(t(key)),
+    ...entryNotes(provider, unsupported),
     keyShown ? null : providerKeyPanel(provider),
     unsupported ? null : edit,
     at === 0 ? null : providerTest(provider)]));
@@ -6189,11 +6174,62 @@ function providerEntry(provider, line) {
 // switch, else Add AI.
 function createdFocus(name) {
   // Creation appends one native entry, even if it also materializes automatic Gemini.
-  const created = form.providers.filter((p) => p.selector.source !== 'gemini').at(-1);
+  const created = form.providers.findLast((p) => p.selector.source !== 'gemini');
   if (created?.name !== name) return { simple: [`on:${name}`, 'catalog.open'] };
   const own = `key:entry:${selectorKey(created.selector)}`;
   const first = form.providers.find((p) => p.name === name) === created;
   return { simple: first ? [`key:${name}`, own, 'catalog.open'] : [own, `on:${name}`, 'catalog.open'] };
+}
+
+// An AI line's key part: the note of a key file another AI reads first, or the key field for its
+// first entry while it needs one, or the note that keys cannot be typed here.
+function lineKeyPart(f, provider, { shared, keyShown, keyOwner }) {
+  if (shared) return el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }));
+  if (!keyShown) return null;
+  return el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported')));
+}
+
+// An entry's notes: what is saved, what is in effect, its address or command, and its key.
+function entryNotes(provider, unsupported) {
+  const saved = provider.saved;
+  const model = (value) => value ?? t('provider_default_model');
+  const key = saved.key === 'none' && saved.kind === 'openai' ? 'provider_key_none' : `key_${saved.key.replaceAll('-', '_')}`;
+  return [
+    note(t('provider_saved_native', { on: t(saved.enabled ? 'value_on' : 'value_off'), model: model(saved.model), timeout: saved.timeout_s })),
+    note(t('provider_effective', { on: t(provider.effective.on ? 'value_on' : 'value_off'), order: provider.effective.order + 1,
+      model: model(provider.effective.model), timeout: provider.effective.timeout_s })),
+    saved.kind === 'openai' ? note(saved.base_url || t('provider_unsupported_endpoint')) : note(saved.cli),
+    unsupported ? note(t('provider_unsupported_cli')) : null,
+    note(t(key)),
+  ];
+}
+
+// An entry's own switch, beside other entries of its name (69b-3c-2).
+function entrySwitch(provider, position, unsupported, after) {
+  const saved = provider.saved;
+  const enabled = checkbox(saved.enabled, (value) => void providerOperation({ op: 'enabled', selector: provider.selector, enabled: value },
+    enabled, null, '', after('entry-on:')));
+  enabled.dataset.simpleFocus = `entry-on:${selectorKey(provider.selector)}`;
+  enabled.disabled = !saved.enabled && (unsupported || saved.endpoint_supported === false);
+  enabled.setAttribute('aria-label', `${t('provider_enabled')}: ${provider.name} (${position})`);
+  return enabled;
+}
+
+// An entry's arrow: swapped with the next entry of its name that way, the lower of the two going to the
+// upper's place, so every name keeps where it first appears in config and the names' order stays
+// (69b-3c-2).
+function entryArrow(provider, { entries, at }, position, direction, after) {
+  const button = el('button', 'quiet small', direction < 0 ? '↑' : '↓');
+  button.type = 'button';
+  button.title = t(direction < 0 ? 'up' : 'down');
+  button.setAttribute('aria-label', `${button.title}: ${provider.name} (${position})`);
+  button.dataset.simpleFocus = `entry-move:${selectorKey(provider.selector)}:${direction}`;
+  const other = entries[at + direction];
+  const [lower, upper] = direction < 0 ? [provider, other] : [other, provider];
+  button.disabled = !other || [provider, other].some((p) => p.selector.source === 'gemini');
+  button.addEventListener('click', () => void providerOperation({ op: 'move', selector: lower.selector, to: upper.selector.index },
+    button, null, '', after('entry-move:', `:${direction}`)));
+  return button;
 }
 
 // An AI line's entries, in config order, in a fold at the line's end (69b-3c-2), open while one of
@@ -6767,25 +6803,31 @@ function clearSimpleReceipt() {
   for (const receipt of $('panel').querySelectorAll('.simple-saved')) receipt.replaceChildren();
 }
 
+// Where the focus goes when the control a key names is not drawn, or is disabled: the names tried
+// after it, in this order (a table, not a chain of ifs: SonarCloud on #820).
+const FOCUS_FALLBACKS = [
+  // An arrow at its name's end: the other one.
+  [(key) => /^(entry-)?move:/.test(key), (key) => (key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'))],
+  // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
+  // cubic on #820).
+  [(key) => key.startsWith('key-save:'), (key) => key.replace('key-save:', 'key:')],
+  [(key) => /^(resume|resume-more|key|key-save):/.test(key), (key) => key.replace(/^[^:]+:/, 'on:')],
+  [(key) => key.startsWith('test-run:'), (key) => key.replace('test-run:', 'test:')],
+  [(key) => key === 'context.again' || key === 'context.repo', () => 'context.open'],
+  [(key) => key.startsWith('entry-test-run:'), (key) => key.replace('entry-test-run:', 'entry-test:')],
+  // A model name saved closes its field: the line's model choice takes the focus.
+  [(key) => key.startsWith('model-text:'), (key) => key.replace('model-text:', 'model:')],
+  [(key) => key === 'mask.confirm', () => 'redaction.enabled'],
+  [(key) => key === 'cap.confirm', () => 'paid_usd_per_month.no_cap'],
+  [(key) => key === 'embedding.start' || key === 'embedding.cancel', () => `embedding:${form?.embedding?.provider}`],
+];
+
 function simpleFocus(key) {
   // A list: the first of its keys found (69b-3c-2).
   if (Array.isArray(key)) return key.some((one) => simpleFocus(one));
   if (typeof key !== 'string' || !key) return false;
   const controls = $('panel').querySelectorAll('button, input, select, summary');
-  const keys = [key];
-  if (key.startsWith('move:') || key.startsWith('entry-move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
-  // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
-  // cubic on #820).
-  if (key.startsWith('key-save:')) keys.push(key.replace('key-save:', 'key:'));
-  if (/^(resume|resume-more|key|key-save):/.test(key)) keys.push(key.replace(/^[^:]+:/, 'on:'));
-  if (key.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
-  if (key === 'context.again' || key === 'context.repo') keys.push('context.open');
-  if (key.startsWith('entry-test-run:')) keys.push(key.replace('entry-test-run:', 'entry-test:'));
-  // A model name saved closes its field: the line's model choice takes the focus.
-  if (key.startsWith('model-text:')) keys.push(key.replace('model-text:', 'model:'));
-  if (key === 'mask.confirm') keys.push('redaction.enabled');
-  if (key === 'cap.confirm') keys.push('paid_usd_per_month.no_cap');
-  if (key === 'embedding.start' || key === 'embedding.cancel') keys.push(`embedding:${form?.embedding?.provider}`);
+  const keys = [key, ...FOCUS_FALLBACKS.filter(([applies]) => applies(key)).map(([, to]) => to(key))];
   const next = keys.map(key => [...controls].find(control => control.dataset.simpleFocus === key && !control.disabled)).find(Boolean);
   if (!next) return false;
   // A control inside a closed fold cannot take the focus: open the folds around it first (decision
@@ -6874,7 +6916,10 @@ async function simpleSettingsSave(button, change, adopt, { hold = true } = {}) {
     }
     const key = button.dataset.simpleFocus;
     while (saveRun) await saveRun;
-    if (view !== 'settings' || !form) { if (hold) releaseSettings(waiting, taken); return; }
+    if (view !== 'settings' || !form) {
+      if (hold) releaseSettings(waiting, taken);
+      return;
+    }
     // The answer waited for drew the page again: the control as drawn now waits for this save, and
     // the page with it, as a provider's write does (#802).
     button = [...$('panel').querySelectorAll('input, select, button')].find((n) => n.dataset.simpleFocus === key) ?? button;
@@ -7064,8 +7109,7 @@ function simpleProviderRow(f, row, index, chain, position) {
       el('div', 'move', ...arrows)),
     model, calls, timeout, row.entries > 1 ? el('p', 'desc', t('simple_for_entries', { n: row.entries })) : null,
     row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
-    shared ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
-      : keyShown ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
+    lineKeyPart(f, provider, { shared, keyShown, keyOwner }),
     el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, lineEntries(row, providers, keyShown));
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
