@@ -7025,8 +7025,9 @@ function simpleProviderRow(f, row, index, chain, position) {
     timeoutDiffers ? '' : String(row.effective_timeout_s));
   const resume = f.stopped?.includes(row.name) ? resumeButton(row.name) : null;
   const needs = row.key === 'missing' || simpleKeyName === row.name || Boolean(resume);
-  // The line's key field is its first entry's, or its key is another line's: that entry's block shows
-  // no key field of its own (69b-3c-2).
+  // The line's key field, when it shows one, is its first entry's: that entry's block then shows no
+  // second one. A line whose key file is another line's shows none, and its entry keeps its own: a
+  // key saved through the other changes only the other's file (69b-3c-2).
   const shared = Boolean(keyOwner) && keyOwner.name !== row.name && row.key === 'missing';
   const keyShown = !shared && Boolean(provider) && (row.key === 'missing' || simpleKeyName === row.name);
   const line = el('summary', 'simple-provider-line', position === null ? null : el('span', 'simple-order', String(position)),
