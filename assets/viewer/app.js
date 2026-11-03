@@ -7041,7 +7041,7 @@ function simpleProviderRow(f, row, index, chain, position) {
     row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
     shared ? el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }))
       : keyShown ? el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported'))) : null,
-    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, lineEntries(row, providers, keyShown || shared));
+    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, lineEntries(row, providers, keyShown));
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
   fold.open = groupOpen.get(key) ?? needs;

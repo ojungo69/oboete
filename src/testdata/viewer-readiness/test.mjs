@@ -3137,6 +3137,23 @@ console.log('PASS: the caps\' No cap switches');
       give(json(ai(['alpha','claude'],{version:'v2',key_input:true})));await settled();
       assert.equal(focused(),'on:claude','a CLI added from Add AI: its line\'s switch');
     }
+    // An AI that reads another's key file while it is missing says so on its line, and its entry
+    // still takes a key of its own, sent for that entry: a key saved through the other changes only
+    // the other's file (Codex's review of 69b-3c-2).
+    {
+      const file='/home/made-up/SHARED_KEY.md';
+      f=draw(ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing',key_file:file}),row('beta',{key:'missing',key_file:file})]}));
+      const lineKey=name=>lineOf(name).querySelectorAll('input').some(n=>n.dataset.field==='providers.key'&&!n.closest('.simple-entries'));
+      assert.deepEqual([lineKey('alpha'),lineKey('beta'),Boolean(named('key:entry:config:0')),Boolean(named('key:entry:config:1'))],
+        [true,false,false,true],'alpha\'s line takes the key; beta\'s says whose it reads, and its entry keeps its own field');
+      assert(text(lineOf('beta')).includes(ctx.t('simple_key_shared',{name:'alpha'})),'beta says whose key it reads');
+      [answer,give]=later();answers=[answer];
+      typeIn(named('key:entry:config:1'),'made-up-beta-key-0823');
+      named('key-save:entry:config:1').click();await settle();
+      assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).selector],['/api/providers/key',{source:'config',index:1}],
+        'sent for beta\'s entry');
+      vm.runInContext('saveRun=null',ctx);
+    }
     // #819. Two alpha entries, the line's key missing: its key field, each entry's switch and arrows.
     const page=(v,extra={})=>ai(['alpha'],{version:v,key_input:true,judge,providers:[at('alpha',0),at('alpha',1)],
       chain:[row('alpha',{key:'missing',entries:2})],...extra});
@@ -3860,9 +3877,12 @@ saved.chain=[{name:'groq',on:true,key:'missing',key_file:'/k/GROQ_API_KEY.md',ef
 saved.providers=[saved.providers[0],{...saved.providers[0],name:'groq-20b',selector:{source:'builtin',index:1}}];
 ctx.ui.setForm(ctx.simpleUi.formOf(plain(saved)));ctx.ui.setLang('ja');ctx.ui.drawSettings();
 const rowOf=name=>panel.querySelectorAll('.simple-provider').find(node=>node.dataset.providerName===name);
-const keyInput=row=>row.querySelectorAll('input').some(node=>node.dataset.field==='providers.key');
+// The line's own field: its entries' blocks keep theirs (69b-3c-2).
+const keyInput=row=>row.querySelectorAll('input').some(node=>node.dataset.field==='providers.key'&&!node.closest('.simple-entries'));
 assert(keyInput(rowOf('groq')),'the first entry of a key file takes the key');
 assert(!keyInput(rowOf('groq-20b')),'a later entry of the same key file has no second key field');
+assert(rowOf('groq-20b').querySelector('.provider-entry').querySelectorAll('input').some(node=>node.dataset.field==='providers.key'),
+  'its entry still takes a key of its own: a key saved through the first changes only that entry\'s key file');
 assert(text(rowOf('groq-20b')).includes('と同じキーを使います'),'a later entry says whose key it uses');
 // A detailed order still unsaved does not move the key field: the rows follow the saved chain.
 f=ctx.simpleUi.formOf(plain(saved));f.chain.reverse();ctx.ui.setForm(f);ctx.ui.drawSettings();
