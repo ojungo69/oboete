@@ -18,6 +18,28 @@ use crate::redact::Rules;
 
 /// A job due this long goes before a window (A3).
 const OVERDUE_MS: i64 = 60 * 60 * 1000;
+
+/// Refresh now (decision 70, parity row X14): how long a request the page leaves for the worker
+/// stands. While it stands, the pass before the windows takes every subject due now.
+pub(crate) const REFRESH_MS: i64 = 30 * 60 * 1000;
+
+/// Where the page leaves its refresh request for the worker; the request's time is the file's.
+pub(crate) fn refresh_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("state").join("my-work-refresh")
+}
+
+/// The refresh request standing at `now`, by its time (unix ms). One `REFRESH_MS` old or more is
+/// removed, and none stands.
+pub(crate) fn refresh_request(home: &std::path::Path, now: i64) -> Option<i64> {
+    let path = refresh_path(home);
+    let at = std::fs::metadata(&path).ok()?.modified().ok()?;
+    let at = i64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()?;
+    if now - at >= REFRESH_MS {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(at)
+}
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// The chain as the role `my_work` (A1): a job's span, prompt, schema, check and gate, to an
@@ -140,6 +162,15 @@ pub(crate) fn jobs() -> Vec<Box<dyn Job>> {
     ]
 }
 
+/// V1: the jobs whose state My Work's status line says; the goals and the rules jobs have lines of
+/// their own (My Goals', My Rules').
+pub(crate) fn line_jobs() -> Vec<&'static str> {
+    (jobs().iter())
+        .map(|j| j.name())
+        .filter(|&n| ![crate::my_work_goals::NAME, crate::my_work_rules::NAME].contains(&n))
+        .collect()
+}
+
 /// One round's runner: the switches and bound as the worker read them, the jobs, and the chain.
 pub(crate) struct Runner<'a> {
     /// `[my_work] curate` (A6); the worker reaches a round only while `[summary] curate` is on
@@ -156,6 +187,8 @@ pub(crate) struct Runner<'a> {
     called: Option<Phase>,
     /// J1: the judge and the month's paid cap, as the worker read them; none without `[judge]`.
     judge: Option<(&'a crate::config::Judge, f64)>,
+    /// Decision 70: the refresh request standing as the round began, by its file.
+    refresh: Option<std::path::PathBuf>,
 }
 
 impl<'a> Runner<'a> {
@@ -175,7 +208,16 @@ impl<'a> Runner<'a> {
             chain,
             called: None,
             judge: None,
+            refresh: None,
         }
+    }
+
+    /// Decision 70 (Refresh now): with a request standing in `home`, the pass before the windows
+    /// takes every subject due now, not only those due an hour or more; a pass that finds none due
+    /// now removes the request.
+    pub(crate) fn refresh(mut self, home: &std::path::Path) -> Self {
+        self.refresh = refresh_request(home, crate::db::now_ms()).map(|_| refresh_path(home));
+        self
     }
 
     /// J3: the judge the jobs ask before the chain, with the month's paid cap.
@@ -262,6 +304,13 @@ impl<'a> Runner<'a> {
             }
             wait = crate::turns::sooner(wait, crate::turns::held(hold, *until, now));
         }
+        // Decision 70: a refresh request stands until no subject is due now.
+        if !due.iter().any(|d| d.0 <= now)
+            && let Some(path) = self.refresh.take()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        let refreshing = self.refresh.is_some();
         due.retain(|&(since, ..)| {
             let later = since > now;
             if later {
@@ -271,7 +320,7 @@ impl<'a> Runner<'a> {
                 };
                 wait = crate::turns::sooner(wait, until);
             }
-            !later && (!overdue || now - since >= OVERDUE_MS)
+            !later && (!overdue || refreshing || now - since >= OVERDUE_MS)
         });
         if due.is_empty() {
             return Ok(wait);
@@ -812,6 +861,68 @@ pub(crate) fn status(home: &std::path::Path, jobs: &[&str], now: i64) -> Result<
         Some(at) => json!({"state": "written", "at": at}),
         None => json!({"state": "none"}),
     })
+}
+
+/// Refresh now (decision 70, parity row X14), the page's side: with no call, what the status line
+/// would say when nothing can run (off, summaries off, or waiting at the daily bound or on a job's
+/// hold, which a refresh does not lift); else how many subjects are due now, by every job's due
+/// check as the runner makes it. With some, it leaves the request the worker takes at its next
+/// round (`Runner::refresh`): `started` and their number; with none, `nothing_due`.
+pub(crate) fn request_refresh(home: &std::path::Path, now: i64) -> Result<Value> {
+    refresh_with(home, now, jobs(), &line_jobs())
+}
+
+/// `request_refresh` with these jobs, waiting as the status line of the jobs `line` names does.
+fn refresh_with(
+    home: &std::path::Path,
+    now: i64,
+    jobs: Vec<Box<dyn Job>>,
+    line: &[&str],
+) -> Result<Value> {
+    let state = status(home, line, now)?;
+    if matches!(
+        state["state"].as_str(),
+        Some("off" | "summaries_off" | "waiting")
+    ) {
+        return Ok(state);
+    }
+    let cfg = crate::config::load(home)?;
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(json!({"state": "nothing_due"}));
+    };
+    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+    let held: BTreeSet<(String, String)> = match crate::providers_db::read_only(home)? {
+        Some(db) => (crate::providers_db::my_work_held(&db, now)?.into_iter())
+            .map(|(job, about, ..)| (job, about))
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    let stores = Stores {
+        raw: &raw,
+        k: &k,
+        rules: &rules,
+        summary: &cfg.summary,
+        reading: &reading,
+        held: &held,
+    };
+    let mut due = 0;
+    for job in &jobs {
+        due += job
+            .due(&stores, now)?
+            .iter()
+            .filter(|d| d.since <= now)
+            .count();
+    }
+    if due == 0 {
+        return Ok(json!({"state": "nothing_due"}));
+    }
+    let path = refresh_path(home);
+    std::fs::create_dir_all(path.parent().unwrap_or(home))?;
+    // The request is the file's time, set on a handle that writes (Windows refuses a read-only
+    // one); two at once each leave a request, the later time standing.
+    std::fs::File::create(&path)?.set_modified(std::time::SystemTime::now())?;
+    Ok(json!({"state": "started", "due": due}))
 }
 
 /// A job every entry failed `ATTEMPTS` times is kept as a skip of what it read, one a subject, and
@@ -1781,5 +1892,140 @@ mod tests {
             "a subject due now the overdue pass did not reach"
         );
         assert!(asked.borrow().is_empty());
+    }
+
+    /// One pass as `pass` makes it, with the refresh request the home holds (decision 70).
+    fn pass_refreshing(
+        s: &mut Store,
+        job: Echo,
+        overdue: bool,
+        asked: &RefCell<Vec<String>>,
+    ) -> Phase {
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        let (rules, summary) = (Rules::load(s.home.path()).unwrap(), Summary::default());
+        let call =
+            |span: &str, _: &str, _: &Value, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+                asked.borrow_mut().push(span.to_owned());
+                Ok(ChainResult {
+                    provider: "fake".into(),
+                    output: json!({"text": "Grouped."}),
+                    tier: 1,
+                })
+            };
+        let mut runner = Runner::new(
+            (true, 100),
+            vec![Box::new(job) as Box<dyn Job>],
+            Box::new(call),
+            (&rules, &summary, "chain"),
+        )
+        .refresh(s.home.path());
+        let phase = runner.pass(&mut s.raw, &k, &db, overdue).unwrap();
+        s.run();
+        phase
+    }
+
+    /// The page's request, as `request_refresh` leaves it, `ago` before now.
+    fn requested(home: &std::path::Path, ago: i64) {
+        let path = refresh_path(home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let at = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(u64::try_from(ago).unwrap());
+        file.set_modified(at).unwrap();
+    }
+
+    /// Decision 70 (Refresh now): with a request standing, the pass before the windows takes a
+    /// subject due minutes ago, as it takes one due an hour; once none is due now, a pass removes
+    /// the request.
+    #[test]
+    fn a_refresh_request_takes_a_job_due_now_before_a_window() {
+        let mut s = Store::new();
+        let seq = s.said("s1", "r", 1_000, "Build the parser.");
+        let now = crate::db::now_ms();
+        let asked = RefCell::new(Vec::new());
+        let echo = || Echo {
+            subjects: vec![("r1", now - 5 * MINUTE)],
+            seq,
+        };
+        let early = pass_refreshing(&mut s, echo(), true, &asked);
+        assert_eq!(
+            (early, asked.borrow().len()),
+            (Phase::Idle, 0),
+            "no request"
+        );
+        requested(s.home.path(), 0);
+        let early = pass_refreshing(&mut s, echo(), true, &asked);
+        assert_eq!(
+            (early, asked.borrow().len()),
+            (Phase::Covered, 1),
+            "a request"
+        );
+        assert!(refresh_path(s.home.path()).exists(), "one call a round");
+        let done = pass_refreshing(&mut s, echo(), true, &asked);
+        assert_eq!((done, asked.borrow().len()), (Phase::Idle, 1));
+        assert!(!refresh_path(s.home.path()).exists(), "nothing due now");
+    }
+
+    /// Decision 70: a request `REFRESH_MS` old is removed and changes nothing.
+    #[test]
+    fn a_stale_refresh_request_is_removed_and_changes_nothing() {
+        let mut s = Store::new();
+        let seq = s.said("s1", "r", 1_000, "Build the parser.");
+        let now = crate::db::now_ms();
+        let asked = RefCell::new(Vec::new());
+        requested(s.home.path(), REFRESH_MS + MINUTE);
+        let job = Echo {
+            subjects: vec![("r1", now - 5 * MINUTE)],
+            seq,
+        };
+        let early = pass_refreshing(&mut s, job, true, &asked);
+        assert_eq!((early, asked.borrow().len()), (Phase::Idle, 0));
+        assert!(!refresh_path(s.home.path()).exists());
+    }
+
+    /// Decision 70, the page's side: off, waiting on a hold, nothing due and some due, each with
+    /// the request left only for the last.
+    #[test]
+    fn a_refresh_is_requested_only_when_something_is_due_and_can_run() {
+        let request = |s: &Store, subjects: Vec<(&'static str, i64)>, seq: i64| {
+            let jobs = vec![Box::new(Echo { subjects, seq }) as Box<dyn Job>];
+            refresh_with(s.home.path(), crate::db::now_ms(), jobs, &["group"]).unwrap()
+        };
+        let now = crate::db::now_ms();
+        let mut off = Store::new();
+        let seq = off.said("s1", "r", 1_000, "Build the parser.");
+        assert_eq!(
+            request(&off, vec![("r1", now)], seq),
+            json!({"state": "off"})
+        );
+        assert!(!refresh_path(off.home.path()).exists());
+
+        let (s, seq) = curating();
+        let later = crate::db::now_ms() + 30 * MINUTE;
+        assert_eq!(
+            request(&s, vec![("r1", later)], seq),
+            json!({"state": "nothing_due"})
+        );
+        assert!(!refresh_path(s.home.path()).exists());
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        let until = crate::db::now_ms() + 60 * MINUTE;
+        crate::providers_db::set_my_work_round(&db, "group", "budget", until).unwrap();
+        let line = request(&s, vec![("r1", now - MINUTE)], seq);
+        assert_eq!(line["state"], "waiting", "{line}");
+        assert!(!refresh_path(s.home.path()).exists());
+        crate::providers_db::clear_my_work_round(&db, "group").unwrap();
+        // A hold of a job My Work's line does not speak for (My Rules' or My Goals') stops none.
+        crate::providers_db::set_my_work_round(&db, "rules", "budget", until).unwrap();
+        assert_eq!(
+            request(
+                &s,
+                vec![("r1", now - MINUTE), ("r2", now - 2 * MINUTE)],
+                seq
+            ),
+            json!({"state": "started", "due": 2})
+        );
+        assert!(refresh_request(s.home.path(), crate::db::now_ms()).is_some());
+        drop(off);
     }
 }

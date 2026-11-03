@@ -6029,6 +6029,85 @@ assert(text(run('mw.line')).startsWith('Written'),'an older read landing later i
 console.log('PASS: The status line: each state, My Work\'s read on its own, the latest line');
 }
 
+// X14 (decision 70, docs/my-work-model.md slice 12): Refresh now beside My Work's status line while
+// My Work is on; one request at a time, its answer said in the line; the focus stays on it.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const settle=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,0));};
+const day=Date.UTC(2026,9,27,12,0);
+run('lang="en"');
+const slot=status=>{run(`ui.setView("my_work");mw.status=${JSON.stringify(status)};mw.refreshing=false;mw.refreshNote=null;myWorkLineSlot()`);return run('mw.refreshParts');};
+for(const state of ['off','summaries_off'])assert.equal(slot({state}).wrap.hidden,true,`no Refresh now while My Work is ${state}`);
+assert.equal(slot(null).wrap.hidden,true,'none before the status reads');
+for(const status of [{state:'none'},{state:'written',at:day},{state:'waiting',why:'resting',until:day}])
+  assert.equal(slot(status).wrap.hidden,false,`Refresh now with ${status.state}`);
+// One request, a POST with the token and an empty body; the button says it is on its way and a
+// second click sends nothing.
+const posts=[];
+ctx.fetch=(url,options={})=>{
+  if(options.method!=='POST')return Promise.resolve(json({state:'none'}));
+  return new Promise((resolve,reject)=>posts.push({url,options,resolve,reject}));
+};
+let parts=slot({state:'none'});
+parts.button.click();parts.button.click();
+assert.equal(posts.length,1,'one request at a time');
+assert.equal(posts[0].url,'/api/my-work/refresh');
+assert.equal(posts[0].options.method,'POST');
+assert.equal(posts[0].options.body,'{}');
+assert(posts[0].options.headers['X-Oboete-Token']!==undefined,'with the token');
+assert.equal(parts.button.attrs['aria-disabled'],'true','on its way');
+posts[0].resolve(json({state:'started',due:3}));await settle();
+assert.equal(parts.button.attrs['aria-disabled'],'false','free again');
+assert.equal(text(parts.note),'Refreshing 3 now.');
+// Each answer's words.
+const answer=async(reply)=>{posts.length=0;parts=slot({state:'written',at:day});parts.button.click();reply(posts[0]);await settle();return text(run('mw.line'));};
+assert((await answer(p=>p.resolve(json({state:'nothing_due'})))).endsWith('Nothing was due.'),'nothing due');
+assert((await answer(p=>p.resolve(json({code:'internal'},500)))).endsWith('The refresh could not start.'),'a refusal');
+assert((await answer(p=>p.reject(new Error('offline')))).endsWith('The refresh could not start.'),'no answer');
+const waiting=await answer(p=>p.resolve(json({state:'waiting',why:'bound',until:day,calls_a_day:100})));
+assert(waiting.startsWith('Waiting: the daily limit of 100 calls is reached.'),'a waiting answer is the line\'s own words');
+assert.equal(text(run('mw.refreshParts.note')),'Not started: My Work is waiting.');
+assert.equal(run('mw.status.state'),'waiting');
+// Off since the page read it: the button goes, and the focus to the line's way to Settings.
+posts.length=0;parts=slot({state:'none'});parts.button.focus();parts.button.click();
+posts[0].resolve(json({state:'off'}));await settle();
+assert.equal(parts.wrap.hidden,true,'no Refresh now once off');
+assert.equal(run('document.activeElement').dataset.focus,'settings','the focus to Open Settings');
+// A note stays until the status line says something new.
+parts=slot({state:'written',at:day});
+run('mw.refreshNote=["my_work_refresh_nothing"];myWorkRefreshShow()');
+ctx.fetch=()=>Promise.resolve(json({state:'written',at:day}));
+await run('myWorkLineRead()');
+assert.equal(text(parts.note),'Nothing was due.','the same status keeps the note');
+ctx.fetch=()=>Promise.resolve(json({state:'written',at:day+60000}));
+await run('myWorkLineRead()');
+assert.equal(text(parts.note),'','a new status clears it');
+// The focus stays on Refresh now through a redraw of the page that names no focus.
+ctx.fetch=url=>Promise.resolve(json(String(url).includes('my-work/status')?{state:'none'}:{requests:[],unlinked:0}));
+run('ui.setView("my_work")');
+(await run('showMyWork()'))();
+await settle();
+const button=()=>document.getElementById('panel').querySelectorAll('button').find(node=>node.dataset.myWork==='refresh');
+assert(button(),'Refresh now on My Work');
+button().focus();
+const before=button();
+run('myWorkDraw()');
+assert.notEqual(button(),before,'drawn again');
+assert.equal(run('document.activeElement'),button(),'the focus on the new button');
+// In Japanese.
+run('lang="ja"');
+parts=slot({state:'none'});
+assert.equal(text(parts.button),'今すぐ更新');
+posts.length=0;
+ctx.fetch=(url,options={})=>new Promise((resolve,reject)=>posts.push({url,options,resolve,reject}));
+parts.button.click();posts[0].resolve(json({state:'started',due:2}));await settle();
+assert.equal(text(parts.note),'2 件の更新を始めました。');
+run('lang="en"');
+console.log('PASS: Refresh now: shown while My Work is on, one request, each answer, the focus kept, JA/EN');
+}
+
 // Decision 57 slice 6b (docs/my-work-model.md V2): the status words an area's header shows, by
 // claude-mem's statusOf over My Work's states, and asked again by full dates in UTC; slice 7a's
 // build story.
