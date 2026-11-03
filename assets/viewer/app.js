@@ -5816,7 +5816,12 @@ async function providerWrite(action, button, body, path, target = null) {
     }
     simpleReceipt = path === '/key' && !answer.key_saved?.durable ? null : 'ai';
     if (path === '/key') simpleKeyName = null;
-    if (action.op === 'create' && action.entry.kind === 'openai') simpleKeyName = action.entry.name;
+    // Its line shows the key field for it only when it is the first entry of its name: the line's
+    // field is the first entry's (CodeRabbit on #820). Each creation sets it anew.
+    if (action.op === 'create') {
+      simpleKeyName = action.entry.kind === 'openai'
+        && form.providers.filter((p) => p.name === action.entry.name).length === 1 ? action.entry.name : null;
+    }
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), path === '/key' && !answer.key_saved?.durable, lang);
     askHeldAgain();
@@ -6167,11 +6172,18 @@ function providerEntry(provider, line) {
   return card;
 }
 
-// Where the focus goes once a new entry is created (69b-3c-2): its line's key field, which the line
-// shows after an HTTP entry's creation; else its switch (`simpleFocus` tries `on:` after `key:`);
-// else Add AI.
+// Where the focus goes once a new entry is created (69b-3c-2), on the form its answer gave: the
+// created entry's own key field. The first entry of its name has it on its line, which shows it after
+// an HTTP entry's creation (`simpleKeyName`); a later one in its block, as the line's field is the
+// first entry's and a key typed there would go to that one (CodeRabbit on #820). Else its line's
+// switch, else Add AI.
 function createdFocus(name) {
-  return { simple: [`key:${name}`, 'catalog.open'] };
+  // Creation appends one native entry, even if it also materializes automatic Gemini.
+  const created = form.providers.filter((p) => p.selector.source !== 'gemini').at(-1);
+  if (created?.name !== name) return { simple: [`on:${name}`, 'catalog.open'] };
+  const own = `key:entry:${selectorKey(created.selector)}`;
+  const first = form.providers.find((p) => p.name === name) === created;
+  return { simple: first ? [`key:${name}`, own, 'catalog.open'] : [own, `on:${name}`, 'catalog.open'] };
 }
 
 // An AI line's entries, in config order, in a fold at the line's end (69b-3c-2), open while one of
@@ -6752,8 +6764,9 @@ function simpleFocus(key) {
   const controls = $('panel').querySelectorAll('button, input, select, summary');
   const keys = [key];
   if (key.startsWith('move:') || key.startsWith('entry-move:')) keys.push(key.endsWith(':-1') ? key.replace(/:-1$/, ':1') : key.replace(/:1$/, ':-1'));
-  // An entry's key saved: its save is drawn disabled with its field emptied (69b-3c-2).
-  if (key.startsWith('key-save:entry:')) keys.push(key.replace('key-save:', 'key:'));
+  // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
+  // cubic on #820).
+  if (key.startsWith('key-save:')) keys.push(key.replace('key-save:', 'key:'));
   if (/^(resume|resume-more|key|key-save):/.test(key)) keys.push(key.replace(/^[^:]+:/, 'on:'));
   if (key.startsWith('test-run:')) keys.push(key.replace('test-run:', 'test:'));
   if (key.startsWith('entry-test-run:')) keys.push(key.replace('entry-test-run:', 'entry-test:'));

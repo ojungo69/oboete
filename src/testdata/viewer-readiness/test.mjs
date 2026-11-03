@@ -2854,7 +2854,9 @@ console.log('PASS: the caps\' No cap switches');
         continue;
       }
       assert.deepEqual([posted.length,held()],[2,true],`${kind}: then sent, held`);
-      giveOwn(kind==='switch'?lineDone('v3'):json({...lineBody('v3'),key_saved:{durable:true}}));await settled();
+      // A line's key saved: its key is there now, so its field goes (the judge's line keeps its own).
+      const saved=kind==='line key'?ai(['alpha'],{version:'v3',key_input:true,judge,chain:[row('alpha',{timeout_s:120,effective_timeout_s:120})]}):lineBody('v3');
+      giveOwn(kind==='switch'?lineDone('v3'):json({...saved,key_saved:{durable:true}}));await settled();
       const back={'switch':focused()==='inject.session_start','judge key':document.activeElement===general('judge.key'),'line key':focused()==='on:alpha'}[kind];
       assert.deepEqual([held(),back,ctx.ui.getForm().version],[false,true,'v3'],`${kind}: answered, the focus is back`);
       if(kind!=='switch')assert(status().startsWith('The key was registered'),`${kind}: saved, as its status says`);
@@ -3108,29 +3110,53 @@ console.log('PASS: the caps\' No cap switches');
       assert(open,`the guide's button opens the AI lines (${names.length} AI)`);
     }
     // A key being typed into the first entry's field goes to the line's field when the line takes it
-    // over (a new HTTP entry of its name created), never to the new entry, and back when the line
-    // gives it back (another key saved); it is never sent (Codex's review of 69b-3c-2).
+    // over (an answer says its key is missing), and back when the line gives it back (its key there
+    // again); never to another entry, never sent (Codex's review of 69b-3c-2).
     {
       const typed='made-up-moving-key-0821';
-      const two=v=>ai(['alpha'],{version:v,key_input:true,providers:[at('alpha',0),at('alpha',1)],chain:[row('alpha',{entries:2})]});
+      const two=(v,key='ok')=>ai(['alpha'],{version:v,key_input:true,providers:[at('alpha',0),at('alpha',1)],chain:[row('alpha',{entries:2,key})]});
+      f=draw(two('v1'));
+      typeIn(named('key:entry:config:0'),typed);
+      [answer,give]=later();answers=[answer];
+      flip(simple('inject.session_start'),false);await settle();
+      give(json(two('v2','missing')));await settled();
+      assert.deepEqual([simple('key:alpha')?.value,named('key:entry:config:0'),named('key:entry:config:1')?.value],[typed,undefined,''],
+        'the line takes the field over with the key typed; the other entry\'s stays empty');
+      [answer,give]=later();answers=[answer];
+      flip(simple('inject.session_start'),true);await settle();
+      give(json(two('v3')));await settled();
+      assert.deepEqual([simple('key:alpha'),named('key:entry:config:0')?.value],[undefined,typed],'given back to the first entry\'s field');
+      assert(!posted.some(p=>p.body.includes(typed)),'never sent');
+    }
+    // A new entry created: the focus on its own key field. A later entry of a name has it in its block,
+    // its line showing none for it, and a key saved there is the new entry's; the first of a name has
+    // it on its line (CodeRabbit on #820).
+    {
       const createButton=()=>panel.querySelector('.new-provider').querySelectorAll('button').find(b=>text(b)===ctx.t('provider_create'));
+      const typed='made-up-kept-key-0824';
       f=draw(ai(['alpha'],{key_input:true}));
       typeIn(named('key:entry:config:0'),typed);
       vm.runInContext("form.newProvider=providerEdit('alpha',{kind:'openai',base_url:'http://127.0.0.1:9/v1',model:'model-alpha',limits:{}})",ctx);
       ctx.ui.drawSettings();
-      assert.equal(named('key:entry:config:0').value,typed,'kept while the new entry\'s form opens');
       [answer,give]=later();answers=[answer];
       createButton().focus();createButton().click();await settle();
-      give(json(two('v2')));await settled();
-      assert.deepEqual([simple('key:alpha')?.value,named('key:entry:config:0'),named('key:entry:config:1')?.value],[typed,undefined,''],
-        'the line\'s field has it, the first entry draws none, the new entry\'s is empty');
-      assert.equal(focused(),'key:alpha','an HTTP entry created: its line\'s key field');
-      typeIn(named('key:entry:config:1'),'made-up-other-key-0822');
+      give(json(ai(['alpha'],{version:'v2',key_input:true,providers:[at('alpha',0),at('alpha',1)],chain:[row('alpha',{entries:2})]})));await settled();
+      assert.deepEqual([focused(),simple('key:alpha'),named('key:entry:config:0')?.value],['key:entry:config:1',undefined,typed],
+        'another alpha entry created: its own key field; no line field; the first entry\'s key being typed stays');
       [answer,give]=later();answers=[answer];
+      typeIn(named('key:entry:config:1'),'made-up-new-entry-key-0825');
       named('key-save:entry:config:1').click();await settle();
-      give(json({...two('v3'),key_saved:{durable:true}}));await settled();
-      assert.deepEqual([simple('key:alpha'),named('key:entry:config:0')?.value],[undefined,typed],'back in the first entry\'s field');
-      assert(!posted.some(p=>p.body.includes(typed)),'never sent');
+      assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).selector],['/api/providers/key',{source:'config',index:1}],'saved for the new entry');
+      assert(!posted.some(p=>p.body.includes(typed)),'the first entry\'s key never sent');
+      vm.runInContext('saveRun=null',ctx);
+      // The first entry of its name: its line's key field.
+      f=draw(ai(['alpha'],{key_input:true}));
+      vm.runInContext("form.newProvider=providerEdit('gamma',{kind:'openai',base_url:'http://127.0.0.1:9/v1',model:'model-gamma',limits:{}})",ctx);
+      ctx.ui.drawSettings();
+      [answer,give]=later();answers=[answer];
+      createButton().focus();createButton().click();await settle();
+      give(json(ai(['alpha','gamma'],{version:'v2',key_input:true})));await settled();
+      assert.equal(focused(),'key:gamma','a new name\'s HTTP entry: its line\'s key field');
       // A CLI entry created: no key field, its line's switch; one added from Add AI's list: its key field.
       f=draw(ai(['alpha'],{key_input:true}));
       vm.runInContext("form.newProvider=providerEdit('gamma',{kind:'cli',cli:'claude',limits:{}})",ctx);ctx.ui.drawSettings();
@@ -3153,6 +3179,18 @@ console.log('PASS: the caps\' No cap switches');
       simple('catalog.save').focus();simple('catalog.save').click();await settle();
       give(json(ai(['alpha','claude'],{version:'v2',key_input:true})));await settled();
       assert.equal(focused(),'on:claude','a CLI added from Add AI: its line\'s switch');
+    }
+    // A line's key saved while its field stays (its key still missing): the field; gone: the switch
+    // (cubic on #820).
+    {
+      for(const [key,expected] of [['missing','key:alpha'],['ok','on:alpha']]){
+        f=draw(ai(['alpha'],{key_input:true,chain:[row('alpha',{key:'missing'})]}));
+        [answer,give]=later();answers=[answer];
+        typeIn(simple('key:alpha'),'made-up-line-key-0826');
+        simple('key-save:alpha').focus();simple('key-save:alpha').click();await settle();
+        give(json({...ai(['alpha'],{version:'v2',key_input:true,chain:[row('alpha',{key})]}),key_saved:{durable:true}}));await settled();
+        assert.equal(focused(),expected,`a line's key saved, its key ${key} after: ${expected}`);
+      }
     }
     // An AI that reads another's key file while it is missing says so on its line, and its entry
     // still takes a key of its own, sent for that entry: a key saved through the other changes only
