@@ -119,13 +119,15 @@ keywords = ["hooks.slack.com"]
 [[rules]]
 id = "masked-remainder"
 description = "What is glued to a mask already there, right after it or after the quote that closed the masked value: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path (which a rescan finds no other way, the host being masked), or a shell's word that goes on after a quoted value ('abc'def is one argument)"
-regex = '''\[REDACTED\](?:["']?([A-Za-z0-9+]{4,})|/([A-Za-z0-9+]{16,}))'''
+regex = '''\[REDACTED\](?:["']?([A-Za-z0-9+]{4,})|/([A-Za-z0-9+]{16,}))|["'][ \t]+\[REDACTED\][ \t]+["']([A-Za-z0-9+]{4,})'''
 keywords = ["[redacted]"]
-# Letters, digits and `+`, as slack-webhook-secret takes them. After a `/` (gitleaks' rule can stop
-# right before the one in front of the secret) only a run as long as a secret: a shorter one is
-# mostly a path's (`/keys/[REDACTED]/rotate`). A mask followed by a space, another sign or the end
-# is left; one to three characters of a secret's end tell nothing of it. Each scan runs to a
-# fixpoint over what it masked, so this takes such an end in a new capture too.
+# A quoted value's mask with the spaces its quotes held around it (`' abc 'def`) counts as glued
+# to its closing quote; a mask, a space and then a quoted argument (`--token [REDACTED] "https…"`)
+# does not. Letters, digits and `+`, as slack-webhook-secret takes them. After a `/` (gitleaks'
+# rule can stop right before the one in front of the secret) only a run as long as a secret: a
+# shorter one is mostly a path's (`/keys/[REDACTED]/rotate`). A mask followed by a space, another
+# sign or the end is left; one to three characters of a secret's end tell nothing of it. Each scan
+# runs to a fixpoint over what it masked, so this takes such an end in a new capture too.
 
 [[rules]]
 id = "discord-webhook-token"

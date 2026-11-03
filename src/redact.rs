@@ -1999,6 +1999,10 @@ mod tests {
                 suffix.clone(),
             ),
             (format!("DB_PASSWORD=\"{quoted}\"{suffix}"), suffix.clone()),
+            (
+                format!("tool --password ' {quoted} '{suffix}"),
+                suffix.clone(),
+            ),
             (format!("d={xoxd_raw} for the client"), xoxd_raw.clone()),
             (format!("d={xoxd_enc} for the client"), xoxd_enc.clone()),
             (
@@ -2068,6 +2072,7 @@ mod tests {
             "masked: [REDACTED] and [REDACTED].",
             "a short end [REDACTED]abc stays",
             "PUT /keys/[REDACTED]/rotate",
+            "curl --token [REDACTED] \"https://example.invalid/\"",
             "cargo run -- --token-file ./token.txt",
             "gh secret set --secret-name deploy",
             "tool --token --verbose",
