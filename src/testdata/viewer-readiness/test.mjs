@@ -6143,6 +6143,8 @@ parts.button.click();posts[0].resolve(json({state:'started',due:2}));await settl
 assert.equal(text(parts.note),'2 件の更新を始めました。');
 posts.length=0;parts.button.click();posts[0].reject(new Error('offline'));await settle();
 assert.equal(text(parts.note),'応答がありませんでした。更新が始まっている可能性があります。');
+posts.length=0;parts.button.click();posts[0].resolve(json({code:'internal'},500));await settle();
+assert.equal(text(parts.note),'更新を始められませんでした。','a refusal in Japanese (Sourcery on #829)');
 run('lang="en"');
 console.log('PASS: Refresh now: shown while My Work is on, one request, each answer, the focus kept, JA/EN');
 }
