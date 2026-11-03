@@ -35,6 +35,12 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;document.activeElement=this;}
+  blur(){if(document.activeElement===this)blurOff();}
+  // Chrome 156 takes the focus off a control made disabled at the next frame (as inert); a browser may
+  // at once: `Node.blurOnDisable` makes this DOM do so, for the tests that the focus is read before (#819).
+  static blurOnDisable=false;
+  get disabled(){return this._disabled===true;}
+  set disabled(value){this._disabled=Boolean(value);if(value&&Node.blurOnDisable&&document.activeElement===this)blurOff();}
   // Chrome keeps the focus in a node made inert for the task, then takes it to the body at the next
   // frame, its blur and focusout run with no related target (#815, Chrome 156): here, at the next
   // `settle`.
@@ -1330,7 +1336,9 @@ console.log('PASS: the caps\' No cap switches');
   };
   holds('inject',['inject.session_start_chars','inject.session_start_note','inject.session_start_list','inject.per_prompt_chars',
     'inject.per_prompt_wait_ms','inject.correction_chars']);
-  holds('ai',['summary.language','summary.window_tokens','summary.idle_minutes','gemini'],['.provider-entries','.stopped-state']);
+  holds('ai',['summary.language','summary.window_tokens','summary.idle_minutes','gemini'],['.stopped-state']);
+  // Each entry is edited in its line (69b-3c-2): no providers section, a closed fold at the line's end.
+  assert(!panel.querySelector('.provider-entries')&&!panel.querySelector('.provider-new'),'no providers section, no new entry form unasked');
   // Each AI's model, calls a day and timeout are its line's (69b-3c), outside More settings.
   const alphaLine=panel.querySelectorAll('.simple-provider').find(n=>n.dataset.providerName==='alpha');
   for(const name of ['chain.alpha.model','chain.alpha.daily_budget','chain.alpha.timeout_s']){
@@ -1364,7 +1372,7 @@ console.log('PASS: the caps\' No cap switches');
   assert(panel.querySelectorAll('.simple-block').every(n=>!n.closest('form')),'no simple control is inside a form');
   ctx.ui.setLang('ja');ctx.ui.drawSettings();
   assert(text(panel).includes('細かい設定')&&text(panel).includes('このパソコン')&&text(panel).includes('診断と保守'),'Japanese');
-  for(const key of ['more_settings','never_recorded_none','never_repos_h','simple_never_more','simple_entry_detail','inject_chars','per_prompt_chars']){
+  for(const key of ['more_settings','never_recorded_none','never_repos_h','simple_never_more','simple_entry','simple_entries','simple_entry_of','simple_entries_desc','simple_entries_order','inject_chars','per_prompt_chars']){
     const [en,ja]=[ctx.tier.text(key,'en'),ctx.tier.text(key,'ja')];
     assert(en&&ja&&en!==ja,`${key} in both languages`);
   }
@@ -1378,12 +1386,21 @@ console.log('PASS: the caps\' No cap switches');
     for(let d=node.parentElement?.closest('details');d;d=d.parentElement?.closest('details'))if(!d.open)return false;
     return true;
   };
+  // Each AI line ends with its entries' fold, closed (69b-3c-2). Its one entry's block has no switch,
+  // arrows or test of its own (the line's are its), and has its key panel (the line shows no key
+  // field), its Edit fold and Remove, named by its selector.
+  const named=(root,key)=>[...root.querySelectorAll('button'),...root.querySelectorAll('input'),...root.querySelectorAll('select'),
+    ...root.querySelectorAll('summary')].find(n=>n.dataset.simpleFocus===key);
+  const lineFold=name=>panel.querySelectorAll('.simple-provider').find(n=>n.dataset.providerName===name).querySelector('.simple-provider-fold');
+  const entriesOf=name=>lineFold(name).children.filter(n=>n&&typeof n==='object').at(-1);
   f=draw(ai(['alpha']));
-  panel.querySelectorAll('.simple-provider').find(n=>n.dataset.providerName==='alpha').querySelectorAll('button')
-    .find(b=>b.className.includes('simple-link')).click();
-  assert(document.activeElement?.className.includes('provider-entry')&&document.activeElement.closest('.more-settings'),
-    'the AI line\'s link focuses its entry in More settings');
-  assert(opened(document.activeElement),'with the folds around it open');
+  assert.deepEqual([entriesOf('alpha').className,entriesOf('alpha').open,entriesOf('alpha').querySelectorAll('.provider-entry').map(n=>n.dataset.selector)],
+    ['simple-entries',false,['config:0']],'the line ends with its entries, closed');
+  assert.deepEqual(['entry-on:config:0','entry-move:config:0:1','entry-move:config:0:-1','entry-test:config:0'].map(k=>Boolean(named(entriesOf('alpha'),k))),
+    [false,false,false,false],'one entry: no switch, arrows or test of its own');
+  assert.deepEqual([Boolean(entriesOf('alpha').querySelector('.provider-key')),Boolean(named(entriesOf('alpha'),'entry-edit:config:0')),
+    Boolean(named(entriesOf('alpha'),'entry-remove:config:0'))],[true,true,true],'its key panel, its Edit fold and Remove');
+  assert(!lineFold('alpha').querySelectorAll('button').some(b=>b.className.includes('simple-link')),'no link to More settings');
   f=draw(ai(['alpha']));
   const customAt=vm.runInContext('AI_CATALOG.findIndex(entry=>!entry.name)',ctx);
   panel.querySelector('.simple-catalog').querySelectorAll('button')[customAt].click();
@@ -1530,27 +1547,26 @@ console.log('PASS: the caps\' No cap switches');
   vm.runInContext('lineDrafts.clear()',ctx);ctx.ui.drawSettings();
   simple('model:alpha').focus();ctx.ui.drawSettings();
   assert.equal(document.activeElement,simple('model:alpha'),'the AI line\'s model choice keeps its own');
-  // A field each AI entry repeats goes back to its own entry's, not to another's or the AI line's.
-  f=draw(ai(['alpha','beta'],{key_input:true,chain:['alpha','beta'].map(n=>row(n,{key:'missing'}))}));
-  assert(simple('key:beta'),'the AI line has its key field too');
-  const keyOf=name=>more('ai').querySelectorAll('.provider-entry').find(n=>text(n).includes(name))
-    ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
-  assert(keyOf('beta')&&keyOf('alpha')!==keyOf('beta'),'each entry has its key field');
+  // A field each AI entry repeats goes back to its own entry's, not to another's or the AI line's. The
+  // line that shows its key field has no second one in its entry's block (69b-3c-2).
+  f=draw(ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')]}));
+  const keyOf=name=>entriesOf(name).querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
+  assert.deepEqual([Boolean(simple('key:alpha')),Boolean(keyOf('alpha')),Boolean(simple('key:beta')),Boolean(keyOf('beta'))],[true,false,false,true],
+    'alpha\'s key on its line, beta\'s in its entry\'s block');
   keyOf('beta').focus();ctx.ui.drawSettings();
-  assert.equal(document.activeElement,keyOf('beta'),'the second entry\'s key field has the focus back');
-  const modelOf=name=>more('ai').querySelectorAll('.provider-entry').find(n=>text(n).includes(name))
-    ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
-  // A key refused is marked on the field it was typed in: the AI line's, not its entry's in More
-  // settings (Codex's review of 69b-2a).
+  assert.equal(document.activeElement,keyOf('beta'),'the entry\'s key field has the focus back');
+  const modelOf=name=>entriesOf(name).querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
+  // A key refused is marked on the field it was typed in: the AI line's, or an entry's (Codex's
+  // review of 69b-2a).
   answers=[json({code:'bad_key',field:'providers.key'},422)];
   const lineKey=()=>simple('key:alpha');
   typeIn(lineKey(),'a made-up wrong key');simple('key-save:alpha').click();await settled();
   assert.equal(posted.at(-1).url,'/api/providers/key');
-  assert.deepEqual([lineKey().attrs['aria-invalid'],keyOf('alpha').attrs['aria-invalid'],document.activeElement===lineKey()],['true',undefined,true],
+  assert.deepEqual([lineKey().attrs['aria-invalid'],keyOf('beta').attrs['aria-invalid'],document.activeElement===lineKey()],['true',undefined,true],
     'the AI line\'s key field is marked and focused');
   answers=[json({code:'bad_key',field:'providers.key'},422)];
-  typeIn(keyOf('alpha'),'another made-up key');more('ai').querySelectorAll('button').find(b=>b.dataset.simpleFocus?.startsWith('key-save:entry:')&&b.closest('.provider-entry')===keyOf('alpha').closest('.provider-entry')).click();await settled();
-  assert.deepEqual([keyOf('alpha').attrs['aria-invalid'],document.activeElement===keyOf('alpha')],['true',true],'and an entry\'s on the entry');
+  typeIn(keyOf('beta'),'another made-up key');named(entriesOf('beta'),'key-save:entry:config:1').click();await settled();
+  assert.deepEqual([keyOf('beta').attrs['aria-invalid'],document.activeElement===keyOf('beta')],['true',true],'and an entry\'s on the entry');
   posted.length=0;document.activeElement=null;
   modelOf('beta').focus();modelOf('beta').setSelectionRange(2,4);ctx.ui.drawSettings();
   assert.deepEqual([document.activeElement===modelOf('beta'),modelOf('beta').selectionStart],[true,2],
@@ -1871,7 +1887,7 @@ console.log('PASS: the caps\' No cap switches');
     [privacyAnswer,givePrivacy]=later();
     (await ctx.ui.showSettings())();posted.length=0;
     const lineKey=()=>simple('key:alpha');
-    const entryKey=selector=>more('ai').querySelectorAll('.provider-entry').find(n=>n.dataset.selector===selector)
+    const entryKey=selector=>panel.querySelectorAll('.provider-entry').find(n=>n.dataset.selector===selector)
       ?.querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
     const buttonBy=input=>input.parentElement.querySelectorAll('button')[0];
     const exactValue=()=>more('privacy').querySelectorAll('input').find(n=>n.type==='password');
@@ -1913,8 +1929,9 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.equal(entryKey('config:1').value,'','nothing put into an entry whose API changed');
     // An entry whose place now holds another entry, or whose address changed, gets nothing back:
-    // a key never goes where it was not typed for.
-    typeIn(entryKey('config:0'),'made-up-entry-key-0004');
+    // a key never goes where it was not typed for. (Alpha's key is its line's, 69b-3c-2: beta's
+    // entry field is the one typed in.)
+    typeIn(entryKey('config:1'),'made-up-entry-key-0004');
     [privacyAnswer,givePrivacy]=later();
     const moved=keyed({version:'v3',inject:sized(4000)});
     moved.providers=[{...moved.providers[1],selector:{source:'config',index:0}},{...moved.providers[0],selector:{source:'config',index:1},
@@ -1922,7 +1939,7 @@ console.log('PASS: the caps\' No cap switches');
     answers=[json(moved)];
     typeIn(general('inject.session_start_chars'),'4100');leave(general('inject.session_start_chars'));await settled();
     givePrivacy(json(privacy));await settled();
-    assert.deepEqual([lineKey().value,entryKey('config:0').value,entryKey('config:1').value],['','',''],
+    assert.deepEqual([lineKey().value,entryKey('config:0')?.value??'',entryKey('config:1')?.value??''],['','',''],
       'nothing put into a field whose entry moved, changed its address or is another');
     assert.equal(exactValue().value,secrets[2],'the exact value, which goes nowhere, stays');
     // Its own save sends it, and nothing is kept once it is sent.
@@ -2729,16 +2746,20 @@ console.log('PASS: the caps\' No cap switches');
       giveSecond(preview('v7'));await settled();
       assert.deepEqual([held(),focused()],[false,'test:alpha'],'the second answered, the focus is on its button');
     }
-    // More settings' entry: its preview's button has no name a redraw finds, but refused, it stays
-    // on the page and has the focus again.
-    {
-      f=draw(ai(['alpha']));
+    // An entry's own preview (its line's second entry; the first's is the line's, 69b-3c-2): refused,
+    // its button keeps the focus; drawn, the focus on its button, its send drawn.
+    const twice=(extra={})=>ai(['alpha'],{providers:[entry('alpha',0),entry('alpha',1)],chain:[row('alpha',{entries:2})],...extra});
+    for(const ok of [false,true]){
+      f=draw(twice());
       [answer,give]=later();answers=[answer];
-      const entryTest=all('.provider-entry')[0].querySelectorAll('button').find(b=>text(b)==='Preview connection test');
+      const entryTest=simple('entry-test:config:1');
       entryTest.focus();entryTest.click();await settle();
       assert.deepEqual([held(),document.activeElement],[true,document.body],'an entry\'s preview: held');
-      give(json({code:'bad_request'},400));await settled();
-      assert.deepEqual([held(),document.activeElement===entryTest],[false,true],'an entry\'s preview refused: its button has the focus');
+      give(ok?json({version:f.version,selector:{source:'config',index:1},ready:true,destination:'http://127.0.0.1:9/v1',model:'model-alpha',
+        fixture:'made-up fixture',estimated_input_tokens:10,max_output_tokens:5,possible_charge:false,estimated_usd:0,monthly_cap_usd:5})
+        :json({code:'bad_request'},400));await settled();
+      assert.deepEqual([held(),focused(),Boolean(simple('entry-test-run:config:1'))],[false,'entry-test:config:1',ok],
+        `an entry's preview ${ok?'drawn':'refused'}: its button has the focus`);
     }
     // A provider's write, an AI line's key: saved, the line's switch (its field is gone); refused,
     // its button.
@@ -2927,6 +2948,224 @@ console.log('PASS: the caps\' No cap switches');
       delete document.visibilityState;
       assert.equal(rests,before+1,'the old read ended, the new one is still the only one on its way');
     }
+    document.activeElement=null;
+  }
+  // 69b-3c-2: each AI line opens its entries' blocks in place; an entry's write gives the focus to its
+  // control at its place then (#815's hold, `mappedProviderSelector`).
+  {
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+      if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+      return new Promise(()=>{});
+    };
+    let confirmed=true;ctx.window.confirm=()=>confirmed;
+    const held=()=>panel.querySelector('.settings').inert===true;
+    const focused=()=>document.activeElement?.dataset?.simpleFocus??null;
+    const named=key=>[...all('button'),...all('input'),...all('select'),...all('summary')].find(n=>n.dataset.simpleFocus===key);
+    const block=sel=>all('.provider-entry').find(n=>n.dataset.selector===sel);
+    const editOf=sel=>block(sel).querySelector('.provider-edit');
+    const lineOf=name=>all('.simple-provider').find(n=>n.dataset.providerName===name);
+    const at=(name,i,extra={})=>({...entry(name,i),...extra});
+    // Alpha's two entries with beta's between them in config.toml.
+    const split=(extra={})=>ai(['alpha','beta'],{providers:[at('alpha',0),at('beta',1),at('alpha',2)],chain:[row('alpha',{entries:2}),row('beta')],...extra});
+    f=draw(split());
+    assert.deepEqual(lineOf('alpha').querySelectorAll('.provider-entry').map(n=>n.dataset.selector),['config:0','config:2'],'alpha\'s line holds its two entries');
+    assert.deepEqual(lineOf('alpha').querySelectorAll('h4').map(text),['Entry 1 of 2','Entry 2 of 2'],'each says its place');
+    assert.deepEqual(['entry-on:config:0','entry-on:config:2','entry-test:config:0','entry-test:config:2'].map(k=>Boolean(named(k))),[true,true,false,true],
+      'each its switch; the second its test, the first\'s is the line\'s');
+    assert.deepEqual([named('entry-move:config:0:-1').disabled,named('entry-move:config:0:1').disabled,named('entry-move:config:2:-1').disabled,
+      named('entry-move:config:2:1').disabled],[true,false,false,true],'the arrows stop at the name\'s ends');
+    // Either arrow between them moves the lower to the upper's place: beta keeps its place among the names.
+    for(const key of ['entry-move:config:0:1','entry-move:config:2:-1']){
+      f=draw(split());answers=[new Promise(()=>{})];
+      named(key).click();await settle();
+      assert.deepEqual(JSON.parse(posted.at(-1).body).action,{op:'move',selector:{source:'config',index:2},to:0},`${key}: one move of the lower`);
+      vm.runInContext('saveRun=null',ctx);
+    }
+    // Moved, the focus on the pressed entry's arrow at its new place (the other one, at its name's
+    // end); refused, on the arrow pressed.
+    const swapped=(v)=>ai(['alpha','beta'],{version:v,providers:[at('alpha',0),at('alpha',1),at('beta',2)],chain:[row('alpha',{entries:2}),row('beta')]});
+    for(const ok of [true,false]){
+      f=draw(split());
+      let [answer,give]=later();answers=[answer];
+      named('entry-move:config:0:1').focus();named('entry-move:config:0:1').click();await settle();
+      assert.deepEqual([held(),document.activeElement],[true,document.body],'a move: held');
+      give(ok?json(swapped('v2')):json({code:'bad_request'},400));await settled();
+      assert.deepEqual([held(),focused()],[false,ok?'entry-move:config:1:-1':'entry-move:config:0:1'],`a move ${ok?'done':'refused'}: the focus`);
+    }
+    // Its switch: the same switch at its place then.
+    f=draw(split());
+    let [answer,give]=later();answers=[answer];
+    named('entry-on:config:2').focus();flip(named('entry-on:config:2'),false);await settle();
+    assert.deepEqual(JSON.parse(posted.at(-1).body).action,{op:'enabled',selector:{source:'config',index:2},enabled:false},'an entry turned off');
+    give(json(split({version:'v2'})));await settled();
+    assert.equal(focused(),'entry-on:config:2','its switch has the focus back');
+    // Edit and Save: answered before the hold took the focus off, or after: its Edit summary, the
+    // editor closed; refused on a field, the field.
+    for(const when of ['at once','after the hold']){
+      f=draw(ai(['alpha']));
+      ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
+      assert(lineOf('alpha').querySelector('.simple-entries').open&&editOf('config:0').open,'an entry edited opens its fold and its editor');
+      [answer,give]=later();answers=[answer];
+      named('entry-save:config:0').focus();named('entry-save:config:0').click();
+      if(when==='after the hold'){await settle();assert.equal(document.activeElement,document.body,'the hold took the focus off');}
+      give(json(ai(['alpha'],{version:'v2'})));await settled();
+      assert.equal(JSON.parse(posted.at(-1).body).action.op,'edit','Save sends edit');
+      assert.deepEqual([focused(),editOf('config:0').open],['entry-edit:config:0',false],`saved ${when}: its Edit summary, the editor closed`);
+    }
+    f=draw(ai(['alpha']));
+    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
+    [answer,give]=later();answers=[answer];
+    named('entry-save:config:0').focus();named('entry-save:config:0').click();await settle();
+    give(json({code:'bad_request',field:'providers.model'},400));await settled();
+    assert.equal(document.activeElement?.dataset.field,'providers.model','refused on a field: the field');
+    // Cancel with the focus on it: its Edit summary, the editor closed.
+    f=draw(ai(['alpha']));
+    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
+    named('entry-cancel:config:0').focus();named('entry-cancel:config:0').click();await settled();
+    assert.deepEqual([focused(),editOf('config:0').open,posted.length],['entry-edit:config:0',false,0],'cancelled: its Edit summary, closed, nothing sent');
+    // A rename takes the entry to its new name's line, its Edit summary there.
+    f=draw(ai(['alpha']));
+    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
+    [answer,give]=later();answers=[answer];
+    named('entry-save:config:0').focus();named('entry-save:config:0').click();await settle();
+    give(json(ai(['gamma'],{version:'v2'})));await settled();
+    assert.deepEqual([focused(),Boolean(lineOf('gamma')?.querySelector('.provider-entry'))],['entry-edit:config:0',true],'renamed: its Edit summary in its new line');
+    // Remove: cancelled sends nothing; done, the line's switch, though beta's entry took its place;
+    // the last entry of a name, "Add AI".
+    f=draw(split());confirmed=false;
+    named('entry-remove:config:0').click();await settled();
+    assert.equal(posted.length,0,'a removal cancelled sends nothing');
+    confirmed=true;
+    [answer,give]=later();answers=[answer];
+    named('entry-remove:config:0').focus();named('entry-remove:config:0').click();await settle();
+    assert.deepEqual(JSON.parse(posted.at(-1).body).action,{op:'remove',selector:{source:'config',index:0}},'confirmed, sent');
+    give(json(ai(['alpha','beta'],{version:'v2',providers:[at('beta',0),at('alpha',1)],chain:[row('alpha'),row('beta')]})));await settled();
+    assert.deepEqual([focused(),Boolean(named('entry-remove:config:0'))],['on:alpha',true],'removed: the line\'s switch, not beta\'s Remove at its place');
+    f=draw(ai(['alpha','beta']));
+    [answer,give]=later();answers=[answer];
+    named('entry-remove:config:0').focus();named('entry-remove:config:0').click();await settle();
+    give(json(ai(['beta'],{version:'v2'})));await settled();
+    assert.equal(focused(),'catalog.open','the last entry of a name removed: "Add AI"');
+    // An entry's key saved: its key field; a built-in entry's at its file place after the write.
+    for(const source of ['config','builtin']){
+      const keyedEntry=(v,src)=>ai(['alpha','beta'],{version:v,key_input:true,providers:[at('alpha',0,{selector:{source:src,index:0}}),at('beta',1,{selector:{source:src,index:1}})]});
+      f=draw(keyedEntry('v1',source));
+      [answer,give]=later();answers=[answer];
+      typeIn(named(`key:entry:${source}:1`),'made-up-entry-key-0819');
+      named(`key-save:entry:${source}:1`).focus();named(`key-save:entry:${source}:1`).click();await settle();
+      give(json({...keyedEntry('v2',source==='builtin'?'file':source),key_saved:{durable:true}}));await settled();
+      assert.equal(focused(),`key:entry:${source==='builtin'?'file':source}:1`,`a ${source} entry's key saved: its key field`);
+    }
+    // A built-in entry saved: its Edit summary at its file place.
+    f=draw(ai(['alpha'],{providers:[at('alpha',0,{selector:{source:'builtin',index:0}})]}));
+    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
+    [answer,give]=later();answers=[answer];
+    named('entry-save:builtin:0').focus();named('entry-save:builtin:0').click();await settle();
+    assert.deepEqual(JSON.parse(posted.at(-1).body).action.selector,{source:'builtin',index:0},'a built-in entry is edited by its selector');
+    give(json(ai(['alpha'],{version:'v2',providers:[at('alpha',0,{selector:{source:'file',index:0}})]})));await settled();
+    assert.deepEqual([focused(),editOf('file:0').open],['entry-edit:file:0',false],'saved: its Edit summary at file:0');
+    // An automatic Gemini entry beside another of its name cannot move; a Codex CLI entry's editor has
+    // its credits box; an unsupported CLI entry says so, with no Edit fold.
+    f=draw(ai(['alpha'],{providers:[at('alpha',0),at('alpha',1,{selector:{source:'gemini',index:0}})],chain:[row('alpha',{entries:2})]}));
+    assert.deepEqual([named('entry-move:config:0:1').disabled,named('entry-move:gemini:0:-1').disabled],[true,true],'no move beside an automatic Gemini entry');
+    f=draw(ai(['alpha'],{providers:[at('alpha',0,{saved:{enabled:true,kind:'cli',cli:'codex',model:null,key:'on-path',timeout_s:60,limits:{}}})]}));
+    assert(block('config:0').querySelectorAll('input').some(n=>n.dataset.field==='providers.credits'),'a Codex entry\'s editor has its credits box');
+    f=draw(ai(['alpha'],{providers:[at('alpha',0,{saved:{enabled:true,kind:'cli',cli:'made-up-cli',model:null,key:'on-path',timeout_s:60,limits:{}}})]}));
+    assert.deepEqual([text(block('config:0')).includes(ctx.t('provider_unsupported_cli')),Boolean(block('config:0').querySelector('.provider-edit'))],
+      [true,false],'an unsupported CLI entry says so, with no Edit fold');
+    // The entries' fold keeps its open state through a redraw.
+    f=draw(ai(['alpha']));
+    const fold=lineOf('alpha').querySelector('.simple-entries');fold.open=true;fold.isConnected=true;
+    for(const cb of fold.listeners.toggle||[])cb({target:fold});
+    ctx.ui.drawSettings();
+    assert(lineOf('alpha').querySelector('.simple-entries').open,'its fold stays open');
+    vm.runInContext("groupOpen.delete('entries:alpha')",ctx);
+    // The guide's "AI for summaries" opens the AI group at its lines, with AI and with none.
+    for(const names of [['alpha'],[]]){
+      f=draw(ai(names));
+      const providers=panel.querySelector('.simple-providers');
+      for(let d=providers.closest('details');d;d=d.parentElement?.closest('details'))d.open=false;
+      panel.querySelector('.onboarding').querySelectorAll('button').find(b=>text(b)===ctx.t('onboarding_providers')).click();
+      let open=true;for(let d=panel.querySelector('.simple-providers').closest('details');d;d=d.parentElement?.closest('details'))open&&=d.open;
+      assert(open,`the guide's button opens the AI lines (${names.length} AI)`);
+    }
+    // #819. Two alpha entries, the line's key missing: its key field, each entry's switch and arrows.
+    const page=(v,extra={})=>ai(['alpha'],{version:v,key_input:true,judge,providers:[at('alpha',0),at('alpha',1)],
+      chain:[row('alpha',{key:'missing',entries:2})],...extra});
+    const lineOn=()=>{const t=simple('timeout:alpha');typeIn(t,'120');
+      for(const cb of t.listeners.keydown||[])cb({key:'Enter',target:t,isComposing:false,keyCode:13,preventDefault(){}});};
+    const judgeSave=()=>{typeIn(general('judge.key'),'made-up-judge-key-0819');return general('judge.key').parentElement.querySelectorAll('button')[0];};
+    const press=node=>{node.focus();if(node.type==='checkbox')flip(node,!node.checked);else node.click();};
+    // A write that waited for its turn behind a line's save, and returns because Settings was left
+    // meanwhile, releases the node it held: a key's, an entry's and a simple switch's.
+    for(const [kind,control] of [['judge key',judgeSave],['entry switch',()=>named('entry-on:config:1')],
+      ['simple switch',()=>simple('inject.session_start')]]){
+      f=draw(page('v1'));
+      const [line,giveLine]=later();answers=[line];
+      lineOn();await settled();
+      const waited=panel.querySelector('.settings');
+      press(control());await settle();
+      assert.deepEqual([posted.length,waited.inert],[1,true],`${kind}: waits for the line's save, the page held`);
+      ctx.ui.setView('timeline');
+      giveLine(json(page('v2')));await settled();
+      ctx.ui.setView('settings');
+      assert.deepEqual([posted.length,waited.inert],[1,false],`${kind}: Settings left, nothing sent, the node it held released`);
+    }
+    // Every hold reads the focus before its control is disabled: where a browser takes the focus off
+    // a control made disabled at once, each write still gives it back.
+    for(const [kind,s,waits,control,own,back] of [
+      ['Resume',page('v1',{stopped:['alpha'],resting:[]}),false,()=>simple('resume:alpha'),[json({provider:'alpha',resumed:true})],
+        ()=>focused()==='on:alpha'],
+      ['an entry\'s arrow',page('v1'),false,()=>named('entry-move:config:0:1'),[json(page('v2'))],()=>focused()==='entry-move:config:1:-1'],
+      ['the judge\'s key',page('v1'),false,judgeSave,[json({...page('v2'),key_saved:{durable:true}})],
+        ()=>document.activeElement===general('judge.key')],
+      ['the judge\'s key after a line\'s save',page('v1'),true,judgeSave,[json({...page('v3'),key_saved:{durable:true}})],
+        ()=>document.activeElement===general('judge.key')],
+      ['an entry\'s switch after a line\'s save',page('v1'),true,()=>named('entry-on:config:1'),[json(page('v3'))],
+        ()=>focused()==='entry-on:config:1'],
+      ['a simple switch after a line\'s save',page('v1'),true,()=>simple('inject.session_start'),[json(page('v3'))],
+        ()=>focused()==='inject.session_start']]){
+      f=draw(s);vm.runInContext('heldFocus=null',ctx);
+      let giveLine=null;
+      if(waits){let line;[line,giveLine]=later();answers=[line,...own];lineOn();await settled();}
+      else answers=[...own];
+      Node.blurOnDisable=true;
+      press(control());await settle();
+      giveLine?.(json(page('v2')));await settled();
+      Node.blurOnDisable=false;
+      assert(back(),`${kind}: the focus read before its control is disabled is given back (on ${focused()})`);
+    }
+    {
+      let hashed;ctx.crypto={subtle:{digest:()=>new Promise(r=>{hashed=r;})}};
+      f=draw(page('v1'));vm.runInContext('heldFocus=null',ctx);
+      answers=[new Promise(()=>{})];
+      const exact=simple('redaction.exact');typeIn(exact,'made-up-exact-0819');
+      const label=exact.parentElement,section=label.parentElement;
+      const hash=section.children[section.children.indexOf(label)+1];
+      Node.blurOnDisable=true;
+      hash.focus();hash.click();await settle();
+      hashed(new Uint8Array(32).buffer);await settled();
+      Node.blurOnDisable=false;delete ctx.crypto;
+      assert.equal(focused(),'redaction.exact','the hash: the focus read before its button is disabled is given back');
+      vm.runInContext('saveRun=null',ctx);
+    }
+    // A throw while the poll draws the rests is handled.
+    {
+      const caught=[];const error=ctx.console.error;ctx.console.error=e=>caught.push(String(e));
+      const unhandled=[];const on=e=>unhandled.push(e);process.on('unhandledRejection',on);
+      ctx.fetch=url=>url.startsWith('/api/rests?')?Promise.resolve(json({stopped:['alpha'],resting:[]}))
+        :url.startsWith('/api/maintenance?')?Promise.reject(new Error('not answered here')):new Promise(()=>{});
+      f=draw(ai(['alpha'],{stopped:[],resting:[]}));
+      const render=vm.runInContext('renderRests',ctx);
+      vm.runInContext("renderRests=()=>{throw new Error('made-up drawing failure')}",ctx);
+      vm.runInContext('restsPolled=null',ctx);
+      await vm.runInContext('pollMaintenance()',ctx);await settled();
+      ctx.renderRests=render;
+      process.off('unhandledRejection',on);ctx.console.error=error;
+      assert.deepEqual([unhandled.length,caught.some(e=>e.includes('made-up drawing failure'))],[0,true],'said in the console, not unhandled');
+    }
+    delete ctx.window.confirm;
     document.activeElement=null;
   }
   ctx.fetch=w6fetch;
