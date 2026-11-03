@@ -35,6 +35,17 @@ class Node {
   get options(){return this.children.filter(node=>node?.tagName==='OPTION');}
   click(){for(const cb of this.listeners.click||[])cb({target:this});}
   focus(){this.focused=true;document.activeElement=this;}
+  // Chrome keeps the focus in a node made inert for the task, then takes it to the body at the next
+  // frame, its blur and focusout run with no related target (#815, Chrome 156): here, at the next
+  // `settle`.
+  get inert(){return this._inert===true;}
+  set inert(value){
+    this._inert=value;
+    if(value)setImmediate(()=>{
+      const a=document.activeElement;
+      if(this._inert&&a&&a!==document.body&&this.contains(a))blurOff();
+    });
+  }
   // A number field has no selection: a browser throws, and reads none (69b-3c).
   setSelectionRange(start,end,direction){
     if(this.type==='number')throw new Error('InvalidStateError');
@@ -85,6 +96,7 @@ assert.equal(simple.status({...row,key:'missing',on:false},['groq']),'missing','
 assert.equal(simple.status({...row,key:'not-on-path'},['groq']),'not-installed');
 assert.equal(simple.status({...row,on:false},['groq']),'stopped','an owner stop retains its resume path');
 assert.equal(simple.status({...row,on:false},[],[]),'off');
+assert.equal(simple.status({...row,on:false},[],[{name:'groq',until:Date.now()+3600000}]),'off','an AI turned off says Off, whatever rest its name has (#817)');
 assert.equal(simple.status({...row,key:'unknown'},[],[]),'unknown','unknown installation is never ready');
 assert.equal(simple.status(row,null),'unknown','unreadable stops are never reported as ready');
 const preset={savedSettings:{chain:[{...row,key:'none'}]},providers:[{name:'groq',saved:{enabled:true,base_url:'https://api.groq.com/openai/v1'}}]};
@@ -2631,7 +2643,291 @@ console.log('PASS: the caps\' No cap switches');
     await read(lists(['alpha'],[{name:'beta',until:noon.getTime()}]));
     assert.deepEqual([moreResume()===kept,document.activeElement===kept],[true,true],'the stopped list and its focus stay');
     restsAnswer=null;document.activeElement=null;
-    restsAnswer=null;document.activeElement=null;
+  }
+  // #815: Chrome takes the focus off a page made inert at the next frame and leaves it on the body
+  // (the harness's DOM does so at the next `settle`); a write that holds Settings gives it back to
+  // the control it was on, or to the one drawn in its place, when no hold is left.
+  {
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'){posted.push({url,body:options.body});return Promise.resolve(answers.shift());}
+      if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+      return new Promise(()=>{});
+    };
+    const held=()=>panel.querySelector('.settings').inert===true;
+    const focused=()=>document.activeElement?.dataset?.simpleFocus??null;
+    // A simple switch: held while its save is on its way, the focus back on it once answered.
+    f=draw(ai(['alpha']));
+    let [answer,give]=later();answers=[answer];
+    const start=simple('inject.session_start');start.focus();
+    flip(start,!start.checked);await settle();
+    assert.deepEqual([posted.length,held(),document.activeElement],[1,true,document.body],
+      'the switch saves, the page held, the focus on the body meanwhile as in Chrome');
+    give(json(ai(['alpha'],{version:'v2',inject:{...base.inject,session_start:start.checked}})));await settled();
+    assert.deepEqual([held(),focused()],[false,'inject.session_start'],'once answered, the focus is on the switch drawn again');
+    // A Resume, on the line and in More settings' list: done, its AI's switch; refused, itself.
+    for(const [key,ok] of [['resume:alpha',true],['resume-more:alpha',true],['resume:alpha',false]]){
+      f=draw(ai(['alpha'],{stopped:['alpha'],resting:[]}));
+      [answer,give]=later();answers=[answer];
+      const resume=simple(key);resume.focus();resume.click();await settle();
+      assert.deepEqual([posted.at(-1)?.url,held(),document.activeElement],['/api/resume',true,document.body],`${key}: held, the focus on the body`);
+      give(ok?json({provider:'alpha',resumed:true}):json({code:'bad_request'},400));await settled();
+      assert.deepEqual([held(),focused()],[false,ok?'on:alpha':key],`${key} ${ok?'done: the AI\'s switch':'refused: itself'}`);
+    }
+    // A key saved by its button or by Enter in its field: the field drawn again, as its button is
+    // drawn disabled with the field empty.
+    for(const by of ['button','enter']){
+      f=draw(ai(['alpha'],{judge,key_input:true}));
+      [answer,give]=later();answers=[answer];
+      const judgeKey=general('judge.key');typeIn(judgeKey,'made-up-judge-key-0815');
+      const keyButton=judgeKey.parentElement.querySelectorAll('button')[0];
+      if(by==='button'){keyButton.focus();keyButton.click();}
+      else{judgeKey.focus();for(const cb of judgeKey.listeners.keydown||[])cb({key:'Enter',target:judgeKey,preventDefault(){}});}
+      await settle();
+      assert.deepEqual([posted.at(-1)?.url,held(),document.activeElement],['/api/judge/key',true,document.body],`a key saved by ${by}: held`);
+      give(json({...ai(['alpha'],{version:'v2',judge,key_input:true}),key_saved:{durable:true}}));await settled();
+      assert.deepEqual([held(),document.activeElement===general('judge.key')],[false,true],`a key saved by ${by}: its field drawn again`);
+    }
+    // A key refused on its field: the field marked keeps the focus the refusal gave it.
+    {
+      f=draw(ai(['alpha'],{judge,key_input:true}));
+      [answer,give]=later();answers=[answer];
+      const judgeKey=general('judge.key');typeIn(judgeKey,'made-up-judge-key-0816');
+      const keyButton=judgeKey.parentElement.querySelectorAll('button')[0];keyButton.focus();keyButton.click();await settle();
+      give(json({code:'bad_request',field:'judge.key'},400));await settled();
+      assert.deepEqual([held(),document.activeElement===general('judge.key'),general('judge.key').attrs['aria-invalid']],[false,true,'true'],
+        'a refused key: its field, marked, keeps the focus');
+    }
+    // A test's preview asked from an AI line: drawn, or refused, the focus back on its button.
+    for(const ok of [true,false]){
+      f=draw(ai(['alpha']));
+      [answer,give]=later();answers=[answer];
+      const test=simple('test:alpha');test.focus();test.click();await settle();
+      assert.deepEqual([held(),document.activeElement],[true,document.body],`a preview ${ok?'drawn':'refused'}: held`);
+      give(ok?json({version:f.version,selector:{source:'config',index:0},ready:true,destination:'http://127.0.0.1:9/v1',model:'model-alpha',
+        fixture:'made-up fixture',estimated_input_tokens:10,max_output_tokens:5,possible_charge:false,estimated_usd:0,monthly_cap_usd:5})
+        :json({code:'bad_request'},400));await settled();
+      assert.deepEqual([held(),focused(),Boolean(simple('test-run:alpha'))],[false,'test:alpha',ok],`a preview ${ok?'drawn':'refused'}: the focus on its button`);
+    }
+    // A preview asked, Settings left and opened again, another asked, then the first answered: the
+    // first's end takes none of the second's focus (Codex's review of 69b-3c-1c).
+    {
+      f=draw(ai(['alpha']));
+      const [first,giveFirst]=later();const [second,giveSecond]=later();answers=[first,second];
+      const preview=v=>json({version:v,selector:{source:'config',index:0},ready:true,destination:'http://127.0.0.1:9/v1',model:'model-alpha',
+        fixture:'made-up fixture',estimated_input_tokens:10,max_output_tokens:5,possible_charge:false,estimated_usd:0,monthly_cap_usd:5});
+      const oldVersion=f.version;
+      simple('test:alpha').focus();simple('test:alpha').click();await settle();
+      const opened=ai(['alpha'],{version:'v7'});
+      const inner=ctx.fetch;
+      ctx.fetch=(url,options)=>url.startsWith('/api/settings?')?Promise.resolve(json(opened))
+        :url.startsWith('/api/hidden?')?Promise.resolve(json([])):inner(url,options);
+      ctx.ui.setView('timeline');ctx.ui.setView('settings');(await ctx.ui.showSettings())();await settled();
+      ctx.fetch=inner;
+      simple('test:alpha').focus();simple('test:alpha').click();await settle();
+      assert.deepEqual([posted.length,held(),document.activeElement],[2,true,document.body],'the second preview is held');
+      giveFirst(preview(oldVersion));await settled();
+      giveSecond(preview('v7'));await settled();
+      assert.deepEqual([held(),focused()],[false,'test:alpha'],'the second answered, the focus is on its button');
+    }
+    // More settings' entry: its preview's button has no name a redraw finds, but refused, it stays
+    // on the page and has the focus again.
+    {
+      f=draw(ai(['alpha']));
+      [answer,give]=later();answers=[answer];
+      const entryTest=all('.provider-entry')[0].querySelectorAll('button').find(b=>text(b)==='Preview connection test');
+      entryTest.focus();entryTest.click();await settle();
+      assert.deepEqual([held(),document.activeElement],[true,document.body],'an entry\'s preview: held');
+      give(json({code:'bad_request'},400));await settled();
+      assert.deepEqual([held(),document.activeElement===entryTest],[false,true],'an entry\'s preview refused: its button has the focus');
+    }
+    // A provider's write, an AI line's key: saved, the line's switch (its field is gone); refused,
+    // its button.
+    for(const ok of [true,false]){
+      f=draw(ai(['alpha'],{chain:[row('alpha',{key:'missing'})],key_input:true}));
+      [answer,give]=later();answers=[answer];
+      typeIn(simple('key:alpha'),'made-up-line-key-0815');
+      const save=simple('key-save:alpha');save.focus();save.click();await settle();
+      assert.deepEqual([posted.at(-1)?.url.endsWith('/key'),held(),document.activeElement],[true,true,document.body],`a line's key ${ok?'saved':'refused'}: held`);
+      give(ok?json({...ai(['alpha'],{version:'v2',key_input:true}),key_saved:{durable:true}}):json({code:'bad_request'},400));await settled();
+      assert.deepEqual([held(),focused()],[false,ok?'on:alpha':'key-save:alpha'],`a line's key ${ok?'saved: the line\'s switch':'refused: its button'}`);
+    }
+    // The masking rule's hash, by its button or by Enter in the value's field: the field, emptied,
+    // takes the focus back (the button is drawn again disabled).
+    for(const by of ['button','enter']){
+      let hashed;ctx.crypto={subtle:{digest:()=>new Promise(r=>{hashed=r;})}};
+      f=draw(ai(['alpha']));
+      answers=[new Promise(()=>{})];
+      const exact=simple('redaction.exact');typeIn(exact,'made-up-exact-0815');
+      const label=exact.parentElement,section=label.parentElement;
+      const hash=section.children[section.children.indexOf(label)+1];
+      if(by==='button'){hash.focus();hash.click();}
+      else{exact.focus();for(const cb of exact.listeners.keydown||[])cb({key:'Enter',target:exact,preventDefault(){}});}
+      await settle();
+      assert.deepEqual([held(),document.activeElement],[true,document.body],`a hash by ${by}: held`);
+      hashed(new Uint8Array(32).buffer);await settled();
+      assert.deepEqual([held(),focused(),simple('redaction.exact').value],[false,'redaction.exact',''],`a hash by ${by}: the value's field, emptied`);
+      vm.runInContext('saveRun=null',ctx);
+    }
+    // A hash that fails: nothing drawn again, the button stays disabled, the value's field has it.
+    {
+      let failed;ctx.crypto={subtle:{digest:()=>new Promise((_,r)=>{failed=r;})}};
+      f=draw(ai(['alpha']));
+      const exact=simple('redaction.exact');typeIn(exact,'made-up-exact-0816');
+      const label=exact.parentElement,section=label.parentElement;
+      const hash=section.children[section.children.indexOf(label)+1];
+      hash.focus();hash.click();await settle();
+      failed(new Error('made-up failure'));await settled();
+      assert.deepEqual([held(),hash.disabled,focused()],[false,true,'redaction.exact'],'a failed hash: the value\'s field');
+    }
+    delete ctx.crypto;
+    // The preference's save: applied, its block is drawn again, and its text's field, emptied, takes
+    // the focus back.
+    {
+      f=draw(ai(['alpha']));
+      [answer,give]=later();answers=[answer];
+      typeIn(general('preference.text'),'Made-up preference: answer in short sentences.');
+      flip(general('preference.apply_to_all_repos'),true);
+      const prefForm=general('preference.text').parentElement.parentElement;
+      const save=prefForm.children.at(-1);save.focus();
+      for(const cb of prefForm.listeners.submit||[])cb({preventDefault(){}});await settle();
+      assert.deepEqual([posted.at(-1)?.url.includes('preferences'),held(),document.activeElement],[true,true,document.body],'a preference: held');
+      give(json({state:'applied',uid:'made-up-uid-0815'}));await settled();
+      assert.deepEqual([held(),document.activeElement===general('preference.text'),general('preference.text').value],[false,true,''],
+        'a preference applied: its field, emptied, has the focus');
+    }
+    // The month's cap saved by Enter: the hold's blur is no leaving (the field is disabled while it
+    // saves), so one request; the field drawn again takes the focus back.
+    {
+      f=draw(ai(['alpha']));
+      [answer,give]=later();answers=[answer];
+      const cap=simple('paid_usd_per_month');cap.focus();typeIn(cap,'7');
+      for(const cb of cap.listeners.keydown||[])cb({key:'Enter',target:cap,preventDefault(){}});
+      await settled();
+      assert.deepEqual([posted.length,held(),document.activeElement],[1,true,document.body],'the cap saves once, held');
+      give(json(ai(['alpha'],{version:'v2',paid_usd_per_month:7})));await settled();
+      assert.deepEqual([posted.length,held(),focused()],[1,false,'paid_usd_per_month'],'once answered, the cap drawn again has the focus');
+    }
+    // Waiting for its turn behind an AI line's save, which holds nothing: a switch, a judge's key and an
+    // AI line's key are held from the start, and the focus comes back once their own write is answered;
+    // a key not sent because the settings were read meanwhile gives it to the key's field.
+    const lineBody=v=>ai(['alpha'],{version:v,key_input:true,judge,chain:[row('alpha',{timeout_s:120,effective_timeout_s:120,key:'missing'})]});
+    const lineDone=v=>json(lineBody(v));
+    for(const kind of ['switch','judge key','line key','key read again']){
+      f=draw(ai(['alpha'],{key_input:true,judge,chain:[row('alpha',{key:'missing'})]}));
+      const [lineAnswer,giveLine]=later();
+      const [own,giveOwn]=later();answers=[lineAnswer,own];
+      const t=simple('timeout:alpha');typeIn(t,'120');
+      for(const cb of t.listeners.keydown||[])cb({key:'Enter',target:t,isComposing:false,keyCode:13,preventDefault(){}});
+      await settled();
+      assert.equal(posted.length,1,`${kind}: the line's save is on its way`);
+      let target;
+      if(kind==='switch'){target=simple('inject.session_start');target.focus();flip(target,!target.checked);}
+      else if(kind==='line key'){typeIn(simple('key:alpha'),'made-up-line-key-0817');target=simple('key-save:alpha');target.focus();target.click();}
+      else{typeIn(general('judge.key'),'made-up-judge-key-0817');target=general('judge.key').parentElement.querySelectorAll('button')[0];target.focus();target.click();}
+      await settle();
+      assert.deepEqual([posted.length,held(),document.activeElement],[1,true,document.body],`${kind}: waits, held, the focus on the body`);
+      if(kind==='key read again')void vm.runInContext("api('settings')",ctx);
+      giveLine(lineDone('v2'));await settled();
+      if(kind==='key read again'){
+        assert.deepEqual([posted.length,held(),document.activeElement===general('judge.key')],[1,false,true],`${kind}: not sent, the key's field has the focus`);
+        continue;
+      }
+      assert.deepEqual([posted.length,held()],[2,true],`${kind}: then sent, held`);
+      giveOwn(kind==='switch'?lineDone('v3'):json({...lineBody('v3'),key_saved:{durable:true}}));await settled();
+      const back={'switch':focused()==='inject.session_start','judge key':document.activeElement===general('judge.key'),'line key':focused()==='on:alpha'}[kind];
+      assert.deepEqual([held(),back,ctx.ui.getForm().version],[false,true,'v3'],`${kind}: answered, the focus is back`);
+      if(kind!=='switch')assert(status().startsWith('The key was registered'),`${kind}: saved, as its status says`);
+    }
+    // An AI line's field sent again unchanged while its first save is on its way, then a switch: the
+    // second ends with nothing to save and held nothing, so it takes none of the switch's focus
+    // (Codex's review of 69b-3c-1c).
+    {
+      f=draw(ai(['alpha'],{key_input:true,judge,chain:[row('alpha',{key:'missing'})]}));
+      const [lineAnswer,giveLine]=later();const [own,giveOwn]=later();answers=[lineAnswer,own];
+      const t=simple('timeout:alpha');typeIn(t,'120');
+      const enter=()=>{for(const cb of t.listeners.keydown||[])cb({key:'Enter',target:t,isComposing:false,keyCode:13,preventDefault(){}});};
+      enter();await settled();enter();await settled();
+      assert.equal(posted.length,1,'the second Enter waits for the first save');
+      const start=simple('inject.session_start');start.focus();flip(start,!start.checked);await settle();
+      giveLine(lineDone('v2'));await settled();
+      assert.deepEqual([posted.length,held()],[2,true],'the second has nothing to send; the switch is sent, held');
+      giveOwn(lineDone('v3'));await settled();
+      assert.deepEqual([held(),focused()],[false,'inject.session_start'],'answered, the focus is back on the switch');
+    }
+    // Another view opened while the save was on its way: its answer gives Settings' focus to nothing.
+    {
+      f=draw(ai(['alpha']));
+      [answer,give]=later();answers=[answer];
+      const start=simple('inject.session_start');start.focus();
+      flip(start,!start.checked);await settle();
+      ctx.ui.setView('timeline');
+      give(json(ai(['alpha'],{version:'v2',inject:{...base.inject,session_start:start.checked}})));await settled();
+      assert.equal(document.activeElement,document.body,'the focus stays where the other view left it');
+      ctx.ui.setView('settings');
+    }
+    // The poll starts the rests read without waiting for it: one that does not answer leaves the
+    // version read each round (#817).
+    {
+      let versions=0;
+      ctx.fetch=url=>{
+        if(url.startsWith('/api/version?')){versions++;return Promise.resolve(json({v:vm.runInContext('version',ctx),waiting:0,held:0}));}
+        if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+        return new Promise(()=>{});
+      };
+      f=draw(ai(['alpha']));
+      vm.runInContext('reposLoaded=true',ctx);
+      document.visibilityState='visible';
+      for(let round=0;round<2;round++){void vm.runInContext('poll()',ctx);await settled();}
+      delete document.visibilityState;
+      assert.equal(versions,2,'each round reads the version though the rests read does not answer');
+    }
+    // A rests read slower than the poll: no other starts while it is on its way, and its answer is
+    // drawn (Codex's review of 69b-3c-1c).
+    {
+      let rests=0,versions=0;const [slow,giveSlow]=later();
+      ctx.fetch=url=>{
+        if(url.startsWith('/api/version?')){versions++;return Promise.resolve(json({v:vm.runInContext('version',ctx),waiting:0,held:0}));}
+        if(url.startsWith('/api/rests?')){rests++;return slow;}
+        if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+        return new Promise(()=>{});
+      };
+      f=draw(ai(['alpha'],{stopped:[],resting:[]}));
+      vm.runInContext('restsPolled=null',ctx);
+      document.visibilityState='visible';
+      for(let round=0;round<2;round++){void vm.runInContext('poll()',ctx);await settled();}
+      assert.deepEqual([rests,versions],[1,2],'one rests read on its way across two rounds, the version read each');
+      giveSlow(json({stopped:[],resting:[{name:'alpha',until:Date.now()+3600000}]}));await settled();
+      delete document.visibilityState;
+      assert(text(all('.simple-provider')[0].querySelector('.simple-state')).startsWith('Resting until'),'its answer is drawn');
+    }
+    // A poll's rests read that does not answer, then Settings opened again: the poll reads the rests
+    // again (Codex's review of 69b-3c-1c).
+    {
+      let rests=0;const [hung,giveHung]=later();const [next]=later();
+      ctx.fetch=url=>{
+        if(url.startsWith('/api/version?'))return Promise.resolve(json({v:vm.runInContext('version',ctx),waiting:0,held:0}));
+        if(url.startsWith('/api/rests?')){rests++;return rests===1?hung:rests===2?next:Promise.resolve(json({stopped:[],resting:[]}));}
+        if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
+        if(url.startsWith('/api/settings?'))return Promise.resolve(json(ai(['alpha'],{stopped:[],resting:[]})));
+        if(url.startsWith('/api/hidden?'))return Promise.resolve(json([]));
+        return new Promise(()=>{});
+      };
+      f=draw(ai(['alpha'],{stopped:[],resting:[]}));
+      vm.runInContext('restsPolled=null',ctx);
+      document.visibilityState='visible';
+      void vm.runInContext('poll()',ctx);await settled();
+      assert.equal(rests,1,'the poll\'s read is on its way, and does not answer');
+      (await ctx.ui.showSettings())();await settled();
+      const before=rests;
+      void vm.runInContext('poll()',ctx);await settled();
+      assert.equal(rests,before+1,'Settings opened again, the poll reads the rests again');
+      // The old read answering at last does not let the poll start another beside the new one.
+      giveHung(json({stopped:[],resting:[]}));await settled();
+      void vm.runInContext('poll()',ctx);await settled();
+      delete document.visibilityState;
+      assert.equal(rests,before+1,'the old read ended, the new one is still the only one on its way');
+    }
+    document.activeElement=null;
   }
   ctx.fetch=w6fetch;
   document.querySelectorAll=pageControls;
