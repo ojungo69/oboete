@@ -62,8 +62,9 @@ keywords = ["secret", "token", "passw", "pwd", "key", "credential"]
 # it on the next line, indented or not); before an unquoted one, spaces and tabs, or a line break
 # before an indented line (YAML's `password:` with its value below): never a blank a value already
 # masked left (redact.rs `fixpoint`), nor an unindented next line, so an env file's next line or
-# the next word is not taken for a value. The header rules (bearer, basic, cookie, authorization)
-# keep to their line the same way.
+# the next word is not taken for a value. The cookie and authorization rules take the same gap
+# after their `:`, and the header rules (bearer, basic, authorization) spaces and tabs alone between
+# a scheme and its value.
 # A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
 # it left as written), however short. An unquoted one runs to a space, a quote or backtick, or a
 # backslash before a letter, a digit, a quote or a backslash (an escape in a flattened tool field);
@@ -84,13 +85,13 @@ keywords = ["://"]
 [[rules]]
 id = "cookie-header"
 description = "Cookies of a Cookie or Set-Cookie header, whatever they are named: name=value pairs split by ;, a value bare or quoted"
-regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=][ \t]*["']?([^\s;=,"']+=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*)(?:;\s*[^\s;=,"']+(?:=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*))?)*)'''
+regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=](?:[ \t\r\n]*["']|[ \t]*\r?\n[ \t]+|[ \t]*)([^\s;=,"']+=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*)(?:;\s*[^\s;=,"']+(?:=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*))?)*)'''
 keywords = ["cookie"]
 
 [[rules]]
 id = "authorization-header"
 description = "Credential in an Authorization header of any scheme, with or without a curl before it: a scheme's auth-params whole (Digest, AWS4-HMAC-SHA256), else one token (Token, ApiKey, none)"
-regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=][ \t]*["']?(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}[ \t]+([a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+))*)|(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}[ \t]+)?([A-Za-z0-9_\-.=+/:~]{8,}))'''
+regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=](?:[ \t\r\n]*["']|[ \t]*\r?\n[ \t]+|[ \t]*)(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}[ \t]+([a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+))*)|(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}[ \t]+)?([A-Za-z0-9_\-.=+/:~]{8,}))'''
 keywords = ["authorization"]
 entropy = 3.0
 

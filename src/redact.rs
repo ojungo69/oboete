@@ -2141,6 +2141,28 @@ mod tests {
             let (stored, found) = scan(&text, &Rules::default());
             check(&stored, &found, &pw);
         }
+        // A header's value on the next line, quoted (JSON) or on an indented line (YAML), is masked.
+        for (text, secret) in [
+            (
+                format!("{{\"Authorization\":\n  \"Token {tok}\"}}"),
+                tok.clone(),
+            ),
+            (
+                format!("{{\"Authorization\":\n\"Token {tok}\"}}"),
+                tok.clone(),
+            ),
+            (
+                format!("headers:\n  Authorization:\n    Token {tok}"),
+                tok.clone(),
+            ),
+            (
+                format!("{{\"Cookie\":\n  \"sid={tok}\"}}"),
+                format!("sid={tok}"),
+            ),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            check(&stored, &found, &secret);
+        }
         // An empty value takes no unindented next line; a header's value no next line.
         let b64 = format!("dXNyOnE5Wng4bUwy{}", "dkI0blI3dFl3");
         let word = format!("Ab3dEfGh5jKlMn7p{}", "QrStUvWx");
