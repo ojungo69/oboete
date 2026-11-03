@@ -2985,9 +2985,13 @@ console.log('PASS: the caps\' No cap switches');
     // Moved, the focus on the pressed entry's arrow at its new place (the other one, at its name's
     // end); refused, on the arrow pressed.
     const swapped=(v)=>ai(['alpha','beta'],{version:v,providers:[at('alpha',0),at('alpha',1),at('beta',2)],chain:[row('alpha',{entries:2}),row('beta')]});
-    // The arrow at its new place is shown, the page moving as little as it takes; refused, nothing
-    // moves the page.
+    // The arrow at its new place, below the window, is brought to its middle; refused, nothing moves
+    // the page. The status line held below the header covers what is under it.
     const scrolled=[];Node.prototype.scrollIntoView=function(o){scrolled.push([this.dataset?.simpleFocus,o?.block]);};
+    const rects=new Map([['entry-move:config:1:-1',{top:700,bottom:730}]]);
+    Node.prototype.getBoundingClientRect=function(){
+      return this===document.getElementById('status')?{top:113,bottom:155}:rects.get(this.dataset?.simpleFocus)??{top:300,bottom:330};};
+    ctx.window.innerHeight=600;
     for(const ok of [true,false]){
       f=draw(split());
       let [answer,give]=later();answers=[answer];
@@ -2995,9 +2999,8 @@ console.log('PASS: the caps\' No cap switches');
       assert.deepEqual([held(),document.activeElement],[true,document.body],'a move: held');
       give(ok?json(swapped('v2')):json({code:'bad_request'},400));await settled();
       assert.deepEqual([held(),focused()],[false,ok?'entry-move:config:1:-1':'entry-move:config:0:1'],`a move ${ok?'done':'refused'}: the focus`);
-      assert.deepEqual(scrolled.splice(0),ok?[['entry-move:config:1:-1','nearest']]:[],`a move ${ok?'done: its arrow shown':'refused: the page stays'}`);
+      assert.deepEqual(scrolled.splice(0),ok?[['entry-move:config:1:-1','center']]:[],`a move ${ok?'done: its arrow shown':'refused: the page stays'}`);
     }
-    delete Node.prototype.scrollIntoView;
     // Its switch: the same switch at its place then.
     f=draw(split());
     let [answer,give]=later();answers=[answer];
@@ -3005,6 +3008,15 @@ console.log('PASS: the caps\' No cap switches');
     assert.deepEqual(JSON.parse(posted.at(-1).body).action,{op:'enabled',selector:{source:'config',index:2},enabled:false},'an entry turned off');
     give(json(split({version:'v2'})));await settled();
     assert.equal(focused(),'entry-on:config:2','its switch has the focus back');
+    assert.deepEqual(scrolled.splice(0),[],'in sight, the page stays');
+    // Its switch under the status line: brought to the middle.
+    rects.set('entry-on:config:2',{top:120,bottom:150});
+    f=draw(split());
+    [answer,give]=later();answers=[answer];
+    named('entry-on:config:2').focus();flip(named('entry-on:config:2'),false);await settle();
+    give(json(split({version:'v2'})));await settled();
+    assert.deepEqual([focused(),scrolled.splice(0)],['entry-on:config:2',[['entry-on:config:2','center']]],'under the status line, brought to the middle');
+    delete Node.prototype.scrollIntoView;delete Node.prototype.getBoundingClientRect;delete ctx.window.innerHeight;
     // Edit and Save: answered before the hold took the focus off, or after: its Edit summary, the
     // editor closed; refused on a field, the field.
     for(const when of ['at once','after the hold']){

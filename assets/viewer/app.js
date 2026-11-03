@@ -7727,14 +7727,24 @@ function entryOf(control) {
   return control.closest('.provider-entry')?.dataset.selector ?? null;
 }
 
+// A write's target may be elsewhere than the control pressed (an entry moved, a line created or
+// gone): brought to the middle of the window when it is out of it, or under the page's header or the
+// status line held below it on Settings; left where it is when it is in sight (69b-3c-2).
+function reveal(control) {
+  const r = control.getBoundingClientRect?.();
+  if (!r) return;
+  const status = $('status');
+  const covered = Math.max(document.querySelector?.('header.bar')?.getBoundingClientRect().bottom ?? 0,
+    status.textContent ? status.getBoundingClientRect?.().bottom ?? 0 : 0);
+  if (r.top < covered || r.bottom > window.innerHeight) control.scrollIntoView?.({ block: 'center' });
+}
+
 function focusBack(keep) {
   if (keep?.simple) {
     const found = simpleFocus(keep.simple);
     const c = document.activeElement;
     if (c?.dataset?.simpleFocus === keep.simple) caretBack(c, keep);
-    // A write's target may be elsewhere than the control pressed (an entry moved, a line created or
-    // gone): shown, the page moving as little as it takes, below its header (69b-3c-2).
-    if (found && keep.reveal) c?.scrollIntoView?.({ block: 'nearest' });
+    if (found && keep.reveal) reveal(c);
     return;
   }
   if (!keep) return;
