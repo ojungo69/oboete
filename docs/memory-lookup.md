@@ -155,7 +155,9 @@ through every five minutes while the hooks have recorded within half an hour: ea
 bit index's chunks are 128 KiB each), under raw.lock's shared hold with a short read-only
 connection, never set aside under an open handle; the hold is given back every half second for
 50 ms and the read goes on where it stopped, since a forget's or a restore's swap waits 10 s for
-the lock and a table read from the disk takes longer (imported's index 14 s). A read that took more
+the lock and a table read from the disk takes longer (`imported_fts_data`, 376 MB, 14 s); a
+knowledge.db replaced between two holds (a rebuild) makes the read no read. The full-text indexes'
+small `_idx` tables (1.0, 0.2 and 0.1 MB, no rowid to go on from) are left to the searches. A read that took more
 than 5 s found the pages gone; a second such read in a row doubles the wait, up to an hour, so a
 box short of memory is not made to read them from the disk again and again; a read that failed
 keeps the wait, and a store gone before the set was read through (a rebuild setting knowledge.db
@@ -173,7 +175,8 @@ answer over the same home, its room, the bodies refused),
 `search::b::tests::the_warm_set_is_read_while_the_hooks_record_and_less_when_slow`,
 `the_warm_set_reads_what_is_made`, `the_warm_read_reads_a_large_value_through` (a value's
 overflow chain broken: `length()` reads, the warm read fails), `a_slow_warm_read_lets_a_swap_through`
-(rows read slowly: a swap gets raw.lock within 2 s and the read goes on);
+(rows read slowly: a swap gets raw.lock within 2 s and the read goes on),
+`a_store_replaced_between_holds_is_no_read`;
 `view::tests::the_lookup_route_waits_for_its_vector_no_longer_than_the_prompt_does` (the embedder
 held: the words side answers within the prompt's wait),
 `the_lookups_vectors_left_running_are_bounded` (a third held lookup makes no vector, each given

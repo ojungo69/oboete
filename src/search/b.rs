@@ -1185,16 +1185,13 @@ pub(crate) fn warm(home: &Path) {
 /// instead of 5.6 s.
 const WARM_SET: &[(&str, &str)] = &[
     ("imported_fts_data", "block"),
-    ("imported_fts_idx", "term"),
     ("imported_fts_docsize", "sz"),
     ("cards_fts_data", "block"),
-    ("cards_fts_idx", "term"),
     ("cards_fts_docsize", "sz"),
     // A query too short for pieces matches the cards' text itself (`curated_fts`, CodeRabbit on
     // #830).
     ("cards_fts_content", "c0"),
     ("claims_fts_data", "block"),
-    ("claims_fts_idx", "term"),
     ("claims_fts_docsize", "sz"),
     ("claims_fts_content", "c0"),
     ("imported", "body"),
@@ -1223,7 +1220,8 @@ pub(crate) fn warm_pages(home: &Path) -> Result<Option<Duration>> {
 
 /// How long the warm read holds raw.lock at a time. A forget's or a restore's swap waits for its
 /// exclusive hold 10 s, trying every 10 ms; a table read from the disk takes longer than that
-/// (imported's index, 14 s on this PC's store), so the read gives the lock back this often, for
+/// (imported's full-text index data, `imported_fts_data`, 376 MB: 14 s on this PC's store), so the
+/// read gives the lock back this often, for
 /// `WARM_GAP`, and goes on where it stopped (Codex on #830).
 const WARM_HOLD: Duration = Duration::from_millis(500);
 /// The time between two holds, longer than a swap's 10 ms between tries.
@@ -1233,6 +1231,9 @@ const WARM_GAP: Duration = Duration::from_millis(50);
 fn warm_pages_holding(home: &Path, hold: Duration) -> Result<Option<Duration>> {
     let started = Instant::now();
     let mut gaps = Duration::ZERO;
+    // The file read, the same through every hold: a rebuild's replacing it between two makes the
+    // place reached in the old one mean nothing in the new (cubic on #830).
+    let mut file = None;
     for &(table, column) in WARM_SET {
         let mut after = None;
         loop {
@@ -1242,7 +1243,8 @@ fn warm_pages_holding(home: &Path, hold: Duration) -> Result<Option<Duration>> {
                 return Ok(None);
             };
             let path = home.join("knowledge.db");
-            if !path.exists() {
+            let this = crate::db::store_file(&path);
+            if this.is_empty() || *file.get_or_insert_with(|| this.clone()) != this {
                 return Ok(None);
             }
             let k = Connection::open_with_flags(
@@ -1268,7 +1270,9 @@ fn warm_pages_holding(home: &Path, hold: Duration) -> Result<Option<Duration>> {
 
 /// `table`'s rows after rowid `after`, in rowid order, each `column` read through, until `hold`
 /// has passed: the rowid of the last row read when the time ran out first, none when the table was
-/// read through. A table with no rowid (a full-text index's `_idx`, small) is read whole at once.
+/// read through. `length()` of a BLOB comes from the record's header and leaves its overflow pages
+/// unread (the bit index's chunks are 128 KiB each, Codex on #830); a comparison reads the value
+/// through.
 fn read_for(
     k: &Connection,
     table: &str,
@@ -1276,10 +1280,6 @@ fn read_for(
     after: Option<i64>,
     hold: Duration,
 ) -> Result<Option<i64>> {
-    if table.ends_with("_idx") {
-        read_whole(k, table, column)?;
-        return Ok(None);
-    }
     let started = Instant::now();
     let mut st = k.prepare(&format!(
         "SELECT rowid, {column} <> x'' FROM {table} WHERE rowid > ?1 ORDER BY rowid"
@@ -1299,18 +1299,6 @@ fn read_for(
 thread_local! {
     /// A warm read's time for each row in a test, as a disk would take.
     static WARM_ROW_DELAY: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
-}
-
-/// Every row's `column` read whole. `length()` of a BLOB comes from the record's header and leaves
-/// its overflow pages unread (the bit index's chunks are 128 KiB each, Codex on #830); a comparison
-/// reads the value through.
-fn read_whole(k: &Connection, table: &str, column: &str) -> Result<()> {
-    let _: i64 = k.query_row(
-        &format!("SELECT count({column} <> x'') FROM {table}"),
-        [],
-        |r| r.get(0),
-    )?;
-    Ok(())
 }
 
 /// Decision 71: when the resident viewer reads `WARM_SET` again. Only while the hooks record,
@@ -7984,6 +7972,43 @@ mod tests {
         assert!(reading.join().unwrap().unwrap().is_some());
     }
 
+    /// cubic on #830: a knowledge.db replaced between two holds of the warm read (a rebuild's) makes
+    /// the read no read, since the place it reached in the old file means nothing in the new one.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_replaced_between_holds_is_no_read() {
+        let mut s = Store::new();
+        s.imported_all(
+            (0..300)
+                .map(|n| {
+                    (
+                        format!("obs-{n}"),
+                        "import",
+                        "feature",
+                        1_000 + n,
+                        "Nebula".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let path = home.path().to_owned();
+        let reading = std::thread::spawn(move || {
+            WARM_ROW_DELAY.set(Duration::from_millis(10));
+            warm_pages_holding(&path, Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let swap = crate::raw::lock_for_swap(home.path()).unwrap();
+        let k = home.path().join("knowledge.db");
+        let copy = home.path().join("knowledge.db.copy");
+        std::fs::copy(&k, &copy).unwrap();
+        std::fs::rename(&copy, &k).unwrap();
+        drop(swap);
+        assert_eq!(reading.join().unwrap().unwrap(), None);
+    }
+
     /// Codex on #830: the warm read goes through a value's overflow pages, which `length()` of a
     /// BLOB leaves unread: with the chain of a large value's overflow pages broken, the read fails
     /// where `length()` does not.
@@ -8008,10 +8033,8 @@ mod tests {
             .query_row("SELECT sum(length(b)) FROM t", [], |r| r.get(0))
             .unwrap();
         assert_eq!(length, 200_000, "length() reads no overflow page");
-        assert!(
-            read_whole(&c, "t", "b").is_err(),
-            "the warm read goes through them"
-        );
+        let read = read_for(&c, "t", "b", None, Duration::MAX);
+        assert!(read.is_err(), "the warm read goes through them");
     }
 
     /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and
