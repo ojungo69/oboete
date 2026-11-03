@@ -2282,7 +2282,10 @@ and remembers the list's view, filter and sort between visits (`create-store.ts`
   itself, a merge moving the choice to the area merged into or a join moving the open request, is
   written with `replaceState` when My Work is drawn.
 - **Back and Forward** (`popstate`, `routeShow`): the address is read and shown, nothing written.
-  Leaving a request this way gives the focus back to its card, as its back button does.
+  Leaving a request this way gives the focus back to its card, as its back button does. A request
+  shown again from the address (Forward, a reload) is opened as `myWorkOpen` opens one: its work
+  product read again, its mark read, its card the place to return to, brought into view by the
+  focus as no scroll was kept.
 - **A place that is gone**: a request the answer does not have shows the page that says so, with its
   back button, as an open request that leaves does; an area not listed or dismissed shows all of My
   Work (`myFocusSelected`). The address keeps the choice, as claude-mem's keeps `focus`.
@@ -2294,9 +2297,10 @@ and remembers the list's view, filter and sort between visits (`create-store.ts`
 - **Tests**: the address read (each `view`, `focus` and `request`, an unknown `view`); on load, a
   page named and none named; each move pushed once and the same place not again, with the token
   and another parameter kept; Back to a request and from it, to another tab and to all of My Work,
-  writing nothing; a merge's area replaced; the status line's way to Settings pushed; the status
-  tab and the sort kept, and unknown ones read back as the defaults. Ten hand mutants of the page's
-  code each fail a check.
+  writing nothing; Back, Forward and Back again from a request each returning the focus to its
+  card, and the work product read again; a merge's area replaced; the status line's way to
+  Settings pushed; the status tab and the sort kept, and unknown ones read back as the defaults.
+  Twelve hand mutants of the page's code each fail a check.
 - **Then**: the speed of rows 54 and N5 (decision 70's order after the three gaps).
 
 ## Not built

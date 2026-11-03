@@ -364,6 +364,13 @@ function routeApply(route) {
   mw.area = route.area;
   mw.editing = null;
   mw.request = route.request;
+  // As `myWorkOpen`: the open request's work product is read again and its mark read, and its
+  // card is where its back button, or Back, returns.
+  if (route.request !== null) {
+    mw.products = null;
+    mw.unread.delete(route.request);
+    mw.back = { id: route.request, scroll: null };
+  }
   if (route.area === 'past-focus') void myFocusReadPast();
 }
 
@@ -9423,9 +9430,11 @@ function myWorkClose() {
   routeWrite(true);
   myWorkDraw();
   const opener = back && myWorkOpenerOf('id', back.id);
-  if (opener) opener.focus({ preventScroll: true });
+  // A request reached through the address kept no scroll: the focus brings its card into view.
+  const scroll = back?.scroll ?? null;
+  if (opener) opener.focus({ preventScroll: scroll !== null });
   else myWorkFocus('current');
-  window.scrollTo?.(0, back?.scroll || 0);
+  if (!opener || scroll !== null) window.scrollTo?.(0, scroll || 0);
 }
 
 function myWorkFact(term, ...value) {

@@ -6213,6 +6213,26 @@ try{
   // What the page changes itself, a merge's area, replaces the address.
   run('mw.area="a2";myWorkDraw()');
   assert.deepEqual(moves,[['replace',page('?focus=a2')]]);
+  // Back, Forward and Back again from a request give the focus back to its card each time, and a
+  // request shown again from the address reads its work product again (as myWorkOpen does).
+  const H=3600000,now=Date.now();
+  ctx.__rows={requests:[{id:'r1',title:'Request r1',summary:'Summary r1',next:null,copy:'recorded',updating:false,
+    status:'working',updated:now-H,started:now-5*H,agents:['claude'],sessions:[{agent:'claude',id:'c:claude:r1'}],
+    projects:['alpha'],repos:['github.com/o/alpha'],ask:{id:'dev:1',ts:now-5*H,text:'Ask r1',from:'prompt'},
+    follow_ups:[],updates:[{ts:now-H,text:'Summary r1'}],work:[],summaries:[],cards:[],focus:null}],unlinked:0};
+  at(page(''));
+  run('setView("my_work");Object.assign(mw,{rows:null,range:"all",area:null,request:null});myWorkAccept(globalThis.__rows);myWorkDraw()');
+  run('myWorkOpen("r1")');
+  const card=()=>run('document.activeElement')?.dataset?.id;
+  at(page(''));run('routeShow()');
+  assert.equal(card(),'r1','Back: the focus on its card');
+  run('mw.products="stale"');
+  at(page('?request=r1'));run('routeShow()');
+  assert.equal(run('mw.products'),null,'Forward: its work product read again');
+  run('myWorkDraw("heading")');
+  at(page(''));run('routeShow()');
+  assert.equal(card(),'r1','Back again: the focus on its card');
+  delete ctx.__rows;
   // The status line's way to Settings is a move.
   moves.length=0;
   run('mw.area=null;setView("my_work")');
