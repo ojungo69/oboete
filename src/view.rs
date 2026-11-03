@@ -585,6 +585,7 @@ pub fn resident(home: &Path) -> Result<()> {
     let warming = viewer.home.clone();
     std::thread::spawn(move || {
         let mut seen = None;
+        let mut pages = crate::search::b::Warmth::default();
         loop {
             let newest = crate::raw::newest_hook(&warming).ok().flatten();
             if let Some((seq, ts)) = newest {
@@ -592,6 +593,12 @@ pub fn resident(home: &Path) -> Result<()> {
                     crate::search::b::warm(&warming);
                 }
                 seen = Some(seq);
+            }
+            // Decision 71: what an agent's memory lookup reads, kept in the page cache while the
+            // hooks record, so a lookup does not wait on the disk.
+            if pages.due(crate::db::now_ms(), newest.map(|(_, ts)| ts)) {
+                let took = crate::search::b::warm_pages(&warming).ok();
+                pages.read(crate::db::now_ms(), took);
             }
             std::thread::sleep(WARM_EVERY);
         }
@@ -1224,6 +1231,7 @@ impl Viewer {
             ("POST", "/api/view/token") => (MAX_BODY, Self::view_token),
             ("POST", "/api/prompt-context") => (PROMPT_BODY, |v, b, _| v.prompt_context(b)),
             ("POST", "/api/query-vector") => (PROMPT_BODY, |v, b, _| v.query_vector(b)),
+            ("POST", "/api/lookup") => (PROMPT_BODY, |v, b, _| v.lookup(b)),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -1234,7 +1242,10 @@ impl Viewer {
         // The prompt hook is no browser and sends no Origin: its request reads as the page's
         // search does, which needs none either, and the token header it carries is what a page of
         // another site cannot send (a custom header needs a preflight, and OPTIONS is 405).
-        let browser = !matches!(target, "/api/prompt-context" | "/api/query-vector");
+        let browser = !matches!(
+            target,
+            "/api/prompt-context" | "/api/query-vector" | "/api/lookup"
+        );
         match self.save_gate(headers, cap, browser) {
             Ok(len) => Head::Body(len, save, given.to_owned()),
             Err(r) => Head::Answer(r),
@@ -1395,6 +1406,53 @@ impl Viewer {
         match search::b::query_vector(&self.home, &asked.repo, &asked.text) {
             Ok(Ok(vector)) => Response::json(&json!({ "vector": vector })),
             Ok(Err(skip)) => Response::json(&json!({ "skip": skip })),
+            Err(e) => failed(&e),
+        }
+    }
+
+    /// Decision 71 (docs/memory-lookup.md): an agent's own memory lookup answered here, as
+    /// claude-mem's hook asks its worker: the answer the hook would give
+    /// (`memory_lookup::index_answer`), with this viewer's vector for its words when it makes one,
+    /// gated and within `room`; `{"text": null}` when nothing is found or fits. The hook decides
+    /// first that the call is a lookup it may answer.
+    fn lookup(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Asked {
+            repo: String,
+            query: String,
+            room: usize,
+        }
+        let asked = match serde_json::from_slice::<Asked>(body) {
+            // The hook's query is at most 1,024 bytes (`memory_lookup::bound`), its room the
+            // hook's note room.
+            Ok(a)
+                if !a.repo.is_empty()
+                    && !a.query.trim().is_empty()
+                    && a.query.len() <= 1024
+                    && a.room <= crate::hook::NOTE_ROOM =>
+            {
+                a
+            }
+            _ => return Response::text(400, "a lookup takes a repository, its words and a room"),
+        };
+        let rules = match crate::capture::Settings::load(&self.home) {
+            Ok(settings) => settings.rules,
+            Err(e) => return failed(&e),
+        };
+        let vector = match search::b::query_vector(&self.home, &asked.repo, &asked.query) {
+            Ok(Ok(vector)) => Some(vector),
+            Ok(Err(_)) | Err(_) => None,
+        };
+        match crate::memory_lookup::index_answer(
+            &self.home,
+            &asked.repo,
+            &asked.query,
+            vector.as_deref(),
+            &rules,
+            asked.room,
+        ) {
+            Ok(text) => Response::json(&json!({ "text": text })),
             Err(e) => failed(&e),
         }
     }
@@ -7920,6 +7978,70 @@ curate = false
             json!({"skip": "no-vectors"})
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Decision 71 (docs/memory-lookup.md): an agent's memory lookup answered by the viewer, as
+    /// claude-mem's hook asks its worker: with the token and no origin, as the hook's other asks;
+    /// the answer the hook's own search gives over the same home; none when its room holds no
+    /// line or nothing holds the words; a body other than a repository, words of at most 1,024
+    /// bytes and a room within the hook's is refused.
+    #[test]
+    fn the_lookup_route_answers_as_the_hook_would() {
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        let v = Viewer::new(s.home.path(), None, 4321, Token::Run("t0k".into()));
+        let ask = |headers: &[(&str, &str)], body: &Value| {
+            let body = serde_json::to_vec(body).unwrap();
+            let len = body.len().to_string();
+            let mut h = headers.to_vec();
+            h.extend([
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ]);
+            request(&v, "POST", "/api/lookup", &h, &body)
+        };
+        let room = crate::hook::NOTE_ROOM;
+        let asked = json!({"repo": R, "query": "parser errors", "room": room});
+        assert_eq!(ask(&[HOST], &asked).status, 401);
+        for body in [
+            json!({"repo": "", "query": "parser", "room": room}),
+            json!({"repo": R, "query": " ", "room": room}),
+            json!({"repo": R, "query": "x".repeat(1025), "room": room}),
+            json!({"repo": R, "query": "parser", "room": room + 1}),
+            json!({"repo": R, "query": "parser", "room": room, "more": 1}),
+            json!({"repo": R, "query": "parser"}),
+        ] {
+            assert_eq!(ask(&[HOST, TOKEN], &body).status, 400, "{body}");
+        }
+        let rules = crate::capture::Settings::load(s.home.path()).unwrap().rules;
+        let own = crate::memory_lookup::index_answer(
+            s.home.path(),
+            R,
+            "parser errors",
+            None,
+            &rules,
+            room,
+        )
+        .unwrap();
+        assert!(
+            own.as_deref().is_some_and(|t| t.contains("Parser errors")),
+            "{own:?}"
+        );
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &asked)),
+            json!({ "text": own })
+        );
+        let narrow = json!({"repo": R, "query": "parser errors", "room": 10});
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &narrow)),
+            json!({ "text": null })
+        );
+        let none = json!({"repo": R, "query": "zebra quokka", "room": room});
+        assert_eq!(
+            json_of(&ask(&[HOST, TOKEN], &none)),
+            json!({ "text": null })
+        );
     }
 
     /// G23 (Codex on #521): the viewer leaves out what the hook's session was shown by reading the

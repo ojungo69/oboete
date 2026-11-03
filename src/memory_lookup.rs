@@ -2,9 +2,10 @@
 //! Claude Code or Codex reads its own memory folder, or calls a native memory search, its
 //! PreToolUse searches oboete for the lookup's words and gives the index beside the native result,
 //! as claude-mem 15.0's gives (N4). The behaviour of record is claude-mem's
-//! `src/cli/handlers/memory-search.ts` at v15.0.1 (Apache-2.0; NOTICE). The hook embeds nothing
-//! and calls no provider: the search takes the words side, and the meaning side only from the
-//! resident viewer's vector (decision 38, N5).
+//! `src/cli/handlers/memory-search.ts` at v15.0.1 (Apache-2.0; NOTICE). The resident viewer
+//! answers it, as claude-mem's hook asks its worker (decision 71, N5); with none, the hook
+//! searches itself, embedding nothing and calling no provider: the words side, and the meaning
+//! side only from the resident viewer's vector (decision 38).
 
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -319,6 +320,11 @@ fn looked_up(
         return Ok(None);
     }
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
+    // Decision 71: the resident viewer answers, as claude-mem's hook asks its worker, until the
+    // deadline; the hook searches itself only when none listens or it refuses.
+    if let Some(answer) = crate::hook::ask_lookup(home, &repo, &found.query, room, deadline) {
+        return Ok(answer);
+    }
     // N5: the meaning side too, from the resident viewer within the prompt's wait (G23), as
     // claude-mem's worker searches with its vectors; else the words side alone.
     let prompt_wait = Duration::from_millis(inject.per_prompt_wait_ms as u64);
@@ -328,23 +334,43 @@ fn looked_up(
         &found.query,
         (Instant::now() + prompt_wait).min(deadline),
     );
+    index_answer(
+        home,
+        &repo,
+        &found.query,
+        vector.as_deref(),
+        &settings.rules,
+        room,
+    )
+}
+
+/// The answer to a lookup of `query` in `repo`, the hook's and the resident viewer's alike
+/// (decision 71): the index of `Search::lookup_index`, with `vector` for the meaning side when
+/// there is one, through the egress gate whole, as the MCP server's `text` passes every answer
+/// (spec 6.4, 6.5), then in the fence within `room`; none when nothing is found or fits.
+pub(crate) fn index_answer(
+    home: &Path,
+    repo: &str,
+    query: &str,
+    vector: Option<&[f32]>,
+    rules: &crate::redact::Rules,
+    room: usize,
+) -> anyhow::Result<Option<String>> {
     let cursors = std::sync::Mutex::new(crate::mem_search::Cursors::default());
-    let scope = |_: Option<&str>| Ok(Ok(Some(repo.clone())));
+    let scope = |_: Option<&str>| Ok(Ok(Some(repo.to_owned())));
     let search = crate::mem_search::Search {
         home,
-        scope: repo.clone(),
+        scope: repo.to_owned(),
         cursors: &cursors,
         now: crate::db::now_ms(),
         repo: &scope,
-        rules: &settings.rules,
+        rules,
         hook: true,
-        vector: vector.as_deref(),
+        vector,
     };
-    // The egress gate over the whole answer, as the MCP server's `text` passes every answer through
-    // it, before the fence (spec 6.4, 6.5).
     Ok(search
-        .lookup_index(&found.query, 8)?
-        .and_then(|text| fitted(&crate::redact::outbound_with(&text, &settings.rules), room)))
+        .lookup_index(query, 8)?
+        .and_then(|text| fitted(&crate::redact::outbound_with(&text, rules), room)))
 }
 
 /// `text` in the memory fence after `LOOKUP`, its last lines left out until the whole is within

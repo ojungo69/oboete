@@ -24,6 +24,13 @@ note (docs/file-note.md).
 - **Its words**: the query; a grep's or rg's pattern (`-e`/`--regexp` first, none when `-f` names a
   pattern file, an option's value never); a tool's `pattern`; else the file's name, `MEMORY`
   standing for "preferences decisions corrections". At most 500 characters and 1,024 bytes.
+- **Who answers**: the resident viewer, as claude-mem's hook asks its worker (decision 71): once the
+  hook has found a lookup it may answer (the switch, a recorded checkout, the stores made), it
+  asks `POST /api/lookup` with the checkout's repository, the words and its room, and waits for
+  the answer until its 3 s are up. The viewer searches with its own query vector for the words and
+  gives the same answer the hook's own search would (`memory_lookup::index_answer`); its "nothing"
+  is the hook's too. With no resident viewer listening, or one that refuses (one from before the
+  route), the hook searches the stores itself in the time left, as below.
 - **The answer**: the index of a search of its words, as claude-mem 15.0's bridge gives (N4): at
   most 8 rows of the kinds claude-mem calls observations (cards and imported observations) and
   oboete's claims, the search's own filter, which each leg applies before it takes its depth (a
@@ -48,7 +55,8 @@ note (docs/file-note.md).
 
 | claude-mem | oboete | Why |
 |---|---|---|
-| The worker searches, through HTTP, waiting at most 3 s | the hook searches the stores itself, at most 3 s from its start | oboete's hooks read the stores directly; the 3 s keep the hook within Claude Code's 5 s, as claude-mem's do |
+| The worker searches, through HTTP, waiting at most 3 s | the resident viewer searches, through HTTP, at most 3 s from the hook's start; with none listening or one that refuses, the hook searches the stores itself in the time left | as claude-mem's hook asks its worker (decision 71); the 3 s keep the hook within Claude Code's 5 s, as claude-mem's do |
+| The worker's process holds its vectors in memory (Chroma, 6.4 GB on this PC on 2026-11-03) | the resident viewer reads what a lookup reads through every five minutes while the hooks record, so the system keeps it in its page cache, and less often when the system keeps dropping it | the page cache, which the system takes back when it needs it, does what a held copy would without holding it (decision 71) |
 | Search with its vectors (Chroma) | with the resident viewer's query vector within the prompt's wait, else the words side alone | a hook embeds nothing itself (decision 38); the viewer holds the model, as for the prompt's block (G23) |
 | `<claude-mem-retrieved-data>`, its text cut at 10,000 characters and the sentence and tags added | oboete's fence, the whole within 9,500 UTF-16 units | Grok and Claude Code clip a context at 10,000 (docs/file-note.md F1) |
 | Folders of `CLAUDE_MEM_MEMORY_WATCH_ROOTS` too | not yet | claude-mem's folder watcher is parity row 44, after the switch |
@@ -114,9 +122,42 @@ decisions corrections", words most documents hold), which passed 3 s and gave no
 0.76 to 1.02 s. What a cold lookup still reads: the imported ranking (0.7 s), the bit index's scan
 of the imported partition (0.6 s) and the legs' hits.
 
+## Speed (2026-11-03, decision 71)
+
+Claude Code's record from 2026-10-21 to 2026-11-03: 117 lookups; oboete gave an index 78 times,
+median 2.4 s, often giving up at its 3 s; claude-mem gave one 89 times, median 2.6 s (0.25 s with
+its worker warm).
+
+Measured on this PC's store (263,213 imported documents, the imported full-text index 376 MB):
+
+- A process that stays (the MCP server, the same search) took 0.7 to 1.4 s a search, the same
+  query again 0.7 to 1.1 s; a new process with its pages cached, 0.6 to 0.9 s. Starting a process
+  and compiling the masking rules cost a few milliseconds. So the viewer answering saves the
+  vector's round trip, not the search.
+- The page cache decides the rest. With knowledge.db's pages dropped, a search took 5.63 s, then
+  1.53 and 1.30 s. Reading the full-text indexes once took 14.2 s from the disk and 0.31 s cached,
+  the rows they find 2.0 s and 0.24 s; read beforehand, three new searches took 0.68 to 0.87 s.
+- A warm search's time went to the imported leg's full-text query (42%), the gate over the
+  candidates' text (21%), the claims' pages (10%) and their order (9%) (perf, ten searches).
+
+So the resident viewer keeps what a lookup reads warm (`search::b::WARM_SET`: the full-text
+indexes of claims, cards and imported observations, the rows they find, the bit index), reading it
+through every five minutes while the hooks have recorded within half an hour, with a short
+read-only connection each time (a forget's rebuild sets knowledge.db aside). A read that took more
+than 5 s found the pages gone; a second such read in a row doubles the wait, up to an hour, so a
+box short of memory is not made to read them from the disk again and again. Not reached: claude-
+mem's 0.25 s with its worker warm, which would take a different search over the imported
+documents; the fp32 vectors a search scores (330,273 of them, 1.35 GB) stay on the disk, read ahead
+when cold (`prefetch_vectors`).
+
 ## Tests
 
-`hook::tests::a_memory_lookup_past_its_wait_gives_nothing` (a forget holding the search back: an
+`hook::tests::a_memory_lookup_is_answered_by_the_resident_viewer` (its text and its "nothing" the
+hook's, with no search of its own, asked the repository, words and room),
+`view::tests::the_lookup_route_answers_as_the_hook_would` (the token, no origin, the hook's own
+answer over the same home, its room, the bodies refused),
+`search::b::tests::the_warm_set_is_read_while_the_hooks_record_and_less_when_slow`,
+`the_warm_set_reads_what_is_made`; `hook::tests::a_memory_lookup_past_its_wait_gives_nothing` (a forget holding the search back: an
 error within the wait, as the hook reports a failure, the native lookup going on),
 `a_memory_lookups_wait_holds_the_viewers_vector_too` (a viewer slower than the wait costs no more),
 `a_memory_lookup_past_its_wait_takes_no_file_note_after_it` (a forget holding the stores back costs

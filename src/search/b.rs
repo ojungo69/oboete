@@ -1177,6 +1177,110 @@ pub(crate) fn warm(home: &Path) {
     }
 }
 
+/// Decision 71 (docs/memory-lookup.md): what a memory lookup reads beside the fp32 vectors it
+/// scores, by table and a column whose length reads each row's pages whole: the full-text indexes
+/// of the kinds it asks (imported observations, cards, claims), the rows they find, and the bit
+/// index. Measured on this PC's store, 2026-11-03: the indexes took 14.2 s from the disk and
+/// 0.31 s cached, the rows 2.0 s and 0.24 s; read beforehand, a lookup took 0.68 to 0.87 s
+/// instead of 5.6 s.
+const WARM_SET: &[(&str, &str)] = &[
+    ("imported_fts_data", "block"),
+    ("imported_fts_idx", "term"),
+    ("imported_fts_docsize", "sz"),
+    ("cards_fts_data", "block"),
+    ("cards_fts_idx", "term"),
+    ("cards_fts_docsize", "sz"),
+    ("claims_fts_data", "block"),
+    ("claims_fts_idx", "term"),
+    ("claims_fts_docsize", "sz"),
+    ("claims_fts_content", "c0"),
+    ("imported", "body"),
+    ("cards", "narrative"),
+    ("vec_index_chunks", "rowids"),
+    ("vec_index_rowids", "id"),
+    ("vec_index_vector_chunks00", "vectors"),
+    ("vec_index_metadatachunks00", "data"),
+    ("vec_index_metadatachunks01", "data"),
+    ("vec_index_metadatachunks02", "data"),
+    ("vec_index_metadatatext00", "data"),
+    ("vec_index_metadatatext02", "data"),
+];
+
+/// Decision 71: `WARM_SET` read through once, so the system keeps it in its page cache for the
+/// hooks' lookups, the MCP server's searches and the page's alike; a table not made yet is passed
+/// over. A short read-only connection each time: a forget's rebuild sets knowledge.db aside, and a
+/// held one would go on reading the file set aside. How long it took.
+pub(crate) fn warm_pages(home: &Path) -> Result<Duration> {
+    let started = Instant::now();
+    let path = home.join("knowledge.db");
+    if !path.exists() {
+        return Ok(started.elapsed());
+    }
+    let k = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    for (table, column) in WARM_SET {
+        if !crate::consumer::manifest::exists(&k, "table", table)? {
+            continue;
+        }
+        let _: Option<i64> = k.query_row(
+            &format!("SELECT sum(length({column})) FROM {table}"),
+            [],
+            |r| r.get(0),
+        )?;
+    }
+    Ok(started.elapsed())
+}
+
+/// Decision 71: when the resident viewer reads `WARM_SET` again. Only while the hooks record,
+/// as the model is kept (parity row 31), and every `WARM_PAGES_EVERY`; a read that took longer
+/// than `WARM_PAGES_SLOW` found the pages gone, and when the one before it did too, the system is
+/// short of memory: the next waits twice as long, up to `WARM_PAGES_MOST`, so a box short of
+/// memory is not made to read them from the disk again every few minutes.
+#[derive(Debug, Default)]
+pub(crate) struct Warmth {
+    /// When the last read ended (Unix ms).
+    last: Option<i64>,
+    /// The wait after it; `WARM_PAGES_EVERY` until reads come slow.
+    every: Option<Duration>,
+    /// Whether the last read was slow.
+    slow: bool,
+}
+
+/// How often the warm set is read while the hooks record.
+const WARM_PAGES_EVERY: Duration = Duration::from_secs(5 * 60);
+/// The longest wait after slow reads.
+const WARM_PAGES_MOST: Duration = Duration::from_secs(60 * 60);
+/// A read slower than this found its pages gone (0.6 s when the system holds them).
+const WARM_PAGES_SLOW: Duration = Duration::from_secs(5);
+/// The hooks' last record this recent keeps the set warm.
+const WARM_PAGES_IDLE: Duration = Duration::from_secs(30 * 60);
+
+impl Warmth {
+    /// Whether to read the set now, the hooks' newest record at `hook` (Unix ms).
+    pub(crate) fn due(&self, now: i64, hook: Option<i64>) -> bool {
+        let every = self.every.unwrap_or(WARM_PAGES_EVERY).as_millis() as i64;
+        hook.is_some_and(|ts| now.saturating_sub(ts) < WARM_PAGES_IDLE.as_millis() as i64)
+            && self.last.is_none_or(|at| now.saturating_sub(at) >= every)
+    }
+
+    /// A read that ended at `now`, with how long it took, or none when it failed.
+    pub(crate) fn read(&mut self, now: i64, took: Option<Duration>) {
+        let slow = took.is_none_or(|t| t > WARM_PAGES_SLOW);
+        let every = self.every.unwrap_or(WARM_PAGES_EVERY);
+        self.every = Some(if !slow {
+            WARM_PAGES_EVERY
+        } else if self.slow || took.is_none() {
+            (every * 2).min(WARM_PAGES_MOST)
+        } else {
+            every
+        });
+        self.slow = slow;
+        self.last = Some(now);
+    }
+}
+
 /// This process's local model for searches (D14): started by the first search that needs it,
 /// gone after `READER_IDLE` without one (`WARM_IDLE` without one or a hook record where the hooks
 /// keep it warm). A load that failed is tried again only after `READER_IDLE`.
@@ -7682,6 +7786,66 @@ mod tests {
         assert!(!warms(None, (5, now - 241 * min), now));
         assert!(!warms(Some(5), (5, now), now));
         assert!(warms(Some(5), (6, now - 241 * min), now));
+    }
+
+    /// Decision 71: the warm set is read while the hooks record, first at once, then every five
+    /// minutes; not once they have been quiet half an hour, nor with none recorded. A slow read
+    /// keeps the wait, a second slow one in a row doubles it up to an hour, a failed one doubles
+    /// it too, and a quick one brings it back to five minutes.
+    #[test]
+    fn the_warm_set_is_read_while_the_hooks_record_and_less_when_slow() {
+        let min = 60 * 1_000;
+        let now = 100 * 60 * min;
+        let mut w = Warmth::default();
+        assert!(!w.due(now, None), "no hook record");
+        assert!(!w.due(now, Some(now - 31 * min)), "the hooks quiet");
+        assert!(
+            w.due(now, Some(now - 29 * min)),
+            "at once while they record"
+        );
+        let quick = Some(Duration::from_millis(600));
+        let slow = Some(Duration::from_secs(16));
+        w.read(now, quick);
+        assert!(!w.due(now + 4 * min, Some(now)));
+        assert!(w.due(now + 5 * min, Some(now)));
+        let wait = |w: &Warmth, from: i64| {
+            // The hooks recording all along.
+            (1..=120)
+                .find(|m| w.due(from + m * min, Some(from + m * min)))
+                .unwrap()
+        };
+        let mut at = now;
+        w.read(at, slow);
+        assert_eq!(wait(&w, at), 5, "one slow read keeps the wait");
+        for expected in [10, 20, 40, 60, 60] {
+            at += 60 * min;
+            w.read(at, slow);
+            assert_eq!(wait(&w, at), expected);
+        }
+        at += 60 * min;
+        w.read(at, quick);
+        assert_eq!(wait(&w, at), 5, "a quick read brings it back");
+        w.read(at, None);
+        assert_eq!(wait(&w, at), 10, "a failed read doubles it");
+    }
+
+    /// Decision 71: reading the warm set touches every table of it that is made and passes over
+    /// one that is not: a store with records reads, and a home with no knowledge.db reads nothing.
+    #[test]
+    fn the_warm_set_reads_what_is_made() {
+        let mut s = Store::new();
+        s.imported_all(vec![(
+            "obs-1".into(),
+            "import",
+            "feature",
+            1_000,
+            "Nebula".to_owned(),
+        )]);
+        s.run();
+        assert!(warm_pages(s.home.path()).is_ok());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(warm_pages(empty.path()).is_ok());
+        assert!(!empty.path().join("knowledge.db").exists());
     }
 
     /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and

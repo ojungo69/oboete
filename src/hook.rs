@@ -715,7 +715,7 @@ const FILE_NOTE: &str = "Recorded from earlier sessions about the file being rea
 
 /// The most of a read's answer the file notes may take, in UTF-16 units: Claude Code shows a
 /// context over 10,000 characters only as a preview (CodeRabbit on #388), and Grok clips one there.
-const NOTE_ROOM: usize = 9_500;
+pub(crate) const NOTE_ROOM: usize = 9_500;
 
 /// X5 (docs/file-note.md F1, F2, F5, F8): the notes on the files of an agent's read
 /// (`read_paths`), inside the memory fence and within `room` UTF-16 units, or none. It reads the
@@ -2350,6 +2350,26 @@ pub(crate) fn ask_vector(
     let v = post_json(port, &token, "/api/query-vector", &body, deadline)?;
     let vector: Vec<f32> = serde_json::from_value(v.get("vector")?.clone()).ok()?;
     (vector.len() == crate::embed::DIM && vector.iter().all(|x| x.is_finite())).then_some(vector)
+}
+
+/// Decision 71 (docs/memory-lookup.md): the resident viewer asked to answer a memory lookup of
+/// `query` in `repo` within `room`, as claude-mem's hook asks its worker, waited for until
+/// `deadline`: `Some` of its answer (none when nothing is found), or `None` when no resident viewer
+/// listens, it refused, or it came late, so the hook searches itself with what time is left.
+pub(crate) fn ask_lookup(
+    home: &Path,
+    repo: &str,
+    query: &str,
+    room: usize,
+    deadline: std::time::Instant,
+) -> Option<Option<String>> {
+    let (port, token) = crate::view::resident_answering(home)?;
+    let body = serde_json::to_vec(&json!({"repo": repo, "query": query, "room": room})).ok()?;
+    match post_json(port, &token, "/api/lookup", &body, deadline)?.get("text")? {
+        Value::Null => Some(None),
+        Value::String(text) => Some(Some(text.clone())),
+        _ => None,
+    }
 }
 
 /// One `POST /api/prompt-context` to the viewer at 127.0.0.1:`port`, given up at `deadline`: whether
@@ -4958,7 +4978,50 @@ mod tests {
             meaning.contains("Parser caches stay in Redis."),
             "{meaning}"
         );
-        assert_eq!(r.asked(), [json!({"repo": p.repo, "text": "zebra"})]);
+        // Asked to answer first (decision 71); an answer with no text, as from a viewer before the
+        // route, leaves the hook its own search with the viewer's vector.
+        assert_eq!(
+            r.asked(),
+            [
+                json!({"repo": p.repo, "query": "zebra", "room": NOTE_ROOM}),
+                json!({"repo": p.repo, "text": "zebra"})
+            ]
+        );
+    }
+
+    /// Decision 71 (docs/memory-lookup.md): the resident viewer answers a memory lookup, as
+    /// claude-mem's hook asks its worker: its text is the hook's answer, and its "nothing" is the
+    /// hook's too, with no search of the hook's own (which would find the claim); it is asked the
+    /// lookup's repository, words and room, and nothing else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_memory_lookup_is_answered_by_the_resident_viewer() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let payload = json!({"session_id": "s1", "cwd": p.c, "tool_name": "memory_search",
+            "tool_input": {"query": "canary deploys"}});
+        let ask = || {
+            crate::memory_lookup::answer_within(&home, &payload, NOTE_ROOM, Duration::from_secs(30))
+                .unwrap()
+        };
+        let own = ask();
+        assert!(
+            own.as_deref().is_some_and(|t| t.contains("canary")),
+            "{own:?}"
+        );
+        let viewer = "<oboete-memory>from the viewer</oboete-memory>";
+        let r = Resident::answering(&home, 2_000, json!({ "text": viewer }));
+        assert_eq!(ask().as_deref(), Some(viewer));
+        assert_eq!(
+            r.asked(),
+            [json!({"repo": p.repo, "query": "canary deploys", "room": NOTE_ROOM})]
+        );
+        drop(r);
+        let r = Resident::answering(&home, 2_000, json!({ "text": null }));
+        assert_eq!(ask(), None);
+        assert_eq!(r.asked().len(), 1);
     }
 
     /// N5 (docs/memory-lookup.md): a lookup whose search has not answered within its wait gives
