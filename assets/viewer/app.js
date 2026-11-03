@@ -7932,9 +7932,12 @@ function foldGroup(key, open, title, desc, ...sections) {
 
 // What the next session receives, behind a button (decision 69, slice 69c): the Context view's
 // parts for a repository chosen here, as the header's picker is hidden on Settings. Read when the
-// fold opens, when another repository is chosen, and after an answer that changed what is saved;
-// a redraw otherwise draws the last answer again. The context is built from the store: no AI.
-const contextPreview = { repo: null, asked: 0, answer: null, read: null, pending: null, failed: false };
+// fold opens and when Settings is shown again, as the store may have changed what is given since,
+// when another repository is chosen, and after an answer that changed what is saved; a redraw of the
+// same form otherwise draws the last answer again. The context is built from the store: no AI.
+// `read`, `pending` and `failed`: the repository, version and form of the answer shown, of the read
+// on its way and of a read that failed (Codex's review of 69c).
+const contextPreview = { repo: null, asked: 0, answer: null, read: null, pending: null, failed: null };
 
 // The header's repositories (its picker is filled on every page, Settings' included).
 function contextRepos() {
@@ -7949,40 +7952,55 @@ function contextRepoDefault(options) {
   return options.reduce((best, option) => (Number(option.dataset.last ?? 0) > Number(best?.dataset.last ?? -1) ? option : best), null)?.value ?? '';
 }
 
-function contextPreviewFold(f) {
+// The fold's choice of the header's repositories, none when it lists none; a choice no longer listed
+// (or none yet) is made again.
+function contextRepoChoice(f) {
   const options = contextRepos();
-  if (contextPreview.repo === null || (contextPreview.repo && !options.some((option) => option.value === contextPreview.repo))) {
-    contextPreview.repo = contextRepoDefault(options);
-  }
-  // Due when neither the answer shown nor the read on its way is for this repository and what is
-  // saved now.
-  const same = (a) => a?.repo === contextPreview.repo && a?.version === f.version;
-  const due = () => !same(contextPreview.read) && !same(contextPreview.pending);
-  const out = el('div', 'context-preview-out', ...contextPreviewParts());
-  let select = null;
-  if (options.length) {
-    select = el('select', null, ...options.map((option) => {
-      const o = new Option(option.textContent, option.value);
-      o.title = option.title;
-      return o;
-    }));
-    select.value = contextPreview.repo;
-    select.dataset.simpleFocus = 'context.repo';
-    select.addEventListener('change', () => { contextPreview.repo = select.value; void readContextPreview(f); });
-  }
+  if (!options.some((option) => option.value === contextPreview.repo)) contextPreview.repo = contextRepoDefault(options);
+  if (!options.length) return null;
+  const select = el('select', null, ...options.map((option) => {
+    const o = new Option(option.textContent, option.value);
+    o.title = option.title;
+    return o;
+  }));
+  select.value = contextPreview.repo;
+  select.dataset.simpleFocus = 'context.repo';
+  select.addEventListener('change', () => { contextPreview.repo = select.value; void readContextPreview(f); });
+  return el('label', 'field', el('span', null, t('repository')), select);
+}
+
+function contextAsk(f) {
+  return { repo: contextPreview.repo, version: f.version, form: f };
+}
+
+function contextFor(mark, f) {
+  return mark?.repo === contextPreview.repo && mark?.version === f.version && mark?.form === f;
+}
+
+function contextPreviewFold(f) {
+  const out = el('div', 'context-preview-out');
   const fold = smallFold('context-preview', 'context-preview', t('context_preview'), note(t('context_preview_desc')),
-    select ? el('label', 'field', el('span', null, t('repository')), select) : null, out);
-  fold.addEventListener('toggle', () => { if (fold.isConnected && fold.open && due()) void readContextPreview(f); });
-  // Open and not read for what is saved now: read once the page is drawn.
-  if (fold.open && due()) {
-    contextPreview.pending = { repo: contextPreview.repo, version: f.version };
-    out.replaceChildren(...contextPreviewParts());
+    el('div', 'context-repo', contextRepoChoice(f)), out);
+  // Opened by the owner: read afresh. A browser also fires `toggle` for the open state a redraw
+  // gives the fold, which is no opening.
+  let shown = fold.open;
+  fold.addEventListener('toggle', () => {
+    if (!fold.isConnected || fold.open === shown) return;
+    shown = fold.open;
+    if (fold.open) void readContextPreview(f);
+  });
+  // Open, and neither shown, asked nor failed for this form, its version and repository: read once
+  // the page is drawn.
+  if (fold.open && ![contextPreview.read, contextPreview.pending, contextPreview.failed].some((mark) => contextFor(mark, f))) {
+    contextPreview.pending = contextAsk(f);
     void Promise.resolve().then(() => readContextPreview(f));
   }
+  out.append(...contextPreviewParts());
   return fold;
 }
 
 function contextPreviewParts() {
+  if (contextPreview.pending) return [note(t('context_reading'))];
   if (contextPreview.failed) {
     const again = el('button', 'quiet small', t('retry'));
     again.type = 'button';
@@ -7990,8 +8008,8 @@ function contextPreviewParts() {
     again.addEventListener('click', () => void readContextPreview(form));
     return [note(t('context_failed')), again];
   }
-  if (contextPreview.pending || !contextPreview.answer) return [note(t('context_reading'))];
   const c = contextPreview.answer;
+  if (!c) return [note(t('context_reading'))];
   return c.choose ? [note(t('context_preview_choose'))] : contextParts(c);
 }
 
@@ -8005,24 +8023,43 @@ function drawContextPreview() {
   if (had && !out.contains(document.activeElement)) out.parentElement?.querySelector('summary')?.focus({ preventScroll: true });
 }
 
-// Only the last read asked ends the wait and is drawn, and only on the form it was asked for: a page
-// drawn again for another form, or Settings shown again, reads anew when it is due.
+// Only the last read asked ends the wait and is drawn, and only on the form it was asked for, under
+// the version it was asked under: a general save changes the version of the form in place, and the
+// read is then made again (Codex's review of 69c).
 async function readContextPreview(f) {
   if (!f || form !== f) return;
   const asked = ++contextPreview.asked;
-  const repo = contextPreview.repo;
-  Object.assign(contextPreview, { pending: { repo, version: f.version }, failed: false });
+  const ask = contextAsk(f);
+  Object.assign(contextPreview, { pending: ask, failed: null });
   drawContextPreview();
   let c = null;
   try {
-    c = await api('context', repo && repo !== currentRepo ? { repo } : {});
+    c = await api('context', ask.repo && ask.repo !== currentRepo ? { repo: ask.repo } : {});
   } catch { /* said below */ }
   if (asked !== contextPreview.asked) return;
   contextPreview.pending = null;
   if (view !== 'settings' || form !== f) return;
-  if (c) Object.assign(contextPreview, { answer: c, read: { repo, version: f.version } });
-  else contextPreview.failed = true;
+  if (f.version !== ask.version) {
+    if ($('panel').querySelector('.context-preview')?.open) void readContextPreview(f);
+    else drawContextPreview();
+    return;
+  }
+  if (c) Object.assign(contextPreview, { answer: c, read: ask });
+  else contextPreview.failed = ask;
   drawContextPreview();
+}
+
+// The header's list read again while Settings is shown (`refresh` keeps the page): the fold's choice
+// follows it in place, and an open fold reads again when the repository chosen changed (Codex's
+// review of 69c).
+function syncContextRepos() {
+  const slot = view === 'settings' && form ? $('panel').querySelector('.context-repo') : null;
+  if (!slot) return;
+  const was = contextPreview.repo;
+  const had = slot.contains(document.activeElement);
+  slot.replaceChildren(...present([contextRepoChoice(form)]));
+  if (had) slot.querySelector('select')?.focus({ preventScroll: true });
+  if (contextPreview.repo !== was && slot.parentElement?.open) void readContextPreview(form);
 }
 
 // A smaller fold inside a group (the AI not in use, the places never recorded), closed at first.
@@ -10031,6 +10068,7 @@ async function loadRepos() {
   $('repo').replaceChildren(new Option(t('all_repositories'), ''), ...options);
   $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : '';
   reposLoaded = true;
+  syncContextRepos();
 }
 
 async function refresh(live, selectedRepo) {

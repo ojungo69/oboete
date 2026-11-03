@@ -3357,10 +3357,48 @@ console.log('PASS: the caps\' No cap switches');
     ctx.ui.setView('settings');answer=()=>Promise.resolve(said(alpha,'read on return'));
     ctx.ui.drawSettings();await settled();
     assert.deepEqual([reads.length,text(out()).includes('read on return')],[2,true],'shown again: read anew');
+    // Settings shown again (a new form, the same version) before a read on its way answers: the new
+    // page reads anew; the old answer ends nothing and is not drawn (Codex's review of 69c).
+    reads.length=0;
+    const [old,giveOld]=later();const [renewed,giveRenewed]=later();const order=[old,renewed];answer=()=>order.shift();
+    f=draw(ai(['alpha'],{version:'v8'}));await settle();
+    ctx.ui.setView('timeline');ctx.ui.setView('settings');
+    f=draw(ai(['alpha'],{version:'v8'}));await settle();
+    giveOld(said(alpha,'stale on return'));await settled();
+    assert(text(out()).includes(ctx.t('context_reading')),'the new read still awaited');
+    giveRenewed(said(alpha,'fresh on return'));await settled();
+    assert.deepEqual([reads.length,text(out()).includes('fresh on return'),text(out()).includes('stale on return')],[2,true,false],
+      'Settings shown again before the old answer: the new read drawn');
+    // A general save gives the form a new version in place while a read is on its way: its answer is
+    // not taken for the new version, and the open fold reads again.
+    reads.length=0;
+    const [before,giveBefore]=later();const [after,giveAfter]=later();const pair=[before,after];answer=()=>pair.shift();
+    f=draw(ai(['alpha'],{version:'v9'}));await settle();
+    ctx.ui.getForm().version='v10';
+    giveBefore(said(alpha,'under v9'));await settled();
+    assert.equal(reads.length,2,'read again for the version the form has now');
+    giveAfter(said(alpha,'under v10'));await settled();
+    assert(text(out()).includes('under v10')&&!text(out()).includes('under v9'),'what is saved now');
+    reads.length=0;ctx.ui.drawSettings();await settled();
+    assert.equal(reads.length,0,'its answer kept for that version');
+    // The version changed in place with nothing on its way, then drawn: read for it.
+    answer=()=>Promise.resolve(said(alpha,'under v11'));
+    ctx.ui.getForm().version='v11';ctx.ui.drawSettings();await settled();
+    assert.deepEqual([reads.length,text(out()).includes('under v11')],[1,true],'a new version in place: read');
+    // Closed and opened again: read afresh, as the store may have changed what is given; the toggle a
+    // browser fires for the open state a redraw gives reads nothing.
+    reads.length=0;answer=()=>Promise.resolve(said(alpha,'reopened'));
+    const toggle=()=>{for(const cb of fold().listeners.toggle||[])cb({target:fold()});};
+    fold().isConnected=true;fold().open=false;toggle();fold().open=true;toggle();await settled();
+    assert.deepEqual([reads.length,text(out()).includes('reopened')],[1,true],'opened again: read afresh');
+    reads.length=0;ctx.ui.drawSettings();fold().isConnected=true;toggle();await settled();
+    assert.equal(reads.length,0,'a redraw\'s own toggle reads nothing');
     // A failed read says so; Retry reads again, the focus on the fold's summary once Retry is gone.
     answer=()=>Promise.resolve(json({code:'made_up_failure'},500));
     f=draw(ai(['alpha'],{version:'v5'}));await settled();
     assert(text(out()).includes(ctx.t('context_failed')),'a failed read says so');
+    reads.length=0;ctx.ui.drawSettings();await settled();
+    assert.deepEqual([reads.length,text(out()).includes(ctx.t('context_failed'))],[0,true],'drawn again: no read by itself, Retry still offered');
     answer=()=>Promise.resolve(said(alpha,'after a retry'));
     const again=fold().querySelectorAll('button').find(b=>b.dataset.simpleFocus==='context.again');
     again.focus();again.click();await settled();
@@ -3372,6 +3410,29 @@ console.log('PASS: the caps\' No cap switches');
     f=draw(ai(['alpha'],{version:'v6'}));await settled();
     assert.deepEqual([fold().querySelectorAll('select').length,text(out()).includes(ctx.t('context_preview_choose')),text(out()).includes(ctx.t('context_choose'))],
       [0,true,false],'no repository: no choice, its own wording');
+    // Repositories known later: the choice is made then, and read.
+    repoSelect.replaceChildren(new ctx.Option('All repositories',''),option(alpha,100),option(beta,200));
+    reads.length=0;answer=()=>Promise.resolve(said(beta,'now known'));
+    ctx.ui.drawSettings();await settled();
+    assert.deepEqual([fold().querySelectorAll('select')[0]?.value,reads,text(out()).includes('now known')],[beta,[beta],true],
+      'the latest chosen once known, and read');
+    // The header's list read again while Settings is shown: the choice follows it in place; the
+    // repository chosen gone, the latest is chosen and read.
+    {
+      const gamma='github.com/made-up/gamma';
+      let listed=[alpha,beta,gamma].map((repo,i)=>({repo,claims:0,imported:0,records:1,last:100*(i+1)}));
+      const before=ctx.fetch,wasLoaded=vm.runInContext('reposLoaded',ctx);
+      ctx.fetch=(url,options)=>url.startsWith('/api/repos?')?Promise.resolve(json({current:'',repos:listed})):before(url,options);
+      reads.length=0;
+      await vm.runInContext('loadRepos()',ctx);await settled();
+      assert.deepEqual([fold().querySelectorAll('select')[0].options.map(o=>o.value),fold().querySelectorAll('select')[0].value,reads.length],
+        [[alpha,beta,gamma],beta,0],'a repository added: listed in place, the choice kept, nothing read');
+      listed=listed.filter(r=>r.repo!==beta);answer=()=>Promise.resolve(said(gamma,'gamma now'));
+      await vm.runInContext('loadRepos()',ctx);await settled();
+      assert.deepEqual([fold().querySelectorAll('select')[0].value,reads,text(out()).includes('gamma now')],[gamma,[gamma],true],
+        'the one chosen gone: the latest, read');
+      ctx.fetch=before;vm.runInContext(`reposLoaded=${wasLoaded}`,ctx);repoSelect.value='';
+    }
     // The viewer's own checkout: chosen first after the header's, and read without its name, as the
     // Context view reads it (its branch is the checkout's).
     repoSelect.replaceChildren(new ctx.Option('All repositories',''),option(alpha,100),option(beta,200));
