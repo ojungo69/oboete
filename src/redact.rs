@@ -1952,6 +1952,13 @@ mod tests {
         let xoxd = format!("xoxd-{r20}{}", "Hj5kL7");
         // A stored end of a webhook's secret with a `+` in it, as gitleaks' rule left it.
         let tail_plus = format!("8sD1+{}", "Bn7MqPz2");
+        // A shell's word that goes on after a quoted value: one argument, both parts its.
+        let (quoted, suffix) = (format!("Abcd{}", "1234"), format!("Secret{}", "Suffix"));
+        // A whole secret after the `/` gitleaks' rule stopped in front of.
+        let after_slash = format!("{r20}{}", "Wq3E");
+        // A cookie token, decoded and URL-encoded.
+        let xoxd_raw = format!("xoxd-{r20}/{}", "Ab+Cd==");
+        let xoxd_enc = format!("xoxd-{r20}%2F{}", "Ab%2BCd%3D%3D");
         let digits = format!("1234{}", "5678");
         let tail = format!("Tq9v2{}", "LmX4wPz");
         let cases = [
@@ -1979,6 +1986,21 @@ mod tests {
                 format!("curl -X POST https://[REDACTED]{tail_plus}"),
                 tail_plus.clone(),
             ),
+            (
+                format!("curl -X POST https://[REDACTED]/{after_slash}"),
+                after_slash.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'{suffix}"),
+                quoted.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'{suffix}"),
+                suffix.clone(),
+            ),
+            (format!("DB_PASSWORD=\"{quoted}\"{suffix}"), suffix.clone()),
+            (format!("d={xoxd_raw} for the client"), xoxd_raw.clone()),
+            (format!("d={xoxd_enc} for the client"), xoxd_enc.clone()),
             (
                 format!(
                     "curl -X POST https://hooks.slack.com/workflows/T0AB1CD2E/A0FG3HI4J/{}/{hook}",
@@ -2045,6 +2067,7 @@ mod tests {
             "llm --num-output-token 51200000",
             "masked: [REDACTED] and [REDACTED].",
             "a short end [REDACTED]abc stays",
+            "PUT /keys/[REDACTED]/rotate",
             "cargo run -- --token-file ./token.txt",
             "gh secret set --secret-name deploy",
             "tool --token --verbose",

@@ -106,8 +106,9 @@ regexes = ['''(?i)--(?:max|min|num)[-_](?:[a-z0-9]+[-_])*token[ \t]+["']?[0-9]+[
 [[rules]]
 id = "slack-token"
 description = "A Slack token of any length and kind (xoxb-, xoxp-, xoxe-, xoxc-, xoxd- and the rest, xapp-), as claude-mem 15.5 masks one and its client and cookie tokens too: gitleaks' rules take a refresh token only at 146 characters after xoxe-1-, and neither takes xoxc- or xoxd-"
-regex = '''(?i)\b((?:xox[a-z]|xapp)-[a-z0-9-]{10,})'''
+regex = '''(?i)\b((?:xox[a-z]|xapp)-[a-z0-9%/+=-]{10,})'''
 keywords = ["xox", "xapp-"]
+# A cookie token (`xoxd-`) holds `/`, `+` and `=`, or `%2F`, `%2B` and `%3D` once URL-encoded.
 
 [[rules]]
 id = "slack-webhook-secret"
@@ -117,13 +118,14 @@ keywords = ["hooks.slack.com"]
 
 [[rules]]
 id = "masked-remainder"
-description = "What is glued to a mask already stored: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path, which a rescan finds no other way, the host being masked"
-regex = '''\[REDACTED\]([A-Za-z0-9+]{4,})'''
+description = "What is glued to a mask already there, right after it or after the quote that closed the masked value: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path (which a rescan finds no other way, the host being masked), or a shell's word that goes on after a quoted value ('abc'def is one argument)"
+regex = '''\[REDACTED\](?:["']?([A-Za-z0-9+]{4,})|/([A-Za-z0-9+]{16,}))'''
 keywords = ["[redacted]"]
-# Letters, digits and `+`, as slack-webhook-secret takes them; not `/`, which after a mask is mostly
-# a path's (`/keys/[REDACTED]/rotate`). A mask followed by a space, another sign or the end is
-# left; one to three characters of a secret's end tell nothing of it. Each scan runs to a fixpoint
-# over what it masked, so this takes such an end in a new capture too.
+# Letters, digits and `+`, as slack-webhook-secret takes them. After a `/` (gitleaks' rule can stop
+# right before the one in front of the secret) only a run as long as a secret: a shorter one is
+# mostly a path's (`/keys/[REDACTED]/rotate`). A mask followed by a space, another sign or the end
+# is left; one to three characters of a secret's end tell nothing of it. Each scan runs to a
+# fixpoint over what it masked, so this takes such an end in a new capture too.
 
 [[rules]]
 id = "discord-webhook-token"
