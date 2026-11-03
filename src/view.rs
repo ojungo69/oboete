@@ -1212,6 +1212,7 @@ impl Viewer {
             ("POST", "/api/hide") => (MAX_BODY, |v, b, _| v.hide(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
+            ("POST", "/api/my-work/refresh") => (MAX_BODY, |v, b, _| v.my_work_refresh(b)),
             ("POST", "/api/my-work/suggestion") => (MAX_BODY, |v, b, _| v.my_work_suggestion(b)),
             ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
             ("POST", "/api/my-focus") => (MAX_BODY, |v, b, _| v.my_focus(b)),
@@ -1739,6 +1740,19 @@ impl Viewer {
     /// as the page saw it, or its Undo. The request is found by its id as this route shows it; a
     /// version that is not its current one, or a check of one not reported complete, is refused
     /// with 409, and the page reads My Work again.
+    /// Decision 70 (parity row X14): Refresh now. The body is `{}`; the answer is the status
+    /// line's state when nothing can run, else `nothing_due`, or `started` with how many subjects
+    /// the worker takes at its next round.
+    fn my_work_refresh(&self, body: &[u8]) -> Response {
+        if !empty_object(body) {
+            return refused(400, "bad_request", "");
+        }
+        match crate::my_work_run::request_refresh(&self.home, crate::db::now_ms()) {
+            Ok(answer) => Response::json(&answered("my-work-refresh", answer)),
+            Err(e) => failed(&e),
+        }
+    }
+
     fn my_work_review(&self, body: &[u8]) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -2079,15 +2093,11 @@ impl Viewer {
             },
             // V1 (docs/my-work-model.md): My Work's status line, a route of its own so that the
             // requests' answer stays as the page's held updates compare it.
-            "my-work/status" => {
-                let jobs: Vec<&str> = (crate::my_work_run::jobs().iter())
-                    .map(|j| j.name())
-                    .filter(|&n| {
-                        ![crate::my_work_goals::NAME, crate::my_work_rules::NAME].contains(&n)
-                    })
-                    .collect();
-                crate::my_work_run::status(&self.home, &jobs, crate::db::now_ms())?
-            }
+            "my-work/status" => crate::my_work_run::status(
+                &self.home,
+                &crate::my_work_run::line_jobs(),
+                crate::db::now_ms(),
+            )?,
             // V2: the owner's goals, as claude-mem's My Goals shows them, with the goals job's
             // status line (V1).
             "my-goals" => {
@@ -4931,6 +4941,37 @@ curate = false
         headers.push(TOKEN);
         let answer = request(&v, "POST", "/api/my-rules", &headers, body);
         assert_eq!(answer.status, 404);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// X14: Refresh now is a save as the page's others are (the token, the page's own origin) and
+    /// takes an empty object; over an empty home My Work is off, so the answer is the status line's
+    /// and no request is written.
+    #[test]
+    fn the_my_work_refresh_route_takes_the_token_and_an_empty_object() {
+        let (dir, v) = viewer("my-work-refresh");
+        let post = |body: &[u8], origin: &str, token: bool| {
+            let length = body.len().to_string();
+            let mut headers = vec![
+                HOST,
+                ("Origin", origin),
+                ("Content-Type", "application/json"),
+                ("Content-Length", length.as_str()),
+            ];
+            if token {
+                headers.push(TOKEN);
+            }
+            request(&v, "POST", "/api/my-work/refresh", &headers, body)
+        };
+        let page = "http://127.0.0.1:4321";
+        assert_eq!(post(b"{}", page, false).status, 401);
+        assert_eq!(post(b"{}", "https://evil.example", true).status, 403);
+        assert_eq!(post(br#"{"now":true}"#, page, true).status, 400);
+        assert_eq!(post(b"[]", page, true).status, 400);
+        let answer = post(b"{}", page, true);
+        assert_eq!(answer.status, 200);
+        assert_eq!(json_of(&answer), json!({"state": "off"}));
+        assert!(!crate::my_work_run::refresh_path(&dir).exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

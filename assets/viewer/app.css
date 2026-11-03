@@ -972,6 +972,10 @@ button.my-work-row-title:hover:not(:disabled) { background: none; border: 0; tex
 .my-work-note { margin-top: 22px; color: var(--muted); font-size: 12.5px; }
 .my-work-status-line { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
 .my-work-status-line button { margin-left: 4px; }
+/* X14: Refresh now beside the status line, its note after it. */
+.my-work-line { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; }
+.my-work-refresh { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-top: 6px; color: var(--muted); font-size: 12.5px; }
+.my-work-refresh button[aria-disabled="true"] { opacity: .6; cursor: progress; }
 /* My Goals (docs/my-work-model.md V2). */
 .my-goals section { margin: 0 0 22px; }
 .my-goals h3 { margin: 0 0 8px; font-size: 15px; }

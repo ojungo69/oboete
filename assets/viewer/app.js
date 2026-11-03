@@ -2533,6 +2533,11 @@ const TEXT = {
   my_work_line_until: ['Next try:', '次に試すのは'],
   my_work_line_written: ['Written', '書いたのは'],
   my_work_line_none: ['Nothing written yet.', 'まだ何も書いていません。'],
+  my_work_refresh: ['Refresh now', '今すぐ更新'],
+  my_work_refresh_started: ['Refreshing {n} now.', '{n} 件の更新を始めました。'],
+  my_work_refresh_nothing: ['Nothing was due.', '更新するものはありませんでした。'],
+  my_work_refresh_failed: ['The refresh could not start.', '更新を始められませんでした。'],
+  my_work_refresh_waiting: ['Not started: My Work is waiting.', '始められませんでした: 待機中です。'],
   my_goals_tab_months: ['Month by month', '月ごと'],
   my_goals_asked_once: ['asked once', '1 回頼みました'],
   my_goals_asked_n: ['asked {n}×', '{n} 回頼みました'],
@@ -8160,7 +8165,9 @@ const mw = {
   // The reads in the order they began, and the latest whose answer the page took.
   reads: 0, taken: 0,
   // The status line's last answer, its place, and how many reads of it began (V1).
-  status: null, line: null, lineReads: 0,
+  status: null, line: null, lineText: null, lineReads: 0,
+  // Refresh now (X14): its button and note, a request on its way, and the note's words.
+  refreshParts: null, refreshing: false, refreshNote: null,
   // claude-mem's `changed` (a flash, once) and `unread` (the "New update" mark until opened).
   changed: new Set(), unread: new Set(),
   // A check or its Undo being saved (`saveReview`'s `busy`).
@@ -9208,6 +9215,9 @@ function myWorkBanner() {
 
 function myWorkDraw(focus = null) {
   const typing = myWorkTyping();
+  // Refresh now keeps the focus through a redraw, whatever it names (a save that ends meanwhile
+  // names the place it started from), as the search field does (X14).
+  const back = document.activeElement === mw.refreshParts?.button ? 'refresh' : focus;
   if (mw.request !== null) {
     myWorkDrawRequest();
     mw.changed.clear();
@@ -9231,7 +9241,7 @@ function myWorkDraw(focus = null) {
   // The search field the owner types in keeps the focus and its caret, whatever a redraw asked
   // for: a save that ends meanwhile draws the page again (#777).
   if (typing && myWorkFocus('search')) document.activeElement.setSelectionRange?.(...typing);
-  else myWorkFocus(focus);
+  else myWorkFocus(back);
 }
 
 // The caret of the search field while the owner types in it, before a redraw replaces it.
@@ -9694,7 +9704,8 @@ async function showMyWork() {
 // its own after the requests': it is no part of the held updates, and a line that does not read
 // leaves the requests as they are.
 function myWorkLineSlot() {
-  mw.line = el('div', 'my-work-line', myWorkStatusLine(mw.status));
+  mw.lineText = el('div', 'my-work-line-text', myWorkStatusLine(mw.status));
+  mw.line = el('div', 'my-work-line', mw.lineText, myWorkRefreshControl());
   return mw.line;
 }
 
@@ -9709,7 +9720,70 @@ async function myWorkLineRead() {
   }
   if (read !== mw.lineReads || view !== 'my_work' || JSON.stringify(status) === JSON.stringify(mw.status)) return;
   mw.status = status;
-  mw.line?.replaceChildren(...present([myWorkStatusLine(status)]));
+  // A note said before the status changed is said no more: the line says what came of it.
+  if (!mw.refreshing) mw.refreshNote = null;
+  mw.lineText?.replaceChildren(...present([myWorkStatusLine(status)]));
+  myWorkRefreshShow();
+}
+
+// X14 (decision 70, claude-mem 15.9's Refresh now): beside My Work's status line while My Work is
+// on, the worker runs what is due at once. Its button stays in place, so the focus stays on it.
+function myWorkRefreshControl() {
+  const button = word('button', 'small quiet', 'my_work_refresh');
+  button.type = 'button';
+  button.dataset.myWork = 'refresh';
+  button.addEventListener('click', () => void myWorkRefresh());
+  const note = el('span', 'my-work-refresh-note');
+  note.setAttribute('aria-live', 'polite');
+  mw.refreshParts = { wrap: el('div', 'my-work-refresh', button, note), button, note };
+  myWorkRefreshShow();
+  return mw.refreshParts.wrap;
+}
+
+function myWorkRefreshShow() {
+  const parts = mw.refreshParts;
+  if (!parts) return;
+  const focused = document.activeElement === parts.button;
+  parts.wrap.hidden = !mw.status?.state || ['off', 'summaries_off'].includes(mw.status.state);
+  // Hidden with My Work off, by a refresh's answer or a read of the line, the button gives the
+  // focus to the line's way to Settings.
+  if (parts.wrap.hidden && focused) mw.lineText?.querySelector('button')?.focus();
+  // Not `disabled`: the focus stays on the button while its request is on its way.
+  parts.button.setAttribute('aria-disabled', String(mw.refreshing));
+  parts.note.replaceChildren(...(mw.refreshNote ? [t(...mw.refreshNote)] : []));
+}
+
+// The answer, read-only before a request is written: started with how many are due, nothing due,
+// or the status the line says (off, waiting, and why) when the refresh may not run.
+async function myWorkRefresh() {
+  if (mw.refreshing) return;
+  mw.refreshing = true;
+  mw.refreshNote = null;
+  myWorkRefreshShow();
+  // A read of the status line as the others are (#722): an older read's answer is dropped, and
+  // this one's status when a read begins after it.
+  const read = ++mw.lineReads;
+  let note = ['my_work_refresh_failed'];
+  try {
+    const { res, answer } = await memoryWrite('my-work/refresh', {});
+    if (res.ok && answer.state === 'started') note = ['my_work_refresh_started', { n: answer.due }];
+    else if (res.ok && answer.state === 'nothing_due') note = ['my_work_refresh_nothing'];
+    else if (res.ok && answer.state) {
+      // Waiting, or off since the page read it: the status line says why, unless a read begun
+      // after this one says something newer, which this answer then says nothing against.
+      note = null;
+      if (read === mw.lineReads) {
+        if (answer.state === 'waiting') note = ['my_work_refresh_waiting'];
+        mw.status = answer;
+        mw.lineText?.replaceChildren(...present([myWorkStatusLine(answer)]));
+      }
+    }
+  } catch {
+    // Said as not started.
+  }
+  mw.refreshing = false;
+  mw.refreshNote = note;
+  myWorkRefreshShow();
 }
 
 // V1: the status line of My Work and My Goals, as the reads say it, with no call: off or waiting

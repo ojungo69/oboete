@@ -2202,12 +2202,69 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - **Then**: the side by side with claude-mem that decision 50 asks for; decision 34's single
   evaluation picks the default destination.
 
+### Slice 12: Refresh now (2026-11-03)
+
+Decision 70, parity row X14: claude-mem 15.9 put "Refresh now" on My Work and Past focus (#5249). It
+runs what is due at once (`autoRefresh.runNow`), says when nothing was due, refuses while setup
+runs and leaves a run another live worker owns to it.
+
+- **The request** (`POST /api/my-work/refresh`, a save as the page's others are: the token, the
+  page's own origin, an empty object). The viewer answers from what it reads, in this order: `off`
+  or `summaries_off`, and `waiting` with why and until when the status line waits (the daily bound
+  or a job's round hold): the status line's own answer (`my_work_run::status`), and no request, as
+  a refresh lifts no cap and no rest. Else it counts the subjects due now across the jobs, read as
+  the runner reads them (`Job::due` over the viewer's stores, the batch holds left out): none is
+  `nothing_due`; some is `started` with their count, and the request is written, the time of the
+  file `<home>/state/my-work-refresh`.
+- **The worker**: its wait ends when a request newer than the round's start is there, as it ends
+  for a change of raw.db; it looks every 200 ms while it waits (`POLL`), and a request made during
+  a round is taken by the next.
+- **The runner**: while a request is under 30 minutes old (`REFRESH_MS`), the pass before the
+  windows takes every subject due now, not only those due an hour or more (`OVERDUE_MS`). It is
+  still one call a round, so a refresh of n subjects takes n rounds, each ahead of the windows. A
+  pass that finds no subject due now marks the request it read done, in a file of its own
+  (`my-work-refresh-done`, its time the request's): the page only writes the request and the worker
+  only marks it, so neither removes what the other wrote, and a request the page leaves meanwhile
+  stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
+  since), stands no more and changes nothing; a done mark dated that far ahead marks nothing done.
+  The bound and the holds stop the pass as they stop any.
+- **The page**: "Refresh now" / 「今すぐ更新」 beside My Work's status line while My Work and its
+  summaries are on (on My Work, Suggested and Past focus, whose pages share the line; not on My
+  Rules). It is marked busy
+  (`aria-disabled`, so the focus stays on it) while its request is on its way, and a click then
+  sends nothing. The answer follows it: "Refreshing 3 now." / 「3 件の更新を始めました。」,
+  "Nothing was due." / 「更新するものはありませんでした。」, or "The refresh could not start." /
+  「更新を始められませんでした。」 for a refusal or no answer. A `waiting` answer redraws the status
+  line, which says why, with "Not started: My Work is waiting." / 「始められませんでした: 待機中です。」;
+  an `off` one (My Work turned off since the page read it) redraws the line and takes the button
+  away, its focus going to the line's Open Settings, as a read of the line that says My Work is off
+  does. The note stays until the status line says
+  something new. A redraw of the page keeps the focus on the button, whatever place it names (a save
+  that ends meanwhile), as the search field does. The status a refresh answers is a read of the
+  line as the others are (#722): a read begun before it that lands later is dropped, and one begun
+  after it keeps its answer, with no note against it. Whether My Work waits is
+  decided by the jobs its status line speaks for (`line_jobs`): a hold of My Rules' or My Goals'
+  job stops no refresh.
+- **Differences from claude-mem**: claude-mem's worker runs every due job at once; oboete's makes one
+  call a round, so a refresh goes first rather than all at once. claude-mem refuses while setup
+  runs; oboete's viewer has no such state, and a request made while the worker is stopped is taken
+  when it starts, if under 30 minutes old. claude-mem's refresh model per agent is not built
+  (decision 70: each entry has its model).
+- **Tests**: the runner's pass with a request, without one, with a stale one and with one dated
+  ahead, and a done mark dated ahead; a request left while a round finishes another standing; the
+  request's
+  answers (off, waiting, nothing due, started) and that only `started` writes it; the route's
+  guards and its answer over an empty home; the page's button, its one request at a time, each
+  answer's words in English and Japanese, the note's end, the focus through a redraw and to Open
+  Settings when off, and the refresh's status and note ordered with the line's reads. Thirteen hand
+  mutants of the page's code, and five of the request's in the runner, each fail a check.
+- **Then**: parity row X10, the address that keeps My Work's place.
+
 ## Not built
 
 - claude-mem's owner map, its outcome block, "Replace" on My Rules, and the files of each day's
   prompts.
 - The setup page's goals, rules and groups from claude-mem Cloud (row X22).
-- A refresh button: the viewer would need a way to ask the worker.
 - Grouping of a session in a scratch folder by the repository its tool calls touched: it stays its
   folder's.
 

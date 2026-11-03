@@ -1173,6 +1173,8 @@ fn serve(
         // What the pass below reads up to, new records or new ops of this device (an owner's
         // correction appends only an op): one that lands after it, even before the wait, wakes it.
         let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
+        // Decision 70: a refresh request the page leaves after this round began wakes the wait.
+        let began = crate::db::now_ms();
         while pass_report(&raw, &mut k, consumers, report)? {
             // Between two batches too: a consumer opens the home's files by path (the rescan).
             if gone(home, holding) {
@@ -1281,6 +1283,8 @@ fn serve(
                 // command gave up) starts a round, which lets the embedding go on: a resident
                 // worker starts none at its idle time.
                 if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen
+                    || crate::my_work_run::refresh_request(home, crate::db::now_ms())
+                        .is_some_and(|at| at >= began)
                     || phases.embed.as_ref().is_some_and(|e| e.done())
                     || (asked && !asked_aside(home))
                 {
@@ -1524,7 +1528,8 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             Box::new(call),
             (&rules, &cfg.summary, &chain),
         )
-        .judge(cfg.judge.as_ref().map(|j| (j, cfg.paid_usd_per_month)));
+        .judge(cfg.judge.as_ref().map(|j| (j, cfg.paid_usd_per_month)))
+        .refresh(&home);
         crate::turns::round(
             raw,
             k,
