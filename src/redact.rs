@@ -839,10 +839,13 @@ fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
 /// Rule `rule` to its fixpoint, from what it `found` and `kept` in its first look. A rule finds
 /// one secret per context per look (curl-auth-user's greedy `.*` takes the last `-u` of a line,
 /// curl-auth-header's lazy `.*?` the first header after a `curl`), so each look is at a copy of
-/// `text` where what this rule found or kept before is blanked out with spaces of the same length:
-/// offsets stay those of `text`, and no other rule's finding is blanked, so no rule takes context
-/// another needs. Still finding after `MAX_PASSES`, the whole text is one span: a look never stops
-/// with a secret left unlooked-at.
+/// `text` where what this rule found or kept before is blanked out with vertical tabs of the same
+/// length: offsets stay those of `text`, and no other rule's finding is blanked, so no rule takes
+/// context another needs. A vertical tab is white space to `\s`, as a space was, but no space or
+/// tab: a rule's gap of those (`--token VALUE next`, `KEY=VALUE` and the next line) does not take
+/// the blank for its own and the word after it for another value (Codex on #826). Still finding
+/// after `MAX_PASSES`, the whole text is one span: a look never stops with a secret left
+/// unlooked-at.
 fn fixpoint(
     text: &str,
     rules: &Rules,
@@ -856,7 +859,7 @@ fn fixpoint(
     let mut new_kept = kept.to_vec();
     for _ in 0..=MAX_PASSES {
         for &(s, e, _) in new.iter().chain(&new_kept) {
-            work.replace_range(s..e, &" ".repeat(e - s));
+            work.replace_range(s..e, &"\u{b}".repeat(e - s));
             blank.push((s, e));
         }
         new_kept.clear();
@@ -1925,6 +1928,282 @@ mod tests {
         // A header quoted for the shell: its closing quote ends the cookie, not the line.
         let (stored, _) = scan(&cases[3].0, &Rules::default());
         assert!(stored.ends_with("\" https://x.invalid/"), "{stored}");
+    }
+
+    /// The forms claude-mem 15.5 to 15.9 masks that the bundled rules left (decision 70): a Slack
+    /// token of any length, a Slack webhook's whole secret, a Discord webhook's token, a Stripe
+    /// webhook secret, a Docker Hub token, a test.pypi.org token, a `_PWD` value and a flag's value
+    /// after a space; and past claude-mem's (#826's review): Slack's client and cookie tokens, a
+    /// shell's escape inside a value, and the end of a secret glued to a mask stored before.
+    #[test]
+    fn the_forms_claude_mem_masks_are_masked_too() {
+        // Split literals: secret scanners flag whole ones in the repository.
+        let r20 = format!("Q7wE9rT2yU{}", "4iO6pA8sD1");
+        let slack = format!("xoxe-1-{r20}{}", "Zx3Cv5");
+        // Long enough that gitleaks' rule, which stops 56 characters into the path, leaves its end.
+        let hook = format!("{r20}{r20}{}", "Bn7M");
+        let discord = format!("{r20}{r20}{r20}{}", "Ab3dEf_h");
+        let whsec = format!("whsec_{r20}{}", "Lm4nOp6qRs8t");
+        let docker = format!("dckr_pat_{r20}{}", "Ab3-dE_");
+        let pypi = format!("pypi-AgENdGVzdC5weXBpLm9yZw{r20}{r20}{}", "Kj8hGf6dSa4q");
+        let pw = format!("Tr0ub4d{}", "or3xyz");
+        let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+        // A shell's escape inside a password, as typed and as a flattened tool field holds it.
+        let esc = format!("Q7wE9rT2\\!{}", "K4j8N6pL");
+        let esc_json = format!("Q7wE9rT2\\\\!{}", "K4j8N6pL");
+        let xoxc = format!("xoxc-{}-{r20}", "1234567890");
+        let xoxd = format!("xoxd-{r20}{}", "Hj5kL7");
+        // A stored end of a webhook's secret with a `+` in it, as gitleaks' rule left it.
+        let tail_plus = format!("8sD1+{}", "Bn7MqPz2");
+        // A shell's word that goes on after a quoted value: one argument, both parts its.
+        let (quoted, suffix) = (format!("Abcd{}", "1234"), format!("Secret{}", "Suffix"));
+        // A whole secret after the `/` gitleaks' rule stopped in front of.
+        let after_slash = format!("{r20}{}", "Wq3E");
+        // A cookie token, decoded and URL-encoded.
+        let xoxd_raw = format!("xoxd-{r20}/{}", "Ab+Cd==");
+        let xoxd_enc = format!("xoxd-{r20}%2F{}", "Ab%2BCd%3D%3D");
+        let digits = format!("1234{}", "5678");
+        let tail = format!("Tq9v2{}", "LmX4wPz");
+        let cases = [
+            (format!("SLACK_REFRESH={slack}"), slack.clone()),
+            (format!("SLACK_CLIENT={xoxc}"), xoxc.clone()),
+            (format!("Cookie-less d={xoxd} for the client"), xoxd.clone()),
+            (format!("tool --password {esc} --verbose"), esc.clone()),
+            (format!("DB_PASSWORD={esc}"), esc.clone()),
+            (
+                format!("{{\"command\": \"tool --password {esc_json}\"}}"),
+                esc_json.clone(),
+            ),
+            (format!("tool --token {digits}"), digits.clone()),
+            (
+                format!("tool --auth-token {digits}{digits}"),
+                format!("{digits}{digits}"),
+            ),
+            (format!("tool --password {digits}"), digits.clone()),
+            // The end gitleaks' slack-webhook-url left after its mask in a record stored before.
+            (
+                format!("curl -X POST https://[REDACTED]{tail}"),
+                tail.clone(),
+            ),
+            (
+                format!("curl -X POST https://[REDACTED]{tail_plus}"),
+                tail_plus.clone(),
+            ),
+            (
+                format!("curl -X POST https://[REDACTED]/{after_slash}"),
+                after_slash.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'{suffix}"),
+                quoted.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'{suffix}"),
+                suffix.clone(),
+            ),
+            (format!("DB_PASSWORD=\"{quoted}\"{suffix}"), suffix.clone()),
+            (
+                format!("tool --password ' {quoted} '{suffix}"),
+                suffix.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'_{suffix}"),
+                suffix.clone(),
+            ),
+            (
+                format!("tool --password '{quoted}'-{suffix}.x9"),
+                suffix.clone(),
+            ),
+            (format!("d={xoxd_raw} for the client"), xoxd_raw.clone()),
+            (format!("d={xoxd_enc} for the client"), xoxd_enc.clone()),
+            (
+                format!(
+                    "curl -X POST https://hooks.slack.com/workflows/T0AB1CD2E/A0FG3HI4J/{}/{hook}",
+                    "123456789012345678"
+                ),
+                hook.clone(),
+            ),
+            (
+                format!(
+                    "curl -X POST https://discord.com/api/webhooks/{}/{discord}",
+                    "123456789012345678"
+                ),
+                discord.clone(),
+            ),
+            (format!("STRIPE_WEBHOOK={whsec}"), whsec.clone()),
+            (
+                format!("echo {docker} | docker login -u me --password-stdin"),
+                docker.clone(),
+            ),
+            (format!("twine upload -p {pypi} dist/*"), pypi.clone()),
+            (format!("MYSQL_PWD={pw} mysql -u app"), pw.clone()),
+            (format!("{{\"DB_PWD\": \"{pw}\"}}"), pw.clone()),
+            (format!("tool --auth-token {tok} --verbose"), tok.clone()),
+            (format!("tool --client-secret '{tok}'"), tok.clone()),
+            (
+                format!("huggingface-cli login --hf-token {tok}"),
+                tok.clone(),
+            ),
+            (format!("tool --api-key {tok}"), tok.clone()),
+        ];
+        for (text, secret) in &cases {
+            let (stored, found) = scan(text, &Rules::default());
+            assert!(!found.is_empty(), "{text}: nothing found");
+            check(&stored, &found, secret);
+            // Masked whole: no end of it is left beside a mask.
+            let tail = &secret[secret.len() - 6..];
+            assert!(!stored.contains(tail), "{text}: {stored}");
+        }
+        // A secret whose end goes two characters past gitleaks' 56 characters of path, too short an
+        // end for masked-remainder: this rule masks it whole, and nothing follows the mask.
+        let near = format!("{r20}{}", "Mb2Xs7Kp4Q9wE1rTzY");
+        let (stored, _) = scan(
+            &format!("https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{near}"),
+            &Rules::default(),
+        );
+        assert!(stored.ends_with(MASK), "{stored}");
+        // A `+` in a secret two characters from its end, past those 56 characters: this rule's class
+        // reaches the end, where masked-remainder takes no end that short.
+        let (stored, _) = scan(
+            &format!(
+                "https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{r20}{r20}+{}",
+                "Bn"
+            ),
+            &Rules::default(),
+        );
+        assert!(stored.ends_with(MASK), "{stored}");
+        // Not secrets: a working directory, a number after a flag, a flag that names a file or a
+        // name, the next flag where a value would be, and the prefixes named in prose.
+        for text in [
+            "PWD=/home/user/project",
+            "OLDPWD=/home/user",
+            "llm --max-token 4096 --stream",
+            "llm --max-token 12345678 --stream",
+            "llm --num-output-token 51200000",
+            "masked: [REDACTED] and [REDACTED].",
+            "a short end [REDACTED]abc stays",
+            "PUT /keys/[REDACTED]/rotate",
+            "key = '[REDACTED]'.strip()",
+            "{\"token\":\"[REDACTED]\",\"next\":1}",
+            "curl --token [REDACTED] \"https://example.invalid/\"",
+            "cargo run -- --token-file ./token.txt",
+            "gh secret set --secret-name deploy",
+            "tool --token --verbose",
+            "the whsec_ and dckr_pat_ prefixes mark Stripe's and Docker Hub's secrets",
+        ] {
+            let (stored, found) = scan(text, &Rules::default());
+            assert!(found.is_empty(), "{text}: {found:?}");
+            assert_eq!(stored, text);
+        }
+    }
+
+    /// A value masked takes no word after it: the next argument of a command line, the next line of
+    /// an env file; a second secret there is still masked (Codex on #826).
+    #[test]
+    fn a_masked_value_takes_no_word_after_it() {
+        let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+        let tok2 = format!("Hb3nM6qW9{}", "eR2tY5uI8oP");
+        for (text, kept) in [
+            (
+                format!("tool --token {tok} https://api.example.org/important-resource"),
+                "https://api.example.org/important-resource",
+            ),
+            (
+                format!("TOKEN={tok} https://api.example.org/important-resource"),
+                "https://api.example.org/important-resource",
+            ),
+            (
+                format!("API_KEY={tok}\nDEBUG_MODE=true\nPORT_NUMBER=8080\n"),
+                "DEBUG_MODE=true\nPORT_NUMBER=8080",
+            ),
+            (
+                format!("{{\"out\": \"API_KEY={tok}\\nDEBUG_MODE=true\"}}"),
+                "DEBUG_MODE=true",
+            ),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            check(&stored, &found, &tok);
+            assert!(stored.contains(kept), "{text}: {stored}");
+        }
+        let text = format!("API_KEY={tok}\nSECRET_KEY={tok2}\nDEBUG_MODE=true\n");
+        let (stored, found) = scan(&text, &Rules::default());
+        check(&stored, &found, &tok);
+        check(&stored, &found, &tok2);
+        assert!(stored.contains("DEBUG_MODE=true"), "{stored}");
+        // A value on the indented line below its key (YAML, pretty-printed JSON) is still masked;
+        // short and plain, so that no generic rule takes it instead.
+        let pw = format!("Abcd{}", "1234");
+        for text in [
+            format!("password:\n  {pw}\nuser: app"),
+            format!("{{\"password\":\n  \"{pw}\"}}"),
+            format!("{{\"password\":\n\"{pw}\"}}"),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            check(&stored, &found, &pw);
+        }
+        // A header's value on the next line, quoted (JSON) or on an indented line (YAML), is masked.
+        for (text, secret) in [
+            (
+                format!("{{\"Authorization\":\n  \"Token {tok}\"}}"),
+                tok.clone(),
+            ),
+            (
+                format!("{{\"Authorization\":\n\"Token {tok}\"}}"),
+                tok.clone(),
+            ),
+            (
+                format!("headers:\n  Authorization:\n    Token {tok}"),
+                tok.clone(),
+            ),
+            (
+                format!("{{\"Cookie\":\n  \"sid={tok}\"}}"),
+                format!("sid={tok}"),
+            ),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            check(&stored, &found, &secret);
+        }
+        // An empty value takes no unindented next line; a header's value no next line.
+        let b64 = format!("dXNyOnE5Wng4bUwy{}", "dkI0blI3dFl3");
+        let word = format!("Ab3dEfGh5jKlMn7p{}", "QrStUvWx");
+        for (text, secret, kept) in [
+            (
+                "API_KEY=\nDEBUG_MODE=true".to_owned(),
+                None,
+                "DEBUG_MODE=true".to_owned(),
+            ),
+            (
+                format!("Authorization: Bearer {tok}{tok2}\nX-Request-Id: {word}"),
+                Some(format!("{tok}{tok2}")),
+                format!("X-Request-Id: {word}"),
+            ),
+            (
+                format!("Bearer {tok}{tok2}\n{word} is the next line"),
+                Some(format!("{tok}{tok2}")),
+                format!("{word} is the next line"),
+            ),
+            (
+                format!("Authorization: Basic {b64}\nAccept: application/json"),
+                Some(b64.clone()),
+                "Accept: application/json".to_owned(),
+            ),
+            (
+                format!("Authorization: Token {tok}\n{word}"),
+                Some(tok.clone()),
+                word.clone(),
+            ),
+            (
+                format!("Set-Cookie: session={tok}\nnext=1"),
+                Some(tok.clone()),
+                "next=1".to_owned(),
+            ),
+        ] {
+            let (stored, found) = scan(&text, &Rules::default());
+            if let Some(secret) = &secret {
+                check(&stored, &found, secret);
+            }
+            assert!(stored.contains(&kept), "{text}: {stored}");
+        }
     }
 
     #[test]

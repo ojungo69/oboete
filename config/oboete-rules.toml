@@ -41,25 +41,34 @@ keywords = ["tvly-"]
 [[rules]]
 id = "generic-bearer-token"
 description = "Bearer token in an Authorization header"
-regex = '''(?i)\bbearer\s+([A-Za-z0-9_\-.=+/]{20,})'''
+regex = '''(?i)\bbearer[ \t]+([A-Za-z0-9_\-.=+/]{20,})'''
 keywords = ["bearer"]
 entropy = 3.0
 
 [[rules]]
 id = "generic-basic-auth"
 description = "Basic credentials in an Authorization header, with or without a curl before it"
-regex = '''(?i)\bauthorization["']?\s*[:=]\s*["']?basic\s+([A-Za-z0-9+/]{4,}={0,2})'''
+regex = '''(?i)\bauthorization["']?\s*[:=]\s*["']?basic[ \t]+([A-Za-z0-9+/]{4,}={0,2})'''
 keywords = ["basic"]
 # No entropy gate: after "Authorization: Basic" even a weak credential is one.
 
 [[rules]]
 id = "secret-assignment"
-description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
-regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=]\s*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|["']?([^\s"'`\\<>;,(){}\[\]$][^\s"'`\\]{6,}[^\s"'`\\<>;,(){}\[\]$]))'''
-keywords = ["secret", "token", "passw", "key", "credential"]
+description = "A value assigned to a name that says it is a secret (BOT_CHANNEL_SECRET=, \"client_secret\": , DB_PASSWORD=, MYSQL_PWD=), however plain: generic-api-key passes over one under 10 characters, of entropy 3.5 or below, or with a $ or ; in it (#541)"
+regex = '''(?i)\b[a-z0-9_.-]*(?:secret|token|passw(?:or)?d|_pwd|api[_-]?key|private[_-]?key|access[_-]?key|credential)s?["']?\s*[:=](?:[ \t\r\n]*(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*')|(?:[ \t]*\r?\n[ \t]+|[ \t]*)["']?([^\s"'`\\<>;,(){}\[\]$](?:[^\s"'`\\]|\\[^\sA-Za-z0-9"'`\\]){6,}(?:[^\s"'`\\<>;,(){}\[\]$]|\\[^\sA-Za-z0-9"'`\\])))'''
+keywords = ["secret", "token", "passw", "pwd", "key", "credential"]
+# `_pwd` only as the end of a name (MYSQL_PWD, DB_PWD): `PWD` and `OLDPWD` hold a working directory.
+# Between the `=` or `:` and a quoted value, spaces, tabs and line breaks (pretty-printed JSON puts
+# it on the next line, indented or not); before an unquoted one, spaces and tabs, or a line break
+# before an indented line (YAML's `password:` with its value below): never a blank a value already
+# masked left (redact.rs `fixpoint`), nor an unindented next line, so an env file's next line or
+# the next word is not taken for a value. The cookie and authorization rules take the same gap
+# after their `:`, and the header rules (bearer, basic, authorization) spaces and tabs alone between
+# a scheme and its value.
 # A quoted value whole, up to its closing quote (an escaped quote kept inside, the spaces around
 # it left as written), however short. An unquoted one runs to a space, a quote or backtick, or a
-# backslash (an escape in a flattened tool field): a bracket, `;`, `,` or `$` inside it is the
+# backslash before a letter, a digit, a quote or a backslash (an escape in a flattened tool field);
+# a shell's escape of a sign (`\!`, `\$`) is the value's. A bracket, `;`, `,` or `$` inside it is the
 # value's, one at either end the code's (`max_output_tokens:10000}),`, `${API_KEY}`, a mask
 # already there). It is taken from 8 characters, the shortest password most systems take: shorter,
 # it is mostly a number or a type (`max_tokens: 4096`, `password: String`). No entropy gate and no
@@ -76,12 +85,80 @@ keywords = ["://"]
 [[rules]]
 id = "cookie-header"
 description = "Cookies of a Cookie or Set-Cookie header, whatever they are named: name=value pairs split by ;, a value bare or quoted"
-regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=]\s*["']?([^\s;=,"']+=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*)(?:;\s*[^\s;=,"']+(?:=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*))?)*)'''
+regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=](?:[ \t\r\n]*["']|[ \t]*\r?\n[ \t]+|[ \t]*)([^\s;=,"']+=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*)(?:;\s*[^\s;=,"']+(?:=(?:"(?:[^"\\\r\n]|\\.)*"|[^\s;,"']*))?)*)'''
 keywords = ["cookie"]
 
 [[rules]]
 id = "authorization-header"
 description = "Credential in an Authorization header of any scheme, with or without a curl before it: a scheme's auth-params whole (Digest, AWS4-HMAC-SHA256), else one token (Token, ApiKey, none)"
-regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}\s+([a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+))*)|(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}\s+)?([A-Za-z0-9_\-.=+/:~]{8,}))'''
+regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=](?:[ \t\r\n]*["']|[ \t]*\r?\n[ \t]+|[ \t]*)(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}[ \t]+([a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+)(?:\s*,\s*[a-z0-9_-]+\s*=\s*(?:"(?:[^"\\\r\n]|\\.)*"|[^\s,"']+))*)|(?:[a-z0-9!#$%&*+.^_`|~-]{2,31}[ \t]+)?([A-Za-z0-9_\-.=+/:~]{8,}))'''
 keywords = ["authorization"]
 entropy = 3.0
+
+[[rules]]
+id = "cli-flag-secret"
+description = "A value given after a space to a command-line flag that names a secret (--auth-token VALUE, --client-secret 'VALUE'); after `=` it is secret-assignment's"
+regex = '''(?i)(?:^|[\s"'])--(?:[a-z0-9]+[-_])*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?key|credential)[ \t]+(?:"[ \t]*((?:[^"\\\s]|\\.)(?:[^"\\\r\n]|\\.)*?)[ \t]*"|'[ \t]*((?:[^'\\\s]|\\.)(?:[^'\\\r\n]|\\.)*?)[ \t]*'|([^\s"'`\\<>;,(){}\[\]$-](?:[^\s"'`\\]|\\[^\sA-Za-z0-9"'`\\]){6,}(?:[^\s"'`\\<>;,(){}\[\]$]|\\[^\sA-Za-z0-9"'`\\])))'''
+keywords = ["secret", "token", "passw", "key", "credential"]
+# As secret-assignment: a quoted value whole, an unquoted one from 8 characters (shorter is mostly a
+# number, `--max-token 4096`), a shell's escape of a sign inside it; a value that starts with `-` is
+# the next flag.
+[[rules.allowlists]]
+# A number given to a flag that counts tokens is a count (`--max-token 12345678`,
+# `--num-output-token 512000`); a token's own flag (`--token`, `--auth-token`) and a password's
+# keep a value of digits masked.
+regexTarget = "match"
+regexes = ['''(?i)--(?:max|min|num)[-_](?:[a-z0-9]+[-_])*token[ \t]+["']?[0-9]+["']?$''']
+
+[[rules]]
+id = "slack-token"
+description = "A Slack token of any length and kind (xoxb-, xoxp-, xoxe-, xoxc-, xoxd- and the rest, xapp-), as claude-mem 15.5 masks one and its client and cookie tokens too: gitleaks' rules take a refresh token only at 146 characters after xoxe-1-, and neither takes xoxc- or xoxd-"
+regex = '''(?i)\b((?:xox[a-z]|xapp)-[a-z0-9%/+=-]{10,})'''
+keywords = ["xox", "xapp-"]
+# A cookie token (`xoxd-`) holds `/`, `+` and `=`, or `%2F`, `%2B` and `%3D` once URL-encoded.
+
+[[rules]]
+id = "slack-webhook-secret"
+description = "The secret of a Slack incoming, workflow or trigger webhook URL, whole: gitleaks' rule stops 56 characters into the path"
+regex = '''(?i)\bhooks\.slack\.com/(?:services|workflows|triggers)/t[a-z0-9]+/[a-z0-9]+/(?:[0-9]+/)?([a-z0-9+]{20,})'''
+keywords = ["hooks.slack.com"]
+
+[[rules]]
+id = "masked-remainder"
+description = "What is glued to a mask already there, right after it or after the quote that closed the masked value: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path (which a rescan finds no other way, the host being masked), or a shell's word that goes on after a quoted value ('abc'def is one argument)"
+regex = '''\[REDACTED\](?:([A-Za-z0-9+]{4,})|["']([A-Za-z0-9_+-][^\s"'`\\<>;,(){}\[\]$|&]{3,})|/([A-Za-z0-9+]{16,}))|["'][ \t]+\[REDACTED\][ \t]+["']([A-Za-z0-9_+-][^\s"'`\\<>;,(){}\[\]$|&]{3,})'''
+keywords = ["[redacted]"]
+# After the quote that closed a masked value, the rest of the shell's word (`'abc'_def`, `'abc'-x.y`)
+# from a letter, a digit, `_`, `+` or `-`, up to a space, a quote or a sign the shell reads; so a
+# method after a string (`'[REDACTED]'.strip()`) is left. A quoted value's mask with the spaces its
+# quotes held around it (`' abc 'def`) counts as glued to its closing quote; a mask, a space and
+# then a quoted argument (`--token [REDACTED] "https…"`) does not. Glued right after the mask, letters,
+# digits and `+`, as slack-webhook-secret takes them. After a `/` (gitleaks'
+# rule can stop right before the one in front of the secret) only a run as long as a secret: a
+# shorter one is mostly a path's (`/keys/[REDACTED]/rotate`). A mask followed by a space, another
+# sign or the end is left; one to three characters of a secret's end tell nothing of it. Each scan
+# runs to a fixpoint over what it masked, so this takes such an end in a new capture too.
+
+[[rules]]
+id = "discord-webhook-token"
+description = "The token of a Discord webhook URL (discord.com, discordapp.com and their ptb and canary hosts)"
+regex = '''(?i)\b(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/[0-9]{17,20}/([a-z0-9_-]{60,})'''
+keywords = ["discord"]
+
+[[rules]]
+id = "stripe-webhook-secret"
+description = "A Stripe webhook signing secret"
+regex = '''\b(whsec_[A-Za-z0-9]{32,})'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "dockerhub-pat"
+description = "A Docker Hub personal access token"
+regex = '''\b(dckr_pat_[A-Za-z0-9_-]{27,})'''
+keywords = ["dckr_pat_"]
+
+[[rules]]
+id = "pypi-token"
+description = "A PyPI API token of pypi.org or test.pypi.org: gitleaks' rule takes pypi.org's alone"
+regex = '''\b(pypi-AgE[A-Za-z0-9_-]{50,})'''
+keywords = ["pypi-"]
