@@ -1,0 +1,44 @@
+src/deliverables.rs
+  s_f7d8663ba9ca22::t_0d2a4adfec8ea4 754-763,767-768
+  s_f7d8663ba9ca22::t_abbc4c6611d2c5 773,1196,1297-1354,1358,1360-1362
+  s_f7d8663ba9ca22::t_274f25952bcf15 653
+  s_f7d8663ba9ca22::t_b52d923af44a36 1241-1242
+  s_f7d8663ba9ca22::t_71c55086542d40 576-579,587,590-591
+  s_f7d8663ba9ca22::t_d333edfe4ae85b 615-623
+  s_f7d8663ba9ca22::t_1771a0a4a68420 1190,1193-1195
+  s_f7d8663ba9ca22::t_8d29b209c5c822 38-39,45
+  s_f7d8663ba9ca22::t_3a83d2df991b71 769-772
+  s_f7d8663ba9ca22::t_7d1eb519b4a6c4 1197-1199
+  s_f7d8663ba9ca22::t_0cf63d15589bd0 1243-1245
+  s_f7d8663ba9ca22::t_77401a60dcae88 1355-1357
+  s_f7d8663ba9ca22::t_a9e4317c15dc65 1359
+  s_f7d8663ba9ca22::t_f8b7bb44ef0da1 1363-1365
+  s_f7d8663ba9ca22::t_1bcd8b0db6d12e 1200,1246-1247,1366,1755-1761
+docs/spec.md
+  s_f7d8663ba9ca22::t_2efa555a990552 100
+docs/deliverables.md
+  s_f7d8663ba9ca22::t_69595198ccd8cc 113-114
+  s_f7d8663ba9ca22::t_d5361a05564ad5 108-109
+  s_f7d8663ba9ca22::t_aee638ef51bc96 170-172
+  s_f7d8663ba9ca22::t_33778200f4322a 90-95
+src/capture.rs
+  s_f7d8663ba9ca22::t_7fc8f2dfacce69 82-83
+docs/claude-mem-parity.md
+  s_f7d8663ba9ca22::t_4b80005f39baad 21-22,104,127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8470c81b99739bb103ec1afdc33f7b0c6e0eeef3",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
