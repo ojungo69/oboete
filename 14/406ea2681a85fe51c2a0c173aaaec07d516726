@@ -1,0 +1,69 @@
+docs/deliverables.md
+  s_f7d8663ba9ca22::t_1580e905a66f8d 176-178
+  s_f7d8663ba9ca22::t_981276e2570d00 192-193
+  s_f7d8663ba9ca22::t_89907dabd98270 63-65
+  s_f7d8663ba9ca22::t_e92aca5e3e50e5 120-132
+  s_f7d8663ba9ca22::t_3307c3cb7f8fbe 147-148
+  s_f7d8663ba9ca22::t_dff913be753ecb 60-62,66
+  s_f7d8663ba9ca22::t_770b946ae83a37 72-82
+  s_f7d8663ba9ca22::t_8415f811a75797 133-134
+  s_f7d8663ba9ca22::t_86148e0fb69eed 83,86
+  s_f7d8663ba9ca22::t_182b92df0017f6 1-43,46-53,87-90,104-105,110,117-119,140-146,152-169,194
+  s_f7d8663ba9ca22::t_bf2c8538bee9ca 54-59,67-69,91-96
+  s_f7d8663ba9ca22::t_7f7b7a2cf46897 114-116,135-139
+  s_f7d8663ba9ca22::t_42af8b2d5400d4 44-45
+  s_f7d8663ba9ca22::t_2a68309bffbf71 84-85
+  s_f7d8663ba9ca22::t_a248f3e8cb1712 97-103
+  s_f7d8663ba9ca22::t_5370b76361f3bd 70-71
+  s_f7d8663ba9ca22::t_6176890c0254a3 149-151
+  s_f7d8663ba9ca22::t_ae10b5d9af00a3 106-107,111-113
+  s_f7d8663ba9ca22::t_846d5b17d0e327 170,180,184-191
+  s_f7d8663ba9ca22::t_5b71f72da20ecb 171,179,181-183
+  s_f7d8663ba9ca22::t_0b639cc22a5d97 108-109
+  s_f7d8663ba9ca22::t_5a198c39c0286b 172-175
+  s_f7d8663ba9ca22::t_8baae054991b03 195-198
+src/deliverables.rs
+  s_f7d8663ba9ca22::t_aed62bb53e1a10 8-10,12-64,96-634,636-826,828-829,831-876,878-890,892-893,897
+  s_f7d8663ba9ca22::t_e940a589f00ed8 1-7,11,65-95,635,877,891
+  s_f7d8663ba9ca22::t_0824bd6fb38d6b 827,830,894-896,898-1428
+docs/claude-mem-parity.md
+  s_f7d8663ba9ca22::t_469e208a26a854 127,272
+docs/spec.md
+  s_f7d8663ba9ca22::t_cd1d3be4f48bbd 100
+src/capture.rs
+  s_f7d8663ba9ca22::t_f67040cf1e2944 48-50,61,81,84-98,565-567,584-588
+src/config.rs
+  s_f7d8663ba9ca22::t_a7fbdee1c1b065 1505-1507,1515,1671
+src/forget.rs
+  s_f7d8663ba9ca22::t_4aa21f4e47c563 1521-1523
+src/hook.rs
+  s_f7d8663ba9ca22::t_f859f93197ce72 1308-1333
+src/main.rs
+  s_f7d8663ba9ca22::t_8eca7384da911b 18
+src/migrate.rs
+  s_f7d8663ba9ca22::t_282405bc988873 675
+src/raw.rs
+  s_f7d8663ba9ca22::t_9bcf8a956e7a53 5479-5539
+src/setup.rs
+  s_f7d8663ba9ca22::t_f374c163aab12d 3886
+src/work_product.rs
+  s_f7d8663ba9ca22::t_31fbb259574c6c 93,97,196
+src/worker.rs
+  s_f7d8663ba9ca22::t_0d4d0e4ebc8daa 1118-1119,1214-1222,1320-1323
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "14406ea2681a85fe51c2a0c173aaaec07d516726",
+  "prompts": {},
+  "sessions": {
+    "s_f7d8663ba9ca22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e343027-8930-48b0-bff0-3b413d0fb70d",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
