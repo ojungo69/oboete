@@ -3628,6 +3628,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
             "s1",
             &settings,
             true,
+            false,
         )
         .unwrap()
         .map(|s| s.text)
@@ -3663,6 +3664,7 @@ INSERT INTO meta VALUES('device_id', 'd1e5');
                 "L",
                 &settings,
                 true,
+                false,
             )
             .unwrap()
             .map(|m| age.replace_all(&m.text, "/ _ min").into_owned())

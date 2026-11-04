@@ -1023,6 +1023,33 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
     Ok(Some(read))
 }
 
+/// `Raw::forgets` on any connection to raw.db, a reader's (`read_only`) too.
+pub(crate) fn forgets_in(
+    conn: &Connection,
+    device: &str,
+    agent: &str,
+    session: &str,
+    repo: Option<&str>,
+    seq: i64,
+    ts: i64,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM denied_records WHERE origin = ?1)
+            OR EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?2 AND (
+              (kind = 'session' AND key = ?3)
+              OR (kind = 'repo' AND key = ?4 AND device = ?5)
+              OR (kind = 'range' AND device = ?5 AND since <= ?2 AND ?2 < until)))",
+        params![
+            crate::forget::live_origin(device, seq, ts),
+            ts,
+            crate::forget::session(agent, session),
+            repo.map(crate::forget::repo),
+            device
+        ],
+        |r| r.get(0),
+    )?)
+}
+
 pub(crate) fn imported_counts_in(
     conn: &Connection,
     device: &str,
@@ -5492,16 +5519,17 @@ impl Raw {
         )?)
     }
 
-    /// `agent`'s `session` hook events on this device strictly between two seqs, each with its
-    /// seq (docs/deliverables.md: a turn's records; a replay's paths are not this machine's).
-    pub(crate) fn turn_events(
+    /// The seqs of `agent`'s `session` hook events on this device strictly between two seqs
+    /// (docs/deliverables.md: a turn's records; a replay's paths are not this machine's), to be
+    /// read one at a time (`event_at`), so a long turn is never held whole.
+    pub(crate) fn turn_seqs(
         &self,
         agent: &str,
         session: &str,
         after: i64,
         before: i64,
-    ) -> Result<Vec<(i64, Event)>> {
-        let seqs: Vec<i64> = self
+    ) -> Result<Vec<i64>> {
+        Ok(self
             .conn
             .prepare(
                 "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
@@ -5511,15 +5539,17 @@ impl Raw {
             .query_map(params![self.device, after, before, agent, session], |r| {
                 r.get(0)
             })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut out = Vec::new();
-        for seq in seqs {
-            let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
-            if let Some(Item::Event(e)) = record.filter(|r| r.seq == seq).map(|r| r.item) {
-                out.push((seq, *e));
-            }
-        }
-        Ok(out)
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// This device's event at `seq` as a read gives it: none when it is forgotten, expired or
+    /// gone.
+    pub(crate) fn event_at(&self, seq: i64) -> Result<Option<Event>> {
+        let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
+        Ok(match record.filter(|r| r.seq == seq).map(|r| r.item) {
+            Some(Item::Event(e)) => Some(*e),
+            _ => None,
+        })
     }
 
     /// docs/deliverables.md: whether forget's denials cover a record recorded on `device` at
@@ -5535,21 +5565,7 @@ impl Raw {
         seq: i64,
         ts: i64,
     ) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM denied_records WHERE origin = ?1)
-                OR EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?2 AND (
-                  (kind = 'session' AND key = ?3)
-                  OR (kind = 'repo' AND key = ?4 AND device = ?5)
-                  OR (kind = 'range' AND device = ?5 AND since <= ?2 AND ?2 < until)))",
-            params![
-                crate::forget::live_origin(device, seq, ts),
-                ts,
-                crate::forget::session(agent, session),
-                repo.map(crate::forget::repo),
-                device
-            ],
-            |r| r.get(0),
-        )?)
+        forgets_in(&self.conn, device, agent, session, repo, seq, ts)
     }
 
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task

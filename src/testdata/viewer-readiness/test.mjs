@@ -4413,6 +4413,47 @@ run('myWorkDraw()');
 assert(text(box()).includes('Later answer')&&!text(box()).includes('Earlier answer'),'the later answer stays');
 back();
 }
+// Slice 2 of docs/deliverables.md: a copy is a link to its own address, its tag and its name, opening apart from the page; a
+// tag that is not one is no link. Through the page's polling, the open request's products are read again in place when a copy
+// lands (its `copies` change, not its version), when the viewer restarted (a new instance), and after a read that failed,
+// while other updates stay held behind "Show updates"; an answer read stays read.
+{
+const asked=[];let products=[];let fail=false;let listed=null;
+ctx.fetch=url=>{
+  url=String(url);
+  if(url.startsWith('/api/my-work/product')){asked.push(url);return fail?Promise.reject(new Error('down')):Promise.resolve(response({products}));}
+  if(url.startsWith('/api/my-work?range=all'))return Promise.resolve(response(listed));
+  return Promise.resolve(response({state:'none'}));
+};
+const box=()=>panel.querySelector('.my-work-products');
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const tag='0123456789abcdef0123456789abcdef';
+set([req('f1',{version:'v1',copies:'c0'})]);
+card('f1').querySelector('button').click();
+await settle();
+assert(box().hidden&&asked.length===1,'no copy yet');
+products=[{kind:'page',title:'report page.html',url:null,path:'/tmp/report page.html',at:now,file:tag},
+  {kind:'file',title:'not a tag',url:null,path:'/tmp/x.bin',at:now,file:'../../api/settings'}];
+listed={requests:[req('f1',{version:'v1',copies:'c1',title:'Held title'})],unlinked:0,instance:''};
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,2,'a copy landing reads the open page\'s products again');
+const links=box().querySelectorAll('a');
+assert.equal(links.length,1,'only a tag is a link');
+assert.equal(links[0].href,`/files/${tag}/report%20page.html`);
+assert.equal(links[0].target,'_blank');assert.equal(links[0].rel,'noopener noreferrer');
+assert(text(box()).includes('Page')&&text(box()).includes('File'),'the kinds are named');
+assert(!text(panel).includes('Held title')&&text(panel).includes('New work updates are ready.'),'other updates stay held');
+fail=true;
+listed={...listed,instance:'i2'};
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,3,'a restarted viewer\'s links are read again');
+fail=false;
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,4,'a read that failed is asked again at the next poll');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,4,'an answer read stays read');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+}
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
 // updates", and an unchanged answer does nothing.
 set([req('h1')]);

@@ -2838,6 +2838,7 @@ const TEXT = {
   my_work_kind_video: ['Video', '動画'],
   my_work_kind_spreadsheet: ['Spreadsheet', '表'],
   my_work_kind_link: ['Link', 'リンク'],
+  my_work_kind_file: ['File', 'ファイル'],
   my_work_no_streams: ['No linked workstreams have been recorded yet.', '結びついた作業はまだ記録されていません。'],
   my_work_supporting: ['Supporting work', '補助の作業'],
   my_work_no_detail: ['No detailed update recorded.', '詳しい更新は記録されていません。'],
@@ -8268,8 +8269,10 @@ const mw = {
   // A check or its Undo being saved (`saveReview`'s `busy`).
   saving: false,
   // The open request's work product, by its id and version, once read (slice 4), and the number
-  // of its latest read: an earlier read's late answer is not kept (CodeRabbit on #650).
-  products: null, productsAsk: 0,
+  // of its latest read: an earlier read's late answer is not kept (CodeRabbit on #650). With it
+  // the open page's products box, and the viewer's links' instance from the last answer taken
+  // (docs/deliverables.md).
+  products: null, productsAsk: 0, productsBox: null, instance: '',
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -9583,31 +9586,48 @@ function myWorkProducts(row) {
   const box = el('section', 'my-work-products');
   box.hidden = true;
   const fill = (list) => {
-    if (!list.length) return;
-    box.replaceChildren(word('h3', null, 'my_work_products'),
-      el('ul', 'my-work-product-list', ...list.map(myWorkProduct)));
-    box.hidden = false;
+    box.hidden = !list.length;
+    box.replaceChildren(...(list.length ? [word('h3', null, 'my_work_products'),
+      el('ul', 'my-work-product-list', ...list.map(myWorkProduct))] : []));
   };
-  const key = `${row.id}\n${row.version}`;
-  if (mw.products?.key === key) {
-    fill(mw.products.list);
-  } else {
-    const ask = ++mw.productsAsk;
-    api('my-work/product', { request: row.id }).then((answer) => {
-      if (ask !== mw.productsAsk) return;
-      mw.products = { key, list: answer.products || [] };
-      if (mw.request === row.id) fill(mw.products.list);
-    }).catch(() => {});
-  }
+  mw.productsBox = { id: row.id, fill };
+  if (mw.products?.key === myWorkProductsKey(row, mw.instance)) fill(mw.products.list);
+  else myWorkProductsRead(row, mw.instance);
   return box;
+}
+
+// What a request's products were read by: its version, its copies (docs/deliverables.md: a copy
+// lands a second or two after its turn's reply, which moved the version) and the viewer's links'
+// instance (a restarted viewer's links are new).
+function myWorkProductsKey(row, instance) {
+  return `${row.id}\n${row.version}\n${row.copies ?? ''}\n${instance ?? ''}`;
+}
+
+// Reads a request's products into its open page; only a read that answered is kept, so a poll
+// after one that failed asks again.
+function myWorkProductsRead(row, instance) {
+  const key = myWorkProductsKey(row, instance);
+  const ask = ++mw.productsAsk;
+  api('my-work/product', { request: row.id }).then((answer) => {
+    if (ask !== mw.productsAsk) return;
+    mw.products = { key, list: answer.products || [] };
+    if (mw.request === row.id && mw.productsBox?.id === row.id) mw.productsBox.fill(mw.products.list);
+  }).catch(() => {});
 }
 
 function myWorkProduct(p) {
   const label = `my_work_kind_${String(p.kind).replace(/-/g, '_')}`;
   const kind = Object.hasOwn(TEXT, label) ? word('span', 'my-work-product-kind', label) : el('span', 'my-work-product-kind', p.kind);
   let title = el('span', null, p.title);
-  // The answer holds only http and https links; the page checks again before it makes one.
-  if (/^https?:\/\//i.test(p.url || '')) {
+  // A copy opens by its own link, this viewer's tag for it (docs/deliverables.md); its name is
+  // for the browser alone.
+  if (/^[0-9a-f]{32}$/.test(p.file || '')) {
+    title = el('a', null, p.title);
+    title.href = `/files/${p.file}/${encodeURIComponent(p.title || 'file')}`;
+    title.target = '_blank';
+    title.rel = 'noopener noreferrer';
+  } else if (/^https?:\/\//i.test(p.url || '')) {
+    // The answer holds only http and https links; the page checks again before it makes one.
     title = el('a', null, p.title);
     title.href = p.url;
     title.target = '_blank';
@@ -9735,7 +9755,7 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 // What tells two answers of My Work apart: a change of any is drawn, or held while a person reads.
-const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.story, answer.areas, answer.other_asks]);
+const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.story, answer.areas, answer.other_asks, answer.instance]);
 
 function myWorkAccept(answer) {
   mw.signature = myWorkAnswerSignature(answer);
@@ -9762,6 +9782,7 @@ function myWorkAccept(answer) {
   mw.areas = answer.areas ?? [];
   mw.otherAsks = answer.other_asks ?? [];
   mw.pageWords = answer.page_words ?? [];
+  mw.instance = answer.instance ?? '';
   mw.fetched = Date.now();
   mw.pending = null;
 }
@@ -9790,6 +9811,14 @@ async function myWorkLive() {
   // Taken, so that the tab's older read lands on nothing (`showMyWork`; Codex and Greptile on #597).
   mw.taken = read;
   mw.fetched = Date.now();
+  // The open request's products are read again in place when the answer's key for them is not
+  // the one they were read by (a copy landed, the viewer restarted, a read failed), the updates
+  // held behind "Show updates" or not (docs/deliverables.md).
+  const open = mw.request !== null ? answer.requests.find((row) => row.id === mw.request) : null;
+  if (open && mw.productsBox?.id === open.id
+    && mw.products?.key !== myWorkProductsKey(open, answer.instance)) {
+    myWorkProductsRead(open, answer.instance);
+  }
   const signature = myWorkAnswerSignature(answer);
   if (signature === mw.signature) return true;
   if (myWorkReading()) {
