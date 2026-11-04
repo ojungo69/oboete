@@ -171,10 +171,12 @@ const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
 /// What `Raw::previous_window_ops` seeks a session's latest event by. Without it the seek walks
 /// the device's records down from the window, past every other session's, which for a session with
 /// no earlier event reads them all (1.2 s warm and about 12 s cold on 717,000 records, 2026-11-04).
-/// Only the worker creates it, in a pause of the owner's work (`ensure_session_index`), never
-/// `open` or a hook: its first build on such a store takes seconds, longer than a hook's write
-/// waits (`OPEN_WAIT`).
-const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_sessions
+/// Forget's `records_sessions` (`session_indexes`) does not serve it: ordered by seq, the seek
+/// still walks the primary key with that one in place (0.65 s on the same records). Only the
+/// worker creates this one, in a pause of the owner's work (`ensure_session_index`), never `open`
+/// or a hook: its first build on such a store takes seconds, longer than a hook's write waits
+/// (`OPEN_WAIT`).
+const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
     ON records(device, agent, session, seq)";
 
 /// A session's events before a window, newest first: the seek `SESSION_INDEX` serves.
@@ -6525,7 +6527,7 @@ impl Raw {
     pub(crate) fn has_session_index(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master
-               WHERE type = 'index' AND name = 'records_sessions')",
+               WHERE type = 'index' AND name = 'records_session_seq')",
             [],
             |r| r.get(0),
         )?)
@@ -11833,14 +11835,69 @@ mod tests {
                 .unwrap()
         };
         assert!(!raw.has_session_index().unwrap());
-        assert!(!plan(&raw).contains("records_sessions"), "{}", plan(&raw));
+        assert!(
+            !plan(&raw).contains("records_session_seq"),
+            "{}",
+            plan(&raw)
+        );
         assert_eq!(latest(&raw), vec![3, 1]);
         raw.ensure_session_index().unwrap();
         assert!(raw.has_session_index().unwrap());
-        assert!(plan(&raw).contains("records_sessions"), "{}", plan(&raw));
+        assert!(plan(&raw).contains("records_session_seq"), "{}", plan(&raw));
         assert_eq!(latest(&raw), vec![3, 1]);
         drop(raw);
         assert!(open(home.path()).unwrap().has_session_index().unwrap());
+    }
+
+    /// Forget's `records_sessions` and the seek's `records_session_seq` are two indexes, each as
+    /// its own builder makes it, whichever is built first; the seek takes its own.
+    #[test]
+    fn the_seeks_index_and_forgets_are_two_whichever_comes_first() {
+        let indexes = |raw: &Raw| -> Vec<(String, String)> {
+            raw.conn
+                .prepare(
+                    "SELECT name, sql FROM sqlite_master WHERE type = 'index'
+                       AND name IN ('records_sessions', 'records_session_seq') ORDER BY name",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let mut seen = Vec::new();
+        for forget_first in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = open(home.path()).unwrap();
+            raw.append(&test_event("one")).unwrap();
+            if forget_first {
+                raw.session_indexes().unwrap();
+                assert!(!raw.has_session_index().unwrap());
+            }
+            raw.ensure_session_index().unwrap();
+            raw.session_indexes().unwrap();
+            let both = indexes(&raw);
+            assert_eq!(both.len(), 2, "{both:?}");
+            assert!(
+                both[0].1.contains("device, agent, session, seq"),
+                "{both:?}"
+            );
+            assert!(both[1].1.contains("agent, session, source"), "{both:?}");
+            let plan: String = raw
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {SESSION_LATEST}"))
+                .unwrap()
+                .query_map(params![raw.device, 2, "claude", "s"], |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(" ");
+            assert!(plan.contains("records_session_seq"), "{plan}");
+            seen.push(both);
+        }
+        assert_eq!(seen[0], seen[1]);
     }
 
     /// A session's previous window (#240) is the one the worker cut before the window at `from`,
