@@ -2408,9 +2408,9 @@ mod tests {
         };
         raw.append(&e).unwrap();
         drop(raw);
-        let worker = resident(p, 100);
         let built = || crate::raw::open(p).unwrap().has_session_index().unwrap();
         assert!(!built());
+        let worker = resident(p, 100);
         until("the index built in the pause", built);
         std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
         worker.join().unwrap().unwrap();
