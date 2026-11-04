@@ -1554,13 +1554,14 @@ const INDEX_PAUSE_MS: i64 = 5 * 60_000;
 /// nor with a call out (R10). A build that fails is tried again at a later idle time; the seek
 /// works without the index, only slower.
 fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
-    if leaving || calling || asked_aside(home) {
+    // Built (or unreadable) first: the newest hook record's time may walk a history of imports.
+    if leaving || calling || asked_aside(home) || raw.has_session_index().unwrap_or(true) {
         return;
     }
     let paused = raw
         .last_hook_ts()
         .is_ok_and(|ts| ts.is_none_or(|ts| crate::db::now_ms() - ts >= INDEX_PAUSE_MS));
-    if paused && raw.has_session_index().is_ok_and(|built| !built) {
+    if paused {
         let _ = raw.ensure_session_index();
     }
 }
