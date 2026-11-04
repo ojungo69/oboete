@@ -7452,6 +7452,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             lines: Vec::new(),
             reading: Default::default(),
             top: 0,
+            scale: 1,
         };
         let check = |v: &Value| crate::curate::check(&w, v);
         let claim = json!({"id": "c1", "kind": "decision", "status": "decided", "speaker": "user",
@@ -8468,8 +8469,13 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     /// whole, uncached.
     #[test]
     fn a_fenced_prompts_instructions_write_the_prompt_cache() {
-        let fenced =
-            crate::curate::prompt("English", "## claude session s\nL1 [user] Hi.\n", "", "");
+        let fenced = crate::curate::prompt(
+            "English",
+            "## claude session s\nL1 [user] Hi.\n",
+            "",
+            "",
+            crate::curate::MAX_CARDS,
+        );
         let schema = json!({"type": "object"});
         let none = serde_json::Map::new();
         let content = &anthropic_request("m", &fenced, &schema, &none)["messages"][0]["content"];
