@@ -672,6 +672,7 @@ pub(crate) fn capture_settings(bytes: Option<&[u8]>, source: &'static str) -> Re
         store_prompts: config.capture.store_prompts,
         tool_output: config.capture.tool_output,
         source,
+        private_turn: false,
     })
 }
 

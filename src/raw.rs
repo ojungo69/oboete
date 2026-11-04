@@ -5476,6 +5476,67 @@ impl Raw {
         Ok(out)
     }
 
+    /// `agent`'s `session` live events on this device strictly between two seqs, each with its
+    /// seq (docs/deliverables.md: a turn's records).
+    pub(crate) fn turn_events(
+        &self,
+        agent: &str,
+        session: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<Vec<(i64, Event)>> {
+        let seqs: Vec<i64> = self
+            .conn
+            .prepare(&format!(
+                "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+                   AND type = 'event' AND agent = ?4 AND session = ?5 AND source IN ('{live}')
+                 ORDER BY seq",
+                live = LIVE.join("', '")
+            ))?
+            .query_map(params![self.device, after, before, agent, session], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::new();
+        for seq in seqs {
+            let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
+            if let Some(Item::Event(e)) = record.filter(|r| r.seq == seq).map(|r| r.item) {
+                out.push((seq, *e));
+            }
+        }
+        Ok(out)
+    }
+
+    /// docs/deliverables.md: whether forget's denials cover a record recorded on `device` at
+    /// `seq` and `ts`: its origin in `denied_records` (a seq a restore gave again is another
+    /// record's), or a `denied_scopes` page registered after it of its session, its repository on
+    /// its device, or a time range of its device, as `scope_tombstoned` reads them.
+    pub(crate) fn forgets(
+        &self,
+        device: &str,
+        agent: &str,
+        session: &str,
+        repo: Option<&str>,
+        seq: i64,
+        ts: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM denied_records WHERE origin = ?1)
+                OR EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?2 AND (
+                  (kind = 'session' AND key = ?3)
+                  OR (kind = 'repo' AND key = ?4 AND device = ?5)
+                  OR (kind = 'range' AND device = ?5 AND since <= ?2 AND ?2 < until)))",
+            params![
+                crate::forget::live_origin(device, seq, ts),
+                ts,
+                crate::forget::session(agent, session),
+                repo.map(crate::forget::repo),
+                device
+            ],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
     /// 11). A scan by label: sessions have no index (spec 1.6).
     pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {

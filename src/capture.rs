@@ -45,6 +45,9 @@ pub struct Settings {
     /// Who wrote the events: `hook`, or `replay` for a fixture (D9: only a hook says the owner is
     /// at work).
     pub source: &'static str,
+    /// The event comes in a wholly private prompt's turn (docs/deliverables.md): its tool calls
+    /// and its reply carry `"private_turn": true`, so no copy is made of what they name.
+    pub private_turn: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +58,7 @@ impl Default for Settings {
             store_prompts: c.store_prompts,
             tool_output: c.tool_output,
             source: "hook",
+            private_turn: false,
         }
     }
 }
@@ -74,8 +78,24 @@ impl Settings {
             } else {
                 "hook"
             },
+            private_turn: false,
         })
     }
+
+    /// A wholly private prompt's turn's events (docs/deliverables.md).
+    pub(crate) fn in_private_turn(&self) -> Self {
+        Self {
+            private_turn: true,
+            ..self.clone()
+        }
+    }
+}
+
+/// Whether a prompt is wholly private: text that `<private>` blocks leave nothing of, which is
+/// recorded as no event (`shaped`), so its turn is marked in its own records instead.
+pub(crate) fn wholly_private_prompt(payload: &Value) -> bool {
+    let typed = str_field(payload, &["prompt"]).unwrap_or("");
+    !typed.trim().is_empty() && strip_blocks(typed, true).is_empty()
 }
 
 /// One event as captured, with the ledger rows of what its redaction masked: (field, finding).
@@ -542,6 +562,9 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
                 body["output"] = json!("");
                 body["memory_write"] = json!(true);
             }
+            if settings.private_turn {
+                body["private_turn"] = json!(true);
+            }
             ("tool", body)
         }
         "Stop" => {
@@ -558,7 +581,11 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             if reply.trim().is_empty() {
                 return None;
             }
-            ("reply", json!({"assistant": base64_runs(&reply)}))
+            let mut body = json!({"assistant": base64_runs(&reply)});
+            if settings.private_turn {
+                body["private_turn"] = json!(true);
+            }
+            ("reply", body)
         }
         "PreCompact" => (
             "compaction",

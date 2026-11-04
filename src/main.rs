@@ -15,6 +15,7 @@ mod consumer;
 mod crash;
 mod curate;
 mod db;
+mod deliverables;
 mod dispatch;
 mod embed;
 #[cfg(feature = "local-embed")]

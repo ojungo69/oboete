@@ -1305,7 +1305,32 @@ fn built(
                 let session = payload["session_id"].as_str().unwrap_or("unknown");
                 (session.to_owned(), step)
             });
-        for (mut c, read) in crate::capture::events_read(agent, &event, &payload, ts, settings) {
+        // docs/deliverables.md: a wholly private prompt's turn is marked in its own records, from
+        // the flag as it is when this event comes, so a later prompt clearing it changes nothing.
+        let session = str_field(&payload, &["session_id", "sessionId"]).unwrap_or("unknown");
+        let turn = crate::deliverables::PrivateTurn::new(home, agent, session);
+        let marked;
+        let settings = match event.as_str() {
+            "PostToolUse" | "PostToolUseFailure" | "Stop" if turn.is_set() => {
+                marked = settings.in_private_turn();
+                &marked
+            }
+            _ => settings,
+        };
+        let captured = crate::capture::events_read(agent, &event, &payload, ts, settings);
+        let flag = match event.as_str() {
+            "UserPromptSubmit" if crate::capture::wholly_private_prompt(&payload) => turn.set(),
+            "UserPromptSubmit" if captured.iter().any(|(c, _)| c.event.kind == "prompt") => {
+                turn.clear()
+            }
+            "Stop" | "SessionEnd" => turn.clear(),
+            _ => Ok(()),
+        };
+        if let Err(e) = flag {
+            // An accepted limit (docs/deliverables.md): the turn's files may be copied.
+            eprintln!("oboete: the private turn's flag could not be kept: {e}");
+        }
+        for (mut c, read) in captured {
             // The repository and folder as read, before the gate, with the list as given: a rule
             // that masks part of a name, or one taken away since, changes neither (#496); and the
             // labels, with the list as given and as the rules now read it.

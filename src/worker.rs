@@ -1115,6 +1115,8 @@ fn serve(
     let mut config = config_stamp(home);
     // Whether a round ran since a resident worker's last idle step (R3).
     let mut ran;
+    // docs/deliverables.md: the phase's providers.db, opened when first needed.
+    let mut deliverables_db: Option<rusqlite::Connection> = None;
     // R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
     // says all is well, so doctor reports a kill during a round and none during a wait.
     let mut waited = false;
@@ -1208,6 +1210,15 @@ fn serve(
             )? == Phase::Covered
         {
             again = true;
+        }
+        // docs/deliverables.md: copies of what each turn that ended made, the worker's own (a
+        // command that borrows the loop copies nothing), not while a command waits for it.
+        if yields && !hold {
+            match crate::deliverables::run(home, &raw, &mut deliverables_db, &|| asked_aside(home))
+            {
+                Ok(took) => again |= took,
+                Err(e) => eprintln!("oboete worker: deliverables: {e:#}"),
+            }
         }
         if !hold && let Some(phase) = phases.curation.as_mut() {
             match phase(&mut raw, &k)? {
@@ -1306,6 +1317,10 @@ fn serve(
             // without it, and the worker's next pause builds it.
             if yields {
                 maintain(home, &raw, departing, calling(phases));
+                // The copies forget's denials cover, and files no row names (docs/deliverables.md).
+                if let Err(e) = crate::deliverables::sweep(home, &raw, true) {
+                    eprintln!("oboete worker: deliverables sweep: {e:#}");
+                }
             }
             if !resident {
                 break true;

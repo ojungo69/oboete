@@ -1518,6 +1518,9 @@ pub fn purge(home: &Path) -> Result<Option<Purged>> {
         // And the checks My Work holds of a forgotten session (docs/my-work.md rule 6), swept
         // again by a purge that stops before step 5 is recorded.
         crate::my_work::forget_reviews(home, &sessions)?;
+        // And the copies of files a forgotten turn made (docs/deliverables.md); the page and the
+        // links already refuse them by the same denials.
+        crate::deliverables::sweep(home, &raw, false)?;
         for job in past.iter().chain(&records_past) {
             raw.finish_forget_step(job, 5)?;
         }
