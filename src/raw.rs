@@ -5476,8 +5476,8 @@ impl Raw {
         Ok(out)
     }
 
-    /// `agent`'s `session` live events on this device strictly between two seqs, each with its
-    /// seq (docs/deliverables.md: a turn's records).
+    /// `agent`'s `session` hook events on this device strictly between two seqs, each with its
+    /// seq (docs/deliverables.md: a turn's records; a replay's paths are not this machine's).
     pub(crate) fn turn_events(
         &self,
         agent: &str,
@@ -5487,12 +5487,11 @@ impl Raw {
     ) -> Result<Vec<(i64, Event)>> {
         let seqs: Vec<i64> = self
             .conn
-            .prepare(&format!(
+            .prepare(
                 "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
-                   AND type = 'event' AND agent = ?4 AND session = ?5 AND source IN ('{live}')
+                   AND type = 'event' AND agent = ?4 AND session = ?5 AND source = 'hook'
                  ORDER BY seq",
-                live = LIVE.join("', '")
-            ))?
+            )?
             .query_map(params![self.device, after, before, agent, session], |r| {
                 r.get(0)
             })?

@@ -71,14 +71,15 @@ none.
   is recorded never depends on the settings), and a turn before it may leave no reply, so the records
   alone cannot tell its calls from the turn before. So the mark goes into the turn's own records:
   the prompt hook sets the session's private-turn flag (a file under `state/private-turns/`, no
-  text), and while it is set each event the hooks record for that session (its tool calls, its
-  reply) carries `"private_turn": true` in its body. The session's next public prompt clears it,
-  as do its reply (after the reply is recorded with the mark) and its end. The hooks of one session
-  run one after another (none is async), so the flag is set and cleared in the order the agent
-  works; and as the mark is in the record, a busy store's write-back (docs/unwritten.md) and a
-  restore keep it with the record. The phase copies no call whose record is marked, as claude-mem
-  copies nothing for a wholly private turn. A flag that cannot be read marks the event (fail
-  closed); a flag that cannot be set is reported as the hook's failures are (`oboete doctor`), and
+  text) for a wholly private prompt, and while it is not set each tool call and reply the hooks
+  record for that session carries `"public_turn": true`, added after the redaction gate (a rule
+  cannot take it away at capture; a rescan that masks it later only stops a copy). The session's
+  next public prompt clears the flag, as do its reply and its end. A call counts only when its
+  record is so marked and a `prompt` record of its turn comes before it, so hooks set up in the middle
+  of a turn copy nothing of it. The hooks of one session run one after another (none is async), and
+  the mark is taken as each event comes and kept in its record, so a busy store's write-back
+  (docs/unwritten.md) and a restore keep it with the record. A flag that cannot be read leaves the
+  event unmarked (fail closed); a flag that cannot be set is reported on the hook's error output, and
   that turn's files may be copied: an accepted limit. Only agents whose prompt
   hook sees each prompt as it comes are copied from (Claude Code, Codex, Grok): agy's records are
   built from its transcript afterwards, and Cursor's print mode runs its tool hooks without its
@@ -175,8 +176,9 @@ none.
   no reply is copied at the next reply or the session's end; a public prompt, a turn without a reply,
   then a wholly private prompt whose turn declares a file: the file is not copied, also when the
   public prompt is written back late from the unwritten spool, when another session's turn ends in
-  between, and after a restore gives seqs again; an unreadable flag marks the event; the next public
-  prompt's calls are copied again.
+  between, and after a restore gives seqs again; an unreadable flag leaves the event unmarked; a
+  call before any prompt record of its turn, or whose mark a rule masked, is not copied; the next
+  public prompt's calls are copied again.
 - A file, or a folder above it, swapped for a link to outside the roots is not copied; a FIFO in a
   file's place is refused without blocking; a folder of `<home>/deliverables/` that is a link is not
   written to; a file already under

@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS deliverables(
   bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
   declared INTEGER NOT NULL, list TEXT, field TEXT,
   copied INTEGER NOT NULL,
-  UNIQUE(device, turn_seq, copy)
+  UNIQUE(device, turn_seq, turn_ts, copy)
 );
 CREATE INDEX IF NOT EXISTS deliverables_session ON deliverables(agent, session);
 -- The last turn end the phase took on each device, with that record's time.
@@ -125,6 +125,19 @@ impl PrivateTurn {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
+    }
+}
+
+/// Marks a tool call's or a reply's record as of a turn whose prompt the hooks saw public
+/// (docs/deliverables.md): only such calls are copied from. Added after the gate, at the top of the
+/// body, so no field's text or its ledger's offsets change.
+pub(crate) fn mark_public(e: &mut Event) {
+    if !matches!(e.kind.as_str(), "tool" | "reply") || !AGENTS.contains(&e.agent.as_str()) {
+        return;
+    }
+    if let Ok(Value::Object(mut body)) = serde_json::from_str::<Value>(&e.body) {
+        body.insert("public_turn".into(), Value::Bool(true));
+        e.body = Value::Object(body).to_string();
     }
 }
 
@@ -704,20 +717,24 @@ fn is_work_state_write(tool: &str) -> bool {
         .is_some_and(|(server, name)| name == "work_state_write" && crate::curate::oboete(server))
 }
 
-/// A turn's files, declared first, then those written outside the source tree, at most
-/// `MAX_FILES` (claude-mem's capture order).
+/// A turn's files, declared first, then those written outside the source tree (claude-mem's
+/// capture order). A call counts only after a prompt record of the turn, and only when the hooks
+/// marked it as of a public prompt's turn: a wholly private prompt is recorded as nothing, and a
+/// mark a rule masked stops the copy rather than allows it.
 fn candidates(events: &[(i64, Event)]) -> Vec<Candidate> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
+    let mut prompted = false;
     for (seq, e) in events {
-        if e.kind != "tool" {
+        prompted |= e.kind == "prompt";
+        if e.kind != "tool" || !prompted {
             continue;
         }
         let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
             continue;
         };
-        // A private turn's call, and a call that failed, name nothing.
-        if body["private_turn"] == true || body["failed"] == true {
+        // A call of a turn not seen public, and a call that failed, name nothing.
+        if body["public_turn"] != true || body["failed"] == true {
             continue;
         }
         let tool = body["tool"].as_str().unwrap_or("");
@@ -767,7 +784,6 @@ fn candidates(events: &[(i64, Event)]) -> Vec<Candidate> {
             cwd,
         });
     }
-    out.truncate(MAX_FILES);
     out
 }
 
@@ -819,13 +835,25 @@ pub(crate) fn run(
                 .and_then(|k| k.rsplit(['/', '\\']).find(|p| !p.is_empty()))
                 .unwrap_or(""),
         );
+        // At most `MAX_FILES` a turn, of those that open as a file inside a root, as claude-mem
+        // counts the ones that resolve.
+        let mut opened = 0;
         for c in candidates(&events) {
+            if opened == MAX_FILES {
+                eprintln!(
+                    "oboete: over {MAX_FILES} files for one turn: {} not copied",
+                    c.path.display()
+                );
+                continue;
+            }
+            // Taken again whole next round, from the last turn end done.
             if aside() {
-                set_checkpoint(db, &device, r.seq - 1, None)?;
                 return Ok(true);
             }
-            let copied = open_source(&c.path, &roots(&c.cwd))
-                .and_then(|file| copy_into(home, &folder, &c.path, file));
+            let copied = open_source(&c.path, &roots(&c.cwd)).and_then(|file| {
+                opened += 1;
+                copy_into(home, &folder, &c.path, file)
+            });
             let copied = match copied {
                 Ok(copied) => copied,
                 Err(err) => {
@@ -868,7 +896,8 @@ pub(crate) fn run(
     if seq < last {
         set_checkpoint(db, &device, last, time_at(raw, last)?)?;
     }
-    Ok(took)
+    // Records read past is progress too: more may wait behind them.
+    Ok(took || last > from)
 }
 
 /// The rows forget's denials cover (docs/deliverables.md): the origin of the call or the turn end
@@ -916,21 +945,24 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
     let gone = forgotten(raw, &db)?;
     let mut removed = 0;
     for (id, copy) in &gone {
-        db.execute("DELETE FROM deliverables WHERE id = ?1", [id])?;
+        // The file before its row: a file that cannot be removed keeps its row for the next sweep.
         let named: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM deliverables WHERE copy = ?1)",
-            [copy],
+            "SELECT EXISTS(SELECT 1 FROM deliverables WHERE copy = ?1 AND id <> ?2)",
+            params![copy, id],
             |r| r.get(0),
         )?;
         if !named && remove_copy(home, copy)? {
             removed += 1;
         }
+        db.execute("DELETE FROM deliverables WHERE id = ?1", [id])?;
     }
     if orphans {
         let named: HashSet<String> = db
             .prepare("SELECT copy FROM deliverables")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        // `remove_copy` deletes only inside a real folder: a link at `deliverables/` is read, not
+        // followed for a deletion.
         let top = home.join(FOLDER);
         let Ok(folders) = std::fs::read_dir(&top) else {
             return Ok(removed);
@@ -965,7 +997,10 @@ fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
     }
     let top = home.join(FOLDER);
     let dir = top.join(folder);
-    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+    if ![&top, &dir]
+        .iter()
+        .all(|d| std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()))
+    {
         return Ok(false);
     }
     let path = dir.join(name);
@@ -1000,9 +1035,12 @@ mod tests {
         }
     }
 
+    /// A call as the hooks record one in a public prompt's turn (`mark_public`).
     fn tool(session: &str, name: &str, input: Value, cwd: &Path) -> Event {
         let body = json!({"tool": name, "input": input.to_string(), "output": "", "failed": false});
-        ev(session, "tool", body, cwd)
+        let mut e = ev(session, "tool", body, cwd);
+        mark_public(&mut e);
+        e
     }
 
     /// A turn of `session`: its prompt, its calls and its reply.
@@ -1147,7 +1185,8 @@ mod tests {
         let w = work.path();
         std::fs::write(w.join("report.pdf"), b"pdf").unwrap();
         let input = json!({"file_path": w.join("report.pdf")}).to_string();
-        let failed = json!({"tool": "Write", "input": input, "output": "", "failed": true});
+        let failed = json!({"tool": "Write", "input": input, "output": "", "failed": true,
+            "public_turn": true});
         raw.append(&ev("s1", "prompt", json!({"prompt": "Go."}), w))
             .unwrap();
         raw.append(&ev("s1", "tool", failed, w)).unwrap();
@@ -1229,6 +1268,96 @@ mod tests {
             !PrivateTurn::new(home.path(), "claude", "s1").is_set(),
             "cleared by the reply"
         );
+    }
+
+    /// A call before any prompt record of its turn (hooks set up during a turn, a wholly private
+    /// prompt), and a call whose mark a rule masked, copy nothing; past the cap of a turn, only the
+    /// files that open count, so fifty missing ones leave a real one copied.
+    #[test]
+    fn a_call_with_no_prompt_or_a_masked_mark_copies_nothing() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("report.pdf"), b"pdf").unwrap();
+        let write = json!({"file_path": w.join("report.pdf")});
+        raw.append(&tool("s1", "Write", write.clone(), w)).unwrap();
+        raw.append(&ev("s1", "reply", json!({"assistant": "Done."}), w))
+            .unwrap();
+        let masked = json!({"tool": "Write", "input": write.to_string(), "output": "",
+            "failed": false, "[REDACTED:word]": true});
+        raw.append(&ev("s2", "prompt", json!({"prompt": "Go."}), w))
+            .unwrap();
+        raw.append(&ev("s2", "tool", masked, w)).unwrap();
+        raw.append(&ev("s2", "reply", json!({"assistant": "Done."}), w))
+            .unwrap();
+        step(home.path(), &raw);
+        assert!(copies(home.path()).is_empty());
+        let mut many: Vec<Value> = (0..MAX_FILES)
+            .map(|i| json!(w.join(format!("gone-{i}.pdf"))))
+            .collect();
+        many.push(json!(w.join("report.pdf")));
+        let declare =
+            json!({"list": "l", "fields": {"work_products": Value::Array(many).to_string()}});
+        turn(
+            &mut raw,
+            "s3",
+            w,
+            &[("mcp__oboete__work_state_write", declare)],
+        );
+        step(home.path(), &raw);
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["report.pdf"]);
+    }
+
+    /// A seq a restore gave again is another turn: its row and the old one are both kept, so
+    /// forgetting one leaves the copy the other names.
+    #[test]
+    fn a_turn_end_is_known_by_its_seq_and_time() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let row = |turn_ts: i64| {
+            db.execute(
+                "INSERT OR IGNORE INTO deliverables(device, agent, session, turn_seq, turn_ts,
+                   call_seq, call_ts, title, kind, source_path, copy, bytes, sha256, declared,
+                   copied)
+                 VALUES('d', 'claude', 's', 7, ?1, 6, 1, 't', 'file', '/w/a', 'shop/a-1', 1, 'h', 0, 1)",
+                [turn_ts],
+            )
+            .unwrap()
+        };
+        assert_eq!((row(100), row(200), row(200)), (1, 1, 0));
+    }
+
+    /// The sweep never follows a link at `deliverables/` itself: files outside no row names stay.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_follows_no_link_at_its_folder() {
+        let (home, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir(outside.path().join("shop")).unwrap();
+        std::fs::write(outside.path().join("shop").join("keep.txt"), b"keep").unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join(FOLDER)).unwrap();
+        drop(open(home.path()).unwrap());
+        let raw = crate::raw::open(home.path()).unwrap();
+        assert_eq!(sweep(home.path(), &raw, true).unwrap(), 0);
+        assert!(outside.path().join("shop").join("keep.txt").is_file());
+    }
+
+    /// Records read past a whole round with no turn end are progress: the worker takes the next
+    /// round, where a turn end may wait.
+    #[test]
+    fn records_read_past_are_progress() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        raw.append(&ev("s1", "prompt", json!({"prompt": "Go."}), w))
+            .unwrap();
+        for _ in 0..BATCH + 5 {
+            raw.append(&tool("s1", "Read", json!({"file_path": "/w/a"}), w))
+                .unwrap();
+        }
+        assert!(step(home.path(), &raw), "a full round");
+        assert!(step(home.path(), &raw), "the rest");
+        assert!(!step(home.path(), &raw), "nothing left");
     }
 
     /// The flag the hooks keep: a flag that cannot be read is set (fail closed).

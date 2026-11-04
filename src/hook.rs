@@ -1305,19 +1305,19 @@ fn built(
                 let session = payload["session_id"].as_str().unwrap_or("unknown");
                 (session.to_owned(), step)
             });
-        // docs/deliverables.md: a wholly private prompt's turn is marked in its own records, from
-        // the flag as it is when this event comes, so a later prompt clearing it changes nothing.
+        // docs/deliverables.md: a call or a reply in the turn of a prompt the hooks saw public is
+        // marked so, after the gate (a rule cannot take the mark away at capture; one that masks
+        // it later only stops a copy), from the flag as it is when this event comes.
         let session = str_field(&payload, &["session_id", "sessionId"]).unwrap_or("unknown");
         let turn = crate::deliverables::PrivateTurn::new(home, agent, session);
-        let marked;
-        let settings = match event.as_str() {
-            "PostToolUse" | "PostToolUseFailure" | "Stop" if turn.is_set() => {
-                marked = settings.in_private_turn();
-                &marked
-            }
-            _ => settings,
-        };
-        let captured = crate::capture::events_read(agent, &event, &payload, ts, settings);
+        let public = matches!(
+            event.as_str(),
+            "PostToolUse" | "PostToolUseFailure" | "Stop"
+        ) && !turn.is_set();
+        let mut captured = crate::capture::events_read(agent, &event, &payload, ts, settings);
+        for (c, _) in captured.iter_mut().filter(|_| public) {
+            crate::deliverables::mark_public(&mut c.event);
+        }
         let flag = match event.as_str() {
             "UserPromptSubmit" if crate::capture::wholly_private_prompt(&payload) => turn.set(),
             "UserPromptSubmit" if captured.iter().any(|(c, _)| c.event.kind == "prompt") => {
@@ -11352,9 +11352,8 @@ mod tests {
         let events = recorded(dir.path(), "grok", "g1");
         assert_eq!(events.len(), 2);
         assert!(
-            events
-                .iter()
-                .all(|e| e.kind == "reply" && e.body == r#"{"assistant":"compat reply"}"#)
+            events.iter().all(|e| e.kind == "reply"
+                && e.body == r#"{"assistant":"compat reply","public_turn":true}"#)
         );
         assert_eq!(raw.max_seq().unwrap(), 2);
         assert_eq!(
@@ -11463,12 +11462,13 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<Value>(&ev[0].body).unwrap(),
-            json!({"assistant":"grok said hi"})
+            json!({"assistant":"grok said hi","public_turn":true})
         );
         assert_eq!(
             serde_json::from_str::<Value>(&ev[1].body).unwrap(),
             json!({
                 "tool":"Bash", "input":"{\"cmd\":\"ls\"}", "output":"a b", "failed":false,
+                "public_turn":true,
             })
         );
         assert!(
