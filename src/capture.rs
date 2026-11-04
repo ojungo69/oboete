@@ -78,6 +78,14 @@ impl Settings {
     }
 }
 
+/// Whether a prompt is wholly private: text that `<private>` blocks leave nothing of, which is
+/// recorded as no event (`shaped`), so its turn is marked by the session's private-turn flag
+/// instead (`deliverables::PrivateTurn`).
+pub(crate) fn wholly_private_prompt(payload: &Value) -> bool {
+    let typed = str_field(payload, &["prompt"]).unwrap_or("");
+    !typed.trim().is_empty() && strip_blocks(typed, true).is_empty()
+}
+
 /// One event as captured, with the ledger rows of what its redaction masked: (field, finding).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Captured {

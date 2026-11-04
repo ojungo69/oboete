@@ -1305,7 +1305,38 @@ fn built(
                 let session = payload["session_id"].as_str().unwrap_or("unknown");
                 (session.to_owned(), step)
             });
-        for (mut c, read) in crate::capture::events_read(agent, &event, &payload, ts, settings) {
+        // docs/deliverables.md: a call or a reply in the turn of a prompt the hooks saw public is
+        // marked so, after the gate (a rule cannot take the mark away at capture; one that masks
+        // it later only stops a copy), from the flag as it is when this event comes.
+        let session = str_field(&payload, &["session_id", "sessionId"]).unwrap_or("unknown");
+        let turn = crate::deliverables::PrivateTurn::new(home, agent, session);
+        // A replay's hooks are not the owner's turns: they neither read nor change the flag.
+        let live = settings.source == "hook";
+        let public =
+            live && matches!(
+                event.as_str(),
+                "PostToolUse" | "PostToolUseFailure" | "Stop"
+            ) && !turn.is_set();
+        let mut captured = crate::capture::events_read(agent, &event, &payload, ts, settings);
+        for (c, _) in captured.iter_mut().filter(|_| public) {
+            crate::deliverables::mark_public(&mut c.event);
+        }
+        let flag = match event.as_str() {
+            _ if !live => Ok(()),
+            "UserPromptSubmit" if crate::capture::wholly_private_prompt(&payload) => turn.set(),
+            "UserPromptSubmit" if captured.iter().any(|(c, _)| c.event.kind == "prompt") => {
+                turn.clear()
+            }
+            // An empty Stop records no reply, and its turn may go on (a Stop hook that blocks).
+            "Stop" if captured.iter().any(|(c, _)| c.event.kind == "reply") => turn.clear(),
+            "SessionEnd" => turn.clear(),
+            _ => Ok(()),
+        };
+        if let Err(e) = flag {
+            // An accepted limit (docs/deliverables.md): the turn's files may be copied.
+            eprintln!("oboete: the private turn's flag could not be kept: {e}");
+        }
+        for (mut c, read) in captured {
             // The repository and folder as read, before the gate, with the list as given: a rule
             // that masks part of a name, or one taken away since, changes neither (#496); and the
             // labels, with the list as given and as the rules now read it.
@@ -11327,9 +11358,8 @@ mod tests {
         let events = recorded(dir.path(), "grok", "g1");
         assert_eq!(events.len(), 2);
         assert!(
-            events
-                .iter()
-                .all(|e| e.kind == "reply" && e.body == r#"{"assistant":"compat reply"}"#)
+            events.iter().all(|e| e.kind == "reply"
+                && e.body == r#"{"assistant":"compat reply","public_turn":true}"#)
         );
         assert_eq!(raw.max_seq().unwrap(), 2);
         assert_eq!(
@@ -11438,12 +11468,13 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<Value>(&ev[0].body).unwrap(),
-            json!({"assistant":"grok said hi"})
+            json!({"assistant":"grok said hi","public_turn":true})
         );
         assert_eq!(
             serde_json::from_str::<Value>(&ev[1].body).unwrap(),
             json!({
                 "tool":"Bash", "input":"{\"cmd\":\"ls\"}", "output":"a b", "failed":false,
+                "public_turn":true,
             })
         );
         assert!(

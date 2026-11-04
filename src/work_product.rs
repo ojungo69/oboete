@@ -90,11 +90,11 @@ fn js_lines(text: &str) -> impl Iterator<Item = &str> {
     text.split(['\n', '\r', '\u{2028}', '\u{2029}'])
 }
 
-fn whitespace(c: char) -> bool {
+pub(crate) fn whitespace(c: char) -> bool {
     (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
 }
 
-fn short(value: &str) -> Option<String> {
+pub(crate) fn short(value: &str) -> Option<String> {
     let text = value
         .split(whitespace)
         .filter(|part| !part.is_empty())
@@ -193,7 +193,7 @@ fn extension_kind(path: &str) -> Option<&'static str> {
         .find_map(|(suffix, kind)| suffix[1..].eq_ignore_ascii_case(extension).then_some(*kind))
 }
 
-fn file_kind(path: &str) -> Option<&'static str> {
+pub(crate) fn file_kind(path: &str) -> Option<&'static str> {
     is_local_path(path).then(|| extension_kind(path)).flatten()
 }
 

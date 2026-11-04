@@ -3883,7 +3883,7 @@ fn diagnostic_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 #[cfg(windows)]
-fn diagnostic_file_name(file: &std::fs::File) -> std::io::Result<PathBuf> {
+pub(crate) fn diagnostic_file_name(file: &std::fs::File) -> std::io::Result<PathBuf> {
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
     let mut name = vec![0u16; 32768];

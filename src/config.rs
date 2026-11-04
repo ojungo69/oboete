@@ -1502,6 +1502,9 @@ pub struct Capture {
     pub store_prompts: bool,
     #[serde(default)]
     pub tool_output: ToolOutput,
+    /// Copies of the files a turn made (docs/deliverables.md, decision 73): on, as claude-mem's are.
+    #[serde(default = "default_true")]
+    pub deliverables: bool,
 }
 
 impl Default for Capture {
@@ -1509,6 +1512,7 @@ impl Default for Capture {
         Self {
             store_prompts: true,
             tool_output: ToolOutput::default(),
+            deliverables: true,
         }
     }
 }
@@ -1664,6 +1668,7 @@ paid_usd_per_month = 2.5
 [backup]
 [redaction]
 [capture]
+deliverables = false
 [inject]
 session_start = false
 [chain]
