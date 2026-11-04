@@ -959,7 +959,7 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
     }
     let db = open(home)?;
     let gone = forgotten(raw, &db)?;
-    let mut removed = 0;
+    let (mut removed, mut kept) = (0, 0);
     for (id, copy) in &gone {
         // The file before its row: a file that cannot be removed keeps its row for the next sweep,
         // and the others go on.
@@ -974,12 +974,18 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
                 Ok(false) => {}
                 Err(e) => {
                     eprintln!("oboete: the copy {copy} was not removed yet: {e:#}");
+                    kept += 1;
                     continue;
                 }
             }
         }
         db.execute("DELETE FROM deliverables WHERE id = ?1", [id])?;
     }
+    // A forgotten copy still there keeps forget's last step owed (`forget --continue`).
+    anyhow::ensure!(
+        kept == 0,
+        "{kept} forgotten copies could not be removed yet"
+    );
     if orphans {
         let named: HashSet<String> = db
             .prepare("SELECT copy FROM deliverables")?
@@ -1368,6 +1374,52 @@ mod tests {
             .unwrap()
         };
         assert_eq!((row(100), row(200), row(200)), (1, 1, 0));
+    }
+
+    /// A forgotten copy the sweep cannot remove yet keeps its row and fails the sweep, so forget's
+    /// last step stays owed; once it can, the sweep and `forget --continue`'s purge remove it.
+    #[cfg(unix)]
+    #[test]
+    fn a_forgotten_copy_not_yet_removed_keeps_forget_owed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("own.pdf"), b"own").unwrap();
+        turn(
+            &mut raw,
+            "s1",
+            w,
+            &[("Write", json!({"file_path": w.join("own.pdf")}))],
+        );
+        let first = raw.max_seq().unwrap();
+        step(home.path(), &raw);
+        let copy = copies(home.path()).remove(0).1;
+        let folder = home
+            .path()
+            .join(FOLDER)
+            .join(copy.split('/').next().unwrap());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let handle = format!("{}:{first}", raw.device());
+        let target = crate::forget::session_target(home.path(), &handle).unwrap();
+        let preview = crate::forget::preview(home.path(), target).unwrap();
+        crate::forget::start(home.path(), &preview).unwrap();
+        drop(raw);
+        let raw = crate::raw::open(home.path()).unwrap();
+        let blocked = std::fs::remove_file(folder.join("probe"))
+            .err()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+            || std::fs::write(folder.join("probe"), b"").is_err();
+        let swept = sweep(home.path(), &raw, false);
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if blocked {
+            assert!(swept.is_err());
+            assert_eq!(copies(home.path()).len(), 1, "its row stays");
+        }
+        drop(raw);
+        crate::forget::purge(home.path()).unwrap();
+        assert!(copies(home.path()).is_empty());
+        assert!(!home.path().join(FOLDER).join(&copy).exists());
     }
 
     /// The sweep never follows a link at `deliverables/` itself: files outside no row names stay,
