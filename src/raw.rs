@@ -5476,6 +5476,22 @@ impl Raw {
         Ok(out)
     }
 
+    /// docs/deliverables.md: `turn_start` by live hook records alone, so a replay's reply in the
+    /// same session is no boundary of a live turn.
+    pub(crate) fn hook_turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MIN(seq), ?4) FROM records
+             WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
+               AND seq <= ?4 AND source = 'hook'
+               AND seq > COALESCE(
+                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
+                    AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
+                    AND source = 'hook'), 0)",
+            params![self.device, agent, session, reply],
+            |r| r.get(0),
+        )?)
+    }
+
     /// `agent`'s `session` hook events on this device strictly between two seqs, each with its
     /// seq (docs/deliverables.md: a turn's records; a replay's paths are not this machine's).
     pub(crate) fn turn_events(

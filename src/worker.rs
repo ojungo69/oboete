@@ -1115,7 +1115,7 @@ fn serve(
     let mut config = config_stamp(home);
     // Whether a round ran since a resident worker's last idle step (R3).
     let mut ran;
-    // docs/deliverables.md: the phase's providers.db, opened when first needed.
+    // docs/deliverables.md: the phase's deliverables.db, opened when first needed.
     let mut deliverables_db: Option<rusqlite::Connection> = None;
     // R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
     // says all is well, so doctor reports a kill during a round and none during a wait.

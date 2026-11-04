@@ -1327,7 +1327,9 @@ fn built(
             "UserPromptSubmit" if captured.iter().any(|(c, _)| c.event.kind == "prompt") => {
                 turn.clear()
             }
-            "Stop" | "SessionEnd" => turn.clear(),
+            // An empty Stop records no reply, and its turn may go on (a Stop hook that blocks).
+            "Stop" if captured.iter().any(|(c, _)| c.event.kind == "reply") => turn.clear(),
+            "SessionEnd" => turn.clear(),
             _ => Ok(()),
         };
         if let Err(e) = flag {

@@ -219,6 +219,12 @@ fn copy_name(source: &Path, hash: &str) -> Result<String> {
         .unwrap_or_default();
     let ext = extension(&name);
     let stem = &name[..name.len() - ext.len()];
+    // The extension made safe as the stem is (`.p\df` is a name POSIX allows), so every name a
+    // copy gets is one `remove_copy` removes.
+    let ext = match ext.strip_prefix('.') {
+        Some(rest) => format!(".{}", safe_name(rest)),
+        None => String::new(),
+    };
     let suffix = format!("-{hash}{ext}");
     let stem = safe_name(stem);
     let stem = if stem.is_empty() {
@@ -691,24 +697,23 @@ fn time_at(raw: &Raw, seq: i64) -> Result<Option<i64>> {
 }
 
 /// Whether raw.db still holds the record the checkpoint names: not after a restore that ends below
-/// it or gives its seq to a record of another time. A removed one keeps its seq.
+/// it or gives its seq to another record. A record with a time is known by it; one with none (a
+/// tombstone, a removed one) is known by having none; one forget removed since keeps its seq; the
+/// empty store's checkpoint (seq 0) names none.
 fn still_there(raw: &Raw, seq: i64, ts: Option<i64>) -> Result<bool> {
-    let Some(ts) = ts else {
-        return Ok(seq <= raw.max_seq()?);
-    };
-    Ok(
-        match raw
-            .after(raw.device(), seq - 1, 1)?
-            .into_iter()
-            .find(|r| r.seq == seq)
-        {
-            Some(r) => match r.item {
-                Item::Event(e) | Item::Expired(e) => e.ts == ts,
-                _ => true,
-            },
-            None => false,
-        },
-    )
+    if seq == 0 {
+        return Ok(true);
+    }
+    let at = raw
+        .after(raw.device(), seq - 1, 1)?
+        .into_iter()
+        .find(|r| r.seq == seq);
+    Ok(match (ts, at.map(|r| r.item)) {
+        (_, None) => false,
+        (Some(ts), Some(Item::Event(e) | Item::Expired(e))) => e.ts == ts,
+        (None, Some(Item::Event(_) | Item::Expired(_))) => false,
+        (_, Some(_)) => true,
+    })
 }
 
 /// The work_state_write tool of oboete, under the name any agent gives it.
@@ -721,7 +726,7 @@ fn is_work_state_write(tool: &str) -> bool {
 /// capture order). A call counts only after a prompt record of the turn, and only when the hooks
 /// marked it as of a public prompt's turn: a wholly private prompt is recorded as nothing, and a
 /// mark a rule masked stops the copy rather than allows it.
-fn candidates(events: &[(i64, Event)]) -> Vec<Candidate> {
+fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<Candidate>> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
     let mut prompted = false;
@@ -766,7 +771,14 @@ fn candidates(events: &[(i64, Event)]) -> Vec<Candidate> {
             continue;
         }
         let text = path.to_string_lossy().into_owned();
-        if crate::work_product::file_kind(&text).is_none() || !outside_source(&path, &mut seen) {
+        if crate::work_product::file_kind(&text).is_none() {
+            continue;
+        }
+        // Each git check takes up to 5 s: a command waiting for the worker comes first.
+        if aside() {
+            return None;
+        }
+        if !outside_source(&path, &mut seen) {
             continue;
         }
         let title = path
@@ -784,7 +796,7 @@ fn candidates(events: &[(i64, Event)]) -> Vec<Candidate> {
             cwd,
         });
     }
-    out
+    Some(out)
 }
 
 /// The phase (docs/deliverables.md): each turn end recorded on this device since its checkpoint,
@@ -827,7 +839,7 @@ pub(crate) fn run(
         {
             continue;
         }
-        let start = raw.turn_start(&e.agent, &e.session, r.seq)?;
+        let start = raw.hook_turn_start(&e.agent, &e.session, r.seq)?;
         let events = raw.turn_events(&e.agent, &e.session, start - 1, r.seq)?;
         let folder = folder_name(
             e.repo
@@ -838,7 +850,10 @@ pub(crate) fn run(
         // At most `MAX_FILES` a turn, of those that open as a file inside a root, as claude-mem
         // counts the ones that resolve.
         let mut opened = 0;
-        for c in candidates(&events) {
+        let Some(found) = candidates(&events, aside) else {
+            return Ok(true);
+        };
+        for c in found {
             if opened == MAX_FILES {
                 eprintln!(
                     "oboete: over {MAX_FILES} files for one turn: {} not copied",
@@ -946,14 +961,22 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
     let gone = forgotten(raw, &db)?;
     let mut removed = 0;
     for (id, copy) in &gone {
-        // The file before its row: a file that cannot be removed keeps its row for the next sweep.
+        // The file before its row: a file that cannot be removed keeps its row for the next sweep,
+        // and the others go on.
         let named: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM deliverables WHERE copy = ?1 AND id <> ?2)",
             params![copy, id],
             |r| r.get(0),
         )?;
-        if !named && remove_copy(home, copy)? {
-            removed += 1;
+        if !named {
+            match remove_copy(home, copy) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("oboete: the copy {copy} was not removed yet: {e:#}");
+                    continue;
+                }
+            }
         }
         db.execute("DELETE FROM deliverables WHERE id = ?1", [id])?;
     }
@@ -977,8 +1000,13 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
             let name = folder.file_name().to_string_lossy().into_owned();
             for file in std::fs::read_dir(folder.path())?.flatten() {
                 let copy = format!("{name}/{}", file.file_name().to_string_lossy());
-                if !named.contains(&copy) && remove_copy(home, &copy)? {
-                    removed += 1;
+                if named.contains(&copy) {
+                    continue;
+                }
+                match remove_copy(home, &copy) {
+                    Ok(true) => removed += 1,
+                    Ok(false) => {}
+                    Err(e) => eprintln!("oboete: {copy} was not removed: {e:#}"),
                 }
             }
         }
@@ -989,15 +1017,15 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
 /// Removes one copy, only a regular file directly in a folder of `deliverables/`, no link
 /// followed.
 fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
-    let Some((folder, name)) = copy.split_once('/') else {
-        return Ok(false);
+    // A name no copy is given is refused, never taken as gone: its row stays.
+    let parts = copy.split_once('/').filter(|(folder, name)| {
+        [folder, name]
+            .iter()
+            .all(|p| !p.is_empty() && **p != "." && **p != ".." && !p.contains(['/', '\\']))
+    });
+    let Some((folder, name)) = parts else {
+        anyhow::bail!("not a copy's name");
     };
-    if [folder, name]
-        .iter()
-        .any(|p| p.is_empty() || *p == "." || *p == ".." || p.contains(['/', '\\']))
-    {
-        return Ok(false);
-    }
     // A folder or a file that cannot be read is an error, so its row stays for the next sweep;
     // one that is not there is gone already.
     let meta = |p: &Path| match std::fs::symlink_metadata(p) {
@@ -1129,6 +1157,11 @@ mod tests {
             "{whole}"
         );
         assert!(name(&format!("/w/a.{}", "x".repeat(260)), &sha[..8]).is_err());
+        // An extension is made safe too, so every copy's name is one the sweep removes.
+        assert_eq!(
+            name(r"/w/report.p\df", &sha[..8]).unwrap(),
+            "report-3f9a1c2b.p-df"
+        );
     }
 
     /// X23: a turn's declared file (relative to its folder) and the files it wrote outside the
@@ -1360,6 +1393,85 @@ mod tests {
         assert!(outside.path().join("shop").join("keep.txt").is_file());
     }
 
+    /// An empty Stop records no reply and leaves the flag set: its turn may go on.
+    #[test]
+    fn an_empty_stop_leaves_the_private_turn_set() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let settings = crate::capture::Settings::default();
+        let (mut failed, mut back) = (0, 0);
+        let mut hook = |raw: &mut Raw, event: &str, mut payload: Value| {
+            payload["session_id"] = json!("s1");
+            payload["cwd"] = json!(home.path());
+            crate::hook::record(
+                home.path(),
+                raw,
+                "claude",
+                event,
+                &payload,
+                1,
+                &settings,
+                &mut failed,
+                &mut back,
+            )
+            .unwrap();
+        };
+        hook(
+            &mut raw,
+            "UserPromptSubmit",
+            json!({"prompt": "<private>plan</private>"}),
+        );
+        hook(&mut raw, "Stop", json!({"last_assistant_message": ""}));
+        assert!(PrivateTurn::new(home.path(), "claude", "s1").is_set());
+        hook(&mut raw, "Stop", json!({"last_assistant_message": "Done."}));
+        assert!(!PrivateTurn::new(home.path(), "claude", "s1").is_set());
+    }
+
+    /// A replayed reply in a live session is no boundary of its live turn: the turn's file is
+    /// copied at the live reply.
+    #[test]
+    fn a_replayed_reply_is_no_boundary_of_a_live_turn() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("report.pdf"), b"pdf").unwrap();
+        raw.append(&ev("s1", "prompt", json!({"prompt": "Go."}), w))
+            .unwrap();
+        raw.append(&tool(
+            "s1",
+            "Write",
+            json!({"file_path": w.join("report.pdf")}),
+            w,
+        ))
+        .unwrap();
+        let replayed = Event {
+            source: "replay".into(),
+            ..ev("s1", "reply", json!({"assistant": "Replayed."}), w)
+        };
+        raw.append(&replayed).unwrap();
+        raw.append(&ev("s1", "reply", json!({"assistant": "Done."}), w))
+            .unwrap();
+        step(home.path(), &raw);
+        assert_eq!(copies(home.path()).len(), 1);
+    }
+
+    /// The checkpoint's record: the empty store's (seq 0) names none; a record with a time where
+    /// the checkpoint had none is another one.
+    #[test]
+    fn a_checkpoint_knows_its_record() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        assert!(still_there(&raw, 0, None).unwrap());
+        let seq = raw
+            .append(&ev("s1", "prompt", json!({"prompt": "Go."}), home.path()))
+            .unwrap();
+        let ts = time_at(&raw, seq).unwrap();
+        assert!(still_there(&raw, seq, ts).unwrap());
+        assert!(!still_there(&raw, seq, None).unwrap());
+        assert!(!still_there(&raw, seq, Some(1)).unwrap());
+        assert!(!still_there(&raw, seq + 1, ts).unwrap());
+    }
+
     /// A replay's hooks for the same session neither clear nor read a live private turn's flag.
     #[test]
     fn a_replay_leaves_a_live_private_turn_alone() {
@@ -1539,11 +1651,13 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let w = work.path();
         std::fs::write(w.join("report.pdf"), b"pdf").unwrap();
+        // Declared: no git check comes first, so the copy's own wait is what gives way.
+        let declare = json!({"list": "l", "fields": {"work_product": w.join("report.pdf")}});
         turn(
             &mut raw,
             "s1",
             w,
-            &[("Write", json!({"file_path": w.join("report.pdf")}))],
+            &[("mcp__oboete__work_state_write", declare)],
         );
         assert!(run(home.path(), &raw, &mut None, &|| true).unwrap());
         assert!(copies(home.path()).is_empty());
