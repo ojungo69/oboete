@@ -1302,6 +1302,11 @@ fn serve(
             if gone(home, holding) {
                 return Err(Gone.into());
             }
+            // The worker's own: a command that borrows the loop (a restore, a rebuild) ends
+            // without it, and the worker's next pause builds it.
+            if yields {
+                maintain(home, &raw, departing, calling(phases));
+            }
             if !resident {
                 break true;
             }
@@ -1542,6 +1547,29 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
             &mut |raw, k, db, overdue| runner.pass(raw, k, db, overdue),
         )
     })
+}
+
+/// How long no hook has recorded before the worker builds raw's session index: long enough that
+/// a hook seldom comes during the build, which it waits out for at most its 2 s before it keeps
+/// its events for the next hook to write back (docs/unwritten.md).
+const INDEX_PAUSE_MS: i64 = 30 * 60_000;
+
+/// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`),
+/// built once in a pause of the owner's work, since its first build takes seconds a hook's write
+/// would wait out. Not while a command waits for the worker to step aside (R12) or it is leaving,
+/// nor with a call out (R10). A build that fails is tried again at a later idle time; the seek
+/// works without the index, only slower.
+fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
+    // Built (or unreadable) first: the newest hook record's time may walk a history of imports.
+    if leaving || calling || asked_aside(home) || raw.has_session_index().unwrap_or(true) {
+        return;
+    }
+    let paused = raw
+        .last_hook_ts()
+        .is_ok_and(|ts| ts.is_none_or(|ts| crate::db::now_ms() - ts >= INDEX_PAUSE_MS));
+    if paused {
+        let _ = raw.ensure_session_index();
+    }
 }
 
 /// A run's outcome until it ends.
@@ -2347,6 +2375,89 @@ mod tests {
     use super::*;
     use crate::knowledge;
     use crate::raw;
+
+    /// What an idle worker keeps up waits for a command that asked it to step aside, for its
+    /// leaving and for a call out, whatever the pause.
+    #[test]
+    fn the_session_index_waits_for_a_command_a_leaving_and_a_call() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let e = crate::raw::Event {
+            ts: crate::db::now_ms() - INDEX_PAUSE_MS,
+            ..crate::raw::test_event("a step")
+        };
+        raw.append(&e).unwrap();
+        maintain(p, &raw, true, false);
+        maintain(p, &raw, false, true);
+        let asked = yield_request(p);
+        std::fs::write(&asked, "").unwrap();
+        maintain(p, &raw, false, false);
+        assert!(!raw.has_session_index().unwrap());
+        std::fs::remove_file(asked).unwrap();
+        maintain(p, &raw, false, false);
+        assert!(raw.has_session_index().unwrap());
+    }
+
+    /// A resident worker that went idle before the pause came builds the index once it has: its
+    /// idle times go on with nothing new.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resident_worker_builds_the_session_index_once_the_pause_comes() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let e = crate::raw::Event {
+            ts: crate::db::now_ms() - INDEX_PAUSE_MS + 1_000,
+            ..crate::raw::test_event("a step")
+        };
+        raw.append(&e).unwrap();
+        drop(raw);
+        let built = || crate::raw::open(p).unwrap().has_session_index().unwrap();
+        assert!(!built());
+        let worker = resident(p, 100);
+        until("the index built in the pause", built);
+        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    /// Decision 71's plan, slice 1: the worker builds raw's session index in a pause of the
+    /// owner's work, and not while hooks record (its first build takes seconds a hook's write
+    /// would wait out).
+    #[test]
+    fn the_session_index_is_built_in_a_pause_only() {
+        for (ago, worker, built) in [
+            (INDEX_PAUSE_MS, true, true),
+            (1_000, true, false),
+            (INDEX_PAUSE_MS, false, false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = crate::raw::open(p).unwrap();
+            let e = crate::raw::Event {
+                ts: crate::db::now_ms() - ago,
+                ..crate::raw::test_event("a step")
+            };
+            raw.append(&e).unwrap();
+            drop(raw);
+            if worker {
+                // `oboete worker` itself, as a hook starts it.
+                let held = lock(p).unwrap();
+                let phases = Phases {
+                    yields: true,
+                    ..Phases::default()
+                };
+                run_holding(p, 0, vec![], || {}, held, phases).unwrap();
+            } else {
+                // A command that borrows the loop, as a restore or a rebuild does.
+                run_with(p, 0, vec![], || {}).unwrap();
+            }
+            let raw = crate::raw::open(p).unwrap();
+            let case = format!("{ago} ms ago, the worker's own: {worker}");
+            assert_eq!(raw.has_session_index().unwrap(), built, "{case}");
+        }
+    }
 
     #[test]
     fn w5c_config_lock_failure_drains_records_captured_while_worker_held() {
