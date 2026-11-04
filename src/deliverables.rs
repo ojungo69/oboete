@@ -1251,23 +1251,33 @@ pub(crate) fn denied_by(
 /// at that very path (the home canonicalized once, then the fixed folder: a `deliverables/`
 /// swapped for a link before the open is refused), whose bytes, read on the handle within
 /// `deadline` and no further than the row's size, are the row's: its size and its sha256. The
-/// handle comes back at its start.
+/// handle comes back at its start. None when the copy is not as its row says (gone, a link or not
+/// a regular file in its place, other bytes); an error when it could not be read in time or at all.
 pub(crate) fn open_copy(
     home: &Path,
     r: &Row,
     deadline: std::time::Instant,
-) -> Result<std::fs::File> {
+) -> Result<Option<std::fs::File>> {
     use std::io::Seek;
     let Some((folder, name)) = copy_parts(&r.copy) else {
-        anyhow::bail!("not a copy's name");
+        return Ok(None);
+    };
+    let gone = |e: &std::io::Error| {
+        // A link in the file's place fails the open with ELOOP under O_NOFOLLOW.
+        #[cfg(unix)]
+        let link = e.raw_os_error() == Some(libc::ELOOP);
+        #[cfg(not(unix))]
+        let link = false;
+        e.kind() == std::io::ErrorKind::NotFound || link
     };
     let dir = home.canonicalize()?.join(FOLDER).join(folder);
     for d in [dir.parent().context("deliverables")?, &dir] {
-        anyhow::ensure!(
-            std::fs::symlink_metadata(d)?.is_dir(),
-            "{} is not a real folder",
-            d.display()
-        );
+        match std::fs::symlink_metadata(d) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
     }
     let path = dir.join(name);
     let mut options = std::fs::OpenOptions::new();
@@ -1277,9 +1287,14 @@ pub(crate) fn open_copy(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
-    let mut file = options.open(&path)?;
-    anyhow::ensure!(file.metadata()?.is_file(), "not a regular file");
-    anyhow::ensure!(handle_path(&file)? == path, "not at the copy's place");
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !file.metadata()?.is_file() || handle_path(&file)? != path {
+        return Ok(None);
+    }
     let mut hash = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     let mut read = 0u64;
@@ -1290,15 +1305,16 @@ pub(crate) fn open_copy(
             break;
         }
         read += n as u64;
-        anyhow::ensure!(read <= r.bytes, "grew past the copy's size");
+        if read > r.bytes {
+            return Ok(None);
+        }
         hash.update(&buf[..n]);
     }
-    anyhow::ensure!(
-        read == r.bytes && hex(&hash.finalize()) == r.sha256,
-        "not the copy's bytes"
-    );
+    if read != r.bytes || hex(&hash.finalize()) != r.sha256 {
+        return Ok(None);
+    }
     file.seek(std::io::SeekFrom::Start(0))?;
-    Ok(file)
+    Ok(Some(file))
 }
 
 #[cfg(test)]
@@ -2156,38 +2172,33 @@ mod tests {
         let row = rows(&db).unwrap().remove(0);
         let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut got = Vec::new();
-        (open_copy(home.path(), &row, later()).unwrap())
+        (open_copy(home.path(), &row, later()).unwrap().unwrap())
             .read_to_end(&mut got)
             .unwrap();
         assert_eq!(got, b"deck one");
         let copy = home.path().join(FOLDER).join(&row.copy);
         std::fs::write(&copy, b"deck two").unwrap();
-        assert!(open_copy(home.path(), &row, later()).is_err(), "same size");
+        let none = |deadline| matches!(open_copy(home.path(), &row, deadline), Ok(None));
+        assert!(none(later()), "same size");
         std::fs::write(&copy, b"deck").unwrap();
-        assert!(
-            open_copy(home.path(), &row, later()).is_err(),
-            "another size"
-        );
+        assert!(none(later()), "another size");
         std::fs::write(&copy, b"deck one").unwrap();
         let past = std::time::Instant::now();
         assert!(open_copy(home.path(), &row, past).is_err(), "out of time");
-        assert!(open_copy(home.path(), &row, later()).is_ok());
+        assert!(open_copy(home.path(), &row, later()).unwrap().is_some());
         #[cfg(unix)]
         {
             std::fs::remove_file(&copy).unwrap();
             std::fs::write(w.join("other"), b"deck one").unwrap();
             std::os::unix::fs::symlink(w.join("other"), &copy).unwrap();
-            assert!(open_copy(home.path(), &row, later()).is_err(), "a link");
+            assert!(none(later()), "a link");
             std::fs::remove_file(&copy).unwrap();
             std::fs::write(&copy, b"deck one").unwrap();
             let top = home.path().join(FOLDER);
             let moved = w.join("moved");
             std::fs::rename(&top, &moved).unwrap();
             std::os::unix::fs::symlink(&moved, &top).unwrap();
-            assert!(
-                open_copy(home.path(), &row, later()).is_err(),
-                "a linked folder"
-            );
+            assert!(none(later()), "a linked folder");
             let alias = w.join("home");
             std::os::unix::fs::symlink(home.path(), &alias).unwrap();
             let db = open_read(&alias)

@@ -184,7 +184,10 @@ it in their fence before they become a count (#703). A fence that would hold the
 tried only after both (#711). Lines are measured as the fence holds them, a closing tag
 quoted and so longer. The memory's own fence stays outside the size, as it always was. The viewer's Context page and `oboete inject` show the same text, the page also for a home
 with no store yet (which it does not create), without the line on copies: OpenCode and Pi, which read
-`oboete inject`, have no files copied (docs/deliverables.md). Pi gets no section: its
+`oboete inject`, have no files copied (docs/deliverables.md). So does the MCP tool
+`session_start_context`: its server, which every agent's MCP client starts alike (agy's, OpenCode's
+and Cursor's too), does not know which agent asks; Claude Code's, Codex's and Grok's hooks give the
+line at session start. Pi gets no section: its
 extension has no MCP client, so neither tool, and its manifest keeps the whole size.
 
 L8. **Exclusion.** A repository excluded from capture (milestone 5 slice 4a), or a write from a

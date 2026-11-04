@@ -1469,15 +1469,12 @@ impl Viewer {
         for row in rows {
             anyhow::ensure!(Instant::now() < ask.deadline, "out of time");
             if self.file_mac(&row)?.verify_truncated_left(&ask.tag).is_ok() {
-                return Ok(
-                    match crate::deliverables::open_copy(&self.home, &row, ask.deadline) {
-                        Ok(file) => Some((file, row)),
-                        Err(e) => {
-                            eprintln!("oboete: copy {} not served: {e:#}", row.id);
-                            None
-                        }
-                    },
-                );
+                // Not as its row says: none (404); not read in time or at all: an error (503).
+                let file = crate::deliverables::open_copy(&self.home, &row, ask.deadline)?;
+                if file.is_none() {
+                    eprintln!("oboete: copy {} is not as its row says: not served", row.id);
+                }
+                return Ok(file.map(|file| (file, row)));
             }
         }
         Ok(None)
@@ -2632,10 +2629,17 @@ impl Viewer {
             // 2), move the page's version too.
             "version" => {
                 let mut answer = polled(&self.home)?;
-                let files = match crate::deliverables::open_read(&self.home)? {
-                    Some(db) => crate::deliverables::fingerprint(&crate::deliverables::rows(&db)?),
-                    None => String::new(),
-                };
+                // A copies' store that does not read moves no version rather than stopping the
+                // page's polls (the list and the products report it, less often than this).
+                let files = (|| -> Result<String> {
+                    Ok(match crate::deliverables::open_read(&self.home)? {
+                        Some(db) => {
+                            crate::deliverables::fingerprint(&crate::deliverables::rows(&db)?)
+                        }
+                        None => String::new(),
+                    })
+                })()
+                .unwrap_or_else(|_| "unread".into());
                 let v = answer["v"].as_str().unwrap_or("").to_owned();
                 answer["v"] = json!(format!("{v}:{files}:{}", self.files_instance()?));
                 answer
@@ -10567,6 +10571,11 @@ curate = false
         assert_ne!(after, before);
         let other = Viewer::new(&v.home, None, 4321, Token::Run("t0k".into()));
         assert_ne!(get(&other, "/api/version")["v"], after);
+        // A copies' store that does not read stops no poll.
+        let store = v.home.join("deliverables.db");
+        std::fs::remove_file(&store).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        assert!(get(&v, "/api/version")["v"].is_string());
     }
 
     fn hex_tag(tag: &[u8; 16]) -> String {
@@ -10575,7 +10584,8 @@ curate = false
 
     /// The deadline counts the lookup, the hash and the admission's waits: an ask whose time is up
     /// opens nothing, and one that meets a restore's hold on raw.db gives up when its time is up,
-    /// not after the store's own wait.
+    /// not after the store's own wait. Out of time is an error (503); a copy not as its row says is
+    /// none (404).
     #[test]
     fn a_link_past_its_deadline_opens_nothing() {
         let (home, _work, v, row) = copied(b"<p>late</p>");
@@ -10599,6 +10609,17 @@ curate = false
         drop(swap);
         assert!(v.admit(&row, Instant::now()).is_err(), "no time left");
         assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_some());
+        // A copy not as its row says is none (404), not one that could not be read (503).
+        let copy = home
+            .path()
+            .join(crate::deliverables::FOLDER)
+            .join(&row.copy);
+        std::fs::write(&copy, b"<p>LATE</p>").unwrap();
+        let later = FileAsk {
+            deadline: Instant::now() + FILE_TIME,
+            ..ask
+        };
+        assert!(matches!(v.copy_for(&later), Ok(None)));
     }
 
     /// RFC 9110's byte ranges as a copy's answer reads them: one range, a suffix, an open end;

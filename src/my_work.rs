@@ -917,12 +917,22 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     let (mut answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
     // Slice 2 of docs/deliverables.md: a fingerprint of each request's copies, so the page reads
-    // its products again when one lands or goes.
-    if let Some(db) = crate::deliverables::open_read(home)? {
-        for (a, h) in answers.iter_mut().zip(&held) {
-            let copies = copies_of(&db, &raw, h)?;
-            a["copies"] = json!(crate::deliverables::fingerprint(&copies));
-        }
+    // its products again when one lands or goes. A copies' store that does not read leaves the
+    // list without them, not without its requests.
+    let fingerprints = (|| -> Result<Vec<String>> {
+        let Some(db) = crate::deliverables::open_read(home)? else {
+            return Ok(Vec::new());
+        };
+        (held.iter())
+            .map(|h| Ok(crate::deliverables::fingerprint(&copies_of(&db, &raw, h)?)))
+            .collect()
+    })()
+    .unwrap_or_else(|e| {
+        eprintln!("oboete: the copies of My Work's requests not read: {e:#}");
+        Vec::new()
+    });
+    for (a, fingerprint) in answers.iter_mut().zip(fingerprints) {
+        a["copies"] = json!(fingerprint);
     }
     // F2, F7: where each request sits, and the areas.
     let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
@@ -1439,10 +1449,15 @@ pub(crate) fn products(
     let mut list: Vec<Value> = (products_read(&raw, &k, &rules, &held.sources)?.into_iter())
         .map(|(p, _)| p)
         .collect();
-    let copies = match crate::deliverables::open_read(home)? {
-        Some(db) => copies_of(&db, &raw, held)?,
-        None => Vec::new(),
-    };
+    // A copies' store that does not read leaves the page without its copies, not without the rest.
+    let copies = (|| match crate::deliverables::open_read(home)? {
+        Some(db) => copies_of(&db, &raw, held),
+        None => Ok(Vec::new()),
+    })()
+    .unwrap_or_else(|e| {
+        eprintln!("oboete: a request's copies not read: {e:#}");
+        Vec::new()
+    });
     if copies.is_empty() {
         return Ok(list);
     }
@@ -5130,6 +5145,21 @@ mod tests {
         for id in ["c:claude:s1", "c:claude:s2"] {
             assert_ne!(by_id(&answer, id)["copies"], json!(none), "{id}");
         }
+        // A copies' store that does not read leaves the list and the page without copies only.
+        let store = h.s.home.path().join("deliverables.db");
+        std::fs::remove_file(&store).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        let answer = super::read(h.s.home.path(), Range::All, h.t).unwrap();
+        assert!(
+            by_id(&answer, "c:claude:s1").get("copies").is_none(),
+            "{answer}"
+        );
+        let unread = shown(&h);
+        assert!(unread.iter().all(|p| p.get("file").is_none()), "{unread:?}");
+        assert!(
+            unread.iter().any(|p| p["path"] == "/gone/report.pdf"),
+            "{unread:?}"
+        );
     }
 
     /// Slice 2: a request's products are one answer (#439), built in the readers' hold, so a

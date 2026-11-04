@@ -9603,9 +9603,11 @@ function myWorkProductsKey(row, instance) {
   return `${row.id}\n${row.version}\n${row.copies ?? ''}\n${instance ?? ''}`;
 }
 
-// Reads a request's products into its open page; only a read that answered is kept, and one that
-// failed is asked again at the next poll, whether the version moved or not (`poll`).
-function myWorkProductsRead(row, instance) {
+// Reads a request's products into its open page; only a read that answered is kept. One that failed
+// for a reason that may pass (no answer, or the viewer's own error) is asked again at the next poll,
+// whether the version moved or not (`poll`), three times at most for one key; one the viewer
+// refused (a request no longer listed) waits for the next key.
+function myWorkProductsRead(row, instance, tries = 0) {
   const key = myWorkProductsKey(row, instance);
   const ask = ++mw.productsAsk;
   mw.productsRetry = null;
@@ -9613,8 +9615,10 @@ function myWorkProductsRead(row, instance) {
     if (ask !== mw.productsAsk) return;
     mw.products = { key, list: answer.products || [] };
     if (mw.request === row.id && mw.productsBox?.id === row.id) mw.productsBox.fill(mw.products.list);
-  }).catch(() => {
-    if (ask === mw.productsAsk) mw.productsRetry = { row, instance };
+  }).catch((error) => {
+    if (ask === mw.productsAsk && !(error.status < 500) && tries < 3) {
+      mw.productsRetry = { row, instance, tries: tries + 1 };
+    }
   });
 }
 
@@ -10435,7 +10439,7 @@ async function poll() {
     // An open request's products whose read failed (`myWorkProductsRead`).
     const retry = mw.productsRetry;
     if (view === 'my_work' && retry && mw.request === retry.row.id && mw.productsBox?.id === retry.row.id) {
-      myWorkProductsRead(retry.row, retry.instance);
+      myWorkProductsRead(retry.row, retry.instance, retry.tries);
     }
   } catch (e) {
     queue = {};

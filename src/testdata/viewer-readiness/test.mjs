@@ -4421,7 +4421,7 @@ back();
 const asked=[];let products=[];let fail=false;let listed=null;
 ctx.fetch=url=>{
   url=String(url);
-  if(url.startsWith('/api/my-work/product')){asked.push(url);return fail?Promise.reject(new Error('down')):Promise.resolve(response({products}));}
+  if(url.startsWith('/api/my-work/product')){asked.push(url);return fail===404?Promise.resolve({ok:false,status:404,json:async()=>({})}):fail?Promise.reject(new Error('down')):Promise.resolve(response({products}));}
   if(url.startsWith('/api/my-work?range=all'))return Promise.resolve(response(listed));
   return Promise.resolve(response({state:'none'}));
 };
@@ -4462,6 +4462,27 @@ ctx.fetch=listing;
 run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);
 await run('myWorkLive()');await settle();
 assert.equal(asked.length,4,'and through a list read');
+// A request the viewer no longer lists (404) waits for its next key; a failure that may pass is asked
+// again three times at most.
+const polls=async n=>{for(let i=0;i<n;i++){await run('poll()');await settle();}};
+const keyed=copies=>{listed={...listed,requests:listed.requests.map(r=>({...r,copies}))};};
+ctx.fetch=url=>String(url).startsWith('/api/version')?Promise.resolve(response({v:'v-same'})):listing(url);
+run("reposLoaded=true;version='v-same'");
+document.visibilityState='visible';
+fail=404;keyed('c2');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,5,'a new key is read');
+await polls(2);
+assert.equal(asked.length,5,'a request no longer listed is not asked again');
+fail=true;keyed('c3');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,6,'another new key is read');
+await polls(5);
+assert.equal(asked.length,9,'a failure that may pass is asked again three times at most');
+fail=false;
+delete document.visibilityState;
+ctx.fetch=listing;
+run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
 }
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show

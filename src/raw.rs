@@ -965,8 +965,8 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
 
 /// `read_only` within `deadline`: each wait (a restore's swap, SQLite's while busy) no longer than
 /// what is left of it when the wait starts, nor than `read_only`'s own, and an error when nothing is
-/// left. A copy's answer opens raw.db so (docs/deliverables.md), and sets SQLite's wait again
-/// before each later query.
+/// left. The connection keeps the busy wait it was opened with: a caller with a deadline (a copy's
+/// answer, docs/deliverables.md) sets it again before each later query.
 pub(crate) fn read_only_until(
     home: &Path,
     deadline: Option<std::time::Instant>,

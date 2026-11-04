@@ -572,7 +572,7 @@ impl Oboete {
     /// a checkout, as `oboete inject` prints it, which records nothing without a session.
     #[tool(
         name = "session_start_context",
-        description = "Show the session start context for a checkout: the same text the hooks inject at startup, with its decisions and open items, the work state and the recent memory list. Use it to reload that context during a session. Params: project (a checkout's directory; defaults to the active checkout).",
+        description = "Show the session start context for a checkout: the text the hooks inject at startup (less the line on copied files, which only the agent's own hook gives), with its decisions and open items, the work state and the recent memory list. Use it to reload that context during a session. Params: project (a checkout's directory; defaults to the active checkout).",
         annotations(read_only_hint = true)
     )]
     fn session_start_context(

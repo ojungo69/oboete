@@ -176,7 +176,9 @@ card with row X16's products; slice 2c takes #836's first three items.
   joined to it: both folders real directories, the file opened without following a link or
   blocking, a regular file whose handle is at that very path (a `deliverables/` swapped for a link
   is refused), of the row's size, and whose bytes, hashed on the handle before any header, are the
-  row's; then read again from its start on the same handle.
+  row's; then read again from its start on the same handle. A copy not as its row says (gone, a
+  link or not a regular file in its place, other bytes) answers 404; one that could not be read in
+  time or at all, 503.
 - **Admission.** Then raw.db is opened (`raw::read_only_until`, none when there is no store:
   nothing is served), the readers' hold taken (`dispatch::reading`, the order a restore and a
   forget's registration take them), and the call's and the turn end's denials read in it, each
@@ -216,7 +218,9 @@ card with row X16's products; slice 2c takes #836's first three items.
   `copies` and the instance, and at each list read compares the key the answer gives with the one
   it last read by: the open page's products are read again in place, the other updates held behind
   "Show updates" or not. A products read that failed is asked again at the next poll, the version
-  moved or not.
+  moved or not, three times at most for one key; one the viewer refused (a request no longer
+  listed) waits for the next key. A copies' store that does not read leaves the list and the page
+  without copies, not without their requests, and the version then moves with the rest alone.
 - **Card (slice 2b).** The list answer gives each request up to three products other than commits
   and branches, copies included, and how many more, for the card. The replacement compares the
   recorded file's own path, before the gate: as built, a recorded path the gate masks is compared
