@@ -173,9 +173,9 @@ const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
 /// no earlier event reads them all (1.2 s warm and about 12 s cold on 717,000 records, 2026-11-04).
 /// Forget's `records_sessions` (`session_indexes`) does not serve it: ordered by seq, the seek
 /// still walks the primary key with that one in place (0.65 s on the same records). Only the
-/// worker creates this one, in a pause of the owner's work (`ensure_session_index`), never `open`
-/// or a hook: its first build on such a store takes seconds, longer than a hook's write waits
-/// (`OPEN_WAIT`).
+/// worker creates this one, in a pause of the owner's work (`ensure_session_index`), never `open`,
+/// a hook or a command: its first build on such a store takes seconds, longer than a hook's write
+/// waits (`OPEN_WAIT`).
 const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
     ON records(device, agent, session, seq)";
 

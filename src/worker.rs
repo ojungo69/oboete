@@ -1302,7 +1302,11 @@ fn serve(
             if gone(home, holding) {
                 return Err(Gone.into());
             }
-            maintain(home, &raw, departing, calling(phases));
+            // The worker's own: a command that borrows the loop (a restore, a rebuild) ends
+            // without it, and the worker's next pause builds it.
+            if yields {
+                maintain(home, &raw, departing, calling(phases));
+            }
             if !resident {
                 break true;
             }
@@ -1545,8 +1549,10 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
     })
 }
 
-/// How long no hook has recorded before the worker builds raw's session index.
-const INDEX_PAUSE_MS: i64 = 5 * 60_000;
+/// How long no hook has recorded before the worker builds raw's session index: long enough that
+/// a hook seldom comes during the build, which it waits out for at most its 2 s before it keeps
+/// its events for the next hook to write back (docs/unwritten.md).
+const INDEX_PAUSE_MS: i64 = 30 * 60_000;
 
 /// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`),
 /// built once in a pause of the owner's work, since its first build takes seconds a hook's write
@@ -2421,18 +2427,35 @@ mod tests {
     /// would wait out).
     #[test]
     fn the_session_index_is_built_in_a_pause_only() {
-        for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
+        for (ago, worker, built) in [
+            (INDEX_PAUSE_MS, true, true),
+            (1_000, true, false),
+            (INDEX_PAUSE_MS, false, false),
+        ] {
             let home = tempfile::tempdir().unwrap();
-            let mut raw = crate::raw::open(home.path()).unwrap();
+            let p = home.path();
+            let mut raw = crate::raw::open(p).unwrap();
             let e = crate::raw::Event {
                 ts: crate::db::now_ms() - ago,
                 ..crate::raw::test_event("a step")
             };
             raw.append(&e).unwrap();
             drop(raw);
-            run_with(home.path(), 0, vec![], || {}).unwrap();
-            let raw = crate::raw::open(home.path()).unwrap();
-            assert_eq!(raw.has_session_index().unwrap(), built, "{ago} ms ago");
+            if worker {
+                // `oboete worker` itself, as a hook starts it.
+                let held = lock(p).unwrap();
+                let phases = Phases {
+                    yields: true,
+                    ..Phases::default()
+                };
+                run_holding(p, 0, vec![], || {}, held, phases).unwrap();
+            } else {
+                // A command that borrows the loop, as a restore or a rebuild does.
+                run_with(p, 0, vec![], || {}).unwrap();
+            }
+            let raw = crate::raw::open(p).unwrap();
+            let case = format!("{ago} ms ago, the worker's own: {worker}");
+            assert_eq!(raw.has_session_index().unwrap(), built, "{case}");
         }
     }
 
