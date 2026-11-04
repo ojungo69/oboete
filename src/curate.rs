@@ -631,9 +631,11 @@ pub(crate) fn window_at(
     }))
 }
 
-/// The window `p` held, cut again up to where it was held at the size it had: grown when it was
-/// (decision 72). None when nothing is there to cut.
-fn held_cut(
+/// Whether the window `p` held is the one cut again up to where it was held (`same`): at the cut's
+/// size, or else grown (decision 72). The size first: what follows the held end can make the
+/// window cut at that size full now (a tool output it elided), and grown it reads otherwise.
+#[allow(clippy::too_many_arguments)]
+fn held_as(
     raw: &Raw,
     device: &str,
     at: (i64, Option<i64>),
@@ -641,12 +643,26 @@ fn held_cut(
     summary: &Summary,
     rules: &Rules,
     reading: &Reading,
-) -> Result<Option<Window>> {
+    same: impl Fn(&Window) -> bool,
+) -> Result<bool> {
     let until = Some((p.to_seq, p.to_offset));
     let Some(was) = window_at(raw, device, at, until, summary.cut(), rules, reading)? else {
-        return Ok(None);
+        return Ok(false);
     };
-    grown(raw, device, at, until, summary.cut(), rules, reading, was).map(Some)
+    if same(&was) {
+        return Ok(true);
+    }
+    Ok(was.full
+        && same(&grown(
+            raw,
+            device,
+            at,
+            until,
+            summary.cut(),
+            rules,
+            reading,
+            was,
+        )?))
 }
 
 /// Decision 72: window `w`, cut at `cut`, or, when it is full (more records wait past it), the
@@ -1747,8 +1763,9 @@ pub fn run_phase(
         && p.next_attempt_at > now
         && (p.from_seq, p.from_offset) == (w.from_seq, w.from_offset)
         && p.to_seq < w.to_seq
-        && let Some(was) = held_cut(raw, &device, at, p, summary, rules, &reading)?
-        && sha256_hex(&format!("{chain}\n{}\n{}", summary.language, was.text)) == p.prompt
+        && held_as(raw, &device, at, p, summary, rules, &reading, |was| {
+            sha256_hex(&format!("{chain}\n{}\n{}", summary.language, was.text)) == p.prompt
+        })?
     {
         return Ok(waiting(p, now));
     }
@@ -1994,8 +2011,14 @@ fn answered(
                         over.push((d.id, "its uid is forgotten"));
                         continue;
                     }
-                    claims.push(op);
+                    claims.push((d.id, op));
                 }
+                let (claims, beyond) = within_batch(claims);
+                over.extend(
+                    beyond
+                        .into_iter()
+                        .map(|id| (id, "the window's claims are over the batch cap")),
+                );
                 let dropped: Vec<(String, &str)> = lost
                     .into_iter()
                     .map(|id| (id, "its quote is not in the window"))
@@ -2025,6 +2048,25 @@ fn answered(
             Err(e) => return Err(e),
         },
     })
+}
+
+/// The claim ops a window keeps, within one batch with its window op (`cover` appends them
+/// together): what `MAX_BATCH_BYTES` leaves after the window op's own cap, in the answer's order,
+/// and the ids of those past it (a grown window's 150 claims of up to 64 KiB each would not fit,
+/// decision 72).
+fn within_batch(claims: Vec<(String, Value)>) -> (Vec<Value>, Vec<String>) {
+    let mut room = crate::raw::MAX_BATCH_BYTES - crate::raw::MAX_OP_BYTES;
+    let (mut kept, mut over) = (Vec::new(), Vec::new());
+    for (id, op) in claims {
+        let bytes = op.to_string().len();
+        if bytes > room {
+            over.push(id);
+            continue;
+        }
+        room -= bytes;
+        kept.push(op);
+    }
+    (kept, over)
 }
 
 /// A `curated` window op of `output`, an answer about `w`, with `fields` (its provider, summary and
@@ -7413,6 +7455,57 @@ mod tests {
         raw.append(&at(tool("lexed the rest"))).unwrap();
         assert!(matches!(run(&mut raw), Phase::Waiting { .. }));
         assert_eq!(calls.get(), 1, "the grown window keeps its hold");
+    }
+
+    /// Decision 72 (Codex): a window's claim ops fit one batch with its window op, as `cover`
+    /// appends them: past what the batch cap leaves after the window op's own cap, a claim is
+    /// dropped by its id, and a smaller one after it still fits.
+    #[test]
+    fn a_windows_claims_fit_one_batch_with_its_window_op() {
+        let op = |n: usize| json!({"text": "x".repeat(n)});
+        let mut claims: Vec<(String, Value)> =
+            (0..100).map(|i| (format!("c{i}"), op(50_000))).collect();
+        claims.push(("small".into(), op(10)));
+        let (kept, over) = within_batch(claims);
+        let bytes: usize = kept.iter().map(|o| o.to_string().len()).sum();
+        assert!(
+            bytes + crate::raw::MAX_OP_BYTES <= crate::raw::MAX_BATCH_BYTES,
+            "{bytes}"
+        );
+        assert!(!over.is_empty() && kept.len() + over.len() == 101);
+        assert_eq!(
+            over.first().map(String::as_str),
+            Some(format!("c{}", 100 - over.len()).as_str())
+        );
+        assert_eq!(kept.last(), Some(&op(10)));
+    }
+
+    /// Decision 72 (Codex): a window held at the cut's size keeps its hold when what comes after it
+    /// makes that cut full: a lone tool output elided at that size, which grown it would read
+    /// whole, is held as it was elided.
+    #[test]
+    fn a_window_held_at_its_size_keeps_its_hold_when_a_step_follows() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let ts = crate::db::now_ms() - 60_000;
+        let at = |e: Event| Event { ts, ..e };
+        raw.append(&at(tool(&"parsed word ".repeat(40)))).unwrap();
+        let (calls, sent) = (Cell::new(0), std::cell::RefCell::new(String::new()));
+        let mut failing = |_: &str, text: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            *sent.borrow_mut() = text.to_owned();
+            Err(went_past(&[("fake", "failed", Skip::Failed)]))
+        };
+        let (rules, summary) = (Rules::default(), curating(60));
+        let mut run = |raw: &mut Raw| {
+            run_phase(raw, &kn(), &db, &rules, &summary, "chain", &mut failing).unwrap()
+        };
+        assert!(matches!(run(&mut raw), Phase::Waiting { .. }));
+        let at_most = format!("At most {MAX_CARDS}: ");
+        assert!(sent.borrow().contains(&at_most), "held at the cut's size");
+        raw.append(&at(tool("lexed the rest"))).unwrap();
+        assert!(matches!(run(&mut raw), Phase::Waiting { .. }));
+        assert_eq!(calls.get(), 1, "the window held at its size keeps its hold");
     }
 
     /// Decision 72: a grown window takes `GROW` times the claims and the cards a window may give.
