@@ -1664,6 +1664,8 @@ thread_local! {
     /// A test seam: off, a full window is not grown (decision 72), for the tests of a cut's
     /// mechanics at one size (splits, removals, attempts) that build a backlog of small windows.
     static GROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// A test seam: what a window's claim ops may take of their batch, at most (`within_batch`).
+    static ROOM: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
 }
 
 /// The curation phase (D3): this device's next window, curated or waited on. A window that
@@ -1758,11 +1760,12 @@ pub fn run_phase(
     // while the owner works, and each step would otherwise send it again at once, before the
     // providers that failed it are due. Its held part is cut again as it was held: when that is
     // the request that was held (the same chain, rules, language and records), the hold stands.
+    // Grown (decision 72), a window can read more and still end on the record it was held at.
     if pending.is_none()
         && let Some(p) = &held
         && p.next_attempt_at > now
         && (p.from_seq, p.from_offset) == (w.from_seq, w.from_offset)
-        && p.to_seq < w.to_seq
+        && p.to_seq <= w.to_seq
         && held_as(raw, &device, at, p, summary, rules, &reading, |was| {
             sha256_hex(&format!("{chain}\n{}\n{}", summary.language, was.text)) == p.prompt
         })?
@@ -2051,20 +2054,44 @@ fn answered(
 }
 
 /// The claim ops a window keeps, within one batch with its window op (`cover` appends them
-/// together): what `MAX_BATCH_BYTES` leaves after the window op's own cap, in the answer's order,
+/// together): what `MAX_BATCH_BYTES` leaves after the window op's own cap, in the gates' order,
 /// and the ids of those past it (a grown window's 150 claims of up to 64 KiB each would not fit,
-/// decision 72).
+/// decision 72). A uid's claims fit or go together: the gates put a sibling they lowered before
+/// its settled claim, and kept alone it would be the uid's newest derivation.
 fn within_batch(claims: Vec<(String, Value)>) -> (Vec<Value>, Vec<String>) {
     let mut room = crate::raw::MAX_BATCH_BYTES - crate::raw::MAX_OP_BYTES;
+    #[cfg(test)]
+    {
+        room = room.min(ROOM.get());
+    }
+    // A uid is hex: a claim op without one is a group of its own by its id.
+    let sized: Vec<(String, Value, String, usize)> = claims
+        .into_iter()
+        .map(|(id, op)| {
+            let uid = crate::claims::op_uid(&op).unwrap_or_else(|| format!("id {id}"));
+            let bytes = op.to_string().len();
+            (id, op, uid, bytes)
+        })
+        .collect();
+    let mut need: std::collections::HashMap<&str, usize> = Default::default();
+    for (_, _, uid, bytes) in &sized {
+        *need.entry(uid).or_default() += bytes;
+    }
+    let mut fits: std::collections::HashMap<&str, bool> = Default::default();
     let (mut kept, mut over) = (Vec::new(), Vec::new());
-    for (id, op) in claims {
-        let bytes = op.to_string().len();
-        if bytes > room {
-            over.push(id);
-            continue;
+    for (id, op, uid, _) in &sized {
+        let fit = *fits.entry(uid).or_insert_with(|| {
+            let fit = need[uid.as_str()] <= room;
+            if fit {
+                room -= need[uid.as_str()];
+            }
+            fit
+        });
+        if fit {
+            kept.push(op.clone());
+        } else {
+            over.push(id.clone());
         }
-        room -= bytes;
-        kept.push(op);
     }
     (kept, over)
 }
@@ -7480,6 +7507,47 @@ mod tests {
         assert_eq!(kept.last(), Some(&op(10)));
     }
 
+    /// Decision 72 (Codex): a uid's claims are kept or left out together under the batch cap.
+    /// The gates put a sibling they lowered before its settled claim, so that the settled one is
+    /// the uid's newest derivation: kept alone, the lowered one would be, a proposal in place of
+    /// what was decided.
+    #[test]
+    fn a_lowered_sibling_is_not_kept_without_its_settled_claim_under_the_batch_cap() {
+        let first = [prompt("Yes, use tabs everywhere.")];
+        let answer = json!({"claims": [
+            claim("c1", "decided", "L1", "Yes, use tabs everywhere", json!([])),
+            claim("c2", "decided", "L1", "Yes", json!([]))], "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (_, ops) = two_windows(&first, answer.clone(), &[], none);
+        let claims: Vec<_> = ops.iter().filter(|o| o.kind == OpKind::Claim).collect();
+        let kept: Vec<(&Value, &Value)> = claims
+            .iter()
+            .map(|o| (&o.body["id"], &o.body["status"]))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (&json!("c2"), &json!("proposed")),
+                (&json!("c1"), &json!("decided"))
+            ],
+            "the lowered sibling first"
+        );
+        let uids: Vec<_> = claims
+            .iter()
+            .map(|o| crate::claims::op_uid(&o.body))
+            .collect();
+        assert_eq!(uids[0], uids[1], "one claim");
+        let sizes: Vec<usize> = claims.iter().map(|o| o.body.to_string().len()).collect();
+        // Room for either alone, not for both.
+        let (most, least) = (sizes.iter().max().unwrap(), sizes.iter().min().unwrap());
+        ROOM.set(most + least / 2);
+        let (_, ops) = two_windows(&first, answer, &[], none);
+        assert!(ops.iter().all(|o| o.kind != OpKind::Claim));
+        let window = ops.iter().find(|o| o.kind == OpKind::Window).unwrap();
+        let cap = "the window's claims are over the batch cap";
+        assert_eq!(window.body["dropped"], json!([["c2", cap], ["c1", cap]]));
+    }
+
     /// Decision 72 (Codex): a window held at the cut's size keeps its hold when what comes after it
     /// makes that cut full: a lone tool output elided at that size, which grown it would read
     /// whole, is held as it was elided.
@@ -7506,6 +7574,48 @@ mod tests {
         raw.append(&at(tool("lexed the rest"))).unwrap();
         assert!(matches!(run(&mut raw), Phase::Waiting { .. }));
         assert_eq!(calls.get(), 1, "the window held at its size keeps its hold");
+    }
+
+    /// Decision 72 (Codex): the same when the output that follows fits beside the held one at
+    /// neither size: grown, the window reads the held output whole and still ends where it was
+    /// held, and the hold stands, its row as it was.
+    #[test]
+    fn a_window_held_at_its_size_keeps_its_hold_when_grown_it_ends_where_it_was_held() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let ts = crate::db::now_ms() - 60_000;
+        let at = |e: Event| Event { ts, ..e };
+        raw.append(&at(tool(&"parsed word ".repeat(40)))).unwrap();
+        let (calls, sent) = (Cell::new(0), std::cell::RefCell::new(String::new()));
+        let mut failing = |_: &str, text: &str, _: &AnswerCheck, _: &Gate| -> Result<ChainResult> {
+            calls.set(calls.get() + 1);
+            *sent.borrow_mut() = text.to_owned();
+            Err(went_past(&[("fake", "failed", Skip::Failed)]))
+        };
+        let (rules, summary) = (Rules::default(), curating(60));
+        let mut run = |raw: &mut Raw| {
+            run_phase(raw, &kn(), &db, &rules, &summary, "chain", &mut failing).unwrap()
+        };
+        assert!(matches!(run(&mut raw), Phase::Waiting { .. }));
+        assert!(sent.borrow().contains(&format!("At most {MAX_CARDS}: ")));
+        let held = providers_db::pending_of(&db, raw.device()).unwrap();
+        assert!(held.is_some());
+        raw.append(&at(tool(&"lexed token ".repeat(60)))).unwrap();
+        let (dev, reading) = (raw.device().to_owned(), Reading::default());
+        let cut = summary.cut();
+        let w = window_at(&raw, &dev, (0, None), None, cut, &rules, &reading)
+            .unwrap()
+            .unwrap();
+        let g = grown(&raw, &dev, (0, None), None, cut, &rules, &reading, w).unwrap();
+        let to = held.as_ref().map(|p| (p.to_seq, p.to_offset));
+        assert_eq!(
+            (g.scale, Some((g.to_seq, g.to_offset)), g.full),
+            (GROW, to, true),
+            "grown, it ends where it was held"
+        );
+        assert!(matches!(run(&mut raw), Phase::Waiting { .. }));
+        assert_eq!(calls.get(), 1, "the hold stands");
+        assert_eq!(providers_db::pending_of(&db, raw.device()).unwrap(), held);
     }
 
     /// Decision 72: a grown window takes `GROW` times the claims and the cards a window may give.
