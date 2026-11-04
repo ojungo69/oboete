@@ -730,15 +730,17 @@ fn is_work_state_write(tool: &str) -> bool {
 }
 
 /// A turn's files, declared first, then those written outside the source tree (claude-mem's
-/// capture order). A call counts only after a prompt record of the turn, and only when the hooks
-/// marked it as of a public prompt's turn: a wholly private prompt is recorded as nothing, and a
-/// mark a rule masked stops the copy rather than allows it.
+/// capture order). A call counts only after the record that started its turn, a prompt or the
+/// harness's message (`envelope`: a task's notification, another session's message), which
+/// claude-mem reads as a turn of its own too; and only when the hooks marked it as of a public
+/// prompt's turn: a wholly private prompt is recorded as nothing, and a mark a rule masked stops
+/// the copy rather than allows it.
 fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<Candidate>> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
     let mut prompted = false;
     for (seq, e) in events {
-        prompted |= e.kind == "prompt";
+        prompted |= matches!(e.kind.as_str(), "prompt" | "envelope");
         if e.kind != "tool" || !prompted {
             continue;
         }
@@ -1364,16 +1366,38 @@ mod tests {
         assert!(copies(home.path()).is_empty());
     }
 
+    /// A turn the harness's message starts (a task's notification, recorded as an `envelope`) is a
+    /// turn as claude-mem reads one, whose transcript line starts a turn: its files are copied as a
+    /// prompt's turn's are.
+    #[test]
+    fn a_turn_a_notification_starts_copies_its_files() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("deck.pdf"), b"deck").unwrap();
+        let note = json!({"prompt": "<task-notification>\n<status>completed</status>"});
+        raw.append(&ev("s1", "envelope", note, w)).unwrap();
+        let write = json!({"file_path": w.join("deck.pdf")});
+        raw.append(&tool("s1", "Write", write, w)).unwrap();
+        raw.append(&ev("s1", "reply", json!({"assistant": "Done."}), w))
+            .unwrap();
+        assert!(step(home.path(), &raw));
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["deck.pdf"]);
+    }
+
     /// Decision 73: a public prompt the agent never answered, then a wholly private prompt whose
     /// turn declares a file: the private turn's records are marked by the hooks, and the file is
-    /// not copied; the next public prompt's is.
+    /// not copied, nor is one a turn the harness starts after it declares (its reply leaves the
+    /// flag); the next public prompt's is.
     #[test]
     fn a_private_turns_files_are_not_copied() {
         let (home, mut raw) = ready();
         let work = tempfile::tempdir().unwrap();
         let w = work.path();
-        std::fs::write(w.join("plan.pdf"), b"plan").unwrap();
-        std::fs::write(w.join("public.pdf"), b"public").unwrap();
+        for name in ["plan.pdf", "note.pdf", "public.pdf"] {
+            std::fs::write(w.join(name), name).unwrap();
+        }
         let settings = crate::capture::Settings::default();
         let hook = |raw: &mut Raw, event: &str, mut payload: Value| {
             payload["session_id"] = json!("s1");
@@ -1409,6 +1433,11 @@ mod tests {
         );
         hook(&mut raw, "PostToolUse", declare("plan.pdf"));
         hook(&mut raw, "Stop", json!({"last_assistant_message": "Done."}));
+        // A turn a task's notification starts after it goes on with the private work.
+        let note = "<task-notification>\n<status>completed</status>";
+        hook(&mut raw, "UserPromptSubmit", json!({ "prompt": note }));
+        hook(&mut raw, "PostToolUse", declare("note.pdf"));
+        hook(&mut raw, "Stop", json!({"last_assistant_message": "Done."}));
         hook(
             &mut raw,
             "UserPromptSubmit",
@@ -1421,7 +1450,7 @@ mod tests {
         assert_eq!(titles, ["public.pdf"]);
         assert!(
             !PrivateTurn::new(home.path(), "claude", "s1").is_set(),
-            "cleared by the reply"
+            "cleared by the public prompt"
         );
     }
 
@@ -1552,9 +1581,11 @@ mod tests {
         assert!(outside.path().join("shop").join("keep.txt").is_file());
     }
 
-    /// An empty Stop records no reply and leaves the flag set: its turn may go on.
+    /// No Stop clears the flag, an empty one (its turn may go on) or one with a reply (a turn the
+    /// harness starts next may go on with the private work), nor does the harness's message: the
+    /// next public prompt does.
     #[test]
-    fn an_empty_stop_leaves_the_private_turn_set() {
+    fn a_private_turn_lasts_until_a_public_prompt() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         let settings = crate::capture::Settings::default();
@@ -1580,10 +1611,16 @@ mod tests {
             "UserPromptSubmit",
             json!({"prompt": "<private>plan</private>"}),
         );
+        let set = || PrivateTurn::new(home.path(), "claude", "s1").is_set();
         hook(&mut raw, "Stop", json!({"last_assistant_message": ""}));
-        assert!(PrivateTurn::new(home.path(), "claude", "s1").is_set());
+        assert!(set());
         hook(&mut raw, "Stop", json!({"last_assistant_message": "Done."}));
-        assert!(!PrivateTurn::new(home.path(), "claude", "s1").is_set());
+        assert!(set());
+        let note = "<task-notification>\n<status>completed</status>";
+        hook(&mut raw, "UserPromptSubmit", json!({ "prompt": note }));
+        assert!(set());
+        hook(&mut raw, "UserPromptSubmit", json!({"prompt": "Go on."}));
+        assert!(!set());
     }
 
     /// A replayed reply in a live session is no boundary of its live turn: the turn's file is

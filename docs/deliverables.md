@@ -74,9 +74,14 @@ none.
   text) for a wholly private prompt, and while it is not set each tool call and reply the hooks
   record for that session carries `"public_turn": true`, added after the redaction gate (a rule
   cannot take it away at capture; a rescan that masks it later only stops a copy). The session's
-  next public prompt clears the flag, as do its reply and its end. A call counts only when its
-  record is so marked and a `prompt` record of its turn comes before it, so hooks set up in the middle
-  of a turn copy nothing of it. The hooks of one session run one after another (none is async), and
+  next public prompt clears the flag, as does its end; its reply does not, since a turn the harness
+  starts next often goes on with the private work. A call counts only when its record is so marked
+  and the record that started its turn comes before it, a `prompt` or the harness's message
+  (`envelope`: a task's notification, another session's message), which neither sets nor clears
+  the flag. So a turn the harness starts after a private turn is private until a public prompt,
+  where claude-mem, whose transcript reading takes such a message as a public turn of its own,
+  copies its files. Hooks set up in the middle of a turn copy nothing of it. The hooks of one
+  session run one after another (none is async), and
   the mark is taken as each event comes and kept in its record, so a busy store's write-back
   (docs/unwritten.md) and a restore keep it with the record. A flag that cannot be read leaves the
   event unmarked (fail closed); a flag that cannot be set is reported on the hook's error output, and
@@ -177,15 +182,17 @@ none.
   copies both into `<home>/deliverables/<repo>/`, named by content, with one row each; `src/a.rs`
   written in the repository is not copied; a second turn writing the same bytes reuses the copy.
 - Nothing is copied for a failed call, a path outside the checkout and the temp folders (a symlink
-  leading out too), a file over 512 MiB, a turn without a prompt record, a replayed session, the
-  setting off, or the 51st file of a turn; a git that fails counts as inside.
+  leading out too), a file over 512 MiB, a turn with neither a prompt nor an envelope record, a
+  replayed session, the setting off, or the 51st file of a turn; a git that fails counts as inside.
+  A turn a task's notification starts (an envelope) copies its files as a prompt's turn does.
 - A Write whose input was cut at the field cap is copied by the path at its head; a Codex turn with
   no reply is copied at the next reply or the session's end; a public prompt, a turn without a reply,
   then a wholly private prompt whose turn declares a file: the file is not copied, also when the
   public prompt is written back late from the unwritten spool, when another session's turn ends in
-  between, and after a restore gives seqs again; an unreadable flag leaves the event unmarked; a
-  call before any prompt record of its turn, or whose mark a rule masked, is not copied; the next
-  public prompt's calls are copied again.
+  between, and after a restore gives seqs again; nor is a file a turn the harness starts after the
+  private one declares, its reply notwithstanding; an unreadable flag leaves the event unmarked; a
+  call before the prompt or envelope record of its turn, or whose mark a rule masked, is not
+  copied; the next public prompt's calls are copied again.
 - A file, or a folder above it, swapped for a link to outside the roots is not copied; a FIFO in a
   file's place is refused without blocking; a folder of `<home>/deliverables/` that is a link is not
   written to; a file already under
