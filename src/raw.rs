@@ -960,13 +960,25 @@ pub(crate) fn newest_hook(home: &Path) -> Result<Option<(i64, i64)>> {
 }
 
 pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
-    read_only_within(home, OPEN_WAIT)
+    read_only_until(home, None)
 }
 
-/// `read_only`, its waits (for a restore's swap, and SQLite's while busy) no longer than `wait`:
-/// a copy's answer opens raw.db within its own deadline (docs/deliverables.md).
-pub(crate) fn read_only_within(home: &Path, wait: std::time::Duration) -> Result<Option<ReadOnly>> {
-    let wait = wait.min(OPEN_WAIT);
+/// `read_only` within `deadline`: each wait (a restore's swap, SQLite's while busy) no longer than
+/// what is left of it when the wait starts, nor than `read_only`'s own, and an error when nothing is
+/// left. A copy's answer opens raw.db so (docs/deliverables.md), and sets SQLite's wait again
+/// before each later query.
+pub(crate) fn read_only_until(
+    home: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<Option<ReadOnly>> {
+    let wait = || -> Result<std::time::Duration> {
+        let Some(deadline) = deadline else {
+            return Ok(OPEN_WAIT);
+        };
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        anyhow::ensure!(!left.is_zero(), "out of time");
+        Ok(left.min(OPEN_WAIT))
+    };
     let before = existing_read_path(home)?;
     let lock_path = home.join("raw.lock");
     match std::fs::symlink_metadata(&lock_path) {
@@ -990,7 +1002,7 @@ pub(crate) fn read_only_within(home: &Path, wait: std::time::Duration) -> Result
         file.metadata()?.is_file(),
         "raw coordination is not a regular file"
     );
-    let swap = wait_for_swap(file, false, wait)?;
+    let swap = wait_for_swap(file, false, wait()?)?;
     anyhow::ensure!(
         crate::worker::file_id(std::fs::metadata(&lock_path))
             == crate::worker::file_id(swap.metadata()),
@@ -1016,7 +1028,7 @@ pub(crate) fn read_only_within(home: &Path, wait: std::time::Duration) -> Result
             | rusqlite::OpenFlags::SQLITE_OPEN_URI
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    conn.busy_timeout(wait)?;
+    conn.busy_timeout(wait()?)?;
     format_of(&conn)?;
     let read = ReadOnly {
         conn,

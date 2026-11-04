@@ -1461,6 +1461,9 @@ impl Viewer {
         let Some(db) = crate::deliverables::open_read(&self.home)? else {
             return Ok(None);
         };
+        let left = ask.deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!left.is_zero(), "out of time");
+        db.busy_timeout(left.min(Duration::from_secs(2)))?;
         let rows = crate::deliverables::rows(&db)?;
         drop(db);
         for row in rows {
@@ -1558,12 +1561,24 @@ impl Viewer {
             anyhow::ensure!(!left.is_zero(), "out of time");
             Ok(left)
         };
-        let Some(raw) = crate::raw::read_only_within(&self.home, left()?)? else {
+        let Some(raw) = crate::raw::read_only_until(&self.home, Some(deadline))? else {
             return Ok(None);
         };
         let hold = crate::dispatch::reading(&self.home, left()?)?;
-        raw.conn.busy_timeout(left()?)?;
-        Ok((!crate::deliverables::denied(&raw.conn, row)?).then_some((raw, hold)))
+        let denied = crate::deliverables::denied_by(row, |seq, ts| {
+            raw.conn.busy_timeout(left()?)?;
+            let (device, agent, session) = (&row.device, &row.agent, &row.session);
+            crate::raw::forgets_in(
+                &raw.conn,
+                device,
+                agent,
+                session,
+                row.repo.as_deref(),
+                seq,
+                ts,
+            )
+        })?;
+        Ok((!denied).then_some((raw, hold)))
     }
 
     /// Typed operations with a body go through `save_gate`; other requests use `route`.

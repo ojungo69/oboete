@@ -1224,12 +1224,26 @@ pub(crate) fn fingerprint<'a>(rows: impl IntoIterator<Item = &'a Row>) -> String
 /// Whether forget's denials cover the row's call or the end of its turn, on any connection to
 /// raw.db (`raw::forgets_in`).
 pub(crate) fn denied(raw: &Connection, r: &Row) -> Result<bool> {
-    let repo = r.repo.as_deref();
-    let (device, agent, session) = (&r.device, &r.agent, &r.session);
-    Ok(
-        crate::raw::forgets_in(raw, device, agent, session, repo, r.call_seq, r.call_ts)?
-            || crate::raw::forgets_in(raw, device, agent, session, repo, r.turn_seq, r.turn_ts)?,
-    )
+    denied_by(r, |seq, ts| {
+        crate::raw::forgets_in(
+            raw,
+            &r.device,
+            &r.agent,
+            &r.session,
+            r.repo.as_deref(),
+            seq,
+            ts,
+        )
+    })
+}
+
+/// `denied`, `forgets` asked of the call, then of the turn's end (a copy's answer sets its wait
+/// before each).
+pub(crate) fn denied_by(
+    r: &Row,
+    mut forgets: impl FnMut(i64, i64) -> Result<bool>,
+) -> Result<bool> {
+    Ok(forgets(r.call_seq, r.call_ts)? || forgets(r.turn_seq, r.turn_ts)?)
 }
 
 /// A copy opened to serve: its folder and file directly in `<home>/deliverables/`, each a real

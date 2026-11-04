@@ -177,10 +177,11 @@ card with row X16's products; slice 2c takes #836's first three items.
   blocking, a regular file whose handle is at that very path (a `deliverables/` swapped for a link
   is refused), of the row's size, and whose bytes, hashed on the handle before any header, are the
   row's; then read again from its start on the same handle.
-- **Admission.** Then raw.db is opened (`raw::read_only_within`, none when there is no store:
+- **Admission.** Then raw.db is opened (`raw::read_only_until`, none when there is no store:
   nothing is served), the readers' hold taken (`dispatch::reading`, the order a restore and a
   forget's registration take them), and the call's and the turn end's denials read in it, each
-  wait (a restore's swap, SQLite's while busy, the hold) within what is left of the deadline
+  wait (a restore's swap, the hold, SQLite's while busy, set again before each query) within what
+  is left of the deadline when it starts
   (`deliverables::denied`, the query `Raw::forgets` runs): a forget registered before then refuses
   the link (404) from that moment, its purge run or not. The head is sent in that hold, and both are
   let go before the body; a forget registered after it waits for the hold, and a stream it let in
@@ -201,7 +202,8 @@ card with row X16's products; slice 2c takes #836's first three items.
   copy whose call raw no longer has (a restore gave its seq to another record) joins only the
   conversation's one holder among all requests built, counted before the answer's range. A copy a
   forget denies (`Raw::denies`: its call or its turn's end) is none from the registration on, its
-  sweep run or not, and its request's `copies` changes with it. Each copy
+  sweep run or not, and its request's `copies` changes with it; the page's answer is built in the
+  readers' hold (#439), so a registration under way is waited for, not met halfway. Each copy
   is `{kind, title, url: null, path, at, file}`, `file` its link's tag; a copy hides the recorded
   file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not changed after
   the copy), compared on the copy's own path, so a path a rule masks hides nothing; newest first

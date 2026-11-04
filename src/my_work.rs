@@ -1432,6 +1432,9 @@ pub(crate) fn products(
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(Vec::new());
     };
+    // One fence for the whole answer (#439): a forget registered between two copies' checks would
+    // leave the first in it.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let rules = Rules::load(home)?;
     let mut list: Vec<Value> = (products_read(&raw, &k, &rules, &held.sources)?.into_iter())
         .map(|(p, _)| p)
@@ -5127,6 +5130,46 @@ mod tests {
         for id in ["c:claude:s1", "c:claude:s2"] {
             assert_ne!(by_id(&answer, id)["copies"], json!(none), "{id}");
         }
+    }
+
+    /// Slice 2: a request's products are one answer (#439), built in the readers' hold, so a
+    /// forget's registration (which takes the hold whole) cannot come while it is being built.
+    #[test]
+    fn a_requests_products_are_built_in_the_readers_hold() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Write the report.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        h.run_read();
+        copy_row(&h, "s1", call, -59_000, "/gone/a.pdf");
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = (ids(&answer).iter())
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let held = held.into_iter().nth(i).unwrap();
+        let home = h.s.home.path().to_owned();
+        let (inside, building) = std::sync::mpsc::channel();
+        let (go, paused) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn({
+            let home = home.clone();
+            move || {
+                // The answer pauses while it is being built, at its copy's tag.
+                let tag = |r: &crate::deliverables::Row| {
+                    inside.send(()).unwrap();
+                    paused.recv().unwrap();
+                    Ok(format!("tag{}", r.id))
+                };
+                super::products(&home, &held, &tag).map(|list| list.len())
+            }
+        });
+        building.recv().unwrap();
+        let wait = std::time::Duration::from_millis(100);
+        assert!(
+            crate::dispatch::exclusive_within(&home, wait).is_err(),
+            "a registration waits for the answer"
+        );
+        go.send(()).unwrap();
+        assert_eq!(reader.join().unwrap().unwrap(), 1);
+        assert!(crate::dispatch::exclusive_within(&home, wait).is_ok());
     }
 
     /// Slice 2: where a request holds prompts of a conversation, a copy joins it when a held span
