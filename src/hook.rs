@@ -1327,8 +1327,8 @@ fn built(
             "UserPromptSubmit" if captured.iter().any(|(c, _)| c.event.kind == "prompt") => {
                 turn.clear()
             }
-            // An empty Stop records no reply, and its turn may go on (a Stop hook that blocks).
-            "Stop" if captured.iter().any(|(c, _)| c.event.kind == "reply") => turn.clear(),
+            // Not a reply: a turn the harness starts after a private one (a task's notification)
+            // often goes on with the private work, so it stays private until a public prompt.
             "SessionEnd" => turn.clear(),
             _ => Ok(()),
         };
