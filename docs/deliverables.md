@@ -75,8 +75,11 @@ none.
   record for that session carries `"public_turn": true`, added after the redaction gate (a rule
   cannot take it away at capture; a rescan that masks it later only stops a copy). The session's
   next public prompt clears the flag, as do its reply and its end. A call counts only when its
-  record is so marked and a `prompt` record of its turn comes before it, so hooks set up in the middle
-  of a turn copy nothing of it. The hooks of one session run one after another (none is async), and
+  record is so marked and the record that started its turn comes before it, a `prompt` or the
+  harness's message (`envelope`: a task's notification, another session's message, which
+  claude-mem's transcript reading also takes as a turn of its own; it neither sets nor clears the
+  flag), so hooks set up in the middle of a turn copy nothing of it. The hooks of one session run
+  one after another (none is async), and
   the mark is taken as each event comes and kept in its record, so a busy store's write-back
   (docs/unwritten.md) and a restore keep it with the record. A flag that cannot be read leaves the
   event unmarked (fail closed); a flag that cannot be set is reported on the hook's error output, and

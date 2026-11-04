@@ -730,15 +730,17 @@ fn is_work_state_write(tool: &str) -> bool {
 }
 
 /// A turn's files, declared first, then those written outside the source tree (claude-mem's
-/// capture order). A call counts only after a prompt record of the turn, and only when the hooks
-/// marked it as of a public prompt's turn: a wholly private prompt is recorded as nothing, and a
-/// mark a rule masked stops the copy rather than allows it.
+/// capture order). A call counts only after the record that started its turn, a prompt or the
+/// harness's message (`envelope`: a task's notification, another session's message), which
+/// claude-mem reads as a turn of its own too; and only when the hooks marked it as of a public
+/// prompt's turn: a wholly private prompt is recorded as nothing, and a mark a rule masked stops
+/// the copy rather than allows it.
 fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<Candidate>> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
     let mut prompted = false;
     for (seq, e) in events {
-        prompted |= e.kind == "prompt";
+        prompted |= matches!(e.kind.as_str(), "prompt" | "envelope");
         if e.kind != "tool" || !prompted {
             continue;
         }
@@ -1362,6 +1364,26 @@ mod tests {
         }
         step(home.path(), &raw);
         assert!(copies(home.path()).is_empty());
+    }
+
+    /// A turn the harness's message starts (a task's notification, recorded as an `envelope`) is a
+    /// turn as claude-mem reads one, whose transcript line starts a turn: its files are copied as a
+    /// prompt's turn's are.
+    #[test]
+    fn a_turn_a_notification_starts_copies_its_files() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("deck.pdf"), b"deck").unwrap();
+        let note = json!({"prompt": "<task-notification>\n<status>completed</status>"});
+        raw.append(&ev("s1", "envelope", note, w)).unwrap();
+        let write = json!({"file_path": w.join("deck.pdf")});
+        raw.append(&tool("s1", "Write", write, w)).unwrap();
+        raw.append(&ev("s1", "reply", json!({"assistant": "Done."}), w))
+            .unwrap();
+        assert!(step(home.path(), &raw));
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["deck.pdf"]);
     }
 
     /// Decision 73: a public prompt the agent never answered, then a wholly private prompt whose
