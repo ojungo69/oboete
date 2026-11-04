@@ -195,7 +195,8 @@ card with row X16's products; slice 2c takes #836's first three items.
   read neither the page's token nor an answer of the API. The body is streamed in 64 KiB chunks.
   One deadline (`FILE_TIME`, 60 s) holds for the whole answer from when its head came: the lookup,
   the hash, the admission's waits and every write; a reader slower than that is cut, and a player
-  asks again from where it stopped. A HEAD has the whole length; on a GET one `Range: bytes=a-b` (or `a-`, `-n`)
+  asks again from where it stopped. A refusal the deadline made (503) is still written, within a
+  second. A HEAD has the whole length; on a GET one `Range: bytes=a-b` (or `a-`, `-n`)
   answers 206 with `Content-Range`, several or a malformed one the whole file, one past the end 416.
 - **My Work.** A request's copies join its products on its page (`my_work::products`, the viewer's
   answer, not `products_read`, which the model's progress review reads: no copy or tag reaches a
@@ -219,7 +220,10 @@ card with row X16's products; slice 2c takes #836's first three items.
   it last read by: the open page's products are read again in place, the other updates held behind
   "Show updates" or not. A products read that failed is asked again at the next poll, the version
   moved or not, three times at most for one key; one the viewer refused (a request no longer
-  listed) waits for the next key. A copies' store that does not read leaves the list and the page
+  listed) waits for the next key. A list read begins a key's read once: not again while it is under
+  way, so its answer lands, nor after it failed. A drawing shows what was read for its request and
+  begins a read only for a request none was begun for, as the row it draws may be older, behind
+  "Show updates". A copies' store that does not read leaves the list and the page
   without copies, not without their requests, and the version then moves with the rest alone.
 - **Card (slice 2b).** The list answer gives each request up to three products other than commits
   and branches, copies included, and how many more, for the card. The replacement compares the

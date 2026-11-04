@@ -4418,10 +4418,10 @@ back();
 // lands (its `copies` change, not its version), when the viewer restarted (a new instance), and after a read that failed,
 // while other updates stay held behind "Show updates"; an answer read stays read.
 {
-const asked=[];let products=[];let fail=false;let listed=null;
+const asked=[];let products=[];let fail=false;let listed=null;let release=null;
 ctx.fetch=url=>{
   url=String(url);
-  if(url.startsWith('/api/my-work/product')){asked.push(url);return fail===404?Promise.resolve({ok:false,status:404,json:async()=>({})}):fail?Promise.reject(new Error('down')):Promise.resolve(response({products}));}
+  if(url.startsWith('/api/my-work/product')){asked.push(url);return fail==='hold'?new Promise(resolve=>{release=()=>resolve(response({products}));}):fail===404?Promise.resolve({ok:false,status:404,json:async()=>({})}):fail?Promise.reject(new Error('down')):Promise.resolve(response({products}));}
   if(url.startsWith('/api/my-work?range=all'))return Promise.resolve(response(listed));
   return Promise.resolve(response({state:'none'}));
 };
@@ -4430,8 +4430,9 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const tag='0123456789abcdef0123456789abcdef';
 set([req('f1',{version:'v1',copies:'c0'})]);
 card('f1').querySelector('button').click();
+run('myWorkDraw()');
 await settle();
-assert(box().hidden&&asked.length===1,'no copy yet');
+assert(box().hidden&&asked.length===1,'no copy yet, and a drawing before the answer reads nothing again');
 products=[{kind:'page',title:'report page.html',url:null,path:'/tmp/report page.html',at:now,file:tag},
   {kind:'file',title:'not a tag',url:null,path:'/tmp/x.bin',at:now,file:'../../api/settings'}];
 listed={requests:[req('f1',{version:'v1',copies:'c1',title:'Held title'})],unlinked:0,instance:''};
@@ -4479,6 +4480,18 @@ await run('myWorkLive()');await settle();
 assert.equal(asked.length,6,'another new key is read');
 await polls(5);
 assert.equal(asked.length,9,'a failure that may pass is asked again three times at most');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,9,'nor begun again for that key by a list read');
+// A read under way is not begun again for its key, so its answer lands.
+fail='hold';keyed('c4');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,10,'a new key is read');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,10,'a read under way is not begun again');
+run('myWorkDraw()');await settle();
+assert.equal(asked.length,10,'nor by a drawing');
+release();await settle();
+assert(text(box()).includes('report page.html'),'its answer lands');
 fail=false;
 delete document.visibilityState;
 ctx.fetch=listing;

@@ -368,6 +368,9 @@ function routeApply(route) {
   // card is where its back button, or Back, returns.
   if (route.request !== null) {
     mw.products = null;
+    mw.productsKey = '';
+    mw.productsFor = null;
+    mw.productsRetry = null;
     mw.productsAsk += 1;
     mw.unread.delete(route.request);
     mw.back = { id: route.request, scroll: null };
@@ -8272,7 +8275,7 @@ const mw = {
   // of its latest read: an earlier read's late answer is not kept (CodeRabbit on #650). With it
   // the open page's products box, and the viewer's links' instance from the last answer taken
   // (docs/deliverables.md).
-  products: null, productsAsk: 0, productsBox: null, productsRetry: null, instance: '',
+  products: null, productsAsk: 0, productsBox: null, productsKey: '', productsFor: null, productsRetry: null, instance: '',
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -9422,6 +9425,9 @@ function myWorkOpen(id) {
   // Its work product is read again: new records, expired ones and new rules change it without
   // changing the request's version (Codex on #650); a read still on its way is not kept.
   mw.products = null;
+  mw.productsKey = '';
+  mw.productsFor = null;
+  mw.productsRetry = null;
   mw.productsAsk += 1;
   mw.unread.delete(id);
   mw.back = { id, scroll: window.scrollY || 0 };
@@ -9591,8 +9597,10 @@ function myWorkProducts(row) {
       el('ul', 'my-work-product-list', ...list.map(myWorkProduct))] : []));
   };
   mw.productsBox = { id: row.id, fill };
-  if (mw.products?.key === myWorkProductsKey(row, mw.instance)) fill(mw.products.list);
-  else myWorkProductsRead(row, mw.instance);
+  // A drawing shows what was read for its request, its key the live read's (`myWorkLive`), and
+  // reads only a request none was begun for (the drawn row may be older, behind "Show updates").
+  if (mw.products?.id === row.id) fill(mw.products.list);
+  else if (mw.productsFor !== row.id) myWorkProductsRead(row, mw.instance);
   return box;
 }
 
@@ -9603,17 +9611,20 @@ function myWorkProductsKey(row, instance) {
   return `${row.id}\n${row.version}\n${row.copies ?? ''}\n${instance ?? ''}`;
 }
 
-// Reads a request's products into its open page; only a read that answered is kept. One that failed
-// for a reason that may pass (no answer, or the viewer's own error) is asked again at the next poll,
-// whether the version moved or not (`poll`), three times at most for one key; one the viewer
-// refused (a request no longer listed) waits for the next key.
+// Reads a request's products into its open page; only a read that answered is kept. A key's read is
+// begun once (`productsKey`: one under way is not begun again, nor one that failed, by a list read
+// or a drawing); one that failed for a reason that may pass (no answer, or the viewer's own error)
+// is asked again at the next poll, whether the version moved or not (`poll`), three times at most;
+// one the viewer refused (a request no longer listed) waits for the next key.
 function myWorkProductsRead(row, instance, tries = 0) {
   const key = myWorkProductsKey(row, instance);
   const ask = ++mw.productsAsk;
+  mw.productsKey = key;
+  mw.productsFor = row.id;
   mw.productsRetry = null;
   api('my-work/product', { request: row.id }).then((answer) => {
     if (ask !== mw.productsAsk) return;
-    mw.products = { key, list: answer.products || [] };
+    mw.products = { key, id: row.id, list: answer.products || [] };
     if (mw.request === row.id && mw.productsBox?.id === row.id) mw.productsBox.fill(mw.products.list);
   }).catch((error) => {
     if (ask === mw.productsAsk && !(error.status < 500) && tries < 3) {
@@ -9819,11 +9830,11 @@ async function myWorkLive() {
   mw.taken = read;
   mw.fetched = Date.now();
   // The open request's products are read again in place when the answer's key for them is not
-  // the one they were read by (a copy landed, the viewer restarted, a read failed), the updates
-  // held behind "Show updates" or not (docs/deliverables.md).
+  // the one they were read by (a copy landed, the viewer restarted) nor one a read was begun for,
+  // the updates held behind "Show updates" or not (docs/deliverables.md).
   const open = mw.request !== null ? answer.requests.find((row) => row.id === mw.request) : null;
-  if (open && mw.productsBox?.id === open.id
-    && mw.products?.key !== myWorkProductsKey(open, answer.instance)) {
+  const openKey = open && myWorkProductsKey(open, answer.instance);
+  if (open && mw.productsBox?.id === open.id && mw.products?.key !== openKey && mw.productsKey !== openKey) {
     myWorkProductsRead(open, answer.instance);
   }
   const signature = myWorkAnswerSignature(answer);

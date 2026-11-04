@@ -1488,11 +1488,12 @@ impl Viewer {
     fn send_file(&self, stream: &mut TcpStream, ask: &FileAsk, head_only: bool) {
         use std::io::{Seek, SeekFrom};
         let left = || ask.deadline.saturating_duration_since(Instant::now());
+        // A refusal is still written when the deadline made it: a second at least.
         let refuse = |stream: &mut TcpStream, status: u16, msg: &str| {
             send(
                 stream,
                 &Response::text(status, msg).bytes(head_only),
-                left().min(ANSWER_TIME),
+                left().clamp(Duration::from_secs(1), ANSWER_TIME),
             );
         };
         let (mut file, row) = match self.copy_for(ask) {
@@ -10620,6 +10621,19 @@ curate = false
             ..ask
         };
         assert!(matches!(v.copy_for(&later), Ok(None)));
+        // Through the answer: out of time is a 503 written, not a silence.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let late = FileAsk {
+            deadline: Instant::now(),
+            ..later
+        };
+        v.send_file(&mut server, &late, false);
+        drop(server);
+        let mut got = String::new();
+        client.read_to_string(&mut got).unwrap();
+        assert!(got.starts_with("HTTP/1.1 503 "), "{got}");
     }
 
     /// RFC 9110's byte ranges as a copy's answer reads them: one range, a suffix, an open end;
