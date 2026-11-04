@@ -961,9 +961,11 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
             .prepare("SELECT copy FROM deliverables")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // `remove_copy` deletes only inside a real folder: a link at `deliverables/` is read, not
-        // followed for a deletion.
+        // Only a real folder is read: a link at `deliverables/` leads elsewhere.
         let top = home.join(FOLDER);
+        if !std::fs::symlink_metadata(&top).is_ok_and(|m| m.is_dir()) {
+            return Ok(removed);
+        }
         let Ok(folders) = std::fs::read_dir(&top) else {
             return Ok(removed);
         };
@@ -995,17 +997,23 @@ fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
     {
         return Ok(false);
     }
+    // A folder or a file that cannot be read is an error, so its row stays for the next sweep;
+    // one that is not there is gone already.
+    let meta = |p: &Path| match std::fs::symlink_metadata(p) {
+        Ok(m) => Ok(Some(m)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    };
     let top = home.join(FOLDER);
     let dir = top.join(folder);
-    if ![&top, &dir]
-        .iter()
-        .all(|d| std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()))
-    {
-        return Ok(false);
+    for d in [&top, &dir] {
+        if !meta(d)?.is_some_and(|m| m.is_dir()) {
+            return Ok(false);
+        }
     }
     let path = dir.join(name);
-    match std::fs::symlink_metadata(&path) {
-        Ok(m) if m.is_file() => {
+    match meta(&path)? {
+        Some(m) if m.is_file() => {
             std::fs::remove_file(&path)?;
             Ok(true)
         }
@@ -1328,18 +1336,55 @@ mod tests {
         assert_eq!((row(100), row(200), row(200)), (1, 1, 0));
     }
 
-    /// The sweep never follows a link at `deliverables/` itself: files outside no row names stay.
+    /// The sweep never follows a link at `deliverables/` itself: files outside no row names stay,
+    /// and a folder there that cannot be read is not read; a copy removed through a folder link is
+    /// refused too.
     #[cfg(unix)]
     #[test]
     fn the_sweep_follows_no_link_at_its_folder() {
+        use std::os::unix::fs::PermissionsExt;
         let (home, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         std::fs::create_dir(outside.path().join("shop")).unwrap();
         std::fs::write(outside.path().join("shop").join("keep.txt"), b"keep").unwrap();
+        let closed = outside.path().join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join(FOLDER)).unwrap();
         drop(open(home.path()).unwrap());
         let raw = crate::raw::open(home.path()).unwrap();
-        assert_eq!(sweep(home.path(), &raw, true).unwrap(), 0);
+        let swept = sweep(home.path(), &raw, true);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(swept.unwrap(), 0);
+        assert!(!remove_copy(home.path(), "shop/keep.txt").unwrap());
         assert!(outside.path().join("shop").join("keep.txt").is_file());
+    }
+
+    /// A replay's hooks for the same session neither clear nor read a live private turn's flag.
+    #[test]
+    fn a_replay_leaves_a_live_private_turn_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let replay = crate::capture::Settings {
+            source: "replay",
+            ..crate::capture::Settings::default()
+        };
+        let flag = PrivateTurn::new(home.path(), "claude", "s1");
+        flag.set().unwrap();
+        let (mut failed, mut back) = (0, 0);
+        let prompt = json!({"session_id": "s1", "cwd": home.path(), "prompt": "A public one."});
+        crate::hook::record(
+            home.path(),
+            &mut raw,
+            "claude",
+            "UserPromptSubmit",
+            &prompt,
+            1,
+            &replay,
+            &mut failed,
+            &mut back,
+        )
+        .unwrap();
+        assert!(flag.is_set());
     }
 
     /// Records read past a whole round with no turn end are progress: the worker takes the next

@@ -127,8 +127,9 @@ none.
   expired forgets nothing; a later forget of its session or repository still does, by the scope.
 - Read paths decide by those denials from the moment forget is registered (spec: every read
   filters from then): slice 2's listing and every file request ask them before answering.
-  `deliverables::sweep` is cleanup: it deletes forgotten rows, then each file no row names, only
-  regular files directly in a folder of `<home>/deliverables/`, no link followed. It runs after
+  `deliverables::sweep` is cleanup: for each forgotten row it removes the file when no other row
+  names it, then the row (a file it cannot remove keeps its row for the next sweep), only regular
+  files directly in a real folder of `<home>/deliverables/`, no link followed. It runs after
   forget's purge (step 5, under its lock) and in the worker at its idle time (its scan for files no
   row names only there, where no copy is in progress), so a sweep that failed is made up by the
   next.

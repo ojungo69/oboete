@@ -1310,15 +1310,19 @@ fn built(
         // it later only stops a copy), from the flag as it is when this event comes.
         let session = str_field(&payload, &["session_id", "sessionId"]).unwrap_or("unknown");
         let turn = crate::deliverables::PrivateTurn::new(home, agent, session);
-        let public = matches!(
-            event.as_str(),
-            "PostToolUse" | "PostToolUseFailure" | "Stop"
-        ) && !turn.is_set();
+        // A replay's hooks are not the owner's turns: they neither read nor change the flag.
+        let live = settings.source == "hook";
+        let public =
+            live && matches!(
+                event.as_str(),
+                "PostToolUse" | "PostToolUseFailure" | "Stop"
+            ) && !turn.is_set();
         let mut captured = crate::capture::events_read(agent, &event, &payload, ts, settings);
         for (c, _) in captured.iter_mut().filter(|_| public) {
             crate::deliverables::mark_public(&mut c.event);
         }
         let flag = match event.as_str() {
+            _ if !live => Ok(()),
             "UserPromptSubmit" if crate::capture::wholly_private_prompt(&payload) => turn.set(),
             "UserPromptSubmit" if captured.iter().any(|(c, _)| c.event.kind == "prompt") => {
                 turn.clear()
