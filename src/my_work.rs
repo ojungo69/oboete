@@ -893,18 +893,47 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     let goals = (crate::my_work_goals::newest(&k, raw.device(), &hidden, now)?)
         .map(|(_, items)| items)
         .unwrap_or_default();
+    let mut holders: HashMap<&Key, usize> = HashMap::new();
+    for (key, _) in requests.iter().flat_map(|r| &r.owns) {
+        *holders.entry(key).or_default() += 1;
+    }
     for r in &requests {
         let stores = (&raw, &k, &rules, &hidden);
-        answers.extend(answer(
+        let found = answer(
             r,
             (&convs, &work, &reviews),
             stores,
             (home, &mut key),
             (since, now),
-        )?);
+        )?;
+        if let Some((v, mut h)) = found {
+            h.sole = (r.owns.iter())
+                .filter(|(key, _)| holders.get(key) == Some(&1))
+                .map(|(key, _)| key.clone())
+                .collect();
+            answers.push((v, h));
+        }
     }
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     let (mut answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
+    // Slice 2 of docs/deliverables.md: a fingerprint of each request's copies, so the page reads
+    // its products again when one lands or goes. A copies' store that does not read leaves the
+    // list without them, not without its requests.
+    let fingerprints = (|| -> Result<Vec<String>> {
+        let Some(db) = crate::deliverables::open_read(home)? else {
+            return Ok(Vec::new());
+        };
+        (held.iter())
+            .map(|h| Ok(crate::deliverables::fingerprint(&copies_of(&db, &raw, h)?)))
+            .collect()
+    })()
+    .unwrap_or_else(|e| {
+        eprintln!("oboete: the copies of My Work's requests not read: {e:#}");
+        Vec::new()
+    });
+    for (a, fingerprint) in answers.iter_mut().zip(fingerprints) {
+        a["copies"] = json!(fingerprint);
+    }
     // F2, F7: where each request sits, and the areas.
     let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
     for (a, h) in answers.iter_mut().zip(&held) {
@@ -1371,6 +1400,10 @@ pub(crate) struct Held {
     /// The conversation that suggestion is about, as `sessions` shows it (its id and fingerprint),
     /// which a Join follows to where it went (#777).
     about: Option<Value>,
+    /// The conversations no other request built holds, counted before a range leaves any out: a
+    /// copy whose call raw no longer has joins only such a conversation's request
+    /// (docs/deliverables.md, slice 2).
+    sole: Vec<Key>,
 }
 
 impl Held {
@@ -1398,17 +1431,119 @@ const PRODUCTS: usize = 60;
 /// its publishing tools returned, the files of kinds a person opens that its cards name as
 /// modified, and what its work items attach. The calls are read live from raw.db, so a forgotten
 /// or expired one is none; each entry is gated as the page's text is, and a link the gate changes
-/// is shown as its title alone. No provider is called.
-pub(crate) fn products(home: &Path, held: &Held) -> Result<Vec<Value>> {
+/// is shown as its title alone. No provider is called. With them, the request's copies
+/// (docs/deliverables.md, slice 2), each with `file`, its link's tag (`tag`), which only this page
+/// gets: `products_read`, which the model's progress review reads, has none. The flag says the
+/// copies were not read (their store did not read): the page shows the rest and asks again.
+pub(crate) fn products(
+    home: &Path,
+    held: &Held,
+    tag: &dyn Fn(&crate::deliverables::Row) -> Result<String>,
+) -> Result<(Vec<Value>, bool)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
+    // One fence for the whole answer (#439): a forget registered between two copies' checks would
+    // leave the first in it.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let rules = Rules::load(home)?;
-    Ok(
-        (products_read(&raw, &k, &rules, &held.sources)?.into_iter())
-            .map(|(p, _)| p)
-            .collect(),
-    )
+    let mut list: Vec<Value> = (products_read(&raw, &k, &rules, &held.sources)?.into_iter())
+        .map(|(p, _)| p)
+        .collect();
+    // A copies' store that does not read leaves the page without its copies, not without the rest.
+    let copies = (|| match crate::deliverables::open_read(home)? {
+        Some(db) => copies_of(&db, &raw, held),
+        None => Ok(Vec::new()),
+    })();
+    let copies = match copies {
+        Ok(copies) => copies,
+        Err(e) => {
+            eprintln!("oboete: a request's copies not read: {e:#}");
+            return Ok((list, true));
+        }
+    };
+    if copies.is_empty() {
+        return Ok((list, false));
+    }
+    let gate = |s: &str| crate::redact::outbound_with(s, &rules);
+    // A copy hides the recorded file of the path it covers, as claude-mem's `copyCoversSource`
+    // does: the copy's own path, which no rule masked, is what is compared, so a path a rule
+    // masks hides nothing.
+    for c in &copies {
+        if gate(&c.source_path) == c.source_path && covers(c) {
+            list.retain(|p| p["url"].is_string() || p["path"] != c.source_path.as_str());
+        }
+    }
+    let mut shown = (copies.iter())
+        .map(|c| {
+            Ok(json!({
+                "kind": c.kind,
+                "title": gate(&c.title),
+                "url": null,
+                "path": gate(&c.source_path),
+                "at": c.copied,
+                "file": tag(c)?,
+            }))
+        })
+        .collect::<Result<Vec<Value>>>()?;
+    shown.extend(list);
+    // Newest first within claude-mem's 60, a copy before an entry of the same time.
+    shown.sort_by_key(|p| std::cmp::Reverse(p["at"].as_i64().unwrap_or(0)));
+    shown.truncate(PRODUCTS);
+    Ok((shown, false))
+}
+
+/// Whether a copy covers its source as claude-mem's `copyCoversSource` reads it: the source is
+/// gone, or was not changed after the copy was made.
+fn covers(c: &crate::deliverables::Row) -> bool {
+    let modified = std::fs::metadata(&c.source_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    modified.is_none_or(|ms| ms <= c.copied)
+}
+
+/// A request's copies (docs/deliverables.md, slice 2), by id: those of the conversations it holds
+/// whole, and of those it holds prompts of, the copies whose call a held prompt span holds while
+/// raw still has that call (the record at its seq has its time). A copy whose call raw no longer
+/// has (a restore gave its seq to another record, or it was removed) joins a request only as its
+/// conversation's one holder among all requests built (`Held::sole`), as claude-mem attaches a
+/// copy only to a conversation's single owner. A copy a forget denies (its call or its turn's end)
+/// is none from the forget's registration on, before the sweep removes it.
+fn copies_of(db: &Connection, raw: &Raw, held: &Held) -> Result<Vec<crate::deliverables::Row>> {
+    let mut out = Vec::new();
+    for (key, spans) in &held.sources.convs {
+        for row in crate::deliverables::rows_of(db, &key.0, &key.1)? {
+            let ours = match spans {
+                None => true,
+                Some(spans) => match call_kept(raw, &row)? {
+                    true => {
+                        (spans.iter()).any(|s| holds(s, &row.device, (row.call_seq, row.call_seq)))
+                    }
+                    false => held.sole.contains(key),
+                },
+            };
+            if ours && !raw.denies(&row)? {
+                out.push(row);
+            }
+        }
+    }
+    out.sort_by_key(|r| r.id);
+    Ok(out)
+}
+
+/// Whether raw still has a copy's call: the record at its seq is an event, live or expired, of
+/// its time.
+fn call_kept(raw: &Raw, row: &crate::deliverables::Row) -> Result<bool> {
+    let at = raw
+        .after(&row.device, row.call_seq - 1, 1)?
+        .into_iter()
+        .next();
+    Ok(match at.filter(|r| r.seq == row.call_seq).map(|r| r.item) {
+        Some(crate::raw::Item::Event(e) | crate::raw::Item::Expired(e)) => e.ts == row.call_ts,
+        _ => false,
+    })
 }
 
 /// Where a product was read from (docs/my-work-model.md S5): a call's record, a card's window op,
@@ -2070,6 +2205,7 @@ fn answer(
         sources,
         suggested: r.suggested.clone(),
         about,
+        sole: Vec::new(),
     };
     Ok(Some((
         json!({
@@ -2634,7 +2770,9 @@ mod tests {
                 .iter()
                 .position(|id| id == "c:claude:s1")
                 .unwrap();
-            super::products(h.s.home.path(), &held[i]).unwrap()
+            super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+                .unwrap()
+                .0
         };
         let products = shown(&h);
         let titles: Vec<&str> = products
@@ -2679,7 +2817,9 @@ mod tests {
             .iter()
             .position(|id| id == "c:claude:s1")
             .unwrap();
-        let products = super::products(h.s.home.path(), &held[i]).unwrap();
+        let products = super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+            .unwrap()
+            .0;
         let url = |title: &str| {
             (products.iter())
                 .find(|p| p["title"] == title)
@@ -2730,9 +2870,12 @@ mod tests {
         let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
         let titles = |id: &str| -> Vec<String> {
             let i = ids(&answer).iter().position(|x| x == id).unwrap();
-            (super::products(h.s.home.path(), &held[i]).unwrap().iter())
-                .map(|p| p["title"].as_str().unwrap().to_owned())
-                .collect()
+            (super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+                .unwrap()
+                .0
+                .iter())
+            .map(|p| p["title"].as_str().unwrap().to_owned())
+            .collect()
         };
         assert_eq!(titles("r:A"), ["aaa1111 Write the notes"]);
         assert_eq!(titles("r:B"), ["release-1"]);
@@ -2776,7 +2919,9 @@ mod tests {
             .iter()
             .position(|id| id == "c:claude:s1")
             .unwrap();
-        let products = super::products(h.s.home.path(), &held[i]).unwrap();
+        let products = super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+            .unwrap()
+            .0;
         // A work item's link the gate hides any of, beside its key, is its title alone when an
         // address is left (notes_url), and nothing when none is (docs_url's host, spec_url whole).
         let shown = serde_json::to_string(&products).unwrap();
@@ -4855,7 +5000,9 @@ mod tests {
         assert_eq!(v["unlinked"], 0, "{v}");
         let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
         assert_eq!(ids(&answer).len(), 1, "{answer}");
-        let products = super::products(h.s.home.path(), &held[0]).unwrap();
+        let products = super::products(h.s.home.path(), &held[0], &|_| Ok(String::new()))
+            .unwrap()
+            .0;
         assert!(
             products
                 .iter()
@@ -4921,5 +5068,226 @@ mod tests {
         h.s.raw.exclude(R, true).unwrap();
         let v = h.read(Range::All, crate::db::now_ms());
         assert_eq!(v["requests"].as_array().unwrap().len(), 1, "{v}");
+    }
+
+    /// A copy's row for `session`'s call at `seq` (`at` from the home's time), as the phase makes
+    /// one (docs/deliverables.md), its source at `source`.
+    fn copy_row(h: &Home, session: &str, seq: i64, at: i64, source: &str) {
+        let db = crate::deliverables::open(h.s.home.path()).unwrap();
+        let device = crate::raw::open(h.s.home.path())
+            .unwrap()
+            .device()
+            .to_owned();
+        let title = source.rsplit('/').next().unwrap();
+        db.execute(
+            "INSERT INTO deliverables(device, agent, session, repo, turn_seq, turn_ts, call_seq,
+               call_ts, title, kind, source_path, copy, bytes, sha256, declared, list, field, copied)
+             VALUES(?1, 'claude', ?2, ?3, ?4, ?5, ?4, ?5, ?6, 'document', ?7, ?8, 3, 'ab', 0, NULL,
+               NULL, ?9)",
+            params![
+                device,
+                session,
+                R,
+                seq,
+                h.t + at,
+                title,
+                source,
+                format!("r/{title}"),
+                h.t + at + 1
+            ],
+        )
+        .unwrap();
+    }
+
+    /// Slice 2 of docs/deliverables.md: a request's page lists its copies with their links' tags,
+    /// newest first, a copy hiding the recorded file of the path it covers (its source gone); a
+    /// copy of another conversation is not this request's; the model's review input
+    /// (`products_read`) has no copy; the list answer's `copies` names each request's copies.
+    #[test]
+    fn a_requests_copies_join_its_work_product() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Write the report.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        h.wrote(
+            "s1",
+            "report",
+            json!({"task": "Report", "status": "done", "work_product": "/gone/report.pdf"}),
+        );
+        h.said("s2", -50_000, "Something else.");
+        let other = bash(&mut h, "s2", -49_000, "ls", "");
+        h.run_read();
+        let shown = |h: &Home| {
+            let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+            let i = (ids(&answer).iter())
+                .position(|id| id == "c:claude:s1")
+                .unwrap();
+            let tag = |r: &crate::deliverables::Row| Ok(format!("tag{}", r.id));
+            super::products(h.s.home.path(), &held[i], &tag).unwrap()
+        };
+        let shown = |h: &Home| {
+            let (list, unread) = shown(h);
+            assert!(!unread, "the copies were read");
+            list
+        };
+        let before: Vec<Value> = shown(&h);
+        assert!(
+            before.iter().any(|p| p["path"] == "/gone/report.pdf"),
+            "{before:?}"
+        );
+        copy_row(&h, "s1", call, -59_000, "/gone/report.pdf");
+        copy_row(&h, "s2", other, -49_000, "/gone/other.pdf");
+        let after = shown(&h);
+        let files: Vec<(&str, &str)> = (after.iter())
+            .filter_map(|p| Some((p["title"].as_str()?, p["file"].as_str()?)))
+            .collect();
+        assert_eq!(files, [("report.pdf", "tag1")], "{after:?}");
+        assert_eq!(
+            (after.iter())
+                .filter(|p| p["path"] == "/gone/report.pdf")
+                .count(),
+            1,
+            "the copy hides the recorded file it covers: {after:?}"
+        );
+        let (raw, k) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
+        let rules = Rules::load(h.s.home.path()).unwrap();
+        let (_, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        for held in &held {
+            let read = products_read(&raw, &k, &rules, &held.sources).unwrap();
+            assert!(
+                read.iter().all(|(p, _)| p.get("file").is_none()),
+                "{read:?}"
+            );
+        }
+        let answer = super::read(h.s.home.path(), Range::All, h.t).unwrap();
+        let none = crate::deliverables::fingerprint(std::iter::empty());
+        for id in ["c:claude:s1", "c:claude:s2"] {
+            assert_ne!(by_id(&answer, id)["copies"], json!(none), "{id}");
+        }
+        // A copies' store that does not read leaves the list and the page without copies only.
+        let store = h.s.home.path().join("deliverables.db");
+        std::fs::remove_file(&store).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        let answer = super::read(h.s.home.path(), Range::All, h.t).unwrap();
+        assert!(
+            by_id(&answer, "c:claude:s1").get("copies").is_none(),
+            "{answer}"
+        );
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = (ids(&answer).iter())
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let (unread, flagged) =
+            super::products(h.s.home.path(), &held[i], &|_| Ok(String::new())).unwrap();
+        assert!(flagged, "the page is told its copies were not read");
+        assert!(unread.iter().all(|p| p.get("file").is_none()), "{unread:?}");
+        assert!(
+            unread.iter().any(|p| p["path"] == "/gone/report.pdf"),
+            "{unread:?}"
+        );
+    }
+
+    /// Slice 2: a request's products are one answer (#439), built in the readers' hold, so a
+    /// forget's registration (which takes the hold whole) cannot come while it is being built.
+    #[test]
+    fn a_requests_products_are_built_in_the_readers_hold() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Write the report.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        h.run_read();
+        copy_row(&h, "s1", call, -59_000, "/gone/a.pdf");
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = (ids(&answer).iter())
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let held = held.into_iter().nth(i).unwrap();
+        let home = h.s.home.path().to_owned();
+        let (inside, building) = std::sync::mpsc::channel();
+        let (go, paused) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn({
+            let home = home.clone();
+            move || {
+                // The answer pauses while it is being built, at its copy's tag.
+                let tag = |r: &crate::deliverables::Row| {
+                    inside.send(()).unwrap();
+                    paused.recv().unwrap();
+                    Ok(format!("tag{}", r.id))
+                };
+                super::products(&home, &held, &tag).map(|(list, _)| list.len())
+            }
+        });
+        building.recv().unwrap();
+        let wait = std::time::Duration::from_millis(100);
+        assert!(
+            crate::dispatch::exclusive_within(&home, wait).is_err(),
+            "a registration waits for the answer"
+        );
+        go.send(()).unwrap();
+        assert_eq!(reader.join().unwrap().unwrap(), 1);
+        assert!(crate::dispatch::exclusive_within(&home, wait).is_ok());
+    }
+
+    /// Slice 2: where a request holds prompts of a conversation, a copy joins it when a held span
+    /// holds its call and raw still has that call; a copy whose call raw no longer has (a restore
+    /// gave its seq to another record) joins only the conversation's one holder. A forget over a
+    /// copy's call leaves it out from its registration on, the request kept and the copy not yet
+    /// swept.
+    #[test]
+    fn a_copy_joins_the_request_that_holds_its_call() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Write the report.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        h.run_read();
+        let device = crate::raw::open(h.s.home.path())
+            .unwrap()
+            .device()
+            .to_owned();
+        copy_row(&h, "s1", call, -59_000, "/gone/a.pdf");
+        // A row whose call time is not the record's: raw no longer has that call.
+        copy_row(&h, "s1", call, -58_500, "/gone/b.pdf");
+        let (raw, _) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
+        let db = crate::deliverables::open_read(h.s.home.path())
+            .unwrap()
+            .unwrap();
+        let key: Key = ("claude".into(), "s1".into());
+        let held = |spans: Option<Vec<Span>>, sole: bool| Held {
+            key: String::new(),
+            id: String::new(),
+            sessions: Vec::new(),
+            sources: Sources {
+                convs: vec![(key.clone(), spans)],
+                fields: Vec::new(),
+                files: Vec::new(),
+            },
+            suggested: None,
+            about: None,
+            sole: if sole { vec![key.clone()] } else { Vec::new() },
+        };
+        let titles = |held: &Held| -> Vec<String> {
+            (copies_of(&db, &raw, held).unwrap().into_iter())
+                .map(|r| r.title)
+                .collect()
+        };
+        let holding = Some(vec![(device.clone(), call - 1, call + 1)]);
+        let elsewhere = Some(vec![(device.clone(), call + 10, call + 20)]);
+        assert_eq!(titles(&held(holding.clone(), false)), ["a.pdf"]);
+        assert_eq!(
+            titles(&held(elsewhere.clone(), false)),
+            Vec::<String>::new()
+        );
+        assert_eq!(titles(&held(elsewhere, true)), ["b.pdf"]);
+        assert_eq!(titles(&held(holding.clone(), true)), ["a.pdf", "b.pdf"]);
+        assert_eq!(titles(&held(None, false)), ["a.pdf", "b.pdf"]);
+        // A forget of the time of a.pdf's call, not of the prompt: the request stays.
+        let target = crate::forget::Target::Range {
+            device,
+            since: h.t - 59_100,
+            until: h.t - 58_900,
+        };
+        let preview = crate::forget::preview(h.s.home.path(), target).unwrap();
+        crate::forget::start(h.s.home.path(), &preview).unwrap();
+        assert_eq!(titles(&held(holding, true)), ["b.pdf"]);
+        assert_eq!(titles(&held(None, false)), ["b.pdf"]);
+        let (answer, _) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        assert!(ids(&answer).contains(&"c:claude:s1".to_owned()), "{answer}");
     }
 }

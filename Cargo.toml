@@ -10,6 +10,8 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 getrandom = "0.4"
+# The viewer's links to copies (docs/deliverables.md): on the digest 0.10 sha2 0.10 brings.
+hmac = "0.12.1"
 httparse = "1"
 percent-encoding = "2"
 regex = "1"

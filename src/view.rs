@@ -91,6 +91,9 @@ struct Viewer {
     /// `LOOKUP_VECTORS`; one a lookup stopped waiting for runs on, holding its reads, after the
     /// lookup's connection is gone.
     vectors: Arc<AtomicUsize>,
+    /// The secret the links to copies are made with (docs/deliverables.md), made when first
+    /// needed: a link opens its copy until this viewer stops.
+    files: std::sync::OnceLock<[u8; 32]>,
 }
 
 /// The query vectors lookups leave being made past their wait, at most; past them a lookup takes
@@ -191,7 +194,132 @@ impl Drop for Slot {
 enum Head {
     Answer(Response),
     Body(usize, Save, String),
+    /// A copy asked for by its link (`send_file`).
+    File(FileAsk),
 }
+
+/// A copy asked for by its link, `/files/<tag>/<name>` (docs/deliverables.md, slice 2): its tag,
+/// the one `Range` it asked for, and the deadline of the whole answer, from when its head came.
+struct FileAsk {
+    tag: [u8; 16],
+    range: Option<String>,
+    deadline: Instant,
+}
+
+/// The whole answer to a link to a copy, the head's lookup and the hash included: a reader slower
+/// than this is cut, and a player asks again from where it stopped (`Range`).
+const FILE_TIME: Duration = Duration::from_secs(60);
+
+/// A copy's headers: its page's script runs in an opaque origin, so it can read neither the
+/// viewer's token nor its answers; and no policy of the viewer's own page.
+const COPY_HEADERS: &str = "Content-Security-Policy: sandbox allow-scripts\r\n\
+    X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n\
+    Accept-Ranges: bytes\r\n";
+
+/// A copy's type by its extension, claude-mem's table (`WorkViewRoutes.ts` 79-83).
+fn copy_type(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "pdf" => "application/pdf",
+        "html" => "text/html; charset=utf-8",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "csv" => "text/csv; charset=utf-8",
+        "md" | "markdown" | "txt" | "rst" | "json" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// One `bytes=` range of `len` bytes (RFC 9110 14.1.2): `Some(Ok((first, last)))` answers 206,
+/// `Some(Err(()))` 416; none, several, or one that is no range answer the whole file.
+fn byte_range(header: Option<&str>, len: u64) -> Option<Result<(u64, u64), ()>> {
+    let spec = header?.trim().strip_prefix("bytes=")?;
+    let (first, last) = spec.split_once('-')?;
+    let (first, last) = (first.trim(), last.trim());
+    let number = |s: &str| {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<u64>().ok())
+            .flatten()
+    };
+    if first.is_empty() {
+        // The last `n` bytes.
+        let n = number(last)?;
+        return Some(if n == 0 || len == 0 {
+            Err(())
+        } else {
+            Ok((len.saturating_sub(n), len - 1))
+        });
+    }
+    let first = number(first)?;
+    let last = if last.is_empty() {
+        u64::MAX
+    } else {
+        number(last)?
+    };
+    if last < first {
+        return None;
+    }
+    Some(if first >= len {
+        Err(())
+    } else {
+        Ok((first, last.min(len - 1)))
+    })
+}
+
+/// The head of a copy's answer: 200 with the whole length, 206 with its range, or 416.
+fn copy_head(status: u16, name: &str, first: u64, count: u64, len: u64) -> Vec<u8> {
+    let (reason, ctype) = match status {
+        200 => ("OK", copy_type(name)),
+        206 => ("Partial Content", copy_type(name)),
+        _ => ("Range Not Satisfiable", "text/plain; charset=utf-8"),
+    };
+    let range = match status {
+        206 => format!(
+            "Content-Range: bytes {first}-{}/{len}\r\n",
+            first + count - 1
+        ),
+        416 => format!("Content-Range: bytes */{len}\r\n"),
+        _ => String::new(),
+    };
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {count}\r\n\
+         {range}{COPY_HEADERS}Connection: close\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// A link's tag: 32 lowercase hex digits.
+fn parse_tag(s: &str) -> Option<[u8; 16]> {
+    let mut tag = [0u8; 16];
+    if s.len() != 32 {
+        return None;
+    }
+    for (i, out) in tag.iter_mut().enumerate() {
+        let pair = s.get(i * 2..i * 2 + 2)?;
+        if !pair
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        *out = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(tag)
+}
+
+type FilesMac = hmac::Hmac<Sha256>;
 
 /// A typed operation that takes a request's body and the token it brought: one that moves the
 /// page's address checks that token again under its lock (R6).
@@ -1112,6 +1240,7 @@ impl Viewer {
             requests: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             vectors: Arc::new(AtomicUsize::new(0)),
+            files: std::sync::OnceLock::new(),
         }
     }
 
@@ -1231,7 +1360,7 @@ impl Viewer {
             }
         };
         let len = match &head {
-            Head::Answer(_) => 0,
+            Head::Answer(_) | Head::File(_) => 0,
             Head::Body(len, ..) => *len,
         };
         // Read only once the head has passed every check (`save_gate`).
@@ -1244,12 +1373,217 @@ impl Viewer {
         let resp = match head {
             Head::Answer(r) => r,
             Head::Body(_, save, given) => self.take(save, body, &given),
+            Head::File(ask) => return self.send_file(&mut stream, &ask, head_only),
         };
         send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
     }
 
+    /// The secret of this viewer's links to copies, made once.
+    fn files_key(&self) -> Result<&[u8; 32]> {
+        if let Some(key) = self.files.get() {
+            return Ok(key);
+        }
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Two first uses at once both make one; the first set is the one both read.
+        let _ = self.files.set(key);
+        self.files
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("the links' secret"))
+    }
+
+    /// A copy's link tag: HMAC-SHA256 of its provenance under this viewer's secret, cut to 16
+    /// bytes (docs/deliverables.md, slice 2).
+    fn file_mac(&self, row: &crate::deliverables::Row) -> Result<FilesMac> {
+        use hmac::Mac;
+        let mut mac =
+            FilesMac::new_from_slice(self.files_key()?).map_err(|e| anyhow::anyhow!("{e}"))?;
+        mac.update(&crate::deliverables::provenance(row));
+        Ok(mac)
+    }
+
+    /// The tag a copy's link carries, hex.
+    fn file_tag(&self, row: &crate::deliverables::Row) -> Result<String> {
+        use hmac::Mac;
+        let tag = self.file_mac(row)?.finalize().into_bytes();
+        Ok(tag[..16].iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// This viewer's links' instance: what the page compares to know its links still open. Made
+    /// from the secret, so it changes with it and tells nothing of it.
+    fn files_instance(&self) -> Result<String> {
+        let hash = Sha256::new()
+            .chain_update(b"oboete files instance\0")
+            .chain_update(self.files_key()?)
+            .finalize();
+        Ok(hash[..8].iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// A link to a copy: the same refusals as `route`'s reads, a cross-site fetch refused too (as
+    /// claude-mem's), and no token, the link being its own capability. The name after the tag is
+    /// for the browser alone.
+    fn file_head(&self, method: &str, rest: &str, headers: &[(&str, &str)]) -> Head {
+        let deadline = Instant::now() + FILE_TIME;
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        };
+        let refuse = |status, msg| Head::Answer(Response::text(status, msg));
+        if method != "GET" && method != "HEAD" {
+            return refuse(405, "method not allowed");
+        }
+        if header("transfer-encoding").is_some() || header("content-length").is_some() {
+            return refuse(400, "requests carry no body");
+        }
+        if !self.host_ok(header("host")) {
+            return refuse(403, "open the viewer through 127.0.0.1 or localhost");
+        }
+        if header("sec-fetch-site").is_some_and(|s| s.eq_ignore_ascii_case("cross-site")) {
+            return refuse(403, "a copy opens from this computer's viewer only");
+        }
+        let tag = rest.split(['/', '?']).next().unwrap_or("");
+        let Some(tag) = parse_tag(tag) else {
+            return refuse(404, "not found");
+        };
+        Head::File(FileAsk {
+            tag,
+            range: header("range").map(str::to_owned),
+            deadline,
+        })
+    }
+
+    /// The copy a link names, opened and checked (`deliverables::open_copy`); none for a tag no
+    /// row has, or a copy that is not as its row says.
+    fn copy_for(&self, ask: &FileAsk) -> Result<Option<(std::fs::File, crate::deliverables::Row)>> {
+        use hmac::Mac;
+        let Some(db) = crate::deliverables::open_read(&self.home)? else {
+            return Ok(None);
+        };
+        let left = ask.deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!left.is_zero(), "out of time");
+        db.busy_timeout(left.min(Duration::from_secs(2)))?;
+        let rows = crate::deliverables::rows(&db)?;
+        drop(db);
+        for row in rows {
+            anyhow::ensure!(Instant::now() < ask.deadline, "out of time");
+            if self.file_mac(&row)?.verify_truncated_left(&ask.tag).is_ok() {
+                // Not as its row says: none (404); not read in time or at all: an error (503).
+                let file = crate::deliverables::open_copy(&self.home, &row, ask.deadline)?;
+                if file.is_none() {
+                    eprintln!("oboete: copy {} is not as its row says: not served", row.id);
+                }
+                return Ok(file.map(|file| (file, row)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Sends a copy (docs/deliverables.md, slice 2), all of it within the ask's deadline. Its
+    /// records' denials are read last, with raw.db open and the readers' hold taken (the order a
+    /// restore and a forget's registration take them), right before the head goes: a forget
+    /// registered before then refuses the link; one after waits for the hold, and the stream it
+    /// let in may finish, reading the bytes it was let in with.
+    fn send_file(&self, stream: &mut TcpStream, ask: &FileAsk, head_only: bool) {
+        use std::io::{Seek, SeekFrom};
+        let left = || ask.deadline.saturating_duration_since(Instant::now());
+        // A refusal is still written when the deadline made it: a second at least.
+        let refuse = |stream: &mut TcpStream, status: u16, msg: &str| {
+            send(
+                stream,
+                &Response::text(status, msg).bytes(head_only),
+                left().clamp(Duration::from_secs(1), ANSWER_TIME),
+            );
+        };
+        let (mut file, row) = match self.copy_for(ask) {
+            Ok(Some(found)) => found,
+            Ok(None) => return refuse(stream, 404, "not found"),
+            Err(e) => {
+                eprintln!("oboete: a copy could not be looked up: {e:#}");
+                return refuse(stream, 503, "the copy cannot be served now");
+            }
+        };
+        let len = row.bytes;
+        let range = if head_only {
+            None
+        } else {
+            byte_range(ask.range.as_deref(), len)
+        };
+        let (status, first, count) = match range {
+            None => (200, 0, len),
+            Some(Ok((first, last))) => (206, first, last - first + 1),
+            Some(Err(())) => (416, 0, 0),
+        };
+        let admitted = match self.admit(&row, ask.deadline) {
+            Ok(Some(admitted)) => admitted,
+            Ok(None) => return refuse(stream, 404, "not found"),
+            Err(_) => return refuse(stream, 503, "the copy cannot be served now"),
+        };
+        let sent = send(
+            stream,
+            &copy_head(status, &row.copy, first, count, len),
+            left(),
+        );
+        drop(admitted);
+        if !sent || head_only || status == 416 || file.seek(SeekFrom::Start(first)).is_err() {
+            return;
+        }
+        let mut buf = vec![0u8; 64 << 10];
+        let mut todo = count;
+        while todo > 0 {
+            let want = buf.len().min(usize::try_from(todo).unwrap_or(usize::MAX));
+            let n = match file.read(&mut buf[..want]) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            if !send(stream, &buf[..n], left()) {
+                return;
+            }
+            todo -= n as u64;
+        }
+    }
+
+    /// A copy's admission (docs/deliverables.md, slice 2): raw.db open, then the readers' hold
+    /// (the order a restore and a forget's registration take them), and its records' denials read
+    /// in that hold, each wait within what is left before `deadline`; none when they deny it, or
+    /// when there are no records to read them from. The caller sends the head while it keeps
+    /// both, and lets them go before the body.
+    fn admit(
+        &self,
+        row: &crate::deliverables::Row,
+        deadline: Instant,
+    ) -> Result<Option<(crate::raw::ReadOnly, std::fs::File)>> {
+        let left = || {
+            let left = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(!left.is_zero(), "out of time");
+            Ok(left)
+        };
+        let Some(raw) = crate::raw::read_only_until(&self.home, Some(deadline))? else {
+            return Ok(None);
+        };
+        let hold = crate::dispatch::reading(&self.home, left()?)?;
+        let denied = crate::deliverables::denied_by(row, |seq, ts| {
+            raw.conn.busy_timeout(left()?)?;
+            let (device, agent, session) = (&row.device, &row.agent, &row.session);
+            crate::raw::forgets_in(
+                &raw.conn,
+                device,
+                agent,
+                session,
+                row.repo.as_deref(),
+                seq,
+                ts,
+            )
+        })?;
+        Ok((!denied).then_some((raw, hold)))
+    }
+
     /// Typed operations with a body go through `save_gate`; other requests use `route`.
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
+        if let Some(rest) = target.strip_prefix("/files/") {
+            return self.file_head(method, rest, headers);
+        }
         let (cap, save): (usize, Save) = match (method, target) {
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
@@ -2216,7 +2550,12 @@ impl Viewer {
             }
             // X10 (docs/my-work.md): every repository's requests, as claude-mem's My Work shows them.
             "my-work" => match crate::my_work::Range::of(q.get("range").map(String::as_str)) {
-                Some(range) => crate::my_work::read(&self.home, range, crate::db::now_ms())?,
+                Some(range) => {
+                    let mut answer = crate::my_work::read(&self.home, range, crate::db::now_ms())?;
+                    // The links' instance: a restarted viewer's links are new (docs/deliverables.md).
+                    answer["instance"] = json!(self.files_instance()?);
+                    answer
+                }
                 None => return Ok(bad("range")),
             },
             // V1 (docs/my-work-model.md): My Work's status line, a route of its own so that the
@@ -2255,7 +2594,14 @@ impl Viewer {
                 let Some(i) = requests.iter().position(|r| r["id"] == request) else {
                     return Ok(Response::text(404, "no such request"));
                 };
-                json!({"products": crate::my_work::products(&self.home, &held[i])?})
+                let tag = |row: &crate::deliverables::Row| self.file_tag(row);
+                let (products, unread) = crate::my_work::products(&self.home, &held[i], &tag)?;
+                let mut out = json!({"products": products});
+                // The copies not read: the page shows the rest and asks again.
+                if unread {
+                    out["copies_unread"] = json!(true);
+                }
+                out
             }
             "timeline" => {
                 let (all, limit, before) = match (flag(q, "all"), limit(q, 50), page(q)) {
@@ -2286,7 +2632,25 @@ impl Viewer {
                 let (current, branch) = self.checkout()?.unwrap_or_default();
                 json!({ "current": current, "branch": branch, "repos": repos(&self.home)? })
             }
-            "version" => polled(&self.home)?,
+            // A copy made or swept, and a viewer whose links changed (docs/deliverables.md, slice
+            // 2), move the page's version too.
+            "version" => {
+                let mut answer = polled(&self.home)?;
+                // A copies' store that does not read moves no version rather than stopping the
+                // page's polls (the list and the products report it, less often than this).
+                let files = (|| -> Result<String> {
+                    Ok(match crate::deliverables::open_read(&self.home)? {
+                        Some(db) => {
+                            crate::deliverables::fingerprint(&crate::deliverables::rows(&db)?)
+                        }
+                        None => String::new(),
+                    })
+                })()
+                .unwrap_or_else(|_| "unread".into());
+                let v = answer["v"].as_str().unwrap_or("").to_owned();
+                answer["v"] = json!(format!("{v}:{files}:{}", self.files_instance()?));
+                answer
+            }
             "stats" => stats(&self.home)?,
             _ => return Ok(Response::text(404, "not found")),
         };
@@ -2322,6 +2686,7 @@ impl Viewer {
             Some(raw) => crate::hook::own_session("unknown".into(), raw),
             None => "unknown".into(),
         };
+        // As `oboete inject` prints it, which agents whose files are not copied read.
         let manifest = crate::hook::start_text_read(
             &self.home,
             raw.as_ref(),
@@ -2330,6 +2695,7 @@ impl Viewer {
             &session,
             &settings,
             true,
+            false,
         )?;
         let text = crate::hook::joined(&self.home, raw.as_ref(), manifest.as_ref());
         Ok(json!({
@@ -2432,6 +2798,28 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     };
     let area_ids = take(answer.get_mut("areas"), "id");
     let placed = take(answer.get_mut("requests"), "focus");
+    // The viewer's own values (docs/deliverables.md, slice 2): the instance of its links to
+    // copies, each request's copies' fingerprint and each copy's link tag are selectors, so no
+    // rule's mask merges two of them or breaks a link; a copy's title and path go through it.
+    let instance = (name == "my-work")
+        .then(|| answer.as_object_mut().and_then(|a| a.remove("instance")))
+        .flatten();
+    let own = |items: Option<&mut Value>, key: &str| -> Vec<Option<Value>> {
+        match items {
+            Some(Value::Array(items)) => (items.iter_mut())
+                .map(|i| i.as_object_mut().and_then(|i| i.remove(key)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let copies = match name {
+        "my-work" => own(answer.get_mut("requests"), "copies"),
+        _ => Vec::new(),
+    };
+    let files = match name {
+        "my-work/product" => own(answer.get_mut("products"), "file"),
+        _ => Vec::new(),
+    };
     // A session's key, a hash that names it in the page's requests (docs/page.md S2), leaves the
     // gate's walk and comes back as a cursor does, so no rule of the user's masks a selector
     // (CodeRabbit on #635).
@@ -2457,7 +2845,15 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     if let Some(next) = next {
         answer["next"] = next;
     }
-    for (key, list, values) in [("id", "areas", area_ids), ("focus", "requests", placed)] {
+    if let Some(instance) = instance {
+        answer["instance"] = instance;
+    }
+    for (key, list, values) in [
+        ("id", "areas", area_ids),
+        ("focus", "requests", placed),
+        ("copies", "requests", copies),
+        ("file", "products", files),
+    ] {
         if let Some(Value::Array(items)) = answer.get_mut(list) {
             for (item, value) in items.iter_mut().zip(values) {
                 if let (Value::Object(item), Some(value)) = (item, value) {
@@ -5017,7 +5413,9 @@ curate = false
         assert_eq!(v.route("GET", "/api/my-work", &[HOST]).status, 401);
         for q in ["", "?range=day", "?range=week", "?range=all"] {
             let answer = get(&v, &format!("/api/my-work{q}"));
-            assert_eq!(answer, json!({"requests": [], "unlinked": 0}), "{q}");
+            let instance = v.files_instance().unwrap();
+            let empty = json!({"requests": [], "unlinked": 0, "instance": instance});
+            assert_eq!(answer, empty, "{q}");
         }
         let year = v.route("GET", "/api/my-work?range=year", &[HOST, TOKEN]);
         assert_eq!(year.status, 400);
@@ -5104,7 +5502,8 @@ curate = false
     }
 
     /// Slice 4 (docs/my-work.md): a request's work product, by the id the page has, with the
-    /// token; a request it does not know, none named, or no token, refused.
+    /// token; a request it does not know, none named, or no token, refused. A copies' store that
+    /// does not read leaves the rest, flagged `copies_unread` (docs/deliverables.md).
     #[test]
     fn the_my_work_product_route_answers_for_a_request_it_knows() {
         let (mut s, v) = feed_fixture();
@@ -5119,6 +5518,16 @@ curate = false
             answer["products"][0]["url"], "https://example.com/notes",
             "{answer}"
         );
+        assert!(answer.get("copies_unread").is_none(), "{answer}");
+        // A copies' store that does not read: the rest, and the page told to ask again.
+        std::fs::create_dir(v.home.join("deliverables.db")).unwrap();
+        let answer = get(&v, "/api/my-work/product?request=r%3Arel");
+        assert_eq!(answer["copies_unread"], true, "{answer}");
+        assert_eq!(
+            answer["products"][0]["url"], "https://example.com/notes",
+            "{answer}"
+        );
+        std::fs::remove_dir(v.home.join("deliverables.db")).unwrap();
         let status =
             |target: &str, headers: &[(&str, &str)]| v.route("GET", target, headers).status;
         assert_eq!(status("/api/my-work/product?request=r%3Arel", &[HOST]), 401);
@@ -5359,6 +5768,7 @@ curate = false
             let r = match v.head("POST", "/api/my-work/review", &h) {
                 Head::Body(_, save, given) => v.take(save, body, &given),
                 Head::Answer(r) => r,
+                Head::File(_) => panic!("no link"),
             };
             (
                 r.status,
@@ -5512,6 +5922,7 @@ curate = false
             let r = match v.head("POST", "/api/my-work/suggestion", &h) {
                 Head::Body(_, save, given) => v.take(save, body, &given),
                 Head::Answer(r) => r,
+                Head::File(_) => panic!("no link"),
             };
             (
                 r.status,
@@ -7589,6 +8000,7 @@ curate = false
     ) -> Response {
         match v.head(method, target, headers) {
             Head::Answer(r) => r,
+            Head::File(_) => panic!("a link is served on a stream (`send_file`)"),
             Head::Body(len, save, given) => {
                 assert_eq!(len, body.len());
                 v.take(save, body, &given)
@@ -7894,7 +8306,7 @@ curate = false
         ];
         match v.head("POST", path, &over) {
             Head::Answer(r) => assert_eq!(r.status, 413, "{path}"),
-            Head::Body(..) => panic!("a body over {path}'s cap would be read"),
+            Head::Body(..) | Head::File(_) => panic!("a body over {path}'s cap would be read"),
         }
     }
 
@@ -9620,7 +10032,7 @@ curate = false
             ];
             match v.head("POST", path, &h) {
                 Head::Body(_, save, given) => (save, given),
-                Head::Answer(_) => panic!("the head did not pass"),
+                Head::Answer(_) | Head::File(_) => panic!("the head did not pass"),
             }
         };
         let (save, given) = head("/api/settings", body.len());
@@ -9970,5 +10382,303 @@ curate = false
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(w6p_closed(run), "the run's address still answers");
+    }
+
+    /// A home with one copy (docs/deliverables.md): a public turn of session `s1` that wrote
+    /// `page.html` outside the source tree, copied by the phase, and its row; a viewer of it.
+    fn copied(
+        bytes: &[u8],
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Viewer,
+        crate::deliverables::Row,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(work.path().join("page.html"), bytes).unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        // The phase's first run starts after what is there.
+        assert!(!crate::deliverables::run(home.path(), &raw, &mut None, &|| false).unwrap());
+        let event = |kind: &str, body: Value| crate::raw::Event {
+            agent: "claude".into(),
+            session: "s1".into(),
+            kind: kind.into(),
+            ts: crate::db::now_ms(),
+            repo: Some(R.into()),
+            branch: None,
+            head: None,
+            gitdir: None,
+            cwd: Some(work.path().to_string_lossy().into_owned()),
+            source: "hook".into(),
+            body: body.to_string(),
+            original_bytes: None,
+        };
+        raw.append(&event("prompt", json!({"prompt": "Make the page."})))
+            .unwrap();
+        let input = json!({"file_path": work.path().join("page.html")}).to_string();
+        let mut call = event(
+            "tool",
+            json!({"tool": "Write", "input": input, "output": "", "failed": false}),
+        );
+        crate::deliverables::mark_public(&mut call);
+        raw.append(&call).unwrap();
+        raw.append(&event("reply", json!({"assistant": "Done."})))
+            .unwrap();
+        assert!(crate::deliverables::run(home.path(), &raw, &mut None, &|| false).unwrap());
+        drop(raw);
+        let db = crate::deliverables::open_read(home.path())
+            .unwrap()
+            .unwrap();
+        let row = crate::deliverables::rows(&db).unwrap().remove(0);
+        let v = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
+        (home, work, v, row)
+    }
+
+    /// A request for a copy's link, with these headers, through the viewer's socket.
+    fn file_ask(port: u16, method: &str, target: &str, headers: &[&str]) -> String {
+        let mut raw = format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+        for h in headers {
+            raw.push_str(h);
+            raw.push_str("\r\n");
+        }
+        raw.push_str("\r\n");
+        ask(port, raw.as_bytes())
+    }
+
+    /// Slice 2 of docs/deliverables.md: a copy opens by its link alone, no token, with headers
+    /// that run its page's script in an opaque origin and none of the page's own policy; a HEAD
+    /// gives its length, a range its bytes, a range past its end 416; a tag of another viewer's
+    /// secret, a malformed one, a cross-site fetch and another host open nothing.
+    #[test]
+    fn a_copy_is_served_by_its_link_alone() {
+        let page = b"<!doctype html><script>localStorage.getItem('oboete-token')</script>";
+        let (_home, _work, v, row) = copied(page);
+        let tag = v.file_tag(&row).unwrap();
+        let other = Viewer::new(&v.home, None, 4321, Token::Run("t0k".into()));
+        let foreign = other.file_tag(&row).unwrap();
+        assert_ne!(tag, foreign, "each viewer has its own secret");
+        let (port, server) = serving(v, 8);
+        let link = format!("/files/{tag}/page.html");
+        let whole = file_ask(port, "GET", &link, &[]);
+        let (head, body) = whole.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        for line in [
+            "Content-Type: text/html; charset=utf-8",
+            "Content-Security-Policy: sandbox allow-scripts",
+            "X-Content-Type-Options: nosniff",
+            "Referrer-Policy: no-referrer",
+            "Cache-Control: no-store",
+            "Accept-Ranges: bytes",
+            &format!("Content-Length: {}", page.len()),
+        ] {
+            assert!(head.contains(line), "{line}: {head}");
+        }
+        assert!(
+            !head.contains("allow-same-origin") && !head.contains("default-src"),
+            "{head}"
+        );
+        assert_eq!(body.as_bytes(), page);
+        let headed = file_ask(port, "HEAD", &link, &[]);
+        let (head, body) = headed.split_once("\r\n\r\n").unwrap();
+        assert!(
+            head.contains(&format!("Content-Length: {}", page.len())),
+            "{head}"
+        );
+        assert!(body.is_empty());
+        let part = file_ask(port, "GET", &link, &["Range: bytes=2-5"]);
+        let (head, body) = part.split_once("\r\n\r\n").unwrap();
+        assert!(
+            head.starts_with("HTTP/1.1 206 Partial Content\r\n"),
+            "{head}"
+        );
+        assert!(
+            head.contains(&format!("Content-Range: bytes 2-5/{}", page.len())),
+            "{head}"
+        );
+        assert_eq!(body.as_bytes(), &page[2..6]);
+        let past = file_ask(port, "GET", &link, &["Range: bytes=9999-"]);
+        assert!(
+            past.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"),
+            "{past}"
+        );
+        assert!(
+            past.contains(&format!("Content-Range: bytes */{}", page.len())),
+            "{past}"
+        );
+        let refused = |target: &str, headers: &[&str]| {
+            file_ask(port, "GET", target, headers)
+                .split_once("\r\n")
+                .map(|(status, _)| status.to_owned())
+                .unwrap()
+        };
+        assert_eq!(
+            refused(&format!("/files/{foreign}/page.html"), &[]),
+            "HTTP/1.1 404 Not Found"
+        );
+        assert_eq!(
+            refused("/files/not-a-tag/page.html", &[]),
+            "HTTP/1.1 404 Not Found"
+        );
+        assert_eq!(
+            refused(&link, &["Sec-Fetch-Site: cross-site"]),
+            "HTTP/1.1 403 Forbidden"
+        );
+        let wrong_host = ask(
+            port,
+            format!("GET {link} HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n").as_bytes(),
+        );
+        assert!(
+            wrong_host.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "{wrong_host}"
+        );
+        server.join().unwrap();
+    }
+
+    /// Slice 2's acceptance: a link given before a forget is refused right after the forget is
+    /// registered, its purge not yet run (the copy still on disk); the check at admission comes
+    /// after the copy was opened and hashed.
+    #[test]
+    fn a_link_is_refused_once_its_records_are_forgotten() {
+        let (home, _work, v, row) = copied(b"<p>made</p>");
+        let tag = parse_tag(&v.file_tag(&row).unwrap()).unwrap();
+        let ask = FileAsk {
+            tag,
+            range: None,
+            deadline: Instant::now() + FILE_TIME,
+        };
+        let (_file, found) = v.copy_for(&ask).unwrap().unwrap();
+        assert_eq!(found, row);
+        assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_some());
+        let raw = crate::raw::open(home.path()).unwrap();
+        let handle = format!("{}:{}", raw.device(), row.call_seq);
+        drop(raw);
+        let target = crate::forget::session_target(home.path(), &handle).unwrap();
+        let preview = crate::forget::preview(home.path(), target).unwrap();
+        crate::forget::start(home.path(), &preview).unwrap();
+        let copy = home
+            .path()
+            .join(crate::deliverables::FOLDER)
+            .join(&row.copy);
+        assert!(copy.exists(), "the purge has not run");
+        assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_none());
+        let (port, server) = serving(v, 1);
+        let link = format!("/files/{}/page.html", hex_tag(&ask.tag));
+        assert!(file_ask(port, "GET", &link, &[]).starts_with("HTTP/1.1 404 Not Found\r\n"));
+        server.join().unwrap();
+    }
+
+    /// The page's version moves when a copy is made or swept (docs/deliverables.md: the open page
+    /// then reads its products again), and differs between two viewers, whose links differ.
+    #[test]
+    fn the_version_moves_with_the_copies() {
+        let (_home, _work, v, _row) = copied(b"<p>one</p>");
+        let before = get(&v, "/api/version")["v"].clone();
+        assert_eq!(get(&v, "/api/version")["v"], before);
+        let db = crate::deliverables::open(&v.home).unwrap();
+        db.execute(
+            "INSERT INTO deliverables(device, agent, session, repo, turn_seq, turn_ts, call_seq,
+               call_ts, title, kind, source_path, copy, bytes, sha256, declared, copied)
+             SELECT device, agent, session, repo, turn_seq + 100, turn_ts, call_seq, call_ts,
+               title, kind, source_path, copy, bytes, sha256, declared, copied FROM deliverables",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        let after = get(&v, "/api/version")["v"].clone();
+        assert_ne!(after, before);
+        let other = Viewer::new(&v.home, None, 4321, Token::Run("t0k".into()));
+        assert_ne!(get(&other, "/api/version")["v"], after);
+        // A copies' store that does not read stops no poll.
+        let store = v.home.join("deliverables.db");
+        std::fs::remove_file(&store).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        assert!(get(&v, "/api/version")["v"].is_string());
+    }
+
+    fn hex_tag(tag: &[u8; 16]) -> String {
+        tag.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The deadline counts the lookup, the hash and the admission's waits: an ask whose time is up
+    /// opens nothing, and one that meets a restore's hold on raw.db gives up when its time is up,
+    /// not after the store's own wait. Out of time is an error (503); a copy not as its row says is
+    /// none (404).
+    #[test]
+    fn a_link_past_its_deadline_opens_nothing() {
+        let (home, _work, v, row) = copied(b"<p>late</p>");
+        let tag = parse_tag(&v.file_tag(&row).unwrap()).unwrap();
+        let ask = FileAsk {
+            tag,
+            range: None,
+            deadline: Instant::now(),
+        };
+        assert!(v.copy_for(&ask).is_err());
+        let swap = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(home.path().join("raw.lock"))
+            .unwrap();
+        swap.lock().unwrap();
+        let started = Instant::now();
+        assert!(v.admit(&row, started + Duration::from_millis(200)).is_err());
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        drop(swap);
+        assert!(v.admit(&row, Instant::now()).is_err(), "no time left");
+        assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_some());
+        // A copy not as its row says is none (404), not one that could not be read (503).
+        let copy = home
+            .path()
+            .join(crate::deliverables::FOLDER)
+            .join(&row.copy);
+        std::fs::write(&copy, b"<p>LATE</p>").unwrap();
+        let later = FileAsk {
+            deadline: Instant::now() + FILE_TIME,
+            ..ask
+        };
+        assert!(matches!(v.copy_for(&later), Ok(None)));
+        // Through the answer: out of time is a 503 written, not a silence.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let late = FileAsk {
+            deadline: Instant::now(),
+            ..later
+        };
+        v.send_file(&mut server, &late, false);
+        drop(server);
+        let mut got = String::new();
+        client.read_to_string(&mut got).unwrap();
+        assert!(got.starts_with("HTTP/1.1 503 "), "{got}");
+    }
+
+    /// RFC 9110's byte ranges as a copy's answer reads them: one range, a suffix, an open end;
+    /// several, reversed, signed or overflowing ones are none (the whole file); past the end, a
+    /// suffix of none and any range of an empty file are 416.
+    #[test]
+    fn a_range_is_read_as_rfc_9110_has_it() {
+        let r = |h: &str, len| byte_range(Some(h), len);
+        assert_eq!(r("bytes=2-5", 10), Some(Ok((2, 5))));
+        assert_eq!(r("bytes=5-", 10), Some(Ok((5, 9))));
+        assert_eq!(r("bytes=-3", 10), Some(Ok((7, 9))));
+        assert_eq!(r("bytes=-30", 10), Some(Ok((0, 9))));
+        assert_eq!(r("bytes=2-50", 10), Some(Ok((2, 9))));
+        assert_eq!(r("bytes=10-", 10), Some(Err(())));
+        assert_eq!(r("bytes=-0", 10), Some(Err(())));
+        assert_eq!(r("bytes=0-", 0), Some(Err(())));
+        for whole in [
+            "bytes=0-1,3-4",
+            "bytes=5-2",
+            "bytes=+1-2",
+            "bytes=99999999999999999999-",
+            "bytes=-",
+            "items=0-1",
+        ] {
+            assert_eq!(r(whole, 10), None, "{whole}");
+        }
+        assert_eq!(byte_range(None, 10), None);
+        assert!(parse_tag(&"A".repeat(32)).is_none());
+        assert!(parse_tag(&"a".repeat(31)).is_none());
     }
 }

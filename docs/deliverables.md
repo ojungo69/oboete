@@ -52,7 +52,8 @@ none.
   files of up to 512 MiB there would hold the agent. A worker phase (`deliverables::run`, beside the
   shortlist, not under `[summary] curate`, skipped while a command asks the worker to step aside)
   reads each new `reply` or `end` record of a live hook session (`source = "hook"`: a replay's paths
-  are not this machine's) and the turn's records before it (`Raw::turn_start`). A Codex turn may
+  are not this machine's) and the turn's records before it (`Raw::turn_start`), one at a time
+  (`Raw::turn_seqs`, `Raw::event_at`), keeping only what a copy needs of each (#836). A Codex turn may
   leave no reply (capture.rs: an empty Stop and transcript tail), so its records are read with the
   next reply or the session's end. A resident worker sees a reply within a second or two, so the copy
   is the file as the turn left it; a worker that comes later copies the file as it is then (a
@@ -102,7 +103,7 @@ none.
   15.1 display rules `work_product::from_fields` ports: a declared `~/` or relative path resolves,
   and another field names a known kind only), with its kinds (`FILE_KINDS`, the same list), title and
   kind rules (`title` or `name` cut at 140, a declared `kind` up to 140) and git checks (5 s each,
-  cached per folder). The roots are the record's `cwd`, `/tmp` and the worker's own temp folder: an
+  cached per folder, with `LC_ALL=C` so "not a git repository" is read in any language: #836). The roots are the record's `cwd`, `/tmp` and the worker's own temp folder: an
   agent's own `TMPDIR` is not recorded, so a file only there is not copied.
 - **The copy.** The source is opened once, without blocking (a FIFO put in its place cannot hold
   the worker), and everything is checked on that handle: a regular file, at most 512 MiB, read with
@@ -148,26 +149,89 @@ none.
 
 ### The rule (slice 2)
 
-- G01's second line, as claude-mem 15.3 wrote it, naming oboete and its folder, once My Work links
-  the copies (its text says they are linked on the request's card).
+- G01's second line, claude-mem 15.3's in oboete's words (`work_state::RULE_COPIES`): oboete copies
+  when the turn ends, into this repository's folder under `~/.oboete/deliverables/`, and links the
+  copy on the request in My Work (its page; its card with row X16, slice 2b). It is shown at session
+  start only to an agent whose files are copied (Claude Code, Codex, Grok) while `[capture]
+  deliverables` is on; `oboete inject` and the viewer's Context page, which OpenCode and Pi read,
+  leave it out. The least size keeps neither attach line (`SHORT_RULE`).
 
 ### Served and shown (slice 2)
 
-- **Links.** A copy is opened by a link that is its own capability:
-  `/files/<HMAC-SHA256 of its id under a secret the viewer makes when it starts>/<file name>`. The
-  page's token stays in its header; a link opens one copy, on this computer, until the viewer
-  restarts. The file must resolve inside `<home>/deliverables/`. Headers as claude-mem's
-  (`Content-Security-Policy: sandbox allow-scripts`, never with `allow-same-origin`, and not the
-  page's own policy; `nosniff`; `no-store`) and `Referrer-Policy: no-referrer`: a copied page's
-  script runs in an opaque origin and cannot read the page's token. A link resolves only its own
-  row, does not depend on the token (a new token keeps it; a restart ends it), is refused once its
-  row is forgotten, and its bytes are streamed from the file, not held whole in memory.
-- **My Work.** A request's copies join its products in what the page is answered with (the
-  viewer's projection, not `my_work::products_read`, which also feeds My Work's model jobs: a copy
-  and its link never reach a model), a copy replacing the record of the same path as claude-mem's
-  does; the list answer gives each request up to three products other than commits and branches,
-  and how many more, for the card. A copy is opened, hashed and served only as a regular file
-  checked on its handle.
+Slice 2a (as built) serves the copies and lists them on a request's page; slice 2b puts them on the
+card with row X16's products; slice 2c takes #836's first three items.
+
+- **Links.** A copy is opened by a link that is its own capability: `/files/<tag>/<name>`, the tag
+  the first 16 bytes of an HMAC-SHA256 (`hmac` 0.12) under a secret the viewer makes when first
+  needed, over the row's whole provenance, each field length-prefixed (device, id, turn seq and
+  time, call seq and time, sha256, copy name): a row id a sweep frees and another copy takes names
+  another tag unless the turn, the call and the name are the same too. The name is for the browser
+  alone. No token is needed (a new token keeps a link; the viewer's restart ends it); the reads'
+  refusals hold (a method other than GET or HEAD, a body, another host), and so does claude-mem's
+  of a cross-site fetch (`Sec-Fetch-Site: cross-site`). Every row's tag is compared in constant
+  time (`verify_truncated_left`). deliverables.db is read through the home resolved and its own
+  name not followed (`deliverables::open_read`, as `raw::read_only` opens raw.db: SQLite's NOFOLLOW
+  refuses a link anywhere in the path, so a home reached through one would read nothing).
+- **The file.** `<home>/deliverables/<copy>`, the home canonicalized once and the fixed folder
+  joined to it: both folders real directories, the file opened without following a link or
+  blocking, a regular file whose handle is at that very path (a `deliverables/` swapped for a link
+  is refused), of the row's size, and whose bytes, hashed on the handle before any header, are the
+  row's; then read again from its start on the same handle. A copy not as its row says (gone, a
+  link or not a regular file in its place, other bytes) answers 404; one that could not be read in
+  time or at all, 503.
+- **Admission.** Then raw.db is opened (`raw::read_only_until`, none when there is no store:
+  nothing is served), the readers' hold taken (`dispatch::reading`, the order a restore and a
+  forget's registration take them), and the call's and the turn end's denials read in it, each
+  wait (a restore's swap, the hold, SQLite's while busy, set again before each query) within what
+  is left of the deadline when it starts
+  (`deliverables::denied`, the query `Raw::forgets` runs): a forget registered before then refuses
+  the link (404) from that moment, its purge run or not. The head is sent in that hold, and both are
+  let go before the body; a forget registered after it waits for the hold, and a stream it let in
+  finishes with the bytes it was let in with.
+- **The answer.** Its own head (not the page's): the type by the copy's extension (claude-mem's
+  table), `Content-Length`, `Content-Security-Policy: sandbox allow-scripts` (never with
+  `allow-same-origin`, and no policy of the page's own), `nosniff`, `no-store`, `Referrer-Policy:
+  no-referrer`, `Accept-Ranges: bytes`: a copied page's script runs in an opaque origin, so it can
+  read neither the page's token nor an answer of the API. The body is streamed in 64 KiB chunks.
+  One deadline (`FILE_TIME`, 60 s) holds for the whole answer from when its head came: the lookup,
+  the hash, the admission's waits and every write; a reader slower than that is cut, and a player
+  asks again from where it stopped. A refusal the deadline made (503) is still written, within a
+  second. A HEAD has the whole length; on a GET one `Range: bytes=a-b` (or `a-`, `-n`)
+  answers 206 with `Content-Range`, several or a malformed one the whole file, one past the end 416.
+- **My Work.** A request's copies join its products on its page (`my_work::products`, the viewer's
+  answer, not `products_read`, which the model's progress review reads: no copy or tag reaches a
+  model). A copy is a request's when the request holds its conversation whole, or holds a prompt
+  span with the copy's call while raw still has that call (the record at its seq has its time); a
+  copy whose call raw no longer has (a restore gave its seq to another record) joins only the
+  conversation's one holder among all requests built, counted before the answer's range. A copy a
+  forget denies (`Raw::denies`: its call or its turn's end) is none from the registration on, its
+  sweep run or not, and its request's `copies` changes with it; the page's answer is built in the
+  readers' hold (#439), so a registration under way is waited for, not met halfway. Each copy
+  is `{kind, title, url: null, path, at, file}`, `file` its link's tag; a copy hides the recorded
+  file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not changed after
+  the copy), compared on the copy's own path, so a path a rule masks hides nothing; newest first
+  within the 60. `file`, each request's `copies` and the list's `instance` are the viewer's own
+  values, kept out of the answer's gate walk as `version` is; titles and paths are gated.
+- **Freshness.** A copy lands a second or two after its turn's reply, which moved the request's
+  version. So the list answer gives each request `copies` (a short hash of its copies'
+  provenance) and itself the viewer's links' `instance`; `/api/version` moves with a hash of every
+  row's provenance and with that instance. The page keeps a request's products by its id, version,
+  `copies` and the instance, and at each list read compares the key the answer gives with the one
+  it last read by: the open page's products are read again in place, the other updates held behind
+  "Show updates" or not. A products read that failed is asked again at the next poll, the version
+  moved or not, three times at most for one key; one the viewer refused (a request no longer
+  listed) waits for the next key; an answer whose copies were not read (`copies_unread`: their
+  store did not read) is shown and asked again the same way. A list read begins a key's read once:
+  not again while it is under way, so its answer lands, nor after it failed; back at the key that
+  was read, it drops a read under way for another, whose answer would replace it. A drawing shows
+  what was read for its request and begins a read only for a request none was begun for, as the
+  row it draws may be older, behind "Show updates". A copies' store that does not read leaves the list and the page
+  without copies, not without their requests, and the version then moves with the rest alone.
+- **Card (slice 2b).** The list answer gives each request up to three products other than commits
+  and branches, copies included, and how many more, for the card. The replacement compares the
+  recorded file's own path, before the gate: as built, a recorded path the gate masks is compared
+  masked, so a copy whose own path is that masked text would hide it (Codex's local review of
+  slice 2a).
 
 ### Not built here
 

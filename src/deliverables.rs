@@ -450,15 +450,27 @@ fn run_bounded(cmd: &mut std::process::Command) -> Option<(Option<i32>, String, 
 /// that fails or takes too long counts as inside (claude-mem's `isOutsideSourceTree`), each folder
 /// asked once a turn.
 fn outside_source(path: &Path, seen: &mut HashMap<PathBuf, Option<PathBuf>>) -> bool {
+    outside_source_by("git".as_ref(), path, seen)
+}
+
+/// `outside_source` with `git` the program run.
+fn outside_source_by(
+    git: &std::ffi::OsStr,
+    path: &Path,
+    seen: &mut HashMap<PathBuf, Option<PathBuf>>,
+) -> bool {
     let Some(dir) = path.parent().filter(|d| d.is_dir()) else {
         return false;
     };
     let top = seen
         .entry(dir.to_owned())
         .or_insert_with(|| {
+            // Its words in English whatever the user's language (gettext reads no `LANGUAGE`
+            // in the C locale), since "not a git repository" is read from them.
             let found = run_bounded(
-                std::process::Command::new("git")
+                std::process::Command::new(git)
                     .args(["rev-parse", "--show-toplevel"])
+                    .env("LC_ALL", "C")
                     .current_dir(dir),
             );
             match found {
@@ -481,7 +493,7 @@ fn outside_source(path: &Path, seen: &mut HashMap<PathBuf, Option<PathBuf>>) -> 
         Some(top) if top.as_os_str().is_empty() => false,
         Some(top) => matches!(
             run_bounded(
-                std::process::Command::new("git")
+                std::process::Command::new(git)
                     .args(["check-ignore", "-q", "--"])
                     .arg(path)
                     .current_dir(&top),
@@ -734,12 +746,17 @@ fn is_work_state_write(tool: &str) -> bool {
 /// harness's message (`envelope`: a task's notification, another session's message), which
 /// claude-mem reads as a turn of its own too; and only when the hooks marked it as of a public
 /// prompt's turn: a wholly private prompt is recorded as nothing, and a mark a rule masked stops
-/// the copy rather than allows it.
-fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<Candidate>> {
+/// the copy rather than allows it. The events come one at a time and only what a copy needs is
+/// kept of each, so a long turn is never held whole.
+fn candidates(
+    events: impl IntoIterator<Item = Result<(i64, Event)>>,
+    aside: &dyn Fn() -> bool,
+) -> Result<Option<Vec<Candidate>>> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
     let mut prompted = false;
-    for (seq, e) in events {
+    for event in events {
+        let (seq, e) = event?;
         prompted |= matches!(e.kind.as_str(), "prompt" | "envelope");
         if e.kind != "tool" || !prompted {
             continue;
@@ -763,7 +780,7 @@ fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<C
         else {
             continue;
         };
-        let call = (*seq, e.ts);
+        let call = (seq, e.ts);
         if is_work_state_write(tool) {
             if let Ok(input) = serde_json::from_str::<Value>(input) {
                 // Grok's hooks give an MCP call's input as {"tool_name", "tool_input"}.
@@ -800,7 +817,7 @@ fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<C
         }
         // Each git check takes up to 5 s: a command waiting for the worker comes first.
         if aside() {
-            return None;
+            return Ok(None);
         }
         if !outside_source(&path, &mut seen) {
             continue;
@@ -820,7 +837,7 @@ fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<C
             cwd,
         });
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The phase (docs/deliverables.md): each turn end recorded on this device since its checkpoint,
@@ -864,7 +881,9 @@ pub(crate) fn run(
             continue;
         }
         let start = raw.hook_turn_start(&e.agent, &e.session, r.seq)?;
-        let events = raw.turn_events(&e.agent, &e.session, start - 1, r.seq)?;
+        let seqs = raw.turn_seqs(&e.agent, &e.session, start - 1, r.seq)?;
+        let events = (seqs.into_iter())
+            .filter_map(|seq| raw.event_at(seq).transpose().map(|e| e.map(|e| (seq, e))));
         let folder = folder_name(
             e.repo
                 .as_deref()
@@ -874,7 +893,7 @@ pub(crate) fn run(
         // At most `MAX_FILES` a turn, of those that open as a file inside a root, as claude-mem
         // counts the ones that resolve.
         let mut opened = 0;
-        let Some(found) = candidates(&events, aside) else {
+        let Some(found) = candidates(events, aside)? else {
             return Ok(true);
         };
         for c in found {
@@ -1044,16 +1063,20 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
     Ok(removed)
 }
 
+/// A copy's folder and file name, each one plain part: anything else is no copy's name.
+fn copy_parts(copy: &str) -> Option<(&str, &str)> {
+    copy.split_once('/').filter(|(folder, name)| {
+        [folder, name]
+            .iter()
+            .all(|p| !p.is_empty() && **p != "." && **p != ".." && !p.contains(['/', '\\']))
+    })
+}
+
 /// Removes one copy, only a regular file directly in a folder of `deliverables/`, no link
 /// followed.
 fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
     // A name no copy is given is refused, never taken as gone: its row stays.
-    let parts = copy.split_once('/').filter(|(folder, name)| {
-        [folder, name]
-            .iter()
-            .all(|p| !p.is_empty() && **p != "." && **p != ".." && !p.contains(['/', '\\']))
-    });
-    let Some((folder, name)) = parts else {
+    let Some((folder, name)) = copy_parts(copy) else {
         anyhow::bail!("not a copy's name");
     };
     // A folder or a file that cannot be read is an error, so its row stays for the next sweep;
@@ -1078,6 +1101,220 @@ fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
         }
         _ => Ok(false),
     }
+}
+
+/// Whether the rule `agent` reads at session start says its files are copied (row G01's second
+/// line): an agent copied from, while `[capture] deliverables` is on. Settings that do not read
+/// say no.
+pub(crate) fn copies_for(home: &Path, agent: &str) -> bool {
+    AGENTS.contains(&agent)
+        && crate::config::load_capture(home).is_ok_and(|c| c.capture.deliverables)
+}
+
+/// A copy's row as the viewer reads it to serve or list it (docs/deliverables.md, slice 2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Row {
+    pub id: i64,
+    pub device: String,
+    pub agent: String,
+    pub session: String,
+    pub repo: Option<String>,
+    pub turn_seq: i64,
+    pub turn_ts: i64,
+    pub call_seq: i64,
+    pub call_ts: i64,
+    pub title: String,
+    pub kind: String,
+    pub source_path: String,
+    pub copy: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub copied: i64,
+}
+
+const ROW: &str = "SELECT id, device, agent, session, repo, turn_seq, turn_ts, call_seq, call_ts,
+    title, kind, source_path, copy, bytes, sha256, copied FROM deliverables";
+
+fn row_of(r: &rusqlite::Row) -> rusqlite::Result<Row> {
+    Ok(Row {
+        id: r.get(0)?,
+        device: r.get(1)?,
+        agent: r.get(2)?,
+        session: r.get(3)?,
+        repo: r.get(4)?,
+        turn_seq: r.get(5)?,
+        turn_ts: r.get(6)?,
+        call_seq: r.get(7)?,
+        call_ts: r.get(8)?,
+        title: r.get(9)?,
+        kind: r.get(10)?,
+        source_path: r.get(11)?,
+        copy: r.get(12)?,
+        bytes: r.get::<_, i64>(13)?.max(0) as u64,
+        sha256: r.get(14)?,
+        copied: r.get(15)?,
+    })
+}
+
+/// deliverables.db opened to read, none when it was never made: a reader neither makes nor
+/// changes it.
+pub(crate) fn open_read(home: &Path) -> Result<Option<Connection>> {
+    let path = home.join(DB);
+    match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+        Ok(m) => anyhow::ensure!(m.is_file(), "deliverables.db is not a regular file"),
+    }
+    // SQLite's NOFOLLOW refuses a link anywhere in the path: the home is resolved and the leaf is
+    // not, as `raw::read_only` opens raw.db.
+    let db = Connection::open_with_flags(
+        home.canonicalize()?.join(DB),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    db.busy_timeout(std::time::Duration::from_secs(2))?;
+    Ok(Some(db))
+}
+
+/// Every row, by id.
+pub(crate) fn rows(db: &Connection) -> Result<Vec<Row>> {
+    let mut q = db.prepare(&format!("{ROW} ORDER BY id"))?;
+    let rows = q.query_map([], row_of)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The rows of one conversation, by id.
+pub(crate) fn rows_of(db: &Connection, agent: &str, session: &str) -> Result<Vec<Row>> {
+    let mut q = db.prepare_cached(&format!(
+        "{ROW} WHERE agent = ?1 AND session = ?2 ORDER BY id"
+    ))?;
+    let rows = q.query_map([agent, session], row_of)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A row's provenance, each field prefixed by its length: what its link's tag is made of, and
+/// what the page's fingerprints of copies compare. A row id a sweep frees and another copy takes
+/// gives another provenance unless the turn, the call and the name are the same too.
+pub(crate) fn provenance(r: &Row) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut put = |b: &[u8]| {
+        out.extend_from_slice(&(b.len() as u64).to_be_bytes());
+        out.extend_from_slice(b);
+    };
+    put(r.device.as_bytes());
+    for n in [r.id, r.turn_seq, r.turn_ts, r.call_seq, r.call_ts] {
+        put(&n.to_be_bytes());
+    }
+    put(r.sha256.as_bytes());
+    put(r.copy.as_bytes());
+    out
+}
+
+/// A short hash of these rows' provenance, in their order: what changes when a copy is made or
+/// swept, even one that takes a swept row's id.
+pub(crate) fn fingerprint<'a>(rows: impl IntoIterator<Item = &'a Row>) -> String {
+    let mut hash = Sha256::new();
+    for r in rows {
+        let p = provenance(r);
+        hash.update((p.len() as u64).to_be_bytes());
+        hash.update(&p);
+    }
+    hex(&hash.finalize()[..8])
+}
+
+/// Whether forget's denials cover the row's call or the end of its turn, on any connection to
+/// raw.db (`raw::forgets_in`).
+pub(crate) fn denied(raw: &Connection, r: &Row) -> Result<bool> {
+    denied_by(r, |seq, ts| {
+        crate::raw::forgets_in(
+            raw,
+            &r.device,
+            &r.agent,
+            &r.session,
+            r.repo.as_deref(),
+            seq,
+            ts,
+        )
+    })
+}
+
+/// `denied`, `forgets` asked of the call, then of the turn's end (a copy's answer sets its wait
+/// before each).
+pub(crate) fn denied_by(
+    r: &Row,
+    mut forgets: impl FnMut(i64, i64) -> Result<bool>,
+) -> Result<bool> {
+    Ok(forgets(r.call_seq, r.call_ts)? || forgets(r.turn_seq, r.turn_ts)?)
+}
+
+/// A copy opened to serve: its folder and file directly in `<home>/deliverables/`, each a real
+/// folder, the file opened without following a link or blocking, a regular file whose handle is
+/// at that very path (the home canonicalized once, then the fixed folder: a `deliverables/`
+/// swapped for a link before the open is refused), whose bytes, read on the handle within
+/// `deadline` and no further than the row's size, are the row's: its size and its sha256. The
+/// handle comes back at its start. None when the copy is not as its row says (gone, a link or not
+/// a regular file in its place, other bytes); an error when it could not be read in time or at all.
+pub(crate) fn open_copy(
+    home: &Path,
+    r: &Row,
+    deadline: std::time::Instant,
+) -> Result<Option<std::fs::File>> {
+    use std::io::Seek;
+    let Some((folder, name)) = copy_parts(&r.copy) else {
+        return Ok(None);
+    };
+    let gone = |e: &std::io::Error| {
+        // A link in the file's place fails the open with ELOOP under O_NOFOLLOW.
+        #[cfg(unix)]
+        let link = e.raw_os_error() == Some(libc::ELOOP);
+        #[cfg(not(unix))]
+        let link = false;
+        e.kind() == std::io::ErrorKind::NotFound || link
+    };
+    let dir = home.canonicalize()?.join(FOLDER).join(folder);
+    for d in [dir.parent().context("deliverables")?, &dir] {
+        match std::fs::symlink_metadata(d) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let path = dir.join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !file.metadata()?.is_file() || handle_path(&file)? != path {
+        return Ok(None);
+    }
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    let mut read = 0u64;
+    loop {
+        anyhow::ensure!(std::time::Instant::now() < deadline, "out of time");
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        read += n as u64;
+        if read > r.bytes {
+            return Ok(None);
+        }
+        hash.update(&buf[..n]);
+    }
+    if read != r.bytes || hex(&hash.finalize()) != r.sha256 {
+        return Ok(None);
+    }
+    file.seek(std::io::SeekFrom::Start(0))?;
+    Ok(Some(file))
 }
 
 #[cfg(test)]
@@ -1916,5 +2153,138 @@ mod tests {
         sweep(home.path(), &raw, false).unwrap();
         assert!(copies(home.path()).is_empty());
         assert!(!file(&after[0].1).exists());
+    }
+
+    /// Slice 2: a copy is opened to serve only at its place, of its size and bytes, within its
+    /// time: a same-size file put in its place, another size, a link there, and `deliverables/`
+    /// swapped for a link to a folder holding the same name and bytes are refused. A home reached
+    /// through a link reads its copies' store; a link in the store's place is refused.
+    #[test]
+    fn a_copy_opens_only_as_its_row_says() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("deck.pdf"), b"deck one").unwrap();
+        let write = json!({"file_path": w.join("deck.pdf")});
+        turn(&mut raw, "s1", w, &[("Write", write)]);
+        assert!(step(home.path(), &raw));
+        let db = open_read(home.path()).unwrap().unwrap();
+        let row = rows(&db).unwrap().remove(0);
+        let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut got = Vec::new();
+        (open_copy(home.path(), &row, later()).unwrap().unwrap())
+            .read_to_end(&mut got)
+            .unwrap();
+        assert_eq!(got, b"deck one");
+        let copy = home.path().join(FOLDER).join(&row.copy);
+        std::fs::write(&copy, b"deck two").unwrap();
+        let none = |deadline| matches!(open_copy(home.path(), &row, deadline), Ok(None));
+        assert!(none(later()), "same size");
+        std::fs::write(&copy, b"deck").unwrap();
+        assert!(none(later()), "another size");
+        std::fs::write(&copy, b"deck one").unwrap();
+        let past = std::time::Instant::now();
+        assert!(open_copy(home.path(), &row, past).is_err(), "out of time");
+        assert!(open_copy(home.path(), &row, later()).unwrap().is_some());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&copy).unwrap();
+            std::fs::write(w.join("other"), b"deck one").unwrap();
+            std::os::unix::fs::symlink(w.join("other"), &copy).unwrap();
+            assert!(none(later()), "a link");
+            std::fs::remove_file(&copy).unwrap();
+            std::fs::write(&copy, b"deck one").unwrap();
+            let top = home.path().join(FOLDER);
+            let moved = w.join("moved");
+            std::fs::rename(&top, &moved).unwrap();
+            std::os::unix::fs::symlink(&moved, &top).unwrap();
+            assert!(none(later()), "a linked folder");
+            let alias = w.join("home");
+            std::os::unix::fs::symlink(home.path(), &alias).unwrap();
+            let db = open_read(&alias)
+                .unwrap()
+                .expect("a home reached through a link");
+            assert_eq!(rows(&db).unwrap(), std::slice::from_ref(&row));
+            let leaf = w.join("leaf");
+            std::fs::create_dir(&leaf).unwrap();
+            std::os::unix::fs::symlink(home.path().join(DB), leaf.join(DB)).unwrap();
+            assert!(open_read(&leaf).is_err(), "the store a link");
+        }
+    }
+
+    /// A row's provenance names its turn, call and name too: a row id a sweep freed, taken by a
+    /// copy of the same bytes at the same time in another turn, has another provenance and
+    /// fingerprint (and so another link's tag).
+    #[test]
+    fn a_reused_row_id_is_another_copy() {
+        let row = Row {
+            id: 7,
+            device: "d".into(),
+            agent: "claude".into(),
+            session: "s".into(),
+            repo: None,
+            turn_seq: 10,
+            turn_ts: 100,
+            call_seq: 9,
+            call_ts: 99,
+            title: "a.pdf".into(),
+            kind: "document".into(),
+            source_path: "/w/a.pdf".into(),
+            copy: "r/a-1.pdf".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            copied: 1_000,
+        };
+        let other = Row {
+            turn_seq: 20,
+            turn_ts: 200,
+            ..row.clone()
+        };
+        assert_ne!(provenance(&row), provenance(&other));
+        assert_ne!(fingerprint([&row]), fingerprint([&other]));
+        assert_eq!(fingerprint([&row]), fingerprint([&row.clone()]));
+        assert_ne!(fingerprint([&row]), fingerprint(std::iter::empty::<&Row>()));
+    }
+
+    /// A long turn's records are read one at a time (#836): a turn of hundreds of records copies
+    /// its file all the same.
+    #[test]
+    fn a_long_turn_copies_its_file() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("deck.pdf"), b"deck").unwrap();
+        let mut calls: Vec<(&str, Value)> = (0..450)
+            .map(|i| ("Read", json!({"file_path": format!("/w/{i}.rs")})))
+            .collect();
+        calls.push(("Write", json!({"file_path": w.join("deck.pdf")})));
+        turn(&mut raw, "s1", w, &calls);
+        // The phase reads `BATCH` records a round, as the worker calls it while it goes on.
+        while step(home.path(), &raw) {}
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["deck.pdf"]);
+    }
+
+    /// git's verdict is read in English whatever the user's language (#836): a git that answers
+    /// in another language unless `LC_ALL=C` still leaves a folder in no repository outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_in_no_repository_is_outside_in_any_language() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let git = bin.path().join("git");
+        let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ]; then\n  \
+            echo 'fatal: not a git repository (or any of the parent directories): .git' >&2\n\
+            else\n  echo 'fatal: git リポジトリではありません' >&2\nfi\nexit 128\n";
+        std::fs::write(&git, script).unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let file = work.path().join("deck.pdf");
+        std::fs::write(&file, b"deck").unwrap();
+        assert!(outside_source_by(
+            git.as_os_str(),
+            &file,
+            &mut HashMap::new()
+        ));
     }
 }

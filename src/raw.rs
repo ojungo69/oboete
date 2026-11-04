@@ -960,6 +960,25 @@ pub(crate) fn newest_hook(home: &Path) -> Result<Option<(i64, i64)>> {
 }
 
 pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
+    read_only_until(home, None)
+}
+
+/// `read_only` within `deadline`: each wait (a restore's swap, SQLite's while busy) no longer than
+/// what is left of it when the wait starts, nor than `read_only`'s own, and an error when nothing is
+/// left. The connection keeps the busy wait it was opened with: a caller with a deadline (a copy's
+/// answer, docs/deliverables.md) sets it again before each later query.
+pub(crate) fn read_only_until(
+    home: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<Option<ReadOnly>> {
+    let wait = || -> Result<std::time::Duration> {
+        let Some(deadline) = deadline else {
+            return Ok(OPEN_WAIT);
+        };
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        anyhow::ensure!(!left.is_zero(), "out of time");
+        Ok(left.min(OPEN_WAIT))
+    };
     let before = existing_read_path(home)?;
     let lock_path = home.join("raw.lock");
     match std::fs::symlink_metadata(&lock_path) {
@@ -983,7 +1002,7 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
         file.metadata()?.is_file(),
         "raw coordination is not a regular file"
     );
-    let swap = wait_for_swap(file, false, OPEN_WAIT)?;
+    let swap = wait_for_swap(file, false, wait()?)?;
     anyhow::ensure!(
         crate::worker::file_id(std::fs::metadata(&lock_path))
             == crate::worker::file_id(swap.metadata()),
@@ -1009,7 +1028,7 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
             | rusqlite::OpenFlags::SQLITE_OPEN_URI
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    conn.busy_timeout(OPEN_WAIT)?;
+    conn.busy_timeout(wait()?)?;
     format_of(&conn)?;
     let read = ReadOnly {
         conn,
@@ -1021,6 +1040,33 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
     };
     read.current()?;
     Ok(Some(read))
+}
+
+/// `Raw::forgets` on any connection to raw.db, a reader's (`read_only`) too.
+pub(crate) fn forgets_in(
+    conn: &Connection,
+    device: &str,
+    agent: &str,
+    session: &str,
+    repo: Option<&str>,
+    seq: i64,
+    ts: i64,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM denied_records WHERE origin = ?1)
+            OR EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?2 AND (
+              (kind = 'session' AND key = ?3)
+              OR (kind = 'repo' AND key = ?4 AND device = ?5)
+              OR (kind = 'range' AND device = ?5 AND since <= ?2 AND ?2 < until)))",
+        params![
+            crate::forget::live_origin(device, seq, ts),
+            ts,
+            crate::forget::session(agent, session),
+            repo.map(crate::forget::repo),
+            device
+        ],
+        |r| r.get(0),
+    )?)
 }
 
 pub(crate) fn imported_counts_in(
@@ -5492,16 +5538,17 @@ impl Raw {
         )?)
     }
 
-    /// `agent`'s `session` hook events on this device strictly between two seqs, each with its
-    /// seq (docs/deliverables.md: a turn's records; a replay's paths are not this machine's).
-    pub(crate) fn turn_events(
+    /// The seqs of `agent`'s `session` hook events on this device strictly between two seqs
+    /// (docs/deliverables.md: a turn's records; a replay's paths are not this machine's), to be
+    /// read one at a time (`event_at`), so a long turn is never held whole.
+    pub(crate) fn turn_seqs(
         &self,
         agent: &str,
         session: &str,
         after: i64,
         before: i64,
-    ) -> Result<Vec<(i64, Event)>> {
-        let seqs: Vec<i64> = self
+    ) -> Result<Vec<i64>> {
+        Ok(self
             .conn
             .prepare(
                 "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
@@ -5511,15 +5558,17 @@ impl Raw {
             .query_map(params![self.device, after, before, agent, session], |r| {
                 r.get(0)
             })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut out = Vec::new();
-        for seq in seqs {
-            let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
-            if let Some(Item::Event(e)) = record.filter(|r| r.seq == seq).map(|r| r.item) {
-                out.push((seq, *e));
-            }
-        }
-        Ok(out)
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// This device's event at `seq` as a read gives it: none when it is forgotten, expired or
+    /// gone.
+    pub(crate) fn event_at(&self, seq: i64) -> Result<Option<Event>> {
+        let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
+        Ok(match record.filter(|r| r.seq == seq).map(|r| r.item) {
+            Some(Item::Event(e)) => Some(*e),
+            _ => None,
+        })
     }
 
     /// docs/deliverables.md: whether forget's denials cover a record recorded on `device` at
@@ -5535,21 +5584,13 @@ impl Raw {
         seq: i64,
         ts: i64,
     ) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM denied_records WHERE origin = ?1)
-                OR EXISTS(SELECT 1 FROM denied_scopes WHERE before >= ?2 AND (
-                  (kind = 'session' AND key = ?3)
-                  OR (kind = 'repo' AND key = ?4 AND device = ?5)
-                  OR (kind = 'range' AND device = ?5 AND since <= ?2 AND ?2 < until)))",
-            params![
-                crate::forget::live_origin(device, seq, ts),
-                ts,
-                crate::forget::session(agent, session),
-                repo.map(crate::forget::repo),
-                device
-            ],
-            |r| r.get(0),
-        )?)
+        forgets_in(&self.conn, device, agent, session, repo, seq, ts)
+    }
+
+    /// `deliverables::denied` on this store: a forget registered over a copy's call or its turn's
+    /// end denies it from then on, before the sweep removes it (docs/deliverables.md).
+    pub(crate) fn denies(&self, r: &crate::deliverables::Row) -> Result<bool> {
+        crate::deliverables::denied(&self.conn, r)
     }
 
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task

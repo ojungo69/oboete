@@ -41,12 +41,28 @@ macro_rules! rule {
     };
 }
 
+/// claude-mem's attach line (row G01).
+macro_rules! attach {
+    () => {
+        "- Made something a person can open (PR, deck, page, image, report)? Attach it to that \
+        item: fields {\"work_product\": \"https://…\" or \"/absolute/file\"}; several, with \
+        titles, as one JSON string: \"[{\\\"title\\\": \\\"<name>\\\", \\\"url\\\": \
+        \\\"https://…\\\"}]\"\n"
+    };
+}
+
 /// claude-mem's rule, its attach line too.
-pub const RULE: &str = rule!(
-    "- Made something a person can open (PR, deck, page, image, report)? Attach it to that item: \
-    fields {\"work_product\": \"https://…\" or \"/absolute/file\"}; several, with titles, as one \
-    JSON string: \"[{\\\"title\\\": \\\"<name>\\\", \\\"url\\\": \\\"https://…\\\"}]\"\n"
-);
+pub const RULE: &str = rule!(attach!());
+/// The rule with claude-mem 15.3's second attach line in oboete's words (row G01), for an agent
+/// whose files oboete copies while `[capture] deliverables` is on (docs/deliverables.md).
+pub const RULE_COPIES: &str = rule!(concat!(
+    attach!(),
+    "- Deliverables: write a deck, report, page or other file the person asked for as a file and \
+    attach it as work_product before you finish. When your turn ends, oboete copies each attached \
+    file (and any deck, document, page, image or spreadsheet you wrote outside the source tree) \
+    into this repository's folder under ~/.oboete/deliverables/ and links it on the request in My \
+    Work.\n"
+));
 /// The rule without its attach line, for a section too small for both (`session_start_chars`
 /// near its least): the rest is what an agent needs to keep its lists.
 pub(crate) const SHORT_RULE: &str = rule!("");
@@ -699,23 +715,44 @@ impl Section {
 /// What a session start begins with while nothing is open, for the tests of what shows it.
 #[cfg(test)]
 pub fn nothing_open() -> String {
+    nothing_open_with(false)
+}
+
+/// `nothing_open` with the rule's line on copies when `copies`: an agent whose files are copied
+/// (Claude Code, Codex, Grok) sees it while `[capture] deliverables` is on, as by default.
+#[cfg(test)]
+pub fn nothing_open_with(copies: bool) -> String {
     // The memory tools' use follows the rule (`[inject] memory_instructions`, on by default).
     format!(
         "{}\n{}",
-        section(&[], 0, SECTION, &Rules::default()).text(),
+        section_with(&[], 0, SECTION, &Rules::default(), copies).text(),
         crate::mem_search::MEMORY_USE
     )
 }
 
 /// The section for `entries` at `now`, at most `limit` UTF-16 units, its open lines as the egress
 /// gate with `rules` shows them (`Raw::shown`) before they are cut, then cut, then gated whole.
+#[cfg(test)]
 pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Section {
+    section_with(entries, now, limit, rules, false)
+}
+
+/// `section`, its rule with the line on copies (`RULE_COPIES`) when `copies`: the same room,
+/// and the same fallback to `SHORT_RULE`, which has neither attach line.
+pub fn section_with(
+    entries: &[Entry],
+    now: i64,
+    limit: usize,
+    rules: &Rules,
+    copies: bool,
+) -> Section {
+    let rule = if copies { RULE_COPIES } else { RULE };
     let l = lists(entries, None, false, rules, now);
     let n = l.rows.len();
     // The rule and what follows it, without the attach line when the whole, with the newline that
     // joins it to what follows (`Section::units`), does not fit.
     let ruled = |after: &str| {
-        let whole = format!("{RULE}\n\n{after}");
+        let whole = format!("{rule}\n\n{after}");
         if units(&whole) < limit {
             whole
         } else {
@@ -748,9 +785,9 @@ pub fn section(entries: &[Entry], now: i64, limit: usize, rules: &Rules) -> Sect
     };
     // The whole rule with lines, else the rule without its attach line with lines (#703), else
     // the whole rule's fence of the count alone, as before (#711).
-    (fenced(RULE, true)
+    (fenced(rule, true)
         .or_else(|| fenced(SHORT_RULE, true))
-        .or_else(|| fenced(RULE, false)))
+        .or_else(|| fenced(rule, false)))
     .unwrap_or_else(|| Section {
         rule: ruled(&more(n, "")),
         open: None,
@@ -1072,8 +1109,10 @@ mod tests {
         }
     }
 
-    /// The rule is claude-mem's, with oboete's tool and its repository; claude-mem 15.3's line on
-    /// the deliverables it copies waits for row X23, as oboete copies no file.
+    /// The rule is claude-mem's, with oboete's tool and its repository; with claude-mem 15.3's line
+    /// on the deliverables it copies (`RULE_COPIES`, row G01) in oboete's words: oboete copies
+    /// when the turn ends, into its own folder, and links the copy on the request (its page now,
+    /// its card with row X16).
     #[test]
     fn the_rule_is_claude_mems() {
         let theirs = [
@@ -1086,12 +1125,34 @@ mod tests {
             "- Read every list, closed items included: work_state_read with includeClosed=true",
         ]
         .join("\n");
+        let ours = theirs
+            .replace("claude-mem's work_state_write", "oboete's work_state_write")
+            .replace("in this project.", "in this repository.");
+        assert_eq!(RULE, ours);
+        let theirs_copies = "- Deliverables: write a deck, report, page or other file the person asked for as a file and attach it as work_product before you finish. When you stop, claude-mem copies each attached file (and any deck, document, page, image or spreadsheet you wrote outside the source tree) into this project's deliverables bucket, ~/.claude-mem/deliverables/<project>/, and links it on the request's card in My Work.";
+        let ours_copies = theirs_copies
+            .replace("When you stop, claude-mem", "When your turn ends, oboete")
+            .replace(
+                "into this project's deliverables bucket, ~/.claude-mem/deliverables/<project>/, and",
+                "into this repository's folder under ~/.oboete/deliverables/ and",
+            )
+            .replace("on the request's card in My Work", "on the request in My Work");
+        let read = "\n- Read every list";
         assert_eq!(
-            RULE,
-            theirs
-                .replace("claude-mem's work_state_write", "oboete's work_state_write")
-                .replace("in this project.", "in this repository.")
+            RULE_COPIES,
+            ours.replace(read, &format!("\n{ours_copies}{read}"))
         );
+        // The least size keeps neither attach line, with the line on copies or without.
+        for copies in [false, true] {
+            let small = section_with(&[], 0, 1_000, &Rules::default(), copies);
+            assert_eq!(
+                small.rule,
+                format!("{SHORT_RULE}\n\n{NOTHING_OPEN}"),
+                "{copies}"
+            );
+        }
+        let whole = section_with(&[], 0, SECTION, &Rules::default(), true);
+        assert!(whole.rule.starts_with(RULE_COPIES), "{}", whole.rule);
     }
 
     /// The section: the rule alone with nothing open, else the rule and the open lines, gated

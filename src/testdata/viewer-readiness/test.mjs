@@ -4413,6 +4413,115 @@ run('myWorkDraw()');
 assert(text(box()).includes('Later answer')&&!text(box()).includes('Earlier answer'),'the later answer stays');
 back();
 }
+// Slice 2 of docs/deliverables.md: a copy is a link to its own address, its tag and its name, opening apart from the page; a
+// tag that is not one is no link. Through the page's polling, the open request's products are read again in place when a copy
+// lands (its `copies` change, not its version), when the viewer restarted (a new instance), and after a read that failed,
+// while other updates stay held behind "Show updates"; an answer read stays read.
+{
+const asked=[];let products=[];let fail=false;let listed=null;let release=null;
+ctx.fetch=url=>{
+  url=String(url);
+  if(url.startsWith('/api/my-work/product')){asked.push(url);return fail==='hold'?new Promise(resolve=>{release=()=>resolve(response({products}));}):fail===404?Promise.resolve({ok:false,status:404,json:async()=>({})}):fail?Promise.reject(new Error('down')):Promise.resolve(response({products}));}
+  if(url.startsWith('/api/my-work?range=all'))return Promise.resolve(response(listed));
+  return Promise.resolve(response({state:'none'}));
+};
+const box=()=>panel.querySelector('.my-work-products');
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const tag='0123456789abcdef0123456789abcdef';
+set([req('f1',{version:'v1',copies:'c0'})]);
+card('f1').querySelector('button').click();
+run('myWorkDraw()');
+await settle();
+assert(box().hidden&&asked.length===1,'no copy yet, and a drawing before the answer reads nothing again');
+products=[{kind:'page',title:'report page.html',url:null,path:'/tmp/report page.html',at:now,file:tag},
+  {kind:'file',title:'not a tag',url:null,path:'/tmp/x.bin',at:now,file:'../../api/settings'}];
+listed={requests:[req('f1',{version:'v1',copies:'c1',title:'Held title'})],unlinked:0,instance:''};
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,2,'a copy landing reads the open page\'s products again');
+const links=box().querySelectorAll('a');
+assert.equal(links.length,1,'only a tag is a link');
+assert.equal(links[0].href,`/files/${tag}/report%20page.html`);
+assert.equal(links[0].target,'_blank');assert.equal(links[0].rel,'noopener noreferrer');
+assert(text(box()).includes('Page')&&text(box()).includes('File'),'the kinds are named');
+assert(!text(panel).includes('Held title')&&text(panel).includes('New work updates are ready.'),'other updates stay held');
+fail=true;
+listed={...listed,instance:'i2'};
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,3,'a restarted viewer\'s links are read again');
+fail=false;
+// Through the page's own poll, the version unchanged (no list read): the failed read is asked again.
+const listing=ctx.fetch,wasLoaded=run('reposLoaded'),wasVersion=run('version');
+ctx.fetch=url=>String(url).startsWith('/api/version')?Promise.resolve(response({v:'v-same'})):listing(url);
+run("reposLoaded=true;version='v-same'");
+document.visibilityState='visible';
+await run('poll()');await settle();
+assert.equal(asked.length,4,'a read that failed is asked again at the next poll, the version unchanged');
+await run('poll()');await settle();
+assert.equal(asked.length,4,'an answer read stays read');
+delete document.visibilityState;
+ctx.fetch=listing;
+run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,4,'and through a list read');
+// A request the viewer no longer lists (404) waits for its next key; a failure that may pass is asked
+// again three times at most.
+const polls=async n=>{for(let i=0;i<n;i++){await run('poll()');await settle();}};
+const keyed=copies=>{listed={...listed,requests:listed.requests.map(r=>({...r,copies}))};};
+ctx.fetch=url=>String(url).startsWith('/api/version')?Promise.resolve(response({v:'v-same'})):listing(url);
+run("reposLoaded=true;version='v-same'");
+document.visibilityState='visible';
+fail=404;keyed('c2');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,5,'a new key is read');
+await polls(2);
+assert.equal(asked.length,5,'a request no longer listed is not asked again');
+fail=true;keyed('c3');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,6,'another new key is read');
+await polls(5);
+assert.equal(asked.length,9,'a failure that may pass is asked again three times at most');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,9,'nor begun again for that key by a list read');
+// A read under way is not begun again for its key, so its answer lands.
+fail='hold';keyed('c4');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,10,'a new key is read');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,10,'a read under way is not begun again');
+run('myWorkDraw()');await settle();
+assert.equal(asked.length,10,'nor by a drawing');
+release();await settle();
+assert(text(box()).includes('report page.html'),'its answer lands');
+// Back to the key that was read, a read under way for another is dropped: its answer does not
+// replace what is shown.
+keyed('c5');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,11,'a new key is read');
+products=[{kind:'page',title:'stale page.html',url:null,path:'/tmp/stale page.html',at:now,file:tag}];
+keyed('c4');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,11,'the key read before is not read again');
+release();await settle();
+assert(!text(box()).includes('stale page.html')&&text(box()).includes('report page.html'),'the dropped answer replaces nothing');
+// An answer whose copies were not read is shown, and asked again by the poll.
+fail=false;keyed('c6');
+const unreadOnce=ctx.fetch;let unreadLeft=1;
+ctx.fetch=url=>String(url).startsWith('/api/my-work/product')&&unreadLeft-->0
+  ?(asked.push(String(url)),Promise.resolve(response({products:[],copies_unread:true})))
+  :unreadOnce(url);
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,12,'a new key is read');
+await polls(1);
+assert.equal(asked.length,13,'an answer without its copies is asked again');
+await polls(1);
+assert.equal(asked.length,13,'and a whole one stays');
+assert(text(box()).includes('stale page.html'),'the whole answer is shown');
+ctx.fetch=unreadOnce;
+delete document.visibilityState;
+ctx.fetch=listing;
+run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+}
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
 // updates", and an unchanged answer does nothing.
 set([req('h1')]);
