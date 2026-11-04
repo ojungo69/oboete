@@ -35,13 +35,14 @@ const GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// hooks without its prompt hook.
 const AGENTS: [&str; 3] = ["claude", "codex", "grok"];
 /// The tools a file is written with, and the input key that names it (claude-mem reads Claude
-/// Code's four; Grok's `search_replace` takes `file_path` as Edit does).
-const WRITES: [(&str, &str); 5] = [
+/// Code's four; Grok's `search_replace` and `write` take `file_path` as Edit and Write do).
+const WRITES: [(&str, &str); 6] = [
     ("Write", "file_path"),
     ("Edit", "file_path"),
     ("MultiEdit", "file_path"),
     ("NotebookEdit", "notebook_path"),
     ("search_replace", "file_path"),
+    ("write", "file_path"),
 ];
 
 const SCHEMA: &str = "
@@ -572,9 +573,10 @@ fn real_dir(home: &Path, folder: &str) -> Result<PathBuf> {
     Ok(top.join(folder))
 }
 
-/// The sha256 of an existing copy, opened without blocking or following a link and refused unless
-/// a regular file: a FIFO or a link put under a copy's name holds nothing up.
-fn sha256_file(path: &Path) -> Result<String> {
+/// The sha256 of an existing copy of `len` bytes, opened without blocking or following a link and
+/// refused unless a regular file, read to one byte past `len` at most: a FIFO, a link or a file of
+/// any other size put under a copy's name holds nothing up (None for another size).
+fn sha256_file(path: &Path, len: u64) -> Result<Option<String>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -582,11 +584,11 @@ fn sha256_file(path: &Path) -> Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
-    let mut file = options.open(path)?;
+    let file = options.open(path)?;
     anyhow::ensure!(file.metadata()?.is_file(), "not a regular file");
     let mut hash = Sha256::new();
-    std::io::copy(&mut file, &mut hash)?;
-    Ok(hex(&hash.finalize()))
+    let read = std::io::copy(&mut file.take(len + 1), &mut hash)?;
+    Ok((read == len).then(|| hex(&hash.finalize())))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -610,10 +612,15 @@ fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) 
     getrandom::fill(&mut nonce).map_err(|e| anyhow::anyhow!("{e}"))?;
     let partial = dir.join(format!(".partial-{}-{}", std::process::id(), hex(&nonce)));
     let result = (|| -> Result<Copied> {
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&partial)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            // A copy is the owner's alone, whatever its source's mode.
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut out = options.open(&partial)?;
         let mut hash = Sha256::new();
         let mut bytes = 0u64;
         let mut buf = vec![0u8; 1 << 20];
@@ -643,7 +650,7 @@ fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) 
                         sha256,
                     });
                 }
-                Ok(m) if m.is_file() && sha256_file(&path)? == sha256 => {
+                Ok(m) if m.is_file() && sha256_file(&path, bytes)?.as_ref() == Some(&sha256) => {
                     std::fs::remove_file(&partial)?;
                     return Ok(Copied {
                         copy: format!("{folder}/{name}"),
@@ -744,11 +751,26 @@ fn candidates(events: &[(i64, Event)], aside: &dyn Fn() -> bool) -> Option<Vec<C
         }
         let tool = body["tool"].as_str().unwrap_or("");
         let input = body["input"].as_str().unwrap_or("");
-        let cwd = PathBuf::from(e.cwd.as_deref().unwrap_or("/"));
+        // A call with no folder of its own has no root to hold its paths to (claude-mem's roots
+        // start at it): it names nothing, rather than taking the whole disk for its folder.
+        let Some(cwd) = e
+            .cwd
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|c| c.is_absolute())
+        else {
+            continue;
+        };
         let call = (*seq, e.ts);
         if is_work_state_write(tool) {
             if let Ok(input) = serde_json::from_str::<Value>(input) {
-                for c in declared(&input, call, &cwd) {
+                // Grok's hooks give an MCP call's input as {"tool_name", "tool_input"}.
+                let input = if input["tool_input"].is_object() {
+                    &input["tool_input"]
+                } else {
+                    &input
+                };
+                for c in declared(input, call, &cwd) {
                     if !declared_list.iter().any(|d| d.path == c.path) {
                         declared_list.push(c);
                     }
@@ -1165,9 +1187,17 @@ mod tests {
         assert!(name(&format!("/w/a.{}", "x".repeat(260)), &sha[..8]).is_err());
         // An extension is made safe too, so every copy's name is one the sweep removes.
         assert_eq!(
-            name(r"/w/report.p\df", &sha[..8]).unwrap(),
+            name("/w/report.p*df", &sha[..8]).unwrap(),
             "report-3f9a1c2b.p-df"
         );
+        // A backslash is in a name only where it separates no folders.
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                name(r"/w/report.p\df", &sha[..8]).unwrap(),
+                "report-3f9a1c2b.p-df"
+            );
+        }
     }
 
     /// X23: a turn's declared file (relative to its folder) and the files it wrote outside the
@@ -1208,6 +1238,13 @@ mod tests {
         assert!(got[0].1.starts_with("shop/notes-") && got[0].2 && !got[1].2);
         let read = |copy: &str| std::fs::read(home.path().join(FOLDER).join(copy)).unwrap();
         assert_eq!(read(&got[1].1), b"%PDF made");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let copy = home.path().join(FOLDER).join(&got[1].1);
+            let mode = std::fs::metadata(copy).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a copy is the owner's alone");
+        }
         turn(
             &mut raw,
             "s2",
@@ -1251,6 +1288,76 @@ mod tests {
             let call = json!({"file_path": w.join("report.pdf")});
             raw.append(&at(tool("s2", "Write", call, w))).unwrap();
             raw.append(&at(ev("s2", "reply", json!({"assistant": "Done."}), w)))
+                .unwrap();
+        }
+        step(home.path(), &raw);
+        assert!(copies(home.path()).is_empty());
+    }
+
+    /// Grok writes with `write` and `search_replace`, and its hooks give an MCP call's input as
+    /// `{"tool_name", "tool_input"}`: its turn's files are copied as Claude Code's are.
+    #[test]
+    fn a_grok_turns_writes_and_wrapped_declaration_are_read() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        for (name, bytes) in [
+            ("notes.md", "# Notes"),
+            ("deck.pdf", "deck"),
+            ("chart.png", "c"),
+        ] {
+            std::fs::write(w.join(name), bytes).unwrap();
+        }
+        let grok = |e: Event| Event {
+            agent: "grok".into(),
+            ..e
+        };
+        raw.append(&grok(ev("g1", "prompt", json!({"prompt": "Go."}), w)))
+            .unwrap();
+        let declare = json!({"tool_name": "oboete__work_state_write", "tool_input":
+            {"list": "deck", "fields": {"work_product": w.join("notes.md")}}});
+        let calls = [
+            (
+                "write",
+                json!({"file_path": w.join("deck.pdf"), "content": "deck"}),
+            ),
+            ("search_replace", json!({"file_path": w.join("chart.png")})),
+            ("oboete__work_state_write", declare),
+        ];
+        for (name, input) in calls {
+            raw.append(&grok(tool("g1", name, input, w))).unwrap();
+        }
+        raw.append(&grok(ev("g1", "reply", json!({"assistant": "Done."}), w)))
+            .unwrap();
+        assert!(step(home.path(), &raw));
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["notes.md", "deck.pdf", "chart.png"]);
+    }
+
+    /// A call recorded with no folder, an empty one or one not absolute has no root to hold its
+    /// paths to, so it names nothing: claude-mem's roots start at the call's folder, which keeps
+    /// out `work_product: ~/.ssh/id_rsa`.
+    #[test]
+    fn a_call_with_no_folder_names_nothing() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("notes.md"), b"# Notes").unwrap();
+        std::fs::write(w.join("deck.pdf"), b"deck").unwrap();
+        for (i, cwd) in [None, Some(""), Some("work")].into_iter().enumerate() {
+            let session = format!("s{i}");
+            let at = |e: Event| Event {
+                cwd: cwd.map(str::to_owned),
+                ..e
+            };
+            raw.append(&at(ev(&session, "prompt", json!({"prompt": "Go."}), w)))
+                .unwrap();
+            let declare = json!({"list": "l", "fields": {"work_product": w.join("notes.md")}});
+            let write = json!({"file_path": w.join("deck.pdf")});
+            for (name, input) in [("mcp__oboete__work_state_write", declare), ("Write", write)] {
+                raw.append(&at(tool(&session, name, input, w))).unwrap();
+            }
+            raw.append(&at(ev(&session, "reply", json!({"assistant": "Done."}), w)))
                 .unwrap();
         }
         step(home.path(), &raw);
@@ -1645,6 +1752,13 @@ mod tests {
             std::fs::remove_file(&short).unwrap();
             std::os::unix::fs::symlink(&src, &short).unwrap();
             assert_eq!(copy(&src), copied, "a link under the name is not read");
+            // A larger file under the name (sparse here) is read no further than the copy's size.
+            std::fs::remove_file(&short).unwrap();
+            let big = std::fs::File::create(&short).unwrap();
+            big.set_len(MAX_BYTES + 1).unwrap();
+            let started = std::time::Instant::now();
+            assert_eq!(copy(&src), copied);
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
         }
     }
 

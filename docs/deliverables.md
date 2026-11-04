@@ -87,9 +87,12 @@ none.
   `{"omitted":true}` (`[capture] store_prompts` off) is a public prompt. Muted and excluded sessions
   have no records to read.
 - **The calls.** Write, Edit and MultiEdit (`file_path`) and NotebookEdit (`notebook_path`) records
-  not `failed`, and oboete's `work_state_write` (as `curate::served` names it, any agent) with its
-  `fields`. An input cut at the field cap is read for its path by its head (`{"file_path":"…`). A
-  path a masking rule changed does not resolve, so it is not copied.
+  not `failed`, Grok's `search_replace` and `write` (`file_path`), and oboete's `work_state_write`
+  (as `curate::served` names it, any agent) with its `fields`; Grok's hooks give an MCP call's input
+  as `{"tool_name", "tool_input"}`, read inside `tool_input`. An input cut at the field cap is read
+  for its path by its head (`{"file_path":"…`). A path a masking rule changed does not resolve, so
+  it is not copied. A call whose record has no absolute `cwd` names nothing: its roots would start
+  at no folder.
 - **The files.** claude-mem 15.9's capture rules above (`deliverables-capture.ts` 108-153, not the
   15.1 display rules `work_product::from_fields` ports: a declared `~/` or relative path resolves,
   and another field names a known kind only), with its kinds (`FILE_KINDS`, the same list), title and
@@ -102,11 +105,13 @@ none.
   `GetFinalPathNameByHandleW` on Windows; another system copies nothing), inside a root. So a path or
   an ancestor swapped for a link before or after the check is not followed. The folder must be a real
   directory inside `<home>/deliverables/` (no link), the copy is staged under a new name there
-  (create-new), hashed as read, and renamed.
+  (create-new, readable by the owner alone on Unix whatever the source's mode), hashed as read, and
+  renamed.
 - **The folder.** `<home>/deliverables/<name>/`, `<name>` the repository's display name
   (`manifest::repo_name`, the last part of its key) made safe as claude-mem's `safeName` does, or
   `unknown-project` without one; names as claude-mem's, `<stem>-<8 hex><ext>`. An existing name is
-  reused only when its whole sha256 is the copy's; another file under that name (two contents whose
+  reused only when its whole sha256 is the copy's (read no further than one byte past the copy's
+  size, so a larger file there holds nothing up); another file under that name (two contents whose
   hashes start alike) leaves the copy named by its whole hash, its stem cut so the name stays within
   255 bytes.
 - **The record.** A row in `deliverables.db` beside raw.db (not providers.db, which a home that
@@ -162,8 +167,9 @@ none.
 ### Not built here
 
 - SubagentStop's copies come with row X17 (oboete installs no SubagentStop hook yet).
-- Codex and Grok write files through `apply_patch` and shell commands, which claude-mem does not read
-  either: their declared files are copied, their written ones are not.
+- Codex writes files through `apply_patch` and shell commands, and Grok through shell commands as
+  well as its `search_replace` and `write`; claude-mem reads neither `apply_patch` nor a shell
+  command: a file so written is copied only when the turn declares it.
 
 ## Acceptance (slice 1)
 
