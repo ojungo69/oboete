@@ -220,10 +220,12 @@ card with row X16's products; slice 2c takes #836's first three items.
   it last read by: the open page's products are read again in place, the other updates held behind
   "Show updates" or not. A products read that failed is asked again at the next poll, the version
   moved or not, three times at most for one key; one the viewer refused (a request no longer
-  listed) waits for the next key. A list read begins a key's read once: not again while it is under
-  way, so its answer lands, nor after it failed. A drawing shows what was read for its request and
-  begins a read only for a request none was begun for, as the row it draws may be older, behind
-  "Show updates". A copies' store that does not read leaves the list and the page
+  listed) waits for the next key; an answer whose copies were not read (`copies_unread`: their
+  store did not read) is shown and asked again the same way. A list read begins a key's read once:
+  not again while it is under way, so its answer lands, nor after it failed; back at the key that
+  was read, it drops a read under way for another, whose answer would replace it. A drawing shows
+  what was read for its request and begins a read only for a request none was begun for, as the
+  row it draws may be older, behind "Show updates". A copies' store that does not read leaves the list and the page
   without copies, not without their requests, and the version then moves with the rest alone.
 - **Card (slice 2b).** The list answer gives each request up to three products other than commits
   and branches, copies included, and how many more, for the card. The replacement compares the

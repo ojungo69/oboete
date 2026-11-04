@@ -4492,7 +4492,31 @@ run('myWorkDraw()');await settle();
 assert.equal(asked.length,10,'nor by a drawing');
 release();await settle();
 assert(text(box()).includes('report page.html'),'its answer lands');
-fail=false;
+// Back to the key that was read, a read under way for another is dropped: its answer does not
+// replace what is shown.
+keyed('c5');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,11,'a new key is read');
+products=[{kind:'page',title:'stale page.html',url:null,path:'/tmp/stale page.html',at:now,file:tag}];
+keyed('c4');
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,11,'the key read before is not read again');
+release();await settle();
+assert(!text(box()).includes('stale page.html')&&text(box()).includes('report page.html'),'the dropped answer replaces nothing');
+// An answer whose copies were not read is shown, and asked again by the poll.
+fail=false;keyed('c6');
+const unreadOnce=ctx.fetch;let unreadLeft=1;
+ctx.fetch=url=>String(url).startsWith('/api/my-work/product')&&unreadLeft-->0
+  ?(asked.push(String(url)),Promise.resolve(response({products:[],copies_unread:true})))
+  :unreadOnce(url);
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,12,'a new key is read');
+await polls(1);
+assert.equal(asked.length,13,'an answer without its copies is asked again');
+await polls(1);
+assert.equal(asked.length,13,'and a whole one stays');
+assert(text(box()).includes('stale page.html'),'the whole answer is shown');
+ctx.fetch=unreadOnce;
 delete document.visibilityState;
 ctx.fetch=listing;
 run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);

@@ -2595,7 +2595,13 @@ impl Viewer {
                     return Ok(Response::text(404, "no such request"));
                 };
                 let tag = |row: &crate::deliverables::Row| self.file_tag(row);
-                json!({"products": crate::my_work::products(&self.home, &held[i], &tag)?})
+                let (products, unread) = crate::my_work::products(&self.home, &held[i], &tag)?;
+                let mut out = json!({"products": products});
+                // The copies not read: the page shows the rest and asks again.
+                if unread {
+                    out["copies_unread"] = json!(true);
+                }
+                out
             }
             "timeline" => {
                 let (all, limit, before) = match (flag(q, "all"), limit(q, 50), page(q)) {
@@ -5496,7 +5502,8 @@ curate = false
     }
 
     /// Slice 4 (docs/my-work.md): a request's work product, by the id the page has, with the
-    /// token; a request it does not know, none named, or no token, refused.
+    /// token; a request it does not know, none named, or no token, refused. A copies' store that
+    /// does not read leaves the rest, flagged `copies_unread` (docs/deliverables.md).
     #[test]
     fn the_my_work_product_route_answers_for_a_request_it_knows() {
         let (mut s, v) = feed_fixture();
@@ -5511,6 +5518,16 @@ curate = false
             answer["products"][0]["url"], "https://example.com/notes",
             "{answer}"
         );
+        assert!(answer.get("copies_unread").is_none(), "{answer}");
+        // A copies' store that does not read: the rest, and the page told to ask again.
+        std::fs::create_dir(v.home.join("deliverables.db")).unwrap();
+        let answer = get(&v, "/api/my-work/product?request=r%3Arel");
+        assert_eq!(answer["copies_unread"], true, "{answer}");
+        assert_eq!(
+            answer["products"][0]["url"], "https://example.com/notes",
+            "{answer}"
+        );
+        std::fs::remove_dir(v.home.join("deliverables.db")).unwrap();
         let status =
             |target: &str, headers: &[(&str, &str)]| v.route("GET", target, headers).status;
         assert_eq!(status("/api/my-work/product?request=r%3Arel", &[HOST]), 401);

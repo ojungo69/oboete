@@ -9626,6 +9626,8 @@ function myWorkProductsRead(row, instance, tries = 0) {
     if (ask !== mw.productsAsk) return;
     mw.products = { key, id: row.id, list: answer.products || [] };
     if (mw.request === row.id && mw.productsBox?.id === row.id) mw.productsBox.fill(mw.products.list);
+    // Its copies not read (their store did not read): shown without them, and asked again.
+    if (answer.copies_unread && tries < 3) mw.productsRetry = { row, instance, tries: tries + 1 };
   }).catch((error) => {
     if (ask === mw.productsAsk && !(error.status < 500) && tries < 3) {
       mw.productsRetry = { row, instance, tries: tries + 1 };
@@ -9834,8 +9836,18 @@ async function myWorkLive() {
   // the updates held behind "Show updates" or not (docs/deliverables.md).
   const open = mw.request !== null ? answer.requests.find((row) => row.id === mw.request) : null;
   const openKey = open && myWorkProductsKey(open, answer.instance);
-  if (open && mw.productsBox?.id === open.id && mw.products?.key !== openKey && mw.productsKey !== openKey) {
-    myWorkProductsRead(open, answer.instance);
+  if (open && mw.productsBox?.id === open.id) {
+    if (mw.products?.key === openKey) {
+      // Back to the key that was read: a read under way for another is dropped, so its answer
+      // does not replace this one (CodeRabbit on #839).
+      if (mw.productsKey !== openKey) {
+        mw.productsAsk += 1;
+        mw.productsKey = openKey;
+        mw.productsRetry = null;
+      }
+    } else if (mw.productsKey !== openKey) {
+      myWorkProductsRead(open, answer.instance);
+    }
   }
   const signature = myWorkAnswerSignature(answer);
   if (signature === mw.signature) return true;

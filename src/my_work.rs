@@ -1433,14 +1433,15 @@ const PRODUCTS: usize = 60;
 /// or expired one is none; each entry is gated as the page's text is, and a link the gate changes
 /// is shown as its title alone. No provider is called. With them, the request's copies
 /// (docs/deliverables.md, slice 2), each with `file`, its link's tag (`tag`), which only this page
-/// gets: `products_read`, which the model's progress review reads, has none.
+/// gets: `products_read`, which the model's progress review reads, has none. The flag says the
+/// copies were not read (their store did not read): the page shows the rest and asks again.
 pub(crate) fn products(
     home: &Path,
     held: &Held,
     tag: &dyn Fn(&crate::deliverables::Row) -> Result<String>,
-) -> Result<Vec<Value>> {
+) -> Result<(Vec<Value>, bool)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
     // One fence for the whole answer (#439): a forget registered between two copies' checks would
     // leave the first in it.
@@ -1453,13 +1454,16 @@ pub(crate) fn products(
     let copies = (|| match crate::deliverables::open_read(home)? {
         Some(db) => copies_of(&db, &raw, held),
         None => Ok(Vec::new()),
-    })()
-    .unwrap_or_else(|e| {
-        eprintln!("oboete: a request's copies not read: {e:#}");
-        Vec::new()
-    });
+    })();
+    let copies = match copies {
+        Ok(copies) => copies,
+        Err(e) => {
+            eprintln!("oboete: a request's copies not read: {e:#}");
+            return Ok((list, true));
+        }
+    };
     if copies.is_empty() {
-        return Ok(list);
+        return Ok((list, false));
     }
     let gate = |s: &str| crate::redact::outbound_with(s, &rules);
     // A copy hides the recorded file of the path it covers, as claude-mem's `copyCoversSource`
@@ -1486,7 +1490,7 @@ pub(crate) fn products(
     // Newest first within claude-mem's 60, a copy before an entry of the same time.
     shown.sort_by_key(|p| std::cmp::Reverse(p["at"].as_i64().unwrap_or(0)));
     shown.truncate(PRODUCTS);
-    Ok(shown)
+    Ok((shown, false))
 }
 
 /// Whether a copy covers its source as claude-mem's `copyCoversSource` reads it: the source is
@@ -2766,7 +2770,9 @@ mod tests {
                 .iter()
                 .position(|id| id == "c:claude:s1")
                 .unwrap();
-            super::products(h.s.home.path(), &held[i], &|_| Ok(String::new())).unwrap()
+            super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+                .unwrap()
+                .0
         };
         let products = shown(&h);
         let titles: Vec<&str> = products
@@ -2811,7 +2817,9 @@ mod tests {
             .iter()
             .position(|id| id == "c:claude:s1")
             .unwrap();
-        let products = super::products(h.s.home.path(), &held[i], &|_| Ok(String::new())).unwrap();
+        let products = super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+            .unwrap()
+            .0;
         let url = |title: &str| {
             (products.iter())
                 .find(|p| p["title"] == title)
@@ -2864,6 +2872,7 @@ mod tests {
             let i = ids(&answer).iter().position(|x| x == id).unwrap();
             (super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
                 .unwrap()
+                .0
                 .iter())
             .map(|p| p["title"].as_str().unwrap().to_owned())
             .collect()
@@ -2910,7 +2919,9 @@ mod tests {
             .iter()
             .position(|id| id == "c:claude:s1")
             .unwrap();
-        let products = super::products(h.s.home.path(), &held[i], &|_| Ok(String::new())).unwrap();
+        let products = super::products(h.s.home.path(), &held[i], &|_| Ok(String::new()))
+            .unwrap()
+            .0;
         // A work item's link the gate hides any of, beside its key, is its title alone when an
         // address is left (notes_url), and nothing when none is (docs_url's host, spec_url whole).
         let shown = serde_json::to_string(&products).unwrap();
@@ -4989,7 +5000,9 @@ mod tests {
         assert_eq!(v["unlinked"], 0, "{v}");
         let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
         assert_eq!(ids(&answer).len(), 1, "{answer}");
-        let products = super::products(h.s.home.path(), &held[0], &|_| Ok(String::new())).unwrap();
+        let products = super::products(h.s.home.path(), &held[0], &|_| Ok(String::new()))
+            .unwrap()
+            .0;
         assert!(
             products
                 .iter()
@@ -5111,6 +5124,11 @@ mod tests {
             let tag = |r: &crate::deliverables::Row| Ok(format!("tag{}", r.id));
             super::products(h.s.home.path(), &held[i], &tag).unwrap()
         };
+        let shown = |h: &Home| {
+            let (list, unread) = shown(h);
+            assert!(!unread, "the copies were read");
+            list
+        };
         let before: Vec<Value> = shown(&h);
         assert!(
             before.iter().any(|p| p["path"] == "/gone/report.pdf"),
@@ -5154,7 +5172,13 @@ mod tests {
             by_id(&answer, "c:claude:s1").get("copies").is_none(),
             "{answer}"
         );
-        let unread = shown(&h);
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = (ids(&answer).iter())
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let (unread, flagged) =
+            super::products(h.s.home.path(), &held[i], &|_| Ok(String::new())).unwrap();
+        assert!(flagged, "the page is told its copies were not read");
         assert!(unread.iter().all(|p| p.get("file").is_none()), "{unread:?}");
         assert!(
             unread.iter().any(|p| p["path"] == "/gone/report.pdf"),
@@ -5188,7 +5212,7 @@ mod tests {
                     paused.recv().unwrap();
                     Ok(format!("tag{}", r.id))
                 };
-                super::products(&home, &held, &tag).map(|list| list.len())
+                super::products(&home, &held, &tag).map(|(list, _)| list.len())
             }
         });
         building.recv().unwrap();
