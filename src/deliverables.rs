@@ -934,7 +934,8 @@ fn forgotten(raw: &Raw, db: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(out)
 }
 
-/// Removes the copies forget's denials cover, rows and then each file no row names any more.
+/// Removes the copies forget's denials cover: each row's file when no other row names it, then
+/// the row (a file it cannot remove keeps its row for the next sweep).
 /// After forget's purge and at the worker's idle time; `orphans` also removes the files no row
 /// names at all, only where no copy is being made (the worker's own idle step).
 pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
