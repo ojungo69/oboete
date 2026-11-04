@@ -1487,7 +1487,8 @@ fn covers(c: &crate::deliverables::Row) -> bool {
 /// raw still has that call (the record at its seq has its time). A copy whose call raw no longer
 /// has (a restore gave its seq to another record, or it was removed) joins a request only as its
 /// conversation's one holder among all requests built (`Held::sole`), as claude-mem attaches a
-/// copy only to a conversation's single owner.
+/// copy only to a conversation's single owner. A copy a forget denies (its call or its turn's end)
+/// is none from the forget's registration on, before the sweep removes it.
 fn copies_of(db: &Connection, raw: &Raw, held: &Held) -> Result<Vec<crate::deliverables::Row>> {
     let mut out = Vec::new();
     for (key, spans) in &held.sources.convs {
@@ -1501,7 +1502,7 @@ fn copies_of(db: &Connection, raw: &Raw, held: &Held) -> Result<Vec<crate::deliv
                     false => held.sole.contains(key),
                 },
             };
-            if ours {
+            if ours && !raw.denies(&row)? {
                 out.push(row);
             }
         }
@@ -5130,7 +5131,9 @@ mod tests {
 
     /// Slice 2: where a request holds prompts of a conversation, a copy joins it when a held span
     /// holds its call and raw still has that call; a copy whose call raw no longer has (a restore
-    /// gave its seq to another record) joins only the conversation's one holder.
+    /// gave its seq to another record) joins only the conversation's one holder. A forget over a
+    /// copy's call leaves it out from its registration on, the request kept and the copy not yet
+    /// swept.
     #[test]
     fn a_copy_joins_the_request_that_holds_its_call() {
         let mut h = Home::new();
@@ -5149,12 +5152,12 @@ mod tests {
             .unwrap()
             .unwrap();
         let key: Key = ("claude".into(), "s1".into());
-        let held = |spans: Vec<Span>, sole: bool| Held {
+        let held = |spans: Option<Vec<Span>>, sole: bool| Held {
             key: String::new(),
             id: String::new(),
             sessions: Vec::new(),
             sources: Sources {
-                convs: vec![(key.clone(), Some(spans))],
+                convs: vec![(key.clone(), spans)],
                 fields: Vec::new(),
                 files: Vec::new(),
             },
@@ -5167,14 +5170,27 @@ mod tests {
                 .map(|r| r.title)
                 .collect()
         };
-        let holding = vec![(device.clone(), call - 1, call + 1)];
-        let elsewhere = vec![(device.clone(), call + 10, call + 20)];
+        let holding = Some(vec![(device.clone(), call - 1, call + 1)]);
+        let elsewhere = Some(vec![(device.clone(), call + 10, call + 20)]);
         assert_eq!(titles(&held(holding.clone(), false)), ["a.pdf"]);
         assert_eq!(
             titles(&held(elsewhere.clone(), false)),
             Vec::<String>::new()
         );
         assert_eq!(titles(&held(elsewhere, true)), ["b.pdf"]);
-        assert_eq!(titles(&held(holding, true)), ["a.pdf", "b.pdf"]);
+        assert_eq!(titles(&held(holding.clone(), true)), ["a.pdf", "b.pdf"]);
+        assert_eq!(titles(&held(None, false)), ["a.pdf", "b.pdf"]);
+        // A forget of the time of a.pdf's call, not of the prompt: the request stays.
+        let target = crate::forget::Target::Range {
+            device,
+            since: h.t - 59_100,
+            until: h.t - 58_900,
+        };
+        let preview = crate::forget::preview(h.s.home.path(), target).unwrap();
+        crate::forget::start(h.s.home.path(), &preview).unwrap();
+        assert_eq!(titles(&held(holding, true)), ["b.pdf"]);
+        assert_eq!(titles(&held(None, false)), ["b.pdf"]);
+        let (answer, _) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        assert!(ids(&answer).contains(&"c:claude:s1".to_owned()), "{answer}");
     }
 }

@@ -960,6 +960,13 @@ pub(crate) fn newest_hook(home: &Path) -> Result<Option<(i64, i64)>> {
 }
 
 pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
+    read_only_within(home, OPEN_WAIT)
+}
+
+/// `read_only`, its waits (for a restore's swap, and SQLite's while busy) no longer than `wait`:
+/// a copy's answer opens raw.db within its own deadline (docs/deliverables.md).
+pub(crate) fn read_only_within(home: &Path, wait: std::time::Duration) -> Result<Option<ReadOnly>> {
+    let wait = wait.min(OPEN_WAIT);
     let before = existing_read_path(home)?;
     let lock_path = home.join("raw.lock");
     match std::fs::symlink_metadata(&lock_path) {
@@ -983,7 +990,7 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
         file.metadata()?.is_file(),
         "raw coordination is not a regular file"
     );
-    let swap = wait_for_swap(file, false, OPEN_WAIT)?;
+    let swap = wait_for_swap(file, false, wait)?;
     anyhow::ensure!(
         crate::worker::file_id(std::fs::metadata(&lock_path))
             == crate::worker::file_id(swap.metadata()),
@@ -1009,7 +1016,7 @@ pub(crate) fn read_only(home: &Path) -> Result<Option<ReadOnly>> {
             | rusqlite::OpenFlags::SQLITE_OPEN_URI
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    conn.busy_timeout(OPEN_WAIT)?;
+    conn.busy_timeout(wait)?;
     format_of(&conn)?;
     let read = ReadOnly {
         conn,
@@ -5566,6 +5573,12 @@ impl Raw {
         ts: i64,
     ) -> Result<bool> {
         forgets_in(&self.conn, device, agent, session, repo, seq, ts)
+    }
+
+    /// `deliverables::denied` on this store: a forget registered over a copy's call or its turn's
+    /// end denies it from then on, before the sweep removes it (docs/deliverables.md).
+    pub(crate) fn denies(&self, r: &crate::deliverables::Row) -> Result<bool> {
+        crate::deliverables::denied(&self.conn, r)
     }
 
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task

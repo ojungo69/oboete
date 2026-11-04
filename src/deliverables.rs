@@ -1165,8 +1165,10 @@ pub(crate) fn open_read(home: &Path) -> Result<Option<Connection>> {
         Err(e) => return Err(e.into()),
         Ok(m) => anyhow::ensure!(m.is_file(), "deliverables.db is not a regular file"),
     }
+    // SQLite's NOFOLLOW refuses a link anywhere in the path: the home is resolved and the leaf is
+    // not, as `raw::read_only` opens raw.db.
     let db = Connection::open_with_flags(
-        &path,
+        home.canonicalize()?.join(DB),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     db.busy_timeout(std::time::Duration::from_secs(2))?;
@@ -2125,7 +2127,8 @@ mod tests {
 
     /// Slice 2: a copy is opened to serve only at its place, of its size and bytes, within its
     /// time: a same-size file put in its place, another size, a link there, and `deliverables/`
-    /// swapped for a link to a folder holding the same name and bytes are refused.
+    /// swapped for a link to a folder holding the same name and bytes are refused. A home reached
+    /// through a link reads its copies' store; a link in the store's place is refused.
     #[test]
     fn a_copy_opens_only_as_its_row_says() {
         let (home, mut raw) = ready();
@@ -2171,6 +2174,16 @@ mod tests {
                 open_copy(home.path(), &row, later()).is_err(),
                 "a linked folder"
             );
+            let alias = w.join("home");
+            std::os::unix::fs::symlink(home.path(), &alias).unwrap();
+            let db = open_read(&alias)
+                .unwrap()
+                .expect("a home reached through a link");
+            assert_eq!(rows(&db).unwrap(), std::slice::from_ref(&row));
+            let leaf = w.join("leaf");
+            std::fs::create_dir(&leaf).unwrap();
+            std::os::unix::fs::symlink(home.path().join(DB), leaf.join(DB)).unwrap();
+            assert!(open_read(&leaf).is_err(), "the store a link");
         }
     }
 

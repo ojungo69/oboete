@@ -8272,7 +8272,7 @@ const mw = {
   // of its latest read: an earlier read's late answer is not kept (CodeRabbit on #650). With it
   // the open page's products box, and the viewer's links' instance from the last answer taken
   // (docs/deliverables.md).
-  products: null, productsAsk: 0, productsBox: null, instance: '',
+  products: null, productsAsk: 0, productsBox: null, productsRetry: null, instance: '',
 };
 
 const myWorkCategory = (status) => (['working', 'needs', 'ready', 'checked'].includes(status) ? status : 'other');
@@ -9603,16 +9603,19 @@ function myWorkProductsKey(row, instance) {
   return `${row.id}\n${row.version}\n${row.copies ?? ''}\n${instance ?? ''}`;
 }
 
-// Reads a request's products into its open page; only a read that answered is kept, so a poll
-// after one that failed asks again.
+// Reads a request's products into its open page; only a read that answered is kept, and one that
+// failed is asked again at the next poll, whether the version moved or not (`poll`).
 function myWorkProductsRead(row, instance) {
   const key = myWorkProductsKey(row, instance);
   const ask = ++mw.productsAsk;
+  mw.productsRetry = null;
   api('my-work/product', { request: row.id }).then((answer) => {
     if (ask !== mw.productsAsk) return;
     mw.products = { key, list: answer.products || [] };
     if (mw.request === row.id && mw.productsBox?.id === row.id) mw.productsBox.fill(mw.products.list);
-  }).catch(() => {});
+  }).catch(() => {
+    if (ask === mw.productsAsk) mw.productsRetry = { row, instance };
+  });
 }
 
 function myWorkProduct(p) {
@@ -10429,6 +10432,11 @@ async function poll() {
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;
     drawnWithoutBaseline = false;
+    // An open request's products whose read failed (`myWorkProductsRead`).
+    const retry = mw.productsRetry;
+    if (view === 'my_work' && retry && mw.request === retry.row.id && mw.productsBox?.id === retry.row.id) {
+      myWorkProductsRead(retry.row, retry.instance);
+    }
   } catch (e) {
     queue = {};
     drawQueue();

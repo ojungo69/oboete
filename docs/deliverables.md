@@ -169,15 +169,18 @@ card with row X16's products; slice 2c takes #836's first three items.
   alone. No token is needed (a new token keeps a link; the viewer's restart ends it); the reads'
   refusals hold (a method other than GET or HEAD, a body, another host), and so does claude-mem's
   of a cross-site fetch (`Sec-Fetch-Site: cross-site`). Every row's tag is compared in constant
-  time (`verify_truncated_left`).
+  time (`verify_truncated_left`). deliverables.db is read through the home resolved and its own
+  name not followed (`deliverables::open_read`, as `raw::read_only` opens raw.db: SQLite's NOFOLLOW
+  refuses a link anywhere in the path, so a home reached through one would read nothing).
 - **The file.** `<home>/deliverables/<copy>`, the home canonicalized once and the fixed folder
   joined to it: both folders real directories, the file opened without following a link or
   blocking, a regular file whose handle is at that very path (a `deliverables/` swapped for a link
   is refused), of the row's size, and whose bytes, hashed on the handle before any header, are the
   row's; then read again from its start on the same handle.
-- **Admission.** Then raw.db is opened (`raw::read_only`, none when there is no store: nothing is
-  served), the readers' hold taken (`dispatch::reading`, the order a restore and a forget's
-  registration take them), and the call's and the turn end's denials read in it
+- **Admission.** Then raw.db is opened (`raw::read_only_within`, none when there is no store:
+  nothing is served), the readers' hold taken (`dispatch::reading`, the order a restore and a
+  forget's registration take them), and the call's and the turn end's denials read in it, each
+  wait (a restore's swap, SQLite's while busy, the hold) within what is left of the deadline
   (`deliverables::denied`, the query `Raw::forgets` runs): a forget registered before then refuses
   the link (404) from that moment, its purge run or not. The head is sent in that hold, and both are
   let go before the body; a forget registered after it waits for the hold, and a stream it let in
@@ -188,15 +191,17 @@ card with row X16's products; slice 2c takes #836's first three items.
   no-referrer`, `Accept-Ranges: bytes`: a copied page's script runs in an opaque origin, so it can
   read neither the page's token nor an answer of the API. The body is streamed in 64 KiB chunks.
   One deadline (`FILE_TIME`, 60 s) holds for the whole answer from when its head came: the lookup,
-  the hash, the hold and every write; a reader slower than that is cut, and a player asks again from
-  where it stopped. A HEAD has the whole length; on a GET one `Range: bytes=a-b` (or `a-`, `-n`)
+  the hash, the admission's waits and every write; a reader slower than that is cut, and a player
+  asks again from where it stopped. A HEAD has the whole length; on a GET one `Range: bytes=a-b` (or `a-`, `-n`)
   answers 206 with `Content-Range`, several or a malformed one the whole file, one past the end 416.
 - **My Work.** A request's copies join its products on its page (`my_work::products`, the viewer's
   answer, not `products_read`, which the model's progress review reads: no copy or tag reaches a
   model). A copy is a request's when the request holds its conversation whole, or holds a prompt
   span with the copy's call while raw still has that call (the record at its seq has its time); a
   copy whose call raw no longer has (a restore gave its seq to another record) joins only the
-  conversation's one holder among all requests built, counted before the answer's range. Each copy
+  conversation's one holder among all requests built, counted before the answer's range. A copy a
+  forget denies (`Raw::denies`: its call or its turn's end) is none from the registration on, its
+  sweep run or not, and its request's `copies` changes with it. Each copy
   is `{kind, title, url: null, path, at, file}`, `file` its link's tag; a copy hides the recorded
   file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not changed after
   the copy), compared on the copy's own path, so a path a rule masks hides nothing; newest first
@@ -207,10 +212,14 @@ card with row X16's products; slice 2c takes #836's first three items.
   provenance) and itself the viewer's links' `instance`; `/api/version` moves with a hash of every
   row's provenance and with that instance. The page keeps a request's products by its id, version,
   `copies` and the instance, and at each list read compares the key the answer gives with the one
-  it last read by, a read that failed included: the open page's products are read again in place,
-  the other updates held behind "Show updates" or not.
+  it last read by: the open page's products are read again in place, the other updates held behind
+  "Show updates" or not. A products read that failed is asked again at the next poll, the version
+  moved or not.
 - **Card (slice 2b).** The list answer gives each request up to three products other than commits
-  and branches, copies included, and how many more, for the card.
+  and branches, copies included, and how many more, for the card. The replacement compares the
+  recorded file's own path, before the gate: as built, a recorded path the gate masks is compared
+  masked, so a copy whose own path is that masked text would hide it (Codex's local review of
+  slice 2a).
 
 ### Not built here
 

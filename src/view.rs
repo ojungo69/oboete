@@ -1514,7 +1514,7 @@ impl Viewer {
             Some(Ok((first, last))) => (206, first, last - first + 1),
             Some(Err(())) => (416, 0, 0),
         };
-        let admitted = match self.admit(&row, left()) {
+        let admitted = match self.admit(&row, ask.deadline) {
             Ok(Some(admitted)) => admitted,
             Ok(None) => return refuse(stream, 404, "not found"),
             Err(_) => return refuse(stream, 503, "the copy cannot be served now"),
@@ -1544,18 +1544,25 @@ impl Viewer {
     }
 
     /// A copy's admission (docs/deliverables.md, slice 2): raw.db open, then the readers' hold
-    /// within `wait` (the order a restore and a forget's registration take them), and its records'
-    /// denials read in that hold; none when they deny it, or when there are no records to read
-    /// them from. The caller sends the head while it keeps both, and lets them go before the body.
+    /// (the order a restore and a forget's registration take them), and its records' denials read
+    /// in that hold, each wait within what is left before `deadline`; none when they deny it, or
+    /// when there are no records to read them from. The caller sends the head while it keeps
+    /// both, and lets them go before the body.
     fn admit(
         &self,
         row: &crate::deliverables::Row,
-        wait: Duration,
+        deadline: Instant,
     ) -> Result<Option<(crate::raw::ReadOnly, std::fs::File)>> {
-        let Some(raw) = crate::raw::read_only(&self.home)? else {
+        let left = || {
+            let left = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(!left.is_zero(), "out of time");
+            Ok(left)
+        };
+        let Some(raw) = crate::raw::read_only_within(&self.home, left()?)? else {
             return Ok(None);
         };
-        let hold = crate::dispatch::reading(&self.home, wait)?;
+        let hold = crate::dispatch::reading(&self.home, left()?)?;
+        raw.conn.busy_timeout(left()?)?;
         Ok((!crate::deliverables::denied(&raw.conn, row)?).then_some((raw, hold)))
     }
 
@@ -10505,7 +10512,7 @@ curate = false
         };
         let (_file, found) = v.copy_for(&ask).unwrap().unwrap();
         assert_eq!(found, row);
-        assert!(v.admit(&row, FILE_TIME).unwrap().is_some());
+        assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_some());
         let raw = crate::raw::open(home.path()).unwrap();
         let handle = format!("{}:{}", raw.device(), row.call_seq);
         drop(raw);
@@ -10517,7 +10524,7 @@ curate = false
             .join(crate::deliverables::FOLDER)
             .join(&row.copy);
         assert!(copy.exists(), "the purge has not run");
-        assert!(v.admit(&row, FILE_TIME).unwrap().is_none());
+        assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_none());
         let (port, server) = serving(v, 1);
         let link = format!("/files/{}/page.html", hex_tag(&ask.tag));
         assert!(file_ask(port, "GET", &link, &[]).starts_with("HTTP/1.1 404 Not Found\r\n"));
@@ -10551,10 +10558,12 @@ curate = false
         tag.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// The deadline counts the lookup and the hash: an ask whose time is up opens nothing.
+    /// The deadline counts the lookup, the hash and the admission's waits: an ask whose time is up
+    /// opens nothing, and one that meets a restore's hold on raw.db gives up when its time is up,
+    /// not after the store's own wait.
     #[test]
     fn a_link_past_its_deadline_opens_nothing() {
-        let (_home, _work, v, row) = copied(b"<p>late</p>");
+        let (home, _work, v, row) = copied(b"<p>late</p>");
         let tag = parse_tag(&v.file_tag(&row).unwrap()).unwrap();
         let ask = FileAsk {
             tag,
@@ -10562,6 +10571,19 @@ curate = false
             deadline: Instant::now(),
         };
         assert!(v.copy_for(&ask).is_err());
+        let swap = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(home.path().join("raw.lock"))
+            .unwrap();
+        swap.lock().unwrap();
+        let started = Instant::now();
+        assert!(v.admit(&row, started + Duration::from_millis(200)).is_err());
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        drop(swap);
+        assert!(v.admit(&row, Instant::now()).is_err(), "no time left");
+        assert!(v.admit(&row, Instant::now() + FILE_TIME).unwrap().is_some());
     }
 
     /// RFC 9110's byte ranges as a copy's answer reads them: one range, a suffix, an open end;

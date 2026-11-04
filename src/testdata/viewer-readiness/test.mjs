@@ -4448,10 +4448,20 @@ listed={...listed,instance:'i2'};
 await run('myWorkLive()');await settle();
 assert.equal(asked.length,3,'a restarted viewer\'s links are read again');
 fail=false;
-await run('myWorkLive()');await settle();
-assert.equal(asked.length,4,'a read that failed is asked again at the next poll');
-await run('myWorkLive()');await settle();
+// Through the page's own poll, the version unchanged (no list read): the failed read is asked again.
+const listing=ctx.fetch,wasLoaded=run('reposLoaded'),wasVersion=run('version');
+ctx.fetch=url=>String(url).startsWith('/api/version')?Promise.resolve(response({v:'v-same'})):listing(url);
+run("reposLoaded=true;version='v-same'");
+document.visibilityState='visible';
+await run('poll()');await settle();
+assert.equal(asked.length,4,'a read that failed is asked again at the next poll, the version unchanged');
+await run('poll()');await settle();
 assert.equal(asked.length,4,'an answer read stays read');
+delete document.visibilityState;
+ctx.fetch=listing;
+run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);
+await run('myWorkLive()');await settle();
+assert.equal(asked.length,4,'and through a list read');
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
 }
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
