@@ -101,3 +101,31 @@ The p90 is the queue behind earlier windows on the busiest days (2026-10-21: 7,3
 Next: the Anthropic entry's prompt caching, as the instructions are the same bytes for every window
 (G09); after release, cards a day against claude-mem's observations (about 1,300 a day on
 2026-10-23 and 2026-10-24) and the lag from a tool call to its window op, measured again on this PC.
+
+## Decision 72: larger windows under a backlog (2026-11-04)
+
+A tool call waited for its card a median of 280 s and a tenth of them over 3.6 hours on this PC
+(2026-10-26 to 11-04), nearly all of it before its window's first call: behind a call of its own
+session (35%), behind other sessions' calls only (34%), or with none out (31%). The worker's own
+time per window is small (the answer to its op p50 0 s, the op to the next call p50 2.3 s); a
+call grows with what it is sent (claude 8.3 s under 4,000 estimated tokens, 12.2 s at 4,000 to
+8,000). A replay of those days' hook records, with call times drawn from the chain's and scaled by a
+window's size:
+
+| | windows (calls) | wait p50 | p75 | p90 |
+|---|---|---|---|---|
+| one at a time (decision 56) | about 16,265 | 74-90 s | 566-585 s | 1,578-1,599 s |
+| three at once, a session's records in its own (decision 71) | +2.7% | 42-43 s | 315-335 s | 963-1,032 s |
+| one at a time, a full window cut again at three times the size | -16.6% | 29 s | 132-136 s | 417-431 s |
+
+What is built: when the window cut from the checkpoint is full (more records wait past it), it is
+cut again at `GROW` (three) times `[summary] window_tokens`, one call at a time as before. Its
+prompt allows three times the cards (15) and its answer three times the claims (150), so a window
+of more steps keeps what three would have given. A held window that only grew keeps its hold at the
+size it was held at. A window at the device's last record (decision 56's steps) is cut as before:
+the larger size applies to a backlog only. An entry whose request limit a grown window passes is
+skipped for it (`too_big`), as for any window over it. The replay's scripts and outputs are kept
+outside the repository (`../oboete-work/d57/parity/`).
+
+Next: the wait and calls a day measured again on this PC a week after release, against the figures
+above.
