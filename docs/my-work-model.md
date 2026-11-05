@@ -1028,12 +1028,13 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   session's message, which the import leaves out or records as an envelope; an older Claude Code
   wrote neither. Meta and subagent lines were left out before.
 - **Not text** (#841): the entry point is a mark, as `agent_sent` is, so `curate::long_text` leaves
-  it out of a prompt's and an envelope's text: My Work's ask and follow-ups, the curators'
-  windows and the records' text in search and on the page read the words alone. Before the fix
-  that text ended with the field as JSON (`{"entrypoint":"cli"}`); on this PC no claim's quote
-  lay in it, and the windows and cards made from it stay as written. The search index and the
-  vectors read a body's string values on their own (`consumer::fts::text`) and still take the
-  value as a word: #843.
+  it out of a prompt's and an envelope's text: My Work's ask and follow-ups, the curators' and the
+  summaries' windows, the page's prompts and a summary's title from its prompt, and a claim's
+  quote read the words alone. Before the fix that text ended with the field as JSON
+  (`{"entrypoint":"cli"}`); on this PC no claim's quote lay in it, and the windows and cards made
+  from it stay as written. Search reads a body's string values on its own (`consumer::fts::text`):
+  its index, its vectors and a found record's snippet still take the value as a word (#843); `get`
+  shows a record's fields, this one among them.
 - **What counts** (`typed::typed`): a record of kind `prompt` with its text, no `agent_sent`, and
   for Claude Code an entry point that counts. A Claude Code prompt with no entry point counts only
   when a hook wrote it (O5): on a copy of this PC's store, 1,584 of the last 31 days' 1,896 Claude
