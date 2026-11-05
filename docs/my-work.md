@@ -532,7 +532,8 @@ newest first, at most 60; a commit links to GitHub once a recorded push sent its
 - **Where the calls are**: a tool record's text is in no index (#317), so the `products` consumer
   keeps where each live call that may have made something is (`product_calls`: device, seq, time,
   agent, session), picked as claude-mem picks the calls it reads, and nothing it said. My Work
-  reads those records from raw.db when a request's page opens: a forgotten or expired record is
+  reads those records from raw.db when a request's page opens, a device's 100 at a time (and for
+  each card in the list since X23's slice 2b): a forgotten or expired record is
   no call, and what it made goes with it. A call that failed makes only what its output confirms:
   no branch inferred from its command alone, and no publishing tool's link (Codex on #650).
 - **The route**, `GET /api/my-work/product?request=<id>`, with the token, as every route: the

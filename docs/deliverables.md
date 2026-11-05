@@ -242,8 +242,10 @@ with row X16's products; slice 2c takes #836's first three items.
   `isCardDeliverable` takes them (commits and branches stay on the page), copies among them with
   their tags; and `deliverable_count`, how many of the 60 are such. They are built in the readers'
   hold with the copies' fingerprints, from the same read of the copies: a forget registered before
-  it leaves its copies out, and one registered meanwhile waits for the cards (on this PC about
-  0.1 s of a list answer of about 0.5 s, read each minute while My Work is open). A request whose
+  it leaves its copies out, and one registered meanwhile waits for the cards. On a copy of this
+  PC's store (53 requests, 12 with a card) they add 0.05 s to a list answer of 0.41 s (release,
+  median of 7), the list read each minute while My Work is open; a request's product calls are
+  read by device, 100 at a time (`Raw::at`), where one at a time added 0.12 s. A request whose
   products do not read has no card, and a copies' store that does not read leaves the cards
   without copies. Each tag leaves the gate's walk as the page's do. The card shows them under its
   progress and above its focus chip, as claude-mem's under its terminal and above its next move:
