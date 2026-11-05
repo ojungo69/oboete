@@ -209,8 +209,9 @@ with row X16's products; slice 2c takes #836's first three items.
   sweep run or not, and its request's `copies` changes with it; the page's answer is built in the
   readers' hold (#439), so a registration under way is waited for, not met halfway. Each copy
   is `{kind, title, url: null, path, at, file}`, `file` its link's tag. A copy whose file is not on
-  disk as its row says (`deliverables::on_disk`: real folders and a regular file of its size,
-  claude-mem's `bucketFileAvailable`) is left out and hides nothing (slice 2b). One on disk hides the
+  disk as its row says (`deliverables::on_disk`, claude-mem's `bucketFileAvailable`: opened as
+  `open_copy` opens it, a regular file of its size whose handle is at its very path) is left out and
+  hides nothing (slice 2b). One on disk hides the
   recorded file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not
   changed after the copy), its own path compared with the path as recorded, before the page's gate
   (#840): a card's file as the card stored it, a work item's where the gate left its field as it

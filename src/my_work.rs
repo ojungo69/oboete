@@ -1479,6 +1479,8 @@ struct CardFiles {
 
 /// claude-mem's `mergeProducts` limit: the newest this many entries of a request's work product.
 const PRODUCTS: usize = 60;
+/// A request's product calls read at once, at most: a page of records' bodies in memory.
+const CALLS_PAGE: usize = 100;
 
 /// Slice 4 (parity row X16): what a request produced, as claude-mem 15.1's request drawer shows it:
 /// the commits, branches and pull requests its conversations' recorded commands made, the links
@@ -1670,38 +1672,42 @@ fn products_of(
             let rows = (calls
                 .query_map(params![agent, session], |r| Ok((r.get(0)?, r.get(1)?)))?)
             .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+            let mut held: BTreeMap<String, Vec<i64>> = BTreeMap::new();
             for (device, seq) in rows {
                 let ours = |spans: &Vec<Span>| spans.iter().any(|s| holds(s, &device, (seq, seq)));
-                if owned.as_ref().is_some_and(|spans| !ours(spans)) {
-                    continue;
+                if owned.as_ref().is_none_or(ours) {
+                    held.entry(device).or_default().push(seq);
                 }
-                let Some(Item::Event(e)) = (raw.after(&device, seq - 1, 1)?.pop())
-                    .filter(|r| r.seq == seq)
-                    .map(|r| r.item)
-                else {
-                    continue;
-                };
-                let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
-                    continue;
-                };
-                let source = crate::work_product::Source {
-                    kind: "record".into(),
-                    id: format!("{device}:{seq}"),
-                    index: None,
-                };
-                let tool = body["tool"].as_str().unwrap_or("");
-                let mut list = crate::work_product::from_tool_use(
-                    tool,
-                    &body["input"],
-                    &body["output"],
-                    Some(e.ts),
-                    Some(source),
-                    body["failed"] == true,
-                );
-                for p in &mut list {
-                    p.checkout.clone_from(&e.repo);
+            }
+            // Read a device's calls a page at a time (`Raw::at`), as the list reads every
+            // request's: one call at a time was two queries each (slice 2b's measurement).
+            for (device, seqs) in held {
+                for page in seqs.chunks(CALLS_PAGE) {
+                    for r in raw.at(&device, page)? {
+                        let Item::Event(e) = r.item else { continue };
+                        let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
+                            continue;
+                        };
+                        let source = crate::work_product::Source {
+                            kind: "record".into(),
+                            id: format!("{device}:{}", r.seq),
+                            index: None,
+                        };
+                        let tool = body["tool"].as_str().unwrap_or("");
+                        let mut list = crate::work_product::from_tool_use(
+                            tool,
+                            &body["input"],
+                            &body["output"],
+                            Some(e.ts),
+                            Some(source),
+                            body["failed"] == true,
+                        );
+                        for p in &mut list {
+                            p.checkout.clone_from(&e.repo);
+                        }
+                        lists.push(list);
+                    }
                 }
-                lists.push(list);
             }
         }
     }
