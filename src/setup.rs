@@ -3586,7 +3586,7 @@ impl DiagnosticDirectory {
 }
 
 #[cfg(unix)]
-fn diagnostic_directory_names(
+pub(crate) fn diagnostic_directory_names(
     file: &mut std::fs::File,
 ) -> std::io::Result<Vec<std::ffi::OsString>> {
     use std::os::{
@@ -3651,7 +3651,7 @@ fn diagnostic_directory_names(
 }
 
 #[cfg(windows)]
-fn diagnostic_directory_names(
+pub(crate) fn diagnostic_directory_names(
     file: &mut std::fs::File,
 ) -> std::io::Result<Vec<std::ffi::OsString>> {
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
@@ -3728,7 +3728,9 @@ fn diagnostic_directory_names(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn diagnostic_directory_names(_: &mut std::fs::File) -> std::io::Result<Vec<std::ffi::OsString>> {
+pub(crate) fn diagnostic_directory_names(
+    _: &mut std::fs::File,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 

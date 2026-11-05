@@ -578,31 +578,270 @@ fn open_source(path: &Path, roots: &[PathBuf]) -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// A folder under `deliverables/` made or found as a real directory, never through a link.
-fn real_dir(home: &Path, folder: &str) -> Result<PathBuf> {
-    let top = home.join(FOLDER);
-    for dir in [top.clone(), top.join(folder)] {
-        match std::fs::symlink_metadata(&dir) {
-            Ok(m) => anyhow::ensure!(m.is_dir(), "{} is not a real folder", dir.display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&dir)?,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(top.join(folder))
+/// A folder of `deliverables/` held while a copy or a removal acts in it (#836 item 2). On Linux
+/// and macOS by its descriptor: what is made, read, renamed and removed in it is relative to the
+/// folder opened, never through a link, so one swapped for a link afterwards is not followed.
+/// Elsewhere by its path, checked first as before (a stated limit: Windows).
+struct Dir {
+    path: PathBuf,
+    #[cfg(unix)]
+    fd: std::fs::File,
 }
 
-/// The sha256 of an existing copy of `len` bytes, opened without blocking or following a link and
-/// refused unless a regular file, read to one byte past `len` at most: a FIFO, a link or a file of
-/// any other size put under a copy's name holds nothing up (None for another size).
-fn sha256_file(path: &Path, len: u64) -> Result<Option<String>> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+/// What a name in a held folder is, read without following a link.
+#[derive(Debug, PartialEq)]
+enum Entry {
+    File,
+    Other,
+}
+
+/// One plain name in a folder: no separator, not `.` or `..`, no NUL.
+fn plain(name: &str) -> std::io::Result<&str> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
     }
-    let file = options.open(path)?;
+    Ok(name)
+}
+
+#[cfg(unix)]
+impl Dir {
+    const FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+
+    /// `<home>/deliverables`, made (0700) when `create` and missing. None when it is not there or
+    /// not a real folder (a link); the home itself as given, a link to it allowed.
+    fn top(home: &Path, create: bool) -> std::io::Result<Option<Dir>> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let path = home.join(FOLDER);
+        if create {
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
+        }
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path);
+        match opened {
+            Ok(fd) => Ok(Some(Dir { path, fd })),
+            Err(e) if not_a_folder(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The folder `name` of this one, made (0700) when `create` and missing. None when it is not
+    /// there or not a real folder.
+    fn child(&self, name: &str, create: bool) -> std::io::Result<Option<Dir>> {
+        use std::os::fd::AsRawFd;
+        if create {
+            let c = c_name(name)?;
+            // SAFETY: the held descriptor is open and `c` is one NUL-terminated name.
+            if unsafe { libc::mkdirat(self.fd.as_raw_fd(), c.as_ptr(), 0o700) } < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+        }
+        match self.open_at(name, Self::FLAGS, 0) {
+            Ok(fd) => Ok(Some(Dir {
+                path: self.path.join(name),
+                fd,
+            })),
+            Err(e) if not_a_folder(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A new file `name` (0600) for writing, never one already there or a link.
+    fn create_new(&self, name: &str) -> std::io::Result<std::fs::File> {
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW;
+        self.open_at(name, flags, 0o600)
+    }
+
+    /// `name` opened for reading without following a link or blocking (a FIFO holds nothing up).
+    fn open_read(&self, name: &str) -> std::io::Result<std::fs::File> {
+        self.open_at(
+            name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            0,
+        )
+    }
+
+    fn open_at(
+        &self,
+        name: &str,
+        flags: libc::c_int,
+        mode: libc::c_uint,
+    ) -> std::io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let c = c_name(name)?;
+        // SAFETY: the held descriptor is open and `c` is one NUL-terminated name; the mode is
+        // read only with O_CREAT.
+        let fd = unsafe {
+            libc::openat(
+                self.fd.as_raw_fd(),
+                c.as_ptr(),
+                flags | libc::O_CLOEXEC,
+                mode,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a new descriptor openat returned, owned here alone.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    /// What `name` is, its link not followed; None when it is not there.
+    fn entry(&self, name: &str) -> std::io::Result<Option<Entry>> {
+        use std::os::fd::AsRawFd;
+        let c = c_name(name)?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the held descriptor is open, `c` is NUL-terminated and `stat` is writable for
+        // one stat.
+        let status = unsafe {
+            libc::fstatat(
+                self.fd.as_raw_fd(),
+                c.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status < 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(None),
+                _ => Err(e),
+            };
+        }
+        // SAFETY: a successful fstatat filled it.
+        let stat = unsafe { stat.assume_init() };
+        Ok(Some(if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+            Entry::File
+        } else {
+            Entry::Other
+        }))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let (from, to) = (c_name(from)?, c_name(to)?);
+        let fd = self.fd.as_raw_fd();
+        // SAFETY: the held descriptor is open and both names are NUL-terminated.
+        if unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Removes `name` itself (a link is removed, never followed).
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let c = c_name(name)?;
+        // SAFETY: the held descriptor is open and `c` is NUL-terminated.
+        if unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The names in it, read on the held descriptor (setup.rs's reader takes it alone).
+    fn names(&mut self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        crate::setup::diagnostic_directory_names(&mut self.fd)
+    }
+}
+
+/// `name` as one NUL-terminated plain name.
+#[cfg(unix)]
+fn c_name(name: &str) -> std::io::Result<std::ffi::CString> {
+    std::ffi::CString::new(plain(name)?).map_err(|_| std::io::ErrorKind::InvalidInput.into())
+}
+
+/// A folder open under `O_NOFOLLOW` that is not there or not a real folder: a link fails with
+/// `ELOOP`, a file with `ENOTDIR` (Linux and macOS alike).
+#[cfg(unix)]
+fn not_a_folder(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+        || matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+}
+
+#[cfg(not(unix))]
+impl Dir {
+    fn top(home: &Path, create: bool) -> std::io::Result<Option<Dir>> {
+        Self::at(home.join(FOLDER), create)
+    }
+
+    fn child(&self, name: &str, create: bool) -> std::io::Result<Option<Dir>> {
+        Self::at(self.path.join(plain(name)?), create)
+    }
+
+    /// `path` as a real folder, made when `create` and missing; None when it is not one.
+    fn at(path: PathBuf, create: bool) -> std::io::Result<Option<Dir>> {
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => Ok(Some(Dir { path })),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+                std::fs::create_dir(&path)?;
+                Ok(Some(Dir { path }))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn create_new(&self, name: &str) -> std::io::Result<std::fs::File> {
+        let path = self.path.join(plain(name)?);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    fn open_read(&self, name: &str) -> std::io::Result<std::fs::File> {
+        std::fs::File::open(self.path.join(plain(name)?))
+    }
+
+    fn entry(&self, name: &str) -> std::io::Result<Option<Entry>> {
+        match std::fs::symlink_metadata(self.path.join(plain(name)?)) {
+            Ok(m) if m.is_file() => Ok(Some(Entry::File)),
+            Ok(_) => Ok(Some(Entry::Other)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+        std::fs::rename(self.path.join(plain(from)?), self.path.join(plain(to)?))
+    }
+
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        std::fs::remove_file(self.path.join(plain(name)?))
+    }
+
+    fn names(&mut self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        std::fs::read_dir(&self.path)?
+            .map(|e| e.map(|e| e.file_name()))
+            .collect()
+    }
+}
+
+/// `deliverables/<folder>`, made where missing, held (#836 item 2).
+fn held_folder(home: &Path, folder: &str) -> Result<Dir> {
+    let not_real = |path: PathBuf| anyhow::anyhow!("{} is not a real folder", path.display());
+    let top = Dir::top(home, true)?.ok_or_else(|| not_real(home.join(FOLDER)))?;
+    #[cfg(test)]
+    seam(Stage::Top);
+    top.child(folder, true)?
+        .ok_or_else(|| not_real(top.path.join(folder)))
+}
+
+/// The sha256 of an existing copy `name` of `len` bytes in a held folder, opened without blocking
+/// or following a link and refused unless a regular file, read to one byte past `len` at most: a
+/// FIFO, a link or a file of any other size put under a copy's name holds nothing up (None for
+/// another size).
+fn sha256_held(dir: &Dir, name: &str, len: u64) -> Result<Option<String>> {
+    let file = dir.open_read(name)?;
     anyhow::ensure!(file.metadata()?.is_file(), "not a regular file");
     let mut hash = Sha256::new();
     let read = std::io::copy(&mut file.take(len + 1), &mut hash)?;
@@ -625,20 +864,17 @@ pub(crate) struct Copied {
 /// hashed as written, then named by its content; an existing name is reused only for the same
 /// whole hash, else the copy takes its whole hash (claude-mem's `copyDeliverableIntoBucket`).
 fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) -> Result<Copied> {
-    let dir = real_dir(home, folder)?;
+    let dir = held_folder(home, folder)?;
+    #[cfg(test)]
+    seam(Stage::Folder);
     let mut nonce = [0u8; 6];
     getrandom::fill(&mut nonce).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let partial = dir.join(format!(".partial-{}-{}", std::process::id(), hex(&nonce)));
+    let partial = format!(".partial-{}-{}", std::process::id(), hex(&nonce));
     let result = (|| -> Result<Copied> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            // A copy is the owner's alone, whatever its source's mode.
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut out = options.open(&partial)?;
+        // A copy is the owner's alone, whatever its source's mode (0600 where it is made).
+        let mut out = dir.create_new(&partial)?;
+        #[cfg(test)]
+        seam(Stage::Partial);
         let mut hash = Sha256::new();
         let mut bytes = 0u64;
         let mut buf = vec![0u8; 1 << 20];
@@ -658,33 +894,28 @@ fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) 
             copy_name(source, &sha256[..8])?,
             copy_name(source, &sha256)?,
         ] {
-            let path = dir.join(&name);
-            match std::fs::symlink_metadata(&path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::rename(&partial, &path)?;
-                    return Ok(Copied {
-                        copy: format!("{folder}/{name}"),
-                        bytes,
-                        sha256,
-                    });
+            let copied = || Copied {
+                copy: format!("{folder}/{name}"),
+                bytes,
+                sha256: sha256.clone(),
+            };
+            match dir.entry(&name)? {
+                None => {
+                    dir.rename(&partial, &name)?;
+                    return Ok(copied());
                 }
-                Ok(m) if m.is_file() && sha256_file(&path, bytes)?.as_ref() == Some(&sha256) => {
-                    std::fs::remove_file(&partial)?;
-                    return Ok(Copied {
-                        copy: format!("{folder}/{name}"),
-                        bytes,
-                        sha256,
-                    });
+                Some(Entry::File) if sha256_held(&dir, &name, bytes)?.as_ref() == Some(&sha256) => {
+                    dir.remove(&partial)?;
+                    return Ok(copied());
                 }
                 // Another file under the short name: the whole hash's.
-                Ok(_) => {}
-                Err(e) => return Err(e.into()),
+                Some(_) => {}
             }
         }
         anyhow::bail!("both names are taken by other files")
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&partial);
+        let _ = dir.remove(&partial);
     }
     result
 }
@@ -1069,25 +1300,28 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
             .prepare("SELECT copy FROM deliverables")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // Only a real folder is read: a link at `deliverables/` leads elsewhere.
-        let top = home.join(FOLDER);
-        if !std::fs::symlink_metadata(&top).is_ok_and(|m| m.is_dir()) {
-            return Ok(removed);
-        }
-        let Ok(folders) = std::fs::read_dir(&top) else {
+        // Only a real folder is read, each held while its files are removed (#836 item 2): a
+        // link at `deliverables/` or in it leads elsewhere.
+        let Ok(Some(mut top)) = Dir::top(home, false) else {
             return Ok(removed);
         };
-        for folder in folders.flatten() {
-            if !folder.file_type().is_ok_and(|t| t.is_dir()) {
+        let Ok(folders) = top.names() else {
+            return Ok(removed);
+        };
+        for name in folders {
+            let name = name.to_string_lossy();
+            let Some(mut dir) = top.child(&name, false)? else {
                 continue;
-            }
-            let name = folder.file_name().to_string_lossy().into_owned();
-            for file in std::fs::read_dir(folder.path())?.flatten() {
-                let copy = format!("{name}/{}", file.file_name().to_string_lossy());
+            };
+            #[cfg(test)]
+            seam(Stage::Folder);
+            for file in dir.names()? {
+                let file = file.to_string_lossy();
+                let copy = format!("{name}/{file}");
                 if named.contains(&copy) {
                     continue;
                 }
-                match remove_copy(home, &copy) {
+                match remove_held(&dir, &file) {
                     Ok(true) => removed += 1,
                     Ok(false) => {}
                     Err(e) => eprintln!("oboete: {copy} was not removed: {e:#}"),
@@ -1108,30 +1342,30 @@ fn copy_parts(copy: &str) -> Option<(&str, &str)> {
 }
 
 /// Removes one copy, only a regular file directly in a folder of `deliverables/`, no link
-/// followed.
+/// followed, the folder held while it is removed (#836 item 2).
 fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
     // A name no copy is given is refused, never taken as gone: its row stays.
     let Some((folder, name)) = copy_parts(copy) else {
         anyhow::bail!("not a copy's name");
     };
     // A folder or a file that cannot be read is an error, so its row stays for the next sweep;
-    // one that is not there is gone already.
-    let meta = |p: &Path| match std::fs::symlink_metadata(p) {
-        Ok(m) => Ok(Some(m)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+    // one that is not there, or not a real folder, is gone already.
+    let Some(top) = Dir::top(home, false)? else {
+        return Ok(false);
     };
-    let top = home.join(FOLDER);
-    let dir = top.join(folder);
-    for d in [&top, &dir] {
-        if !meta(d)?.is_some_and(|m| m.is_dir()) {
-            return Ok(false);
-        }
-    }
-    let path = dir.join(name);
-    match meta(&path)? {
-        Some(m) if m.is_file() => {
-            std::fs::remove_file(&path)?;
+    let Some(dir) = top.child(folder, false)? else {
+        return Ok(false);
+    };
+    #[cfg(test)]
+    seam(Stage::Folder);
+    remove_held(&dir, name)
+}
+
+/// Removes `name` from a held folder when it is a regular file there: whether it did.
+fn remove_held(dir: &Dir, name: &str) -> Result<bool> {
+    match dir.entry(name)? {
+        Some(Entry::File) => {
+            dir.remove(name)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -1375,6 +1609,37 @@ pub(crate) fn open_copy(
     }
     file.seek(std::io::SeekFrom::Start(0))?;
     Ok(Some(file))
+}
+
+/// Where a test acts while a copy or a removal holds `deliverables/` (#836 item 2).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stage {
+    /// `deliverables/` held, its folder not yet made or opened.
+    Top,
+    /// The folder held.
+    Folder,
+    /// A copy's partial file made in it.
+    Partial,
+}
+
+/// A test's act at each stage.
+#[cfg(test)]
+type Act = Box<dyn FnMut(Stage)>;
+
+#[cfg(test)]
+thread_local! {
+    static SEAM: std::cell::RefCell<Option<Act>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The test's act at `stage`, on this thread.
+#[cfg(test)]
+fn seam(stage: Stage) {
+    SEAM.with(|s| {
+        if let Some(act) = s.borrow_mut().as_mut() {
+            act(stage);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -2087,7 +2352,7 @@ mod tests {
         let src = work.path().join("report.pdf");
         std::fs::write(&src, b"new").unwrap();
         let sha = hex(&Sha256::digest(b"new"));
-        let dir = real_dir(home.path(), "shop").unwrap();
+        let dir = held_folder(home.path(), "shop").unwrap().path;
         let short = dir.join(format!("report-{}.pdf", &sha[..8]));
         std::fs::write(&short, b"other").unwrap();
         let roots = roots(work.path());
@@ -2129,6 +2394,182 @@ mod tests {
             Some("/w/n.ipynb")
         );
         assert_eq!(written("Read", r#"{"file_path":"/w/r.pdf"}"#), None);
+    }
+
+    /// Runs `f` with `act` called at each stage of a copy's or a removal's hold, on this thread.
+    fn with_seam<T>(act: impl FnMut(Stage) + 'static, f: impl FnOnce() -> T) -> T {
+        SEAM.with(|s| *s.borrow_mut() = Some(Box::new(act)));
+        let out = f();
+        SEAM.with(|s| *s.borrow_mut() = None);
+        out
+    }
+
+    /// An act at `at` that moves `dir` to `moved` and puts a link to `outside` in its place, once.
+    #[cfg(unix)]
+    fn swap_at(at: Stage, dir: &Path, moved: &Path, outside: &Path) -> impl FnMut(Stage) + 'static {
+        let (dir, moved, outside) = (dir.to_owned(), moved.to_owned(), outside.to_owned());
+        let mut done = false;
+        move |stage| {
+            if stage == at && !done {
+                done = true;
+                std::fs::rename(&dir, &moved).unwrap();
+                std::os::unix::fs::symlink(&outside, &dir).unwrap();
+            }
+        }
+    }
+
+    /// #836 item 2: a copy holds `deliverables/` and its folder by their descriptors. The folder
+    /// swapped for a link to a folder outside once it is open receives the copy where it was moved:
+    /// the folder outside, holding a file of the copy's short name with other bytes, is neither
+    /// read for that name nor written; the same bytes already under the short name in the folder
+    /// held are reused there.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_holds_its_folder_when_it_is_swapped_for_a_link() {
+        for held_same in [false, true] {
+            let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let work = tempfile::tempdir().unwrap();
+            let src = work.path().join("deck.pdf");
+            std::fs::write(&src, b"deck").unwrap();
+            let short = copy_name(&src, &hex(&Sha256::digest(b"deck"))[..8]).unwrap();
+            let folder = home.path().join(FOLDER).join("shop");
+            std::fs::create_dir_all(&folder).unwrap();
+            if held_same {
+                std::fs::write(folder.join(&short), b"deck").unwrap();
+            }
+            let outside = out.path().join("shop");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join(&short), b"other").unwrap();
+            let moved = out.path().join("moved");
+            let act = swap_at(Stage::Folder, &folder, &moved, &outside);
+            let copied = with_seam(act, || {
+                copy_into(
+                    home.path(),
+                    "shop",
+                    &src,
+                    std::fs::File::open(&src).unwrap(),
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                copied.copy,
+                format!("shop/{short}"),
+                "held_same {held_same}"
+            );
+            assert_eq!(std::fs::read(moved.join(&short)).unwrap(), b"deck");
+            assert_eq!(std::fs::read(outside.join(&short)).unwrap(), b"other");
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+            assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 1);
+        }
+    }
+
+    /// #836 item 2: a copy whose read fails after its partial file is made removes the partial
+    /// from the folder it holds, also when that folder was swapped for a link meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_removes_its_partial_from_the_held_folder() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let folder = home.path().join(FOLDER).join("shop");
+        std::fs::create_dir_all(&folder).unwrap();
+        let outside = out.path().join("shop");
+        std::fs::create_dir(&outside).unwrap();
+        let moved = out.path().join("moved");
+        // A folder's handle read as the source: its read fails, every time.
+        let source = std::fs::File::open(out.path()).unwrap();
+        let act = swap_at(Stage::Partial, &folder, &moved, &outside);
+        let copied = with_seam(act, || {
+            copy_into(home.path(), "shop", Path::new("/w/deck.pdf"), source)
+        });
+        assert!(copied.is_err());
+        assert_eq!(
+            std::fs::read_dir(&moved).unwrap().count(),
+            0,
+            "no partial left"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// #836 item 2: `deliverables/` swapped for a link once it is open, before a folder of it is
+    /// made: the folder is made in the one held, and nothing outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_folder_is_made_in_the_held_top() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let top = home.path().join(FOLDER);
+        std::fs::create_dir(&top).unwrap();
+        let outside = out.path().join("top");
+        std::fs::create_dir(&outside).unwrap();
+        let moved = out.path().join("moved");
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("deck.pdf");
+        std::fs::write(&src, b"deck").unwrap();
+        let act = swap_at(Stage::Top, &top, &moved, &outside);
+        let copied = with_seam(act, || {
+            copy_into(
+                home.path(),
+                "shop",
+                &src,
+                std::fs::File::open(&src).unwrap(),
+            )
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(moved.join(&copied.copy)).unwrap(), b"deck");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// #836 item 2: a removal holds its folder: swapped for a link once it is open, the folder where
+    /// it was moved loses the file and the folder outside keeps its file of the same name; the
+    /// sweep's walk of files no row names does the same, reading the names of the folder it holds
+    /// (one outside holds none of them).
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_holds_its_folder_when_it_is_swapped_for_a_link() {
+        for orphans in [false, true] {
+            let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let folder = home.path().join(FOLDER).join("shop");
+            std::fs::create_dir_all(&folder).unwrap();
+            let held = if orphans { "gone.pdf" } else { "old.pdf" };
+            std::fs::write(folder.join(held), b"old").unwrap();
+            let outside = out.path().join("shop");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("old.pdf"), b"keep").unwrap();
+            let moved = out.path().join("moved");
+            drop(open(home.path()).unwrap());
+            let raw = crate::raw::open(home.path()).unwrap();
+            let act = swap_at(Stage::Folder, &folder, &moved, &outside);
+            let removed = with_seam(act, || {
+                if orphans {
+                    sweep(home.path(), &raw, true).unwrap() == 1
+                } else {
+                    remove_copy(home.path(), "shop/old.pdf").unwrap()
+                }
+            });
+            assert!(removed, "orphans {orphans}");
+            assert!(!moved.join(held).exists(), "orphans {orphans}");
+            assert_eq!(std::fs::read(outside.join("old.pdf")).unwrap(), b"keep");
+        }
+    }
+
+    /// A folder of `deliverables/` that is a link already is neither written through nor emptied
+    /// through (as before #836 item 2: its directory opens never follow a link).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_is_a_link_is_not_followed() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let top = home.path().join(FOLDER);
+        std::fs::create_dir(&top).unwrap();
+        let outside = out.path().join("shop");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("old.pdf"), b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, top.join("shop")).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("deck.pdf");
+        std::fs::write(&src, b"deck").unwrap();
+        let file = std::fs::File::open(&src).unwrap();
+        assert!(copy_into(home.path(), "shop", &src, file).is_err());
+        assert!(!remove_copy(home.path(), "shop/old.pdf").unwrap());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        assert_eq!(std::fs::read(outside.join("old.pdf")).unwrap(), b"keep");
     }
 
     /// raw.db rebuilt from this store's records below `cut` and its ops under the same device, and
