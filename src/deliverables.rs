@@ -1310,12 +1310,26 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
         };
         for name in folders {
             let name = name.to_string_lossy();
-            let Some(mut dir) = top.child(&name, false)? else {
-                continue;
+            // A folder that cannot be read is said and passed over: the others are still swept.
+            let not_swept = |e: std::io::Error| eprintln!("oboete: {name} was not swept: {e:#}");
+            let mut dir = match top.child(&name, false) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => continue,
+                Err(e) => {
+                    not_swept(e);
+                    continue;
+                }
             };
             #[cfg(test)]
             seam(Stage::Folder);
-            for file in dir.names()? {
+            let files = match dir.names() {
+                Ok(files) => files,
+                Err(e) => {
+                    not_swept(e);
+                    continue;
+                }
+            };
+            for file in files {
                 let file = file.to_string_lossy();
                 let copy = format!("{name}/{file}");
                 if named.contains(&copy) {
@@ -2548,6 +2562,33 @@ mod tests {
             assert!(!moved.join(held).exists(), "orphans {orphans}");
             assert_eq!(std::fs::read(outside.join("old.pdf")).unwrap(), b"keep");
         }
+    }
+
+    /// The sweep's walk of files no row names passes over a folder it cannot read, said, and sweeps
+    /// the others, in whatever order the folders are read (CodeRabbit on #845).
+    #[cfg(unix)]
+    #[test]
+    fn the_orphan_walk_passes_over_a_folder_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let top = home.path().join(FOLDER);
+        for folder in ["closed", "open"] {
+            std::fs::create_dir_all(top.join(folder)).unwrap();
+            std::fs::write(top.join(folder).join("orphan.pdf"), b"x").unwrap();
+        }
+        let closed = top.join("closed");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Where permissions bind (not as root).
+        let binds = std::fs::read_dir(&closed).is_err();
+        drop(open(home.path()).unwrap());
+        let raw = crate::raw::open(home.path()).unwrap();
+        let swept = sweep(home.path(), &raw, true);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if binds {
+            assert_eq!(swept.unwrap(), 1);
+            assert!(closed.join("orphan.pdf").exists());
+        }
+        assert!(!top.join("open").join("orphan.pdf").exists());
     }
 
     /// A folder of `deliverables/` that is a link already is neither written through nor emptied

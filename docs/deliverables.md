@@ -152,8 +152,8 @@ none.
   files directly in a real folder of `<home>/deliverables/`, no link followed, the folder held by its
   descriptor while its files are read and removed (Linux and macOS, #836 item 2). It runs after
   forget's purge (step 5, under its lock) and in the worker at its idle time (its scan for files no
-  row names only there, where no copy is in progress), so a sweep that failed is made up by the
-  next.
+  row names only there, where no copy is in progress; a folder it cannot read is said and passed
+  over, the others swept), so a sweep that failed is made up by the next.
 - Retention's expiry (`[retention] days`) removes no copy (decision 73): claude-mem removes none, and
   a copy is what was made, kept longer than the text of the records about it.
 
