@@ -931,10 +931,13 @@ fn long_of(kind: &str, body: &Value) -> (Option<String>, Option<usize>) {
     };
     let long = match kind {
         "prompt" if body["omitted"] == true => None,
-        // `agent_sent` is who sent it (#273), which the line's label shows: not text.
-        "prompt" | "envelope" => {
-            joined(text(&body["prompt"]), &["prompt", "omitted", "agent_sent"])
-        }
+        // `agent_sent` is who sent it (#273), which the line's label shows, and `entrypoint`
+        // where a Claude Code prompt was typed or sent from (#659), a word My Work's goals read
+        // (#841): neither is text.
+        "prompt" | "envelope" => joined(
+            text(&body["prompt"]),
+            &["prompt", "omitted", "agent_sent", "entrypoint"],
+        ),
         "reply" => joined(text(&body["assistant"]), &["assistant"]),
         "compaction" => joined(text(&body["summary"]), &["summary", "trigger"]),
         "directive" => text(&body["text"]),
@@ -6419,6 +6422,34 @@ mod tests {
             assert!(w.to_offset.is_some());
             let took = crate::budget::estimate(&w.text);
             assert!(took <= budget, "{budget}: {took}");
+        }
+    }
+
+    /// #841: where a Claude Code prompt was typed or sent from (`entrypoint`, #659) is not its
+    /// text, as who sent it is not: a prompt's and an envelope's long text is its words alone, for
+    /// any entry point a record keeps, while a field the renderer does not know still follows them.
+    #[test]
+    fn a_prompts_entry_point_is_not_its_text() {
+        let words = "Fix the parser.";
+        for kind in ["prompt", "envelope"] {
+            let entries =
+                (crate::typed::TYPED_ENTRYPOINTS.iter()).chain(&["sdk-cli", "remote_trigger"]);
+            for entry in entries {
+                for body in [
+                    serde_json::json!({"prompt": words, "entrypoint": entry}),
+                    serde_json::json!({"prompt": words, "agent_sent": true, "entrypoint": entry}),
+                ] {
+                    let e = event(kind, body);
+                    assert_eq!(long_text(&e).as_deref(), Some(words), "{kind} {entry}");
+                }
+            }
+            let masked =
+                serde_json::json!({"prompt": words, "entrypoint": "cli", "[REDACTED]": "x"});
+            assert_eq!(
+                long_text(&event(kind, masked)).as_deref(),
+                Some("Fix the parser.\n{\"[REDACTED]\":\"x\"}"),
+                "{kind}"
+            );
         }
     }
 
