@@ -1465,9 +1465,16 @@ impl Held {
 pub(crate) struct Sources {
     convs: Vec<(Key, Option<Vec<Span>>)>,
     fields: Vec<(Map<String, Value>, i64)>,
-    /// A card's modified files as it is shown and as it stored them, its time, and its window op
-    /// by device and seq.
-    files: Vec<(Vec<String>, Vec<String>, i64, (String, i64))>,
+    files: Vec<CardFiles>,
+}
+
+/// A card's modified files as the gate shows them and as the card stored them, its time, and its
+/// window op by device and seq.
+struct CardFiles {
+    shown: Vec<String>,
+    stored: Vec<String>,
+    at: i64,
+    op: (String, i64),
 }
 
 /// claude-mem's `mergeProducts` limit: the newest this many entries of a request's work product.
@@ -1727,17 +1734,17 @@ fn products_of(
         }
         lists.push(list);
     }
-    for (files, stored, at, (device, seq)) in &sources.files {
+    for f in &sources.files {
         let card = crate::work_product::Source {
             kind: "card".into(),
-            id: format!("{device}:{seq}"),
+            id: format!("{}:{}", f.op.0, f.op.1),
             index: None,
         };
-        let mut list = crate::work_product::from_files(files, Some(*at), Some(card));
+        let mut list = crate::work_product::from_files(&f.shown, Some(f.at), Some(card));
         // Each shown as the gate shows the card's file, recorded as the card stored it.
         for p in &mut list {
             let i = p.source.as_ref().and_then(|s| s.index);
-            p.recorded = i.and_then(|i| stored.get(i)).cloned();
+            p.recorded = i.and_then(|i| f.stored.get(i)).cloned();
         }
         lists.push(list);
     }
@@ -2095,11 +2102,13 @@ fn sources(r: &Request, items: &[&Work], cards: &[&Shown]) -> Sources {
             .filter(|(fields, _)| !fields.is_empty())
             .collect(),
         files: (cards.iter())
-            .map(|c| {
-                let op = (c.c.device.clone(), c.c.op_seq);
-                (c.c.files_modified.clone(), c.files.clone(), c.c.ts, op)
+            .filter(|c| !c.c.files_modified.is_empty())
+            .map(|c| CardFiles {
+                shown: c.c.files_modified.clone(),
+                stored: c.files.clone(),
+                at: c.c.ts,
+                op: (c.c.device.clone(), c.c.op_seq),
             })
-            .filter(|(files, ..)| !files.is_empty())
             .collect(),
     }
 }
