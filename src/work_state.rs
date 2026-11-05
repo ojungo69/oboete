@@ -60,8 +60,8 @@ pub const RULE_COPIES: &str = rule!(concat!(
     "- Deliverables: write a deck, report, page or other file the person asked for as a file and \
     attach it as work_product before you finish. When your turn ends, oboete copies each attached \
     file (and any deck, document, page, image or spreadsheet you wrote outside the source tree) \
-    into this repository's folder under ~/.oboete/deliverables/ and links it on the request in My \
-    Work.\n"
+    into this repository's folder under ~/.oboete/deliverables/ and links it on the request's card \
+    in My Work.\n"
 ));
 /// The rule without its attach line, for a section too small for both (`session_start_chars`
 /// near its least): the rest is what an agent needs to keep its lists.
@@ -1111,8 +1111,8 @@ mod tests {
 
     /// The rule is claude-mem's, with oboete's tool and its repository; with claude-mem 15.3's line
     /// on the deliverables it copies (`RULE_COPIES`, row G01) in oboete's words: oboete copies
-    /// when the turn ends, into its own folder, and links the copy on the request (its page now,
-    /// its card with row X16).
+    /// when the turn ends, into its own folder, and links the copy on the request's card, as
+    /// claude-mem's line says (slice 2b).
     #[test]
     fn the_rule_is_claude_mems() {
         let theirs = [
@@ -1135,8 +1135,7 @@ mod tests {
             .replace(
                 "into this project's deliverables bucket, ~/.claude-mem/deliverables/<project>/, and",
                 "into this repository's folder under ~/.oboete/deliverables/ and",
-            )
-            .replace("on the request's card in My Work", "on the request in My Work");
+            );
         let read = "\n- Read every list";
         assert_eq!(
             RULE_COPIES,

@@ -2549,9 +2549,12 @@ impl Viewer {
                 sessions(&self.home, repo.as_deref(), before.as_ref(), limit)?
             }
             // X10 (docs/my-work.md): every repository's requests, as claude-mem's My Work shows them.
+            // Each card with its deliverables, a copy's link made by this viewer (slice 2b).
             "my-work" => match crate::my_work::Range::of(q.get("range").map(String::as_str)) {
                 Some(range) => {
-                    let mut answer = crate::my_work::read(&self.home, range, crate::db::now_ms())?;
+                    let tag = |row: &crate::deliverables::Row| self.file_tag(row);
+                    let now = crate::db::now_ms();
+                    let mut answer = crate::my_work::listed(&self.home, range, now, &tag)?;
                     // The links' instance: a restarted viewer's links are new (docs/deliverables.md).
                     answer["instance"] = json!(self.files_instance()?);
                     answer
@@ -2820,6 +2823,13 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
         "my-work/product" => own(answer.get_mut("products"), "file"),
         _ => Vec::new(),
     };
+    // Each card's deliverables' tags (slice 2b), a list in each request.
+    let card_files: Vec<Vec<Option<Value>>> = match answer.get_mut("requests") {
+        Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
+            .map(|r| own(r.get_mut("deliverables"), "file"))
+            .collect(),
+        _ => Vec::new(),
+    };
     // A session's key, a hash that names it in the page's requests (docs/page.md S2), leaves the
     // gate's walk and comes back as a cursor does, so no rule of the user's masks a selector
     // (CodeRabbit on #635).
@@ -2858,6 +2868,17 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
             for (item, value) in items.iter_mut().zip(values) {
                 if let (Value::Object(item), Some(value)) = (item, value) {
                     item.insert(key.to_owned(), value);
+                }
+            }
+        }
+    }
+    if let Some(Value::Array(requests)) = answer.get_mut("requests") {
+        for (request, files) in requests.iter_mut().zip(card_files) {
+            if let Some(Value::Array(items)) = request.get_mut("deliverables") {
+                for (item, file) in items.iter_mut().zip(files) {
+                    if let (Value::Object(item), Some(file)) = (item, file) {
+                        item.insert("file".to_owned(), file);
+                    }
                 }
             }
         }
@@ -10594,6 +10615,43 @@ curate = false
         std::fs::remove_file(&store).unwrap();
         std::fs::create_dir(&store).unwrap();
         assert!(get(&v, "/api/version")["v"].is_string());
+    }
+
+    /// Slice 2b of docs/deliverables.md: the list's answer gives a request's card its
+    /// deliverables, a copy with this viewer's tag for its link, which leaves the gate's walk as
+    /// the page's tags do: a rule that matches the tag's hex masks none of it, and one that matches
+    /// the copy's name masks its title and path.
+    #[test]
+    fn a_cards_deliverables_keep_their_links_through_the_gate() {
+        if !in_child("view::tests::a_cards_deliverables_keep_their_links_through_the_gate") {
+            return;
+        }
+        let (_home, _work, v, row) = copied(b"<p>card</p>");
+        let tag = v.file_tag(&row).unwrap();
+        let rules = format!(
+            "{{ id = 'tag', regex = '{}' }}, {{ id = 'name', regex = 'page\\.html' }}",
+            &tag[..12]
+        );
+        std::fs::write(
+            v.home.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{rules}]\n"),
+        )
+        .unwrap();
+        redact::set_home(&v.home).unwrap();
+        let answer = get(&v, "/api/my-work?range=all");
+        let card = &answer["requests"][0];
+        assert_eq!(card["deliverable_count"], 1, "{answer}");
+        let d = &card["deliverables"][0];
+        assert_eq!(d["file"], tag.as_str(), "{answer}");
+        assert_eq!(d["kind"], "page", "{answer}");
+        assert_eq!(d["title"], "[REDACTED]", "{answer}");
+        // The whole name, whatever the system's separator (Windows CI).
+        let path = std::path::Path::new(d["path"].as_str().unwrap());
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("[REDACTED]"),
+            "{answer}"
+        );
     }
 
     fn hex_tag(tag: &[u8; 16]) -> String {

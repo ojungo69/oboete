@@ -76,7 +76,8 @@ function blurOff(){
     for(const cb of node.listeners?.focusout||[])cb({target:gone,relatedTarget:null});
 }
 const ids=new Map();
-const document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
+// An SVG element is a node of its tag here, as the page's marks are drawn (slice 2b's icons).
+const document={activeElement:null,createElement:tag=>new Node(tag),createElementNS:(_ns,tag)=>new Node(tag),getElementById:id=>{
   if(!ids.has(id))ids.set(id,new Node());return ids.get(id);
 }};
 // Where a browser puts the focus taken off an element (#810).
@@ -4375,7 +4376,7 @@ assert(box().hidden,'the section waits for its answer');
 await new Promise(resolve=>setImmediate(resolve));
 assert.deepEqual(asked,['/api/my-work/product?request=p1'],'the page asks for its request');
 const shownProducts=text(box());
-assert(!box().hidden&&shownProducts.includes('Work product'),'the section shows what was read');
+assert(!box().hidden&&shownProducts.includes('Deliverables'),'the section shows what was read');
 const links=box().querySelectorAll('a');
 assert.equal(links.length,1,'only an http or https address is a link');
 assert.equal(links[0].href,'https://github.com/o/r/commit/abc1234');
@@ -4521,6 +4522,55 @@ delete document.visibilityState;
 ctx.fetch=listing;
 run(`reposLoaded=${wasLoaded};version=${JSON.stringify(wasVersion)}`);
 panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+}
+// Slice 2b of docs/deliverables.md: a card's deliverables as claude-mem's card shows them: how many, the first three as
+// chips, each with its kind's icon (a copy by its own link, an http address as a link, a path as text with the path as its
+// hint), and "+N more", which opens the request; a kind an agent declared is any text; none, no section; the list and
+// agents views show none; the words follow the language.
+{
+const asked=[];
+ctx.fetch=url=>{asked.push(String(url));return Promise.resolve(response({products:[]}));};
+const tag='0123456789abcdef0123456789abcdef';
+set([req('d1',{deliverables:[
+    {kind:'page',title:'report page.html',url:null,path:'/tmp/report page.html',at:now,file:tag},
+    {kind:'pull-request',title:'#12 Fix the parser',url:'https://github.com/o/r/pull/12',path:null,at:now-H},
+    {kind:'document',title:'notes.pdf',url:null,path:'/work/notes.pdf',at:now-2*H}],deliverable_count:5}),
+  req('d2',{deliverables:[{kind:'constructor',title:'Not a link',url:'javascript:alert(1)',path:null,at:now},
+    {kind:'image',title:'Not a tag',url:null,path:null,at:now,file:'../../api/settings'}],deliverable_count:2}),
+  req('d3')]);
+const strip=id=>card(id).querySelector('.my-work-deliverables');
+assert.equal(text(strip('d1').querySelector('p')),'Deliverables · 5','the label says how many there are');
+const chips=strip('d1').querySelectorAll('.my-work-chip');
+assert.deepEqual(chips.map(n=>n.tagName),['A','A','SPAN'],'three chips: a copy and an http address open, a path does not');
+assert.equal(chips[0].href,`/files/${tag}/report%20page.html`);
+assert.equal(chips[1].href,'https://github.com/o/r/pull/12');
+assert(chips.slice(0,2).every(n=>n.target==='_blank'&&n.rel==='noopener noreferrer'),'each opens apart from the page');
+assert.deepEqual(chips.map(n=>n.title),['/tmp/report page.html','#12 Fix the parser','/work/notes.pdf'],'a path is its chip\'s hint, else its whole title');
+assert(chips.every(n=>n.children[0].tagName==='SVG'&&n.children[0].attrs['aria-hidden']==='true'),'each with its kind\'s icon, hidden from a screen reader');
+assert.deepEqual(chips.map(n=>n.children[0].children.length),[5,4,2],'a page\'s icon, a pull request\'s, a document\'s');
+const more=strip('d1').querySelector('button');
+assert.equal(text(more),'+2 more');
+assert.equal(more.attrs['aria-label'],'Open the request to see 2 more deliverables');
+assert.equal(card('d1').querySelector('button').dataset.id,'d1','the title stays the card\'s first control');
+assert.deepEqual(strip('d2').querySelectorAll('.my-work-chip').map(n=>n.tagName),['SPAN','SPAN'],'an address that is not http and a tag that is not one open nothing');
+assert.equal(strip('d2').querySelector('button'),null,'nothing more, no button');
+assert.equal(strip('d2').querySelectorAll('.my-work-chip')[0].children[0].children.length,2,'a declared kind of any text is a link\'s icon');
+assert.equal(strip('d3'),null,'no deliverables, no section');
+more.click();
+await new Promise(resolve=>setImmediate(resolve));
+assert(text(panel).includes('Where it stands')&&asked.includes('/api/my-work/product?request=d1'),'+N more opens the request');
+panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+ctx.ui.setLang('ja');run('myWorkDraw()');
+const shownJa=text(strip('d1'));
+assert(shownJa.includes('成果物 · 5')&&shownJa.includes('ほか 2 件'),'the words in Japanese');
+assert.equal(strip('d1').querySelector('button').attrs['aria-label'],'依頼を開いて、ほか 2 件の成果物を見る','its name holds the words it shows');
+assert.equal(strip('d1').querySelector('button').dataset.i18nAria,'my_work_deliverables_more_label','a switch of language names it again');
+ctx.ui.setLang('en');run('myWorkDraw()');
+for(const layout of ['list','agents']){
+  run(`mw.layout="${layout}";myWorkDraw()`);
+  assert.equal(panel.querySelector('.my-work-deliverables'),null,`the ${layout} view shows no deliverables`);
+}
+run('mw.layout="cards";myWorkDraw()');
 }
 // New data waits while a person reads (focus in the toolbar, or a request open), behind "Show
 // updates", and an unchanged answer does nothing.

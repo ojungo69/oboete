@@ -151,15 +151,16 @@ none.
 
 - G01's second line, claude-mem 15.3's in oboete's words (`work_state::RULE_COPIES`): oboete copies
   when the turn ends, into this repository's folder under `~/.oboete/deliverables/`, and links the
-  copy on the request in My Work (its page; its card with row X16, slice 2b). It is shown at session
+  copy on the request's card in My Work, as claude-mem's line says (since slice 2b; its page lists
+  them all). It is shown at session
   start only to an agent whose files are copied (Claude Code, Codex, Grok) while `[capture]
   deliverables` is on; `oboete inject` and the viewer's Context page, which OpenCode and Pi read,
   leave it out. The least size keeps neither attach line (`SHORT_RULE`).
 
 ### Served and shown (slice 2)
 
-Slice 2a (as built) serves the copies and lists them on a request's page; slice 2b puts them on the
-card with row X16's products; slice 2c takes #836's first three items.
+Slices 2a and 2b (as built) serve the copies, list them on a request's page and put them on its card
+with row X16's products; slice 2c takes #836's first three items.
 
 - **Links.** A copy is opened by a link that is its own capability: `/files/<tag>/<name>`, the tag
   the first 16 bytes of an HMAC-SHA256 (`hmac` 0.12) under a secret the viewer makes when first
@@ -207,11 +208,19 @@ card with row X16's products; slice 2c takes #836's first three items.
   forget denies (`Raw::denies`: its call or its turn's end) is none from the registration on, its
   sweep run or not, and its request's `copies` changes with it; the page's answer is built in the
   readers' hold (#439), so a registration under way is waited for, not met halfway. Each copy
-  is `{kind, title, url: null, path, at, file}`, `file` its link's tag; a copy hides the recorded
-  file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not changed after
-  the copy), compared on the copy's own path, so a path a rule masks hides nothing; newest first
-  within the 60. `file`, each request's `copies` and the list's `instance` are the viewer's own
-  values, kept out of the answer's gate walk as `version` is; titles and paths are gated.
+  is `{kind, title, url: null, path, at, file}`, `file` its link's tag. A copy whose file is not on
+  disk as its row says (`deliverables::on_disk`, claude-mem's `bucketFileAvailable`: opened as
+  `open_copy` opens it, a regular file of its size whose handle is at its very path) is left out and
+  hides nothing (slice 2b). One on disk hides the
+  recorded file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not
+  changed after the copy), its own path compared with the path as recorded, before the page's gate
+  (#840): a card's file as the card stored it, a work item's where the gate left its field as it
+  was (a field it changed is read as it shows it, so its paths hide nothing); never a path that
+  holds the mask, which a gate made when the record was captured or summarized. So a copy whose own
+  path is the very text the gate shows of a recorded path hides nothing, and a copy of a card's file
+  a rule masks hides its record. Newest first within the 60. `file`, each request's `copies` and the
+  list's `instance` are the viewer's own values, kept out of the answer's gate walk as `version` is;
+  titles and paths are gated.
 - **Freshness.** A copy lands a second or two after its turn's reply, which moved the request's
   version. So the list answer gives each request `copies` (a short hash of its copies'
   provenance) and itself the viewer's links' `instance`; `/api/version` moves with a hash of every
@@ -227,11 +236,26 @@ card with row X16's products; slice 2c takes #836's first three items.
   what was read for its request and begins a read only for a request none was begun for, as the
   row it draws may be older, behind "Show updates". A copies' store that does not read leaves the list and the page
   without copies, not without their requests, and the version then moves with the rest alone.
-- **Card (slice 2b).** The list answer gives each request up to three products other than commits
-  and branches, copies included, and how many more, for the card. The replacement compares the
-  recorded file's own path, before the gate: as built, a recorded path the gate masks is compared
-  masked, so a copy whose own path is that masked text would hide it (Codex's local review of
-  slice 2a).
+- **Card (slice 2b).** The list route's answer (`my_work::listed`) gives each request with any
+  deliverables its card: `deliverables`, the first three of its products as its page builds them
+  (`shown_products`, the one builder of both) that are not history, as claude-mem's
+  `isCardDeliverable` takes them (commits and branches stay on the page), copies among them with
+  their tags; and `deliverable_count`, how many of the 60 are such. They are built in the readers'
+  hold with the copies' fingerprints, from the same read of the copies: a forget registered before
+  it leaves its copies out, and one registered meanwhile waits for the cards. On a copy of this
+  PC's store (53 requests, 12 with a card) they add 0.05 s to a list answer of 0.41 s (release,
+  median of 7), the list read each minute while My Work is open; a request's product calls are
+  read by device, 100 at a time (`Raw::at`), where one at a time added 0.12 s. A request whose
+  products do not read has no card, and a copies' store that does not read leaves the cards
+  without copies. Each tag leaves the gate's walk as the page's do. The card shows them under its
+  progress and above its focus chip, as claude-mem's under its terminal and above its next move:
+  "Deliverables · N" (成果物 · N); the three as chips, each with claude-mem's icon of its kind
+  (lucide's, drawn as inline SVG), a copy or an http or https address a link opened apart from the
+  page, any other as text, its hint its path or else its whole title; and "+N more" (ほか N 件,
+  named with the words it shows), which opens the request
+  as its title does. Cards only, as claude-mem's; the page's section is "Deliverables" too, the word
+  of claude-mem 15.9's drawer. A viewer restarted while updates wait behind "Show updates" leaves the
+  drawn chips' links to the old one until they are shown: meanwhile they open nothing (404).
 
 ### Not built here
 
@@ -276,3 +300,6 @@ card with row X16's products; slice 2c takes #836's first three items.
 - A link given before a forget is refused right after the forget is registered, with its purge not
   yet run.
 - The rule's second line is shown with the first, and the short rule keeps neither.
+- A card shows the first three of what its request's page lists that are not commits or branches,
+  and how many; "+N more" opens the request; a copy whose file is gone is left out and hides
+  nothing; a copy whose own path is the masked text of a recorded path hides nothing (#840).

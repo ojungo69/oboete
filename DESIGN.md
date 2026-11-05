@@ -334,7 +334,7 @@ The system is flat. Cards, tags, rows and groups carry no shadow; a 1px edge or 
 - **Overlay** (`--shadow-l`, light `0 20px 24px #1919190d, 0 5px 8px #19191907, 0 0 0 1px #2a1c0012`; dark `0 0 0 1px #383836, 0 14px 28px -6px #00000059, 0 2px 4px -1px #0000003d`): the welcome dialog and My Focus's menu.
 
 ### Layers
-The header 10; the sticky status line, My Work's banner and My Focus's menu 5; the welcome 50. A My Focus chip inside a My Work card is raised to 1 so it sits above the card's stretched opener.
+The header 10; the sticky status line, My Work's banner and My Focus's menu 5; the welcome 50. A My Focus chip, a deliverable chip and "+N more" inside a My Work card are raised to 1 so they sit above the card's stretched opener.
 
 ### Named Rules
 **The Flat Card Rule.** A card is a border, never a shadow. If something needs to look raised, it is floating over scrolled content, or it is the pressed segment.
@@ -427,7 +427,7 @@ Inside `.feed-state` under an empty list:
 - **Toolbar:** search and filters in a wrapping row, 8px gap.
 - **Status tabs:** a row of borderless tabs on a Line rule; the chosen one is underlined 2px in ink; each carries a count in a mono 11.5px grey box.
 - **My Focus chips:** the same size as the session chips (28px, 2px 10px, 12.5px), pressed the same way.
-- **Cards:** two to a row (one at 850px or less), Surface, Edge, 8px radius, 20px 22px; the title is a button whose stretched area covers the card; focus shows on the whole card (`:focus-within`, Focus Blue). Hover: Strong Line edge. A footer under a Line rule holds the next step and the accent "open" label. An updated card's fill and edge fade from Blue Wash and the accent once (1.4s) unless reduced motion.
+- **Cards:** two to a row (one at 850px or less), Surface, Edge, 8px radius, 20px 22px; the title is a button whose stretched area covers the card; focus shows on the whole card (`:focus-within`, Focus Blue). Hover: Strong Line edge. A footer under a Line rule holds the next step and the accent "open" label. Under the progress, the deliverables (X23's slice 2b): "Deliverables · N" in muted 12.5px, then up to three chips (28px, 2px 10px, 12.5px, 6px radius, Edge border, ink; a link's hover takes the Hover fill and the Strong Line edge), each its kind's 14px icon (lucide's, inline SVG, stroked in Muted) and its title cut with an ellipsis, then a quiet small "+N more" as high. An updated card's fill and edge fade from Blue Wash and the accent once (1.4s) unless reduced motion.
 - **List:** a bordered table; at 640px or less each row becomes a block with the column's label above each value.
 
 ### Welcome
@@ -449,5 +449,5 @@ A 44rem dialog, Surface, 12px radius, 28px padding (20px on a phone), the overla
 - **Don't** fill a card with a tint, use a cream ground or an orange accent, or use a gradient as colour (a fade or a two-colour blend).
 - **Don't** colour links with the accent; links are underlined ink.
 - **Don't** add a web font or rely on a specific font's metrics; the stacks fall back to whatever the system has.
-- **Don't** rename or reorder classes, ids, `data-*` attributes or texts that `src/testdata/viewer-readiness/test.mjs` reads. Its small fake DOM finds elements by tag name and by class only, so a style change must be made in the CSS, not by changing markup. Some checks compare the whole `className`: `my-work-card ` must stay the first class of a My Work card, and `my-work-heading`, `my-work-stream` and `show-more` are matched exactly. It reads the `data-` attributes `action`, `field`, `focus`, `i`, `id`, `kind`, `my-work`, `provider-name`, `session`, `simple-block`, `simple-focus` and `time`.
+- **Don't** rename or reorder classes, ids, `data-*` attributes or texts that `src/testdata/viewer-readiness/test.mjs` reads. Its small fake DOM finds elements by tag name and by class only, so a style change must be made in the CSS, not by changing markup. Some checks compare the whole `className`: `my-work-card ` must stay the first class of a My Work card, and `my-work-heading`, `my-work-stream` and `show-more` are matched exactly. It reads the `data-` attributes `action`, `field`, `focus`, `i`, `i18n-aria`, `id`, `kind`, `my-work`, `provider-name`, `session`, `simple-block`, `simple-focus` and `time`.
 - **Don't** add a label above a heading (an "eyebrow" or kicker), a glyph used as an icon, or a hard offset shadow. The page draws its marks with borders and SVG.
