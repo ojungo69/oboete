@@ -3731,6 +3731,9 @@ mod tests {
                 expected,
                 "{agent}"
             );
+            // #841: where it was typed is not its text.
+            let long = crate::curate::long_text(prompt);
+            assert_eq!(long.as_deref(), Some("Fix the parser."), "{agent}");
         }
     }
 

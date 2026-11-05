@@ -2824,6 +2824,25 @@ mod tests {
         work.iter().map(|w| w["task"].as_str().unwrap()).collect()
     }
 
+    /// #841: where a prompt was typed (`entrypoint`, #659) is not its text: the ask and the
+    /// follow-ups read its words alone.
+    #[test]
+    fn an_entry_point_stays_out_of_the_ask_and_the_follow_ups() {
+        let mut h = Home::new();
+        for (at, text, entry) in [
+            (-60_000, "Fix the parser's error messages.", "cli"),
+            (-59_000, "Then run the tests.", "claude-vscode"),
+        ] {
+            let ts = h.t + at;
+            let body = json!({"prompt": text, "entrypoint": entry});
+            h.s.event("prompt", "s1", (R, "main"), ts, body);
+        }
+        let v = h.read(Range::All, h.t);
+        let s1 = by_id(&v, "c:claude:s1");
+        assert_eq!(s1["ask"]["text"], "Fix the parser's error messages.", "{v}");
+        assert_eq!(s1["follow_ups"][0]["text"], "Then run the tests.", "{v}");
+    }
+
     /// The design's 1 (claude-mem's `originalFor` and scope updates): a session's first prompt
     /// that asks is its request's original ask, not an acknowledgement or a greeting, in English
     /// or Japanese; its later prompts, the newest 6, are the follow-ups, each cut to 500

@@ -2962,6 +2962,14 @@ mod tests {
             .map(|b| crate::typed::typed("prompt", "claude", "transcript", b))
             .collect();
         assert_eq!(typed, [true, false, false, false, true, true, false, true]);
+        // #841: their entry point is not their text.
+        for e in records(&home).iter().filter(|e| e.kind == "prompt") {
+            let body: Value = serde_json::from_str(&e.body).unwrap();
+            assert_eq!(
+                crate::curate::long_text(e).as_deref(),
+                body["prompt"].as_str()
+            );
+        }
     }
 
     /// Codex on #659: a Claude Code line's marks (O2) are not part of its identity, so a transcript
