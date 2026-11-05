@@ -4545,7 +4545,7 @@ assert.deepEqual(chips.map(n=>n.tagName),['A','A','SPAN'],'three chips: a copy a
 assert.equal(chips[0].href,`/files/${tag}/report%20page.html`);
 assert.equal(chips[1].href,'https://github.com/o/r/pull/12');
 assert(chips.slice(0,2).every(n=>n.target==='_blank'&&n.rel==='noopener noreferrer'),'each opens apart from the page');
-assert.equal(chips[2].title,'/work/notes.pdf','a path is its chip\'s hint');
+assert.deepEqual(chips.map(n=>n.title),['/tmp/report page.html','#12 Fix the parser','/work/notes.pdf'],'a path is its chip\'s hint, else its whole title');
 assert(chips.every(n=>n.children[0].tagName==='SVG'&&n.children[0].attrs['aria-hidden']==='true'),'each with its kind\'s icon, hidden from a screen reader');
 assert.deepEqual(chips.map(n=>n.children[0].children.length),[5,4,2],'a page\'s icon, a pull request\'s, a document\'s');
 const more=strip('d1').querySelector('button');
@@ -4563,7 +4563,7 @@ panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click(
 ctx.ui.setLang('ja');run('myWorkDraw()');
 const shownJa=text(strip('d1'));
 assert(shownJa.includes('成果物 · 5')&&shownJa.includes('ほか 2 件'),'the words in Japanese');
-assert.equal(strip('d1').querySelector('button').attrs['aria-label'],'依頼を開いて残り 2 件の成果物を見る');
+assert.equal(strip('d1').querySelector('button').attrs['aria-label'],'依頼を開いて、ほか 2 件の成果物を見る','its name holds the words it shows');
 assert.equal(strip('d1').querySelector('button').dataset.i18nAria,'my_work_deliverables_more_label','a switch of language names it again');
 ctx.ui.setLang('en');run('myWorkDraw()');
 for(const layout of ['list','agents']){

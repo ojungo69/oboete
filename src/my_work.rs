@@ -5619,4 +5619,50 @@ mod tests {
         assert_eq!(reader.join().unwrap().unwrap(), 1);
         assert!(crate::dispatch::exclusive_within(&home, wait).is_ok());
     }
+
+    /// Slice 2b's measurement (docs/deliverables.md): on a copy of a store, never the live one,
+    /// how long the list's answer takes with its cards' deliverables (`listed`) and without them
+    /// (`read`), seven of each taken in turn, and what the cards show. By hand:
+    /// `OBOETE_MEASURE_HOME=<copy> cargo test --release --bin oboete -- --ignored --nocapture
+    /// measure_the_cards`.
+    #[test]
+    #[ignore]
+    fn measure_the_cards_on_a_copy_of_a_store() {
+        let home = std::env::var("OBOETE_MEASURE_HOME").expect("a copy of a store");
+        let home = Path::new(&home);
+        let now = crate::db::now_ms();
+        let tag = |r: &crate::deliverables::Row| Ok(format!("{:032x}", r.id));
+        let (mut plain, mut cards) = (Vec::new(), Vec::new());
+        for _ in 0..7 {
+            let started = std::time::Instant::now();
+            std::hint::black_box(super::read(home, Range::All, now).unwrap());
+            plain.push(started.elapsed().as_secs_f64());
+            let started = std::time::Instant::now();
+            std::hint::black_box(super::listed(home, Range::All, now, &tag).unwrap());
+            cards.push(started.elapsed().as_secs_f64());
+        }
+        plain.sort_by(f64::total_cmp);
+        cards.sort_by(f64::total_cmp);
+        let v = super::listed(home, Range::All, now, &tag).unwrap();
+        let requests = v["requests"].as_array().unwrap();
+        let shown: Vec<&Value> = (requests.iter())
+            .filter_map(|r| r["deliverables"].as_array())
+            .flatten()
+            .collect();
+        eprintln!(
+            "requests {}, cards {}, deliverables shown {} (copies {}); without the cards \
+             {:.3} s fastest, {:.3} s median; with them {:.3} s, {:.3} s",
+            requests.len(),
+            requests
+                .iter()
+                .filter(|r| r.get("deliverables").is_some())
+                .count(),
+            shown.len(),
+            shown.iter().filter(|d| d.get("file").is_some()).count(),
+            plain[0],
+            plain[3],
+            cards[0],
+            cards[3]
+        );
+    }
 }

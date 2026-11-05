@@ -2831,7 +2831,7 @@ const TEXT = {
   my_work_products: ['Deliverables', '成果物'],
   my_work_deliverables: ['Deliverables · {n}', '成果物 · {n}'],
   my_work_deliverables_more: ['+{n} more', 'ほか {n} 件'],
-  my_work_deliverables_more_label: ['Open the request to see {n} more deliverables', '依頼を開いて残り {n} 件の成果物を見る'],
+  my_work_deliverables_more_label: ['Open the request to see {n} more deliverables', '依頼を開いて、ほか {n} 件の成果物を見る'],
   my_work_kind_commit: ['Commit', 'コミット'],
   my_work_kind_branch: ['Branch', 'ブランチ'],
   my_work_kind_pull_request: ['Pull request', 'プルリクエスト'],
@@ -9673,8 +9673,8 @@ function myWorkDeliverables(row) {
   const count = Math.max(Number(row.deliverable_count) || 0, list.length);
   const items = list.map((p) => {
     const chip = myWorkProductLink('my-work-chip', p, myWorkKindIcon(p.kind), el('span', 'my-work-chip-label', p.title || p.kind));
-    // Its path, which the page shows beside it, is the chip's hint.
-    if (p.path) chip.title = p.path;
+    // Its path, which the page shows beside it, else its whole title, which the chip may cut, is its hint.
+    chip.title = p.path || p.title || '';
     return el('li', null, chip);
   });
   const hidden = count - list.length;
