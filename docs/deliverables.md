@@ -217,8 +217,9 @@ with row X16's products; slice 2c takes #836's first three items.
   was (a field it changed is read as it shows it, so its paths hide nothing); never a path that
   holds the mask, which a gate made when the record was captured or summarized. So a copy whose own
   path is the very text the gate shows of a recorded path hides nothing, and a copy of a card's file
-  a rule masks hides its record. Newest first within the 60. `file`, each request's `copies` and the list's `instance` are the viewer's own
-  values, kept out of the answer's gate walk as `version` is; titles and paths are gated.
+  a rule masks hides its record. Newest first within the 60. `file`, each request's `copies` and the
+  list's `instance` are the viewer's own values, kept out of the answer's gate walk as `version` is;
+  titles and paths are gated.
 - **Freshness.** A copy lands a second or two after its turn's reply, which moved the request's
   version. So the list answer gives each request `copies` (a short hash of its copies'
   provenance) and itself the viewer's links' `instance`; `/api/version` moves with a hash of every
@@ -247,7 +248,8 @@ with row X16's products; slice 2c takes #836's first three items.
   progress and above its focus chip, as claude-mem's under its terminal and above its next move:
   "Deliverables · N" (成果物 · N); the three as chips, each with claude-mem's icon of its kind
   (lucide's, drawn as inline SVG), a copy or an http or https address a link opened apart from the
-  page, any other text with its path as its hint; and "+N more" (ほか N 件), which opens the request
+  page, any other as text, its hint its path or else its whole title; and "+N more" (ほか N 件,
+  named with the words it shows), which opens the request
   as its title does. Cards only, as claude-mem's; the page's section is "Deliverables" too, the word
   of claude-mem 15.9's drawer. A viewer restarted while updates wait behind "Show updates" leaves the
   drawn chips' links to the old one until they are shown: meanwhile they open nothing (404).
