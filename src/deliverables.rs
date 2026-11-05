@@ -1246,6 +1246,21 @@ pub(crate) fn denied_by(
     Ok(forgets(r.call_seq, r.call_ts)? || forgets(r.turn_seq, r.turn_ts)?)
 }
 
+/// Whether a copy is on disk as its row says, as far as a list looks (claude-mem's
+/// `bucketFileAvailable`): its folder and file directly in `<home>/deliverables/`, real folders and
+/// a regular file of the row's size, no link followed. Serving reads its bytes too (`open_copy`).
+pub(crate) fn on_disk(home: &Path, r: &Row) -> bool {
+    let Some((folder, name)) = copy_parts(&r.copy) else {
+        return false;
+    };
+    let dir = home.join(FOLDER).join(folder);
+    let real = |d: &Path| std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir());
+    real(&home.join(FOLDER))
+        && real(&dir)
+        && std::fs::symlink_metadata(dir.join(name))
+            .is_ok_and(|m| m.is_file() && m.len() == r.bytes)
+}
+
 /// A copy opened to serve: its folder and file directly in `<home>/deliverables/`, each a real
 /// folder, the file opened without following a link or blocking, a regular file whose handle is
 /// at that very path (the home canonicalized once, then the fixed folder: a `deliverables/`

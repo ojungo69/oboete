@@ -702,10 +702,21 @@ impl Request {
 }
 
 /// The requests of `range` at `now`, the newest update first, and how many work records no
-/// request takes (claude-mem's "N work records need a linked human request").
+/// request takes (claude-mem's "N work records need a linked human request"), without the cards'
+/// deliverables (`listed`, the route's).
+#[cfg(test)]
 pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
-    Ok(read_held(home, range, now)?.0)
+    Ok(read_held(home, range, now, None)?.0)
 }
+
+/// `read` as the page's list shows it: each request's card with its deliverables (docs/
+/// deliverables.md, slice 2b), a copy's link tag made by `tag`.
+pub(crate) fn listed(home: &Path, range: Range, now: i64, tag: Tag) -> Result<Value> {
+    Ok(read_held(home, range, now, Some(tag))?.0)
+}
+
+/// What makes a copy's link tag (the viewer's `file_tag`).
+pub(crate) type Tag<'a> = &'a dyn Fn(&crate::deliverables::Row) -> Result<String>;
 
 /// The held id of the request `anchor` anchors (C6), as `Held::id` gives it.
 pub(crate) fn anchored(anchor: &Key) -> String {
@@ -715,7 +726,7 @@ pub(crate) fn anchored(anchor: &Key) -> String {
 /// `read` of every range, with what each request's check is filed under, in the answer's order:
 /// the review route's (rule 6).
 pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
-    read_held(home, Range::All, now)
+    read_held(home, Range::All, now, None)
 }
 
 /// What My Work reads of the stores before it makes requests: each conversation with its
@@ -872,7 +883,12 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
     Ok(Gathered { convs, work, named })
 }
 
-fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> {
+fn read_held(
+    home: &Path,
+    range: Range,
+    now: i64,
+    cards: Option<Tag>,
+) -> Result<(Value, Vec<Held>)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
     };
@@ -916,24 +932,46 @@ fn read_held(home: &Path, range: Range, now: i64) -> Result<(Value, Vec<Held>)> 
     }
     answers.sort_by_key(|(v, _)| std::cmp::Reverse(v["updated"].as_i64().unwrap_or(0)));
     let (mut answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
-    // Slice 2 of docs/deliverables.md: a fingerprint of each request's copies, so the page reads
-    // its products again when one lands or goes. A copies' store that does not read leaves the
-    // list without them, not without its requests.
-    let fingerprints = (|| -> Result<Vec<String>> {
+    // Slice 2 of docs/deliverables.md: each request's copies, read once, for a fingerprint by which
+    // the page reads its products again when one lands or goes and, in the list's answer, for its
+    // card (slice 2b), both in the readers' hold there (#439), as a request's page builds them: a
+    // forget registered before it leaves its copies out, and one registered meanwhile waits. A
+    // copies' store that does not read leaves the list without them, not without its requests.
+    let _read = match cards {
+        Some(_) => Some(crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?),
+        None => None,
+    };
+    let copies = (|| -> Result<Option<Vec<Vec<crate::deliverables::Row>>>> {
         let Some(db) = crate::deliverables::open_read(home)? else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        (held.iter())
-            .map(|h| Ok(crate::deliverables::fingerprint(&copies_of(&db, &raw, h)?)))
-            .collect()
+        Ok(Some(
+            (held.iter().map(|h| copies_of(&db, &raw, h))).collect::<Result<_>>()?,
+        ))
     })()
     .unwrap_or_else(|e| {
         eprintln!("oboete: the copies of My Work's requests not read: {e:#}");
-        Vec::new()
+        None
     });
-    for (a, fingerprint) in answers.iter_mut().zip(fingerprints) {
-        a["copies"] = json!(fingerprint);
+    for (a, copies) in answers.iter_mut().zip(copies.iter().flatten()) {
+        a["copies"] = json!(crate::deliverables::fingerprint(copies));
     }
+    if let Some(tag) = cards {
+        for (i, (a, h)) in answers.iter_mut().zip(&held).enumerate() {
+            let copies = copies.as_ref().map_or(&[][..], |c| c[i].as_slice());
+            // A request whose products do not read has no card; the others keep theirs.
+            match shown_products(home, (&raw, &k, &rules), &h.sources, copies, tag) {
+                Ok(list) => {
+                    if let Some((deliverables, count)) = card(list) {
+                        a["deliverables"] = json!(deliverables);
+                        a["deliverable_count"] = json!(count);
+                    }
+                }
+                Err(e) => eprintln!("oboete: a My Work card's deliverables not read: {e:#}"),
+            }
+        }
+    }
+    drop(_read);
     // F2, F7: where each request sits, and the areas.
     let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
     for (a, h) in answers.iter_mut().zip(&held) {
@@ -1435,11 +1473,7 @@ const PRODUCTS: usize = 60;
 /// (docs/deliverables.md, slice 2), each with `file`, its link's tag (`tag`), which only this page
 /// gets: `products_read`, which the model's progress review reads, has none. The flag says the
 /// copies were not read (their store did not read): the page shows the rest and asks again.
-pub(crate) fn products(
-    home: &Path,
-    held: &Held,
-    tag: &dyn Fn(&crate::deliverables::Row) -> Result<String>,
-) -> Result<(Vec<Value>, bool)> {
+pub(crate) fn products(home: &Path, held: &Held, tag: Tag) -> Result<(Vec<Value>, bool)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok((Vec::new(), false));
     };
@@ -1447,50 +1481,86 @@ pub(crate) fn products(
     // leave the first in it.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let rules = Rules::load(home)?;
-    let mut list: Vec<Value> = (products_read(&raw, &k, &rules, &held.sources)?.into_iter())
-        .map(|(p, _)| p)
-        .collect();
     // A copies' store that does not read leaves the page without its copies, not without the rest.
     let copies = (|| match crate::deliverables::open_read(home)? {
         Some(db) => copies_of(&db, &raw, held),
         None => Ok(Vec::new()),
     })();
-    let copies = match copies {
-        Ok(copies) => copies,
+    let (copies, unread) = match copies {
+        Ok(copies) => (copies, false),
         Err(e) => {
             eprintln!("oboete: a request's copies not read: {e:#}");
-            return Ok((list, true));
+            (Vec::new(), true)
         }
     };
+    let list = shown_products(home, (&raw, &k, &rules), &held.sources, &copies, tag)?;
+    Ok((list.into_iter().map(|(p, _)| p).collect(), unread))
+}
+
+/// What a person opens on a request's card, at most (claude-mem's `CARD_DELIVERABLES`).
+const CARD: usize = 3;
+
+/// A request's card (docs/deliverables.md, slice 2b): of its products as its page shows them, the
+/// first `CARD` that are not history, as claude-mem's `isCardDeliverable` takes them (commits and
+/// branches stay on the page), and how many there are; none when there are none.
+fn card(list: Vec<(Value, bool)>) -> Option<(Vec<Value>, usize)> {
+    let mut items: Vec<Value> = (list.into_iter())
+        .filter(|(_, history)| !history)
+        .map(|(p, _)| p)
+        .collect();
+    let count = items.len();
+    items.truncate(CARD);
+    (count > 0).then_some((items, count))
+}
+
+/// A request's products as its page shows them, each with whether it is history (a commit or a
+/// branch): what its `sources` recorded, gated, and its `copies` that are on disk (claude-mem's
+/// mapper leaves out one that is not), each with its link's tag, newest first within
+/// claude-mem's 60. A copy hides the recorded file of the path it covers (`covers`), as
+/// claude-mem's `copyCoversSource` does, compared only where the path shows no mask: a recorded
+/// path the gate changed, now or when it was recorded or summarized, is shown masked, and a copy's
+/// own path that is that very text is another file (#840), so a path holding the mask hides
+/// nothing.
+fn shown_products(
+    home: &Path,
+    (raw, k, rules): (&Raw, &Connection, &Rules),
+    sources: &Sources,
+    copies: &[crate::deliverables::Row],
+    tag: Tag,
+) -> Result<Vec<(Value, bool)>> {
+    let mut list: Vec<(Value, bool)> = (products_of(raw, k, rules, sources)?.into_iter())
+        .map(|(p, _, history)| (p, history))
+        .collect();
+    let copies: Vec<&crate::deliverables::Row> = (copies.iter())
+        .filter(|c| crate::deliverables::on_disk(home, c))
+        .collect();
     if copies.is_empty() {
-        return Ok((list, false));
+        return Ok(list);
     }
-    let gate = |s: &str| crate::redact::outbound_with(s, &rules);
-    // A copy hides the recorded file of the path it covers, as claude-mem's `copyCoversSource`
-    // does: the copy's own path, which no rule masked, is what is compared, so a path a rule
-    // masks hides nothing.
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
     for c in &copies {
-        if gate(&c.source_path) == c.source_path && covers(c) {
-            list.retain(|p| p["url"].is_string() || p["path"] != c.source_path.as_str());
+        if !c.source_path.contains(crate::redact::MASK) && covers(c) {
+            list.retain(|(p, _)| p["url"].is_string() || p["path"] != c.source_path.as_str());
         }
     }
     let mut shown = (copies.iter())
         .map(|c| {
-            Ok(json!({
+            let p = json!({
                 "kind": c.kind,
                 "title": gate(&c.title),
                 "url": null,
                 "path": gate(&c.source_path),
                 "at": c.copied,
                 "file": tag(c)?,
-            }))
+            });
+            Ok((p, false))
         })
-        .collect::<Result<Vec<Value>>>()?;
+        .collect::<Result<Vec<(Value, bool)>>>()?;
     shown.extend(list);
     // Newest first within claude-mem's 60, a copy before an entry of the same time.
-    shown.sort_by_key(|p| std::cmp::Reverse(p["at"].as_i64().unwrap_or(0)));
+    shown.sort_by_key(|(p, _)| std::cmp::Reverse(p["at"].as_i64().unwrap_or(0)));
     shown.truncate(PRODUCTS);
-    Ok((shown, false))
+    Ok(shown)
 }
 
 /// Whether a copy covers its source as claude-mem's `copyCoversSource` reads it: the source is
@@ -1557,12 +1627,26 @@ pub(crate) enum Origin {
 
 /// `products` of a request's `sources` from the stores open, each with where it was read from: a
 /// progress review reads them (docs/my-work-model.md P3) and lists those among what it was shown.
+/// Gated as the page shows them, with no copy.
 pub(crate) fn products_read(
     raw: &Raw,
     k: &Connection,
     rules: &Rules,
     sources: &Sources,
 ) -> Result<Vec<(Value, Origin)>> {
+    Ok((products_of(raw, k, rules, sources)?.into_iter())
+        .map(|(p, origin, _)| (p, origin))
+        .collect())
+}
+
+/// `products_read`, each with whether it is history, a commit or a branch, as it was read before
+/// any gate (`card`).
+fn products_of(
+    raw: &Raw,
+    k: &Connection,
+    rules: &Rules,
+    sources: &Sources,
+) -> Result<Vec<(Value, Origin, bool)>> {
     let mut lists = Vec::new();
     // The consumer makes its table; before its first step there is nothing to read.
     if crate::consumer::manifest::exists(k, "table", "product_calls")? {
@@ -1662,6 +1746,7 @@ pub(crate) fn products_read(
                     }
                 })
                 .unwrap_or(Origin::Work);
+            let history = matches!(p.kind.as_str(), "commit" | "branch");
             let shown = json!({
                 "kind": gate(&p.kind),
                 "title": gate(&p.title),
@@ -1669,7 +1754,7 @@ pub(crate) fn products_read(
                 "path": p.path.as_deref().map(gate),
                 "at": p.at,
             });
-            (shown, origin)
+            (shown, origin, history)
         })
         .collect())
 }
@@ -5071,14 +5156,17 @@ mod tests {
     }
 
     /// A copy's row for `session`'s call at `seq` (`at` from the home's time), as the phase makes
-    /// one (docs/deliverables.md), its source at `source`.
+    /// one (docs/deliverables.md), its source at `source`, and its file on disk.
     fn copy_row(h: &Home, session: &str, seq: i64, at: i64, source: &str) {
+        let title = source.rsplit('/').next().unwrap();
+        let folder = h.s.home.path().join("deliverables").join("r");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(title), b"abc").unwrap();
         let db = crate::deliverables::open(h.s.home.path()).unwrap();
         let device = crate::raw::open(h.s.home.path())
             .unwrap()
             .device()
             .to_owned();
-        let title = source.rsplit('/').next().unwrap();
         db.execute(
             "INSERT INTO deliverables(device, agent, session, repo, turn_seq, turn_ts, call_seq,
                call_ts, title, kind, source_path, copy, bytes, sha256, declared, list, field, copied)
@@ -5148,6 +5236,17 @@ mod tests {
             1,
             "the copy hides the recorded file it covers: {after:?}"
         );
+        // A copy whose file is gone is left out and covers nothing, as claude-mem's mapper and
+        // `copyCoversSource` read it (slice 2b): the record shows again.
+        let file = h.s.home.path().join("deliverables/r/report.pdf");
+        std::fs::rename(&file, file.with_extension("kept")).unwrap();
+        let gone = shown(&h);
+        assert!(gone.iter().all(|p| p.get("file").is_none()), "{gone:?}");
+        assert!(
+            gone.iter().any(|p| p["path"] == "/gone/report.pdf"),
+            "{gone:?}"
+        );
+        std::fs::rename(file.with_extension("kept"), &file).unwrap();
         let (raw, k) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
         let rules = Rules::load(h.s.home.path()).unwrap();
         let (_, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
@@ -5289,5 +5388,178 @@ mod tests {
         assert_eq!(titles(&held(None, false)), ["b.pdf"]);
         let (answer, _) = super::reviewing(h.s.home.path(), h.t).unwrap();
         assert!(ids(&answer).contains(&"c:claude:s1".to_owned()), "{answer}");
+    }
+
+    /// Slice 2b of docs/deliverables.md: the list's card of a request is its page's products as
+    /// claude-mem's `isCardDeliverable` takes them, the first three and how many: not its commits
+    /// and branches, which stay on its page, copies among them. A request of history alone, and
+    /// the list read without the page's links (`read`), have no card.
+    #[test]
+    fn a_card_shows_the_first_deliverables_of_its_page() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Ship the report.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        let switched = "Switched to a new branch 'report'";
+        bash(&mut h, "s1", -20_000, "git checkout -b report", switched);
+        let committed = "[report abc1234] Add the report";
+        bash(
+            &mut h,
+            "s1",
+            -10_000,
+            "git commit -m 'Add the report'",
+            committed,
+        );
+        let products = r#"[{"title": "Spec", "url": "https://example.com/spec"},
+            {"title": "Deck", "path": "/gone/deck.pptx"}, {"title": "Sheet", "path": "/gone/sheet.csv"}]"#;
+        h.wrote(
+            "s1",
+            "report",
+            json!({"task": "Report", "status": "doing", "work_products": products}),
+        );
+        h.said("s2", -50_000, "Tidy the parser.");
+        bash(
+            &mut h,
+            "s2",
+            -49_000,
+            "git commit -m 'Tidy'",
+            "[main def5678] Tidy",
+        );
+        h.run_read();
+        copy_row(&h, "s1", call, -59_000, "/gone/report.pdf");
+        let tag = |r: &crate::deliverables::Row| Ok(format!("tag{}", r.id));
+        let listed = super::listed(h.s.home.path(), Range::All, h.t, &tag).unwrap();
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = (ids(&answer).iter())
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let (page, _) = super::products(h.s.home.path(), &held[i], &tag).unwrap();
+        let kinds: Vec<&str> = page.iter().filter_map(|p| p["kind"].as_str()).collect();
+        assert!(
+            kinds.contains(&"commit") && kinds.contains(&"branch"),
+            "{page:?}"
+        );
+        let deliverables: Vec<&Value> = (page.iter())
+            .filter(|p| !["commit", "branch"].contains(&p["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(deliverables.len(), 4, "{page:?}");
+        assert!(deliverables.iter().any(|p| p["file"] == "tag1"), "{page:?}");
+        let card = by_id(&listed, "c:claude:s1");
+        assert_eq!(card["deliverable_count"], 4, "{card}");
+        let shown: Vec<&Value> = card["deliverables"].as_array().unwrap().iter().collect();
+        assert_eq!(shown, deliverables[..3], "{card}");
+        for none in [by_id(&listed, "c:claude:s2"), by_id(&answer, "c:claude:s1")] {
+            assert!(
+                none.get("deliverables").is_none() && none.get("deliverable_count").is_none(),
+                "{none}"
+            );
+        }
+        // The copies' fingerprints are the same with the card as without it.
+        assert_eq!(card["copies"], by_id(&answer, "c:claude:s1")["copies"]);
+        // A copies' store that does not read leaves the card without its copies, not without
+        // the rest.
+        let store = h.s.home.path().join("deliverables.db");
+        std::fs::remove_file(&store).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        let listed = super::listed(h.s.home.path(), Range::All, h.t, &tag).unwrap();
+        let card = by_id(&listed, "c:claude:s1");
+        assert_eq!(card["deliverable_count"], 3, "{card}");
+        assert!(
+            (card["deliverables"].as_array().unwrap().iter()).all(|p| p.get("file").is_none()),
+            "{card}"
+        );
+    }
+
+    /// #840: a copy hides the recorded file of its own path only: compared where the path shows
+    /// no mask, so a copy whose own path is the very text the gate makes of a recorded path (a work
+    /// item's, a card's) hides nothing, and a recorded path a rule masks is listed beside its copy.
+    /// The model's review input (`products_read`) has neither a copy nor an ungated path.
+    #[test]
+    fn a_copy_hides_only_the_record_of_its_own_path() {
+        let mut h = Home::new();
+        let p = h.said("s1", -60_000, "Write the plan.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        h.wrote(
+            "s1",
+            "plan",
+            json!({"task": "Plan", "status": "doing", "work_product": "/gone/secret-plan.pdf"}),
+        );
+        let r = h.reply("s1", -50_000);
+        h.s.cards(
+            p,
+            r,
+            json!([{"type": "feature", "title": "Deck", "narrative": "Made it.",
+            "files_modified": ["/gone/secret-deck.pptx"]}]),
+            false,
+        );
+        h.run_read();
+        std::fs::write(
+            h.s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'secret', regex = 'secret' }]\n",
+        )
+        .unwrap();
+        copy_row(&h, "s1", call, -59_000, "/gone/[REDACTED]-plan.pdf");
+        copy_row(&h, "s1", call, -59_000, "/gone/[REDACTED]-deck.pptx");
+        copy_row(&h, "s1", call, -59_000, "/gone/secret-plan.pdf");
+        let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
+        let i = (ids(&answer).iter())
+            .position(|id| id == "c:claude:s1")
+            .unwrap();
+        let tag = |r: &crate::deliverables::Row| Ok(format!("tag{}", r.id));
+        let (page, _) = super::products(h.s.home.path(), &held[i], &tag).unwrap();
+        let listed = |path: &str| -> (usize, usize) {
+            let at: Vec<&Value> = page.iter().filter(|p| p["path"] == path).collect();
+            let copies = at.iter().filter(|p| p.get("file").is_some()).count();
+            (at.len() - copies, copies)
+        };
+        // The work item's record, the copy of the same path (masked, so not compared) and the
+        // copy whose own path is that mask's text, all shown masked; the card's record and the
+        // copy whose own path is its masked text.
+        assert_eq!(listed("/gone/[REDACTED]-plan.pdf"), (1, 2), "{page:?}");
+        assert_eq!(listed("/gone/[REDACTED]-deck.pptx"), (1, 1), "{page:?}");
+        assert!(!serde_json::to_string(&page).unwrap().contains("secret"));
+        let (raw, k) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
+        let rules = Rules::load(h.s.home.path()).unwrap();
+        let read = products_read(&raw, &k, &rules, &held[i].sources).unwrap();
+        let read = serde_json::to_string(&read.iter().map(|(p, _)| p).collect::<Vec<_>>()).unwrap();
+        assert!(
+            !read.contains("secret") && !read.contains("\"file\""),
+            "{read}"
+        );
+    }
+
+    /// Slice 2b: the list's cards are built in the readers' hold, as a request's page is (#439),
+    /// so a forget's registration cannot come while their copies are read.
+    #[test]
+    fn the_cards_are_built_in_the_readers_hold() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Write the report.");
+        let call = bash(&mut h, "s1", -59_000, "ls", "");
+        h.run_read();
+        copy_row(&h, "s1", call, -59_000, "/gone/a.pdf");
+        let home = h.s.home.path().to_owned();
+        let (inside, building) = std::sync::mpsc::channel();
+        let (go, paused) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn({
+            let home = home.clone();
+            let now = h.t;
+            move || {
+                let tag = |r: &crate::deliverables::Row| {
+                    inside.send(()).unwrap();
+                    paused.recv().unwrap();
+                    Ok(format!("tag{}", r.id))
+                };
+                super::listed(&home, Range::All, now, &tag)
+                    .map(|v| v["requests"][0]["deliverable_count"].clone())
+            }
+        });
+        building.recv().unwrap();
+        let wait = std::time::Duration::from_millis(100);
+        assert!(
+            crate::dispatch::exclusive_within(&home, wait).is_err(),
+            "a registration waits for the cards"
+        );
+        go.send(()).unwrap();
+        assert_eq!(reader.join().unwrap().unwrap(), 1);
+        assert!(crate::dispatch::exclusive_within(&home, wait).is_ok());
     }
 }

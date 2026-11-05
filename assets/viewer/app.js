@@ -2828,7 +2828,10 @@ const TEXT = {
   my_work_original: ['Original request', '元の依頼'],
   my_work_read_original: ['Read full original', '元の依頼の全文を読む'],
   my_work_streams: ['Work behind this request', 'この依頼の作業'],
-  my_work_products: ['Work product', '成果物'],
+  my_work_products: ['Deliverables', '成果物'],
+  my_work_deliverables: ['Deliverables · {n}', '成果物 · {n}'],
+  my_work_deliverables_more: ['+{n} more', 'ほか {n} 件'],
+  my_work_deliverables_more_label: ['Open the request to see {n} more deliverables', '依頼を開いて残り {n} 件の成果物を見る'],
   my_work_kind_commit: ['Commit', 'コミット'],
   my_work_kind_branch: ['Branch', 'ブランチ'],
   my_work_kind_pull_request: ['Pull request', 'プルリクエスト'],
@@ -9033,6 +9036,7 @@ function myWorkCard(row) {
     row.updating ? word('small', 'my-work-copy-note', 'my_work_copy_updating') : null,
     myWorkSuggestion(row),
     myWorkProgress(row),
+    myWorkDeliverables(row),
     myFocusChip(row),
     el('div', 'my-work-context', myWorkContributors(row), el('span', 'my-work-project', myWorkProjects(row))),
     el('div', next ? 'my-work-footer' : 'my-work-footer no-next',
@@ -9638,23 +9642,89 @@ function myWorkProductsRead(row, instance, tries = 0) {
 function myWorkProduct(p) {
   const label = `my_work_kind_${String(p.kind).replace(/-/g, '_')}`;
   const kind = Object.hasOwn(TEXT, label) ? word('span', 'my-work-product-kind', label) : el('span', 'my-work-product-kind', p.kind);
-  let title = el('span', null, p.title);
-  // A copy opens by its own link, this viewer's tag for it (docs/deliverables.md); its name is
-  // for the browser alone.
-  if (/^[0-9a-f]{32}$/.test(p.file || '')) {
-    title = el('a', null, p.title);
-    title.href = `/files/${p.file}/${encodeURIComponent(p.title || 'file')}`;
-    title.target = '_blank';
-    title.rel = 'noopener noreferrer';
-  } else if (/^https?:\/\//i.test(p.url || '')) {
-    // The answer holds only http and https links; the page checks again before it makes one.
-    title = el('a', null, p.title);
-    title.href = p.url;
-    title.target = '_blank';
-    title.rel = 'noopener noreferrer';
-  }
-  return el('li', null, kind, ' ', title, p.path ? el('code', 'my-work-product-path', p.path) : null,
+  return el('li', null, kind, ' ', myWorkProductLink(null, p, p.title),
+    p.path ? el('code', 'my-work-product-path', p.path) : null,
     p.at ? el('span', 'meta', localTime(p.at, lang)) : null);
+}
+
+// A product's title as a link where it opens, else as text. A copy opens by its own link, this
+// viewer's tag for it (docs/deliverables.md); its name is for the browser alone. The answer holds
+// only http and https links; the page checks again before it makes one.
+function myWorkProductLink(cls, p, ...children) {
+  let href = null;
+  if (/^[0-9a-f]{32}$/.test(p.file || '')) href = `/files/${p.file}/${encodeURIComponent(p.title || 'file')}`;
+  else if (/^https?:\/\//i.test(p.url || '')) href = p.url;
+  const node = el(href ? 'a' : 'span', cls, ...children);
+  if (href) {
+    node.href = href;
+    node.target = '_blank';
+    node.rel = 'noopener noreferrer';
+  }
+  return node;
+}
+
+// claude-mem 15.3's deliverables on the front of a request's card (`request-card.tsx`
+// `Deliverables`): what a person opens of what it produced, not its commits and branches, copies
+// among them, the first three as chips and the rest behind "+N more", which opens the request as
+// its title does; nothing when there is nothing (docs/deliverables.md, slice 2b).
+function myWorkDeliverables(row) {
+  const list = Array.isArray(row.deliverables) ? row.deliverables : [];
+  if (!list.length) return null;
+  const count = Math.max(Number(row.deliverable_count) || 0, list.length);
+  const items = list.map((p) => {
+    const chip = myWorkProductLink('my-work-chip', p, myWorkKindIcon(p.kind), el('span', 'my-work-chip-label', p.title || p.kind));
+    // Its path, which the page shows beside it, is the chip's hint.
+    if (p.path) chip.title = p.path;
+    return el('li', null, chip);
+  });
+  const hidden = count - list.length;
+  if (hidden > 0) {
+    const more = word('button', 'quiet small my-work-more', 'my_work_deliverables_more', { n: hidden });
+    more.type = 'button';
+    more.setAttribute('aria-label', t('my_work_deliverables_more_label', { n: hidden }));
+    more.dataset.i18nAria = 'my_work_deliverables_more_label';
+    more.addEventListener('click', () => myWorkOpen(row.id));
+    items.push(el('li', null, more));
+  }
+  return el('div', 'my-work-deliverables', word('p', 'my-work-deliverables-label', 'my_work_deliverables', { n: count }),
+    el('ul', 'my-work-deliverable-list', ...items));
+}
+
+// claude-mem's kinds of work product, each to its icon (`to-work-model.ts`, `product-icons.ts`):
+// any other kind is a link.
+const DELIVERABLE_KINDS = { 'pull-request': 'pr', artifact: 'page', page: 'page', deployment: 'page', deck: 'deck',
+  document: 'doc', documentation: 'doc', image: 'file', video: 'file', spreadsheet: 'file', file: 'file' };
+// Lucide's icons (lucide-static 1.69.0; NOTICE), drawn as inline SVG as the page draws its marks:
+// no icon image loads under the page's CSP (DESIGN.md).
+const DELIVERABLE_ICONS = {
+  pr: [['circle', { cx: 18, cy: 18, r: 3 }], ['circle', { cx: 6, cy: 6, r: 3 }],
+    ['path', { d: 'M13 6h3a2 2 0 0 1 2 2v7' }], ['line', { x1: 6, x2: 6, y1: 9, y2: 21 }]],
+  page: [['path', { d: 'M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z' }],
+    ['path', { d: 'M14 2v5a1 1 0 0 0 1 1h5' }], ['path', { d: 'M10 9H8' }], ['path', { d: 'M16 13H8' }], ['path', { d: 'M16 17H8' }]],
+  deck: [['path', { d: 'M2 3h20' }], ['path', { d: 'M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3' }], ['path', { d: 'm7 21 5-5 5 5' }]],
+  doc: [['path', { d: 'M12 5v16' }],
+    ['path', { d: 'M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z' }]],
+  file: [['path', { d: 'M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z' }],
+    ['path', { d: 'M14 2v5a1 1 0 0 0 1 1h5' }]],
+  link: [['path', { d: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71' }],
+    ['path', { d: 'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71' }]],
+};
+
+function myWorkKindIcon(kind) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'my-work-chip-icon');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  // A kind an agent declared is any text: only the table's own names are looked up.
+  const icon = Object.hasOwn(DELIVERABLE_KINDS, kind) ? DELIVERABLE_KINDS[kind] : 'link';
+  for (const [tag, attrs] of DELIVERABLE_ICONS[icon]) {
+    const part = document.createElementNS(ns, tag);
+    for (const [name, value] of Object.entries(attrs)) part.setAttribute(name, String(value));
+    svg.append(part);
+  }
+  return svg;
 }
 
 // claude-mem's review dialog (`openReview`), in the page: this viewer opens a request within the

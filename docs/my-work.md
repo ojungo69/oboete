@@ -537,8 +537,10 @@ newest first, at most 60; a commit links to GitHub once a recorded push sent its
   no branch inferred from its command alone, and no publishing tool's link (Codex on #650).
 - **The route**, `GET /api/my-work/product?request=<id>`, with the token, as every route: the
   request named by its id as `GET /api/my-work` shows it; one not read is 404, none named 400.
-  The list of requests does not carry it, since the page reads every request each minute.
-- **What it shows**: a "Work product" section of the request's page, read each time the request
+  The list of requests carries only each card's first three that are not commits or branches, and
+  their count (X23's slice 2b, docs/deliverables.md), read with the list each minute.
+- **What it shows**: a "Deliverables" section of the request's page (claude-mem 15.9's word; 成果物
+  in Japanese), read each time the request
   opens (new records, expired ones and new rules change it without changing the request's version:
   Codex on #650) and again when its version changes while it stays open, each entry with its kind,
   its title, a link when
