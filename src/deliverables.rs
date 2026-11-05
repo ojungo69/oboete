@@ -1247,18 +1247,28 @@ pub(crate) fn denied_by(
 }
 
 /// Whether a copy is on disk as its row says, as far as a list looks (claude-mem's
-/// `bucketFileAvailable`): its folder and file directly in `<home>/deliverables/`, real folders and
-/// a regular file of the row's size, no link followed. Serving reads its bytes too (`open_copy`).
+/// `bucketFileAvailable`): its file directly in a folder of `<home>/deliverables/`, opened without
+/// following a link or blocking, a regular file of the row's size whose handle is at that very path
+/// (the home canonicalized, then the fixed folder), as `open_copy` opens it: a folder above it
+/// swapped for a link, whenever, is not followed. Serving reads its bytes too.
 pub(crate) fn on_disk(home: &Path, r: &Row) -> bool {
     let Some((folder, name)) = copy_parts(&r.copy) else {
         return false;
     };
-    let dir = home.join(FOLDER).join(folder);
-    let real = |d: &Path| std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir());
-    real(&home.join(FOLDER))
-        && real(&dir)
-        && std::fs::symlink_metadata(dir.join(name))
-            .is_ok_and(|m| m.is_file() && m.len() == r.bytes)
+    let at = |home: PathBuf| -> std::io::Result<bool> {
+        let path = home.join(FOLDER).join(folder).join(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(&path)?;
+        let meta = file.metadata()?;
+        Ok(meta.is_file() && meta.len() == r.bytes && handle_path(&file)? == path)
+    };
+    home.canonicalize().and_then(at).unwrap_or(false)
 }
 
 /// A copy opened to serve: its folder and file directly in `<home>/deliverables/`, each a real
@@ -2225,6 +2235,48 @@ mod tests {
             std::os::unix::fs::symlink(home.path().join(DB), leaf.join(DB)).unwrap();
             assert!(open_read(&leaf).is_err(), "the store a link");
         }
+    }
+
+    /// Slice 2b: a list takes a copy as on disk only as `open_copy` would open it: of its row's
+    /// size, with no link in its place nor for its folder, its home reached through a link too, by
+    /// one open and the handle's own path, so a folder swapped for a link between two checks is
+    /// not followed (Codex's local review of slice 2b).
+    #[test]
+    fn a_copy_is_on_disk_only_where_it_would_open() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        std::fs::write(w.join("deck.pdf"), b"deck one").unwrap();
+        let write = json!({"file_path": w.join("deck.pdf")});
+        turn(&mut raw, "s1", w, &[("Write", write)]);
+        assert!(step(home.path(), &raw));
+        let db = open_read(home.path()).unwrap().unwrap();
+        let row = rows(&db).unwrap().remove(0);
+        assert!(on_disk(home.path(), &row));
+        let copy = home.path().join(FOLDER).join(&row.copy);
+        std::fs::write(&copy, b"deck").unwrap();
+        assert!(!on_disk(home.path(), &row), "another size");
+        std::fs::write(&copy, b"deck one").unwrap();
+        #[cfg(unix)]
+        {
+            let alias = w.join("home");
+            std::os::unix::fs::symlink(home.path(), &alias).unwrap();
+            assert!(on_disk(&alias, &row), "a home reached through a link");
+            // Its folder swapped for a link to one outside that holds the same name and size.
+            let folder = copy.parent().unwrap();
+            let outside = w.join("outside");
+            std::fs::rename(folder, &outside).unwrap();
+            std::os::unix::fs::symlink(&outside, folder).unwrap();
+            assert!(!on_disk(home.path(), &row), "a linked folder");
+            std::fs::remove_file(folder).unwrap();
+            std::fs::rename(&outside, folder).unwrap();
+            assert!(on_disk(home.path(), &row));
+            std::fs::remove_file(&copy).unwrap();
+            std::os::unix::fs::symlink(w.join("deck.pdf"), &copy).unwrap();
+            assert!(!on_disk(home.path(), &row), "a link in its place");
+        }
+        let _ = std::fs::remove_file(&copy);
+        assert!(!on_disk(home.path(), &row), "gone");
     }
 
     /// A row's provenance names its turn, call and name too: a row id a sweep freed, taken by a
