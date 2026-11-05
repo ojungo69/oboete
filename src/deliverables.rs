@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS deliverables(
 CREATE INDEX IF NOT EXISTS deliverables_session ON deliverables(agent, session);
 -- The last turn end the phase took on each device, with that record's time.
 CREATE TABLE IF NOT EXISTS deliverable_scan(
-  device TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER
+  device TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER, file TEXT
 );
 ";
 
@@ -88,6 +88,12 @@ pub(crate) fn open(home: &Path) -> Result<Connection> {
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal_until(&conn, "NORMAL", deadline)?;
     crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("deliverables schema")?;
+    // #836 item 3: raw.db's file beside the phase's checkpoint, in a store made before it.
+    crate::claims::migrate(
+        &conn,
+        "SELECT count(*) = 0 FROM pragma_table_info('deliverable_scan') WHERE name = 'file'",
+        "ALTER TABLE deliverable_scan ADD COLUMN file TEXT;",
+    )?;
     for file in [DB, "deliverables.db-wal", "deliverables.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -572,31 +578,270 @@ fn open_source(path: &Path, roots: &[PathBuf]) -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// A folder under `deliverables/` made or found as a real directory, never through a link.
-fn real_dir(home: &Path, folder: &str) -> Result<PathBuf> {
-    let top = home.join(FOLDER);
-    for dir in [top.clone(), top.join(folder)] {
-        match std::fs::symlink_metadata(&dir) {
-            Ok(m) => anyhow::ensure!(m.is_dir(), "{} is not a real folder", dir.display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&dir)?,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(top.join(folder))
+/// A folder of `deliverables/` held while a copy or a removal acts in it (#836 item 2). On Linux
+/// and macOS by its descriptor: what is made, read, renamed and removed in it is relative to the
+/// folder opened, never through a link, so one swapped for a link afterwards is not followed.
+/// Elsewhere by its path, checked first as before (a stated limit: Windows).
+struct Dir {
+    path: PathBuf,
+    #[cfg(unix)]
+    fd: std::fs::File,
 }
 
-/// The sha256 of an existing copy of `len` bytes, opened without blocking or following a link and
-/// refused unless a regular file, read to one byte past `len` at most: a FIFO, a link or a file of
-/// any other size put under a copy's name holds nothing up (None for another size).
-fn sha256_file(path: &Path, len: u64) -> Result<Option<String>> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+/// What a name in a held folder is, read without following a link.
+#[derive(Debug, PartialEq)]
+enum Entry {
+    File,
+    Other,
+}
+
+/// One plain name in a folder: no separator, not `.` or `..`, no NUL.
+fn plain(name: &str) -> std::io::Result<&str> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
     }
-    let file = options.open(path)?;
+    Ok(name)
+}
+
+#[cfg(unix)]
+impl Dir {
+    const FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+
+    /// `<home>/deliverables`, made (0700) when `create` and missing. None when it is not there or
+    /// not a real folder (a link); the home itself as given, a link to it allowed.
+    fn top(home: &Path, create: bool) -> std::io::Result<Option<Dir>> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let path = home.join(FOLDER);
+        if create {
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
+        }
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path);
+        match opened {
+            Ok(fd) => Ok(Some(Dir { path, fd })),
+            Err(e) if not_a_folder(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The folder `name` of this one, made (0700) when `create` and missing. None when it is not
+    /// there or not a real folder.
+    fn child(&self, name: &str, create: bool) -> std::io::Result<Option<Dir>> {
+        use std::os::fd::AsRawFd;
+        if create {
+            let c = c_name(name)?;
+            // SAFETY: the held descriptor is open and `c` is one NUL-terminated name.
+            if unsafe { libc::mkdirat(self.fd.as_raw_fd(), c.as_ptr(), 0o700) } < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+        }
+        match self.open_at(name, Self::FLAGS, 0) {
+            Ok(fd) => Ok(Some(Dir {
+                path: self.path.join(name),
+                fd,
+            })),
+            Err(e) if not_a_folder(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A new file `name` (0600) for writing, never one already there or a link.
+    fn create_new(&self, name: &str) -> std::io::Result<std::fs::File> {
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW;
+        self.open_at(name, flags, 0o600)
+    }
+
+    /// `name` opened for reading without following a link or blocking (a FIFO holds nothing up).
+    fn open_read(&self, name: &str) -> std::io::Result<std::fs::File> {
+        self.open_at(
+            name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            0,
+        )
+    }
+
+    fn open_at(
+        &self,
+        name: &str,
+        flags: libc::c_int,
+        mode: libc::c_uint,
+    ) -> std::io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let c = c_name(name)?;
+        // SAFETY: the held descriptor is open and `c` is one NUL-terminated name; the mode is
+        // read only with O_CREAT.
+        let fd = unsafe {
+            libc::openat(
+                self.fd.as_raw_fd(),
+                c.as_ptr(),
+                flags | libc::O_CLOEXEC,
+                mode,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a new descriptor openat returned, owned here alone.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    /// What `name` is, its link not followed; None when it is not there.
+    fn entry(&self, name: &str) -> std::io::Result<Option<Entry>> {
+        use std::os::fd::AsRawFd;
+        let c = c_name(name)?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the held descriptor is open, `c` is NUL-terminated and `stat` is writable for
+        // one stat.
+        let status = unsafe {
+            libc::fstatat(
+                self.fd.as_raw_fd(),
+                c.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status < 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(None),
+                _ => Err(e),
+            };
+        }
+        // SAFETY: a successful fstatat filled it.
+        let stat = unsafe { stat.assume_init() };
+        Ok(Some(if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+            Entry::File
+        } else {
+            Entry::Other
+        }))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let (from, to) = (c_name(from)?, c_name(to)?);
+        let fd = self.fd.as_raw_fd();
+        // SAFETY: the held descriptor is open and both names are NUL-terminated.
+        if unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Removes `name` itself (a link is removed, never followed).
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let c = c_name(name)?;
+        // SAFETY: the held descriptor is open and `c` is NUL-terminated.
+        if unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The names in it, read on the held descriptor (setup.rs's reader takes it alone).
+    fn names(&mut self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        crate::setup::diagnostic_directory_names(&mut self.fd)
+    }
+}
+
+/// `name` as one NUL-terminated plain name.
+#[cfg(unix)]
+fn c_name(name: &str) -> std::io::Result<std::ffi::CString> {
+    std::ffi::CString::new(plain(name)?).map_err(|_| std::io::ErrorKind::InvalidInput.into())
+}
+
+/// A folder open under `O_NOFOLLOW` that is not there or not a real folder: a link fails with
+/// `ELOOP`, a file with `ENOTDIR` (Linux and macOS alike).
+#[cfg(unix)]
+fn not_a_folder(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+        || matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+}
+
+#[cfg(not(unix))]
+impl Dir {
+    fn top(home: &Path, create: bool) -> std::io::Result<Option<Dir>> {
+        Self::at(home.join(FOLDER), create)
+    }
+
+    fn child(&self, name: &str, create: bool) -> std::io::Result<Option<Dir>> {
+        Self::at(self.path.join(plain(name)?), create)
+    }
+
+    /// `path` as a real folder, made when `create` and missing; None when it is not one.
+    fn at(path: PathBuf, create: bool) -> std::io::Result<Option<Dir>> {
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => Ok(Some(Dir { path })),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+                std::fs::create_dir(&path)?;
+                Ok(Some(Dir { path }))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn create_new(&self, name: &str) -> std::io::Result<std::fs::File> {
+        let path = self.path.join(plain(name)?);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    fn open_read(&self, name: &str) -> std::io::Result<std::fs::File> {
+        std::fs::File::open(self.path.join(plain(name)?))
+    }
+
+    fn entry(&self, name: &str) -> std::io::Result<Option<Entry>> {
+        match std::fs::symlink_metadata(self.path.join(plain(name)?)) {
+            Ok(m) if m.is_file() => Ok(Some(Entry::File)),
+            Ok(_) => Ok(Some(Entry::Other)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+        std::fs::rename(self.path.join(plain(from)?), self.path.join(plain(to)?))
+    }
+
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        std::fs::remove_file(self.path.join(plain(name)?))
+    }
+
+    fn names(&mut self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        std::fs::read_dir(&self.path)?
+            .map(|e| e.map(|e| e.file_name()))
+            .collect()
+    }
+}
+
+/// `deliverables/<folder>`, made where missing, held (#836 item 2).
+fn held_folder(home: &Path, folder: &str) -> Result<Dir> {
+    let not_real = |path: PathBuf| anyhow::anyhow!("{} is not a real folder", path.display());
+    let top = Dir::top(home, true)?.ok_or_else(|| not_real(home.join(FOLDER)))?;
+    #[cfg(test)]
+    seam(Stage::Top);
+    top.child(folder, true)?
+        .ok_or_else(|| not_real(top.path.join(folder)))
+}
+
+/// The sha256 of an existing copy `name` of `len` bytes in a held folder, opened without blocking
+/// or following a link and refused unless a regular file, read to one byte past `len` at most: a
+/// FIFO, a link or a file of any other size put under a copy's name holds nothing up (None for
+/// another size).
+fn sha256_held(dir: &Dir, name: &str, len: u64) -> Result<Option<String>> {
+    let file = dir.open_read(name)?;
     anyhow::ensure!(file.metadata()?.is_file(), "not a regular file");
     let mut hash = Sha256::new();
     let read = std::io::copy(&mut file.take(len + 1), &mut hash)?;
@@ -619,20 +864,17 @@ pub(crate) struct Copied {
 /// hashed as written, then named by its content; an existing name is reused only for the same
 /// whole hash, else the copy takes its whole hash (claude-mem's `copyDeliverableIntoBucket`).
 fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) -> Result<Copied> {
-    let dir = real_dir(home, folder)?;
+    let dir = held_folder(home, folder)?;
+    #[cfg(test)]
+    seam(Stage::Folder);
     let mut nonce = [0u8; 6];
     getrandom::fill(&mut nonce).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let partial = dir.join(format!(".partial-{}-{}", std::process::id(), hex(&nonce)));
+    let partial = format!(".partial-{}-{}", std::process::id(), hex(&nonce));
     let result = (|| -> Result<Copied> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            // A copy is the owner's alone, whatever its source's mode.
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut out = options.open(&partial)?;
+        // A copy is the owner's alone, whatever its source's mode (0600 where it is made).
+        let mut out = dir.create_new(&partial)?;
+        #[cfg(test)]
+        seam(Stage::Partial);
         let mut hash = Sha256::new();
         let mut bytes = 0u64;
         let mut buf = vec![0u8; 1 << 20];
@@ -652,53 +894,65 @@ fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) 
             copy_name(source, &sha256[..8])?,
             copy_name(source, &sha256)?,
         ] {
-            let path = dir.join(&name);
-            match std::fs::symlink_metadata(&path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::rename(&partial, &path)?;
-                    return Ok(Copied {
-                        copy: format!("{folder}/{name}"),
-                        bytes,
-                        sha256,
-                    });
+            let copied = || Copied {
+                copy: format!("{folder}/{name}"),
+                bytes,
+                sha256: sha256.clone(),
+            };
+            match dir.entry(&name)? {
+                None => {
+                    dir.rename(&partial, &name)?;
+                    return Ok(copied());
                 }
-                Ok(m) if m.is_file() && sha256_file(&path, bytes)?.as_ref() == Some(&sha256) => {
-                    std::fs::remove_file(&partial)?;
-                    return Ok(Copied {
-                        copy: format!("{folder}/{name}"),
-                        bytes,
-                        sha256,
-                    });
+                Some(Entry::File) if sha256_held(&dir, &name, bytes)?.as_ref() == Some(&sha256) => {
+                    dir.remove(&partial)?;
+                    return Ok(copied());
                 }
                 // Another file under the short name: the whole hash's.
-                Ok(_) => {}
-                Err(e) => return Err(e.into()),
+                Some(_) => {}
             }
         }
         anyhow::bail!("both names are taken by other files")
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&partial);
+        let _ = dir.remove(&partial);
     }
     result
 }
 
-/// The phase's last turn end on this device and that record's time.
-fn checkpoint(db: &Connection, device: &str) -> Result<Option<(i64, Option<i64>)>> {
+/// The phase's place on a device: the last record it read (a turn end, or one it read past), that
+/// record's time, and raw.db's file then (#836 item 3).
+#[derive(Debug)]
+struct Checkpoint {
+    seq: i64,
+    ts: Option<i64>,
+    file: Option<String>,
+}
+
+fn checkpoint(db: &Connection, device: &str) -> Result<Option<Checkpoint>> {
     Ok(db
         .query_row(
-            "SELECT seq, ts FROM deliverable_scan WHERE device = ?1",
+            "SELECT seq, ts, file FROM deliverable_scan WHERE device = ?1",
             [device],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok(Checkpoint {
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    file: r.get(2)?,
+                })
+            },
         )
         .optional()?)
 }
 
-fn set_checkpoint(db: &Connection, device: &str, seq: i64, ts: Option<i64>) -> Result<()> {
+/// The checkpoint of `raw`'s device at `seq`, its record's time `ts`, in raw.db's file as `raw`
+/// has it open.
+fn set_checkpoint(db: &Connection, raw: &Raw, seq: i64, ts: Option<i64>) -> Result<()> {
     db.execute(
-        "INSERT INTO deliverable_scan(device, seq, ts) VALUES(?1, ?2, ?3)
-         ON CONFLICT(device) DO UPDATE SET seq = excluded.seq, ts = excluded.ts",
-        params![device, seq, ts],
+        "INSERT INTO deliverable_scan(device, seq, ts, file) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(device) DO UPDATE SET seq = excluded.seq, ts = excluded.ts,
+           file = excluded.file",
+        params![raw.device(), seq, ts, raw.file_identity()],
     )?;
     Ok(())
 }
@@ -716,22 +970,27 @@ fn time_at(raw: &Raw, seq: i64) -> Result<Option<i64>> {
 }
 
 /// Whether raw.db still holds the record the checkpoint names: not after a restore that ends below
-/// it or gives its seq to another record. A record with a time is known by it; one with none (a
-/// tombstone, a removed one) is known by having none; one forget removed since keeps its seq; the
-/// empty store's checkpoint (seq 0) names none.
-fn still_there(raw: &Raw, seq: i64, ts: Option<i64>) -> Result<bool> {
-    if seq == 0 {
+/// it or gives its seq to another record. A record with a time is known by it. One with none now (a
+/// tombstone, a removed one, also one a forget made so since) is known by raw.db's file as well,
+/// which a restore replaces (#836 item 3); a checkpoint kept before the file was, or a raw.db with
+/// no file identity, is taken as it is. The empty store's checkpoint (seq 0) names none.
+fn still_there(raw: &Raw, c: &Checkpoint) -> Result<bool> {
+    if c.seq == 0 {
         return Ok(true);
     }
     let at = raw
-        .after(raw.device(), seq - 1, 1)?
+        .after(raw.device(), c.seq - 1, 1)?
         .into_iter()
-        .find(|r| r.seq == seq);
-    Ok(match (ts, at.map(|r| r.item)) {
+        .find(|r| r.seq == c.seq);
+    let same_file = match (c.file.as_deref(), raw.file_identity()) {
+        (Some(then), Some(now)) => then == now,
+        _ => true,
+    };
+    Ok(match (c.ts, at.map(|r| r.item)) {
         (_, None) => false,
         (Some(ts), Some(Item::Event(e) | Item::Expired(e))) => e.ts == ts,
         (None, Some(Item::Event(_) | Item::Expired(_))) => false,
-        (_, Some(_)) => true,
+        (_, Some(_)) => same_file,
     })
 }
 
@@ -860,10 +1119,17 @@ pub(crate) fn run(
     let device = raw.device().to_owned();
     let newest = raw.max_seq()?;
     let from = match checkpoint(db, &device)? {
-        Some((seq, ts)) if still_there(raw, seq, ts)? => seq,
+        Some(c) if still_there(raw, &c)? => {
+            // One kept before raw.db's file was takes the file now, once, also when no record
+            // follows it (#836 item 3).
+            if c.file.is_none() && raw.file_identity().is_some() {
+                set_checkpoint(db, raw, c.seq, c.ts)?;
+            }
+            c.seq
+        }
         // The first run, or a raw.db restored below the checkpoint: nothing older is copied.
         _ => {
-            set_checkpoint(db, &device, newest, time_at(raw, newest)?)?;
+            set_checkpoint(db, raw, newest, time_at(raw, newest)?)?;
             return Ok(false);
         }
     };
@@ -947,12 +1213,12 @@ pub(crate) fn run(
                 ],
             )?;
         }
-        set_checkpoint(db, &device, r.seq, Some(e.ts))?;
+        set_checkpoint(db, raw, r.seq, Some(e.ts))?;
         took = true;
     }
-    let (seq, _) = checkpoint(db, &device)?.unwrap_or((from, None));
+    let seq = checkpoint(db, &device)?.map_or(from, |c| c.seq);
     if seq < last {
-        set_checkpoint(db, &device, last, time_at(raw, last)?)?;
+        set_checkpoint(db, raw, last, time_at(raw, last)?)?;
     }
     // Records read past is progress too: more may wait behind them.
     Ok(took || last > from)
@@ -1034,25 +1300,42 @@ pub(crate) fn sweep(home: &Path, raw: &Raw, orphans: bool) -> Result<usize> {
             .prepare("SELECT copy FROM deliverables")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // Only a real folder is read: a link at `deliverables/` leads elsewhere.
-        let top = home.join(FOLDER);
-        if !std::fs::symlink_metadata(&top).is_ok_and(|m| m.is_dir()) {
-            return Ok(removed);
-        }
-        let Ok(folders) = std::fs::read_dir(&top) else {
+        // Only a real folder is read, each held while its files are removed (#836 item 2): a
+        // link at `deliverables/` or in it leads elsewhere.
+        let Ok(Some(mut top)) = Dir::top(home, false) else {
             return Ok(removed);
         };
-        for folder in folders.flatten() {
-            if !folder.file_type().is_ok_and(|t| t.is_dir()) {
-                continue;
-            }
-            let name = folder.file_name().to_string_lossy().into_owned();
-            for file in std::fs::read_dir(folder.path())?.flatten() {
-                let copy = format!("{name}/{}", file.file_name().to_string_lossy());
+        let Ok(folders) = top.names() else {
+            return Ok(removed);
+        };
+        for name in folders {
+            let name = name.to_string_lossy();
+            // A folder that cannot be read is said and passed over: the others are still swept.
+            let not_swept = |e: std::io::Error| eprintln!("oboete: {name} was not swept: {e:#}");
+            let mut dir = match top.child(&name, false) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => continue,
+                Err(e) => {
+                    not_swept(e);
+                    continue;
+                }
+            };
+            #[cfg(test)]
+            seam(Stage::Folder);
+            let files = match dir.names() {
+                Ok(files) => files,
+                Err(e) => {
+                    not_swept(e);
+                    continue;
+                }
+            };
+            for file in files {
+                let file = file.to_string_lossy();
+                let copy = format!("{name}/{file}");
                 if named.contains(&copy) {
                     continue;
                 }
-                match remove_copy(home, &copy) {
+                match remove_held(&dir, &file) {
                     Ok(true) => removed += 1,
                     Ok(false) => {}
                     Err(e) => eprintln!("oboete: {copy} was not removed: {e:#}"),
@@ -1073,30 +1356,30 @@ fn copy_parts(copy: &str) -> Option<(&str, &str)> {
 }
 
 /// Removes one copy, only a regular file directly in a folder of `deliverables/`, no link
-/// followed.
+/// followed, the folder held while it is removed (#836 item 2).
 fn remove_copy(home: &Path, copy: &str) -> Result<bool> {
     // A name no copy is given is refused, never taken as gone: its row stays.
     let Some((folder, name)) = copy_parts(copy) else {
         anyhow::bail!("not a copy's name");
     };
     // A folder or a file that cannot be read is an error, so its row stays for the next sweep;
-    // one that is not there is gone already.
-    let meta = |p: &Path| match std::fs::symlink_metadata(p) {
-        Ok(m) => Ok(Some(m)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+    // one that is not there, or not a real folder, is gone already.
+    let Some(top) = Dir::top(home, false)? else {
+        return Ok(false);
     };
-    let top = home.join(FOLDER);
-    let dir = top.join(folder);
-    for d in [&top, &dir] {
-        if !meta(d)?.is_some_and(|m| m.is_dir()) {
-            return Ok(false);
-        }
-    }
-    let path = dir.join(name);
-    match meta(&path)? {
-        Some(m) if m.is_file() => {
-            std::fs::remove_file(&path)?;
+    let Some(dir) = top.child(folder, false)? else {
+        return Ok(false);
+    };
+    #[cfg(test)]
+    seam(Stage::Folder);
+    remove_held(&dir, name)
+}
+
+/// Removes `name` from a held folder when it is a regular file there: whether it did.
+fn remove_held(dir: &Dir, name: &str) -> Result<bool> {
+    match dir.entry(name)? {
+        Some(Entry::File) => {
+            dir.remove(name)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -1340,6 +1623,37 @@ pub(crate) fn open_copy(
     }
     file.seek(std::io::SeekFrom::Start(0))?;
     Ok(Some(file))
+}
+
+/// Where a test acts while a copy or a removal holds `deliverables/` (#836 item 2).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stage {
+    /// `deliverables/` held, its folder not yet made or opened.
+    Top,
+    /// The folder held.
+    Folder,
+    /// A copy's partial file made in it.
+    Partial,
+}
+
+/// A test's act at each stage.
+#[cfg(test)]
+type Act = Box<dyn FnMut(Stage)>;
+
+#[cfg(test)]
+thread_local! {
+    static SEAM: std::cell::RefCell<Option<Act>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The test's act at `stage`, on this thread.
+#[cfg(test)]
+fn seam(stage: Stage) {
+    SEAM.with(|s| {
+        if let Some(act) = s.borrow_mut().as_mut() {
+            act(stage);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1914,20 +2228,37 @@ mod tests {
     }
 
     /// The checkpoint's record: the empty store's (seq 0) names none; a record with a time where
-    /// the checkpoint had none is another one.
+    /// the checkpoint had none is another one; one a forget made a tombstone since is the same
+    /// record in the same raw.db file, or with no file kept, and not in another (#836 item 3).
     #[test]
     fn a_checkpoint_knows_its_record() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
-        assert!(still_there(&raw, 0, None).unwrap());
+        let at = |seq, ts, file: Option<&str>| Checkpoint {
+            seq,
+            ts,
+            file: file.map(str::to_owned),
+        };
+        let file = raw.file_identity().map(str::to_owned);
+        assert!(file.is_some());
+        assert!(still_there(&raw, &at(0, None, None)).unwrap());
         let seq = raw
             .append(&ev("s1", "prompt", json!({"prompt": "Go."}), home.path()))
             .unwrap();
         let ts = time_at(&raw, seq).unwrap();
-        assert!(still_there(&raw, seq, ts).unwrap());
-        assert!(!still_there(&raw, seq, None).unwrap());
-        assert!(!still_there(&raw, seq, Some(1)).unwrap());
-        assert!(!still_there(&raw, seq + 1, ts).unwrap());
+        assert!(still_there(&raw, &at(seq, ts, None)).unwrap());
+        assert!(!still_there(&raw, &at(seq, None, None)).unwrap());
+        assert!(!still_there(&raw, &at(seq, Some(1), None)).unwrap());
+        assert!(!still_there(&raw, &at(seq + 1, ts, None)).unwrap());
+        let device = raw.device().to_owned();
+        raw.append_tombstone(crate::raw::Target::Record { device, seq })
+            .unwrap();
+        assert_eq!(time_at(&raw, seq).unwrap(), None, "removed now");
+        for kept in [ts, None] {
+            assert!(still_there(&raw, &at(seq, kept, file.as_deref())).unwrap());
+            assert!(still_there(&raw, &at(seq, kept, None)).unwrap());
+            assert!(!still_there(&raw, &at(seq, kept, Some("0:0"))).unwrap());
+        }
     }
 
     /// A replay's hooks for the same session neither clear nor read a live private turn's flag.
@@ -2035,7 +2366,7 @@ mod tests {
         let src = work.path().join("report.pdf");
         std::fs::write(&src, b"new").unwrap();
         let sha = hex(&Sha256::digest(b"new"));
-        let dir = real_dir(home.path(), "shop").unwrap();
+        let dir = held_folder(home.path(), "shop").unwrap().path;
         let short = dir.join(format!("report-{}.pdf", &sha[..8]));
         std::fs::write(&short, b"other").unwrap();
         let roots = roots(work.path());
@@ -2079,6 +2410,327 @@ mod tests {
         assert_eq!(written("Read", r#"{"file_path":"/w/r.pdf"}"#), None);
     }
 
+    /// Runs `f` with `act` called at each stage of a copy's or a removal's hold, on this thread.
+    fn with_seam<T>(act: impl FnMut(Stage) + 'static, f: impl FnOnce() -> T) -> T {
+        SEAM.with(|s| *s.borrow_mut() = Some(Box::new(act)));
+        let out = f();
+        SEAM.with(|s| *s.borrow_mut() = None);
+        out
+    }
+
+    /// An act at `at` that moves `dir` to `moved` and puts a link to `outside` in its place, once.
+    #[cfg(unix)]
+    fn swap_at(at: Stage, dir: &Path, moved: &Path, outside: &Path) -> impl FnMut(Stage) + 'static {
+        let (dir, moved, outside) = (dir.to_owned(), moved.to_owned(), outside.to_owned());
+        let mut done = false;
+        move |stage| {
+            if stage == at && !done {
+                done = true;
+                std::fs::rename(&dir, &moved).unwrap();
+                std::os::unix::fs::symlink(&outside, &dir).unwrap();
+            }
+        }
+    }
+
+    /// #836 item 2: a copy holds `deliverables/` and its folder by their descriptors. The folder
+    /// swapped for a link to a folder outside once it is open receives the copy where it was moved:
+    /// the folder outside, holding a file of the copy's short name with other bytes, is neither
+    /// read for that name nor written; the same bytes already under the short name in the folder
+    /// held are reused there.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_holds_its_folder_when_it_is_swapped_for_a_link() {
+        for held_same in [false, true] {
+            let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let work = tempfile::tempdir().unwrap();
+            let src = work.path().join("deck.pdf");
+            std::fs::write(&src, b"deck").unwrap();
+            let short = copy_name(&src, &hex(&Sha256::digest(b"deck"))[..8]).unwrap();
+            let folder = home.path().join(FOLDER).join("shop");
+            std::fs::create_dir_all(&folder).unwrap();
+            if held_same {
+                std::fs::write(folder.join(&short), b"deck").unwrap();
+            }
+            let outside = out.path().join("shop");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join(&short), b"other").unwrap();
+            let moved = out.path().join("moved");
+            let act = swap_at(Stage::Folder, &folder, &moved, &outside);
+            let copied = with_seam(act, || {
+                copy_into(
+                    home.path(),
+                    "shop",
+                    &src,
+                    std::fs::File::open(&src).unwrap(),
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                copied.copy,
+                format!("shop/{short}"),
+                "held_same {held_same}"
+            );
+            assert_eq!(std::fs::read(moved.join(&short)).unwrap(), b"deck");
+            assert_eq!(std::fs::read(outside.join(&short)).unwrap(), b"other");
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+            assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 1);
+        }
+    }
+
+    /// #836 item 2: a copy whose read fails after its partial file is made removes the partial
+    /// from the folder it holds, also when that folder was swapped for a link meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_removes_its_partial_from_the_held_folder() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let folder = home.path().join(FOLDER).join("shop");
+        std::fs::create_dir_all(&folder).unwrap();
+        let outside = out.path().join("shop");
+        std::fs::create_dir(&outside).unwrap();
+        let moved = out.path().join("moved");
+        // A folder's handle read as the source: its read fails, every time.
+        let source = std::fs::File::open(out.path()).unwrap();
+        let act = swap_at(Stage::Partial, &folder, &moved, &outside);
+        let copied = with_seam(act, || {
+            copy_into(home.path(), "shop", Path::new("/w/deck.pdf"), source)
+        });
+        assert!(copied.is_err());
+        assert_eq!(
+            std::fs::read_dir(&moved).unwrap().count(),
+            0,
+            "no partial left"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// #836 item 2: `deliverables/` swapped for a link once it is open, before a folder of it is
+    /// made: the folder is made in the one held, and nothing outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_folder_is_made_in_the_held_top() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let top = home.path().join(FOLDER);
+        std::fs::create_dir(&top).unwrap();
+        let outside = out.path().join("top");
+        std::fs::create_dir(&outside).unwrap();
+        let moved = out.path().join("moved");
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("deck.pdf");
+        std::fs::write(&src, b"deck").unwrap();
+        let act = swap_at(Stage::Top, &top, &moved, &outside);
+        let copied = with_seam(act, || {
+            copy_into(
+                home.path(),
+                "shop",
+                &src,
+                std::fs::File::open(&src).unwrap(),
+            )
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(moved.join(&copied.copy)).unwrap(), b"deck");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// #836 item 2: a removal holds its folder: swapped for a link once it is open, the folder where
+    /// it was moved loses the file and the folder outside keeps its file of the same name; the
+    /// sweep's walk of files no row names does the same, reading the names of the folder it holds
+    /// (one outside holds none of them).
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_holds_its_folder_when_it_is_swapped_for_a_link() {
+        for orphans in [false, true] {
+            let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let folder = home.path().join(FOLDER).join("shop");
+            std::fs::create_dir_all(&folder).unwrap();
+            let held = if orphans { "gone.pdf" } else { "old.pdf" };
+            std::fs::write(folder.join(held), b"old").unwrap();
+            let outside = out.path().join("shop");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("old.pdf"), b"keep").unwrap();
+            let moved = out.path().join("moved");
+            drop(open(home.path()).unwrap());
+            let raw = crate::raw::open(home.path()).unwrap();
+            let act = swap_at(Stage::Folder, &folder, &moved, &outside);
+            let removed = with_seam(act, || {
+                if orphans {
+                    sweep(home.path(), &raw, true).unwrap() == 1
+                } else {
+                    remove_copy(home.path(), "shop/old.pdf").unwrap()
+                }
+            });
+            assert!(removed, "orphans {orphans}");
+            assert!(!moved.join(held).exists(), "orphans {orphans}");
+            assert_eq!(std::fs::read(outside.join("old.pdf")).unwrap(), b"keep");
+        }
+    }
+
+    /// The sweep's walk of files no row names passes over a folder it cannot read, said, and sweeps
+    /// the others, in whatever order the folders are read (CodeRabbit on #845).
+    #[cfg(unix)]
+    #[test]
+    fn the_orphan_walk_passes_over_a_folder_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let top = home.path().join(FOLDER);
+        for folder in ["closed", "open"] {
+            std::fs::create_dir_all(top.join(folder)).unwrap();
+            std::fs::write(top.join(folder).join("orphan.pdf"), b"x").unwrap();
+        }
+        let closed = top.join("closed");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Where permissions bind (not as root).
+        let binds = std::fs::read_dir(&closed).is_err();
+        drop(open(home.path()).unwrap());
+        let raw = crate::raw::open(home.path()).unwrap();
+        let swept = sweep(home.path(), &raw, true);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if binds {
+            assert_eq!(swept.unwrap(), 1);
+            assert!(closed.join("orphan.pdf").exists());
+        }
+        assert!(!top.join("open").join("orphan.pdf").exists());
+    }
+
+    /// A folder of `deliverables/` that is a link already is neither written through nor emptied
+    /// through (as before #836 item 2: its directory opens never follow a link).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_is_a_link_is_not_followed() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let top = home.path().join(FOLDER);
+        std::fs::create_dir(&top).unwrap();
+        let outside = out.path().join("shop");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("old.pdf"), b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, top.join("shop")).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("deck.pdf");
+        std::fs::write(&src, b"deck").unwrap();
+        let file = std::fs::File::open(&src).unwrap();
+        assert!(copy_into(home.path(), "shop", &src, file).is_err());
+        assert!(!remove_copy(home.path(), "shop/old.pdf").unwrap());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        assert_eq!(std::fs::read(outside.join("old.pdf")).unwrap(), b"keep");
+    }
+
+    /// raw.db rebuilt from this store's records below `cut` and its ops under the same device, and
+    /// put in place as a restore puts one (`turns.rs`'s #646 test does the same): another file.
+    fn rebuilt_below(home: &Path, raw: Raw, cut: i64) -> Raw {
+        let (device, lines) = (
+            raw.device().to_owned(),
+            raw.export_lines(0, usize::MAX).unwrap(),
+        );
+        let ops = raw.export_op_lines(0, usize::MAX).unwrap();
+        let before = raw.file_identity().map(str::to_owned);
+        drop(raw);
+        let rebuilt = home.join("raw.db.rebuilt");
+        let mut rebuild = crate::raw::Rebuild::new(&rebuilt, &device).unwrap();
+        for (_, line) in lines.iter().filter(|(seq, _)| *seq < cut) {
+            rebuild.add(line).unwrap();
+        }
+        for (_, line) in &ops {
+            rebuild.add_op(line).unwrap();
+        }
+        rebuild.finish().unwrap();
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(file));
+        }
+        std::fs::rename(&rebuilt, home.join("raw.db")).unwrap();
+        let raw = crate::raw::open(home).unwrap();
+        assert_eq!(raw.device(), device);
+        assert_ne!(raw.file_identity().map(str::to_owned), before);
+        raw
+    }
+
+    /// #836 item 3: a checkpoint at a record with no time (a tombstone) is known by raw.db's file
+    /// too. A restore below it that gives its seq to another tombstone is seen, and the phase starts
+    /// again at the newest record as at any restore, copying nothing older; in the same file the
+    /// records after it are read.
+    #[test]
+    fn a_restore_that_gives_a_timeless_checkpoints_seq_to_another_record_is_seen() {
+        for restored in [true, false] {
+            let (home, mut raw) = ready();
+            let work = tempfile::tempdir().unwrap();
+            let w = work.path();
+            std::fs::write(w.join("plan.pdf"), b"plan").unwrap();
+            turn(&mut raw, "s1", w, &[]);
+            let target = raw.max_seq().unwrap();
+            let device = raw.device().to_owned();
+            let tombstone = |raw: &mut Raw| {
+                raw.append_tombstone(crate::raw::Target::Record {
+                    device: device.clone(),
+                    seq: target,
+                })
+                .unwrap()
+            };
+            let cut = tombstone(&mut raw);
+            assert!(step(home.path(), &raw));
+            let db = open(home.path()).unwrap();
+            let at = checkpoint(&db, &device).unwrap().map(|c| (c.seq, c.ts));
+            assert_eq!(at, Some((cut, None)));
+            if restored {
+                raw = rebuilt_below(home.path(), raw, cut);
+                assert_eq!(tombstone(&mut raw), cut, "the seq given again");
+            } else {
+                tombstone(&mut raw);
+            }
+            let write = [("Write", json!({"file_path": w.join("plan.pdf")}))];
+            turn(&mut raw, "s2", w, &write);
+            step(home.path(), &raw);
+            assert_eq!(
+                copies(home.path()).len(),
+                usize::from(!restored),
+                "restored: {restored}"
+            );
+        }
+    }
+
+    /// #836 item 3: a checkpoint kept before raw.db's file was (`file` NULL) is taken as it is, and
+    /// the file is written to it then, also when no record follows it, so a restore after that is
+    /// seen; with a turn after it, the turn is copied.
+    #[test]
+    fn a_checkpoint_kept_before_the_file_takes_it_once() {
+        for pending in [false, true] {
+            let (home, mut raw) = ready();
+            let work = tempfile::tempdir().unwrap();
+            let w = work.path();
+            std::fs::write(w.join("plan.pdf"), b"plan").unwrap();
+            turn(&mut raw, "s1", w, &[]);
+            let target = raw.max_seq().unwrap();
+            let device = raw.device().to_owned();
+            let tombstone = |raw: &mut Raw| {
+                raw.append_tombstone(crate::raw::Target::Record {
+                    device: device.clone(),
+                    seq: target,
+                })
+                .unwrap()
+            };
+            let cut = tombstone(&mut raw);
+            assert!(step(home.path(), &raw));
+            let db = open(home.path()).unwrap();
+            db.execute("UPDATE deliverable_scan SET file = NULL", [])
+                .unwrap();
+            let write = [("Write", json!({"file_path": w.join("plan.pdf")}))];
+            if pending {
+                turn(&mut raw, "s2", w, &write);
+                assert!(step(home.path(), &raw));
+                assert_eq!(copies(home.path()).len(), 1);
+                continue;
+            }
+            assert!(!step(home.path(), &raw));
+            let c = checkpoint(&db, &device).unwrap().unwrap();
+            assert_eq!(
+                (c.seq, c.ts, c.file.as_deref()),
+                (cut, None, raw.file_identity())
+            );
+            raw = rebuilt_below(home.path(), raw, cut);
+            assert_eq!(tombstone(&mut raw), cut);
+            turn(&mut raw, "s2", w, &write);
+            step(home.path(), &raw);
+            assert!(copies(home.path()).is_empty());
+        }
+    }
+
     /// The first run copies none of the records already there; a restore that ends below the
     /// checkpoint moves it to the newest record, copying nothing older.
     #[test]
@@ -2096,11 +2748,11 @@ mod tests {
         // raw.db ends below the checkpoint, or another record's time is at its seq.
         for ahead in [10, 0] {
             let seq = raw.max_seq().unwrap() + ahead;
-            set_checkpoint(&db, raw.device(), seq, Some(1)).unwrap();
+            set_checkpoint(&db, &raw, seq, Some(1)).unwrap();
             turn(&mut raw, "s1", w, &write());
             assert!(!step(home.path(), &raw), "{ahead}");
             assert!(copies(home.path()).is_empty(), "{ahead}");
-            let at = checkpoint(&db, raw.device()).unwrap().map(|c| c.0);
+            let at = checkpoint(&db, raw.device()).unwrap().map(|c| c.seq);
             assert_eq!(at, Some(raw.max_seq().unwrap()), "{ahead}");
         }
         turn(&mut raw, "s1", w, &write());

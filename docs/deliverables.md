@@ -59,11 +59,16 @@ none.
   is the file as the turn left it; a worker that comes later copies the file as it is then (a
   difference: claude-mem copies in the Stop hook).
 - **Where it starts.** Its own checkpoint per device in deliverables.db (`deliverable_scan`), the seq
-  and the time of the last turn end it took. The first run starts at the device's newest record: no
-  history is copied. When raw.db no longer holds that record at that seq with that time (a restore,
-  whose seqs are given again: raw.db ends below it, or another record's time is there), the
-  checkpoint moves to the newest record: nothing older is copied. A record forget removed at that
-  seq keeps the checkpoint (its seq is not given again).
+  and the time of the last record it read (a turn end it took, or one it read past), and raw.db's
+  file then (`Raw::file_identity`: device and inode, the volume and file index on Windows). The first
+  run starts at the device's newest record: no history is copied. When raw.db no longer holds that
+  record at that seq with that time (a restore, whose seqs are given again: raw.db ends below it, or
+  another record's time is there), the checkpoint moves to the newest record: nothing older is
+  copied. A record with no time at that seq (a tombstone, or one a forget removed since) is the same
+  record only in the same raw.db file, which a restore replaces (#836 item 3); a checkpoint kept
+  before the file was is taken as it is and given the file at its next run, also when no record
+  follows it. A record forget removed at that seq keeps the checkpoint (its seq is not given again,
+  and the file stays).
   Copies are made outside any raw.db
   or deliverables.db transaction, a row written after each; between files the phase stops when a command
   asks the worker to step aside, and the checkpoint passes a turn only once all its files are done
@@ -109,10 +114,14 @@ none.
   the worker), and everything is checked on that handle: a regular file, at most 512 MiB, read with
   that bound; its real path, read from the handle (`/proc/self/fd` on Linux, `F_GETPATH` on macOS,
   `GetFinalPathNameByHandleW` on Windows; another system copies nothing), inside a root. So a path or
-  an ancestor swapped for a link before or after the check is not followed. The folder must be a real
-  directory inside `<home>/deliverables/` (no link), the copy is staged under a new name there
-  (create-new, readable by the owner alone on Unix whatever the source's mode), hashed as read, and
-  renamed.
+  an ancestor swapped for a link before or after the check is not followed. `<home>/deliverables/`
+  and the folder are opened as real directories, no link followed, and on Linux and macOS held by
+  their descriptors while the copy is made (#836 item 2): it is staged under a new name in the folder
+  held (create-new, readable by the owner alone whatever the source's mode), hashed as read, and
+  renamed there; an existing name is read there, and a staged file whose copy fails is removed there.
+  A folder swapped for a link once it is held is not followed. On Windows these steps go by path
+  after the same check: a link or a junction put there between the check and the act is followed (a
+  stated limit).
 - **The folder.** `<home>/deliverables/<name>/`, `<name>` the repository's display name
   (`manifest::repo_name`, the last part of its key) made safe as claude-mem's `safeName` does, or
   `unknown-project` without one; names as claude-mem's, `<stem>-<8 hex><ext>`. An existing name is
@@ -140,10 +149,11 @@ none.
   filters from then): slice 2's listing and every file request ask them before answering.
   `deliverables::sweep` is cleanup: for each forgotten row it removes the file when no other row
   names it, then the row (a file it cannot remove keeps its row for the next sweep), only regular
-  files directly in a real folder of `<home>/deliverables/`, no link followed. It runs after
+  files directly in a real folder of `<home>/deliverables/`, no link followed, the folder held by its
+  descriptor while its files are read and removed (Linux and macOS, #836 item 2). It runs after
   forget's purge (step 5, under its lock) and in the worker at its idle time (its scan for files no
-  row names only there, where no copy is in progress), so a sweep that failed is made up by the
-  next.
+  row names only there, where no copy is in progress; a folder it cannot read is said and passed
+  over, the others swept), so a sweep that failed is made up by the next.
 - Retention's expiry (`[retention] days`) removes no copy (decision 73): claude-mem removes none, and
   a copy is what was made, kept longer than the text of the records about it.
 
@@ -160,7 +170,9 @@ none.
 ### Served and shown (slice 2)
 
 Slices 2a and 2b (as built) serve the copies, list them on a request's page and put them on its card
-with row X16's products; slice 2c takes #836's first three items.
+with row X16's products; slice 2c takes #836's first three items: items 2 and 3 as built (the
+destination held by its descriptors, the checkpoint known by raw.db's file, above), item 1 (the
+call's folder as a root by its identity, recorded by the hook) in a PR of its own.
 
 - **Links.** A copy is opened by a link that is its own capability: `/files/<tag>/<name>`, the tag
   the first 16 bytes of an HMAC-SHA256 (`hmac` 0.12) under a secret the viewer makes when first
@@ -303,3 +315,13 @@ with row X16's products; slice 2c takes #836's first three items.
 - A card shows the first three of what its request's page lists that are not commits or branches,
   and how many; "+N more" opens the request; a copy whose file is gone is left out and hides
   nothing; a copy whose own path is the masked text of a recorded path hides nothing (#840).
+- A folder of `<home>/deliverables/` swapped for a link to a folder outside once a copy or a removal
+  holds it (Linux, macOS): the copy is made, an existing name read and a failed copy's staged file
+  removed in the folder held; a removal and the sweep's walk of files no row names remove from the
+  folder held, and read its names; nothing outside is read, written or removed. `deliverables/`
+  swapped for a link before a missing folder is made: the folder is made in the one held. A folder
+  that is a link already is neither written to nor emptied (#836 item 2).
+- A checkpoint at a record with no time, then a restore below it that gives its seq to another such
+  record: the restore is seen, the checkpoint moves to the newest record and a turn after it is not
+  copied; in the same raw.db file that turn is copied. A checkpoint kept before the file was is taken
+  once and given the file, also with no record after it, so a later restore is seen (#836 item 3).
