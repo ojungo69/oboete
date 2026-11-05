@@ -10629,7 +10629,7 @@ curate = false
         let (_home, _work, v, row) = copied(b"<p>card</p>");
         let tag = v.file_tag(&row).unwrap();
         let rules = format!(
-            "{{ id = 'tag', regex = '{}' }}, {{ id = 'page', regex = 'page' }}",
+            "{{ id = 'tag', regex = '{}' }}, {{ id = 'name', regex = 'page\\.html' }}",
             &tag[..12]
         );
         std::fs::write(
@@ -10637,16 +10637,18 @@ curate = false
             format!("[redaction]\nextra_rules = [{rules}]\n"),
         )
         .unwrap();
+        redact::set_home(&v.home).unwrap();
         let answer = get(&v, "/api/my-work?range=all");
         let card = &answer["requests"][0];
         assert_eq!(card["deliverable_count"], 1, "{answer}");
         let d = &card["deliverables"][0];
         assert_eq!(d["file"], tag.as_str(), "{answer}");
         assert_eq!(d["kind"], "page", "{answer}");
-        for field in ["title", "path"] {
-            let shown = d[field].as_str().unwrap();
-            assert!(shown.ends_with("[REDACTED].html"), "{answer}");
-        }
+        assert_eq!(d["title"], "[REDACTED]", "{answer}");
+        assert!(
+            d["path"].as_str().unwrap().ends_with("/[REDACTED]"),
+            "{answer}"
+        );
     }
 
     fn hex_tag(tag: &[u8; 16]) -> String {

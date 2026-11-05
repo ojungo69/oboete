@@ -212,10 +212,12 @@ with row X16's products; slice 2c takes #836's first three items.
   disk as its row says (`deliverables::on_disk`: real folders and a regular file of its size,
   claude-mem's `bucketFileAvailable`) is left out and hides nothing (slice 2b). One on disk hides the
   recorded file of the path it covers (claude-mem's `copyCoversSource`: the source gone, or not
-  changed after the copy), compared only where the path shows no mask (#840): a recorded path the
-  gate changed, now or when it was recorded or summarized, is shown masked, and a copy whose own
-  path is that very text is another file, so a path that holds the mask hides nothing, and a copy
-  of a path a rule masks is listed beside its record. Newest first within the 60. `file`, each request's `copies` and the list's `instance` are the viewer's own
+  changed after the copy), its own path compared with the path as recorded, before the page's gate
+  (#840): a card's file as the card stored it, a work item's where the gate left its field as it
+  was (a field it changed is read as it shows it, so its paths hide nothing); never a path that
+  holds the mask, which a gate made when the record was captured or summarized. So a copy whose own
+  path is the very text the gate shows of a recorded path hides nothing, and a copy of a card's file
+  a rule masks hides its record. Newest first within the 60. `file`, each request's `copies` and the list's `instance` are the viewer's own
   values, kept out of the answer's gate walk as `version` is; titles and paths are gated.
 - **Freshness.** A copy lands a second or two after its turn's reply, which moved the request's
   version. So the list answer gives each request `copies` (a short hash of its copies'

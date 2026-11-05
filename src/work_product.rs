@@ -28,6 +28,9 @@ pub(crate) struct Product {
     /// The repository of the record it was read from (`Event.repo`): a commit or a branch takes a
     /// push's repository only from a push recorded in the same one (#652).
     pub checkout: Option<String>,
+    /// Its path as it was recorded, before the page's gate, where that is known: what a copy's own
+    /// path is compared with (docs/deliverables.md, #840).
+    pub recorded: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

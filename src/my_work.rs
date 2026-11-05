@@ -144,10 +144,12 @@ struct Turn {
     span: (i64, i64),
 }
 
-/// A card, with the records its window holds.
+/// A card, with the records its window holds and its modified files as it stored them, before the
+/// gate (a copy is compared with those: #840).
 struct Shown {
     c: Card,
     span: (i64, i64),
+    files: Vec<String>,
 }
 
 /// A prompt's records on its device: from the prompt through the record before the next prompt of
@@ -780,26 +782,32 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
             let (page, more) = crate::cards::page(k, raw, (None, None), before, CARDS, rules)?;
             let rows = (page.into_iter())
                 .map(|c| {
-                    let (span, agent, session): ((i64, i64), Option<String>, Option<String>) = k
-                        .query_row(
-                            "SELECT from_seq, to_seq, agent, session FROM cards
-                             WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
-                            params![c.device, c.op_seq, c.n],
-                            |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?, r.get(3)?)),
-                        )?;
-                    Ok((c, span, agent.zip(session)))
+                    type Row = ((i64, i64), Option<String>, Option<String>, String);
+                    let (span, agent, session, files): Row = k.query_row(
+                        "SELECT from_seq, to_seq, agent, session, files_modified FROM cards
+                         WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+                        params![c.device, c.op_seq, c.n],
+                        |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?, r.get(3)?, r.get(4)?)),
+                    )?;
+                    // As `cards::read` parses them before it gates each.
+                    let files: Vec<String> = serde_json::from_str(&files).unwrap_or_default();
+                    Ok((c, span, agent.zip(session), files))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok((rows, more))
         },
         |(c, ..)| c.position(),
-        |(_, _, key)| key.as_ref().is_some_and(|key| !excluded.contains(key)),
+        |(_, _, key, _)| key.as_ref().is_some_and(|key| !excluded.contains(key)),
     )?;
-    for (card, span, key) in cards {
+    for (card, span, key, files) in cards {
         let Some(key) = key else { continue };
         let c = convs.entry(key).or_default();
         c.repos.extend(card.repo.clone());
-        c.cards.push(Shown { c: card, span });
+        c.cards.push(Shown {
+            c: card,
+            span,
+            files,
+        });
     }
     let writes = (raw.native_work_writes()?.into_iter())
         .filter(|w| !excluded_repos.contains(&w.repo))
@@ -1457,8 +1465,9 @@ impl Held {
 pub(crate) struct Sources {
     convs: Vec<(Key, Option<Vec<Span>>)>,
     fields: Vec<(Map<String, Value>, i64)>,
-    /// A card's modified files, its time, and its window op by device and seq.
-    files: Vec<(Vec<String>, i64, (String, i64))>,
+    /// A card's modified files as it is shown and as it stored them, its time, and its window op
+    /// by device and seq.
+    files: Vec<(Vec<String>, Vec<String>, i64, (String, i64))>,
 }
 
 /// claude-mem's `mergeProducts` limit: the newest this many entries of a request's work product.
@@ -1517,10 +1526,9 @@ fn card(list: Vec<(Value, bool)>) -> Option<(Vec<Value>, usize)> {
 /// branch): what its `sources` recorded, gated, and its `copies` that are on disk (claude-mem's
 /// mapper leaves out one that is not), each with its link's tag, newest first within
 /// claude-mem's 60. A copy hides the recorded file of the path it covers (`covers`), as
-/// claude-mem's `copyCoversSource` does, compared only where the path shows no mask: a recorded
-/// path the gate changed, now or when it was recorded or summarized, is shown masked, and a copy's
-/// own path that is that very text is another file (#840), so a path holding the mask hides
-/// nothing.
+/// claude-mem's `copyCoversSource` does: its own path compared with the path as recorded, before
+/// the page's gate (#840, `Ungated::recorded`), never one that holds the mask, which a gate made
+/// when the record was captured or summarized.
 fn shown_products(
     home: &Path,
     (raw, k, rules): (&Raw, &Connection, &Rules),
@@ -1528,21 +1536,19 @@ fn shown_products(
     copies: &[crate::deliverables::Row],
     tag: Tag,
 ) -> Result<Vec<(Value, bool)>> {
-    let mut list: Vec<(Value, bool)> = (products_of(raw, k, rules, sources)?.into_iter())
-        .map(|(p, _, history)| (p, history))
-        .collect();
+    let mut list = products_of(raw, k, rules, sources)?;
     let copies: Vec<&crate::deliverables::Row> = (copies.iter())
         .filter(|c| crate::deliverables::on_disk(home, c))
         .collect();
-    if copies.is_empty() {
-        return Ok(list);
-    }
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
     for c in &copies {
         if !c.source_path.contains(crate::redact::MASK) && covers(c) {
-            list.retain(|(p, _)| p["url"].is_string() || p["path"] != c.source_path.as_str());
+            list.retain(|(p, _, u)| {
+                p["url"].is_string() || u.recorded.as_deref() != Some(c.source_path.as_str())
+            });
         }
     }
+    let list = (list.into_iter()).map(|(p, _, u)| (p, u.history));
     let mut shown = (copies.iter())
         .map(|c| {
             let p = json!({
@@ -1639,14 +1645,13 @@ pub(crate) fn products_read(
         .collect())
 }
 
-/// `products_read`, each with whether it is history, a commit or a branch, as it was read before
-/// any gate (`card`).
+/// `products_read`, each with what was read of it before any gate (`Ungated`).
 fn products_of(
     raw: &Raw,
     k: &Connection,
     rules: &Rules,
     sources: &Sources,
-) -> Result<Vec<(Value, Origin, bool)>> {
+) -> Result<Vec<(Value, Origin, Ungated)>> {
     let mut lists = Vec::new();
     // The consumer makes its table; before its first step there is nothing to read.
     if crate::consumer::manifest::exists(k, "table", "product_calls")? {
@@ -1713,27 +1718,33 @@ fn products_of(
             .collect();
         let mut list = crate::work_product::from_fields(&shown, Some(*at), None);
         for p in &mut list {
+            // A field the gate changed was read as gated: its path is not known as recorded.
             if p.field.as_ref().is_some_and(|f| changed.contains(f)) {
                 p.url = None;
+            } else {
+                p.recorded.clone_from(&p.path);
             }
         }
         lists.push(list);
     }
-    for (files, at, (device, seq)) in &sources.files {
+    for (files, stored, at, (device, seq)) in &sources.files {
         let card = crate::work_product::Source {
             kind: "card".into(),
             id: format!("{device}:{seq}"),
             index: None,
         };
-        lists.push(crate::work_product::from_files(
-            files,
-            Some(*at),
-            Some(card),
-        ));
+        let mut list = crate::work_product::from_files(files, Some(*at), Some(card));
+        // Each shown as the gate shows the card's file, recorded as the card stored it.
+        for p in &mut list {
+            let i = p.source.as_ref().and_then(|s| s.index);
+            p.recorded = i.and_then(|i| stored.get(i)).cloned();
+        }
+        lists.push(list);
     }
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
     Ok((crate::work_product::merge(lists, PRODUCTS).into_iter())
         .map(|p| {
+            let recorded = p.recorded;
             let url = p.url.filter(|url| gate(url) == *url);
             let origin = (p.source.as_ref())
                 .and_then(|s| {
@@ -1746,7 +1757,6 @@ fn products_of(
                     }
                 })
                 .unwrap_or(Origin::Work);
-            let history = matches!(p.kind.as_str(), "commit" | "branch");
             let shown = json!({
                 "kind": gate(&p.kind),
                 "title": gate(&p.title),
@@ -1754,9 +1764,25 @@ fn products_of(
                 "path": p.path.as_deref().map(gate),
                 "at": p.at,
             });
-            (shown, origin, history)
+            let ungated = Ungated {
+                history: matches!(p.kind.as_str(), "commit" | "branch"),
+                recorded,
+            };
+            (shown, origin, ungated)
         })
         .collect())
+}
+
+/// What `products_of` knows of a product before any gate, which the page's own list uses and the
+/// model's review input never gets.
+struct Ungated {
+    /// A commit or a branch, which a card leaves to the page (`card`).
+    history: bool,
+    /// Its path as it was recorded, before the page's gate, which a copy's own path is compared
+    /// with (#840): a card's file as the card stored it, a work item's where the gate left its
+    /// field as it was; none for a link (a tool record makes only links), or a field the gate
+    /// changed, which was read as the gate shows it.
+    recorded: Option<String>,
 }
 
 const REVIEWS: &str = "my-work-reviews.json";
@@ -2071,7 +2097,7 @@ fn sources(r: &Request, items: &[&Work], cards: &[&Shown]) -> Sources {
         files: (cards.iter())
             .map(|c| {
                 let op = (c.c.device.clone(), c.c.op_seq);
-                (c.c.files_modified.clone(), c.c.ts, op)
+                (c.c.files_modified.clone(), c.files.clone(), c.c.ts, op)
             })
             .filter(|(files, ..)| !files.is_empty())
             .collect(),
@@ -5469,10 +5495,15 @@ mod tests {
         );
     }
 
-    /// #840: a copy hides the recorded file of its own path only: compared where the path shows
-    /// no mask, so a copy whose own path is the very text the gate makes of a recorded path (a work
-    /// item's, a card's) hides nothing, and a recorded path a rule masks is listed beside its copy.
-    /// The model's review input (`products_read`) has neither a copy nor an ungated path.
+    /// #840: a copy hides the record of its own path only, compared with the path as recorded,
+    /// before the page's gate: a card's file as the card stored it, a work item's where the gate
+    /// left its field as it was. A copy whose own path is the very text the gate shows of a
+    /// recorded path hides nothing, nor does a copy of a path recorded with the mask in it (a card
+    /// summarized from masked text), nor one of the path the gate shows of a card's file it changed
+    /// without a mask (a space it trims), nor one of a path in a work item's field the gate changed
+    /// (read as gated, its path is not known as recorded); a copy of a card's file the gate masks
+    /// hides its record. The model's
+    /// review input (`products_read`) has neither a copy nor an ungated path.
     #[test]
     fn a_copy_hides_only_the_record_of_its_own_path() {
         let mut h = Home::new();
@@ -5483,12 +5514,26 @@ mod tests {
             "plan",
             json!({"task": "Plan", "status": "doing", "work_product": "/gone/secret-plan.pdf"}),
         );
+        // A field the gate changes elsewhere than its path: the path is not known as recorded.
+        let notes = r#"[{"title": "secret notes", "path": "/gone/notes.pdf"}]"#;
+        h.wrote(
+            "s1",
+            "notes",
+            json!({"task": "Notes", "status": "doing", "work_products": notes}),
+        );
         let r = h.reply("s1", -50_000);
+        let files = [
+            "/gone/secret-deck.pptx",
+            "/gone/[REDACTED]-old.pdf",
+            "/gone/trail.pdf ",
+            "/gone/same.pdf",
+            "/gone/secret-sheet.csv",
+        ];
         h.s.cards(
             p,
             r,
             json!([{"type": "feature", "title": "Deck", "narrative": "Made it.",
-            "files_modified": ["/gone/secret-deck.pptx"]}]),
+            "files_modified": files}]),
             false,
         );
         h.run_read();
@@ -5497,32 +5542,44 @@ mod tests {
             "[redaction]\nextra_rules = [{ id = 'secret', regex = 'secret' }]\n",
         )
         .unwrap();
-        copy_row(&h, "s1", call, -59_000, "/gone/[REDACTED]-plan.pdf");
-        copy_row(&h, "s1", call, -59_000, "/gone/[REDACTED]-deck.pptx");
-        copy_row(&h, "s1", call, -59_000, "/gone/secret-plan.pdf");
+        for source in [
+            "/gone/[REDACTED]-plan.pdf",
+            "/gone/secret-plan.pdf",
+            "/gone/[REDACTED]-deck.pptx",
+            "/gone/[REDACTED]-old.pdf",
+            "/gone/trail.pdf",
+            "/gone/same.pdf",
+            "/gone/secret-sheet.csv",
+            "/gone/notes.pdf",
+        ] {
+            copy_row(&h, "s1", call, -59_000, source);
+        }
         let (answer, held) = super::reviewing(h.s.home.path(), h.t).unwrap();
         let i = (ids(&answer).iter())
             .position(|id| id == "c:claude:s1")
             .unwrap();
         let tag = |r: &crate::deliverables::Row| Ok(format!("tag{}", r.id));
         let (page, _) = super::products(h.s.home.path(), &held[i], &tag).unwrap();
+        // Records and copies shown at each path.
         let listed = |path: &str| -> (usize, usize) {
             let at: Vec<&Value> = page.iter().filter(|p| p["path"] == path).collect();
             let copies = at.iter().filter(|p| p.get("file").is_some()).count();
             (at.len() - copies, copies)
         };
-        // The work item's record, the copy of the same path (masked, so not compared) and the
-        // copy whose own path is that mask's text, all shown masked; the card's record and the
-        // copy whose own path is its masked text.
         assert_eq!(listed("/gone/[REDACTED]-plan.pdf"), (1, 2), "{page:?}");
         assert_eq!(listed("/gone/[REDACTED]-deck.pptx"), (1, 1), "{page:?}");
+        assert_eq!(listed("/gone/[REDACTED]-old.pdf"), (1, 1), "{page:?}");
+        assert_eq!(listed("/gone/trail.pdf"), (1, 1), "{page:?}");
+        assert_eq!(listed("/gone/same.pdf"), (0, 1), "{page:?}");
+        assert_eq!(listed("/gone/[REDACTED]-sheet.csv"), (0, 1), "{page:?}");
+        assert_eq!(listed("/gone/notes.pdf"), (1, 1), "{page:?}");
         assert!(!serde_json::to_string(&page).unwrap().contains("secret"));
         let (raw, k) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
         let rules = Rules::load(h.s.home.path()).unwrap();
         let read = products_read(&raw, &k, &rules, &held[i].sources).unwrap();
         let read = serde_json::to_string(&read.iter().map(|(p, _)| p).collect::<Vec<_>>()).unwrap();
         assert!(
-            !read.contains("secret") && !read.contains("\"file\""),
+            !read.contains("secret") && !read.contains("\"file\"") && !read.contains("trail.pdf "),
             "{read}"
         );
     }
