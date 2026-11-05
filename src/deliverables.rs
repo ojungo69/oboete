@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS deliverables(
 CREATE INDEX IF NOT EXISTS deliverables_session ON deliverables(agent, session);
 -- The last turn end the phase took on each device, with that record's time.
 CREATE TABLE IF NOT EXISTS deliverable_scan(
-  device TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER
+  device TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER, file TEXT
 );
 ";
 
@@ -88,6 +88,12 @@ pub(crate) fn open(home: &Path) -> Result<Connection> {
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal_until(&conn, "NORMAL", deadline)?;
     crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("deliverables schema")?;
+    // #836 item 3: raw.db's file beside the phase's checkpoint, in a store made before it.
+    crate::claims::migrate(
+        &conn,
+        "SELECT count(*) = 0 FROM pragma_table_info('deliverable_scan') WHERE name = 'file'",
+        "ALTER TABLE deliverable_scan ADD COLUMN file TEXT;",
+    )?;
     for file in [DB, "deliverables.db-wal", "deliverables.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -683,22 +689,39 @@ fn copy_into(home: &Path, folder: &str, source: &Path, mut file: std::fs::File) 
     result
 }
 
-/// The phase's last turn end on this device and that record's time.
-fn checkpoint(db: &Connection, device: &str) -> Result<Option<(i64, Option<i64>)>> {
+/// The phase's place on a device: the last record it read (a turn end, or one it read past), that
+/// record's time, and raw.db's file then (#836 item 3).
+#[derive(Debug)]
+struct Checkpoint {
+    seq: i64,
+    ts: Option<i64>,
+    file: Option<String>,
+}
+
+fn checkpoint(db: &Connection, device: &str) -> Result<Option<Checkpoint>> {
     Ok(db
         .query_row(
-            "SELECT seq, ts FROM deliverable_scan WHERE device = ?1",
+            "SELECT seq, ts, file FROM deliverable_scan WHERE device = ?1",
             [device],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok(Checkpoint {
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    file: r.get(2)?,
+                })
+            },
         )
         .optional()?)
 }
 
-fn set_checkpoint(db: &Connection, device: &str, seq: i64, ts: Option<i64>) -> Result<()> {
+/// The checkpoint of `raw`'s device at `seq`, its record's time `ts`, in raw.db's file as `raw`
+/// has it open.
+fn set_checkpoint(db: &Connection, raw: &Raw, seq: i64, ts: Option<i64>) -> Result<()> {
     db.execute(
-        "INSERT INTO deliverable_scan(device, seq, ts) VALUES(?1, ?2, ?3)
-         ON CONFLICT(device) DO UPDATE SET seq = excluded.seq, ts = excluded.ts",
-        params![device, seq, ts],
+        "INSERT INTO deliverable_scan(device, seq, ts, file) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(device) DO UPDATE SET seq = excluded.seq, ts = excluded.ts,
+           file = excluded.file",
+        params![raw.device(), seq, ts, raw.file_identity()],
     )?;
     Ok(())
 }
@@ -716,22 +739,27 @@ fn time_at(raw: &Raw, seq: i64) -> Result<Option<i64>> {
 }
 
 /// Whether raw.db still holds the record the checkpoint names: not after a restore that ends below
-/// it or gives its seq to another record. A record with a time is known by it; one with none (a
-/// tombstone, a removed one) is known by having none; one forget removed since keeps its seq; the
-/// empty store's checkpoint (seq 0) names none.
-fn still_there(raw: &Raw, seq: i64, ts: Option<i64>) -> Result<bool> {
-    if seq == 0 {
+/// it or gives its seq to another record. A record with a time is known by it. One with none now (a
+/// tombstone, a removed one, also one a forget made so since) is known by raw.db's file as well,
+/// which a restore replaces (#836 item 3); a checkpoint kept before the file was, or a raw.db with
+/// no file identity, is taken as it is. The empty store's checkpoint (seq 0) names none.
+fn still_there(raw: &Raw, c: &Checkpoint) -> Result<bool> {
+    if c.seq == 0 {
         return Ok(true);
     }
     let at = raw
-        .after(raw.device(), seq - 1, 1)?
+        .after(raw.device(), c.seq - 1, 1)?
         .into_iter()
-        .find(|r| r.seq == seq);
-    Ok(match (ts, at.map(|r| r.item)) {
+        .find(|r| r.seq == c.seq);
+    let same_file = match (c.file.as_deref(), raw.file_identity()) {
+        (Some(then), Some(now)) => then == now,
+        _ => true,
+    };
+    Ok(match (c.ts, at.map(|r| r.item)) {
         (_, None) => false,
         (Some(ts), Some(Item::Event(e) | Item::Expired(e))) => e.ts == ts,
         (None, Some(Item::Event(_) | Item::Expired(_))) => false,
-        (_, Some(_)) => true,
+        (_, Some(_)) => same_file,
     })
 }
 
@@ -860,10 +888,17 @@ pub(crate) fn run(
     let device = raw.device().to_owned();
     let newest = raw.max_seq()?;
     let from = match checkpoint(db, &device)? {
-        Some((seq, ts)) if still_there(raw, seq, ts)? => seq,
+        Some(c) if still_there(raw, &c)? => {
+            // One kept before raw.db's file was takes the file now, once, also when no record
+            // follows it (#836 item 3).
+            if c.file.is_none() && raw.file_identity().is_some() {
+                set_checkpoint(db, raw, c.seq, c.ts)?;
+            }
+            c.seq
+        }
         // The first run, or a raw.db restored below the checkpoint: nothing older is copied.
         _ => {
-            set_checkpoint(db, &device, newest, time_at(raw, newest)?)?;
+            set_checkpoint(db, raw, newest, time_at(raw, newest)?)?;
             return Ok(false);
         }
     };
@@ -947,12 +982,12 @@ pub(crate) fn run(
                 ],
             )?;
         }
-        set_checkpoint(db, &device, r.seq, Some(e.ts))?;
+        set_checkpoint(db, raw, r.seq, Some(e.ts))?;
         took = true;
     }
-    let (seq, _) = checkpoint(db, &device)?.unwrap_or((from, None));
+    let seq = checkpoint(db, &device)?.map_or(from, |c| c.seq);
     if seq < last {
-        set_checkpoint(db, &device, last, time_at(raw, last)?)?;
+        set_checkpoint(db, raw, last, time_at(raw, last)?)?;
     }
     // Records read past is progress too: more may wait behind them.
     Ok(took || last > from)
@@ -1914,20 +1949,37 @@ mod tests {
     }
 
     /// The checkpoint's record: the empty store's (seq 0) names none; a record with a time where
-    /// the checkpoint had none is another one.
+    /// the checkpoint had none is another one; one a forget made a tombstone since is the same
+    /// record in the same raw.db file, or with no file kept, and not in another (#836 item 3).
     #[test]
     fn a_checkpoint_knows_its_record() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
-        assert!(still_there(&raw, 0, None).unwrap());
+        let at = |seq, ts, file: Option<&str>| Checkpoint {
+            seq,
+            ts,
+            file: file.map(str::to_owned),
+        };
+        let file = raw.file_identity().map(str::to_owned);
+        assert!(file.is_some());
+        assert!(still_there(&raw, &at(0, None, None)).unwrap());
         let seq = raw
             .append(&ev("s1", "prompt", json!({"prompt": "Go."}), home.path()))
             .unwrap();
         let ts = time_at(&raw, seq).unwrap();
-        assert!(still_there(&raw, seq, ts).unwrap());
-        assert!(!still_there(&raw, seq, None).unwrap());
-        assert!(!still_there(&raw, seq, Some(1)).unwrap());
-        assert!(!still_there(&raw, seq + 1, ts).unwrap());
+        assert!(still_there(&raw, &at(seq, ts, None)).unwrap());
+        assert!(!still_there(&raw, &at(seq, None, None)).unwrap());
+        assert!(!still_there(&raw, &at(seq, Some(1), None)).unwrap());
+        assert!(!still_there(&raw, &at(seq + 1, ts, None)).unwrap());
+        let device = raw.device().to_owned();
+        raw.append_tombstone(crate::raw::Target::Record { device, seq })
+            .unwrap();
+        assert_eq!(time_at(&raw, seq).unwrap(), None, "removed now");
+        for kept in [ts, None] {
+            assert!(still_there(&raw, &at(seq, kept, file.as_deref())).unwrap());
+            assert!(still_there(&raw, &at(seq, kept, None)).unwrap());
+            assert!(!still_there(&raw, &at(seq, kept, Some("0:0"))).unwrap());
+        }
     }
 
     /// A replay's hooks for the same session neither clear nor read a live private turn's flag.
@@ -2079,6 +2131,124 @@ mod tests {
         assert_eq!(written("Read", r#"{"file_path":"/w/r.pdf"}"#), None);
     }
 
+    /// raw.db rebuilt from this store's records below `cut` and its ops under the same device, and
+    /// put in place as a restore puts one (`turns.rs`'s #646 test does the same): another file.
+    fn rebuilt_below(home: &Path, raw: Raw, cut: i64) -> Raw {
+        let (device, lines) = (
+            raw.device().to_owned(),
+            raw.export_lines(0, usize::MAX).unwrap(),
+        );
+        let ops = raw.export_op_lines(0, usize::MAX).unwrap();
+        let before = raw.file_identity().map(str::to_owned);
+        drop(raw);
+        let rebuilt = home.join("raw.db.rebuilt");
+        let mut rebuild = crate::raw::Rebuild::new(&rebuilt, &device).unwrap();
+        for (_, line) in lines.iter().filter(|(seq, _)| *seq < cut) {
+            rebuild.add(line).unwrap();
+        }
+        for (_, line) in &ops {
+            rebuild.add_op(line).unwrap();
+        }
+        rebuild.finish().unwrap();
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(file));
+        }
+        std::fs::rename(&rebuilt, home.join("raw.db")).unwrap();
+        let raw = crate::raw::open(home).unwrap();
+        assert_eq!(raw.device(), device);
+        assert_ne!(raw.file_identity().map(str::to_owned), before);
+        raw
+    }
+
+    /// #836 item 3: a checkpoint at a record with no time (a tombstone) is known by raw.db's file
+    /// too. A restore below it that gives its seq to another tombstone is seen, and the phase starts
+    /// again at the newest record as at any restore, copying nothing older; in the same file the
+    /// records after it are read.
+    #[test]
+    fn a_restore_that_gives_a_timeless_checkpoints_seq_to_another_record_is_seen() {
+        for restored in [true, false] {
+            let (home, mut raw) = ready();
+            let work = tempfile::tempdir().unwrap();
+            let w = work.path();
+            std::fs::write(w.join("plan.pdf"), b"plan").unwrap();
+            turn(&mut raw, "s1", w, &[]);
+            let target = raw.max_seq().unwrap();
+            let device = raw.device().to_owned();
+            let tombstone = |raw: &mut Raw| {
+                raw.append_tombstone(crate::raw::Target::Record {
+                    device: device.clone(),
+                    seq: target,
+                })
+                .unwrap()
+            };
+            let cut = tombstone(&mut raw);
+            assert!(step(home.path(), &raw));
+            let db = open(home.path()).unwrap();
+            let at = checkpoint(&db, &device).unwrap().map(|c| (c.seq, c.ts));
+            assert_eq!(at, Some((cut, None)));
+            if restored {
+                raw = rebuilt_below(home.path(), raw, cut);
+                assert_eq!(tombstone(&mut raw), cut, "the seq given again");
+            } else {
+                tombstone(&mut raw);
+            }
+            let write = [("Write", json!({"file_path": w.join("plan.pdf")}))];
+            turn(&mut raw, "s2", w, &write);
+            step(home.path(), &raw);
+            assert_eq!(
+                copies(home.path()).len(),
+                usize::from(!restored),
+                "restored: {restored}"
+            );
+        }
+    }
+
+    /// #836 item 3: a checkpoint kept before raw.db's file was (`file` NULL) is taken as it is, and
+    /// the file is written to it then, also when no record follows it, so a restore after that is
+    /// seen; with a turn after it, the turn is copied.
+    #[test]
+    fn a_checkpoint_kept_before_the_file_takes_it_once() {
+        for pending in [false, true] {
+            let (home, mut raw) = ready();
+            let work = tempfile::tempdir().unwrap();
+            let w = work.path();
+            std::fs::write(w.join("plan.pdf"), b"plan").unwrap();
+            turn(&mut raw, "s1", w, &[]);
+            let target = raw.max_seq().unwrap();
+            let device = raw.device().to_owned();
+            let tombstone = |raw: &mut Raw| {
+                raw.append_tombstone(crate::raw::Target::Record {
+                    device: device.clone(),
+                    seq: target,
+                })
+                .unwrap()
+            };
+            let cut = tombstone(&mut raw);
+            assert!(step(home.path(), &raw));
+            let db = open(home.path()).unwrap();
+            db.execute("UPDATE deliverable_scan SET file = NULL", [])
+                .unwrap();
+            let write = [("Write", json!({"file_path": w.join("plan.pdf")}))];
+            if pending {
+                turn(&mut raw, "s2", w, &write);
+                assert!(step(home.path(), &raw));
+                assert_eq!(copies(home.path()).len(), 1);
+                continue;
+            }
+            assert!(!step(home.path(), &raw));
+            let c = checkpoint(&db, &device).unwrap().unwrap();
+            assert_eq!(
+                (c.seq, c.ts, c.file.as_deref()),
+                (cut, None, raw.file_identity())
+            );
+            raw = rebuilt_below(home.path(), raw, cut);
+            assert_eq!(tombstone(&mut raw), cut);
+            turn(&mut raw, "s2", w, &write);
+            step(home.path(), &raw);
+            assert!(copies(home.path()).is_empty());
+        }
+    }
+
     /// The first run copies none of the records already there; a restore that ends below the
     /// checkpoint moves it to the newest record, copying nothing older.
     #[test]
@@ -2096,11 +2266,11 @@ mod tests {
         // raw.db ends below the checkpoint, or another record's time is at its seq.
         for ahead in [10, 0] {
             let seq = raw.max_seq().unwrap() + ahead;
-            set_checkpoint(&db, raw.device(), seq, Some(1)).unwrap();
+            set_checkpoint(&db, &raw, seq, Some(1)).unwrap();
             turn(&mut raw, "s1", w, &write());
             assert!(!step(home.path(), &raw), "{ahead}");
             assert!(copies(home.path()).is_empty(), "{ahead}");
-            let at = checkpoint(&db, raw.device()).unwrap().map(|c| c.0);
+            let at = checkpoint(&db, raw.device()).unwrap().map(|c| c.seq);
             assert_eq!(at, Some(raw.max_seq().unwrap()), "{ahead}");
         }
         turn(&mut raw, "s1", w, &write());
