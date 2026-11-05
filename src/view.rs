@@ -10645,10 +10645,11 @@ curate = false
         assert_eq!(d["file"], tag.as_str(), "{answer}");
         assert_eq!(d["kind"], "page", "{answer}");
         assert_eq!(d["title"], "[REDACTED]", "{answer}");
-        // A folder's separator is the system's own (Windows CI).
-        let path = d["path"].as_str().unwrap();
-        assert!(
-            path.ends_with("[REDACTED]") && !path.contains("page.html"),
+        // The whole name, whatever the system's separator (Windows CI).
+        let path = std::path::Path::new(d["path"].as_str().unwrap());
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("[REDACTED]"),
             "{answer}"
         );
     }
