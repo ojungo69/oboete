@@ -236,8 +236,8 @@ with row X16's products; slice 2c takes #836's first three items.
   what was read for its request and begins a read only for a request none was begun for, as the
   row it draws may be older, behind "Show updates". A copies' store that does not read leaves the list and the page
   without copies, not without their requests, and the version then moves with the rest alone.
-- **Card (slice 2b).** The list route's answer (`my_work::listed`) gives each request that has any
-  its card: `deliverables`, the first three of its products as its page builds them
+- **Card (slice 2b).** The list route's answer (`my_work::listed`) gives each request with any
+  deliverables its card: `deliverables`, the first three of its products as its page builds them
   (`shown_products`, the one builder of both) that are not history, as claude-mem's
   `isCardDeliverable` takes them (commits and branches stay on the page), copies among them with
   their tags; and `deliverable_count`, how many of the 60 are such. They are built in the readers'

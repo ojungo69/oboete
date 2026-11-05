@@ -10645,8 +10645,10 @@ curate = false
         assert_eq!(d["file"], tag.as_str(), "{answer}");
         assert_eq!(d["kind"], "page", "{answer}");
         assert_eq!(d["title"], "[REDACTED]", "{answer}");
+        // A folder's separator is the system's own (Windows CI).
+        let path = d["path"].as_str().unwrap();
         assert!(
-            d["path"].as_str().unwrap().ends_with("/[REDACTED]"),
+            path.ends_with("[REDACTED]") && !path.contains("page.html"),
             "{answer}"
         );
     }
