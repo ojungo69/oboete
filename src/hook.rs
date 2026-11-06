@@ -8429,6 +8429,14 @@ mod tests {
         stop(json!({"agent_type": "Explore"}));
         stop(json!({"agent_id": "", "agent_type": "Explore"}));
         stop(json!({"agent_id": "x".repeat(129), "agent_type": "Explore"}));
+        stop(json!({"session_id": "", "agent_id": "a9", "agent_type": "Explore"}));
+        // A checkout that records nothing keeps no stop either, as no work state.
+        let off = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(off.path().join(".git")).unwrap();
+        std::fs::write(off.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(off.path().join(".oboete.toml"), "capture = false\n").unwrap();
+        let o = off.path().to_string_lossy().into_owned();
+        stop(json!({"cwd": o, "agent_id": "a8", "agent_type": "Explore"}));
         let raw = crate::raw::open(home.path()).unwrap();
         let events = (raw.after(raw.device(), 0, 100).unwrap().into_iter())
             .filter(|r| matches!(r.item, crate::raw::Item::Event(_)))
@@ -8473,6 +8481,8 @@ mod tests {
             "{}",
             shown.text()
         );
+        let (_, other, _) = crate::capture::checkout(&json!({"cwd": o}), &settings);
+        assert!(raw.work_state_entries(&other).unwrap().is_empty());
     }
 
     /// Codex on #532: a thread's tool call that took its mark and then failed its write puts the
