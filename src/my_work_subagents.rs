@@ -646,6 +646,42 @@ mod tests {
         assert_eq!(task("c3").chars().count(), 156, "{}", task("c3"));
     }
 
+    /// Slice 2 (Codex on slice 2): a launch's task falls back as claude-mem reads one, to the input's
+    /// prompt (cut at 500) and to the response's description when the input does not parse; a task
+    /// a build before this one kept in the launch is never read, so with neither text parsing there
+    /// is none.
+    #[test]
+    fn a_launch_task_falls_back_as_claude_mem_reads_one() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let record = |id: &str, input: String, output: String| {
+            ev(
+                "s",
+                "tool",
+                MIN,
+                json!({"tool": "Agent", "input": input, "output": output, "launched":
+                    {"agent_id": id, "status": "async_launched", "async": true,
+                     "task": "Kept task"}}),
+            )
+        };
+        let prompt = json!({ "prompt": "p ".repeat(400) }).to_string();
+        let described = json!({"description": "From the response"}).to_string();
+        for (id, input, output) in [
+            ("a1", prompt, String::new()),
+            ("b2", "{cut".to_owned(), described),
+            ("c3", "{cut".to_owned(), "{cut".to_owned()),
+        ] {
+            store.append(&record(id, input, output)).unwrap();
+            store.append(&step("s", id, 2 * MIN)).unwrap();
+        }
+        let k = drain(home.path(), &store);
+        let found = read(&store, &k, &[key("s")], &Rules::default()).unwrap();
+        let task = |id: &str| (found.iter().find(|s| s.agent_id == id).unwrap().task).clone();
+        assert_eq!(task("a1").map(|t| t.chars().count()), Some(500));
+        assert_eq!(task("b2").as_deref(), Some("From the response"));
+        assert_eq!(task("c3"), None);
+    }
+
     /// Slice 2 (Codex on slice 2): in a home copied from another device's, whose own device the
     /// consumer has no checkpoint of yet, a forget of the first device's record and a stop recorded
     /// there count at once.

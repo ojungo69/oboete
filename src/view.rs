@@ -2217,7 +2217,7 @@ impl Viewer {
     }
 
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
-    /// page has it; under the reviews' lock and the readers' hold, from a fresh read to the write:
+    /// page has it; under its own lock and the readers' hold, from a fresh read to the write:
     /// 404 when it names no listed subagent, 409 `finished` when it is Finished already, 409
     /// `not_recorded` when its conversation's folder is gone or masked or records nothing now.
     /// The page reads My Work again after it, which counts the new stop at once.
@@ -2231,7 +2231,7 @@ impl Viewer {
             Ok(p) if p.id.starts_with("s:") && p.id.len() <= 64 => p,
             _ => return refused(400, "bad_request", ""),
         };
-        let _lock = match crate::my_work::reviews_lock(&self.home) {
+        let _lock = match crate::my_work::finished_lock(&self.home) {
             Ok(lock) => lock,
             Err(e) => return failed(&e),
         };
@@ -6135,7 +6135,7 @@ curate = false
         });
         assert_eq!(answer, (409, Some("finished".into())));
         let before = crate::db::now_ms();
-        let hold = crate::my_work::reviews_lock(home).unwrap();
+        let hold = crate::my_work::finished_lock(home).unwrap();
         let answer = std::thread::scope(|scope| {
             let posting = scope.spawn(|| post(&explore, "t0k", ours));
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -6184,7 +6184,8 @@ curate = false
 
     /// Slice 2 (Codex on slice 2): Mark finished opens raw.db before it takes the readers' hold, the
     /// order a restore takes raw.lock and the hold in: while a restore holds raw.db, a forget's hold
-    /// is free, and the action goes on once the restore lets go.
+    /// is free, and the action goes on once the restore lets go. It takes no reviews' lock, which a
+    /// purge waits for while it holds the readers' hold.
     #[test]
     fn mark_finished_opens_raw_before_the_readers_hold() {
         let (mut s, v) = feed_fixture();
@@ -6220,21 +6221,50 @@ curate = false
                 Head::File(_) => panic!("no link"),
             }
         };
+        // Blocked on raw.db, which a restore holds, it holds no readers' hold: the restore's next
+        // hold is free (the check runs in the posting thread, when its open waits).
         let swapping = crate::raw::lock_for_swap(home.path()).unwrap();
+        let (told, free) = std::sync::mpsc::channel();
+        let path = home.path().to_owned();
         let status = std::thread::scope(|scope| {
-            let posting = scope.spawn(post);
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let wait = std::time::Duration::from_millis(300);
-            let free = crate::dispatch::exclusive_within(home.path(), wait);
-            assert!(
-                free.is_ok(),
-                "Mark finished holds no readers' hold for raw.db"
-            );
-            drop(free);
-            drop(swapping);
-            posting.join().unwrap()
+            (scope.spawn(move || {
+                crate::raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        let wait = std::time::Duration::from_millis(300);
+                        let hold = crate::dispatch::exclusive_within(&path, wait);
+                        told.send(hold.is_ok()).unwrap();
+                        drop(hold);
+                        drop(swapping);
+                    }));
+                });
+                let status = post();
+                crate::raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
+                status
+            }))
+            .join()
+            .unwrap()
         });
+        assert!(
+            free.recv().unwrap(),
+            "Mark finished holds no readers' hold for raw.db"
+        );
         assert_eq!(status, 200);
+        // Nor the reviews' lock, which a purge waits for while it holds the readers' hold (Codex
+        // on slice 2): it goes on while that lock is held.
+        let reviews = crate::my_work::reviews_lock(home.path()).unwrap();
+        std::thread::scope(|scope| {
+            let posting = scope.spawn(post);
+            for _ in 0..50 {
+                if posting.is_finished() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let done = posting.is_finished();
+            drop(reviews);
+            assert_eq!(posting.join().unwrap(), 409);
+            assert!(done, "Mark finished waits for no reviews' lock");
+        });
     }
 
     /// J4: `POST /api/my-work/suggestion` passes `save_gate` (the token, this viewer's Origin)

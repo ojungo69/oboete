@@ -1005,7 +1005,13 @@ fn read_held(
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
-    let subagents = subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?;
+    // The page's read alone (`listed`): `reviewing`, which the owner's actions read under the
+    // reviews' lock, takes no readers' hold, which a purge holds while it waits for that lock
+    // (Codex on slice 2).
+    let subagents = match cards {
+        Some(_) => subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?,
+        None => Vec::new(),
+    };
     let answer = json!({"requests": answers, "unlinked": unlinked, "story": story,
         "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words(),
         "subagents": subagents});
@@ -1882,15 +1888,27 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
 pub(crate) struct ReviewsLock(#[allow(dead_code)] std::fs::File);
 
 pub(crate) fn reviews_lock(home: &Path) -> Result<ReviewsLock> {
+    Ok(ReviewsLock(state_lock(home, "my-work-reviews.lock")?))
+}
+
+/// Slice 2 of docs/subagents.md: Mark finished's own hold, taken before anything else, so two at
+/// once append one stop. No other path takes it: it waits on nothing a forget's purge holds, as
+/// the reviews' lock would (Codex on slice 2).
+pub(crate) fn finished_lock(home: &Path) -> Result<std::fs::File> {
+    state_lock(home, "my-work-finished.lock")
+}
+
+/// An exclusive hold of `state/<name>`, waited for.
+fn state_lock(home: &Path, name: &str) -> Result<std::fs::File> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let lock = options.open(state.join("my-work-reviews.lock"))?;
+    let lock = options.open(state.join(name))?;
     lock.lock()?;
-    Ok(ReviewsLock(lock))
+    Ok(lock)
 }
 
 /// The checks as `change` leaves them, written whole when it says they changed, under the hold.
@@ -3278,7 +3296,13 @@ mod tests {
         h.s.event("tool", "s1", (R, "main"), h.t - 50_000, step);
         let other = json!({"tool": "Read", "agent_id": "agent-x2"});
         h.s.event("tool", "s9", (R, "main"), h.t - 50_000, other);
-        let v = h.read(Range::All, h.t);
+        let tag = |_: &crate::deliverables::Row| Ok(String::new());
+        let page = |h: &Home| {
+            h.run_read();
+            listed(h.s.home.path(), Range::All, h.t, &tag).unwrap()
+        };
+        assert_eq!(h.read(Range::All, h.t)["subagents"], json!([]));
+        let v = page(&h);
         let subagents = v["subagents"].as_array().unwrap();
         assert_eq!(subagents.len(), 1, "{v}");
         let s = &subagents[0];
@@ -3301,8 +3325,32 @@ mod tests {
         let device = h.s.raw.device().to_owned();
         let target = crate::forget::session_target(home, &format!("{device}:{asked}")).unwrap();
         crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
-        let v = h.read(Range::All, h.t);
+        let v = page(&h);
         assert_eq!(v["subagents"], json!([]), "{v}");
+    }
+
+    /// Slice 2 (Codex on slice 2): the owner's actions read My Work under the reviews' lock, which
+    /// a purge waits for while it holds the readers' hold; their read takes no readers' hold.
+    #[test]
+    fn the_actions_read_takes_no_readers_hold() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        h.run_read();
+        let home = h.s.home.path();
+        let purging = crate::dispatch::exclusive(home).unwrap();
+        std::thread::scope(|scope| {
+            let reading = scope.spawn(|| reviewing(home, h.t).map(|(v, _)| v));
+            for _ in 0..50 {
+                if reading.is_finished() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let done = reading.is_finished();
+            drop(purging);
+            reading.join().unwrap().unwrap();
+            assert!(done, "the actions' read waits for no readers' hold");
+        });
     }
 
     /// The design's 1: two `request_id`s in a session make two requests with its original ask,

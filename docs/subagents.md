@@ -320,7 +320,9 @@ Slice 3:
   (`subagent_rebuild`), as a device's lost tombstone may have taken another device's record (the
   manifest makes the device's alone again); every device raw holds is read.
 - **My Work's read** (`my_work_subagents::read`, from `my_work::read_held` by `subagents_of`, which
-  takes the read fence): the consumer's checkpoints first (none: no subagents), then the rows of the
+  takes the read fence), in the page's read (`my_work::listed`) alone: `my_work::reviewing`, which
+  the owner's actions read under the reviews' lock, reads none, as a purge holds the read fence
+  while it waits for that lock: the consumer's checkpoints first (none: no subagents), then the rows of the
   listed Claude Code conversations, then, past each device's checkpoint (from the first record of
   one it has none of yet, a copied home's own), the `subagent_stop` records (`Raw::stops_after`)
   and the tombstones' targets (`Raw::tombstones_after`), a row read twice counting once; a record expired since is passed over (`Raw::expired_among`). claude-mem's
@@ -340,8 +342,8 @@ Slice 3:
   `can_mark`. `view::answered` takes `conversation` and `id` out of the gate's walk and puts them
   back.
 - **Mark finished** (`POST /api/my-work/finished`, `Viewer::my_work_finished`): `{id}` only (`s:`,
-  at most 64 bytes); `my_work::reviews_lock`, then raw.db and knowledge.db opened, then the read
-  fence (the order a restore takes raw.lock and the fence in), held through a fresh read with that
+  at most 64 bytes); its own lock (`my_work::finished_lock`), then raw.db and knowledge.db opened,
+  then the read fence (the order a restore takes raw.lock and the fence in), held through a fresh read with that
   handle (`my_work::subagent`, every request built, as the page reads `range=all`) and the append
   (`my_work_subagents::mark`, `hook::record_if` with the event `SubagentStop`). 404 `not_found`, 409
   `finished`, 409 `not_recorded` when the conversation's recorded folder (its newest record's `cwd`
@@ -369,7 +371,10 @@ Slice 3:
   second review found the task still cut when it was kept, so a rule added since could not mask a
   secret the cut split, and a run of base64 shorter than the cleaning's length after the cut was
   kept; the task is no longer kept, and is read as above. The order of raw.db and the hold has
-  its own test.
+  its own test. A third found the reviews' lock, which Mark finished and the actions' read
+  (`reviewing`) took before the read fence, taken by a purge after it: Mark finished takes a lock
+  of its own (**not as planned**, which named the review route's), and only the page's read reads
+  the subagents.
 - **Measured** on a copy of this PC's store (2026-11-07, release build): the consumer's first pass
   took 18.1 s and kept 24,596 rows, 1,522 subagents with a step. My Work's subagents part took 71 to
   82 ms over its 277 conversations (106 ms with each checkpoint 20,000 records behind) and the whole
@@ -384,6 +389,8 @@ Slice 3:
   `my_work_subagents::tests::the_subagents_with_the_newest_steps_are_listed`,
   `my_work_subagents::tests::a_copied_homes_own_records_count_before_its_first_checkpoint`,
   `my_work_subagents::tests::a_launch_task_is_read_whole_through_the_rules_of_now_before_its_cut`,
+  `my_work_subagents::tests::a_launch_task_falls_back_as_claude_mem_reads_one`,
+  `my_work::tests::the_actions_read_takes_no_readers_hold`,
   `view::tests::mark_finished_opens_raw_before_the_readers_hold`,
   `consumer::subagents::tests::a_rewind_makes_again_what_another_devices_lost_tombstone_took`,
   `my_work::tests::a_listed_conversations_subagents_are_in_its_answer`,
