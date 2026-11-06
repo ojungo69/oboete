@@ -8306,6 +8306,15 @@ mod tests {
         p.decided(1, "Parser errors go to stderr.", &[]);
         p.s.run();
         let home = p.s.home.path().to_owned();
+        // The root was shown its session start before it spawned the subagent, and a claim was
+        // decided since: the subagent's start holds both, and the root's shown set stays the
+        // root's (Sourcery on #847).
+        let root_start = json!({"session_id": "cx", "cwd": p.c, "hook_event_name": "SessionStart",
+            "source": "startup"});
+        let started = hook(&home, "codex", "SessionStart", &root_start);
+        assert!(started.contains("Parser errors go to stderr."), "{started}");
+        p.decided(2, "Deploys run on Fridays.", &[]);
+        p.s.run();
         let dir = tempfile::tempdir().unwrap();
         // The rollout as Codex has written it when SubagentStart runs: its long session_meta line.
         let rollout = |name: &str, meta: Value| {
@@ -8324,6 +8333,7 @@ mod tests {
             hook(&home, "codex", "SubagentStart", &payload)
         };
         let root = shown_set(&home, "codex", "cx");
+        assert!(!root.is_empty());
         let fresh = start(&rollout("fresh.jsonl", json!({})));
         let v: Value = serde_json::from_str(&fresh).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SubagentStart");
@@ -8331,11 +8341,12 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(context.contains("Parser errors go to stderr."), "{fresh}");
+        assert!(context.contains("Deploys run on Fridays."), "{fresh}");
         assert_eq!(v.as_object().unwrap().len(), 1, "{fresh}");
         let fork = rollout("fork.jsonl", json!({"forked_from_id": "cx"}));
         assert_eq!(start(&fork), "");
         let missing = start(&dir.path().join("missing.jsonl"));
-        assert!(missing.contains("Parser errors go to stderr."), "{missing}");
+        assert!(missing.contains("Deploys run on Fridays."), "{missing}");
         // Whatever its id says: none, or one that names no thread (Codex's review of
         // docs/subagents.md's slice 1).
         for id in [Value::Null, json!(""), json!("x".repeat(129))] {
@@ -8343,7 +8354,7 @@ mod tests {
                 "hook_event_name": "SubagentStart", "transcript_path": "/nowhere.jsonl",
                 "agent_id": id});
             let out = hook(&home, "codex", "SubagentStart", &payload);
-            assert!(out.contains("Parser errors go to stderr."), "{out}");
+            assert!(out.contains("Deploys run on Fridays."), "{out}");
         }
         assert_eq!(shown_set(&home, "codex", "cx"), root);
         // A thread is named by an id of at most 128 UTF-16 units, as claude-mem counts.
@@ -8357,7 +8368,8 @@ mod tests {
                 .into_iter())
             .filter(|r| matches!(&r.item, crate::raw::Item::Event(e) if e.session == "cx"))
             .count();
-        assert_eq!(recorded, 0);
+        // The root's start alone: no subagent's start is recorded.
+        assert_eq!(recorded, 1);
     }
 
     /// X17 (docs/subagents.md): Claude Code's SubagentStop keeps the subagent's id and type, as
@@ -8391,6 +8403,10 @@ mod tests {
         let block = |s: &str| format!("<system-reminder>{s}</system-reminder>");
         stop(json!({"agent_id": block("a7"), "agent_type": "Explore"}));
         stop(json!({"agent_id": "a6", "agent_type": block("Explore")}));
+        // And bounded again: a data URI inside one is cleaned into its longer marker.
+        let uri = |s: &str| format!("{} data:a/b;base64,AAAA", s.repeat(100));
+        stop(json!({"agent_id": uri("x"), "agent_type": "Explore"}));
+        stop(json!({"agent_id": "a5", "agent_type": uri("t")}));
         // A checkout that records nothing keeps no stop either.
         let off = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(off.path().join(".git")).unwrap();
@@ -8418,6 +8434,7 @@ mod tests {
                 mark(json!({"agent_id": "x".repeat(128)})),
                 mark(json!({"agent_id": "😀".repeat(64)})),
                 mark(json!({"agent_id": "a6"})),
+                mark(json!({"agent_id": "a5"})),
             ]
         );
     }

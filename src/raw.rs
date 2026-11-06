@@ -5587,12 +5587,13 @@ impl Raw {
     }
 
     /// docs/deliverables.md: `turn_start` by live hook records alone, so a replay's reply in the
-    /// same session is no boundary of a live turn.
+    /// same session is no boundary of a live turn. A subagent's stop begins no turn here either
+    /// (Sourcery on #847).
     pub(crate) fn hook_turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MIN(seq), ?4) FROM records
              WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
-               AND seq <= ?4 AND source = 'hook'
+               AND seq <= ?4 AND source = 'hook' AND kind <> 'subagent_stop'
                AND seq > COALESCE(
                  (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
                     AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
@@ -9555,6 +9556,7 @@ mod tests {
         let prompt = raw.append(&ev("prompt")).unwrap();
         let reply = raw.append(&ev("reply")).unwrap();
         assert_eq!(raw.turn_start("claude", "s", reply).unwrap(), prompt);
+        assert_eq!(raw.hook_turn_start("claude", "s", reply).unwrap(), prompt);
     }
 
     /// X17 (docs/subagents.md): the session's previous window is the one that holds its last
