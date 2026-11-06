@@ -47,6 +47,11 @@ switches to.
   raises the home to 5 in the transaction that appends it, above a hide op's 4 in the same batch,
   and a rebuild that brings one back is stamped 5 too. A home whose owner never turned My Work's
   jobs on still opens at 2, 3 or 4.
+- **6, a subagent's stop** (docs/subagents.md): a binary before it indexes the stop's id and type
+  as words and reads the stop as a session's work. The first `subagent_stop` record raises the
+  home to 6 in the transaction that appends it (a hook's write and a kept file's write-back
+  alike), and a rebuild that brings one back, live, expired or removed, is stamped 6 too. A home
+  whose agents never sent a SubagentStop still opens at 2 to 5.
 
 ## The refusal
 

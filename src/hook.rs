@@ -466,10 +466,12 @@ fn run_io(
         // `consumer::manifest::text` does after its gate).
         let came = |l: &str| text.lines().any(|t| t == l);
         // A Codex subagent's manifest after its compaction leaves the session's shown set the
-        // root's: only the root has prompts, where the set is read (Codex on #532).
+        // root's: only the root has prompts, where the set is read (Codex on #532). So does its
+        // start, whatever its id says (X26, Codex's review of docs/subagents.md's slice 1).
         if let Some(m) = &manifest
             && agent != "opencode"
             && !took.thread.starts_with("compacted-")
+            && (agent, event) != ("codex", "SubagentStart")
         {
             // A card or summary counts when its own line came: the block puts each on a line that
             // begins with its ID, and a cut keeps whole lines (Codex on #521).
@@ -663,12 +665,12 @@ impl Took {
 }
 
 /// A Codex thread's compaction flag (claude-mem 13.39): a subagent's (`agent_id`) `compacted-`
-/// and 16 hex digits of its id's sha256, the root's `compacted`; an id over 128 characters
+/// and 16 hex digits of its id's sha256, the root's `compacted`; an id over 128 UTF-16 units
 /// names none, as claude-mem drops it.
 fn codex_thread(payload: &Value) -> String {
     match payload["agent_id"]
         .as_str()
-        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .filter(|id| !id.is_empty() && id.encode_utf16().count() <= 128)
     {
         Some(id) => format!("compacted-{}", &crate::curate::sha256_hex(id)[..16]),
         None => "compacted".into(),
@@ -8334,7 +8336,20 @@ mod tests {
         assert_eq!(start(&fork), "");
         let missing = start(&dir.path().join("missing.jsonl"));
         assert!(missing.contains("Parser errors go to stderr."), "{missing}");
+        // Whatever its id says: none, or one that names no thread (Codex's review of
+        // docs/subagents.md's slice 1).
+        for id in [Value::Null, json!(""), json!("x".repeat(129))] {
+            let payload = json!({"session_id": "cx", "turn_id": "t1", "cwd": p.c,
+                "hook_event_name": "SubagentStart", "transcript_path": "/nowhere.jsonl",
+                "agent_id": id});
+            let out = hook(&home, "codex", "SubagentStart", &payload);
+            assert!(out.contains("Parser errors go to stderr."), "{out}");
+        }
         assert_eq!(shown_set(&home, "codex", "cx"), root);
+        // A thread is named by an id of at most 128 UTF-16 units, as claude-mem counts.
+        let thread = |id: String| codex_thread(&json!({ "agent_id": id }));
+        assert!(thread("😀".repeat(64)).starts_with("compacted-"));
+        assert_eq!(thread("😀".repeat(65)), "compacted");
         let recorded =
             (p.s.raw
                 .after(p.s.raw.device(), 0, 1000)

@@ -75,15 +75,28 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 - **A mark, not work.** The stop holds no words: the full-text index gives it no row, a curator's
   window no line. It may come after the reply it worked for, in another session's window, so the
   readers of a session's work pass over it: a window's labels and last time, whether a window is a
-  subagent's alone, the session's previous window, a turn's first record, and the manifest's facts
-  (an ended session stays ended, and the stop is no record to curate).
+  subagent's alone, the session's previous window, a turn's first record and its repository, and
+  the manifest's facts (an ended session stays ended, and the stop is no record to curate).
+- **Nothing made from it.** A curator is shown no line of a stop, nor of a session's start or end,
+  so a forget or a mask of one of them takes nothing that another record's window, turn or request
+  made: the purge judges no op by it, a card or a summary is not hidden for its removal, and a
+  forget's preview counts none of it. Nor does an excluded session's one keep another session's
+  cards and summaries from the embedder, or My Work's ops from being shown. Before slice 1 a start
+  or an end did: a forget of a session took another session's window that held its start or end.
+- **After a forget.** A stop whose time is after its session's forget is recorded, as every event
+  of the session after the registration is (docs/milestone-5-plan.md, 3b-1): what stops a session's
+  future records is the capture exclusion.
+- **The home's format.** The first stop raises the home to format 6 (docs/store-format.md): a
+  binary before it would index the stop's id and type as words and read the stop as a session's
+  work.
 - **SubagentStart.** `setup::CODEX_EVENTS` gains `("SubagentStart", None, 10, true)` (10 s, as
   Codex's SessionStart, whose work it does). `hook::injects` answers it as Codex's SessionStart is
   answered, the session start's context for the checkout, unless the rollout's first line (at most
   1 MiB) is a `session_meta` with a string `payload.forked_from_id`; an unreadable rollout counts as
-  fresh. It takes no compaction flag and records nothing. A recording failure is shown there as at a
-  session start. An assembled context that is empty prints nothing; a checkout with no memory still
-  gets the work state's rule, as at a session start.
+  fresh. It takes no compaction flag and records nothing, and the root's shown set stays the root's
+  whatever the subagent's id says. A recording failure is shown there as at a session start. An
+  assembled context that is empty prints nothing; a checkout with no memory still gets the work
+  state's rule, as at a session start.
 - **On the owner's machines.** A new event is wired only by `oboete setup claude` and
   `oboete setup codex` (or the settings page's agent setup), after the binary is installed, and
   reaches sessions started after that. Tried first in the `oboete-dogfood` user (CLAUDE.md).
@@ -122,17 +135,23 @@ Slice 1:
   no id, an id over 128 UTF-16 units, or in a checkout that records nothing, keeps nothing. It
   prints nothing.
 - The stop is no row of the full-text index and no line of a curator's window. It is none of a
-  span's labels (session, repository, time); a span of a subagent's tool calls and its stop is the
-  subagent's alone, the stop expired too; it begins no turn, makes no previous window of its
-  session, and is no fact of the manifest, live or expired.
+  span's labels (session, repository, time) nor of a turn's repository; a span of a subagent's
+  tool calls and its stop is the subagent's alone, the stop expired too; it begins no turn, makes
+  no previous window of its session, and is no fact of the manifest, live or expired.
+- A forget of a session whose start and subagent's stop lie in another session's window keeps that
+  window's card shown and its op and claims as they were, and its preview counts the session's own
+  window only. A removal or a mask of a start, an end or a stop is no removal from a span, and a
+  span's sessions are not theirs.
+- The first stop raises the home to format 6; a rebuild that brings one back, live, expired or
+  removed, stamps 6; a home without one stays where it was.
 - `oboete setup claude` wires SubagentStop and `oboete setup codex` SubagentStart, a rerun keeps one
   of each, `--remove` takes them out, and Codex's trust rows match the new list; the settings page's
   agent setup shows the change before it is made.
 - A fresh Codex subagent's SubagentStart prints the checkout's session start context under
   `hookEventName: "SubagentStart"` and nothing Codex's output refuses; a forked one (the rollout's
   `forked_from_id`) prints nothing; an unreadable or missing rollout counts as fresh; no compaction
-  flag is taken, nothing is recorded, and the root's shown set stays the root's; a recording failure
-  is shown as at a session start.
+  flag is taken, nothing is recorded, and the root's shown set stays the root's, with no id or one
+  that names no thread too; a recording failure is shown as at a session start.
 
 Slice 2:
 
@@ -160,19 +179,28 @@ Slice 3:
   `subagent_stop` record (`raw::SUBAGENT_STOP`), kept as the hook keeps every record. Nothing is
   printed. The full-text consumer gives it no row (`consumer::fts`); `Raw::labels_in`,
   `Raw::subagent_only` (live or expired), `SESSION_LATEST` (`Raw::previous_window_ops`),
-  `Raw::turn_start` and the manifest's `facts` and `label_facts` pass over it. A curator's window
-  renders no line of a kind it does not know.
+  `Raw::turn_start`, `Raw::session_repo` and the manifest's `facts` and `label_facts` pass over it.
+  A curator's window renders no line of a kind it does not know.
+- **Line-less records** (`raw::LINELESS`: start, end, subagent_stop): `Raw::forgotten_records` and
+  `Raw::forgotten_and_masked` (what a purge judges ops by), `Raw::removed_in` (a card's and a
+  summary's removals), `Raw::with_lines` (a forget's preview), `Raw::sessions_over` (the
+  embedder's excluded sessions) and `Raw::holds_session` (My Work's ops) pass over them.
+- **Format 6** (`raw::SUBAGENT_STOP_FORMAT`): `insert_event` and a rebuild's event, expired and
+  removed lines raise the home when the record is a stop (`raw::record_format`).
 - **SubagentStart** (`setup::CODEX_EVENTS`, no matcher, 10 s, the context whole as
   `additionalContextLimit` 0): `hook::injects` answers it unless `hook::forked` reads the rollout's
   first line as a fork. The context is SessionStart's for the checkout; the subagent's `agent_id`
-  makes its thread `compacted-…`, so the root's shown set stays the root's, as after a subagent's
-  compaction (row N7). A recording failure is shown as at a SessionStart (`reads_start`). Nothing
-  is recorded.
+  makes its thread `compacted-…`, as after a subagent's compaction (row N7), and the root's shown
+  set is left alone at any SubagentStart, whatever its id. `hook::codex_thread` counts an id in
+  UTF-16 units, as claude-mem does. A recording failure is shown as at a SessionStart
+  (`reads_start`). Nothing is recorded.
 - **Both ways tried.** Local Codex reviews found the record, with no reader passing over it, read as
-  a session's work by the five readers above, and claude-mem's work state row lost when the store
+  a session's work by the readers above, and claude-mem's work state row lost when the store
   cannot take it, left behind by a forget of its session, and read as work when the redaction
-  changes its list's name. The record keeps what every record has, and the five readers pass over
-  it.
+  changes its list's name. The record keeps what every record has, and the readers pass over it. A
+  third review found the forget, the masks and the excluded sessions judging what other records
+  made by the stop (and so by a start or an end, before slice 1 too), the home's format, a turn's
+  repository, and a subagent start's shown set.
 - **Tests:** `hook::tests::a_claude_subagent_stop_is_kept_as_its_id_and_type`,
   `hook::tests::a_fresh_codex_subagent_gets_the_session_start_context_and_a_fork_none`,
   `hook::tests::a_home_that_cannot_be_made_is_reported_at_session_start` (a Codex SubagentStart too),
@@ -182,5 +210,10 @@ Slice 3:
   `raw::tests::a_subagent_stop_leaves_a_span_the_subagents_work`,
   `raw::tests::a_subagent_stop_begins_no_turn`,
   `raw::tests::a_subagent_stop_makes_no_previous_window_of_its_session`,
+  `raw::tests::a_subagent_stop_is_none_of_a_turns_repository`,
+  `raw::tests::a_lineless_records_removal_takes_nothing_made`,
+  `raw::tests::a_spans_sessions_are_not_those_of_its_lineless_records`,
+  `raw::tests::a_subagent_stop_raises_the_home_to_the_format_that_reads_it`,
+  `forget::tests::a_forgotten_sessions_lineless_records_take_nothing_from_another_sessions_window`,
   `consumer::manifest::tests::a_subagent_stop_gives_no_fact`,
   `setup::tests::the_subagent_hooks_are_wired`.
