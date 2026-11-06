@@ -274,6 +274,12 @@ mod tests {
             agent: "codex".into(),
             ..ev("tool", json!({"tool": "exec", "agent_id": "a7"}))
         });
+        // Completed in the background is no foreground call's return.
+        add(ev(
+            "tool",
+            json!({"tool": "Agent", "launched": {"agent_id": "a8", "status": "completed",
+                   "async": true}}),
+        ));
         let k = drain(home.path(), &store);
         let t = |s: &str| Some(s.to_owned());
         assert_eq!(
@@ -286,6 +292,7 @@ mod tests {
                 (seqs[3], "launch".into(), "a3".into(), None, false),
                 (seqs[4], "launch".into(), "a4".into(), None, true),
                 (seqs[5], "step".into(), "a5".into(), None, false),
+                (seqs[8], "launch".into(), "a8".into(), None, false),
             ]
         );
     }

@@ -2123,6 +2123,13 @@ mod tests {
         let e = one("PostToolUse", call(json!(text.to_string()), json!({})));
         assert_eq!(body(&e)["launched"]["async"], true);
         assert_eq!(body(&e)["launched"]["task"].as_str().unwrap().len(), 500);
+        // A description, at 160.
+        let described = json!({"description": "d".repeat(200), "prompt": "p"});
+        let e = one(
+            "PostToolUse",
+            call(json!({"agentId": "a7", "status": "completed"}), described),
+        );
+        assert_eq!(body(&e)["launched"]["task"], "d".repeat(160));
         // No id, or another tool, launches nothing.
         let e = one(
             "PostToolUse",

@@ -4798,9 +4798,10 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   assert.deepEqual(shownCards().map(n=>n.dataset.subagent??n.dataset.session),['c:claude:s1','s:1','s:2','c:claude:s2','s:3'],
     'each subagent after its conversation');
   const of=id=>shownCards().find(n=>n.dataset.subagent===id);
-  assert(flat(of('s:1')).includes('Claude Code · Explore')&&flat(of('s:1')).includes('Subagent · Fix the parser'),flat(of('s:1')));
+  const named=id=>flat(of(id).querySelectorAll('h3')[0]);
+  assert(named('s:1')==='Claude Code · Explore'&&flat(of('s:1')).includes('Subagent · Fix the parser'),flat(of('s:1')));
   assert(flat(of('s:1')).includes('Working')&&flat(of('s:1')).includes('Find the parser'),'its state and task');
-  assert(flat(of('s:2')).includes('Claude Code · Subagent')&&flat(of('s:2')).includes('No recent step'),'"Subagent" with no type');
+  assert(named('s:2')==='Claude Code · Subagent'&&flat(of('s:2')).includes('No recent step'),'"Subagent" with no type');
   assert(flat(of('s:3')).includes(`Finished · ${new Date(now-30000).toLocaleString('en')}`)&&flat(of('s:3')).includes('Subagent · Tidy the notes'),
     flat(of('s:3')));
   const finish=id=>of(id).querySelectorAll('button').find(n=>n.className.includes('my-work-finish'));
