@@ -1046,30 +1046,28 @@ fn subagents_of(
     )
 }
 
-/// Slice 2: the listed subagent the page names `id`, read afresh, with the folder its
-/// conversation's newest record was recorded in (none when that label is gone or masked). The
-/// caller holds the readers' hold.
+/// Slice 2: the listed subagent the page names `id`, read afresh from `raw` and `k`, with the folder
+/// its conversation's newest record was recorded in (none when that label is gone or masked). The
+/// caller holds the readers' hold, taken after it opened them.
 pub(crate) fn subagent(
     home: &Path,
+    (raw, k): (&Raw, &Connection),
     id: &str,
 ) -> Result<Option<(crate::my_work_subagents::Subagent, Option<String>)>> {
-    let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(None);
-    };
     let rules = Rules::load(home)?;
-    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
-    let Built { requests, .. } = build(&raw, &k, &rules, &reading)?;
+    let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+    let Built { requests, .. } = build(raw, k, &rules, &reading)?;
     let listed: Vec<Key> = (requests.iter().flat_map(|r| &r.owns))
         .map(|(key, _)| key.clone())
         .collect();
     let mut key = None;
-    for s in crate::my_work_subagents::read(&raw, &k, &listed)? {
+    for s in crate::my_work_subagents::read(raw, k, &listed)? {
         let shown = format!(
             "s:{}",
             keyed_print(&crate::my_work_subagents::held(&s), home, &mut key)?
         );
         if shown == id {
-            let folder = crate::my_work_subagents::recorded_folder(&raw, &s.conversation)?;
+            let folder = crate::my_work_subagents::recorded_folder(raw, &s.conversation)?;
             return Ok(Some((s, folder)));
         }
     }

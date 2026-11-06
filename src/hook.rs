@@ -1245,6 +1245,33 @@ pub fn record(
     failed: &mut i64,
     written_back: &mut usize,
 ) -> Result<Recorded> {
+    let all = |_: &crate::raw::Event| true;
+    record_if(
+        home,
+        raw,
+        agent,
+        event,
+        payload,
+        (ts, settings),
+        (failed, written_back),
+        &all,
+    )
+}
+
+/// `record`, appending and keeping nothing of the call unless every event it builds `keeps`: the
+/// viewer's Mark finished (slice 2 of docs/subagents.md) keeps the session and the subagent it
+/// names, which the gate's rules of now may change (Codex on slice 2).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_if(
+    home: &Path,
+    raw: &mut crate::raw::Raw,
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    (ts, settings): (i64, &crate::capture::Settings),
+    (failed, written_back): (&mut i64, &mut usize),
+    keeps: &dyn Fn(&crate::raw::Event) -> bool,
+) -> Result<Recorded> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
     // ponytail: one recovery lock per home; use per-session locks if end hooks contend.
     let _recovery = if agent == "cursor" && event == "SessionEnd" {
@@ -1264,6 +1291,11 @@ pub fn record(
     let back;
     (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
+    let built = if built.iter().all(|b| keeps(&b.captured.event)) {
+        built
+    } else {
+        Vec::new()
+    };
     match back {
         Ok(()) => {}
         // A damaged raw.db goes on to `run_io`, which asks the worker to restore it; this call's

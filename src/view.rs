@@ -2235,11 +2235,18 @@ impl Viewer {
             Ok(lock) => lock,
             Err(e) => return failed(&e),
         };
+        // raw.db first, then the readers' hold, the order a restore takes them in (Codex on
+        // slice 2); the same handle reads and appends.
+        let (mut raw, k) = match crate::search::b::stores(&self.home) {
+            Ok(Some(stores)) => stores,
+            Ok(None) => return refused(404, "not_found", ""),
+            Err(e) => return failed(&e),
+        };
         let _read = match crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT) {
             Ok(hold) => hold,
             Err(e) => return failed(&e),
         };
-        let (found, folder) = match crate::my_work::subagent(&self.home, &posted.id) {
+        let (found, folder) = match crate::my_work::subagent(&self.home, (&raw, &k), &posted.id) {
             Ok(Some(found)) => found,
             Ok(None) => return refused(404, "not_found", ""),
             Err(e) => return failed(&e),
@@ -2250,7 +2257,13 @@ impl Viewer {
         let Some(folder) = folder else {
             return refused(409, "not_recorded", "");
         };
-        match crate::my_work_subagents::mark(&self.home, &found, &folder, crate::db::now_ms()) {
+        match crate::my_work_subagents::mark(
+            &self.home,
+            &mut raw,
+            &found,
+            &folder,
+            crate::db::now_ms(),
+        ) {
             Ok(true) => Response::json(&json!({})),
             Ok(false) => refused(409, "not_recorded", ""),
             Err(e) => failed(&e),
@@ -5935,11 +5948,12 @@ curate = false
             std::fs::create_dir_all(&p).unwrap();
             p.to_string_lossy().into_owned()
         };
-        let (open, off, gone, excluded) = (
+        let (open, off, gone, excluded, elsewhere) = (
             folder("open"),
             folder("off"),
             folder("gone"),
             folder("excluded"),
+            folder("elsewhere"),
         );
         std::fs::create_dir(Path::new(&off).join(".git")).unwrap();
         std::fs::write(Path::new(&off).join(".oboete.toml"), "capture = false\n").unwrap();
@@ -5969,6 +5983,7 @@ curate = false
             step("s1", 1_000, &open, "a1", "Explore"),
             step("s1", 1_000, &open, "a2", "Plan"),
             step(hex, 1_000, &open, "b1", "Hex"),
+            step(hex, 1_000, &open, "b2", "Hex2"),
             step("s3", 1_000, &off, "c1", "Off"),
             step("s4", 1_000, &gone, "d1", "Gone"),
             step("s5", 1_000, &excluded, "e1", "Excluded"),
@@ -5976,6 +5991,22 @@ curate = false
             s.raw.append(&e).unwrap();
         }
         s.raw.append(&stop("s1", 2_000, "a2")).unwrap();
+        // The conversation's newest record, in another folder, forgotten before its purge.
+        let moved = crate::raw::Event {
+            kind: "tool".into(),
+            session: "s1".into(),
+            cwd: Some(elsewhere.clone()),
+            ts: t + 1_500,
+            ..crate::raw::test_event(r#"{"tool":"Read"}"#)
+        };
+        let moved = s.raw.append(&moved).unwrap();
+        let mine = s.raw.device().to_owned();
+        (s.raw)
+            .append_tombstone(crate::raw::Target::Record {
+                device: mine,
+                seq: moved,
+            })
+            .unwrap();
         std::fs::remove_dir(&gone).unwrap();
         s.run();
         let home = s.home.path();
@@ -6004,7 +6035,7 @@ curate = false
                 .unwrap_or_else(|| panic!("no request for {kind} in {first}"));
             assert_eq!(request["ask"]["text"], asked, "{first}");
         }
-        for kind in ["Explore", "Plan", "Hex", "Off", "Gone", "Excluded"] {
+        for kind in ["Explore", "Plan", "Hex", "Hex2", "Off", "Gone", "Excluded"] {
             let id = by_type(&first, kind)["id"].as_str().unwrap().to_owned();
             assert!(
                 id.len() > 2 && id[2..].bytes().all(|b| b.is_ascii_hexdigit()),
@@ -6079,6 +6110,11 @@ curate = false
                 "{kind}"
             );
         }
+        // A rule of now that masks the conversation's session would record the stop as another's.
+        assert_eq!(
+            code(post(&body(&id("Hex2")), "t0k", ours)),
+            (409, Some("not_recorded".into()))
+        );
         assert_eq!(stops(), 1);
         // A hook's stop before the fresh read.
         s.raw.append(&stop(hex, 3_000, "b1")).unwrap();

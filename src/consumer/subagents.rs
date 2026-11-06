@@ -48,12 +48,7 @@ pub(crate) fn facts(e: &Event) -> Vec<Fact> {
         return Vec::new();
     }
     let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
-    // An id a mask touched (`*`, which no agent's id holds) names no subagent of the record's.
-    let named = |v: &Value| {
-        (v.as_str())
-            .filter(|s| !s.is_empty() && !s.contains('*'))
-            .map(str::to_owned)
-    };
+    let named = |v: &Value| (v.as_str()).filter(|s| unmasked(s)).map(str::to_owned);
     let mut out = Vec::new();
     if e.kind == SUBAGENT_STOP {
         if let Some(agent_id) = named(&body["agent_id"]) {
@@ -88,6 +83,12 @@ pub(crate) fn facts(e: &Event) -> Vec<Fact> {
     out
 }
 
+/// An id no mask touched: a tombstone's (`*`) or the capture gate's (`[REDACTED]`), which no agent's
+/// id holds, makes ids alike that were not (Codex on slice 2).
+fn unmasked(id: &str) -> bool {
+    !id.is_empty() && !id.contains('*') && !id.contains(crate::redact::MASK)
+}
+
 /// The subagent a call started and whether the call returned with it: its `launched`, or, in a
 /// record from before slice 2, its output when that still parses.
 fn launched(body: &Value) -> Option<(String, bool)> {
@@ -102,7 +103,7 @@ fn launched(body: &Value) -> Option<(String, bool)> {
     } else {
         return None;
     };
-    let agent_id = (launched["agent_id"].as_str()).filter(|s| !s.is_empty() && !s.contains('*'))?;
+    let agent_id = (launched["agent_id"].as_str()).filter(|s| unmasked(s))?;
     let returned = launched["status"] == "completed" && launched["async"] != true;
     Some((agent_id.to_owned(), returned))
 }
@@ -181,15 +182,21 @@ impl Consumer for Subagents {
         Ok(recs.last().map_or(from, |r| r.seq))
     }
 
-    /// Lost commits may hold tombstones that changed older records' rows: the device's rows are
-    /// dropped and made again from seq 1, as the manifest's facts are.
+    /// Lost commits may hold tombstones that changed older records' rows, another device's too (a
+    /// forget written here of another device's record): every device's rows are dropped and made
+    /// again from seq 1 (Codex on slice 2; the manifest's facts make the device's alone again).
     fn rewind(&mut self, k: &Connection, device: &str, _to: i64) -> Result<()> {
         schema(k)?;
-        k.execute("DELETE FROM subagent_facts WHERE device = ?1", [device])?;
+        k.execute(
+            "INSERT OR IGNORE INTO subagent_rebuild(device)
+             SELECT device FROM checkpoints WHERE consumer = ?1",
+            [NAME],
+        )?;
         k.execute(
             "INSERT OR IGNORE INTO subagent_rebuild(device) VALUES(?1)",
             [device],
         )?;
+        k.execute("DELETE FROM subagent_facts", [])?;
         Ok(())
     }
 }
@@ -280,6 +287,13 @@ mod tests {
             json!({"tool": "Agent", "launched": {"agent_id": "a8", "status": "completed",
                    "async": true}}),
         ));
+        // An id the capture gate masked names no subagent.
+        add(ev(
+            "tool",
+            json!({"tool": "Agent", "agent_id": "[REDACTED]", "launched": {"agent_id":
+                   "x-[REDACTED]", "status": "completed", "async": false}}),
+        ));
+        add(ev(SUBAGENT_STOP, json!({"agent_id": "[REDACTED]"})));
         let k = drain(home.path(), &store);
         let t = |s: &str| Some(s.to_owned());
         assert_eq!(
@@ -295,6 +309,42 @@ mod tests {
                 (seqs[8], "launch".into(), "a8".into(), None, false),
             ]
         );
+    }
+
+    /// Slice 2 (Codex on slice 2): when raw loses a device's tombstone of another device's record,
+    /// that device's rewind makes the record's rows again.
+    #[test]
+    fn a_rewind_makes_again_what_another_devices_lost_tombstone_took() {
+        let from = tempfile::tempdir().unwrap();
+        let mut store = raw::open(from.path()).unwrap();
+        let step = ev("tool", json!({"tool": "Read", "agent_id": "a1"}));
+        let a = store.append(&step).unwrap();
+        let first = store.device().to_owned();
+        drop(drain(from.path(), &store));
+        drop(store);
+        let to = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+            if from.path().join(f).exists() {
+                std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+            }
+        }
+        let mut store = raw::open(to.path()).unwrap();
+        let second = store.device().to_owned();
+        (store.append_tombstone(Target::Record {
+            device: first,
+            seq: a,
+        }))
+        .unwrap();
+        let k = drain(to.path(), &store);
+        assert!(rows(&k).is_empty());
+        (Connection::open(to.path().join("raw.db")).unwrap())
+            .execute("DELETE FROM records WHERE type = 'tombstone'", [])
+            .unwrap();
+        Subagents.rewind(&k, &second, 0).unwrap();
+        drop(k);
+        let k = drain(to.path(), &store);
+        let ids: Vec<String> = rows(&k).into_iter().map(|r| r.2).collect();
+        assert_eq!(ids, ["a1"]);
     }
 
     /// Slice 2: a forget of a record takes its rows, a mask makes them again from what is left (an

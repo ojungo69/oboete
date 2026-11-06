@@ -5,6 +5,7 @@
 use crate::consumer::subagents::{self, Fact};
 use crate::raw::{Item, Raw, SUBAGENT_STOP};
 use crate::redact::Rules;
+use crate::worker::Consumer as _;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -116,13 +117,16 @@ pub(crate) fn read(raw: &Raw, k: &Connection, convs: &[Key]) -> Result<Vec<Subag
     }
     // Past each device's checkpoint: the stops appended since count at once (the owner's Mark
     // finished among them), and a tombstone's target since then is hidden, as the manifest's
-    // reader hides it. Steps and launches past it wait for the consumer.
+    // reader hides it. Steps and launches past it wait for the consumer. Every device it reads,
+    // one it has no checkpoint of yet from its first record: a copied home's own, where a forget
+    // of another device's record is written (Codex on slice 2).
     let mut hidden: HashSet<(String, i64)> = HashSet::new();
     let wanted: HashSet<&Key> = convs.iter().copied().collect();
-    for (device, &at) in &checkpoints {
-        hidden.extend(raw.tombstones_after(device, at)?);
-        let seqs = raw.stops_after(device, at)?;
-        for r in raw.at(device, &seqs)? {
+    for device in subagents::Subagents.devices(raw)? {
+        let at = checkpoints.get(&device).copied().unwrap_or(0);
+        hidden.extend(raw.tombstones_after(&device, at)?);
+        let seqs = raw.stops_after(&device, at)?;
+        for r in raw.at(&device, &seqs)? {
             let Item::Event(e) = r.item else { continue };
             let key = (e.agent.clone(), e.session.clone());
             if e.kind != SUBAGENT_STOP || !wanted.contains(&key) {
@@ -313,28 +317,42 @@ pub(crate) fn recorded_folder(raw: &Raw, key: &Key) -> Result<Option<String>> {
 
 /// Mark finished: the owner's stop of `s`, sent through the hook's own path as if Claude Code had
 /// sent it from `folder`, the conversation's recorded folder, at `now`, so the checkout's capture
-/// setting, the exclusions and the gate read it as they read the hook's. True when it is recorded,
+/// setting, the exclusions and the gate read it as they read the hook's. `raw` is the handle the
+/// caller read `s` with, opened before its readers' hold. True when it is recorded,
 /// or kept to be written back as a hook's stop would be.
-pub(crate) fn mark(home: &Path, s: &Subagent, folder: &str, now: i64) -> Result<bool> {
+pub(crate) fn mark(
+    home: &Path,
+    raw: &mut Raw,
+    s: &Subagent,
+    folder: &str,
+    now: i64,
+) -> Result<bool> {
     let settings = crate::capture::Settings::load(home)?;
-    let mut raw = crate::raw::open(home)?;
     let mut payload = json!({"session_id": s.conversation.1, "cwd": folder,
         "hook_event_name": "SubagentStop", "agent_id": s.agent_id});
     if let Some(kind) = &s.agent_type {
         payload["agent_type"] = json!(kind);
     }
     payload[crate::capture::OWNER_MARK] = json!(true);
+    // The stop is the listed conversation's and subagent's, or nothing is recorded: a rule of now
+    // that masks the session or the id would make it another's (Codex on slice 2).
+    let keeps = |e: &crate::raw::Event| {
+        e.kind == SUBAGENT_STOP
+            && e.agent == s.conversation.0
+            && e.session == s.conversation.1
+            && serde_json::from_str::<Value>(&e.body)
+                .is_ok_and(|b| b["agent_id"] == s.agent_id.as_str())
+    };
     let (mut failed, mut written_back) = (0, 0);
-    let recorded = crate::hook::record(
+    let recorded = crate::hook::record_if(
         home,
-        &mut raw,
+        raw,
         &s.conversation.0,
         "SubagentStop",
         &payload,
-        now,
-        &settings,
-        &mut failed,
-        &mut written_back,
+        (now, &settings),
+        (&mut failed, &mut written_back),
+        &keeps,
     )?;
     // A stop kept behind older kept files is recorded when they are written back, as the hook's.
     Ok(recorded.kept || recorded.events.iter().any(|(_, e)| e.kind == SUBAGENT_STOP))
@@ -560,6 +578,37 @@ mod tests {
         )
         .unwrap();
         assert!(read(&store, &k, &[key("s")]).unwrap().is_empty());
+    }
+
+    /// Slice 2 (Codex on slice 2): in a home copied from another device's, whose own device the
+    /// consumer has no checkpoint of yet, a forget of the first device's record and a stop recorded
+    /// there count at once.
+    #[test]
+    fn a_copied_homes_own_records_count_before_its_first_checkpoint() {
+        let from = tempfile::tempdir().unwrap();
+        let mut store = raw::open(from.path()).unwrap();
+        let a = store.append(&step("s", "a1", MIN)).unwrap();
+        store.append(&step("s", "b2", MIN)).unwrap();
+        let first = store.device().to_owned();
+        drop(drain(from.path(), &store));
+        drop(store);
+        let to = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+            if from.path().join(f).exists() {
+                std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+            }
+        }
+        let mut store = raw::open(to.path()).unwrap();
+        assert_ne!(store.device(), first);
+        let k = crate::knowledge::open(to.path()).unwrap();
+        (store.append_tombstone(Target::Record {
+            device: first,
+            seq: a,
+        }))
+        .unwrap();
+        store.append(&stop("s", "b2", 2 * MIN)).unwrap();
+        let found = read(&store, &k, &[key("s")]).unwrap();
+        assert_eq!(states(&found, 2 * MIN), [("b2", "finished", Some(2 * MIN))]);
     }
 
     /// Slice 2: a claude-mem `agent-lifecycle` row `oboete import claude-mem` brought in is its

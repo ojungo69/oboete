@@ -4776,7 +4776,8 @@ impl Raw {
     }
 
     /// Slice 2: the label `column` (`cwd` or `repo`) of `agent`'s `session`'s newest event on this
-    /// device that has one, as stored (gated).
+    /// device that has one, as stored (gated), passing over an event a tombstone targets: a forget
+    /// registered before its purge, or a mask (Codex on slice 2).
     pub(crate) fn newest_label(
         &self,
         agent: &str,
@@ -4789,9 +4790,11 @@ impl Raw {
             .conn
             .query_row(
                 &format!(
-                    "SELECT {column} FROM records WHERE device = ?1 AND type = 'event'
-                       AND agent = ?2 AND session = ?3 AND {column} IS NOT NULL
-                     ORDER BY seq DESC LIMIT 1"
+                    "SELECT r.{column} FROM records r WHERE r.device = ?1 AND r.type = 'event'
+                       AND r.agent = ?2 AND r.session = ?3 AND r.{column} IS NOT NULL
+                       AND NOT EXISTS (SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                         AND t.target_device = r.device AND t.target_seq = r.seq)
+                     ORDER BY r.seq DESC LIMIT 1"
                 ),
                 params![self.device, agent, session],
                 |r| r.get(0),

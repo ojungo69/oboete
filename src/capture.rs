@@ -539,7 +539,7 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             if let Some(kind) = agent_field(payload, "agent_type") {
                 body["agent_type"] = kind;
             }
-            if let Some(launched) = launched(payload) {
+            if let Some(launched) = launched(payload, &settings.rules) {
                 body["launched"] = launched;
             }
             // When the call began, its record's time being when it ended (#692).
@@ -1070,7 +1070,9 @@ fn agent_field(payload: &Value, key: &str) -> Option<Value> {
 /// response's `status`, whether it ran async, and the task it was given (the input's description,
 /// else the response's, else the input's prompt, else the response's), its whitespace folded and
 /// cut to 160 and 500 characters, as claude-mem's agent view reads a launch (`readAgentLaunches`).
-fn launched(payload: &Value) -> Option<Value> {
+/// The task is cleaned and masked whole before it is cut, as every stored string is (`Gate`), so a
+/// cut never opens a closed block or splits a secret out of its rule's reach.
+fn launched(payload: &Value, rules: &redact::Rules) -> Option<Value> {
     let tool = str_field(payload, &["tool_name", "toolName", "name"])?;
     if !matches!(tool, "Agent" | "Task") {
         return None;
@@ -1091,11 +1093,8 @@ fn launched(payload: &Value) -> Option<Value> {
     let input = object(field(payload, &["tool_input", "toolInput", "args"]));
     let id = agent_field(&response, "agentId")?;
     let said = |v: &Value, key: &str, cap: usize| {
-        let folded = v[key]
-            .as_str()?
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let whole = redact::scan(&without_blocks(v[key].as_str()?, false), rules).0;
+        let folded = whole.split_whitespace().collect::<Vec<_>>().join(" ");
         (!folded.is_empty()).then(|| folded.chars().take(cap).collect::<String>())
     };
     let task = said(&input, "description", 160)
@@ -2123,6 +2122,26 @@ mod tests {
         let e = one("PostToolUse", call(json!(text.to_string()), json!({})));
         assert_eq!(body(&e)["launched"]["async"], true);
         assert_eq!(body(&e)["launched"]["task"].as_str().unwrap().len(), 500);
+        // A closed block and a secret across the cut are taken out whole first (Codex on slice 2).
+        let rule = with("[redaction]\nextra_rules = [{ id = 'teal', regex = 'teal-[0-9]{8}' }]\n");
+        let crossing = |description: String| {
+            let payload = call(
+                json!({"agentId": "a6", "status": "completed"}),
+                json!({ "description": description }),
+            );
+            let b = body(&events("claude", "PostToolUse", &payload, 0, &rule)[0].event);
+            b["launched"]["task"].as_str().unwrap().to_owned()
+        };
+        let private = crossing(format!(
+            "{} <private>zqx hidden words</private> after",
+            "d".repeat(150)
+        ));
+        assert!(
+            !private.contains("zqx") && !private.contains("private"),
+            "{private}"
+        );
+        let secret = crossing(format!("{} teal-{}{}", "d".repeat(150), "1234", "5678"));
+        assert!(!secret.contains("1234"), "{secret}");
         // A description, at 160.
         let described = json!({"description": "d".repeat(200), "prompt": "p"});
         let e = one(
