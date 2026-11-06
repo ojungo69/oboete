@@ -572,13 +572,18 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
         // keeps them (`pickAgentField`: a non-empty string of at most 128 UTF-16 units each): no
         // text, and nothing without a session or an id.
         "SubagentStop" => {
+            // Bounded as claude-mem bounds it, and still a non-empty string once cleaned: a
+            // `<system-reminder>` block is taken out of it as of any text (cubic on #847).
             let field = |key: &str| {
-                (payload[key].as_str()).filter(|s| !s.is_empty() && s.encode_utf16().count() <= 128)
+                (payload[key].as_str())
+                    .filter(|s| !s.is_empty() && s.encode_utf16().count() <= 128)
+                    .map(|s| clean(&json!(s)))
+                    .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
             };
             str_field(payload, &["session_id"]).filter(|s| !s.is_empty())?;
-            let mut body = json!({"agent_id": clean(&json!(field("agent_id")?))});
+            let mut body = json!({"agent_id": field("agent_id")?});
             if let Some(kind) = field("agent_type") {
-                body["agent_type"] = clean(&json!(kind));
+                body["agent_type"] = kind;
             }
             (crate::raw::SUBAGENT_STOP, body)
         }

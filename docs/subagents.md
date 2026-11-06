@@ -15,23 +15,27 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 ## What claude-mem does
 
 - **A subagent's stop (row X17).** Claude Code's `SubagentStop` runs `hook claude-code
-  subagent-stop` (asynchronous, 30 s). With a session id and an agent id (each a non-empty string of
-  at most 128 characters; the agent type the same, else absent), in a tracked folder, it keeps the
+  subagent-stop` (asynchronous, 30 s). With a session id and an agent id (the id a non-empty string
+  of at most 128 UTF-16 units, `pickAgentField`; the agent type the same, else absent; the session
+  id is not bounded), in a tracked folder, it keeps the
   session, the platform, the agent's id and type and the hook's time, nothing of the subagent's
   text: one closed row of the work-state list `agent-lifecycle` (`stop_source`
   `subagent-stop-hook`), which session start never shows. No observation, summary or model call
   comes of it. Without an agent id nothing is kept.
 - **A subagent's state (row X17).** My Work's agent view gives each agent a card: a conversation's
-  main agent, and each Claude Code subagent, an agent id with an agent type
-  (`isSubagentEvent`; an id alone is main-agent work). A subagent's card is named by its type, its
-  role reads "Subagent · " and the conversation's title, else its folder's name, and it holds the
-  request it was launched with (the parent's Agent or Task call's description, else its prompt).
-  Its state, from recorded evidence only: **Finished** when a stop came at or after its last
-  recorded step (its SubagentStop, the parent's foreground Agent call returning, or the owner's
-  **Mark finished**), with the time; else **Working** when its last step is within 15 minutes, else
-  **No recent step**. A later step after a stop means it resumed. Mark finished, shown on a
-  subagent with no stop, writes the same row with `stop_source` `owner-marked-finished`. A main
-  agent's card shows no state.
+  main agent, and each Claude Code subagent, a Claude Code record's agent id (`agent-view.mjs`
+  `isSubagent`: Codex tags its main thread too, so a Codex thread keeps the main agent's layout).
+  A subagent's card is named as every card is, by its agent ("Claude Code"; its type is kept and
+  shown nowhere), its role reads "Subagent · " and the conversation's title, else its folder's
+  name, and its one row is the task it was launched with (the parent's Agent or Task call's
+  description, else its prompt, matched by the agent id the call returned), once the subagent has
+  an observation. Its state, from recorded evidence only: **Finished** when a stop came at or after
+  its last recorded step (its SubagentStop, the parent's foreground Agent call returning, or the
+  owner's **Mark finished**; its tool calls count as steps here), with the time; else **Working**
+  when its last observation or work state write is within 15 minutes, else **No recent step**. A
+  later step after a stop means it resumed. Mark finished, shown on a subagent no stop covers,
+  writes the same row with `stop_source` `owner-marked-finished`. A main agent's card shows no
+  state.
 - **A subagent's files (rows X17, X23).** At its SubagentStop claude-mem reads the subagent's own
   transcript (`agent_transcript_path`) whole and copies the files it wrote or declared, as a turn's
   at Stop, under the session's privacy; a failure there still keeps the stop.
@@ -65,13 +69,14 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 
 - **SubagentStop.** `setup::CLAUDE_EVENTS` gains `("SubagentStop", 5)`. The hook keeps the stop as
   a record of kind `subagent_stop` in the session: the subagent's id and type (each a non-empty
-  string of at most 128 UTF-16 units, as claude-mem's `pickAgentField` counts; the type left out
-  when it is not one) and the hook's time, nothing of the subagent's text. With no session or no
-  id, or where nothing is recorded, nothing. Nothing is printed.
+  string of at most 128 UTF-16 units, as claude-mem's `pickAgentField` counts, and still one after
+  the capture's cleaning; the type left out when it is not one) and the hook's time, nothing of the
+  subagent's text. With no session or no id, or where nothing is recorded, nothing. Nothing is
+  printed.
 - **A record, not claude-mem's work state row.** A record is what the hook keeps aside and writes
   back when the store cannot take it, what a forget of its session removes and the retention
   expires, and what the capture exclusions and the redaction cover. A work state write is an op,
-  which nothing deletes and no forget of a session reaches (docs/work-state.md).
+  which no forget of a session reaches (docs/work-state.md).
 - **A mark, not work.** The stop holds no words: the full-text index gives it no row, a curator's
   window no line. It may come after the reply it worked for, in another session's window, so the
   readers of a session's work pass over it: a window's labels and last time, whether a window is a
@@ -112,9 +117,11 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 - claude-mem's `agent-lifecycle` rows that `oboete import` brings in with its work state are read
   as stops, and are no work of My Work.
 - The agents view keeps one card a conversation (its main agent) and adds a card per subagent, as
-  claude-mem's: its type, "Subagent · " and the conversation's title, its state (Working,
-  No recent step, Finished with the time), its request, and Mark finished when it has no stop. Both
-  languages.
+  claude-mem's: its agent's name, "Subagent · " and the conversation's title, with its type beside
+  them (claude-mem keeps the type and shows it nowhere), its state (Working, No recent step,
+  Finished with the time), the task it was launched with, and Mark finished when no stop covers its
+  last step. Working is read from the subagent's own records, the tool calls claude-mem's
+  observations are made from. Both languages.
 - Mark finished keeps the same mark as the owner's (claude-mem's `stop_source`
   `owner-marked-finished`), its time the click's; the page posts it as its other actions are posted.
 - Bounded as the page's lists are: the subagents of the conversations the view shows.

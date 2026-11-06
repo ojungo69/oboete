@@ -8387,6 +8387,10 @@ mod tests {
         stop(json!({"agent_id": "😀".repeat(64), "agent_type": "😀".repeat(65)}));
         stop(json!({"agent_id": "😀".repeat(65), "agent_type": "Explore"}));
         stop(json!({"session_id": "", "agent_id": "a9", "agent_type": "Explore"}));
+        // Checked again once cleaned: a block the capture takes out leaves nothing (cubic on #847).
+        let block = |s: &str| format!("<system-reminder>{s}</system-reminder>");
+        stop(json!({"agent_id": block("a7"), "agent_type": "Explore"}));
+        stop(json!({"agent_id": "a6", "agent_type": block("Explore")}));
         // A checkout that records nothing keeps no stop either.
         let off = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(off.path().join(".git")).unwrap();
@@ -8413,6 +8417,7 @@ mod tests {
                 mark(json!({"agent_id": "a3"})),
                 mark(json!({"agent_id": "x".repeat(128)})),
                 mark(json!({"agent_id": "😀".repeat(64)})),
+                mark(json!({"agent_id": "a6"})),
             ]
         );
     }
