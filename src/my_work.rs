@@ -1897,24 +1897,54 @@ pub(crate) fn reviews_lock(home: &Path) -> Result<ReviewsLock> {
 
 /// Slice 2 of docs/subagents.md: Mark finished's own hold, taken before anything else, so two at
 /// once append one stop. No other path takes it: it waits on nothing a forget's purge holds, as
-/// the reviews' lock would (Codex on slice 2). Waited for `wait` at most, none past it, so a
-/// request does not keep its connection waiting behind others (CodeRabbit on #850).
+/// the reviews' lock would (Codex on slice 2). Waited for `wait` at most, none past it, and by
+/// `FINISHED_WAITERS` at most at once, so requests do not keep the viewer's connections waiting
+/// (CodeRabbit on #850).
 pub(crate) fn finished_lock(
     home: &Path,
     wait: std::time::Duration,
 ) -> Result<Option<std::fs::File>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WAITING: AtomicUsize = AtomicUsize::new(0);
+    struct Waiting;
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            WAITING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if WAITING.fetch_add(1, Ordering::SeqCst) >= FINISHED_WAITERS {
+        WAITING.fetch_sub(1, Ordering::SeqCst);
+        return Ok(None);
+    }
+    let _waiting = Waiting;
     let lock = state_file(home, "my-work-finished.lock")?;
     let deadline = std::time::Instant::now() + wait;
     loop {
         match lock.try_lock() {
             Ok(()) => return Ok(Some(lock)),
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                #[cfg(test)]
+                if let Some(blocked) = FINISHED_BLOCKED.with(|hook| hook.borrow_mut().take()) {
+                    blocked();
+                }
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(std::time::Duration::from_millis(20).min(left));
             }
             Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
     }
+}
+
+/// How many Mark finished requests may hold or wait for its lock at once, well under the viewer's
+/// 32 connections; one more is answered at once (CodeRabbit on #850).
+const FINISHED_WAITERS: usize = 4;
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot for this thread's next wait for Mark finished's lock: a test's sign that it waits.
+    pub(crate) static FINISHED_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// `state/<name>`, opened to be locked.

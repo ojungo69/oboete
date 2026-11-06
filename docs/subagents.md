@@ -322,43 +322,44 @@ Slice 3:
 - **My Work's read** (`my_work_subagents::read`, from `my_work::read_held` by `subagents_of`, which
   takes the read fence), in the page's read (`my_work::listed`) alone: `my_work::reviewing`, which
   the owner's actions read under the reviews' lock, reads none, as a purge holds the read fence
-  while it waits for that lock. Its conversations are every request's, whatever the range, as
-  Mark finished looks a subagent up (the page reads all and filters itself): the consumer's checkpoints first (none: no subagents), then the rows of the
-  listed Claude Code conversations, then, past each device's checkpoint (from the first record of
-  one it has none of yet, a copied home's own), the `subagent_stop` records (`Raw::stops_after`)
-  and the tombstones' targets (`Raw::tombstones_after`), a row read twice counting once; a record expired since is passed over (`Raw::expired_among`). claude-mem's
-  imported `agent-lifecycle` rows are the ops of an import's source on that list whose
-  `content_session_id` is a listed conversation's (`Raw::imported_list_fields`). An older record's
-  output is read as async by `isAsync`, `is_async` (true or 1) or the status `async_launched`, as
-  capture reads a response. A launch's task is read from its record when My Work is read, as
-  claude-mem reads a launch: its input's description, else the response's, else the input's prompt,
-  else the response's, as capture kept them (cleaned whole), through the gate as its rules are now,
-  then folded and cut to 160 and 500 characters, as My Work's other texts are; none when neither
-  the input nor the response parses (a text cut when it was kept).
-  **Not as planned**: at most 300 subagents are listed (`my_work_subagents::MAX_LISTED`), those
-  with the newest last steps. claude-mem's agent view is made from its newest 300 observations and
-  its recent work state writes, so a subagent with nothing recent leaves it too; all of this PC's
-  would have more than doubled each minute's read (below).
+  while it waits for that lock. Its conversations are every request's, whatever the range, as Mark
+  finished looks a subagent up (the page reads all and filters itself): the consumer's checkpoints
+  first (none: no subagents), then the rows of the listed Claude Code conversations, then, past each
+  device's checkpoint (from the first record of one it has none of yet, a copied home's own), the
+  `subagent_stop` records (`Raw::stops_after`) and the tombstones' targets
+  (`Raw::tombstones_after`), a row read twice counting once; a record expired since is passed over
+  (`Raw::expired_among`). claude-mem's imported `agent-lifecycle` rows are the ops of an import's
+  source on that list whose `content_session_id` is a listed conversation's
+  (`Raw::imported_list_fields`). An older record's output is read as async by `isAsync`, `is_async`
+  (true or 1) or the status `async_launched`, as capture reads a response. A launch's task is read
+  from its record when My Work is read, as claude-mem reads a launch: its input's description, else
+  the response's, else the input's prompt, else the response's, as capture kept them (cleaned
+  whole), through the gate as its rules are now, then folded and cut to 160 and 500 characters, as
+  My Work's other texts are; none when neither the input nor the response parses (a text cut when it
+  was kept). **Not as planned**: at most 300 subagents are listed (`my_work_subagents::MAX_LISTED`),
+  those with the newest last steps. claude-mem's agent view is made from its newest 300 observations
+  and its recent work state writes, so a subagent with nothing recent leaves it too; all of this
+  PC's would have more than doubled each minute's read (below).
 - **The answer's `subagents`**: each with `conversation` (`{id, fingerprint}`, as the request's
   `sessions` give it), `id` (`s:` and the keyed print of the agent, session and subagent id),
   `type`, `state` (`working`, `quiet`, `finished`), `finished_at`, `last_step`, `task` (gated) and
   `can_mark`. `view::answered` takes `conversation` and `id` out of the gate's walk and puts them
   back.
 - **Mark finished** (`POST /api/my-work/finished`, `Viewer::my_work_finished`): `{id}` only (`s:`,
-  at most 64 bytes); its own lock (`my_work::finished_lock`, waited for 10 s at most, else 503
-  `busy`), then raw.db and knowledge.db opened,
-  then the read fence (the order a restore takes raw.lock and the fence in), held through a fresh read with that
+  at most 64 bytes); its own lock (`my_work::finished_lock`, waited for 10 s at most and by four
+  requests at most at once, else 503 `busy`), then raw.db and knowledge.db opened, then the read
+  fence (the order a restore takes raw.lock and the fence in), held through a fresh read with that
   handle (`my_work::subagent`, every request built, as the page reads `range=all`) and the append
   (`my_work_subagents::mark`, `hook::record_if` with the event `SubagentStop`). 404 `not_found`, 409
   `finished`, 409 `not_recorded` when the folder of the subagent's newest step record, whichever
   device recorded it (`my_work_subagents::recorded_folder`, read through the tombstones), is empty,
-  masked or no directory,
-  when the hook's path records no stop, or when the stop it would record names another session or
-  subagent (a rule of now that masks the session or the id: `record_if` then appends and keeps
-  nothing). After a stop is recorded the worker is started, as a hook starts it; a stop kept behind
-  older kept files (`hook::Recorded::kept`) is recorded when they are
-  written back, and counts. **Not as planned**: the answer is `{}`, and the page reads My Work again
-  (`myWorkReread`), which counts the new stop at once, as it is past the consumer's checkpoint.
+  masked or no directory, when the hook's path records no stop, or when the stop it would record
+  names another session or subagent (a rule of now that masks the session or the id: `record_if`
+  then appends and keeps nothing). After a stop is recorded the worker is started, as a hook starts
+  it, and reaped when it leaves; a stop kept behind older kept files (`hook::Recorded::kept`) is
+  recorded when they are written back, and counts. **Not as planned**: the answer is `{}`, and the
+  page reads My Work again (`myWorkReread`), which counts the new stop at once, as it is past the
+  consumer's checkpoint.
 - **The page** (`myWorkAgents`, `myWorkSubagent`, `myWorkFinish`): after each conversation's card,
   one per subagent whose `conversation.id` is the card's: "Claude Code · " and the type (else
   "Subagent"), "Subagent · " and the conversation's newest request's title (else its projects), the
@@ -371,19 +372,19 @@ Slice 3:
   title of a session's own.
 - **Reviewed.** A local Codex review of the built change found a launch task cut before its clean
   and mask, a copied home's own device left out of the read's tail, a forgotten record's folder
-  taken before its purge, a stop the rules of now would record under another session, raw.db
-  opened after the read fence, a lost tombstone of another device's record never made again, and
-  an id the capture gate masked taken for a subagent's. Each is fixed as above, with a test. A
-  second review found the task still cut when it was kept, so a rule added since could not mask a
-  secret the cut split, and a run of base64 shorter than the cleaning's length after the cut was
-  kept; the task is no longer kept, and is read as above. The order of raw.db and the hold has
-  its own test. A third found the reviews' lock, which Mark finished and the actions' read
-  (`reviewing`) took before the read fence, taken by a purge after it: Mark finished takes a lock
-  of its own (**not as planned**, which named the review route's), and only the page's read reads
-  the subagents. On #850 Codex's app, cubic and CodeRabbit found the worker not started after the
-  owner's stop, the listing's conversations bound to the range, every imported row read, an older
-  record's `is_async` not read, the folder looked up on this device alone, and the lock's wait
-  unbounded: each is fixed as above, with a test.
+  taken before its purge, a stop the rules of now would record under another session, raw.db opened
+  after the read fence, a lost tombstone of another device's record never made again, and an id the
+  capture gate masked taken for a subagent's. Each is fixed as above, with a test. A second review
+  found the task still cut when it was kept, so a rule added since could not mask a secret the cut
+  split, and a run of base64 shorter than the cleaning's length after the cut was kept; the task is
+  no longer kept, and is read as above. The order of raw.db and the hold has its own test. A third
+  found the reviews' lock, which Mark finished and the actions' read (`reviewing`) took before the
+  read fence, taken by a purge after it: Mark finished takes a lock of its own (**not as planned**,
+  which named the review route's), and only the page's read reads the subagents. On #850 Codex's
+  app, cubic and CodeRabbit found the worker not started after the owner's stop, the listing's
+  conversations bound to the range, every imported row read, an older record's `is_async` not read,
+  the folder looked up on this device alone, and the lock's wait unbounded; on its second head the
+  worker left unreaped and the lock's waiters uncounted: each is fixed as above, with a test.
 - **Measured** on a copy of this PC's store (2026-11-07, release build): the consumer's first pass
   took 18.1 s and kept 24,596 rows, 1,522 subagents with a step. My Work's subagents part took 71 to
   82 ms over its 277 conversations (106 ms with each checkpoint 20,000 records behind) and the whole
@@ -405,5 +406,6 @@ Slice 3:
   `consumer::subagents::tests::a_rewind_makes_again_what_another_devices_lost_tombstone_took`,
   `my_work::tests::a_listed_conversations_subagents_are_in_its_answer`,
   `view::tests::the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest`, and the
-  page's in `src/testdata/viewer-readiness/test.mjs`; `my_work::tests::imported_work_state_is_neither_read_nor_counted`
-  keeps an imported row out of the requests.
+  page's in `src/testdata/viewer-readiness/test.mjs`;
+  `my_work::tests::imported_work_state_is_neither_read_nor_counted` keeps an imported row out of the
+  requests.

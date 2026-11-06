@@ -2267,9 +2267,14 @@ impl Viewer {
             crate::db::now_ms(),
         ) {
             Ok(true) => {
-                // As a hook starts one after it writes (Codex and cubic on #850).
-                if let Err(e) = crate::hook::start_worker(&self.home) {
-                    eprintln!("oboete: worker not started: {e:#}");
+                // As a hook starts one after it writes (Codex and cubic on #850), reaped when it
+                // leaves, or it sits as a zombie for as long as the viewer runs (cubic on #850).
+                match crate::hook::start_worker(&self.home) {
+                    Ok(Some(mut child)) => {
+                        std::thread::spawn(move || child.wait());
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("oboete: worker not started: {e:#}"),
                 }
                 Response::json(&json!({}))
             }
@@ -6152,14 +6157,20 @@ curate = false
                 .unwrap()
                 .is_none()
         );
+        // It lets go once the other waits for it, as the lock tells (CodeRabbit on #850).
+        let (told, waits) = std::sync::mpsc::channel::<()>();
         let (answer, started) = std::thread::scope(|scope| {
             let posting = scope.spawn(|| {
+                let told = told.clone();
+                crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || told.send(()).unwrap()));
+                });
                 let before = crate::hook::WORKER_ASKED.get();
                 let answer = post(&explore, "t0k", ours);
+                crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| *hook = None);
                 (answer, crate::hook::WORKER_ASKED.get() - before)
             });
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            assert!(!posting.is_finished(), "Mark finished waits for the hold");
+            waits.recv().unwrap();
             drop(hold);
             posting.join().unwrap()
         });
@@ -6286,6 +6297,42 @@ curate = false
             drop(reviews);
             assert_eq!(posting.join().unwrap(), 409);
             assert!(done, "Mark finished waits for no reviews' lock");
+        });
+    }
+
+    /// Slice 2 (CodeRabbit on #850): Mark finished's lock is waited for by four at most at once, well
+    /// under the viewer's connections; one more is answered at once, and the four take it in turn.
+    #[test]
+    fn mark_finisheds_lock_is_waited_for_by_four_at_most() {
+        if !in_child("view::tests::mark_finisheds_lock_is_waited_for_by_four_at_most") {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let (path, wait) = (home.path(), std::time::Duration::from_secs(5));
+        let hold = crate::my_work::finished_lock(path, wait).unwrap().unwrap();
+        let (told, waits) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let waiting: Vec<_> = (0..4)
+                .map(|_| {
+                    let told = told.clone();
+                    scope.spawn(move || {
+                        crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| {
+                            *hook = Some(Box::new(move || told.send(()).unwrap()));
+                        });
+                        crate::my_work::finished_lock(path, wait).unwrap().is_some()
+                    })
+                })
+                .collect();
+            for _ in 0..4 {
+                waits.recv().unwrap();
+            }
+            let at = std::time::Instant::now();
+            assert!(crate::my_work::finished_lock(path, wait).unwrap().is_none());
+            assert!(at.elapsed() < std::time::Duration::from_secs(1));
+            drop(hold);
+            for one in waiting {
+                assert!(one.join().unwrap());
+            }
         });
     }
 

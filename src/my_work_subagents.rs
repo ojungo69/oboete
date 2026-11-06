@@ -190,19 +190,15 @@ pub(crate) fn read(
     }
     // A subagent is listed from its first step: a stop or a launch with no step makes none. The
     // newest last steps first, at most `MAX_LISTED`.
-    let mut stepped: Vec<((Key, String), Seen, i64)> = (seen.into_iter())
-        .filter_map(|(id, s)| {
-            s.last_step
-                .as_ref()
-                .map(|(at, _)| *at)
-                .map(|at| (id, s, at))
-        })
+    type Stepped = ((Key, String), Seen, (i64, (String, i64)));
+    let mut stepped: Vec<Stepped> = (seen.into_iter())
+        .filter_map(|(id, mut s)| s.last_step.take().map(|last| (id, s, last)))
         .collect();
-    stepped.sort_by_key(|(.., at)| std::cmp::Reverse(*at));
+    stepped.sort_by_key(|(.., (at, _))| std::cmp::Reverse(*at));
     stepped.truncate(MAX_LISTED);
     let imported = imported_stops(raw, &wanted)?;
     let mut out = Vec::new();
-    for ((key, agent_id), s, last_step) in stepped {
+    for ((key, agent_id), s, (last_step, step_record)) in stepped {
         let finished = (s.stops.iter())
             .chain(
                 imported
@@ -216,9 +212,6 @@ pub(crate) fn read(
         let task = match &s.launch {
             Some((device, seq, _)) => task_of(raw, device, *seq, rules)?,
             None => None,
-        };
-        let Some((_, step_record)) = s.last_step else {
-            continue;
         };
         out.push(Subagent {
             conversation: key,
