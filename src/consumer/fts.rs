@@ -83,7 +83,9 @@ pub(crate) fn indexed(kind: &str) -> bool {
 }
 
 /// The text a person would search for: every string in the event's JSON body (not its keys), or
-/// the body itself when it is not JSON.
+/// the body itself when it is not JSON. Where a Claude Code prompt was typed or sent from
+/// (`entrypoint`, #659) is a mark on the record, as `curate::long_text` reads it (#841): no word of
+/// it (#843).
 pub(crate) fn text(body: &str) -> String {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
@@ -94,7 +96,14 @@ pub(crate) fn text(body: &str) -> String {
         }
     }
     match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(v @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+        Ok(serde_json::Value::Object(m)) => {
+            let mut out = Vec::new();
+            m.iter()
+                .filter(|(key, _)| *key != "entrypoint")
+                .for_each(|(_, v)| walk(v, &mut out));
+            out.join("\n")
+        }
+        Ok(v @ serde_json::Value::Array(_)) => {
             let mut out = Vec::new();
             walk(&v, &mut out);
             out.join("\n")
@@ -401,5 +410,199 @@ impl Consumer for Fts {
             crate::embed_phase::touched(None, k, "r", &format!("{device}:{seq}"))?;
         }
         Ok(())
+    }
+}
+
+/// #843: the rows `raw_fts` indexed before a prompt's entry point left `text`, indexed again once,
+/// and so their vectors made again. A consumer of its own, before `Fts` (`worker::consumers`): its
+/// first step finds what an older oboete indexed, and each step it takes is progress a drain goes
+/// on with.
+pub struct FtsText;
+
+/// Rows of `FtsText` a step: one knowledge.db transaction each.
+pub(crate) const AGAIN: usize = 200;
+
+impl Consumer for FtsText {
+    fn name(&self) -> &'static str {
+        "fts-text"
+    }
+
+    fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
+        schema(k)?;
+        // What the index held when this first ran: nothing in a new knowledge.db.
+        k.execute_batch(
+            "CREATE TABLE IF NOT EXISTS fts_text(device TEXT PRIMARY KEY, upto INTEGER NOT NULL)",
+        )?;
+        k.execute(
+            "INSERT OR IGNORE INTO fts_text(device, upto)
+             SELECT ?1, coalesce(max(seq), 0) FROM raw_docs WHERE device = ?1",
+            [device],
+        )?;
+        let seqs: Vec<i64> = k
+            .prepare_cached(
+                "SELECT seq FROM raw_docs WHERE device = ?1 AND seq > ?2
+                   AND seq <= (SELECT upto FROM fts_text WHERE device = ?1)
+                   AND kind IN ('prompt', 'envelope')
+                 ORDER BY seq LIMIT ?3",
+            )?
+            .query_map(params![device, after, AGAIN as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for r in raw.at(device, &seqs)? {
+            let Item::Event(e) = &r.item else { continue };
+            let marked = serde_json::from_str::<serde_json::Value>(&e.body)
+                .is_ok_and(|v| v.get("entrypoint").is_some());
+            if marked {
+                reindex(raw, k, device, r.seq)?;
+            }
+        }
+        // Fewer than a step's rows: done, as `Fts` indexed every record after them as `text`
+        // reads it now.
+        Ok(match seqs.get(AGAIN - 1) {
+            Some(&last) => last,
+            None => raw.max_seq_of(device)?,
+        })
+    }
+
+    fn rewind(&mut self, _k: &Connection, _device: &str, _to: i64) -> Result<()> {
+        // Nothing: `Fts` deletes the rows past `to`, and indexes what comes there again with `text`
+        // as it is now.
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knowledge::checkpoint;
+    use crate::search::b::fixture::Store;
+    use serde_json::json;
+
+    const R: &str = "github.com/o/r";
+
+    /// The seqs of the records whose `raw_fts` row `word` finds, in order.
+    fn finds(k: &Connection, word: &str) -> Vec<i64> {
+        k.prepare(
+            "SELECT d.seq FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+             WHERE raw_fts MATCH ?1 ORDER BY d.seq",
+        )
+        .unwrap()
+        .query_map([word], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    /// Record `seq`'s `raw_fts` row made of `text`.
+    fn indexed_as(k: &Connection, device: &str, seq: i64, text: &str) {
+        let rowid: i64 = k
+            .query_row(
+                "SELECT rowid FROM raw_docs WHERE device = ?1 AND seq = ?2",
+                params![device, seq],
+                |r| r.get(0),
+            )
+            .unwrap();
+        k.execute("DELETE FROM raw_fts WHERE rowid = ?1", [rowid])
+            .unwrap();
+        k.execute(
+            "INSERT INTO raw_fts(rowid, text) VALUES(?1, ?2)",
+            params![rowid, text],
+        )
+        .unwrap();
+    }
+
+    /// #843: the rows an older oboete indexed with a prompt's entry point as a line of its text
+    /// are indexed again once, at most `AGAIN` prompts and envelopes a step (tool output between
+    /// them read by none), each step a knowledge.db transaction of its own; then the consumer's
+    /// checkpoint follows raw's top, as a caught-up consumer's does.
+    #[test]
+    fn rows_indexed_with_an_entry_point_are_indexed_again_once_in_batches() {
+        let mut s = Store::new();
+        let device = s.raw.device().to_owned();
+        let typed = |words: &str| json!({"prompt": words, "entrypoint": "cli"});
+        let mut rows = Vec::new();
+        for i in 0..AGAIN {
+            let words = format!("Fix parser number {i}.");
+            let ts = 1_000 + i as i64;
+            rows.push((
+                s.event("prompt", "s", (R, "main"), ts, typed(&words)),
+                words,
+            ));
+            s.event("tool", "s", (R, "main"), ts, json!({"tool_name": "Bash"}));
+        }
+        let words = "<task-notification>Build passed.</task-notification>".to_owned();
+        rows.push((
+            s.event("envelope", "s", (R, "main"), 3_000, typed(&words)),
+            words,
+        ));
+        let says = s.event(
+            "prompt",
+            "s",
+            (R, "main"),
+            4_000,
+            typed("Run the cli tests."),
+        );
+        s.run();
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        assert_eq!(finds(&k, "cli"), [says]);
+        // The index as an older oboete left it: the entry point a line of each prompt's and
+        // envelope's text, and no catch-up begun.
+        for (seq, words) in &rows {
+            indexed_as(&k, &device, *seq, &format!("{words}\ncli"));
+        }
+        k.execute_batch("DROP TABLE IF EXISTS fts_text").unwrap();
+        checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &device, 0).unwrap();
+        assert_eq!(finds(&k, "cli").len(), AGAIN + 2);
+        let mut again = crate::worker::consumers(s.home.path())
+            .into_iter()
+            .find(|c| c.name() == "fts-text")
+            .expect("the consumer that indexes the rows again");
+        let tx = k
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let first = again.step(&s.raw, &tx, &device, 0).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(first, rows[AGAIN - 1].0);
+        assert_eq!(finds(&k, "cli"), [rows[AGAIN].0, says]);
+        // A drain goes on from there and finishes it: the checkpoint is raw's top.
+        checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &device, first).unwrap();
+        s.run();
+        assert_eq!(finds(&k, "cli"), [says]);
+        let top = s.raw.max_seq_of(&device).unwrap();
+        assert_eq!(checkpoint::get(&k, "fts-text", &device).unwrap(), top);
+        // Once: a row made as before after the catch-up stays as it is through the next drain.
+        indexed_as(&k, &device, rows[0].0, &format!("{}\ncli", rows[0].1));
+        s.run();
+        assert_eq!(finds(&k, "cli"), [rows[0].0, says]);
+    }
+
+    /// #843: where a Claude Code prompt was typed or sent from (`entrypoint`, #659) is a mark on the
+    /// record, as `curate::long_text` reads it (#841), not a word of its text: neither indexed nor
+    /// embedded. A field the renderer does not know is a word as before, and so is an `entrypoint`
+    /// inside a value.
+    #[test]
+    fn a_prompts_entry_point_is_no_word_of_its_text() {
+        for entry in ["cli", "claude-vscode", "sdk-cli", "remote_trigger"] {
+            let of = |body: serde_json::Value| text(&body.to_string());
+            assert_eq!(
+                of(json!({"prompt": "Fix the parser.", "entrypoint": entry})),
+                "Fix the parser."
+            );
+            assert_eq!(
+                of(json!({"prompt": "Ship it.", "agent_sent": true, "entrypoint": entry})),
+                "Ship it."
+            );
+            assert_eq!(of(json!({"omitted": true, "entrypoint": entry})), "");
+        }
+        assert_eq!(
+            text(
+                &json!({"prompt": "Fix the parser.", "entrypoint": "cli", "note": "kept"})
+                    .to_string()
+            ),
+            "Fix the parser.\nkept"
+        );
+        assert_eq!(
+            text(&json!({"tool_input": {"entrypoint": "main.rs"}}).to_string()),
+            "main.rs"
+        );
     }
 }

@@ -256,6 +256,9 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
     vec![
         // The rescan first: the tombstones it appends are in raw before the others read a record.
         Box::new(crate::consumer::rescan::Rescan::new(home)),
+        // #843: before `Fts`, so its first step finds the rows an older oboete indexed and none
+        // this one did.
+        Box::new(crate::consumer::fts::FtsText),
         Box::new(crate::consumer::fts::Fts),
         // Where the tool calls that may have made something are, for My Work (docs/my-work.md).
         Box::new(crate::consumer::products::Products),
