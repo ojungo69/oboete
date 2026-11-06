@@ -1,0 +1,42 @@
+src/capture.rs
+  s_70102dd6ea5599::t_51eb2ba0f03d15 571-583
+docs/subagents.md
+  s_70102dd6ea5599::t_8ce218de025a87 132-134
+  s_70102dd6ea5599::t_3de47cd044ba28 142-160
+  s_70102dd6ea5599::t_89dd0c8d97f3da 1-131,135-141
+src/setup.rs
+  s_70102dd6ea5599::t_a2c741b60c4b61 5221-5245,5253-5254
+  s_70102dd6ea5599::t_cbd71f04992f7e 55-57
+  s_70102dd6ea5599::t_5762f891affa59 39-40
+  s_70102dd6ea5599::t_0baa2364cd1a3b 5246-5252
+src/hook.rs
+  s_70102dd6ea5599::t_083c8a655e5ec7 8294-8390
+  s_70102dd6ea5599::t_2c6bb790632342 601-604,611-628
+  s_70102dd6ea5599::t_bdc55d9479d6a3 629-630
+src/curate.rs
+  s_70102dd6ea5599::t_f3c7190961b9dc 5359-5380
+  s_70102dd6ea5599::t_5aff425e95eda5 5358
+src/consumer/fts.rs
+  s_70102dd6ea5599::t_0a090e7bc455b3 351-353
+  s_70102dd6ea5599::t_c33623863c33b5 589-600,602-613
+  s_70102dd6ea5599::t_3080159f21bf39 601
+docs/claude-mem-parity.md
+  s_70102dd6ea5599::t_126ca67e57b86e 121,130
+  s_70102dd6ea5599::t_654262ceee2079 20-22,251,275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6b20e4cc2778ad1ace0c0e78061aa6a6cdae0099",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
