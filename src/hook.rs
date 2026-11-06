@@ -628,7 +628,14 @@ fn forked(payload: &Value) -> bool {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK);
         }
-        (options.open(path).ok()).filter(|file| file.metadata().is_ok_and(|m| m.is_file()))
+        let file = options.open(path).ok()?;
+        // On Windows a named pipe or a device opens without waiting and its read waits instead:
+        // only a file on a disk is read (cubic on #847).
+        #[cfg(windows)]
+        if !winapi_util::file::typ(&file).is_ok_and(|t| t.is_disk()) {
+            return None;
+        }
+        file.metadata().is_ok_and(|m| m.is_file()).then_some(file)
     };
     let Some(file) = str_field(payload, &["transcript_path"]).and_then(open) else {
         return false;
