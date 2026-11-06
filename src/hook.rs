@@ -618,9 +618,19 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
 /// tokens, a missing one the memory.
 fn forked(payload: &Value) -> bool {
     use std::io::BufRead;
-    let Some(file) =
-        str_field(payload, &["transcript_path"]).and_then(|path| std::fs::File::open(path).ok())
-    else {
+    // Opened without waiting and read only as a regular file, as `migrate::finish_open` opens one:
+    // a FIFO at the path would hold the hook until a writer came (CodeRabbit on #847).
+    let open = |path: &str| {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        (options.open(path).ok()).filter(|file| file.metadata().is_ok_and(|m| m.is_file()))
+    };
+    let Some(file) = str_field(payload, &["transcript_path"]).and_then(open) else {
         return false;
     };
     let mut first = Vec::new();
@@ -8347,6 +8357,15 @@ mod tests {
         assert_eq!(start(&fork), "");
         let missing = start(&dir.path().join("missing.jsonl"));
         assert!(missing.contains("Deploys run on Fridays."), "{missing}");
+        // A FIFO at the path is not waited on: it is no rollout, so the subagent counts as fresh.
+        #[cfg(unix)]
+        {
+            let fifo = dir.path().join("fifo.jsonl");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+            assert!(made.is_ok_and(|s| s.success()));
+            let out = start(&fifo);
+            assert!(out.contains("Deploys run on Fridays."), "{out}");
+        }
         // Whatever its id says: none, or one that names no thread (Codex's review of
         // docs/subagents.md's slice 1).
         for id in [Value::Null, json!(""), json!("x".repeat(129))] {
