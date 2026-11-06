@@ -308,9 +308,9 @@ Slice 3:
 - **Capture** (`capture::agent_field`, `capture::launched`): a Claude Code tool record keeps the
   payload's `agent_type` beside its `agent_id`, bounded at 128 UTF-16 units, cleaned and bounded
   again. An `Agent` or `Task` call keeps `launched` (`agent_id` from the response's `agentId`,
-  `async`, `status`, `task`), made from the payload before its text is flattened and cut; the task
-  is cleaned and masked whole before it is folded and cut, so a cut never opens a closed block or
-  splits a secret out of its rule's reach. A SubagentStop payload with `oboete_marked: true` (`capture::OWNER_MARK`, the viewer's alone) keeps
+  `async`, `status`), made from the payload before its text is flattened and cut. **Not as
+  planned**: it keeps no task, which My Work reads from the call's input (below). A SubagentStop
+  payload with `oboete_marked: true` (`capture::OWNER_MARK`, the viewer's alone) keeps
   `marked: true`.
 - **Facts** (`consumer::subagents`, after `products` in `worker::consumers()`): rows of
   `subagent_facts` keyed by (device, seq, fact, agent id), with the conversation, the time, the type
@@ -325,8 +325,11 @@ Slice 3:
   one it has none of yet, a copied home's own), the `subagent_stop` records (`Raw::stops_after`)
   and the tombstones' targets (`Raw::tombstones_after`), a row read twice counting once; a record expired since is passed over (`Raw::expired_among`). claude-mem's
   imported `agent-lifecycle` rows are the ops of an import's source on that list
-  (`Raw::imported_list_fields`). A launch's task is read from its record when My Work is read: its
-  `launched.task`, else in an older record its input's description (160) or prompt (500).
+  (`Raw::imported_list_fields`). A launch's task is read from its record when My Work is read, as
+  claude-mem reads a launch: its input's description, else the response's, else the input's prompt,
+  else the response's, as capture kept them (cleaned whole), through the gate as its rules are now,
+  then folded and cut to 160 and 500 characters, as My Work's other texts are; none when neither
+  the input nor the response parses (a text cut when it was kept).
   **Not as planned**: at most 300 subagents are listed (`my_work_subagents::MAX_LISTED`), those
   with the newest last steps. claude-mem's agent view is made from its newest 300 observations and
   its recent work state writes, so a subagent with nothing recent leaves it too; all of this PC's
@@ -362,7 +365,11 @@ Slice 3:
   and mask, a copied home's own device left out of the read's tail, a forgotten record's folder
   taken before its purge, a stop the rules of now would record under another session, raw.db
   opened after the read fence, a lost tombstone of another device's record never made again, and
-  an id the capture gate masked taken for a subagent's. Each is fixed as above, with a test.
+  an id the capture gate masked taken for a subagent's. Each is fixed as above, with a test. A
+  second review found the task still cut when it was kept, so a rule added since could not mask a
+  secret the cut split, and a run of base64 shorter than the cleaning's length after the cut was
+  kept; the task is no longer kept, and is read as above. The order of raw.db and the hold has
+  its own test.
 - **Measured** on a copy of this PC's store (2026-11-07, release build): the consumer's first pass
   took 18.1 s and kept 24,596 rows, 1,522 subagents with a step. My Work's subagents part took 71 to
   82 ms over its 277 conversations (106 ms with each checkpoint 20,000 records behind) and the whole
@@ -376,6 +383,8 @@ Slice 3:
   `my_work_subagents::tests::an_imported_agent_lifecycle_row_is_its_subagents_stop`,
   `my_work_subagents::tests::the_subagents_with_the_newest_steps_are_listed`,
   `my_work_subagents::tests::a_copied_homes_own_records_count_before_its_first_checkpoint`,
+  `my_work_subagents::tests::a_launch_task_is_read_whole_through_the_rules_of_now_before_its_cut`,
+  `view::tests::mark_finished_opens_raw_before_the_readers_hold`,
   `consumer::subagents::tests::a_rewind_makes_again_what_another_devices_lost_tombstone_took`,
   `my_work::tests::a_listed_conversations_subagents_are_in_its_answer`,
   `view::tests::the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest`, and the

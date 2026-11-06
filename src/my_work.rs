@@ -1024,7 +1024,7 @@ fn subagents_of(
 ) -> Result<Vec<Value>> {
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let found =
-        crate::my_work_subagents::read(raw, k, &listed.iter().cloned().collect::<Vec<_>>())?;
+        crate::my_work_subagents::read(raw, k, &listed.iter().cloned().collect::<Vec<_>>(), rules)?;
     let mut conversations: HashMap<Key, (String, Option<String>)> = HashMap::new();
     for s in &found {
         if !conversations.contains_key(&s.conversation) {
@@ -1061,7 +1061,7 @@ pub(crate) fn subagent(
         .map(|(key, _)| key.clone())
         .collect();
     let mut key = None;
-    for s in crate::my_work_subagents::read(raw, k, &listed)? {
+    for s in crate::my_work_subagents::read(raw, k, &listed, &rules)? {
         let shown = format!(
             "s:{}",
             keyed_print(&crate::my_work_subagents::held(&s), home, &mut key)?
@@ -3270,8 +3270,9 @@ mod tests {
     fn a_listed_conversations_subagents_are_in_its_answer() {
         let mut h = Home::new();
         let asked = h.said("s1", -60_000, "Fix the parser.");
-        let launched = json!({"tool": "Agent", "launched": {"agent_id": "agent-x1",
-            "status": "async_launched", "async": true, "task": "Find the parser"}});
+        let input = json!({"description": "Find the parser"}).to_string();
+        let launched = json!({"tool": "Agent", "input": input, "launched": {"agent_id": "agent-x1",
+            "status": "async_launched", "async": true}});
         h.s.event("tool", "s1", (R, "main"), h.t - 55_000, launched);
         let step = json!({"tool": "Read", "agent_id": "agent-x1", "agent_type": "Explore"});
         h.s.event("tool", "s1", (R, "main"), h.t - 50_000, step);

@@ -6182,6 +6182,61 @@ curate = false
         ));
     }
 
+    /// Slice 2 (Codex on slice 2): Mark finished opens raw.db before it takes the readers' hold, the
+    /// order a restore takes raw.lock and the hold in: while a restore holds raw.db, a forget's hold
+    /// is free, and the action goes on once the restore lets go.
+    #[test]
+    fn mark_finished_opens_raw_before_the_readers_hold() {
+        let (mut s, v) = feed_fixture();
+        let place = tempfile::tempdir().unwrap();
+        let t = crate::db::now_ms() - 3_600_000;
+        s.said("s1", R, t, "Fix the parser.");
+        let step = crate::raw::Event {
+            kind: "tool".into(),
+            session: "s1".into(),
+            cwd: Some(place.path().to_string_lossy().into_owned()),
+            ts: t + 1_000,
+            ..crate::raw::test_event(&json!({"tool": "Read", "agent_id": "a1"}).to_string())
+        };
+        s.raw.append(&step).unwrap();
+        s.run();
+        let read = get(&v, "/api/my-work?range=all");
+        let id = read["subagents"][0]["id"].as_str().unwrap().to_owned();
+        let Store { home, raw } = s;
+        drop(raw);
+        let body = serde_json::to_vec(&json!({ "id": id })).unwrap();
+        let len = body.len().to_string();
+        let post = || {
+            let h = [
+                HOST,
+                ("Origin", "http://127.0.0.1:4321"),
+                TOKEN,
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            match v.head("POST", "/api/my-work/finished", &h) {
+                Head::Body(_, save, given) => v.take(save, &body, &given).status,
+                Head::Answer(r) => r.status,
+                Head::File(_) => panic!("no link"),
+            }
+        };
+        let swapping = crate::raw::lock_for_swap(home.path()).unwrap();
+        let status = std::thread::scope(|scope| {
+            let posting = scope.spawn(post);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let wait = std::time::Duration::from_millis(300);
+            let free = crate::dispatch::exclusive_within(home.path(), wait);
+            assert!(
+                free.is_ok(),
+                "Mark finished holds no readers' hold for raw.db"
+            );
+            drop(free);
+            drop(swapping);
+            posting.join().unwrap()
+        });
+        assert_eq!(status, 200);
+    }
+
     /// J4: `POST /api/my-work/suggestion` passes `save_gate` (the token, this viewer's Origin)
     /// and answers a judge's suggestion. The request a suggestion names leaves the route with its
     /// id as the page has it, though a rule matches hex digits, so that the page can open it; and

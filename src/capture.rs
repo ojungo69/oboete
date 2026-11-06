@@ -539,7 +539,7 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             if let Some(kind) = agent_field(payload, "agent_type") {
                 body["agent_type"] = kind;
             }
-            if let Some(launched) = launched(payload, &settings.rules) {
+            if let Some(launched) = launched(payload) {
                 body["launched"] = launched;
             }
             // When the call began, its record's time being when it ended (#692).
@@ -1067,40 +1067,22 @@ fn agent_field(payload: &Value, key: &str) -> Option<Value> {
 
 /// Slice 2: what the facts read of a Claude Code `Agent` or `Task` call that started a subagent,
 /// kept apart from its text, which may be cut: the subagent's id (the response's `agentId`), the
-/// response's `status`, whether it ran async, and the task it was given (the input's description,
-/// else the response's, else the input's prompt, else the response's), its whitespace folded and
-/// cut to 160 and 500 characters, as claude-mem's agent view reads a launch (`readAgentLaunches`).
-/// The task is cleaned and masked whole before it is cut, as every stored string is (`Gate`), so a
-/// cut never opens a closed block or splits a secret out of its rule's reach.
-fn launched(payload: &Value, rules: &redact::Rules) -> Option<Value> {
+/// response's `status` and whether it ran async. Its task is no part of it: My Work reads the task
+/// from the call's input as it is kept, whole, through the gate as its rules are now before it cuts
+/// it (Codex on slice 2).
+fn launched(payload: &Value) -> Option<Value> {
     let tool = str_field(payload, &["tool_name", "toolName", "name"])?;
     if !matches!(tool, "Agent" | "Task") {
         return None;
     }
-    let object = |v: &Value| {
-        match v {
-            Value::String(s) => serde_json::from_str::<Value>(s).ok(),
-            Value::Object(_) => Some(v.clone()),
-            _ => None,
-        }
-        .filter(Value::is_object)
-        .unwrap_or(Value::Null)
-    };
-    let response = object(field(
-        payload,
-        &["tool_response", "toolResult", "tool_output"],
-    ));
-    let input = object(field(payload, &["tool_input", "toolInput", "args"]));
+    let response = field(payload, &["tool_response", "toolResult", "tool_output"]);
+    let response = match response {
+        Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+        Value::Object(_) => Some(response.clone()),
+        _ => None,
+    }
+    .filter(Value::is_object)?;
     let id = agent_field(&response, "agentId")?;
-    let said = |v: &Value, key: &str, cap: usize| {
-        let whole = redact::scan(&without_blocks(v[key].as_str()?, false), rules).0;
-        let folded = whole.split_whitespace().collect::<Vec<_>>().join(" ");
-        (!folded.is_empty()).then(|| folded.chars().take(cap).collect::<String>())
-    };
-    let task = said(&input, "description", 160)
-        .or_else(|| said(&response, "description", 160))
-        .or_else(|| said(&input, "prompt", 500))
-        .or_else(|| said(&response, "prompt", 500));
     let status = response["status"].as_str();
     let not_async = !(response["isAsync"] == true
         || response["is_async"] == true
@@ -1109,9 +1091,6 @@ fn launched(payload: &Value, rules: &redact::Rules) -> Option<Value> {
     let mut out = json!({"agent_id": id, "async": !not_async});
     if let Some(status) = status {
         out["status"] = clean(&json!(status));
-    }
-    if let Some(task) = task {
-        out["task"] = clean(&json!(task));
     }
     Some(out)
 }
@@ -2111,44 +2090,19 @@ mod tests {
         ] {
             let payload = call(response.clone(), input.clone());
             let b = body(&events("claude", "PostToolUse", &payload, 0, &settings)[0].event);
+            // No task: My Work reads it from the input, through the rules of now before its cut.
             assert_eq!(
                 b["launched"],
-                json!({"agent_id": "a9", "async": false, "status": "completed",
-                       "task": "Count the files"})
+                json!({"agent_id": "a9", "async": false, "status": "completed"})
             );
         }
-        // The response as text, async; with no description the prompt, cut at 500 characters.
+        // The response as text, async.
         let text = json!({"agentId": "a8", "status": "async_launched", "prompt": "x".repeat(600)});
         let e = one("PostToolUse", call(json!(text.to_string()), json!({})));
-        assert_eq!(body(&e)["launched"]["async"], true);
-        assert_eq!(body(&e)["launched"]["task"].as_str().unwrap().len(), 500);
-        // A closed block and a secret across the cut are taken out whole first (Codex on slice 2).
-        let rule = with("[redaction]\nextra_rules = [{ id = 'teal', regex = 'teal-[0-9]{8}' }]\n");
-        let crossing = |description: String| {
-            let payload = call(
-                json!({"agentId": "a6", "status": "completed"}),
-                json!({ "description": description }),
-            );
-            let b = body(&events("claude", "PostToolUse", &payload, 0, &rule)[0].event);
-            b["launched"]["task"].as_str().unwrap().to_owned()
-        };
-        let private = crossing(format!(
-            "{} <private>zqx hidden words</private> after",
-            "d".repeat(150)
-        ));
-        assert!(
-            !private.contains("zqx") && !private.contains("private"),
-            "{private}"
+        assert_eq!(
+            body(&e)["launched"],
+            json!({"agent_id": "a8", "async": true, "status": "async_launched"})
         );
-        let secret = crossing(format!("{} teal-{}{}", "d".repeat(150), "1234", "5678"));
-        assert!(!secret.contains("1234"), "{secret}");
-        // A description, at 160.
-        let described = json!({"description": "d".repeat(200), "prompt": "p"});
-        let e = one(
-            "PostToolUse",
-            call(json!({"agentId": "a7", "status": "completed"}), described),
-        );
-        assert_eq!(body(&e)["launched"]["task"], "d".repeat(160));
         // No id, or another tool, launches nothing.
         let e = one(
             "PostToolUse",

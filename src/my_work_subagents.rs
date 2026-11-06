@@ -62,7 +62,12 @@ impl Subagent {
 /// The subagents of `convs` (Claude Code conversations), the `MAX_LISTED` with the newest last steps,
 /// each conversation's newest step first. The caller holds the read fence: a forget registers before
 /// this read or after it.
-pub(crate) fn read(raw: &Raw, k: &Connection, convs: &[Key]) -> Result<Vec<Subagent>> {
+pub(crate) fn read(
+    raw: &Raw,
+    k: &Connection,
+    convs: &[Key],
+    rules: &Rules,
+) -> Result<Vec<Subagent>> {
     let convs: Vec<&Key> = convs.iter().filter(|(a, _)| a == "claude").collect();
     if convs.is_empty() || !crate::consumer::manifest::exists(k, "table", "subagent_facts")? {
         return Ok(Vec::new());
@@ -197,7 +202,7 @@ pub(crate) fn read(raw: &Raw, k: &Connection, convs: &[Key]) -> Result<Vec<Subag
             .filter(|&at| at >= last_step)
             .max();
         let task = match &s.launch {
-            Some((device, seq, _)) => task_of(raw, device, *seq)?,
+            Some((device, seq, _)) => task_of(raw, device, *seq, rules)?,
             None => None,
         };
         out.push(Subagent {
@@ -237,10 +242,12 @@ fn imported_stops(raw: &Raw, wanted: &HashSet<&Key>) -> Result<HashMap<(Key, Str
     Ok(out)
 }
 
-/// The task a launch record gave its subagent: its `launched` task, or in a record from before
-/// slice 2 its input's description, else its prompt, when that input still parses. None when the
-/// record is gone or holds none.
-fn task_of(raw: &Raw, device: &str, seq: i64) -> Result<Option<String>> {
+/// The task a launch record gave its subagent, as claude-mem's agent view reads a launch: its input's
+/// description, else the response's, else the input's prompt, else the response's, as capture kept
+/// them (cleaned whole), through the gate as its rules are now and then folded and cut to 160 and
+/// 500 characters, as My Work's other texts are (Codex on slice 2). None when the record is gone,
+/// or its input and response no longer parse (a text cut when it was kept).
+fn task_of(raw: &Raw, device: &str, seq: i64, rules: &Rules) -> Result<Option<String>> {
     let Some(Item::Event(e)) = (raw.at(device, &[seq])?.into_iter())
         .find(|r| r.seq == seq)
         .map(|r| r.item)
@@ -248,21 +255,21 @@ fn task_of(raw: &Raw, device: &str, seq: i64) -> Result<Option<String>> {
         return Ok(None);
     };
     let body: Value = serde_json::from_str(&e.body).unwrap_or_default();
-    if let Some(task) = body["launched"]["task"].as_str() {
-        return Ok(Some(task.to_owned()));
-    }
-    let input: Value = (body["input"].as_str())
-        .and_then(|i| serde_json::from_str(i).ok())
-        .unwrap_or_default();
-    let said = |key: &str, cap: usize| {
-        let folded = input[key]
-            .as_str()?
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+    let parsed = |key: &str| -> Value {
+        (body[key].as_str())
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or_default()
+    };
+    let (input, response) = (parsed("input"), parsed("output"));
+    let said = |v: &Value, key: &str, cap: usize| {
+        let whole = crate::redact::outbound_with(v[key].as_str()?, rules);
+        let folded = whole.split_whitespace().collect::<Vec<_>>().join(" ");
         (!folded.is_empty()).then(|| folded.chars().take(cap).collect::<String>())
     };
-    Ok(said("description", 160).or_else(|| said("prompt", 500)))
+    Ok(said(&input, "description", 160)
+        .or_else(|| said(&response, "description", 160))
+        .or_else(|| said(&input, "prompt", 500))
+        .or_else(|| said(&response, "prompt", 500)))
 }
 
 /// The answer's `subagents`: each with its conversation's id as the request's `sessions` give it,
@@ -291,7 +298,8 @@ pub(crate) fn answer(
             "state": state,
             "finished_at": s.finished,
             "last_step": s.last_step,
-            "task": s.task.as_deref().map(gate),
+            // Through the gate when it was read, before its cut.
+            "task": s.task,
             "can_mark": state != "finished",
         }));
     }
@@ -384,12 +392,16 @@ mod tests {
         ev(session, SUBAGENT_STOP, ts, json!({"agent_id": id}))
     }
 
-    fn launch(session: &str, ts: i64, launched: Value) -> Event {
+    /// A launch record as capture keeps it: what it launched, and its input with the task given
+    /// here as `task`.
+    fn launch(session: &str, ts: i64, mut launched: Value) -> Event {
+        let task = launched.as_object_mut().unwrap().remove("task");
+        let input = json!({ "description": task }).to_string();
         ev(
             session,
             "tool",
             ts,
-            json!({"tool": "Agent", "launched": launched}),
+            json!({"tool": "Agent", "input": input, "launched": launched}),
         )
     }
 
@@ -461,7 +473,7 @@ mod tests {
         }
         let k = drain(home.path(), &store);
         let codex = ("codex".to_owned(), "s".to_owned());
-        let found = read(&store, &k, &[key("s"), codex]).unwrap();
+        let found = read(&store, &k, &[key("s"), codex], &Rules::default()).unwrap();
         assert_eq!(
             states(&found, 5 * MIN),
             [
@@ -480,7 +492,11 @@ mod tests {
         let b2 = of("b2");
         assert_eq!(b2.state(3 * MIN + RECENT_MS), "working");
         assert_eq!(b2.state(3 * MIN + RECENT_MS + 1), "quiet");
-        assert!(read(&store, &k, &[key("u")]).unwrap().is_empty());
+        assert!(
+            read(&store, &k, &[key("u")], &Rules::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Slice 2: at most `MAX_LISTED` subagents, those with the newest last steps.
@@ -495,7 +511,7 @@ mod tests {
                 .unwrap();
         }
         let k = drain(home.path(), &store);
-        let found = read(&store, &k, &[key("s"), key("t")]).unwrap();
+        let found = read(&store, &k, &[key("s"), key("t")], &Rules::default()).unwrap();
         assert_eq!(found.len(), MAX_LISTED);
         assert!(found.iter().all(|s| s.agent_id != "a0"), "{found:?}");
         assert_eq!(
@@ -514,7 +530,11 @@ mod tests {
         let mut store = raw::open(home.path()).unwrap();
         let empty = crate::knowledge::open(home.path()).unwrap();
         store.append(&step("s", "a1", MIN)).unwrap();
-        assert!(read(&store, &empty, &[key("s")]).unwrap().is_empty());
+        assert!(
+            read(&store, &empty, &[key("s")], &Rules::default())
+                .unwrap()
+                .is_empty()
+        );
         drop(empty);
         let b = store.append(&step("s", "b2", MIN)).unwrap();
         let c = store.append(&step("s", "c3", MIN)).unwrap();
@@ -531,7 +551,7 @@ mod tests {
             found.iter().map(|s| s.agent_id.clone()).collect()
         };
         assert_eq!(
-            ids(&read(&store, &k, &[key("s")]).unwrap()),
+            ids(&read(&store, &k, &[key("s")], &Rules::default()).unwrap()),
             ["a1", "b2", "c3", "d4"]
         );
         let device = store.device().to_owned();
@@ -558,7 +578,7 @@ mod tests {
         }))
         .unwrap();
         store.expire_for_test(&[d]);
-        let found = read(&store, &k, &[key("s")]).unwrap();
+        let found = read(&store, &k, &[key("s")], &Rules::default()).unwrap();
         assert_eq!(states(&found, 2 * MIN), [("a1", "finished", Some(2 * MIN))]);
         assert_eq!(found[0].task, None);
         drop(k);
@@ -570,14 +590,60 @@ mod tests {
             params![stopped - 1, subagents::NAME],
         )
         .unwrap();
-        let found = read(&store, &k, &[key("s")]).unwrap();
+        let found = read(&store, &k, &[key("s")], &Rules::default()).unwrap();
         assert_eq!(states(&found, 2 * MIN), [("a1", "finished", Some(2 * MIN))]);
         k.execute(
             "DELETE FROM checkpoints WHERE consumer = ?1",
             [subagents::NAME],
         )
         .unwrap();
-        assert!(read(&store, &k, &[key("s")]).unwrap().is_empty());
+        assert!(
+            read(&store, &k, &[key("s")], &Rules::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Slice 2 (Codex on slice 2): a launch's task is read from its record's input as capture kept it
+    /// whole (a closed block and a run of base64 taken out there), through the rules of now before
+    /// its cut: a value a rule added since masks is masked where the cut splits it.
+    #[test]
+    fn a_launch_task_is_read_whole_through_the_rules_of_now_before_its_cut() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let captured = |id: &str, description: String| {
+            let payload = json!({"session_id": "s", "tool_name": "Agent",
+                "tool_input": {"description": description, "prompt": "p"},
+                "tool_response": {"agentId": id, "status": "async_launched"}});
+            (crate::capture::events("claude", "PostToolUse", &payload, MIN, &settings))
+                .remove(0)
+                .event
+        };
+        let secret = format!("{} teal-{}{}", "d".repeat(150), "1234", "5678");
+        let encoded = format!("{} {}", "e".repeat(10), "aA0z".repeat(400));
+        let private = format!("{} <private>zqx hidden</private> after", "f".repeat(150));
+        for (id, description) in [("a1", secret), ("b2", encoded), ("c3", private)] {
+            store.append(&captured(id, description)).unwrap();
+            store.append(&step("s", id, 2 * MIN)).unwrap();
+        }
+        let k = drain(home.path(), &store);
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'teal', regex = 'teal-[0-9]{8}' }]\n",
+        )
+        .unwrap();
+        let rules = Rules::load(home.path()).unwrap();
+        let found = read(&store, &k, &[key("s")], &rules).unwrap();
+        let task = |id: &str| -> String {
+            let s = found.iter().find(|s| s.agent_id == id).unwrap();
+            s.task.clone().unwrap_or_else(|| panic!("no task of {id}"))
+        };
+        assert!(!task("a1").contains("1234"), "{}", task("a1"));
+        assert!(task("a1").starts_with(&"d".repeat(150)), "{}", task("a1"));
+        assert!(!task("b2").contains("aA0zaA0z"), "{}", task("b2"));
+        assert!(!task("c3").contains("zqx"), "{}", task("c3"));
+        assert_eq!(task("c3").chars().count(), 156, "{}", task("c3"));
     }
 
     /// Slice 2 (Codex on slice 2): in a home copied from another device's, whose own device the
@@ -607,7 +673,7 @@ mod tests {
         }))
         .unwrap();
         store.append(&stop("s", "b2", 2 * MIN)).unwrap();
-        let found = read(&store, &k, &[key("s")]).unwrap();
+        let found = read(&store, &k, &[key("s")], &Rules::default()).unwrap();
         assert_eq!(states(&found, 2 * MIN), [("b2", "finished", Some(2 * MIN))]);
     }
 
@@ -650,7 +716,10 @@ mod tests {
             .unwrap();
         let k = drain(home.path(), &store);
         assert_eq!(
-            states(&read(&store, &k, &[key("s")]).unwrap(), 3 * MIN),
+            states(
+                &read(&store, &k, &[key("s")], &Rules::default()).unwrap(),
+                3 * MIN
+            ),
             [
                 ("a1", "finished", Some(3 * MIN)),
                 ("b2", "working", None),
