@@ -561,13 +561,16 @@ pub fn preview(home: &Path, target: Target) -> Result<Preview> {
             let mut preview = raw.forget_preview(target)?;
             raw.scope_summary(&mut preview)?;
             // Read from raw's op log, as the purge reads them: knowledge.db may not hold them yet,
-            // or not be there (CodeRabbit on #471).
-            let keys: Vec<(String, i64)> = preview
-                .records
-                .iter()
-                .chain(&preview.copies)
-                .map(|r| (r.device.clone(), r.seq))
-                .collect();
+            // or not be there (CodeRabbit on #471). Not by a record a curator is shown no line of,
+            // as the purge judges (`raw::LINELESS`).
+            let keys = raw.with_lines(
+                preview
+                    .records
+                    .iter()
+                    .chain(&preview.copies)
+                    .map(|r| (r.device.clone(), r.seq))
+                    .collect(),
+            )?;
             let quoting = raw.record_claims(&crate::raw::Forgotten::of(
                 keys.iter().cloned(),
                 std::iter::empty(),
@@ -3586,6 +3589,80 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// X17 (docs/subagents.md): a forget of a session takes what its own window made, and nothing
+    /// of another session's window that holds no more of it than records a curator is shown no
+    /// line of (its start, a subagent's stop): that window's card stays shown, its op and claims as
+    /// they were.
+    #[test]
+    fn a_forgotten_sessions_lineless_records_take_nothing_from_another_sessions_window() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let repo = "github.com/o/r";
+        let (deploys, tests, hooks) = (
+            "Deploys run on Fridays.",
+            "Tests run on CI.",
+            "Hooks keep secrets out.",
+        );
+        let a1 = s.said("a", repo, 1_000, deploys);
+        s.event("start", "b", (repo, "main"), 1_500, json!({}));
+        let stop = s.event(
+            raw::SUBAGENT_STOP,
+            "b",
+            (repo, "main"),
+            2_500,
+            json!({"agent_id": "a1"}),
+        );
+        let a2 = s.said("a", repo, 3_000, tests);
+        let b1 = s.said("b", repo, 4_000, hooks);
+        let mut append = |ops: &[(raw::OpKind, serde_json::Value)]| s.raw.append_ops(ops).unwrap();
+        let wa = append(&[
+            window_op(a1, a2, "A's window.", json!({})),
+            claim_op(&device, &[(a1, deploys)], deploys),
+            claim_op(&device, &[(a2, tests)], tests),
+        ]);
+        let wb = append(&[
+            window_op(b1, b1, "B's window.", json!({})),
+            claim_op(&device, &[(b1, hooks)], hooks),
+        ]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let before = op_bodies(&home);
+        let target = session_target(&home, &format!("{device}:{stop}")).unwrap();
+        let shown = preview(&home, target).unwrap();
+        assert_eq!((shown.claims, shown.cards, shown.summaries), (1, 1, 0));
+        start(&home, &shown).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap().unwrap();
+        let job = crate::raw::open(&home).unwrap().forget_jobs().unwrap()[0]
+            .0
+            .job
+            .clone();
+        let after = op_bodies(&home);
+        for seq in &wa {
+            assert_eq!(after[seq], before[seq], "{seq}");
+        }
+        assert_ne!(after[&wb[0]], before[&wb[0]]);
+        assert_eq!(after[&wb[1]], json!({ "forgotten": job }));
+        // A's card is still read; B's is gone with its window.
+        let raw = crate::raw::open(&home).unwrap();
+        let k = crate::knowledge::open(&home).unwrap();
+        let taken: Vec<(i64, bool)> = k
+            .prepare(&format!(
+                "SELECT {} FROM cards ORDER BY op_seq",
+                crate::cards::COLUMNS
+            ))
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(1)?, crate::cards::taken_row(r, &raw).unwrap()))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(taken, [(wa[0], false)]);
     }
 
     /// A text only what curators were shown of a forgotten record holds (slice 3d-2).

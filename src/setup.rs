@@ -36,6 +36,8 @@ const CLAUDE_EVENTS: &[(&str, u32)] = &[
     ("Stop", 5),
     ("PostCompact", 5),
     ("SessionEnd", 3),
+    // X17 (docs/subagents.md): a subagent's stop, kept as its id and type.
+    ("SubagentStop", 5),
 ];
 /// (event, matcher, timeout, injects). `resume` is left out: the transcript already carries it.
 const CODEX_EVENTS: &[(&str, Option<&str>, u32, bool)] = &[
@@ -50,6 +52,9 @@ const CODEX_EVENTS: &[(&str, Option<&str>, u32, bool)] = &[
     ("Stop", None, 5, false),
     ("PostCompact", None, 5, false),
     ("SessionEnd", None, 3, false),
+    // X26 (docs/subagents.md): a spawned subagent's start, which Codex sends in place of a
+    // SessionStart, given the session start's context; its time as that one's.
+    ("SubagentStart", None, 10, true),
 ];
 /// The tools a Codex read goes through, as claude-mem's Codex hooks match them (13.35.0): its
 /// shell, and an MCP server's read tools (`hook::read_paths` takes the files); and the native
@@ -5211,6 +5216,40 @@ mod tests {
         // manifest back, whole.
         let post = &root["hooks"]["PostToolUse"][0]["hooks"][0];
         assert_eq!(post["additionalContextLimit"], 0);
+    }
+
+    /// X17, X26 (docs/subagents.md): Claude Code's SubagentStop and Codex's SubagentStart are
+    /// wired as claude-mem wires them, with no matcher; Codex's gives its context whole, with the
+    /// row that trusts it.
+    #[test]
+    fn the_subagent_hooks_are_wired() {
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        let mut root = json!({});
+        merge_groups(&mut root, claude_groups(&cmd));
+        let stop = root["hooks"]["SubagentStop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert!(stop[0].get("matcher").is_none());
+        let command = stop[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.ends_with("hook claude SubagentStop"), "{command}");
+        let mut root = json!({});
+        merge_groups(&mut root, codex_groups(&cmd));
+        let start = root["hooks"]["SubagentStart"].as_array().unwrap();
+        assert_eq!(start.len(), 1);
+        assert!(start[0].get("matcher").is_none());
+        let handler = &start[0]["hooks"][0];
+        let command = handler["command"].as_str().unwrap();
+        assert!(command.ends_with("hook codex SubagentStart"), "{command}");
+        assert_eq!(handler["additionalContextLimit"], 0);
+        let rows = codex_trust_keys(Path::new("/h/hooks.json"), &root);
+        let row = rows
+            .iter()
+            .find(|r| r.key == "/h/hooks.json:subagent_start:0:0")
+            .unwrap();
+        assert!(row.ours);
+        assert_eq!(row.hash, codex_trust_hash("SubagentStart", None, handler));
     }
 
     #[test]

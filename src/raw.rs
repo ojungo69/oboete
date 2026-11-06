@@ -181,15 +181,32 @@ const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
 
 /// A session's events before a window, newest first: the seek `SESSION_INDEX` serves.
 const SESSION_LATEST: &str = "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2
-       AND type = 'event' AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+       AND type = 'event' AND agent = ?3 AND session = ?4
+       AND kind NOT IN ('start', 'end', 'subagent_stop')
      ORDER BY seq DESC";
+
+/// X17 (docs/subagents.md): a Claude Code subagent's stop, its id and type and no text. A mark of
+/// the session's, not its work: the full-text index gives it no row, and a window's labels
+/// (`labels_in`), whether a window is a subagent's alone (`subagent_only`), the session's
+/// previous window (`SESSION_LATEST`), a turn's first record (`turn_start`) and the manifest's facts
+/// pass over it.
+pub(crate) const SUBAGENT_STOP: &str = "subagent_stop";
+
+/// The kinds of event a curator is shown no line of (`curate::Prepared`): a session's start and
+/// end, and a subagent's stop. Nothing a window, a turn or a request made holds a word of one, so a
+/// forget or a mask of one takes nothing made there, and an excluded session's one keeps nothing
+/// made there back (docs/subagents.md).
+pub(crate) const LINELESS: [&str; 3] = ["start", "end", SUBAGENT_STOP];
+
+/// `LINELESS` as an SQL list.
+const LINELESS_SQL: &str = "('start', 'end', 'subagent_stop')";
 
 /// One agent event as captured, after redaction.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub agent: String,
     pub session: String,
-    /// prompt, tool, reply, compaction, end
+    /// prompt, envelope, tool, reply, compaction, start, end, directive, subagent_stop
     pub kind: String,
     pub ts: i64,
     pub repo: Option<String>,
@@ -1744,12 +1761,13 @@ impl std::error::Error for Restoring {}
 /// The home's format (docs/store-format.md): raw.db's `user_version`, raised by a release that
 /// writes anything an older binary would mishandle, in any store or a backup segment. The newest
 /// this binary reads.
-pub(crate) const FORMAT: i64 = 5;
+pub(crate) const FORMAT: i64 = 6;
 
 /// What an open stamps, below `FORMAT` while a home holds nothing only a newer binary reads: 3
 /// comes with the first expiry batch (docs/retention.md), 4 with the first hide op
-/// (docs/card-hide.md) and 5 with the first My Work op (docs/my-work-model.md S3), so a home that
-/// has none of them still opens in the binaries before them.
+/// (docs/card-hide.md), 5 with the first My Work op (docs/my-work-model.md S3) and 6 with the
+/// first subagent's stop (docs/subagents.md), so a home that has none of them still opens in the
+/// binaries before them.
 pub(crate) const OPEN_FORMAT: i64 = 2;
 
 /// The format of a home with an expired record, or an expiry batch begun (docs/retention.md).
@@ -1761,6 +1779,18 @@ pub(crate) const HIDDEN_FORMAT: i64 = 4;
 
 /// The format of a home with a My Work op (docs/my-work-model.md S3), for the same reason.
 pub(crate) const MY_WORK_FORMAT: i64 = 5;
+
+/// The format of a home with a subagent's stop (docs/subagents.md): a binary before it indexes the
+/// stop's id and type as words, and reads it as a session's work.
+pub(crate) const SUBAGENT_STOP_FORMAT: i64 = 6;
+
+/// The format a record of `kind` raises a home to when it is written or brought back.
+fn record_format(kind: &str) -> i64 {
+    match kind {
+        SUBAGENT_STOP => SUBAGENT_STOP_FORMAT,
+        _ => OPEN_FORMAT,
+    }
+}
 
 /// The format an op of `kind` raises a home to when it is written or brought back.
 fn format_for(kind: OpKind) -> i64 {
@@ -3411,13 +3441,17 @@ impl Raw {
     pub(crate) fn forgotten_records(&self) -> Result<Forgotten> {
         let mut records: std::collections::HashMap<String, Vec<(i64, String, Option<i64>)>> =
             std::collections::HashMap::new();
-        let mut st = self.conn.prepare(
+        // A record a curator is shown no line of took nothing anything made (`LINELESS`): it is
+        // forgotten, and judges no op.
+        let mut st = self.conn.prepare(&format!(
             "SELECT o.device, o.seq, d.job,
                NULLIF((SELECT MIN(t.ts) FROM records t WHERE t.type = 'tombstone'
                   AND t.target_device = o.device AND t.target_seq = o.seq
                   AND t.source = 'forget' AND t.target_offset IS NULL), 0)
-             FROM denied_records d JOIN import_origins o ON o.origin = d.origin",
-        )?;
+             FROM denied_records d JOIN import_origins o ON o.origin = d.origin
+             WHERE NOT EXISTS (SELECT 1 FROM records r WHERE r.device = o.device
+               AND r.seq = o.seq AND r.kind IN {LINELESS_SQL})"
+        ))?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
             records
@@ -3437,17 +3471,35 @@ impl Raw {
         })
     }
 
+    /// `keys` without the records a curator is shown no line of (`LINELESS`), as
+    /// `forgotten_records` reads a forget's: what a preview's purge counts are judged by.
+    pub(crate) fn with_lines(&self, keys: Vec<(String, i64)>) -> Result<Vec<(String, i64)>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT 1 FROM records WHERE device = ?1 AND seq = ?2 AND kind IN {LINELESS_SQL}"
+        ))?;
+        let mut out = Vec::with_capacity(keys.len());
+        for (device, seq) in keys {
+            if !st.exists(params![device, seq])? {
+                out.push((device, seq));
+            }
+        }
+        Ok(out)
+    }
+
     /// Slice 3e-1: `forgotten_records`, with every record a rescan masked (`Forgotten::with_masks`),
     /// by the time of its latest mask: none when a restore lost the time of one of them, which
     /// went as late as can be, whatever the others' (Codex on #480).
     pub(crate) fn forgotten_and_masked(&self) -> Result<Forgotten> {
         let masks = self
             .conn
-            .prepare(
-                "SELECT target_device, target_seq, CASE WHEN MIN(ts) = 0 THEN NULL ELSE MAX(ts) END
-                 FROM records WHERE type = 'tombstone' AND target_offset IS NOT NULL
-                 GROUP BY target_device, target_seq",
-            )?
+            .prepare(&format!(
+                "SELECT t.target_device, t.target_seq,
+                   CASE WHEN MIN(t.ts) = 0 THEN NULL ELSE MAX(t.ts) END
+                 FROM records t WHERE t.type = 'tombstone' AND t.target_offset IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM records r WHERE r.device = t.target_device
+                     AND r.seq = t.target_seq AND r.kind IN {LINELESS_SQL})
+                 GROUP BY t.target_device, t.target_seq"
+            ))?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(self.forgotten_records()?.with_masks(masks))
@@ -4726,7 +4778,8 @@ impl Raw {
         through: Option<i64>,
     ) -> Result<Vec<Removal>> {
         // With a session: not a record of another session, nor an import of this one, which no
-        // live turn rests on (Codex on #371).
+        // live turn rests on (Codex on #371). Never one a curator is shown no line of
+        // (`LINELESS`): nothing made holds a word of it.
         let mut st = self.conn.prepare_cached(&format!(
             "SELECT DISTINCT t.target_seq, t.target_offset, t.target_length FROM records t
              WHERE t.type = 'tombstone' AND t.target_device = ?1
@@ -4737,6 +4790,8 @@ impl Raw {
                    AND (r.agent IS NOT NULL AND r.session IS NOT NULL
                           AND (r.agent <> ?5 OR r.session <> ?6)
                         OR r.source NOT IN ('{}'))))
+               AND NOT EXISTS (SELECT 1 FROM records x WHERE x.device = ?1
+                 AND x.seq = t.target_seq AND x.kind IN {LINELESS_SQL})
              ORDER BY 1, 2, 3",
             LIVE.join("', '")
         ))?;
@@ -5030,7 +5085,8 @@ impl Raw {
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
     /// device: the session's first live event after its previous live reply, or its first live
     /// event (docs/summaries.md T1). A scan by label, as `turns`. Live alone: an import of the
-    /// same session is no boundary of a live turn (Codex on #371).
+    /// same session is no boundary of a live turn (Codex on #371). A subagent's stop, which may
+    /// come after the reply it worked for, begins no turn (docs/subagents.md).
     pub fn turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         // The session's first event after its previous reply, not the record after that reply,
         // which may be another session's or a tombstone (Codex on C2). The reply at the latest.
@@ -5038,7 +5094,7 @@ impl Raw {
             &format!(
                 "SELECT COALESCE(MIN(seq), ?4) FROM records
                  WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
-                   AND seq <= ?4 AND source IN ('{live}')
+                   AND seq <= ?4 AND source IN ('{live}') AND kind <> 'subagent_stop'
                    AND seq > COALESCE(
                      (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
                         AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
@@ -5071,7 +5127,8 @@ impl Raw {
     }
 
     /// The one repository of this device's live events of a session from `from` to `to`, none
-    /// when they are of two (docs/summaries.md T5).
+    /// when they are of two (docs/summaries.md T5). Not a subagent's stop's: a mark, not the work
+    /// (docs/subagents.md).
     pub fn session_repo(
         &self,
         (agent, session): (&str, &str),
@@ -5082,7 +5139,7 @@ impl Raw {
             &format!(
                 "SELECT COUNT(DISTINCT COALESCE(repo, char(0))), MIN(repo) FROM records
                  WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
-                   AND seq BETWEEN ?4 AND ?5 AND source IN ('{}')",
+                   AND seq BETWEEN ?4 AND ?5 AND source IN ('{}') AND kind <> 'subagent_stop'",
                 LIVE.join("', '")
             ),
             params![self.device, agent, session, from, to],
@@ -5301,7 +5358,8 @@ impl Raw {
 
     /// What the labels of `device`'s events `from` to `to` agree on, from the rows alone (no body
     /// is read): their agent and session when they are of one session, their repository when
-    /// they are of one, and the time of the last of them (docs/cards.md K2).
+    /// they are of one, and the time of the last of them (docs/cards.md K2). A subagent's stop is
+    /// none of them: a mark, often of another session, after the work (docs/subagents.md).
     pub fn labels_in(&self, device: &str, from: i64, to: i64) -> Result<SpanLabels> {
         type Row = (
             i64,
@@ -5317,8 +5375,9 @@ impl Raw {
                     -- The last event's, by seq: times need not grow with it (a replay, a late
                     -- hook).
                     (SELECT ts FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
-                       AND type = 'event' ORDER BY seq DESC LIMIT 1)
-             FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
+                       AND type = 'event' AND kind <> 'subagent_stop' ORDER BY seq DESC LIMIT 1)
+             FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'
+               AND kind <> 'subagent_stop'",
             params![device, from, to],
             |r| {
                 Ok((
@@ -5350,10 +5409,12 @@ impl Raw {
             return Ok(false);
         }
         // The span's sessions, each looked up: the list may hold thousands, a span one or a few.
-        let mut st = self.conn.prepare_cached(
+        // Not by a record a curator is shown no line of (`LINELESS`).
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
-             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
-        )?;
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'
+               AND kind NOT IN {LINELESS_SQL}"
+        ))?;
         for key in st.query_map(params![device, from, to], |r| r.get::<_, String>(0))? {
             if sessions.contains(&key?) {
                 return Ok(true);
@@ -5370,7 +5431,7 @@ impl Raw {
         // Most windows hold a prompt or a reply: no body need be read for them.
         let other: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
-               AND type = 'event' AND kind NOT IN ('tool', 'start', 'end'))",
+               AND type = 'event' AND kind NOT IN ('tool', 'start', 'end', 'subagent_stop'))",
             params![device, from, to],
             |r| r.get(0),
         )?;
@@ -5396,6 +5457,7 @@ impl Raw {
                         tools = true;
                     }
                     Item::Event(_) | Item::Removed | Item::Tombstone(_) => {}
+                    Item::Expired(e) if e.kind == SUBAGENT_STOP => {}
                     Item::Expired(_) => return Ok(false),
                 }
             }
@@ -5413,10 +5475,12 @@ impl Raw {
         spans: &[(i64, i64)],
         seqs: &[i64],
     ) -> Result<std::collections::HashSet<String>> {
-        let mut st = self.conn.prepare_cached(
+        // Not by a record a curator is shown no line of (`LINELESS`): nothing was made from it.
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
-             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
-        )?;
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'
+               AND kind NOT IN {LINELESS_SQL}"
+        ))?;
         let mut out = std::collections::HashSet::new();
         for (from, to) in spans.iter().copied().chain(seqs.iter().map(|&s| (s, s))) {
             for key in st.query_map(params![device, from, to], |r| r.get(0))? {
@@ -5523,12 +5587,13 @@ impl Raw {
     }
 
     /// docs/deliverables.md: `turn_start` by live hook records alone, so a replay's reply in the
-    /// same session is no boundary of a live turn.
+    /// same session is no boundary of a live turn. A subagent's stop begins no turn here either
+    /// (Sourcery on #847).
     pub(crate) fn hook_turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MIN(seq), ?4) FROM records
              WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
-               AND seq <= ?4 AND source = 'hook'
+               AND seq <= ?4 AND source = 'hook' AND kind <> 'subagent_stop'
                AND seq > COALESCE(
                  (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
                     AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
@@ -7159,6 +7224,7 @@ impl Rebuild {
                     ],
                 )?;
                 self.ledger(device, seq, &v)?;
+                raise_format(&self.conn, record_format(s("kind").unwrap_or("")))?;
             }
             Some("expired") => {
                 // docs/retention.md: an event whose text retention removed, labels and ledger
@@ -7185,6 +7251,7 @@ impl Rebuild {
                 )?;
                 self.ledger(device, seq, &v)?;
                 raise_format(&self.conn, EXPIRED_FORMAT)?;
+                raise_format(&self.conn, record_format(s("kind").unwrap_or("")))?;
             }
             Some("removed") => {
                 // Restore only a complete explicitly carried triple. A legacy or malformed
@@ -7202,6 +7269,7 @@ impl Rebuild {
                      VALUES(?1, ?2, 'removed', ?3, ?4, ?5)",
                     params![device, seq, metadata.2, metadata.0, metadata.1],
                 )?;
+                raise_format(&self.conn, record_format(metadata.1.unwrap_or("")))?;
             }
             Some("tombstone") => {
                 let t = &v["target"];
@@ -9152,6 +9220,7 @@ fn insert_event(
     ruleset: &str,
 ) -> Result<i64> {
     let seq = next_seq(tx, device)?;
+    raise_format(tx, record_format(&e.kind))?;
     tx.execute(
         "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch, head,
                              gitdir, cwd, source, body, original_bytes)
@@ -9413,6 +9482,248 @@ mod tests {
         let reply = raw.append(&ev("reply", serde_json::json!({}))).unwrap();
         assert!(raw.subagent_only(&dev, c, c).unwrap());
         assert!(!raw.subagent_only(&dev, c, reply).unwrap());
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop beside its tool calls leaves the span its work
+    /// alone, also once retention has emptied the stop.
+    #[test]
+    fn a_subagent_stop_leaves_a_span_the_subagents_work() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let ev = |kind: &str, body: serde_json::Value| Event {
+            kind: kind.into(),
+            ..test_event(&body.to_string())
+        };
+        let tool = (raw.append(&ev(
+            "tool",
+            serde_json::json!({"tool": "Read", "agent_id": "a1"}),
+        )))
+        .unwrap();
+        let stop = (raw.append(&ev(
+            SUBAGENT_STOP,
+            serde_json::json!({"agent_id": "a1", "agent_type": "Explore"}),
+        )))
+        .unwrap();
+        assert!(raw.subagent_only(&dev, tool, stop).unwrap());
+        // A stop alone holds no tool call of the subagent's.
+        assert!(!raw.subagent_only(&dev, stop, stop).unwrap());
+        raw.expire_for_test(&[stop]);
+        assert!(raw.subagent_only(&dev, tool, stop).unwrap());
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop, often of another session and after the work, is
+    /// none of a span's labels: not its session, its repository or its time.
+    #[test]
+    fn a_subagent_stop_is_none_of_a_spans_labels() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let work = (raw.append(&Event {
+            session: "a".into(),
+            repo: Some("github.com/o/one".into()),
+            ts: 5_000,
+            ..test_event("fix the date parser")
+        }))
+        .unwrap();
+        let stop = (raw.append(&Event {
+            session: "b".into(),
+            repo: Some("github.com/o/two".into()),
+            ts: 9_000,
+            kind: SUBAGENT_STOP.into(),
+            ..test_event(r#"{"agent_id":"a1"}"#)
+        }))
+        .unwrap();
+        let labels = raw.labels_in(&dev, work, stop).unwrap();
+        assert_eq!(labels.session, Some(("claude".into(), "a".into())));
+        assert_eq!(labels.repo.as_deref(), Some("github.com/o/one"));
+        assert_eq!(labels.ts, Some(5_000));
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop, which may come after the reply it worked for,
+    /// begins no turn: the next turn begins at its prompt.
+    #[test]
+    fn a_subagent_stop_begins_no_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ev = |kind: &str| Event {
+            kind: kind.into(),
+            ..test_event("{}")
+        };
+        for kind in ["prompt", "reply", SUBAGENT_STOP] {
+            raw.append(&ev(kind)).unwrap();
+        }
+        let prompt = raw.append(&ev("prompt")).unwrap();
+        let reply = raw.append(&ev("reply")).unwrap();
+        assert_eq!(raw.turn_start("claude", "s", reply).unwrap(), prompt);
+        assert_eq!(raw.hook_turn_start("claude", "s", reply).unwrap(), prompt);
+    }
+
+    /// X17 (docs/subagents.md): the session's previous window is the one that holds its last
+    /// work, not one that holds no more of the session than a subagent's stop.
+    #[test]
+    fn a_subagent_stop_makes_no_previous_window_of_its_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ev = |session: &str, kind: &str| Event {
+            session: session.into(),
+            kind: kind.into(),
+            ..test_event("a line")
+        };
+        for (session, kind) in [("s", "prompt"), ("s", "reply"), ("s", SUBAGENT_STOP)] {
+            raw.append(&ev(session, kind)).unwrap();
+        }
+        raw.append(&ev("t", "prompt")).unwrap();
+        let next = raw.append(&ev("s", "prompt")).unwrap();
+        // Windows 1 to 2 and 3 to 4, each with a claim quoting its last record.
+        for (from, to, text) in [(1, 2, "of s"), (3, 4, "of t")] {
+            let op = serde_json::json!({"from_seq": from, "to_seq": to, "recurate": false});
+            let claim = serde_json::json!({"text": text, "evidence": [{"device": raw.device(),
+                "seq": to, "offset": 0, "length": 4}]});
+            (raw.append_ops(&[(OpKind::Window, op), (OpKind::Claim, claim)])).unwrap();
+        }
+        let ops = (raw.previous_window_ops("claude", "s", (next, None), |_| true)).unwrap();
+        let texts: Vec<_> = ops.iter().map(|o| o.body["text"].as_str()).collect();
+        assert_eq!(texts, [Some("of s")]);
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop in another checkout is none of a turn's
+    /// repository.
+    #[test]
+    fn a_subagent_stop_is_none_of_a_turns_repository() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ev = |kind: &str, repo: &str| Event {
+            kind: kind.into(),
+            repo: Some(repo.into()),
+            ..test_event("{}")
+        };
+        let first = raw.append(&ev("prompt", "github.com/o/one")).unwrap();
+        raw.append(&ev(SUBAGENT_STOP, "github.com/o/two")).unwrap();
+        let last = raw.append(&ev("reply", "github.com/o/one")).unwrap();
+        let repo = raw.session_repo(("claude", "s"), first, last).unwrap();
+        assert_eq!(repo.as_deref(), Some("github.com/o/one"));
+    }
+
+    /// docs/subagents.md: a removal or a mask of a record a curator is shown no line of (a
+    /// session's start or end, a subagent's stop) took nothing a card, a summary or a claim holds;
+    /// a prompt's still did.
+    #[test]
+    fn a_lineless_records_removal_takes_nothing_made() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let ev = |kind: &str| Event {
+            kind: kind.into(),
+            ..test_event(r#"{"agent_id":"a1"}"#)
+        };
+        let prompt = raw.append(&ev("prompt")).unwrap();
+        let lineless: Vec<i64> = (LINELESS.iter())
+            .map(|kind| raw.append(&ev(kind)).unwrap())
+            .collect();
+        let last = lineless[2];
+        let range = |seq: i64| Target::Range {
+            device: dev.clone(),
+            seq,
+            offset: 2,
+            length: 8,
+        };
+        for &seq in &lineless {
+            raw.append_tombstone(range(seq)).unwrap();
+            (raw.append_tombstone(Target::Record {
+                device: dev.clone(),
+                seq,
+            }))
+            .unwrap();
+        }
+        assert_eq!(
+            raw.removed_in(&dev, prompt, last, None).unwrap(),
+            Vec::<Removal>::new()
+        );
+        let masked = raw.forgotten_and_masked().unwrap();
+        assert!(
+            lineless
+                .iter()
+                .all(|&seq| masked.entry(&dev, seq).is_none())
+        );
+        raw.append_tombstone(range(prompt)).unwrap();
+        assert_eq!(
+            raw.removed_in(&dev, prompt, last, None).unwrap(),
+            [(prompt, Some(2), Some(8))]
+        );
+        let masked = raw.forgotten_and_masked().unwrap();
+        assert!(masked.entry(&dev, prompt).is_some());
+        let keys = |seqs: &[i64]| -> Vec<(String, i64)> {
+            seqs.iter().map(|&seq| (dev.clone(), seq)).collect()
+        };
+        let all: Vec<i64> = std::iter::once(prompt).chain(lineless.clone()).collect();
+        assert_eq!(raw.with_lines(keys(&all)).unwrap(), keys(&[prompt]));
+    }
+
+    /// docs/subagents.md: a span's sessions are those of the records its curator could be shown,
+    /// not another session's start, end or subagent's stop.
+    #[test]
+    fn a_spans_sessions_are_not_those_of_its_lineless_records() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let ev = |session: &str, kind: &str| Event {
+            session: session.into(),
+            kind: kind.into(),
+            ..test_event("{}")
+        };
+        let first = raw.append(&ev("a", "prompt")).unwrap();
+        for kind in LINELESS {
+            raw.append(&ev("b", kind)).unwrap();
+        }
+        let last = raw.append(&ev("a", "reply")).unwrap();
+        let sessions = raw.sessions_over(&dev, &[(first, last)], &[]).unwrap();
+        assert_eq!(sessions, ["claude\u{0}a".to_owned()].into());
+        let b: std::collections::HashSet<String> = ["claude\u{0}b".to_owned()].into();
+        assert!(!raw.holds_session(&dev, (first, last), &b).unwrap());
+        let prompt = raw.append(&ev("b", "prompt")).unwrap();
+        assert!(raw.holds_session(&dev, (first, prompt), &b).unwrap());
+    }
+
+    /// docs/store-format.md: the first subagent's stop raises the home to format 6 in the
+    /// transaction that appends it, and a rebuild that brings one back, live, expired or removed,
+    /// stamps it too; a home without one stays where it was.
+    #[test]
+    fn a_subagent_stop_raises_the_home_to_the_format_that_reads_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let prompt = raw.append(&test_event("{}")).unwrap();
+        assert_eq!(format_in(&raw), OPEN_FORMAT);
+        let stop = || Event {
+            kind: SUBAGENT_STOP.into(),
+            ..test_event(r#"{"agent_id":"a1"}"#)
+        };
+        let stops: Vec<i64> = (0..3).map(|_| raw.append(&stop()).unwrap()).collect();
+        assert_eq!(format_in(&raw), SUBAGENT_STOP_FORMAT);
+        raw.expire_for_test(&stops[1..2]);
+        (raw.conn.execute(
+            &format!("UPDATE records SET {REMOVED_ROW} WHERE device = ?1 AND seq = ?2"),
+            params![dev, stops[2]],
+        ))
+        .unwrap();
+        let lines = raw.export_lines(0, usize::MAX).unwrap();
+        let stamped = |seq: i64| {
+            let path = home.path().join(format!("raw.db.rebuilt-{seq}"));
+            let mut rebuild = Rebuild::new(&path, &dev).unwrap();
+            for (_, line) in lines.iter().filter(|(s, _)| *s == seq) {
+                rebuild.add(line).unwrap();
+            }
+            rebuild.finish().unwrap();
+            Connection::open(&path)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(stamped(prompt), OPEN_FORMAT);
+        for seq in stops {
+            assert_eq!(stamped(seq), SUBAGENT_STOP_FORMAT, "{seq}");
+        }
     }
 
     fn format_in(raw: &Raw) -> i64 {

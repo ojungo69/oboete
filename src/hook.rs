@@ -400,8 +400,10 @@ fn run_io(
                 .map(|e| (crate::failure::classify(e), ended))
         });
         // Grok, agy and Cursor show it at their injection points only (other calls return nothing
-        // or {}); the others at every SessionStart, resumes too.
-        let reads_start = event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor");
+        // or {}); the others at every SessionStart, resumes too, and a Codex subagent at its
+        // SubagentStart, its session start (Codex's review of docs/subagents.md's slice 1).
+        let reads_start = (event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor"))
+            || (agent, event) == ("codex", "SubagentStart");
         let failure = failed
             .filter(|_| injecting || reads_start)
             .map(|f| crate::failure::line(f, kept_count(home)));
@@ -464,10 +466,12 @@ fn run_io(
         // `consumer::manifest::text` does after its gate).
         let came = |l: &str| text.lines().any(|t| t == l);
         // A Codex subagent's manifest after its compaction leaves the session's shown set the
-        // root's: only the root has prompts, where the set is read (Codex on #532).
+        // root's: only the root has prompts, where the set is read (Codex on #532). So does its
+        // start, whatever its id says (X26, Codex's review of docs/subagents.md's slice 1).
         if let Some(m) = &manifest
             && agent != "opencode"
             && !took.thread.starts_with("compacted-")
+            && (agent, event) != ("codex", "SubagentStart")
         {
             // A card or summary counts when its own line came: the block puts each on a line that
             // begins with its ID, and a cut keeps whole lines (Codex on #521).
@@ -598,10 +602,51 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
             took.compacted = crate::hookstate::take(home, agent, session, "compacted");
             str_field(payload, &["source"]) != Some("resume")
         }
+        // X26 (docs/subagents.md): Codex starts a spawned subagent with SubagentStart, never
+        // SessionStart: a fresh one gets the session start's context; a fork starts from its
+        // parent's history, which holds it.
+        ("codex", "SubagentStart") => !forked(payload),
         ("grok" | "agy" | "cursor", _) => false,
         (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
         _ => false,
     }
+}
+
+/// X26: whether a Codex thread's rollout (`transcript_path`) says it was forked from another
+/// thread's history, as claude-mem reads it: its first line, within 1 MiB, a `session_meta` whose
+/// `payload.forked_from_id` is a string. An unreadable rollout counts as fresh: a duplicate costs
+/// tokens, a missing one the memory.
+fn forked(payload: &Value) -> bool {
+    use std::io::BufRead;
+    // Opened without waiting and read only as a regular file, as `migrate::finish_open` opens one:
+    // a FIFO at the path would hold the hook until a writer came (CodeRabbit on #847).
+    let open = |path: &str| {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path).ok()?;
+        // On Windows a named pipe or a device opens without waiting and its read waits instead:
+        // only a file on a disk is read (cubic on #847).
+        #[cfg(windows)]
+        if !winapi_util::file::typ(&file).is_ok_and(|t| t.is_disk()) {
+            return None;
+        }
+        file.metadata().is_ok_and(|m| m.is_file()).then_some(file)
+    };
+    let Some(file) = str_field(payload, &["transcript_path"]).and_then(open) else {
+        return false;
+    };
+    let mut first = Vec::new();
+    std::io::BufReader::new(file.take(1 << 20))
+        .read_until(b'\n', &mut first)
+        .is_ok()
+        && serde_json::from_slice::<Value>(&first).is_ok_and(|line| {
+            line["type"] == "session_meta" && line["payload"]["forked_from_id"].is_string()
+        })
 }
 
 /// The one-shot hook state a call took to be its session's injection point (`injects`), given back
@@ -637,12 +682,12 @@ impl Took {
 }
 
 /// A Codex thread's compaction flag (claude-mem 13.39): a subagent's (`agent_id`) `compacted-`
-/// and 16 hex digits of its id's sha256, the root's `compacted`; an id over 128 characters
+/// and 16 hex digits of its id's sha256, the root's `compacted`; an id over 128 UTF-16 units
 /// names none, as claude-mem drops it.
 fn codex_thread(payload: &Value) -> String {
     match payload["agent_id"]
         .as_str()
-        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .filter(|id| !id.is_empty() && id.encode_utf16().count() <= 128)
     {
         Some(id) => format!("compacted-{}", &crate::curate::sha256_hex(id)[..16]),
         None => "compacted".into(),
@@ -8267,6 +8312,159 @@ mod tests {
         assert_eq!(tools, 6);
     }
 
+    /// X26 (docs/subagents.md): Codex starts a spawned subagent with SubagentStart, never
+    /// SessionStart: a fresh one gets the session start's context under that event's name, as
+    /// claude-mem gives it, and nothing Codex's output schema refuses; a fork (its rollout's
+    /// `forked_from_id`), which starts from its parent's history, gets none; a missing rollout
+    /// counts as fresh. Nothing is recorded, and the root's shown set stays the root's.
+    #[test]
+    fn a_fresh_codex_subagent_gets_the_session_start_context_and_a_fork_none() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        // The root was shown its session start before it spawned the subagent, and a claim was
+        // decided since: the subagent's start holds both, and the root's shown set stays the
+        // root's (Sourcery on #847).
+        let root_start = json!({"session_id": "cx", "cwd": p.c, "hook_event_name": "SessionStart",
+            "source": "startup"});
+        let started = hook(&home, "codex", "SessionStart", &root_start);
+        assert!(started.contains("Parser errors go to stderr."), "{started}");
+        p.decided(2, "Deploys run on Fridays.", &[]);
+        p.s.run();
+        let dir = tempfile::tempdir().unwrap();
+        // The rollout as Codex has written it when SubagentStart runs: its long session_meta line.
+        let rollout = |name: &str, meta: Value| {
+            let path = dir.path().join(name);
+            let mut payload = json!({"id": "sub", "session_id": "cx", "base_instructions": {"text": "x".repeat(30_000)}});
+            (payload.as_object_mut().unwrap()).extend(meta.as_object().unwrap().clone());
+            let line = json!({"timestamp": "2026-11-06T00:00:00.000Z", "type": "session_meta",
+                              "payload": payload});
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            path
+        };
+        let start = |path: &Path| {
+            let payload = json!({"session_id": "cx", "turn_id": "t1", "cwd": p.c,
+                "hook_event_name": "SubagentStart", "transcript_path": path,
+                "agent_id": "sub", "agent_type": "worker"});
+            hook(&home, "codex", "SubagentStart", &payload)
+        };
+        let root = shown_set(&home, "codex", "cx");
+        assert!(!root.is_empty());
+        let fresh = start(&rollout("fresh.jsonl", json!({})));
+        let v: Value = serde_json::from_str(&fresh).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SubagentStart");
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("Parser errors go to stderr."), "{fresh}");
+        assert!(context.contains("Deploys run on Fridays."), "{fresh}");
+        assert_eq!(v.as_object().unwrap().len(), 1, "{fresh}");
+        let fork = rollout("fork.jsonl", json!({"forked_from_id": "cx"}));
+        assert_eq!(start(&fork), "");
+        let missing = start(&dir.path().join("missing.jsonl"));
+        assert!(missing.contains("Deploys run on Fridays."), "{missing}");
+        // A FIFO at the path is not waited on: it is no rollout, so the subagent counts as fresh.
+        #[cfg(unix)]
+        {
+            let fifo = dir.path().join("fifo.jsonl");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+            assert!(made.is_ok_and(|s| s.success()));
+            let out = start(&fifo);
+            assert!(out.contains("Deploys run on Fridays."), "{out}");
+        }
+        // Whatever its id says: none, or one that names no thread (Codex's review of
+        // docs/subagents.md's slice 1).
+        for id in [Value::Null, json!(""), json!("x".repeat(129))] {
+            let payload = json!({"session_id": "cx", "turn_id": "t1", "cwd": p.c,
+                "hook_event_name": "SubagentStart", "transcript_path": "/nowhere.jsonl",
+                "agent_id": id});
+            let out = hook(&home, "codex", "SubagentStart", &payload);
+            assert!(out.contains("Deploys run on Fridays."), "{out}");
+        }
+        assert_eq!(shown_set(&home, "codex", "cx"), root);
+        // A thread is named by an id of at most 128 UTF-16 units, as claude-mem counts.
+        let thread = |id: String| codex_thread(&json!({ "agent_id": id }));
+        assert!(thread("😀".repeat(64)).starts_with("compacted-"));
+        assert_eq!(thread("😀".repeat(65)), "compacted");
+        let recorded =
+            (p.s.raw
+                .after(p.s.raw.device(), 0, 1000)
+                .unwrap()
+                .into_iter())
+            .filter(|r| matches!(&r.item, crate::raw::Item::Event(e) if e.session == "cx"))
+            .count();
+        // The root's start alone: no subagent's start is recorded.
+        assert_eq!(recorded, 1);
+    }
+
+    /// X17 (docs/subagents.md): Claude Code's SubagentStop keeps the subagent's id and type, as
+    /// claude-mem's stop row does, and nothing of its text; with no id, or one over 128
+    /// characters, nothing; a type that is not a non-empty string of at most 128 characters is
+    /// left out. Nothing is printed.
+    #[test]
+    fn a_claude_subagent_stop_is_kept_as_its_id_and_type() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let stop = |extra: Value| {
+            let mut payload = json!({"session_id": "s1", "cwd": c, "stop_hook_active": false,
+                "last_assistant_message": "The parser is fixed.",
+                "agent_transcript_path": "/nowhere/agent-a1.jsonl"});
+            (payload.as_object_mut().unwrap()).extend(extra.as_object().unwrap().clone());
+            hook(home.path(), "claude", "SubagentStop", &payload)
+        };
+        assert_eq!(stop(json!({"agent_id": "a1", "agent_type": "Explore"})), "");
+        stop(json!({"agent_id": "a2", "agent_type": 7}));
+        stop(json!({"agent_id": "a3", "agent_type": ""}));
+        stop(json!({"agent_id": "x".repeat(128), "agent_type": "t".repeat(129)}));
+        stop(json!({"agent_type": "Explore"}));
+        stop(json!({"agent_id": "", "agent_type": "Explore"}));
+        stop(json!({"agent_id": "x".repeat(129), "agent_type": "Explore"}));
+        // Counted in UTF-16 units, as claude-mem counts: 65 characters of two units each are 130.
+        stop(json!({"agent_id": "😀".repeat(64), "agent_type": "😀".repeat(65)}));
+        stop(json!({"agent_id": "😀".repeat(65), "agent_type": "Explore"}));
+        stop(json!({"session_id": "", "agent_id": "a9", "agent_type": "Explore"}));
+        // Checked again once cleaned: a block the capture takes out leaves nothing (cubic on #847).
+        let block = |s: &str| format!("<system-reminder>{s}</system-reminder>");
+        stop(json!({"agent_id": block("a7"), "agent_type": "Explore"}));
+        stop(json!({"agent_id": "a6", "agent_type": block("Explore")}));
+        // And bounded again: a data URI inside one is cleaned into its longer marker.
+        let uri = |s: &str| format!("{} data:a/b;base64,AAAA", s.repeat(100));
+        stop(json!({"agent_id": uri("x"), "agent_type": "Explore"}));
+        stop(json!({"agent_id": "a5", "agent_type": uri("t")}));
+        // A checkout that records nothing keeps no stop either.
+        let off = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(off.path().join(".git")).unwrap();
+        std::fs::write(off.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(off.path().join(".oboete.toml"), "capture = false\n").unwrap();
+        let o = off.path().to_string_lossy().into_owned();
+        stop(json!({"cwd": o, "agent_id": "a8", "agent_type": "Explore"}));
+        let raw = crate::raw::open(home.path()).unwrap();
+        let kept: Vec<(String, String, Value)> = (raw.after(raw.device(), 0, 100).unwrap())
+            .into_iter()
+            .filter_map(|r| match r.item {
+                crate::raw::Item::Event(e) => {
+                    Some((e.kind, e.session, serde_json::from_str(&e.body).unwrap()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mark = |body: Value| ("subagent_stop".to_owned(), "s1".to_owned(), body);
+        assert_eq!(
+            kept,
+            [
+                mark(json!({"agent_id": "a1", "agent_type": "Explore"})),
+                mark(json!({"agent_id": "a2"})),
+                mark(json!({"agent_id": "a3"})),
+                mark(json!({"agent_id": "x".repeat(128)})),
+                mark(json!({"agent_id": "😀".repeat(64)})),
+                mark(json!({"agent_id": "a6"})),
+                mark(json!({"agent_id": "a5"})),
+            ]
+        );
+    }
+
     /// Codex on #532: a thread's tool call that took its mark and then failed its write puts the
     /// mark back, so the thread's next tool call takes the manifest once recording works again.
     #[test]
@@ -8965,6 +9163,16 @@ mod tests {
         assert!(run_io(&home, "claude", "SessionStart", &start[..], &mut out).is_err());
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("recording has failed since"), "{out}");
+        // X26: a Codex subagent's start is its session start (Codex's review of docs/subagents.md's
+        // slice 1).
+        let mut out = Vec::new();
+        assert!(run_io(&home, "codex", "SubagentStart", &start[..], &mut out).is_err());
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SubagentStart");
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("recording has failed since"), "{v}");
     }
 
     /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.

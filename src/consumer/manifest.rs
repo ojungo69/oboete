@@ -4,7 +4,7 @@
 //! tombstone hides there (Task 7) is hidden here too. File paths are the one copy (labels).
 
 use crate::manifest::{self, Line, Parts};
-use crate::raw::{Event, Item, Raw, Target};
+use crate::raw::{Event, Item, Raw, SUBAGENT_STOP, Target};
 use crate::redact::Mapped;
 use crate::worker::Consumer;
 use anyhow::Result;
@@ -768,7 +768,7 @@ impl Consumer for Manifest {
 /// docs/retention.md: the facts an expired record's labels give (its text gave the others, and it
 /// is gone), and its checkout marked for a rebuild, as `facts` marks it.
 fn label_facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
-    if !crate::raw::is_live(&e.source) || e.kind == "directive" {
+    if !crate::raw::is_live(&e.source) || matches!(e.kind.as_str(), "directive" | SUBAGENT_STOP) {
         return Ok(());
     }
     let Some(repo) = e.repo.as_deref() else {
@@ -811,8 +811,9 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
     // Imported records are history, not the checkout's state (milestone 4 D6): its facts and its
     // count of records not yet curated come from live records only. Slice 8b: nor is the owner's
     // directive of a repository (`pref add --repo`) any session's work: its claim is read when the
-    // start is (`delivered`).
-    if !crate::raw::is_live(&e.source) || e.kind == "directive" {
+    // start is (`delivered`). Nor is a subagent's stop (docs/subagents.md): it would make an ended
+    // session active again, and count as a record to curate.
+    if !crate::raw::is_live(&e.source) || matches!(e.kind.as_str(), "directive" | SUBAGENT_STOP) {
         return Ok(());
     }
     let Some(repo) = e.repo.as_deref() else {
@@ -2496,6 +2497,40 @@ extra_rules = [
             )
             .unwrap();
         assert_eq!(built, 1);
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop is no fact of its checkout, live or expired: it
+    /// would make an ended session active again, and count as a record to curate.
+    #[test]
+    fn a_subagent_stop_gives_no_fact() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let stop = Event {
+            kind: SUBAGENT_STOP.into(),
+            repo: Some("github.com/o/r".into()),
+            branch: Some("main".into()),
+            ..raw::test_event(&serde_json::json!({"agent_id": "a1"}).to_string())
+        };
+        let seq = store.append(&stop).unwrap();
+        let facts = |k: &Connection| -> i64 {
+            k.query_row(
+                "SELECT COUNT(*) FROM manifest_facts WHERE seq = ?1",
+                [seq],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let mut consumers: Vec<Box<dyn worker::Consumer>> =
+            vec![Box::new(Manifest::new(home.path()))];
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        worker::drain(&store, &mut k, &mut consumers).unwrap();
+        assert_eq!(facts(&k), 0);
+        store.expire_for_test(&[seq]);
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        worker::drain(&store, &mut k, &mut consumers).unwrap();
+        assert_eq!(facts(&k), 0);
     }
 
     #[test]
