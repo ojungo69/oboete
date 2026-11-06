@@ -1,0 +1,38 @@
+src/work_state.rs
+  s_70102dd6ea5599::t_ee3723f17cbf93 21-23
+src/hook.rs
+  s_70102dd6ea5599::t_be384580b47025 616-628,631-669
+  s_70102dd6ea5599::t_6c6a341f612b96 407
+  s_70102dd6ea5599::t_98f86c0cfe19ab 629-630,8405-8409,8411,8414-8415,8424,8428,8433-8442,8444,8446-8448,8451-8459,8463-8466,8469-8475,9176-9185
+  s_70102dd6ea5599::t_313409b2efe972 262-264
+  s_70102dd6ea5599::t_06e9fb19f80080 406,408-409
+  s_70102dd6ea5599::t_8c20485fa3751e 8443,8445
+src/consumer/fts.rs
+  s_70102dd6ea5599::t_ef58397d5e6140 351-352
+src/my_work.rs
+  s_70102dd6ea5599::t_98f86c0cfe19ab 2846-2849
+  s_70102dd6ea5599::t_8c20485fa3751e 812-813,816
+  s_70102dd6ea5599::t_bc8487f1efd817 2830-2845,2850-2852
+docs/subagents.md
+  s_70102dd6ea5599::t_6650f05f54b102 93-94,108
+  s_70102dd6ea5599::t_09810dea6734f7 102-103,137-138
+  s_70102dd6ea5599::t_085dbd80a095bb 48,66-78,83-85,117-122,127-130,152-156,161-167,169-170
+docs/claude-mem-parity.md
+  s_70102dd6ea5599::t_09810dea6734f7 121,130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd2ba522bc6703290ce595df31f341fe3971b9ac",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
