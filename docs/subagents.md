@@ -308,19 +308,22 @@ Slice 3:
 - **Capture** (`capture::agent_field`, `capture::launched`): a Claude Code tool record keeps the
   payload's `agent_type` beside its `agent_id`, bounded at 128 UTF-16 units, cleaned and bounded
   again. An `Agent` or `Task` call keeps `launched` (`agent_id` from the response's `agentId`,
-  `async`, `status`, `task`), made from the payload before its text is flattened and cut. A
-  SubagentStop payload with `oboete_marked: true` (`capture::OWNER_MARK`, the viewer's alone) keeps
+  `async`, `status`, `task`), made from the payload before its text is flattened and cut; the task
+  is cleaned and masked whole before it is folded and cut, so a cut never opens a closed block or
+  splits a secret out of its rule's reach. A SubagentStop payload with `oboete_marked: true` (`capture::OWNER_MARK`, the viewer's alone) keeps
   `marked: true`.
 - **Facts** (`consumer::subagents`, after `products` in `worker::consumers()`): rows of
   `subagent_facts` keyed by (device, seq, fact, agent id), with the conversation, the time, the type
-  and whether a launch returned (`status` `completed` and not async). An id a mask touched (`*`)
-  names no subagent. A tombstone's target is made again from raw; a rewind drops the device's rows
-  (`subagent_rebuild` marks it); every device raw holds is read.
+  and whether a launch returned (`status` `completed` and not async). An id a mask touched (a
+  tombstone's `*`, the capture gate's `[REDACTED]`) names no subagent. A tombstone's target is made
+  again from raw; a rewind drops every device's rows and marks each it has a checkpoint of
+  (`subagent_rebuild`), as a device's lost tombstone may have taken another device's record (the
+  manifest makes the device's alone again); every device raw holds is read.
 - **My Work's read** (`my_work_subagents::read`, from `my_work::read_held` by `subagents_of`, which
   takes the read fence): the consumer's checkpoints first (none: no subagents), then the rows of the
-  listed Claude Code conversations, then, past each device's checkpoint, the `subagent_stop`
-  records (`Raw::stops_after`) and the tombstones' targets (`Raw::tombstones_after`), a row read
-  twice counting once; a record expired since is passed over (`Raw::expired_among`). claude-mem's
+  listed Claude Code conversations, then, past each device's checkpoint (from the first record of
+  one it has none of yet, a copied home's own), the `subagent_stop` records (`Raw::stops_after`)
+  and the tombstones' targets (`Raw::tombstones_after`), a row read twice counting once; a record expired since is passed over (`Raw::expired_among`). claude-mem's
   imported `agent-lifecycle` rows are the ops of an import's source on that list
   (`Raw::imported_list_fields`). A launch's task is read from its record when My Work is read: its
   `launched.task`, else in an older record its input's description (160) or prompt (500).
@@ -334,12 +337,15 @@ Slice 3:
   `can_mark`. `view::answered` takes `conversation` and `id` out of the gate's walk and puts them
   back.
 - **Mark finished** (`POST /api/my-work/finished`, `Viewer::my_work_finished`): `{id}` only (`s:`,
-  at most 64 bytes); `my_work::reviews_lock`, then the read fence, held through a fresh read
-  (`my_work::subagent`, every request built, as the page reads `range=all`) and the append
-  (`my_work_subagents::mark`, `hook::record` with the event `SubagentStop`). 404 `not_found`, 409
+  at most 64 bytes); `my_work::reviews_lock`, then raw.db and knowledge.db opened, then the read
+  fence (the order a restore takes raw.lock and the fence in), held through a fresh read with that
+  handle (`my_work::subagent`, every request built, as the page reads `range=all`) and the append
+  (`my_work_subagents::mark`, `hook::record_if` with the event `SubagentStop`). 404 `not_found`, 409
   `finished`, 409 `not_recorded` when the conversation's recorded folder (its newest record's `cwd`
-  on this device, `Raw::newest_label`) is empty, masked or no directory, or the hook's path records
-  no stop; a stop kept behind older kept files (`hook::Recorded::kept`) is recorded when they are
+  on this device that no tombstone targets, `Raw::newest_label`) is empty, masked or no directory,
+  when the hook's path records no stop, or when the stop it would record names another session or
+  subagent (a rule of now that masks the session or the id: `record_if` then appends and keeps
+  nothing); a stop kept behind older kept files (`hook::Recorded::kept`) is recorded when they are
   written back, and counts. **Not as planned**: the answer is `{}`, and the page reads My Work again
   (`myWorkReread`), which counts the new stop at once, as it is past the consumer's checkpoint.
 - **The page** (`myWorkAgents`, `myWorkSubagent`, `myWorkFinish`): after each conversation's card,
@@ -352,6 +358,11 @@ Slice 3:
 - **Not as claude-mem**, besides the plan's: the card names the subagent's type, which claude-mem
   keeps and shows nowhere, and the conversation's title is its newest request's, oboete keeping no
   title of a session's own.
+- **Reviewed.** A local Codex review of the built change found a launch task cut before its clean
+  and mask, a copied home's own device left out of the read's tail, a forgotten record's folder
+  taken before its purge, a stop the rules of now would record under another session, raw.db
+  opened after the read fence, a lost tombstone of another device's record never made again, and
+  an id the capture gate masked taken for a subagent's. Each is fixed as above, with a test.
 - **Measured** on a copy of this PC's store (2026-11-07, release build): the consumer's first pass
   took 18.1 s and kept 24,596 rows, 1,522 subagents with a step. My Work's subagents part took 71 to
   82 ms over its 277 conversations (106 ms with each checkpoint 20,000 records behind) and the whole
@@ -364,6 +375,8 @@ Slice 3:
   `my_work_subagents::tests::the_records_past_the_checkpoint_count_at_once`,
   `my_work_subagents::tests::an_imported_agent_lifecycle_row_is_its_subagents_stop`,
   `my_work_subagents::tests::the_subagents_with_the_newest_steps_are_listed`,
+  `my_work_subagents::tests::a_copied_homes_own_records_count_before_its_first_checkpoint`,
+  `consumer::subagents::tests::a_rewind_makes_again_what_another_devices_lost_tombstone_took`,
   `my_work::tests::a_listed_conversations_subagents_are_in_its_answer`,
   `view::tests::the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest`, and the
   page's in `src/testdata/viewer-readiness/test.mjs`; `my_work::tests::imported_work_state_is_neither_read_nor_counted`
