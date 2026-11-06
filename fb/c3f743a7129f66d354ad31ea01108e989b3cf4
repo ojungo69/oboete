@@ -1,0 +1,44 @@
+docs/subagents.md
+  s_70102dd6ea5599::t_33eb3a06b72015 325-326,330-333,348-349,353-355,358-359,383-386,403
+src/my_work.rs
+  s_70102dd6ea5599::t_5216ab492d1627 3356-3359
+  s_70102dd6ea5599::t_2de38ea5ad561e 1902-1905,1912
+  s_70102dd6ea5599::t_33eb3a06b72015 3330
+  s_70102dd6ea5599::t_3523c263a6216a 3333-3341
+  s_70102dd6ea5599::t_65402f1a01a1e3 924-926,929,1078,1893-1895,1900-1901,1906-1911,1913-1917,1920-1921,1928
+src/my_work_subagents.rs
+  s_70102dd6ea5599::t_c3fbb4f9001b4f 242-243
+  s_70102dd6ea5599::t_3523c263a6216a 194-199,710-757,811-813,818
+  s_70102dd6ea5599::t_65402f1a01a1e3 31-32,47-48,175-179,220-222,228,334-348
+src/hook.rs
+  s_70102dd6ea5599::t_2de38ea5ad561e 3681
+src/raw.rs
+  s_70102dd6ea5599::t_c3fbb4f9001b4f 4760-4766,4772-4774,4776-4778
+src/consumer/subagents.rs
+  s_70102dd6ea5599::t_694ecfaab7dede 101-105,276-283,406-407,409-411
+  s_70102dd6ea5599::t_29f75ff2bd545a 320-323
+src/capture.rs
+  s_70102dd6ea5599::t_2ea467f58ce404 1071-1073
+src/view.rs
+  s_70102dd6ea5599::t_0c888a6b5e8916 6155,6157,6159,6168
+  s_70102dd6ea5599::t_2de38ea5ad561e 2222-2223,2235-2237,2269-2275,6146-6149,6156,6158,6160,6167
+  s_70102dd6ea5599::t_3523c263a6216a 6150-6154
+docs/claude-mem-parity.md
+  s_70102dd6ea5599::t_2ea467f58ce404 121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fbc3f743a7129f66d354ad31ea01108e989b3cf4",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
