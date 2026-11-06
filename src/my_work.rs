@@ -809,11 +809,8 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
             files,
         });
     }
-    // X17 (docs/subagents.md): an agent's recorded stop is no work, as claude-mem's work view reads
-    // its `agent-lifecycle` list apart.
     let writes = (raw.native_work_writes()?.into_iter())
         .filter(|w| !excluded_repos.contains(&w.repo))
-        .filter(|w| w.list != crate::work_state::AGENT_LIFECYCLE)
         .collect();
     let work = link(raw, k, fold(writes), &excluded)?;
     // Every prompt of the sessions read (`PROMPTS`): the work's, the summaries', the cards', and
@@ -2825,29 +2822,6 @@ mod tests {
     fn tasks(r: &Value) -> Vec<&str> {
         let work = r["work"].as_array().unwrap();
         work.iter().map(|w| w["task"].as_str().unwrap()).collect()
-    }
-
-    /// X17 (docs/subagents.md): the rows of claude-mem's `agent-lifecycle` list, an agent's
-    /// recorded stops, are no work: no request is made of them or shows them, as claude-mem's work
-    /// view reads the list apart; a list beside it is read as before.
-    #[test]
-    fn a_subagents_stop_is_no_work_of_a_request() {
-        let mut h = Home::new();
-        h.said("s1", -60_000, "Fix the parser's error messages.");
-        let stop = json!({"task": "Agent a1 in claude session s1", "status": "done",
-            "platform_source": "claude", "content_session_id": "s1", "agent_id": "a1",
-            "agent_type": "Explore", "stopped_at_epoch": h.t - 50_000,
-            "stop_source": "subagent-stop-hook"});
-        h.write(crate::work_state::AGENT_LIFECYCLE, stop.clone());
-        h.wrote("s1", crate::work_state::AGENT_LIFECYCLE, stop);
-        h.wrote("s1", "release", json!({"task": "Ship", "status": "doing"}));
-        let v = h.read(Range::All, h.t);
-        let text = v.to_string();
-        assert!(
-            !text.contains("agent-lifecycle") && !text.contains("Agent a1"),
-            "{v}"
-        );
-        assert!(text.contains("Ship"), "{v}");
     }
 
     /// #841: where a prompt was typed (`entrypoint`, #659) is not its text: the ask and the

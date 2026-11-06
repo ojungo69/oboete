@@ -18,9 +18,6 @@ pub const SECTION: usize = 3_000;
 /// L6: a read's most. claude-mem's read has none; a long history cut here does not fill the
 /// agent's context (Codex's security review of #408).
 pub const READ: usize = 20_000;
-/// X17 (docs/subagents.md): claude-mem's list of agents' recorded stops (`AGENT_LIFECYCLE_LIST`),
-/// each a closed row: My Work reads it apart from the work it shows.
-pub const AGENT_LIFECYCLE: &str = "agent-lifecycle";
 
 /// claude-mem's rule (`WorkStateRenderer.ts`), with oboete's tool and "repository" (L7), and
 /// `$attach`, its line on what an agent made (row G01).

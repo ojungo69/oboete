@@ -181,15 +181,23 @@ const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
 
 /// A session's events before a window, newest first: the seek `SESSION_INDEX` serves.
 const SESSION_LATEST: &str = "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2
-       AND type = 'event' AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+       AND type = 'event' AND agent = ?3 AND session = ?4
+       AND kind NOT IN ('start', 'end', 'subagent_stop')
      ORDER BY seq DESC";
+
+/// X17 (docs/subagents.md): a Claude Code subagent's stop, its id and type and no text. A mark of
+/// the session's, not its work: the full-text index gives it no row, and a window's labels
+/// (`labels_in`), whether a window is a subagent's alone (`subagent_only`), the session's
+/// previous window (`SESSION_LATEST`), a turn's first record (`turn_start`) and the manifest's facts
+/// pass over it.
+pub(crate) const SUBAGENT_STOP: &str = "subagent_stop";
 
 /// One agent event as captured, after redaction.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub agent: String,
     pub session: String,
-    /// prompt, tool, reply, compaction, end
+    /// prompt, envelope, tool, reply, compaction, start, end, directive, subagent_stop
     pub kind: String,
     pub ts: i64,
     pub repo: Option<String>,
@@ -5030,7 +5038,8 @@ impl Raw {
     /// The first record of the turn that `agent`'s `session` ends with its reply `reply` on this
     /// device: the session's first live event after its previous live reply, or its first live
     /// event (docs/summaries.md T1). A scan by label, as `turns`. Live alone: an import of the
-    /// same session is no boundary of a live turn (Codex on #371).
+    /// same session is no boundary of a live turn (Codex on #371). A subagent's stop, which may
+    /// come after the reply it worked for, begins no turn (docs/subagents.md).
     pub fn turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         // The session's first event after its previous reply, not the record after that reply,
         // which may be another session's or a tombstone (Codex on C2). The reply at the latest.
@@ -5038,7 +5047,7 @@ impl Raw {
             &format!(
                 "SELECT COALESCE(MIN(seq), ?4) FROM records
                  WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
-                   AND seq <= ?4 AND source IN ('{live}')
+                   AND seq <= ?4 AND source IN ('{live}') AND kind <> 'subagent_stop'
                    AND seq > COALESCE(
                      (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
                         AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
@@ -5301,7 +5310,8 @@ impl Raw {
 
     /// What the labels of `device`'s events `from` to `to` agree on, from the rows alone (no body
     /// is read): their agent and session when they are of one session, their repository when
-    /// they are of one, and the time of the last of them (docs/cards.md K2).
+    /// they are of one, and the time of the last of them (docs/cards.md K2). A subagent's stop is
+    /// none of them: a mark, often of another session, after the work (docs/subagents.md).
     pub fn labels_in(&self, device: &str, from: i64, to: i64) -> Result<SpanLabels> {
         type Row = (
             i64,
@@ -5317,8 +5327,9 @@ impl Raw {
                     -- The last event's, by seq: times need not grow with it (a replay, a late
                     -- hook).
                     (SELECT ts FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
-                       AND type = 'event' ORDER BY seq DESC LIMIT 1)
-             FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
+                       AND type = 'event' AND kind <> 'subagent_stop' ORDER BY seq DESC LIMIT 1)
+             FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'
+               AND kind <> 'subagent_stop'",
             params![device, from, to],
             |r| {
                 Ok((
@@ -5370,7 +5381,7 @@ impl Raw {
         // Most windows hold a prompt or a reply: no body need be read for them.
         let other: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM records WHERE device = ?1 AND seq BETWEEN ?2 AND ?3
-               AND type = 'event' AND kind NOT IN ('tool', 'start', 'end'))",
+               AND type = 'event' AND kind NOT IN ('tool', 'start', 'end', 'subagent_stop'))",
             params![device, from, to],
             |r| r.get(0),
         )?;
@@ -5396,6 +5407,7 @@ impl Raw {
                         tools = true;
                     }
                     Item::Event(_) | Item::Removed | Item::Tombstone(_) => {}
+                    Item::Expired(e) if e.kind == SUBAGENT_STOP => {}
                     Item::Expired(_) => return Ok(false),
                 }
             }
@@ -9413,6 +9425,108 @@ mod tests {
         let reply = raw.append(&ev("reply", serde_json::json!({}))).unwrap();
         assert!(raw.subagent_only(&dev, c, c).unwrap());
         assert!(!raw.subagent_only(&dev, c, reply).unwrap());
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop beside its tool calls leaves the span its work
+    /// alone, also once retention has emptied the stop.
+    #[test]
+    fn a_subagent_stop_leaves_a_span_the_subagents_work() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let ev = |kind: &str, body: serde_json::Value| Event {
+            kind: kind.into(),
+            ..test_event(&body.to_string())
+        };
+        let tool = (raw.append(&ev(
+            "tool",
+            serde_json::json!({"tool": "Read", "agent_id": "a1"}),
+        )))
+        .unwrap();
+        let stop = (raw.append(&ev(
+            SUBAGENT_STOP,
+            serde_json::json!({"agent_id": "a1", "agent_type": "Explore"}),
+        )))
+        .unwrap();
+        assert!(raw.subagent_only(&dev, tool, stop).unwrap());
+        // A stop alone holds no tool call of the subagent's.
+        assert!(!raw.subagent_only(&dev, stop, stop).unwrap());
+        raw.expire_for_test(&[stop]);
+        assert!(raw.subagent_only(&dev, tool, stop).unwrap());
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop, often of another session and after the work, is
+    /// none of a span's labels: not its session, its repository or its time.
+    #[test]
+    fn a_subagent_stop_is_none_of_a_spans_labels() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let work = (raw.append(&Event {
+            session: "a".into(),
+            repo: Some("github.com/o/one".into()),
+            ts: 5_000,
+            ..test_event("fix the date parser")
+        }))
+        .unwrap();
+        let stop = (raw.append(&Event {
+            session: "b".into(),
+            repo: Some("github.com/o/two".into()),
+            ts: 9_000,
+            kind: SUBAGENT_STOP.into(),
+            ..test_event(r#"{"agent_id":"a1"}"#)
+        }))
+        .unwrap();
+        let labels = raw.labels_in(&dev, work, stop).unwrap();
+        assert_eq!(labels.session, Some(("claude".into(), "a".into())));
+        assert_eq!(labels.repo.as_deref(), Some("github.com/o/one"));
+        assert_eq!(labels.ts, Some(5_000));
+    }
+
+    /// X17 (docs/subagents.md): a subagent's stop, which may come after the reply it worked for,
+    /// begins no turn: the next turn begins at its prompt.
+    #[test]
+    fn a_subagent_stop_begins_no_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ev = |kind: &str| Event {
+            kind: kind.into(),
+            ..test_event("{}")
+        };
+        for kind in ["prompt", "reply", SUBAGENT_STOP] {
+            raw.append(&ev(kind)).unwrap();
+        }
+        let prompt = raw.append(&ev("prompt")).unwrap();
+        let reply = raw.append(&ev("reply")).unwrap();
+        assert_eq!(raw.turn_start("claude", "s", reply).unwrap(), prompt);
+    }
+
+    /// X17 (docs/subagents.md): the session's previous window is the one that holds its last
+    /// work, not one that holds no more of the session than a subagent's stop.
+    #[test]
+    fn a_subagent_stop_makes_no_previous_window_of_its_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let ev = |session: &str, kind: &str| Event {
+            session: session.into(),
+            kind: kind.into(),
+            ..test_event("a line")
+        };
+        for (session, kind) in [("s", "prompt"), ("s", "reply"), ("s", SUBAGENT_STOP)] {
+            raw.append(&ev(session, kind)).unwrap();
+        }
+        raw.append(&ev("t", "prompt")).unwrap();
+        let next = raw.append(&ev("s", "prompt")).unwrap();
+        // Windows 1 to 2 and 3 to 4, each with a claim quoting its last record.
+        for (from, to, text) in [(1, 2, "of s"), (3, 4, "of t")] {
+            let op = serde_json::json!({"from_seq": from, "to_seq": to, "recurate": false});
+            let claim = serde_json::json!({"text": text, "evidence": [{"device": raw.device(),
+                "seq": to, "offset": 0, "length": 4}]});
+            (raw.append_ops(&[(OpKind::Window, op), (OpKind::Claim, claim)])).unwrap();
+        }
+        let ops = (raw.previous_window_ops("claude", "s", (next, None), |_| true)).unwrap();
+        let texts: Vec<_> = ops.iter().map(|o| o.body["text"].as_str()).collect();
+        assert_eq!(texts, [Some("of s")]);
     }
 
     fn format_in(raw: &Raw) -> i64 {

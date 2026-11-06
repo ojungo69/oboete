@@ -568,6 +568,20 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             }
             ("reply", json!({"assistant": base64_runs(&reply)}))
         }
+        // X17 (docs/subagents.md): a Claude Code subagent's stop, its id and type as claude-mem
+        // keeps them (`pickAgentField`: a non-empty string of at most 128 UTF-16 units each): no
+        // text, and nothing without a session or an id.
+        "SubagentStop" => {
+            let field = |key: &str| {
+                (payload[key].as_str()).filter(|s| !s.is_empty() && s.encode_utf16().count() <= 128)
+            };
+            str_field(payload, &["session_id"]).filter(|s| !s.is_empty())?;
+            let mut body = json!({"agent_id": clean(&json!(field("agent_id")?))});
+            if let Some(kind) = field("agent_type") {
+                body["agent_type"] = clean(&json!(kind));
+            }
+            (crate::raw::SUBAGENT_STOP, body)
+        }
         "PreCompact" => (
             "compaction",
             json!({"trigger": payload.get("trigger").map(clean)}),

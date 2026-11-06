@@ -64,18 +64,19 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 ### Slice 1: the two hooks
 
 - **SubagentStop.** `setup::CLAUDE_EVENTS` gains `("SubagentStop", 5)`. The hook keeps the stop as
-  claude-mem does: one closed row of the work state list `agent-lifecycle`, its fields
-  claude-mem's (`agentStopFields`): the task `Agent <id> in claude session <session>`, `status`
-  `done`, `platform_source`, `content_session_id`, `agent_id`, `agent_type` (each a non-empty
-  string of at most 128 characters; the type left out when it is not one), `stopped_at` and
-  `stopped_at_epoch` (the hook's time) and `stop_source` `subagent-stop-hook`. With no session or
-  no id, or where nothing is recorded, nothing. It goes through the gate and the checks
-  `work_state_write` goes through, into the repository of the hook's checkout.
-- **Not an event.** A work state write is an op, not an event, so that no curator's window, summary,
-  card or search reads it (docs/work-state.md L4); a stop is no different. An event would have been
-  read as a session's work: by the window that holds it (its labels, its last time, whether it is
-  a subagent's alone), by the turn it falls into and by the manifest's facts. Session start shows
-  no closed row, and My Work reads the list apart, as claude-mem's work view does.
+  a record of kind `subagent_stop` in the session: the subagent's id and type (each a non-empty
+  string of at most 128 UTF-16 units, as claude-mem's `pickAgentField` counts; the type left out
+  when it is not one) and the hook's time, nothing of the subagent's text. With no session or no
+  id, or where nothing is recorded, nothing. Nothing is printed.
+- **A record, not claude-mem's work state row.** A record is what the hook keeps aside and writes
+  back when the store cannot take it, what a forget of its session removes and the retention
+  expires, and what the capture exclusions and the redaction cover. A work state write is an op,
+  which nothing deletes and no forget of a session reaches (docs/work-state.md).
+- **A mark, not work.** The stop holds no words: the full-text index gives it no row, a curator's
+  window no line. It may come after the reply it worked for, in another session's window, so the
+  readers of a session's work pass over it: a window's labels and last time, whether a window is a
+  subagent's alone, the session's previous window, a turn's first record, and the manifest's facts
+  (an ended session stays ended, and the stop is no record to curate).
 - **SubagentStart.** `setup::CODEX_EVENTS` gains `("SubagentStart", None, 10, true)` (10 s, as
   Codex's SessionStart, whose work it does). `hook::injects` answers it as Codex's SessionStart is
   answered, the session start's context for the checkout, unless the rollout's first line (at most
@@ -90,22 +91,24 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 ### Slice 2: the subagents on My Work
 
 - `/api/my-work` gives each conversation's Claude Code subagents: id, type, the time of its last
-  recorded step (its newest record with its `agent_id`), its stop (the newest `agent-lifecycle`
-  row of the conversation and id, the owner's Mark finished, or the parent's foreground Agent or
+  recorded step (its newest record with its `agent_id`), its stop (the newest `subagent_stop`
+  record of the conversation and id, the owner's Mark finished, or the parent's foreground Agent or
   Task call returning, whichever came at or after its last step), and the request it was launched
   with. Tool records keep the payload's `agent_type` beside `agent_id` from slice 2 on; one without
   it is named "Subagent".
+- claude-mem's `agent-lifecycle` rows that `oboete import` brings in with its work state are read
+  as stops, and are no work of My Work.
 - The agents view keeps one card a conversation (its main agent) and adds a card per subagent, as
   claude-mem's: its type, "Subagent · " and the conversation's title, its state (Working,
   No recent step, Finished with the time), its request, and Mark finished when it has no stop. Both
   languages.
-- Mark finished writes the same `agent-lifecycle` row, its `stop_source` `owner-marked-finished`
-  and its time the click's, as claude-mem's; the page posts it as its other actions are posted.
+- Mark finished keeps the same mark as the owner's (claude-mem's `stop_source`
+  `owner-marked-finished`), its time the click's; the page posts it as its other actions are posted.
 - Bounded as the page's lists are: the subagents of the conversations the view shows.
 
 ### Slice 3: a subagent's files
 
-- An `agent-lifecycle` row from a SubagentStop makes the worker copy the files that subagent's records wrote (its
+- A subagent's stop record makes the worker copy the files that subagent's records wrote (its
   `agent_id` in the session), as a turn's copies are made, so a subagent that finishes after its
   parent's reply has its files copied too. A file its records already had copied is not copied
   twice.
@@ -114,12 +117,14 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 
 Slice 1:
 
-- A Claude Code SubagentStop with a session and an agent id writes one closed `agent-lifecycle` row
-  with claude-mem's fields and the hook's time; one with no id, or an id over 128 characters,
-  writes nothing; a type that is not a short non-empty string is left out. It records no event and
-  prints nothing, and session start shows no closed row.
-- My Work makes no request of an `agent-lifecycle` row and shows none; another list is read as
-  before.
+- A Claude Code SubagentStop with a session and an agent id keeps one `subagent_stop` record with
+  the id, the type when it is a short non-empty string, and the hook's time; one with no session or
+  no id, an id over 128 UTF-16 units, or in a checkout that records nothing, keeps nothing. It
+  prints nothing.
+- The stop is no row of the full-text index and no line of a curator's window. It is none of a
+  span's labels (session, repository, time); a span of a subagent's tool calls and its stop is the
+  subagent's alone, the stop expired too; it begins no turn, makes no previous window of its
+  session, and is no fact of the manifest, live or expired.
 - `oboete setup claude` wires SubagentStop and `oboete setup codex` SubagentStart, a rerun keeps one
   of each, `--remove` takes them out, and Codex's trust rows match the new list; the settings page's
   agent setup shows the change before it is made.
@@ -139,6 +144,8 @@ Slice 2:
 - A tool record without `agent_type` is shown as "Subagent"; a Codex subagent thread is shown as
   claude-mem's agent view shows it (its groups by platform, session and agent id: to be read when
   slice 2 is built).
+- An imported claude-mem `agent-lifecycle` row is read as its subagent's stop and is no request of
+  My Work.
 
 Slice 3:
 
@@ -149,23 +156,31 @@ Slice 3:
 
 ### Slice 1: the two hooks (2026-11-06)
 
-- **SubagentStop** (`setup::CLAUDE_EVENTS`, 5 s): `hook::agent_stop` writes the closed
-  `agent-lifecycle` row through `capture::work_state` and `Raw::work_state_under`, as
-  `work_state_write` does, after the place's capture exclusions; the list's name is
-  `work_state::AGENT_LIFECYCLE`. Nothing is printed. My Work leaves the list out of the work it
-  reads (`my_work::read`).
+- **SubagentStop** (`setup::CLAUDE_EVENTS`, 5 s): `capture::shaped` makes the stop a
+  `subagent_stop` record (`raw::SUBAGENT_STOP`), kept as the hook keeps every record. Nothing is
+  printed. The full-text consumer gives it no row (`consumer::fts`); `Raw::labels_in`,
+  `Raw::subagent_only` (live or expired), `SESSION_LATEST` (`Raw::previous_window_ops`),
+  `Raw::turn_start` and the manifest's `facts` and `label_facts` pass over it. A curator's window
+  renders no line of a kind it does not know.
 - **SubagentStart** (`setup::CODEX_EVENTS`, no matcher, 10 s, the context whole as
   `additionalContextLimit` 0): `hook::injects` answers it unless `hook::forked` reads the rollout's
   first line as a fork. The context is SessionStart's for the checkout; the subagent's `agent_id`
   makes its thread `compacted-…`, so the root's shown set stays the root's, as after a subagent's
   compaction (row N7). A recording failure is shown as at a SessionStart (`reads_start`). Nothing
   is recorded.
-- **First tried as an event** (`subagent_stop`): a local Codex review found it read as a session's
-  work by the window labels (`Raw::labels_in`), whether a window is a subagent's alone
-  (`Raw::subagent_only`), the session's previous window (`SESSION_LATEST`), a turn's start
-  (`Raw::turn_start`) and the manifest's facts, so it became the work state row claude-mem keeps.
-- **Tests:** `hook::tests::a_claude_subagent_stop_is_kept_as_a_closed_lifecycle_row`,
+- **Both ways tried.** Local Codex reviews found the record, with no reader passing over it, read as
+  a session's work by the five readers above, and claude-mem's work state row lost when the store
+  cannot take it, left behind by a forget of its session, and read as work when the redaction
+  changes its list's name. The record keeps what every record has, and the five readers pass over
+  it.
+- **Tests:** `hook::tests::a_claude_subagent_stop_is_kept_as_its_id_and_type`,
   `hook::tests::a_fresh_codex_subagent_gets_the_session_start_context_and_a_fork_none`,
   `hook::tests::a_home_that_cannot_be_made_is_reported_at_session_start` (a Codex SubagentStart too),
-  `my_work::tests::a_subagents_stop_is_no_work_of_a_request`,
+  `consumer::fts::tests::a_subagent_stop_is_no_row_of_the_index`,
+  `curate::tests::a_subagent_stop_gives_a_window_no_line`,
+  `raw::tests::a_subagent_stop_is_none_of_a_spans_labels`,
+  `raw::tests::a_subagent_stop_leaves_a_span_the_subagents_work`,
+  `raw::tests::a_subagent_stop_begins_no_turn`,
+  `raw::tests::a_subagent_stop_makes_no_previous_window_of_its_session`,
+  `consumer::manifest::tests::a_subagent_stop_gives_no_fact`,
   `setup::tests::the_subagent_hooks_are_wired`.
