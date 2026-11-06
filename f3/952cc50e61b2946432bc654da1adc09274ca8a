@@ -1,0 +1,25 @@
+src/consumer/subagents.rs
+  s_70102dd6ea5599::t_d16faf5a33ab58 1-50,55,57-104,106-243,252-260,265-292,296-339,341-342
+  s_70102dd6ea5599::t_f397cf41947aa9 244-251,261-264
+  s_70102dd6ea5599::t_5f450b92d85d6d 51-54,56,105,293-295,340
+src/worker.rs
+  s_70102dd6ea5599::t_f397cf41947aa9 265-266
+src/consumer.rs
+  s_70102dd6ea5599::t_f397cf41947aa9 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f3952cc50e61b2946432bc654da1adc09274ca8a",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
