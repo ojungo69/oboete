@@ -5356,6 +5356,29 @@ mod tests {
     }
 
     #[test]
+    fn a_subagent_stop_gives_a_window_no_line() {
+        // X17 (docs/subagents.md): a subagent's stop is a mark with no text, which a curator never
+        // reads, as claude-mem's observer gets none of it.
+        let (_h, mut raw, dev) = store();
+        let rules = Rules::default();
+        raw.append(&prompt("fix the date parser")).unwrap();
+        let stop = event(
+            "subagent_stop",
+            serde_json::json!({"agent_id": "a1", "agent_type": "Explore"}),
+        );
+        raw.append(&stop).unwrap();
+        raw.append(&tool("0 failed; 21 passed")).unwrap();
+        let w = (next_window(&raw, &dev, WINDOW_TOKENS, &rules).unwrap()).unwrap();
+        assert_eq!((w.from_seq, w.to_seq), (1, 3));
+        assert_eq!(w.lines.len(), 2, "{}", w.text);
+        assert!(
+            !w.text.contains("a1") && !w.text.contains("Explore"),
+            "{}",
+            w.text
+        );
+    }
+
+    #[test]
     fn a_window_takes_what_fits_and_ends_before_its_last_turn() {
         let (_h, mut raw, dev) = store();
         let rules = Rules::default();

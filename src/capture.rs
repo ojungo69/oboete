@@ -568,6 +568,19 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
             }
             ("reply", json!({"assistant": base64_runs(&reply)}))
         }
+        // X17 (docs/subagents.md): a Claude Code subagent's stop, its id and type as claude-mem
+        // keeps them (a non-empty string of at most 128 characters each): no text, and nothing
+        // without an id.
+        "SubagentStop" => {
+            let field = |key: &str| {
+                (payload[key].as_str()).filter(|s| !s.is_empty() && s.chars().count() <= 128)
+            };
+            let mut body = json!({"agent_id": clean(&json!(field("agent_id")?))});
+            if let Some(kind) = field("agent_type") {
+                body["agent_type"] = clean(&json!(kind));
+            }
+            ("subagent_stop", body)
+        }
         "PreCompact" => (
             "compaction",
             json!({"trigger": payload.get("trigger").map(clean)}),
