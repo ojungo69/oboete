@@ -4847,11 +4847,6 @@ mod tests {
         assert!(mapped(&k, &s.key(seq)).is_some());
     }
 
-    /// Row 46-2: every way a document's stored text changes takes its vector off, and the next
-    /// polls give it the vector of the text it has now (embedded, or mapped when that text was
-    /// embedded before): a re-derivation, a correction, a tombstone's mask and its removal, a
-    /// second import of a uid, and the three rewinds. A status-only correction sends nothing, and
-    /// the same text imported again only moves its index row's time.
     /// #843: a prompt an older oboete embedded with its entry point (`{"entrypoint":"cli"}`, #659)
     /// as a line of its text gets the vector of its words once its row is indexed again: the
     /// embedder is sent the words, never the entry point.
@@ -4877,7 +4872,6 @@ mod tests {
         .unwrap();
         k.execute("DELETE FROM vectors WHERE src_sha = ?1", [&words])
             .unwrap();
-        k.execute_batch("DROP TABLE IF EXISTS fts_text").unwrap();
         checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &device, 0).unwrap();
         s.run();
         embed_all(&s);
@@ -4896,6 +4890,11 @@ mod tests {
         assert!(!sent.iter().any(|t| t.contains("cli")), "{sent:?}");
     }
 
+    /// Row 46-2: every way a document's stored text changes takes its vector off, and the next
+    /// polls give it the vector of the text it has now (embedded, or mapped when that text was
+    /// embedded before): a re-derivation, a correction, a tombstone's mask and its removal, a
+    /// second import of a uid, and the three rewinds. A status-only correction sends nothing, and
+    /// the same text imported again only moves its index row's time.
     #[test]
     fn every_way_a_documents_text_changes_replaces_its_vector() {
         use crate::consumer::{claims::Claims, fts::Fts, imported::Imported};

@@ -1035,12 +1035,13 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   (`{"entrypoint":"cli"}`); on this PC no claim's quote lay in it, and the windows and cards made
   from it stay as written. Search reads a body's string values on its own (`consumer::fts::text`),
   and since #843 the entry point's no longer: its index, its vectors and a found record's snippet
-  read the words, and any other field's value as before. The rows indexed before are indexed again
-  once by a consumer of their own (`consumer::fts::FtsText`, before `Fts`), at most 200 prompts
-  and envelopes a knowledge.db transaction, and their vectors are made again; the embedding queue
-  takes the newest first, so a prompt typed meanwhile is not held behind them. On this PC's store
-  1,152 records held an entry point (2026-11-06). `get` shows a record's fields, this one among
-  them.
+  read the words, and any other field's value as before. The rows an older oboete indexed are
+  indexed again once by a consumer of their own (`consumer::fts::FtsText`, before `Fts`), at most
+  200 prompts and envelopes a knowledge.db transaction, and their vectors are made again: those
+  before this one ran, those an older one indexes after it (its checkpoint moves only while this
+  one runs) and a copied home's under its old id. The embedding queue takes the newest first, so a
+  prompt typed meanwhile is not held behind them. On this PC's store 1,152 records held an entry
+  point (2026-11-06). `get` shows a record's fields, this one among them.
 - **What counts** (`typed::typed`): a record of kind `prompt` with its text, no `agent_sent`, and
   for Claude Code an entry point that counts. A Claude Code prompt with no entry point counts only
   when a hook wrote it (O5): on a copy of this PC's store, 1,584 of the last 31 days' 1,896 Claude

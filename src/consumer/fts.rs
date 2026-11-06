@@ -414,9 +414,9 @@ impl Consumer for Fts {
 }
 
 /// #843: the rows `raw_fts` indexed before a prompt's entry point left `text`, indexed again once,
-/// and so their vectors made again. A consumer of its own, before `Fts` (`worker::consumers`): its
-/// first step finds what an older oboete indexed, and each step it takes is progress a drain goes
-/// on with.
+/// and so their vectors made again. A consumer of its own, before `Fts` (`worker::consumers`): the
+/// rows past its checkpoint are those an older oboete indexed, and each step it takes is progress a
+/// drain goes on with.
 pub struct FtsText;
 
 /// Rows of `FtsText` a step: one knowledge.db transaction each.
@@ -427,36 +427,37 @@ impl Consumer for FtsText {
         "fts-text"
     }
 
+    /// Every device with records in raw.db, and this one, as search reads them: a copied home's
+    /// records under its old id were indexed before the copy as this device's were (Sourcery on
+    /// #846).
+    fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
+        let mut devices = raw.devices()?;
+        if !devices.iter().any(|d| d == raw.device()) {
+            devices.push(raw.device().to_owned());
+        }
+        Ok(devices)
+    }
+
     fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
         schema(k)?;
-        // What the index held when this first ran: nothing in a new knowledge.db.
-        k.execute_batch(
-            "CREATE TABLE IF NOT EXISTS fts_text(device TEXT PRIMARY KEY, upto INTEGER NOT NULL)",
-        )?;
-        k.execute(
-            "INSERT OR IGNORE INTO fts_text(device, upto)
-             SELECT ?1, coalesce(max(seq), 0) FROM raw_docs WHERE device = ?1",
-            [device],
-        )?;
+        // The checkpoint moves only while this oboete runs: the rows past it are those an older
+        // one indexed, before this one ran or since (Sourcery on #846).
         let seqs: Vec<i64> = k
             .prepare_cached(
                 "SELECT seq FROM raw_docs WHERE device = ?1 AND seq > ?2
-                   AND seq <= (SELECT upto FROM fts_text WHERE device = ?1)
-                   AND kind IN ('prompt', 'envelope')
-                 ORDER BY seq LIMIT ?3",
+                   AND kind IN ('prompt', 'envelope') ORDER BY seq LIMIT ?3",
             )?
             .query_map(params![device, after, AGAIN as i64], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for r in raw.at(device, &seqs)? {
-            let Item::Event(e) = &r.item else { continue };
-            let marked = serde_json::from_str::<serde_json::Value>(&e.body)
-                .is_ok_and(|v| v.get("entrypoint").is_some());
-            if marked {
+            if let Item::Event(e) = &r.item
+                && marked(&e.body)
+            {
                 reindex(raw, k, device, r.seq)?;
             }
         }
-        // Fewer than a step's rows: done, as `Fts` indexed every record after them as `text`
-        // reads it now.
+        // Fewer than a step's rows: done. The records past them are `Fts`'s to index, after this
+        // in each pass, as `text` reads them now.
         Ok(match seqs.get(AGAIN - 1) {
             Some(&last) => last,
             None => raw.max_seq_of(device)?,
@@ -468,6 +469,11 @@ impl Consumer for FtsText {
         // as it is now.
         Ok(())
     }
+}
+
+/// Whether a record's body holds a Claude Code prompt's entry point at its root (#659).
+fn marked(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| v.get("entrypoint").is_some())
 }
 
 #[cfg(test)]
@@ -549,9 +555,10 @@ mod tests {
         for (seq, words) in &rows {
             indexed_as(&k, &device, *seq, &format!("{words}\ncli"));
         }
-        k.execute_batch("DROP TABLE IF EXISTS fts_text").unwrap();
         checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &device, 0).unwrap();
         assert_eq!(finds(&k, "cli").len(), AGAIN + 2);
+        // Each row indexed again is found by its words (Sourcery on #846: not only gone).
+        let prompts: Vec<i64> = rows[..AGAIN].iter().map(|(seq, _)| *seq).collect();
         let mut again = crate::worker::consumers(s.home.path())
             .into_iter()
             .find(|c| c.name() == "fts-text")
@@ -563,16 +570,62 @@ mod tests {
         tx.commit().unwrap();
         assert_eq!(first, rows[AGAIN - 1].0);
         assert_eq!(finds(&k, "cli"), [rows[AGAIN].0, says]);
+        assert_eq!(finds(&k, "parser"), prompts);
         // A drain goes on from there and finishes it: the checkpoint is raw's top.
         checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &device, first).unwrap();
         s.run();
         assert_eq!(finds(&k, "cli"), [says]);
+        assert_eq!(finds(&k, "parser"), prompts);
+        assert_eq!(finds(&k, "passed"), [rows[AGAIN].0]);
         let top = s.raw.max_seq_of(&device).unwrap();
         assert_eq!(checkpoint::get(&k, "fts-text", &device).unwrap(), top);
         // Once: a row made as before after the catch-up stays as it is through the next drain.
         indexed_as(&k, &device, rows[0].0, &format!("{}\ncli", rows[0].1));
         s.run();
         assert_eq!(finds(&k, "cli"), [rows[0].0, says]);
+    }
+
+    /// Sourcery on #846: an older oboete run after the catch-up indexes new prompts with their entry
+    /// point and leaves this consumer's checkpoint where it was, so this one indexes them again
+    /// when it runs again.
+    #[test]
+    fn rows_an_older_oboete_indexes_after_the_catch_up_are_indexed_again() {
+        let mut s = Store::new();
+        let device = s.raw.device().to_owned();
+        let typed = |words: &str| json!({"prompt": words, "entrypoint": "cli"});
+        s.event("prompt", "s", (R, "main"), 1_000, typed("Fix the parser."));
+        s.run();
+        let later = s.event("prompt", "s", (R, "main"), 2_000, typed("Ship the lexer."));
+        // The older oboete: its consumers without this one, its text with the entry point.
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        crate::worker::drain(&s.raw, &mut k, &mut [Box::new(Fts) as Box<dyn Consumer>]).unwrap();
+        indexed_as(&k, &device, later, "Ship the lexer.\ncli");
+        assert_eq!(finds(&k, "cli"), [later]);
+        s.run();
+        assert_eq!(finds(&k, "cli"), Vec::<i64>::new());
+        assert_eq!(finds(&k, "lexer"), [later]);
+    }
+
+    /// Sourcery on #846: a copied home's records left under its old id (`Raw::devices`) were
+    /// indexed before the copy as this device's were, and are indexed again too.
+    #[test]
+    fn a_copied_homes_rows_under_its_old_id_are_indexed_again() {
+        let mut s = Store::new();
+        let old = s.raw.device().to_owned();
+        let body = json!({"prompt": "Fix the parser.", "entrypoint": "cli"});
+        let seq = s.event("prompt", "s", (R, "main"), 1_000, body);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        indexed_as(&k, &old, seq, "Fix the parser.\ncli");
+        checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &old, 0).unwrap();
+        // The copy's raw.db under a new id, as a copied file gets one (`db::ensure_device`).
+        rusqlite::Connection::open(s.home.path().join("raw.db"))
+            .unwrap()
+            .execute("UPDATE meta SET value = 'copy' WHERE key = 'device_id'", [])
+            .unwrap();
+        s.run();
+        assert_eq!(finds(&k, "cli"), Vec::<i64>::new());
+        assert_eq!(finds(&k, "parser"), [seq]);
     }
 
     /// #843: where a Claude Code prompt was typed or sent from (`entrypoint`, #659) is a mark on the
