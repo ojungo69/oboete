@@ -17,6 +17,12 @@ pub(crate) type Key = (String, String);
 /// claude-mem's `recentMs`: a subagent whose last step is this recent is Working.
 pub(crate) const RECENT_MS: i64 = 15 * 60 * 1000;
 
+/// The most subagents an answer lists, those with the newest last steps. claude-mem's agent view
+/// is made from its newest 300 observations and its recent work state writes, so a subagent with
+/// nothing recent leaves it; this PC's store held 1,522 with a step (2026-11-07), which would have
+/// more than doubled each minute's read of My Work.
+pub(crate) const MAX_LISTED: usize = 300;
+
 /// What a subagent's rows say once read: its last step, its newest stop at or after it, its type,
 /// and the launch record it was started by.
 #[derive(Debug, Default)]
@@ -52,8 +58,9 @@ impl Subagent {
     }
 }
 
-/// The subagents of `convs` (Claude Code conversations), each conversation's newest step first. The
-/// caller holds the read fence: a forget registers before this read or after it.
+/// The subagents of `convs` (Claude Code conversations), the `MAX_LISTED` with the newest last steps,
+/// each conversation's newest step first. The caller holds the read fence: a forget registers before
+/// this read or after it.
 pub(crate) fn read(raw: &Raw, k: &Connection, convs: &[Key]) -> Result<Vec<Subagent>> {
     let convs: Vec<&Key> = convs.iter().filter(|(a, _)| a == "claude").collect();
     if convs.is_empty() || !crate::consumer::manifest::exists(k, "table", "subagent_facts")? {
@@ -165,13 +172,16 @@ pub(crate) fn read(raw: &Raw, k: &Connection, convs: &[Key]) -> Result<Vec<Subag
             }
         }
     }
+    // A subagent is listed from its first step: a stop or a launch with no step makes none. The
+    // newest last steps first, at most `MAX_LISTED`.
+    let mut stepped: Vec<((Key, String), Seen, i64)> = (seen.into_iter())
+        .filter_map(|(id, s)| s.last_step.map(|at| (id, s, at)))
+        .collect();
+    stepped.sort_by_key(|(.., at)| std::cmp::Reverse(*at));
+    stepped.truncate(MAX_LISTED);
     let imported = imported_stops(raw, &wanted)?;
     let mut out = Vec::new();
-    for ((key, agent_id), s) in seen {
-        // A subagent is listed from its first step: a stop or a launch with no step makes none.
-        let Some(last_step) = s.last_step else {
-            continue;
-        };
+    for ((key, agent_id), s, last_step) in stepped {
         let finished = (s.stops.iter())
             .chain(
                 imported
@@ -453,6 +463,27 @@ mod tests {
         assert_eq!(b2.state(3 * MIN + RECENT_MS), "working");
         assert_eq!(b2.state(3 * MIN + RECENT_MS + 1), "quiet");
         assert!(read(&store, &k, &[key("u")]).unwrap().is_empty());
+    }
+
+    /// Slice 2: at most `MAX_LISTED` subagents, those with the newest last steps.
+    #[test]
+    fn the_subagents_with_the_newest_steps_are_listed() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        for n in 0..=MAX_LISTED as i64 {
+            let session = if n % 2 == 0 { "s" } else { "t" };
+            store
+                .append(&step(session, &format!("a{n}"), n * MIN))
+                .unwrap();
+        }
+        let k = drain(home.path(), &store);
+        let found = read(&store, &k, &[key("s"), key("t")]).unwrap();
+        assert_eq!(found.len(), MAX_LISTED);
+        assert!(found.iter().all(|s| s.agent_id != "a0"), "{found:?}");
+        assert_eq!(
+            (found[0].conversation.1.as_str(), found[0].agent_id.as_str()),
+            ("s", "a300")
+        );
     }
 
     /// Slice 2, with the consumer held behind: a stop appended since its pass counts at once, a

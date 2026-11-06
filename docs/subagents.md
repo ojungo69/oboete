@@ -324,6 +324,10 @@ Slice 3:
   imported `agent-lifecycle` rows are the ops of an import's source on that list
   (`Raw::imported_list_fields`). A launch's task is read from its record when My Work is read: its
   `launched.task`, else in an older record its input's description (160) or prompt (500).
+  **Not as planned**: at most 300 subagents are listed (`my_work_subagents::MAX_LISTED`), those
+  with the newest last steps. claude-mem's agent view is made from its newest 300 observations and
+  its recent work state writes, so a subagent with nothing recent leaves it too; all of this PC's
+  would have more than doubled each minute's read (below).
 - **The answer's `subagents`**: each with `conversation` (`{id, fingerprint}`, as the request's
   `sessions` give it), `id` (`s:` and the keyed print of the agent, session and subagent id),
   `type`, `state` (`working`, `quiet`, `finished`), `finished_at`, `last_step`, `task` (gated) and
@@ -348,12 +352,18 @@ Slice 3:
 - **Not as claude-mem**, besides the plan's: the card names the subagent's type, which claude-mem
   keeps and shows nowhere, and the conversation's title is its newest request's, oboete keeping no
   title of a session's own.
+- **Measured** on a copy of this PC's store (2026-11-07, release build): the consumer's first pass
+  took 18.1 s and kept 24,596 rows, 1,522 subagents with a step. My Work's subagents part took 71 to
+  82 ms over its 277 conversations (106 ms with each checkpoint 20,000 records behind) and the whole
+  read 0.49 to 0.54 s. The 1,522 added 326 KB to an answer of 250 KB; all were No recent step, no
+  stop being kept before slice 1 and 18 of them having a launch record that still parses.
 - **Tests:** `capture::tests::a_subagents_call_keeps_its_type_and_a_launch_what_it_started`,
   `consumer::subagents::tests::each_record_says_what_it_says_of_a_subagent`,
   `consumer::subagents::tests::a_records_rows_follow_its_tombstones_rewinds_and_expiry`,
   `my_work_subagents::tests::a_subagents_state_follows_its_steps_stops_and_launch`,
   `my_work_subagents::tests::the_records_past_the_checkpoint_count_at_once`,
   `my_work_subagents::tests::an_imported_agent_lifecycle_row_is_its_subagents_stop`,
+  `my_work_subagents::tests::the_subagents_with_the_newest_steps_are_listed`,
   `my_work::tests::a_listed_conversations_subagents_are_in_its_answer`,
   `view::tests::the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest`, and the
   page's in `src/testdata/viewer-readiness/test.mjs`; `my_work::tests::imported_work_state_is_neither_read_nor_counted`
