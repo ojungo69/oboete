@@ -9,6 +9,10 @@ use serde_json::{Map, Value};
 
 use crate::redact::{self, Rules};
 
+/// claude-mem's list of its subagents' stops (docs/subagents.md), which `oboete import
+/// claude-mem` brings in: My Work reads its rows as stops (slice 2).
+pub(crate) const AGENT_LIFECYCLE: &str = "agent-lifecycle";
+
 /// L3: a list name's most, trimmed, in UTF-16 units as JavaScript counts (claude-mem's).
 pub const MAX_LIST: usize = 200;
 /// L3: the fields' most as JSON, in UTF-16 units.

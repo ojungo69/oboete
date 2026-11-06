@@ -2602,6 +2602,12 @@ const TEXT = {
   my_work_col_updated: ['Last update', '最終更新'],
   my_work_table: ['Requests', '依頼の一覧'],
   my_work_agent_role: ['Contributing to your requests', 'あなたの依頼に参加しています'],
+  my_work_subagent: ['Subagent', 'サブエージェント'],
+  my_work_subagent_role: ['Subagent · {title}', 'サブエージェント · {title}'],
+  my_work_subagent_working: ['Working', '作業中'],
+  my_work_subagent_quiet: ['No recent step', '最近の動きなし'],
+  my_work_subagent_finished: ['Finished · {time}', '完了 · {time}'],
+  my_work_mark_finished: ['Mark finished', '完了にする'],
   my_work_agent_count_one: ['{n} human request', '依頼 {n} 件'],
   my_work_agent_count: ['{n} human requests', '依頼 {n} 件'],
   my_work_agent_view: ['View requests', '依頼を見る'],
@@ -2895,6 +2901,10 @@ const TEXT = {
   my_work_review_stale: ['This work changed while you were reading. Review the latest version before checking.', '読んでいる間に作業が変わりました。最新の版を見てから確認してください。'],
   my_work_review_failed: ['The local review could not be saved. Try again.', '確認を保存できませんでした。もう一度試してください。'],
   my_work_saved_unread: ['Saved. The page shows it at its next read.', '保存しました。次に読み直したときに画面に出ます。'],
+  my_work_marked_finished: ['Marked finished.', '完了にしました。'],
+  my_work_finish_stale: ['This subagent had already finished, or is no longer listed.', 'このサブエージェントは完了済みか、一覧から外れています。'],
+  my_work_finish_not_recorded: ['Not marked finished: its conversation’s folder is gone, or records nothing now.', '完了にできませんでした。この会話のフォルダーが見つからないか、今は記録しない設定です。'],
+  my_work_finish_failed: ['It could not be marked finished. Try again.', '完了にできませんでした。もう一度試してください。'],
 };
 
 const stored = recall('oboete-lang', '');
@@ -8246,6 +8256,8 @@ const myWorkTitles = new Intl.Collator('en', { sensitivity: 'base', numeric: tru
 // (X10); the search, the project and the range for the visit.
 const mw = {
   rows: null, unlinked: 0, goals: 0, story: null, storyOpen: false, signature: '', fetched: 0, pending: null, slot: null, results: null,
+  // docs/subagents.md slice 2: the listed conversations' Claude Code subagents.
+  subagents: [],
   layout: myWorkRecalled('oboete-my-work-layout', MY_WORK_LAYOUTS, 'cards'),
   filter: myWorkRecalled('oboete-my-work-filter', MY_WORK_TABS, 'all'),
   query: '', project: '', range: 'day',
@@ -9149,7 +9161,7 @@ function myWorkAgents(rows) {
     }
   }
   if (!groups.size) return myWorkEmpty('my_work_no_agents', 'my_work_no_agents_body');
-  return el('div', 'my-work-agents', ...[...groups.values()].map(({ session, requests }) => {
+  return el('div', 'my-work-agents', ...[...groups.values()].flatMap(({ session, requests }) => {
     const latest = [...requests].sort((a, b) => b.updated - a.updated)[0];
     const label = myWorkAgent(session.agent);
     const avatar = el('span', 'my-work-avatar', label.slice(0, 1).toUpperCase() || '?');
@@ -9171,8 +9183,71 @@ function myWorkAgents(rows) {
       el('div', 'my-work-agent-requests', ...requests.slice(0, 2).map((row) => el('p', null, myWorkActivity(row)))),
       el('div', 'my-work-footer', word('span', null, count, { n: requests.length }), word('span', 'my-work-open-label', 'my_work_agent_view')));
     card.dataset.session = session.id;
-    return card;
+    const role = latest.title || myWorkProjects(latest);
+    return [card, ...mw.subagents.filter((s) => s.conversation?.id === session.id).map((s) => myWorkSubagent(s, role))];
   }));
+}
+
+// docs/subagents.md slice 2, claude-mem 15.10's subagent card (`my-work.tsx`): the agent and the
+// subagent's type, "Subagent · " and its conversation's title, its state, the task it was
+// launched with, and Mark finished while it is not Finished.
+function myWorkSubagent(subagent, role) {
+  const label = myWorkAgent('claude');
+  const avatar = el('span', 'my-work-avatar', label.slice(0, 1).toUpperCase());
+  avatar.setAttribute('aria-hidden', 'true');
+  const type = subagent.type ? el('span', null, subagent.type) : word('span', null, 'my_work_subagent');
+  const state = subagent.state === 'finished'
+    ? word('span', 'badge my-work-badge my-work-subagent-finished', 'my_work_subagent_finished', { time: new Date(subagent.finished_at).toLocaleString(lang) })
+    : word('span', `badge my-work-badge my-work-subagent-${subagent.state === 'working' ? 'working' : 'quiet'}`,
+      subagent.state === 'working' ? 'my_work_subagent_working' : 'my_work_subagent_quiet');
+  let mark = null;
+  if (subagent.can_mark) {
+    mark = word('button', 'small my-work-finish', 'my_work_mark_finished');
+    mark.type = 'button';
+    mark.disabled = mw.saving;
+    mark.addEventListener('click', () => myWorkFinish(subagent));
+  }
+  // Each card's button is named alike: the card's heading tells them apart to a screen reader.
+  const heading = el('h3', 'my-work-title', label, ' · ', type);
+  heading.id = `my-work-subagent-${subagent.id}`;
+  mark?.setAttribute('aria-describedby', heading.id);
+  const card = el('article', 'my-work-card my-work-agent my-work-subagent',
+    el('div', 'my-work-agent-top', avatar,
+      el('div', 'my-work-agent-identity', heading, word('p', 'my-work-agent-role', 'my_work_subagent_role', { title: role })),
+      myWorkTime(subagent.last_step)),
+    state,
+    subagent.task ? el('p', 'my-work-agent-summary', subagent.task) : null,
+    mark ? el('div', 'my-work-actions', mark) : null);
+  card.dataset.subagent = subagent.id;
+  return card;
+}
+
+// Mark finished (`app.js` `markFinished`): the owner's stop, then My Work read again, the card
+// Finished. A failure says so on the status line, which a screen reader reads out.
+async function myWorkFinish(subagent) {
+  if (mw.saving) return;
+  mw.saving = true;
+  for (const button of $('panel').querySelectorAll('.my-work-finish, .my-work-check, .my-work-undo')) button.disabled = true;
+  let said = 'my_work_finish_failed';
+  try {
+    const { res, answer } = await memoryWrite('my-work/finished', { id: subagent.id });
+    if (res.ok) said = 'my_work_marked_finished';
+    else if (res.status === 404 || answer.code === 'finished') said = 'my_work_finish_stale';
+    else if (answer.code === 'not_recorded') said = 'my_work_finish_not_recorded';
+    if (res.ok || res.status === 404 || res.status === 409) {
+      await myWorkReread().catch(() => {
+        if (res.ok) said = 'my_work_saved_unread';
+      });
+    }
+  } catch {
+    // The page says it was not marked; nothing changed.
+  } finally {
+    mw.saving = false;
+  }
+  if (view !== 'my_work') return;
+  // Drawn first, as drawing clears the status line.
+  myWorkDraw('current');
+  setStatus(t(said), !['my_work_marked_finished', 'my_work_saved_unread'].includes(said), lang);
 }
 
 function myWorkEmpty(title, body, timeline = false) {
@@ -9754,7 +9829,7 @@ function myWorkReviewButton(row, checked) {
 async function myWorkReview(row, checked) {
   if (mw.saving) return;
   mw.saving = true;
-  for (const button of $('panel').querySelectorAll('.my-work-check, .my-work-undo')) button.disabled = true;
+  for (const button of $('panel').querySelectorAll('.my-work-check, .my-work-undo, .my-work-finish')) button.disabled = true;
   let said = 'my_work_review_failed';
   try {
     const { res } = await memoryWrite('my-work/review', { request: row.id, version: row.version, checked });
@@ -9845,7 +9920,7 @@ const myWorkContent = (row) => JSON.stringify([row.ask, row.follow_ups, row.work
 const myWorkSignature = (row) => JSON.stringify([myWorkContent(row), row.title, row.status, myWorkActivity(row), row.next]);
 
 // What tells two answers of My Work apart: a change of any is drawn, or held while a person reads.
-const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.story, answer.areas, answer.other_asks, answer.instance]);
+const myWorkAnswerSignature = (answer) => JSON.stringify([answer.requests, answer.unlinked, answer.story, answer.areas, answer.other_asks, answer.instance, answer.subagents]);
 
 function myWorkAccept(answer) {
   mw.signature = myWorkAnswerSignature(answer);
@@ -9873,6 +9948,7 @@ function myWorkAccept(answer) {
   mw.otherAsks = answer.other_asks ?? [];
   mw.pageWords = answer.page_words ?? [];
   mw.instance = answer.instance ?? '';
+  mw.subagents = answer.subagents ?? [];
   mw.fetched = Date.now();
   mw.pending = null;
 }

@@ -1224,6 +1224,9 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
 pub struct Recorded {
     pub events: Vec<(i64, crate::raw::Event)>,
     pub prompt: Option<String>,
+    /// The call's events were kept to be written back behind older kept files (docs/unwritten.md
+    /// U3), not appended now.
+    pub kept: bool,
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
@@ -1285,6 +1288,7 @@ pub fn record(
         return Ok(Recorded {
             events: Vec::new(),
             prompt,
+            kept: true,
         });
     }
     let mut appended = Vec::new();
@@ -1304,6 +1308,7 @@ pub fn record(
     Ok(Recorded {
         events: appended,
         prompt,
+        kept: false,
     })
 }
 

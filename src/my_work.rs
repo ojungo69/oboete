@@ -921,6 +921,8 @@ fn read_held(
     for (key, _) in requests.iter().flat_map(|r| &r.owns) {
         *holders.entry(key).or_default() += 1;
     }
+    // Slice 2 of docs/subagents.md: the conversations the answer lists, for their subagents.
+    let mut listed: BTreeSet<Key> = BTreeSet::new();
     for r in &requests {
         let stores = (&raw, &k, &rules, &hidden);
         let found = answer(
@@ -931,6 +933,7 @@ fn read_held(
             (since, now),
         )?;
         if let Some((v, mut h)) = found {
+            listed.extend(r.owns.iter().map(|(key, _)| key.clone()));
             h.sole = (r.owns.iter())
                 .filter(|(key, _)| holders.get(key) == Some(&1))
                 .map(|(key, _)| key.clone())
@@ -1002,9 +1005,75 @@ fn read_held(
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
+    let subagents = subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?;
     let answer = json!({"requests": answers, "unlinked": unlinked, "story": story,
-        "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words()});
+        "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words(),
+        "subagents": subagents});
     Ok((answer, held))
+}
+
+/// Slice 2 of docs/subagents.md: the subagents of the `listed` conversations as the answer gives
+/// them, each conversation by the id its request's `sessions` give it. Read in the readers' hold,
+/// taken here: a forget registers before this read or after it.
+fn subagents_of(
+    home: &Path,
+    (raw, k, rules): (&Raw, &Connection, &Rules),
+    listed: &BTreeSet<Key>,
+    now: i64,
+    key: &mut Option<Vec<u8>>,
+) -> Result<Vec<Value>> {
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let found =
+        crate::my_work_subagents::read(raw, k, &listed.iter().cloned().collect::<Vec<_>>())?;
+    let mut conversations: HashMap<Key, (String, Option<String>)> = HashMap::new();
+    for s in &found {
+        if !conversations.contains_key(&s.conversation) {
+            let id = shown_id(&Id::Conversation(s.conversation.clone()), rules, home, key)?;
+            conversations.insert(s.conversation.clone(), id);
+        }
+    }
+    crate::my_work_subagents::answer(
+        &found,
+        &conversations,
+        &mut |s| {
+            Ok(format!(
+                "s:{}",
+                keyed_print(&crate::my_work_subagents::held(s), home, key)?
+            ))
+        },
+        rules,
+        now,
+    )
+}
+
+/// Slice 2: the listed subagent the page names `id`, read afresh, with the folder its
+/// conversation's newest record was recorded in (none when that label is gone or masked). The
+/// caller holds the readers' hold.
+pub(crate) fn subagent(
+    home: &Path,
+    id: &str,
+) -> Result<Option<(crate::my_work_subagents::Subagent, Option<String>)>> {
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(None);
+    };
+    let rules = Rules::load(home)?;
+    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+    let Built { requests, .. } = build(&raw, &k, &rules, &reading)?;
+    let listed: Vec<Key> = (requests.iter().flat_map(|r| &r.owns))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut key = None;
+    for s in crate::my_work_subagents::read(&raw, &k, &listed)? {
+        let shown = format!(
+            "s:{}",
+            keyed_print(&crate::my_work_subagents::held(&s), home, &mut key)?
+        );
+        if shown == id {
+            let folder = crate::my_work_subagents::recorded_folder(&raw, &s.conversation)?;
+            return Ok(Some((s, folder)));
+        }
+    }
+    Ok(None)
 }
 
 /// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any
@@ -3193,6 +3262,48 @@ mod tests {
         let v = h.read(Range::All, h.t);
         assert_eq!(v["unlinked"], 0);
         assert_eq!(tasks(by_id(&v, "c:claude:s1")), Vec::<&str>::new());
+    }
+
+    /// Slice 2 of docs/subagents.md: the answer lists the subagents of the conversations its
+    /// requests list, each with its conversation's id as the request's `sessions` give it and an
+    /// id of its own, its type, state and its launch's task; a subagent of a conversation no
+    /// request lists is not shown, and a forget of the conversation leaves none.
+    #[test]
+    fn a_listed_conversations_subagents_are_in_its_answer() {
+        let mut h = Home::new();
+        let asked = h.said("s1", -60_000, "Fix the parser.");
+        let launched = json!({"tool": "Agent", "launched": {"agent_id": "agent-x1",
+            "status": "async_launched", "async": true, "task": "Find the parser"}});
+        h.s.event("tool", "s1", (R, "main"), h.t - 55_000, launched);
+        let step = json!({"tool": "Read", "agent_id": "agent-x1", "agent_type": "Explore"});
+        h.s.event("tool", "s1", (R, "main"), h.t - 50_000, step);
+        let other = json!({"tool": "Read", "agent_id": "agent-x2"});
+        h.s.event("tool", "s9", (R, "main"), h.t - 50_000, other);
+        let v = h.read(Range::All, h.t);
+        let subagents = v["subagents"].as_array().unwrap();
+        assert_eq!(subagents.len(), 1, "{v}");
+        let s = &subagents[0];
+        assert_eq!(
+            s["conversation"]["id"],
+            by_id(&v, "c:claude:s1")["sessions"][0]["id"]
+        );
+        let id = s["id"].as_str().unwrap();
+        assert!(id.starts_with("s:") && !id.contains("agent-x1"), "{s}");
+        assert_eq!(
+            (&s["type"], &s["state"], &s["task"], &s["can_mark"]),
+            (
+                &json!("Explore"),
+                &json!("working"),
+                &json!("Find the parser"),
+                &json!(true)
+            )
+        );
+        let home = h.s.home.path();
+        let device = h.s.raw.device().to_owned();
+        let target = crate::forget::session_target(home, &format!("{device}:{asked}")).unwrap();
+        crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+        let v = h.read(Range::All, h.t);
+        assert_eq!(v["subagents"], json!([]), "{v}");
     }
 
     /// The design's 1: two `request_id`s in a session make two requests with its original ask,

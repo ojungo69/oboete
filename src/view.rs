@@ -1613,6 +1613,7 @@ impl Viewer {
             ("POST", "/api/hide") => (MAX_BODY, |v, b, _| v.hide(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
+            ("POST", "/api/my-work/finished") => (MAX_BODY, |v, b, _| v.my_work_finished(b)),
             ("POST", "/api/my-work/refresh") => (MAX_BODY, |v, b, _| v.my_work_refresh(b)),
             ("POST", "/api/my-work/suggestion") => (MAX_BODY, |v, b, _| v.my_work_suggestion(b)),
             ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
@@ -2215,6 +2216,47 @@ impl Viewer {
         }
     }
 
+    /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
+    /// page has it; under the reviews' lock and the readers' hold, from a fresh read to the write:
+    /// 404 when it names no listed subagent, 409 `finished` when it is Finished already, 409
+    /// `not_recorded` when its conversation's folder is gone or masked or records nothing now.
+    /// The page reads My Work again after it, which counts the new stop at once.
+    fn my_work_finished(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Posted {
+            id: String,
+        }
+        let posted = match serde_json::from_slice::<Posted>(body) {
+            Ok(p) if p.id.starts_with("s:") && p.id.len() <= 64 => p,
+            _ => return refused(400, "bad_request", ""),
+        };
+        let _lock = match crate::my_work::reviews_lock(&self.home) {
+            Ok(lock) => lock,
+            Err(e) => return failed(&e),
+        };
+        let _read = match crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT) {
+            Ok(hold) => hold,
+            Err(e) => return failed(&e),
+        };
+        let (found, folder) = match crate::my_work::subagent(&self.home, &posted.id) {
+            Ok(Some(found)) => found,
+            Ok(None) => return refused(404, "not_found", ""),
+            Err(e) => return failed(&e),
+        };
+        if found.finished.is_some() {
+            return refused(409, "finished", "");
+        }
+        let Some(folder) = folder else {
+            return refused(409, "not_recorded", "");
+        };
+        match crate::my_work_subagents::mark(&self.home, &found, &folder, crate::db::now_ms()) {
+            Ok(true) => Response::json(&json!({})),
+            Ok(false) => refused(409, "not_recorded", ""),
+            Err(e) => failed(&e),
+        }
+    }
+
     fn my_work_review(&self, body: &[u8]) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -2785,6 +2827,18 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
             .collect(),
         _ => Vec::new(),
     };
+    // Slice 2 of docs/subagents.md: each subagent's conversation, by the id its request's
+    // `sessions` give it, and its own id, a keyed print the page posts back, leave the walk and
+    // come back as theirs do.
+    let subagent_ids: Vec<(Option<String>, Option<Value>)> = match answer.get_mut("subagents") {
+        Some(Value::Array(items)) if name == "my-work" => (items.iter_mut())
+            .map(|s| {
+                let conversation = s.get_mut("conversation").and_then(request_id);
+                (conversation, s.as_object_mut().and_then(|s| s.remove("id")))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     // My Focus's ids (F1), random and code's own, are selectors as a request's id is: an area's,
     // and the area each request sits in, leave the walk and come back (Codex on #746). A value no
     // code made goes through it.
@@ -2880,6 +2934,16 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
                         item.insert("file".to_owned(), file);
                     }
                 }
+            }
+        }
+    }
+    if let Some(Value::Array(items)) = answer.get_mut("subagents") {
+        for (item, (conversation, own)) in items.iter_mut().zip(subagent_ids) {
+            if let Some(shown) = item.get_mut("conversation") {
+                put_id(shown, conversation);
+            }
+            if let (Value::Object(item), Some(own)) = (item, own) {
+                item.insert("id".to_owned(), own);
             }
         }
     }
@@ -5846,6 +5910,240 @@ curate = false
         );
         assert_eq!(post(&body("r:rel", &version, false), "t0k", ours).0, 200);
         assert_eq!(request(&read(), "r:rel")["checked"], Value::Null);
+    }
+
+    /// Slice 2 of docs/subagents.md: `POST /api/my-work/finished` passes `save_gate` (the token,
+    /// this viewer's Origin, JSON) and takes `{id}` only: an id of no listed subagent is 404, a
+    /// Finished one 409 `finished`, a stop a hook appended before it too; a folder that is gone or
+    /// a checkout that records nothing is 409 `not_recorded`, with nothing appended. Else the
+    /// owner's stop goes through the hook's path (marked, the server's time, source `hook`), the
+    /// next read shows it Finished with the consumer held behind, a second click is 409, and a
+    /// forget of the conversation takes the stop. The ids leave the route whole though a rule
+    /// matches hex digits, and two conversations' subagents stay apart.
+    #[test]
+    fn the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest() {
+        if !in_child(
+            "view::tests::the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest",
+        ) {
+            return;
+        }
+        let (mut s, v) = feed_fixture();
+        let t = crate::db::now_ms() - 3_600_000;
+        let place = tempfile::tempdir().unwrap();
+        let folder = |name: &str| {
+            let p = place.path().join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let (open, off, gone, excluded) = (
+            folder("open"),
+            folder("off"),
+            folder("gone"),
+            folder("excluded"),
+        );
+        std::fs::create_dir(Path::new(&off).join(".git")).unwrap();
+        std::fs::write(Path::new(&off).join(".oboete.toml"), "capture = false\n").unwrap();
+        // A session the rule below masks, its id shown with a fingerprint of 12 hex digits.
+        let hex = "0123456789ab";
+        let step = |session: &str, at: i64, cwd: &str, id: &str, kind: &str| crate::raw::Event {
+            kind: "tool".into(),
+            session: session.into(),
+            cwd: Some(cwd.into()),
+            ts: t + at,
+            ..crate::raw::test_event(
+                &json!({"tool": "Read", "agent_id": id, "agent_type": kind}).to_string(),
+            )
+        };
+        let stop = |session: &str, at: i64, id: &str| crate::raw::Event {
+            kind: crate::raw::SUBAGENT_STOP.into(),
+            session: session.into(),
+            ts: t + at,
+            ..crate::raw::test_event(&json!({"agent_id": id}).to_string())
+        };
+        let asked = s.said("s1", R, t, "Fix the parser.");
+        s.said(hex, R, t, "The parser drops a trailing comma.");
+        s.said("s3", R, t, "Tidy the notes.");
+        s.said("s4", R, t, "Rename the module.");
+        s.said("s5", R, t, "Sort the imports.");
+        for e in [
+            step("s1", 1_000, &open, "a1", "Explore"),
+            step("s1", 1_000, &open, "a2", "Plan"),
+            step(hex, 1_000, &open, "b1", "Hex"),
+            step("s3", 1_000, &off, "c1", "Off"),
+            step("s4", 1_000, &gone, "d1", "Gone"),
+            step("s5", 1_000, &excluded, "e1", "Excluded"),
+        ] {
+            s.raw.append(&e).unwrap();
+        }
+        s.raw.append(&stop("s1", 2_000, "a2")).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        s.run();
+        let home = s.home.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'hex', regex = '[0-9a-f]{12}' }]\n",
+        )
+        .unwrap();
+        redact::set_home(home).unwrap();
+        let read = || get(&v, "/api/my-work?range=all");
+        let first = read();
+        let by_type = |answer: &Value, kind: &str| -> Value {
+            (answer["subagents"].as_array().unwrap().iter())
+                .find(|s| s["type"] == kind)
+                .unwrap_or_else(|| panic!("no {kind} in {answer}"))
+                .clone()
+        };
+        // Each subagent's conversation is its own request's, though the rule masks a session.
+        for (kind, asked) in [
+            ("Explore", "Fix the parser."),
+            ("Hex", "The parser drops a trailing comma."),
+        ] {
+            let conversation = &by_type(&first, kind)["conversation"]["id"];
+            let request = (first["requests"].as_array().unwrap().iter())
+                .find(|r| &r["sessions"][0]["id"] == conversation)
+                .unwrap_or_else(|| panic!("no request for {kind} in {first}"));
+            assert_eq!(request["ask"]["text"], asked, "{first}");
+        }
+        for kind in ["Explore", "Plan", "Hex", "Off", "Gone", "Excluded"] {
+            let id = by_type(&first, kind)["id"].as_str().unwrap().to_owned();
+            assert!(
+                id.len() > 2 && id[2..].bytes().all(|b| b.is_ascii_hexdigit()),
+                "{first}"
+            );
+        }
+        assert_eq!(
+            (
+                by_type(&first, "Explore")["state"].as_str(),
+                by_type(&first, "Plan")["state"].as_str()
+            ),
+            (Some("quiet"), Some("finished"))
+        );
+        assert_eq!(by_type(&first, "Plan")["can_mark"], false);
+        let post = |body: &[u8], token: &str, origin: &str| -> (u16, Value) {
+            let len = body.len().to_string();
+            let h = [
+                HOST,
+                ("Origin", origin),
+                ("X-Oboete-Token", token),
+                ("Content-Type", "application/json"),
+                ("Content-Length", len.as_str()),
+            ];
+            let r = match v.head("POST", "/api/my-work/finished", &h) {
+                Head::Body(_, save, given) => v.take(save, body, &given),
+                Head::Answer(r) => r,
+                Head::File(_) => panic!("no link"),
+            };
+            (
+                r.status,
+                serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+            )
+        };
+        let ours = "http://127.0.0.1:4321";
+        let id = |kind: &str| by_type(&first, kind)["id"].as_str().unwrap().to_owned();
+        let body = |id: &str| serde_json::to_vec(&json!({ "id": id })).unwrap();
+        let code =
+            |(status, answer): (u16, Value)| (status, answer["code"].as_str().map(str::to_owned));
+        let stops = || -> usize {
+            let raw = crate::raw::open(home).unwrap();
+            raw.stops_after(raw.device(), 0).unwrap().len()
+        };
+        let explore = body(&id("Explore"));
+        assert_eq!(post(&explore, "wrong", ours).0, 401);
+        assert_eq!(post(&explore, "t0k", "http://evil.example").0, 403);
+        let more = serde_json::to_vec(&json!({"id": id("Explore"), "more": 1})).unwrap();
+        assert_eq!(
+            code(post(&more, "t0k", ours)),
+            (400, Some("bad_request".into()))
+        );
+        assert_eq!(
+            code(post(&body("r:rel"), "t0k", ours)),
+            (400, Some("bad_request".into()))
+        );
+        assert_eq!(
+            code(post(&body("s:00"), "t0k", ours)),
+            (404, Some("not_found".into()))
+        );
+        assert_eq!(
+            code(post(&body(&id("Plan")), "t0k", ours)),
+            (409, Some("finished".into()))
+        );
+        // A folder excluded after the page read it.
+        let op = json!({"folder": excluded, "level": "capture", "undo": false, "clock": 1});
+        (s.raw)
+            .append_ops(&[(crate::raw::OpKind::Exclusion, op)])
+            .unwrap();
+        for kind in ["Off", "Gone", "Excluded"] {
+            assert_eq!(
+                code(post(&body(&id(kind)), "t0k", ours)),
+                (409, Some("not_recorded".into())),
+                "{kind}"
+            );
+        }
+        assert_eq!(stops(), 1);
+        // A hook's stop before the fresh read.
+        s.raw.append(&stop(hex, 3_000, "b1")).unwrap();
+        assert_eq!(
+            code(post(&body(&id("Hex")), "t0k", ours)),
+            (409, Some("finished".into()))
+        );
+        // Mark finished waits for a forget's hold, and for another action's hold of the lock: two
+        // clicks at once append one stop.
+        let held = crate::dispatch::exclusive(home).unwrap();
+        let plan = body(&id("Plan"));
+        let answer = std::thread::scope(|scope| {
+            let posting = scope.spawn(|| code(post(&plan, "t0k", ours)));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!posting.is_finished(), "Mark finished waits for a forget");
+            drop(held);
+            posting.join().unwrap()
+        });
+        assert_eq!(answer, (409, Some("finished".into())));
+        let before = crate::db::now_ms();
+        let hold = crate::my_work::reviews_lock(home).unwrap();
+        let answer = std::thread::scope(|scope| {
+            let posting = scope.spawn(|| post(&explore, "t0k", ours));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!posting.is_finished(), "Mark finished waits for the hold");
+            drop(hold);
+            posting.join().unwrap()
+        });
+        assert_eq!(answer, (200, json!({})));
+        let after = crate::db::now_ms();
+        let raw = crate::raw::open(home).unwrap();
+        let device = raw.device().to_owned();
+        let seq = *raw.stops_after(&device, 0).unwrap().last().unwrap();
+        let crate::raw::Item::Event(e) = raw.at(&device, &[seq]).unwrap()[0].item.clone() else {
+            panic!("the owner's stop")
+        };
+        let recorded: Value = serde_json::from_str(&e.body).unwrap();
+        assert_eq!(
+            (e.source.as_str(), e.session.as_str(), e.cwd.as_deref()),
+            ("hook", "s1", Some(open.as_str()))
+        );
+        assert_eq!(
+            (
+                &recorded["agent_id"],
+                &recorded["agent_type"],
+                &recorded["marked"]
+            ),
+            (&json!("a1"), &json!("Explore"), &json!(true))
+        );
+        assert!((before..=after).contains(&e.ts), "{}", e.ts);
+        let next = read();
+        assert_eq!(by_type(&next, "Explore")["state"], "finished", "{next}");
+        assert_eq!(by_type(&next, "Explore")["can_mark"], false);
+        assert_eq!(
+            code(post(&explore, "t0k", ours)),
+            (409, Some("finished".into()))
+        );
+        assert_eq!(stops(), 3);
+        // A forget of the conversation takes the owner's stop as it takes the hook's.
+        let target = crate::forget::session_target(home, &format!("{device}:{asked}")).unwrap();
+        crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+        assert!(matches!(
+            raw.at(&device, &[seq]).unwrap()[0].item,
+            crate::raw::Item::Removed
+        ));
     }
 
     /// J4: `POST /api/my-work/suggestion` passes `save_gate` (the token, this viewer's Origin)
