@@ -348,9 +348,8 @@ impl Consumer for Fts {
                 Item::Removed => continue,
             };
             // #743: the owner's directive (`pref add`) is its claim, searched and delivered as one:
-            // no raw search hit of its own, and no session that no agent ran. X17
-            // (docs/subagents.md): a subagent's stop is a mark with no words.
-            if matches!(e.kind.as_str(), "directive" | "subagent_stop") {
+            // no raw search hit of its own, and no session that no agent ran.
+            if e.kind == "directive" {
                 continue;
             }
             k.execute(
@@ -584,31 +583,6 @@ mod tests {
         indexed_as(&k, &device, rows[0].0, &format!("{}\ncli", rows[0].1));
         s.run();
         assert_eq!(finds(&k, "cli"), [rows[0].0, says]);
-    }
-
-    /// X17 (docs/subagents.md): a subagent's stop is a mark with no words: no `raw_docs` row, so
-    /// no search hit, vector or snippet, as the owner's directive has none.
-    #[test]
-    fn a_subagent_stop_is_no_row_of_the_index() {
-        let mut s = Store::new();
-        let body = json!({"agent_id": "a1", "agent_type": "Explore"});
-        let seq = s.event("subagent_stop", "s", (R, "main"), 1_000, body);
-        s.event(
-            "prompt",
-            "s",
-            (R, "main"),
-            2_000,
-            json!({"prompt": "Explore the parser."}),
-        );
-        s.run();
-        let k = crate::knowledge::open(s.home.path()).unwrap();
-        let rows: i64 = k
-            .query_row("SELECT count(*) FROM raw_docs WHERE seq = ?1", [seq], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(rows, 0);
-        assert_eq!(finds(&k, "Explore"), [seq + 1]);
     }
 
     /// Sourcery on #846: an older oboete run after the catch-up indexes new prompts with their entry

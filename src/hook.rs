@@ -259,6 +259,9 @@ fn run_io(
         let recorded = recorded?;
         let events = &recorded.events;
         wrote |= !events.is_empty();
+        if (agent, event) == ("claude", "SubagentStop") {
+            wrote |= agent_stop(&mut store, &payload, &settings, db::now_ms())?;
+        }
         session = session_label(&labels).to_owned();
         ended = crate::failure::now();
         // MUST-M21 (D9): the session's last failed call, which its next prompt is matched against.
@@ -400,8 +403,10 @@ fn run_io(
                 .map(|e| (crate::failure::classify(e), ended))
         });
         // Grok, agy and Cursor show it at their injection points only (other calls return nothing
-        // or {}); the others at every SessionStart, resumes too.
-        let reads_start = event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor");
+        // or {}); the others at every SessionStart, resumes too, and a Codex subagent at its
+        // SubagentStart, its session start (Codex's review of docs/subagents.md's slice 1).
+        let reads_start = (event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor"))
+            || (agent, event) == ("codex", "SubagentStart");
         let failure = failed
             .filter(|_| injecting || reads_start)
             .map(|f| crate::failure::line(f, kept_count(home)));
@@ -605,6 +610,60 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
         ("grok" | "agy" | "cursor", _) => false,
         (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
         _ => false,
+    }
+}
+
+/// X17 (docs/subagents.md): a Claude Code subagent's stop, kept as claude-mem keeps it
+/// (`agentStopFields`): one closed row of the work state list `agent-lifecycle`, with the session,
+/// the subagent's id and type (each a non-empty string of at most 128 characters) and the hook's
+/// time, nothing of its text. Not an event, as a work state write is not (docs/work-state.md L4):
+/// no window, summary, search or card reads it. Session start shows no closed row, and My Work
+/// reads the list apart. Nothing without a session or an id, or where nothing is recorded: whether
+/// a row was written.
+fn agent_stop(
+    store: &mut crate::raw::Raw,
+    payload: &Value,
+    settings: &crate::capture::Settings,
+    now: i64,
+) -> Result<bool> {
+    let field =
+        |key: &str| (payload[key].as_str()).filter(|s| !s.is_empty() && s.chars().count() <= 128);
+    let session = str_field(payload, &["session_id"]).filter(|s| !s.is_empty());
+    let (Some(session), Some(id)) = (session, field("agent_id")) else {
+        return Ok(false);
+    };
+    let cwd = str_field(payload, &["cwd"]).unwrap_or_default();
+    let excluded = store.capture_exclusions()?;
+    if crate::capture::not_recorded_why(cwd, &excluded, settings).is_some() {
+        return Ok(false);
+    }
+    let stopped = chrono::DateTime::from_timestamp_millis(now)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let mut fields = serde_json::Map::new();
+    let task = format!("Agent {id} in claude session {session}");
+    fields.insert("task".into(), json!(task));
+    fields.insert("status".into(), json!("done"));
+    fields.insert("platform_source".into(), json!("claude"));
+    fields.insert("content_session_id".into(), json!(session));
+    fields.insert("agent_id".into(), json!(id));
+    if let Some(kind) = field("agent_type") {
+        fields.insert("agent_type".into(), json!(kind));
+    }
+    fields.insert("stopped_at".into(), json!(stopped));
+    fields.insert("stopped_at_epoch".into(), json!(now));
+    fields.insert("stop_source".into(), json!("subagent-stop-hook"));
+    let (_, repo, _) = crate::capture::checkout(payload, settings);
+    let (list, fields) =
+        crate::capture::work_state(crate::work_state::AGENT_LIFECYCLE, &fields, settings);
+    // As `work_state_write`'s: an exclusion committed since the read refuses it in its
+    // transaction.
+    let folder = crate::capture::folder_path(cwd);
+    let label = crate::capture::exclusion_label("cwd", &folder, settings);
+    let key = crate::repo::key(Path::new(&folder));
+    let read = (key.as_str(), Some(folder.as_str()));
+    match store.work_state_under(&repo, &list, &fields, &label, settings, read) {
+        Err(e) if e.is::<crate::raw::NeverRecorded>() => Ok(false),
+        written => written.map(|_| true),
     }
 }
 
@@ -8343,14 +8402,17 @@ mod tests {
         assert_eq!(recorded, 0);
     }
 
-    /// X17 (docs/subagents.md): Claude Code's SubagentStop keeps the subagent's id and type, as
-    /// claude-mem's stop row does, and nothing of its text; with no id, or one over 128
-    /// characters, nothing; a type that is not a non-empty string of at most 128 characters is
-    /// left out. Nothing is printed.
+    /// X17 (docs/subagents.md): Claude Code's SubagentStop keeps the subagent's stop as claude-mem's
+    /// `agentStopFields` does, a closed row of the work state list `agent-lifecycle` with its
+    /// session, id, type and the hook's time, and nothing of its text; with no id, or one over 128
+    /// characters, nothing; a type that is not a non-empty string of at most 128 characters is left
+    /// out. It is no event, prints nothing, and session start shows no closed row.
     #[test]
-    fn a_claude_subagent_stop_is_kept_as_its_id_and_type() {
+    fn a_claude_subagent_stop_is_kept_as_a_closed_lifecycle_row() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let c = cwd.path().to_string_lossy().into_owned();
         let stop = |extra: Value| {
             let mut payload = json!({"session_id": "s1", "cwd": c, "stop_hook_active": false,
@@ -8359,32 +8421,57 @@ mod tests {
             (payload.as_object_mut().unwrap()).extend(extra.as_object().unwrap().clone());
             hook(home.path(), "claude", "SubagentStop", &payload)
         };
+        let long = "x".repeat(128);
         assert_eq!(stop(json!({"agent_id": "a1", "agent_type": "Explore"})), "");
         stop(json!({"agent_id": "a2", "agent_type": 7}));
         stop(json!({"agent_id": "a3", "agent_type": ""}));
-        stop(json!({"agent_id": "x".repeat(128), "agent_type": "t".repeat(129)}));
+        stop(json!({"agent_id": long, "agent_type": "t".repeat(129)}));
         stop(json!({"agent_type": "Explore"}));
         stop(json!({"agent_id": "", "agent_type": "Explore"}));
         stop(json!({"agent_id": "x".repeat(129), "agent_type": "Explore"}));
         let raw = crate::raw::open(home.path()).unwrap();
-        let kept: Vec<(String, String, Value)> = (raw.after(raw.device(), 0, 100).unwrap())
-            .into_iter()
-            .filter_map(|r| match r.item {
-                crate::raw::Item::Event(e) => {
-                    Some((e.kind, e.session, serde_json::from_str(&e.body).unwrap()))
-                }
-                _ => None,
+        let events = (raw.after(raw.device(), 0, 100).unwrap().into_iter())
+            .filter(|r| matches!(r.item, crate::raw::Item::Event(_)))
+            .count();
+        assert_eq!(events, 0);
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let (_, repo, _) = crate::capture::checkout(&json!({"cwd": c}), &settings);
+        let entries = raw.work_state_entries(&repo).unwrap();
+        let kept: Vec<(String, Value)> = (entries.iter())
+            .map(|e| {
+                let mut f = e.fields.clone();
+                // The hook's time, before the op's own.
+                let epoch = f.remove("stopped_at_epoch").unwrap().as_i64().unwrap();
+                assert!(epoch <= e.ts && e.ts - epoch < 60_000, "{f:?}");
+                let at = f.remove("stopped_at").unwrap();
+                assert!(at.as_str().unwrap().ends_with('Z'), "{at}");
+                (e.list.clone(), Value::Object(f))
             })
             .collect();
-        let mark = |body: Value| ("subagent_stop".to_owned(), "s1".to_owned(), body);
+        let row = |id: &str, kind: Option<&str>| {
+            let mut f = json!({"task": format!("Agent {id} in claude session s1"),
+                "status": "done", "platform_source": "claude", "content_session_id": "s1",
+                "agent_id": id, "stop_source": "subagent-stop-hook"});
+            if let Some(kind) = kind {
+                f["agent_type"] = json!(kind);
+            }
+            ("agent-lifecycle".to_owned(), f)
+        };
         assert_eq!(
             kept,
             [
-                mark(json!({"agent_id": "a1", "agent_type": "Explore"})),
-                mark(json!({"agent_id": "a2"})),
-                mark(json!({"agent_id": "a3"})),
-                mark(json!({"agent_id": "x".repeat(128)})),
+                row("a1", Some("Explore")),
+                row("a2", None),
+                row("a3", None),
+                row(&long, None)
             ]
+        );
+        let shown =
+            crate::work_state::section(&entries, crate::db::now_ms(), 3_000, &settings.rules);
+        assert!(
+            !shown.text().contains("agent-lifecycle"),
+            "{}",
+            shown.text()
         );
     }
 
@@ -9086,6 +9173,16 @@ mod tests {
         assert!(run_io(&home, "claude", "SessionStart", &start[..], &mut out).is_err());
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("recording has failed since"), "{out}");
+        // X26: a Codex subagent's start is its session start (Codex's review of docs/subagents.md's
+        // slice 1).
+        let mut out = Vec::new();
+        assert!(run_io(&home, "codex", "SubagentStart", &start[..], &mut out).is_err());
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SubagentStart");
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("recording has failed since"), "{v}");
     }
 
     /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.
