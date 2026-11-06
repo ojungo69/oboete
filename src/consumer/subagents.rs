@@ -98,7 +98,11 @@ fn launched(body: &Value) -> Option<(String, bool)> {
     } else if matches!(body["tool"].as_str(), Some("Agent" | "Task")) {
         let output: Value = serde_json::from_str(body["output"].as_str()?).ok()?;
         let status = output["status"].clone();
-        let in_back = output["isAsync"] == true || status == "async_launched";
+        // As capture reads a response (`capture::launched`; cubic on #850).
+        let in_back = output["isAsync"] == true
+            || output["is_async"] == true
+            || output["is_async"] == 1
+            || status == "async_launched";
         serde_json::json!({"agent_id": output["agentId"], "status": status, "async": in_back})
     } else {
         return None;
@@ -269,6 +273,14 @@ mod tests {
             "tool",
             json!({"tool": "Task", "output": old.to_string()}),
         ));
+        // Run in the background, as capture reads `is_async` too: no return.
+        for (id, flag) in [("b4", json!(true)), ("c4", json!(1))] {
+            let old = json!({"agentId": id, "status": "completed", "is_async": flag});
+            add(ev(
+                "tool",
+                json!({"tool": "Task", "output": old.to_string()}),
+            ));
+        }
         add(Event {
             source: "replay".into(),
             ..ev("tool", json!({"tool": "Read", "agent_id": "a5"}))
@@ -305,8 +317,10 @@ mod tests {
                 (seqs[2], "step".into(), "a1".into(), None, false),
                 (seqs[3], "launch".into(), "a3".into(), None, false),
                 (seqs[4], "launch".into(), "a4".into(), None, true),
-                (seqs[5], "step".into(), "a5".into(), None, false),
-                (seqs[8], "launch".into(), "a8".into(), None, false),
+                (seqs[5], "launch".into(), "b4".into(), None, false),
+                (seqs[6], "launch".into(), "c4".into(), None, false),
+                (seqs[7], "step".into(), "a5".into(), None, false),
+                (seqs[10], "launch".into(), "a8".into(), None, false),
             ]
         );
     }
@@ -389,10 +403,13 @@ mod tests {
         drop(k);
         let k = drain(home.path(), &store);
         assert_eq!(ids(&k), ["c3"]);
-        // A rebuild from raw alone gives the same; an expired record gives none.
+        // A rebuild from raw alone gives the same; an expired record gives none. The rows and the
+        // checkpoint go, not the file, which Windows keeps while it is open.
         store.expire_for_test(&[c]);
+        k.execute("DELETE FROM subagent_facts", []).unwrap();
+        k.execute("DELETE FROM checkpoints WHERE consumer = ?1", [NAME])
+            .unwrap();
         drop(k);
-        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
         let k = drain(home.path(), &store);
         assert!(ids(&k).is_empty());
     }

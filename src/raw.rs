@@ -4757,49 +4757,31 @@ impl Raw {
     }
 
     /// Slice 2: the fields of each imported work state write (an op of an import's source) to
-    /// `list`, as `oboete import claude-mem` brought them in.
-    pub(crate) fn imported_list_fields(&self, list: &str) -> Result<Vec<serde_json::Value>> {
+    /// `list` whose `content_session_id` is one of `sessions`, as `oboete import claude-mem`
+    /// brought them in: the rows of the conversations asked about alone (cubic on #850).
+    pub(crate) fn imported_list_fields(
+        &self,
+        list: &str,
+        sessions: &[&str],
+    ) -> Result<Vec<serde_json::Value>> {
         let bodies: Vec<String> = self
             .conn
             .prepare_cached(
                 "SELECT body FROM ops WHERE type = 'work_state'
                    AND json_extract(body, '$.source') IS NOT NULL
-                   AND json_extract(body, '$.list') = ?1",
+                   AND json_extract(body, '$.list') = ?1
+                   AND json_extract(body, '$.fields.content_session_id')
+                     IN (SELECT value FROM json_each(?2))",
             )?
-            .query_map([list], |r| r.get(0))?
+            .query_map(params![list, serde_json::to_string(sessions)?], |r| {
+                r.get(0)
+            })?
             .collect::<rusqlite::Result<_>>()?;
         Ok((bodies.iter())
             .filter_map(|b| serde_json::from_str::<serde_json::Value>(b).ok())
             .map(|v| v["fields"].clone())
             .filter(serde_json::Value::is_object)
             .collect())
-    }
-
-    /// Slice 2: the label `column` (`cwd` or `repo`) of `agent`'s `session`'s newest event on this
-    /// device that has one, as stored (gated), passing over an event a tombstone targets: a forget
-    /// registered before its purge, or a mask (Codex on slice 2).
-    pub(crate) fn newest_label(
-        &self,
-        agent: &str,
-        session: &str,
-        column: &str,
-    ) -> Result<Option<String>> {
-        use rusqlite::OptionalExtension;
-        anyhow::ensure!(matches!(column, "cwd" | "repo"), "no such label");
-        Ok(self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT r.{column} FROM records r WHERE r.device = ?1 AND r.type = 'event'
-                       AND r.agent = ?2 AND r.session = ?3 AND r.{column} IS NOT NULL
-                       AND NOT EXISTS (SELECT 1 FROM records t WHERE t.type = 'tombstone'
-                         AND t.target_device = r.device AND t.target_seq = r.seq)
-                     ORDER BY r.seq DESC LIMIT 1"
-                ),
-                params![self.device, agent, session],
-                |r| r.get(0),
-            )
-            .optional()?)
     }
 
     /// The targets of `device`'s tombstones after `seq`: what a reader must hide itself until

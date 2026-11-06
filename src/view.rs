@@ -2219,7 +2219,8 @@ impl Viewer {
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
     /// page has it; under its own lock and the readers' hold, from a fresh read to the write:
     /// 404 when it names no listed subagent, 409 `finished` when it is Finished already, 409
-    /// `not_recorded` when its conversation's folder is gone or masked or records nothing now.
+    /// `not_recorded` when its conversation's folder is gone or masked or records nothing now,
+    /// 503 `busy` when another Mark finished holds the lock past the wait.
     /// The page reads My Work again after it, which counts the new stop at once.
     fn my_work_finished(&self, body: &[u8]) -> Response {
         #[derive(serde::Deserialize)]
@@ -2231,8 +2232,9 @@ impl Viewer {
             Ok(p) if p.id.starts_with("s:") && p.id.len() <= 64 => p,
             _ => return refused(400, "bad_request", ""),
         };
-        let _lock = match crate::my_work::finished_lock(&self.home) {
-            Ok(lock) => lock,
+        let _lock = match crate::my_work::finished_lock(&self.home, crate::db::OPEN_WRITE_WAIT) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return refused(503, "busy", ""),
             Err(e) => return failed(&e),
         };
         // raw.db first, then the readers' hold, the order a restore takes them in (Codex on
@@ -2264,7 +2266,13 @@ impl Viewer {
             &folder,
             crate::db::now_ms(),
         ) {
-            Ok(true) => Response::json(&json!({})),
+            Ok(true) => {
+                // As a hook starts one after it writes (Codex and cubic on #850).
+                if let Err(e) = crate::hook::start_worker(&self.home) {
+                    eprintln!("oboete: worker not started: {e:#}");
+                }
+                Response::json(&json!({}))
+            }
             Ok(false) => refused(409, "not_recorded", ""),
             Err(e) => failed(&e),
         }
@@ -6135,15 +6143,29 @@ curate = false
         });
         assert_eq!(answer, (409, Some("finished".into())));
         let before = crate::db::now_ms();
-        let hold = crate::my_work::finished_lock(home).unwrap();
-        let answer = std::thread::scope(|scope| {
-            let posting = scope.spawn(|| post(&explore, "t0k", ours));
+        let wait = crate::db::OPEN_WRITE_WAIT;
+        let hold = crate::my_work::finished_lock(home, wait).unwrap().unwrap();
+        // Another waits for it a bounded time (CodeRabbit on #850).
+        let brief = std::time::Duration::from_millis(50);
+        assert!(
+            crate::my_work::finished_lock(home, brief)
+                .unwrap()
+                .is_none()
+        );
+        let (answer, started) = std::thread::scope(|scope| {
+            let posting = scope.spawn(|| {
+                let before = crate::hook::WORKER_ASKED.get();
+                let answer = post(&explore, "t0k", ours);
+                (answer, crate::hook::WORKER_ASKED.get() - before)
+            });
             std::thread::sleep(std::time::Duration::from_millis(200));
             assert!(!posting.is_finished(), "Mark finished waits for the hold");
             drop(hold);
             posting.join().unwrap()
         });
         assert_eq!(answer, (200, json!({})));
+        // The worker is started after the write, as a hook starts it (Codex and cubic on #850).
+        assert_eq!(started, 1);
         let after = crate::db::now_ms();
         let raw = crate::raw::open(home).unwrap();
         let device = raw.device().to_owned();

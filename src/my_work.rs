@@ -921,9 +921,12 @@ fn read_held(
     for (key, _) in requests.iter().flat_map(|r| &r.owns) {
         *holders.entry(key).or_default() += 1;
     }
-    // Slice 2 of docs/subagents.md: the conversations the answer lists, for their subagents.
+    // Slice 2 of docs/subagents.md: every request's conversations, for their subagents, whatever
+    // the range, as Mark finished looks a subagent up (the page reads all and filters itself;
+    // Codex and cubic on #850).
     let mut listed: BTreeSet<Key> = BTreeSet::new();
     for r in &requests {
+        listed.extend(r.owns.iter().map(|(key, _)| key.clone()));
         let stores = (&raw, &k, &rules, &hidden);
         let found = answer(
             r,
@@ -933,7 +936,6 @@ fn read_held(
             (since, now),
         )?;
         if let Some((v, mut h)) = found {
-            listed.extend(r.owns.iter().map(|(key, _)| key.clone()));
             h.sole = (r.owns.iter())
                 .filter(|(key, _)| holders.get(key) == Some(&1))
                 .map(|(key, _)| key.clone())
@@ -1073,7 +1075,7 @@ pub(crate) fn subagent(
             keyed_print(&crate::my_work_subagents::held(&s), home, &mut key)?
         );
         if shown == id {
-            let folder = crate::my_work_subagents::recorded_folder(raw, &s.conversation)?;
+            let folder = crate::my_work_subagents::recorded_folder(raw, &s)?;
             return Ok(Some((s, folder)));
         }
     }
@@ -1888,27 +1890,42 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
 pub(crate) struct ReviewsLock(#[allow(dead_code)] std::fs::File);
 
 pub(crate) fn reviews_lock(home: &Path) -> Result<ReviewsLock> {
-    Ok(ReviewsLock(state_lock(home, "my-work-reviews.lock")?))
+    let lock = state_file(home, "my-work-reviews.lock")?;
+    lock.lock()?;
+    Ok(ReviewsLock(lock))
 }
 
 /// Slice 2 of docs/subagents.md: Mark finished's own hold, taken before anything else, so two at
 /// once append one stop. No other path takes it: it waits on nothing a forget's purge holds, as
-/// the reviews' lock would (Codex on slice 2).
-pub(crate) fn finished_lock(home: &Path) -> Result<std::fs::File> {
-    state_lock(home, "my-work-finished.lock")
+/// the reviews' lock would (Codex on slice 2). Waited for `wait` at most, none past it, so a
+/// request does not keep its connection waiting behind others (CodeRabbit on #850).
+pub(crate) fn finished_lock(
+    home: &Path,
+    wait: std::time::Duration,
+) -> Result<Option<std::fs::File>> {
+    let lock = state_file(home, "my-work-finished.lock")?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(Some(lock)),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
 }
 
-/// An exclusive hold of `state/<name>`, waited for.
-fn state_lock(home: &Path, name: &str) -> Result<std::fs::File> {
+/// `state/<name>`, opened to be locked.
+fn state_file(home: &Path, name: &str) -> Result<std::fs::File> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let lock = options.open(state.join(name))?;
-    lock.lock()?;
-    Ok(lock)
+    Ok(options.open(state.join(name))?)
 }
 
 /// The checks as `change` leaves them, written whole when it says they changed, under the hold.
@@ -3310,8 +3327,18 @@ mod tests {
             s["conversation"]["id"],
             by_id(&v, "c:claude:s1")["sessions"][0]["id"]
         );
+        assert_eq!(s["conversation"]["id"], "c:claude:s1");
         let id = s["id"].as_str().unwrap();
         assert!(id.starts_with("s:") && !id.contains("agent-x1"), "{s}");
+        // Read for a day, a conversation older than that lists its subagents still, as Mark
+        // finished looks them up (Codex and cubic on #850): the page reads all and filters.
+        h.said("s2", -3 * 86_400_000, "Rename the module.");
+        let old = json!({"tool": "Read", "agent_id": "agent-x3"});
+        h.s.event("tool", "s2", (R, "main"), h.t - 3 * 86_400_000 + 1_000, old);
+        h.run_read();
+        let day = listed(h.s.home.path(), Range::Day, h.t, &tag).unwrap();
+        assert!(ids(&day).iter().all(|id| id != "c:claude:s2"), "{day}");
+        assert_eq!(day["subagents"].as_array().unwrap().len(), 2, "{day}");
         assert_eq!(
             (&s["type"], &s["state"], &s["task"], &s["can_mark"]),
             (
@@ -3326,7 +3353,10 @@ mod tests {
         let target = crate::forget::session_target(home, &format!("{device}:{asked}")).unwrap();
         crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
         let v = page(&h);
-        assert_eq!(v["subagents"], json!([]), "{v}");
+        let left = (v["subagents"].as_array().unwrap().iter())
+            .filter(|s| s["conversation"]["id"] == "c:claude:s1")
+            .count();
+        assert_eq!(left, 0, "{v}");
     }
 
     /// Slice 2 (Codex on slice 2): the owner's actions read My Work under the reviews' lock, which

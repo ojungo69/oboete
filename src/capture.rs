@@ -1068,8 +1068,9 @@ fn agent_field(payload: &Value, key: &str) -> Option<Value> {
 /// Slice 2: what the facts read of a Claude Code `Agent` or `Task` call that started a subagent,
 /// kept apart from its text, which may be cut: the subagent's id (the response's `agentId`), the
 /// response's `status` and whether it ran async. Its task is no part of it: My Work reads the task
-/// from the call's input as it is kept, whole, through the gate as its rules are now before it cuts
-/// it (Codex on slice 2).
+/// from the call's input as it is kept (cleaned and masked whole; an input over the field's cap is
+/// kept as its head and tail, which no longer parses and gives no task), through the gate as its
+/// rules are now before it cuts it (Codex on slice 2).
 fn launched(payload: &Value) -> Option<Value> {
     let tool = str_field(payload, &["tool_name", "toolName", "name"])?;
     if !matches!(tool, "Agent" | "Task") {

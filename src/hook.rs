@@ -3678,7 +3678,7 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
 #[cfg(test)]
 thread_local! {
     /// How many times this thread asked for a worker: a test's look at `start_worker`.
-    static WORKER_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    pub(crate) static WORKER_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// After every append (D6): start a worker when none holds the lock, unless `[worker] autostart =

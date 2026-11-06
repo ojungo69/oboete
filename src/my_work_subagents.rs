@@ -28,7 +28,8 @@ pub(crate) const MAX_LISTED: usize = 300;
 /// and the launch record it was started by.
 #[derive(Debug, Default)]
 struct Seen {
-    last_step: Option<i64>,
+    /// Its newest step's time, and that step's record (device, seq).
+    last_step: Option<(i64, (String, i64))>,
     stops: Vec<i64>,
     /// Its newest type, with that row's time.
     kind: Option<(i64, String)>,
@@ -43,6 +44,8 @@ pub(crate) struct Subagent {
     pub agent_id: String,
     pub agent_type: Option<String>,
     pub last_step: i64,
+    /// Its newest step's record (device, seq), which Mark finished reads the folder of.
+    pub step_record: (String, i64),
     /// When it finished, when a stop came at or after its last step.
     pub finished: Option<i64>,
     pub task: Option<String>,
@@ -169,7 +172,11 @@ pub(crate) fn read(
             s.kind = Some((ts, kind));
         }
         match f.fact {
-            "step" => s.last_step = s.last_step.max(Some(ts)),
+            "step" => {
+                if s.last_step.as_ref().is_none_or(|(at, _)| *at <= ts) {
+                    s.last_step = Some((ts, (device, seq)));
+                }
+            }
             "stop" => s.stops.push(ts),
             _ => {
                 if f.returned {
@@ -184,7 +191,12 @@ pub(crate) fn read(
     // A subagent is listed from its first step: a stop or a launch with no step makes none. The
     // newest last steps first, at most `MAX_LISTED`.
     let mut stepped: Vec<((Key, String), Seen, i64)> = (seen.into_iter())
-        .filter_map(|(id, s)| s.last_step.map(|at| (id, s, at)))
+        .filter_map(|(id, s)| {
+            s.last_step
+                .as_ref()
+                .map(|(at, _)| *at)
+                .map(|at| (id, s, at))
+        })
         .collect();
     stepped.sort_by_key(|(.., at)| std::cmp::Reverse(*at));
     stepped.truncate(MAX_LISTED);
@@ -205,11 +217,15 @@ pub(crate) fn read(
             Some((device, seq, _)) => task_of(raw, device, *seq, rules)?,
             None => None,
         };
+        let Some((_, step_record)) = s.last_step else {
+            continue;
+        };
         out.push(Subagent {
             conversation: key,
             agent_id,
             agent_type: s.kind.map(|(_, kind)| kind),
             last_step,
+            step_record,
             finished,
             task,
         });
@@ -223,7 +239,8 @@ pub(crate) fn read(
 /// platform `claude` when none, as claude-mem reads one).
 fn imported_stops(raw: &Raw, wanted: &HashSet<&Key>) -> Result<HashMap<(Key, String), Vec<i64>>> {
     let mut out: HashMap<(Key, String), Vec<i64>> = HashMap::new();
-    for fields in raw.imported_list_fields(crate::work_state::AGENT_LIFECYCLE)? {
+    let sessions: Vec<&str> = wanted.iter().map(|(_, session)| session.as_str()).collect();
+    for fields in raw.imported_list_fields(crate::work_state::AGENT_LIFECYCLE, &sessions)? {
         let platform = fields["platform_source"].as_str().unwrap_or("claude");
         let (Some(session), Some(agent_id), Some(at)) = (
             fields["content_session_id"].as_str(),
@@ -314,13 +331,21 @@ pub(crate) fn held(s: &Subagent) -> String {
     )
 }
 
-/// The folder the conversation's newest record was recorded in, when that label is whole: the
-/// place Mark finished sends its stop from. None when it is missing or a mask touched it.
-pub(crate) fn recorded_folder(raw: &Raw, key: &Key) -> Result<Option<String>> {
-    let cwd: Option<String> = raw
-        .newest_label(&key.0, &key.1, "cwd")?
-        .filter(|cwd| !cwd.is_empty() && !cwd.contains(crate::redact::MASK));
-    Ok(cwd.filter(|cwd| Path::new(cwd).is_dir()))
+/// The folder the subagent's newest step was recorded in, whichever device recorded it (a copied
+/// home's first device too; cubic on #850), when that label is whole and a directory now: the
+/// place Mark finished sends its stop from. None when the record is gone, the label missing or
+/// masked, or no directory there.
+pub(crate) fn recorded_folder(raw: &Raw, s: &Subagent) -> Result<Option<String>> {
+    let (device, seq) = &s.step_record;
+    let cwd = (raw.at(device, &[*seq])?.into_iter())
+        .find(|r| r.seq == *seq)
+        .and_then(|r| match r.item {
+            Item::Event(e) | Item::Expired(e) => e.cwd,
+            _ => None,
+        });
+    Ok(cwd.filter(|cwd| {
+        !cwd.is_empty() && !cwd.contains(crate::redact::MASK) && Path::new(cwd).is_dir()
+    }))
 }
 
 /// Mark finished: the owner's stop of `s`, sent through the hook's own path as if Claude Code had
@@ -682,6 +707,54 @@ mod tests {
         assert_eq!(task("c3"), None);
     }
 
+    /// Slice 2 (cubic on #850): Mark finished's folder is the one the subagent's newest step was
+    /// recorded in, whichever device recorded it: a copied home's first device's too. One a
+    /// tombstone took, or one no directory now, gives none.
+    #[test]
+    fn the_folder_is_the_newest_steps_of_any_device() {
+        let from = tempfile::tempdir().unwrap();
+        let place = tempfile::tempdir().unwrap();
+        let folder = |name: &str| {
+            let p = place.path().join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let (old, new) = (folder("old"), folder("new"));
+        let mut store = raw::open(from.path()).unwrap();
+        let at = |cwd: &str, ts: i64| Event {
+            cwd: Some(cwd.to_owned()),
+            ..step("s", "a1", ts)
+        };
+        store.append(&at(&old, MIN)).unwrap();
+        store.append(&at(&new, 2 * MIN)).unwrap();
+        let first = store.device().to_owned();
+        drop(drain(from.path(), &store));
+        drop(store);
+        let to = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+            if from.path().join(f).exists() {
+                std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+            }
+        }
+        let mut store = raw::open(to.path()).unwrap();
+        let k = crate::knowledge::open(to.path()).unwrap();
+        let rules = Rules::default();
+        let found = read(&store, &k, &[key("s")], &rules).unwrap();
+        assert_eq!(
+            recorded_folder(&store, &found[0]).unwrap(),
+            Some(new.clone())
+        );
+        std::fs::remove_dir(&new).unwrap();
+        assert_eq!(recorded_folder(&store, &found[0]).unwrap(), None);
+        std::fs::create_dir(&new).unwrap();
+        (store.append_tombstone(Target::Record {
+            device: first,
+            seq: found[0].step_record.1,
+        }))
+        .unwrap();
+        assert_eq!(recorded_folder(&store, &found[0]).unwrap(), None);
+    }
+
     /// Slice 2 (Codex on slice 2): in a home copied from another device's, whose own device the
     /// consumer has no checkpoint of yet, a forget of the first device's record and a stop recorded
     /// there count at once.
@@ -735,10 +808,14 @@ mod tests {
         };
         let mut b2 = stopped("b2", MIN);
         b2["platform_source"] = json!("claude");
+        // Another conversation's row of an id alike is no stop of this one's.
+        let mut other = stopped("c3", 4 * MIN);
+        other["content_session_id"] = json!("u");
         store
             .append_ops(&[
                 (OpKind::WorkState, row("w1", stopped("a1", 3 * MIN))),
                 (OpKind::WorkState, row("w2", b2)),
+                (OpKind::WorkState, row("w3", other)),
             ])
             .unwrap();
         let fields = stopped("c3", 3 * MIN);
