@@ -534,6 +534,14 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
                     body[key] = clean(v);
                 }
             }
+            // Slice 2 (docs/subagents.md): the subagent's type beside its id, as its stop keeps it,
+            // and what the facts read of a call that started one, kept before the output is cut.
+            if let Some(kind) = agent_field(payload, "agent_type") {
+                body["agent_type"] = kind;
+            }
+            if let Some(launched) = launched(payload) {
+                body["launched"] = launched;
+            }
             // When the call began, its record's time being when it ended (#692).
             if let Some(ms) = payload[STARTED].as_i64() {
                 body["started"] = json!(ms);
@@ -572,20 +580,14 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
         // keeps them (`pickAgentField`: a non-empty string of at most 128 UTF-16 units each): no
         // text, and nothing without a session or an id.
         "SubagentStop" => {
-            // Bounded as claude-mem bounds it, and again once cleaned: a `<system-reminder>` block
-            // is taken out of it as of any text (cubic on #847), and a data URI inside it becomes
-            // its longer marker (Sourcery on #847).
-            let bounded = |s: &str| !s.is_empty() && s.encode_utf16().count() <= 128;
-            let field = |key: &str| {
-                (payload[key].as_str())
-                    .filter(|s| bounded(s))
-                    .map(|s| clean(&json!(s)))
-                    .filter(|v| v.as_str().is_some_and(bounded))
-            };
             str_field(payload, &["session_id"]).filter(|s| !s.is_empty())?;
-            let mut body = json!({"agent_id": field("agent_id")?});
-            if let Some(kind) = field("agent_type") {
+            let mut body = json!({"agent_id": agent_field(payload, "agent_id")?});
+            if let Some(kind) = agent_field(payload, "agent_type") {
                 body["agent_type"] = kind;
+            }
+            // Slice 2: the owner's Mark finished, which the viewer sends through this path.
+            if payload[OWNER_MARK] == true {
+                body["marked"] = json!(true);
             }
             (crate::raw::SUBAGENT_STOP, body)
         }
@@ -1045,6 +1047,74 @@ fn segment(key: &str) -> String {
 /// A tool field as text: `clean`, then flattened. `Gate` scans it with the rest of the body.
 fn text(v: &Value) -> String {
     compact(&clean(v))
+}
+
+/// Slice 2: the payload key with which the viewer's Mark finished marks the stop it sends through
+/// the hook's own path as the owner's. No agent sends it.
+pub(crate) const OWNER_MARK: &str = "oboete_marked";
+
+/// X17 (docs/subagents.md): a subagent's id or type as claude-mem keeps it (`pickAgentField`: a
+/// non-empty string of at most 128 UTF-16 units), bounded again once cleaned: a
+/// `<system-reminder>` block is taken out of it as of any text (cubic on #847), and a data URI
+/// inside it becomes its longer marker (Sourcery on #847).
+fn agent_field(payload: &Value, key: &str) -> Option<Value> {
+    let bounded = |s: &str| !s.is_empty() && s.encode_utf16().count() <= 128;
+    (payload[key].as_str())
+        .filter(|s| bounded(s))
+        .map(|s| clean(&json!(s)))
+        .filter(|v| v.as_str().is_some_and(bounded))
+}
+
+/// Slice 2: what the facts read of a Claude Code `Agent` or `Task` call that started a subagent,
+/// kept apart from its text, which may be cut: the subagent's id (the response's `agentId`), the
+/// response's `status`, whether it ran async, and the task it was given (the input's description,
+/// else the response's, else the input's prompt, else the response's), its whitespace folded and
+/// cut to 160 and 500 characters, as claude-mem's agent view reads a launch (`readAgentLaunches`).
+fn launched(payload: &Value) -> Option<Value> {
+    let tool = str_field(payload, &["tool_name", "toolName", "name"])?;
+    if !matches!(tool, "Agent" | "Task") {
+        return None;
+    }
+    let object = |v: &Value| {
+        match v {
+            Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+            Value::Object(_) => Some(v.clone()),
+            _ => None,
+        }
+        .filter(Value::is_object)
+        .unwrap_or(Value::Null)
+    };
+    let response = object(field(
+        payload,
+        &["tool_response", "toolResult", "tool_output"],
+    ));
+    let input = object(field(payload, &["tool_input", "toolInput", "args"]));
+    let id = agent_field(&response, "agentId")?;
+    let said = |v: &Value, key: &str, cap: usize| {
+        let folded = v[key]
+            .as_str()?
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!folded.is_empty()).then(|| folded.chars().take(cap).collect::<String>())
+    };
+    let task = said(&input, "description", 160)
+        .or_else(|| said(&response, "description", 160))
+        .or_else(|| said(&input, "prompt", 500))
+        .or_else(|| said(&response, "prompt", 500));
+    let status = response["status"].as_str();
+    let not_async = !(response["isAsync"] == true
+        || response["is_async"] == true
+        || response["is_async"] == 1
+        || status == Some("async_launched"));
+    let mut out = json!({"agent_id": id, "async": !not_async});
+    if let Some(status) = status {
+        out["status"] = clean(&json!(status));
+    }
+    if let Some(task) = task {
+        out["task"] = clean(&json!(task));
+    }
+    Some(out)
 }
 
 /// A payload value as stored, string by string, so a block never pairs across two fields: closed
@@ -2007,6 +2077,70 @@ mod tests {
         assert!(
             body(&plain).get("agent_id").is_none() && body(&plain).get("interrupted").is_none()
         );
+    }
+
+    /// Slice 2 (docs/subagents.md): a subagent's call keeps its type beside its id, bounded and
+    /// cleaned as its stop's; an `Agent` or `Task` call keeps what it launched beside its text, whole
+    /// when that text is cut under either cut, and an owner's stop says it is the owner's.
+    #[test]
+    fn a_subagents_call_keeps_its_type_and_a_launch_what_it_started() {
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Read", "tool_input": {}, "agent_id": "a1",
+                   "agent_type": "Explore"}),
+        );
+        assert_eq!(body(&e)["agent_type"], "Explore");
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Read", "tool_input": {}, "agent_id": "a1",
+                   "agent_type": "t".repeat(129)}),
+        );
+        assert!(body(&e).get("agent_type").is_none());
+        // The response as Claude Code sends it, its prompt long enough to be cut under both cuts.
+        let long = "p ".repeat(MAX_FIELD_BYTES);
+        let call = |response: Value, input: Value| {
+            json!({"session_id": "s", "tool_name": "Agent", "tool_input": input,
+                   "tool_response": response})
+        };
+        let response = json!({"agentId": "a9", "status": "completed", "isAsync": false,
+                              "prompt": long, "description": "Count the files"});
+        let input = json!({"description": "  Count\n the   files ", "prompt": long,
+                           "subagent_type": "Explore"});
+        for settings in [
+            Settings::default(),
+            with("[capture]\ntool_output = \"head-tail\"\n"),
+        ] {
+            let payload = call(response.clone(), input.clone());
+            let b = body(&events("claude", "PostToolUse", &payload, 0, &settings)[0].event);
+            assert_eq!(
+                b["launched"],
+                json!({"agent_id": "a9", "async": false, "status": "completed",
+                       "task": "Count the files"})
+            );
+        }
+        // The response as text, async; with no description the prompt, cut at 500 characters.
+        let text = json!({"agentId": "a8", "status": "async_launched", "prompt": "x".repeat(600)});
+        let e = one("PostToolUse", call(json!(text.to_string()), json!({})));
+        assert_eq!(body(&e)["launched"]["async"], true);
+        assert_eq!(body(&e)["launched"]["task"].as_str().unwrap().len(), 500);
+        // No id, or another tool, launches nothing.
+        let e = one(
+            "PostToolUse",
+            call(json!({"status": "completed"}), json!({})),
+        );
+        assert!(body(&e).get("launched").is_none());
+        let mut bash = call(response.clone(), input.clone());
+        bash["tool_name"] = json!("Bash");
+        assert!(body(&one("PostToolUse", bash)).get("launched").is_none());
+        // The viewer's Mark finished, through the hook's own path.
+        let mut stop = json!({"session_id": "s", "agent_id": "a9"});
+        assert!(
+            body(&one("SubagentStop", stop.clone()))
+                .get("marked")
+                .is_none()
+        );
+        stop[OWNER_MARK] = json!(true);
+        assert_eq!(body(&one("SubagentStop", stop))["marked"], true);
     }
 
     #[test]
