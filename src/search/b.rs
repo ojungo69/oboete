@@ -4730,6 +4730,37 @@ mod tests {
         );
     }
 
+    /// #843: where a Claude Code prompt was typed (`entrypoint`, #659) is no word of it: a search
+    /// for an entry point finds the prompt whose words say it and not one whose words do not, and
+    /// a found prompt's snippet shows its words alone.
+    #[test]
+    fn an_entry_point_is_found_only_where_a_prompts_words_say_it() {
+        let mut s = Store::new();
+        let typed = |words: &str| serde_json::json!({"prompt": words, "entrypoint": "cli"});
+        let quiet = s.event("prompt", "s", (R, "main"), 1_000, typed("Fix the parser."));
+        let says = s.event(
+            "prompt",
+            "s",
+            (R, "main"),
+            2_000,
+            typed("Run the cli tests."),
+        );
+        s.run();
+        let only = |text: &str| Query {
+            raw: RawArm::Only,
+            ..q(text)
+        };
+        let found = s.query(&only("cli"));
+        assert_eq!(keys(&found), [s.key(says)]);
+        let found = s.query(&only("parser"));
+        assert_eq!(keys(&found), [s.key(quiet)]);
+        assert!(
+            !found.hits[0].snippet.contains("cli"),
+            "{:?}",
+            found.hits[0]
+        );
+    }
+
     #[test]
     fn a_short_japanese_word_boosts_imported_titles_and_bodies() {
         for in_title in [false, true] {

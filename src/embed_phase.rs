@@ -4847,6 +4847,49 @@ mod tests {
         assert!(mapped(&k, &s.key(seq)).is_some());
     }
 
+    /// #843: a prompt an older oboete embedded with its entry point (`{"entrypoint":"cli"}`, #659)
+    /// as a line of its text gets the vector of its words once its row is indexed again: the
+    /// embedder is sent the words, never the entry point.
+    #[test]
+    fn a_prompt_embedded_with_its_entry_point_gets_the_vector_of_its_words() {
+        use crate::knowledge::checkpoint;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        config(&s, &stub);
+        let body = serde_json::json!({"prompt": "Fix the parser.", "entrypoint": "cli"});
+        let seq = s.event("prompt", "s", (R, "main"), 1_000, body);
+        s.run();
+        embed_all(&s);
+        let (key, device) = (s.key(seq), s.raw.device().to_owned());
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let words = sha("Fix the parser.");
+        // As an older oboete left it: the key's vector made of the text with the entry point, none
+        // of the words alone, and no catch-up begun.
+        k.execute(
+            "UPDATE vector_keys SET src_sha = ?1 WHERE kind = 'r' AND key = ?2",
+            params![sha("Fix the parser.\ncli"), key],
+        )
+        .unwrap();
+        k.execute("DELETE FROM vectors WHERE src_sha = ?1", [&words])
+            .unwrap();
+        checkpoint::set_in(&k, checkpoint::SEQS, "fts-text", &device, 0).unwrap();
+        s.run();
+        embed_all(&s);
+        let got: Option<String> = k
+            .query_row(
+                "SELECT src_sha FROM vector_keys WHERE kind = 'r' AND key = ?1 AND skipped IS NULL",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(got, Some(words));
+        let sent = stub.texts().concat();
+        let times = sent.iter().filter(|t| *t == "Fix the parser.").count();
+        assert_eq!(times, 2, "{sent:?}");
+        assert!(!sent.iter().any(|t| t.contains("cli")), "{sent:?}");
+    }
+
     /// Row 46-2: every way a document's stored text changes takes its vector off, and the next
     /// polls give it the vector of the text it has now (embedded, or mapped when that text was
     /// embedded before): a re-derivation, a correction, a tombstone's mask and its removal, a
