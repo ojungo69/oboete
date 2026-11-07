@@ -1809,9 +1809,12 @@ mod tests {
         // 5,000 fresh, 3,000 written at 1.25, 2,000 read at 0.1, and 100 out: USD 0.00905.
         let usd = reservation.cost(&p, usage, true).unwrap();
         assert!((usd - 0.00905).abs() < 1e-12, "{usd}");
-        // A read as its model's (#861): a twentieth on a GPT-6.1 Terra snapshot, the full input
-        // price on an older model, as on a name only like GPT-6's.
+        // A read as its model's (#861, #863): a twentieth on GPT-6.1 Sol, a Sol snapshot and a
+        // GPT-6.1 Terra snapshot, the full input price on an older model, as on a name only like
+        // GPT-6's.
         for (name, want) in [
+            ("gpt-6.1-sol", 0.00895),
+            ("gpt-6.1-sol-2026-10-01", 0.00895),
             ("gpt-6.1-terra-2026-10-01", 0.00895),
             ("gpt-4.1", 0.01085),
             ("gpt-60", 0.01085),

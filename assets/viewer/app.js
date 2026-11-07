@@ -6003,7 +6003,8 @@ async function providerWrite(action, button, body, path, target = null) {
     setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();
     void refreshRests();
-    return true;
+    // A key saved but not kept safely is said so, and is no success to go on from (#863).
+    return kept;
   } catch {
     if (currentSettings(mine)) {
       if (action.op === 'enabled') drawSettings();
@@ -7677,7 +7678,9 @@ function simpleCatalog(f) {
   const field = (name, control, ...notes) => el('label', 'field', el('span', null, t(name)), control, ...notes);
   // 1. Its key: only in its field until "Add" sends it, as every key field's (#807).
   let key = null;
-  if (entry.key_file) {
+  // A key for an HTTP draft of a service that takes one: a draft More settings switched to a CLI
+  // takes none (#863).
+  if (entry.key_file && draft.kind === 'openai') {
     key = el('input');
     key.type = 'text';
     key.autocomplete = 'off';
@@ -7719,7 +7722,9 @@ function simpleCatalog(f) {
   const option = (value, text) => { const node = el('option', null, text); node.value = value; return node; };
   const place = el('select', null, option('last', t('simple_place_last')), option('first', t('simple_place_first')),
     ...simpleSavedChain(f).filter((row) => row.on).map((row) => option(`after:${row.name}`, t('simple_place_after', { name: simpleLabel(row.name) }))));
-  place.value = f.simplePlace ?? 'last';
+  // A place the form no longer offers (the AI it was after turned off since) is last (#863).
+  if (![...place.options].some((node) => node.value === f.simplePlace)) f.simplePlace = 'last';
+  place.value = f.simplePlace;
   place.dataset.simpleFocus = 'catalog.place';
   place.addEventListener('change', () => { f.simplePlace = place.value; });
   const save = el('button', 'small', t('simple_add_save'));
@@ -7769,8 +7774,9 @@ async function simpleAdd(entry, draft, key, place, button) {
   const created = form.providers.findLast((p) => p.selector.source !== 'gemini');
   if (created?.name !== name) return;
   // Its key not typed: it stays off, and its place is still saved.
-  const missing = entry.key_file && !key ? `key:${name}` : null;
-  if (entry.key_file && key) {
+  const keyed = Boolean(entry.key_file) && draft.kind === 'openai';
+  const missing = keyed && !key ? `key:${name}` : null;
+  if (keyed && key) {
     const body = JSON.stringify({ version: form.version, selector: created.selector, key });
     if (!await providerOperation({ op: 'key', selector: created.selector }, control(`key-save:${name}`) ?? button, body, '/key')) {
       return stop(`key:${name}`);

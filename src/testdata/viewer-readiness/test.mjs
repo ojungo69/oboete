@@ -2717,6 +2717,29 @@ console.log('PASS: the caps\' No cap switches');
       choose(simple('catalog.model'),'claude-sonnet-5-5');
       madeNow=await createdBody();
       assert.deepEqual([madeNow.limits.usd_per_mtok_in,madeNow.limits.max_request_tokens],[2,null],'Sonnet: its prices, no cap of its own and none set');
+      // #863: a key saved but not kept safely stops "Add" at its key.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1126');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:false}})];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),focusKey()],[['/api/providers','/api/providers/key'],'key:openai'],
+        'a key not kept: stopped, its key field');
+      // #863: a draft switched to a CLI in More settings takes no key and is made on.
+      await pickOpenAI();posted.length=0;
+      choose(panel.querySelector('.new-provider').querySelectorAll('select')[0],'claude');await settled();
+      assert.equal(simple('catalog.key'),undefined,'a CLI draft: no key field');
+      const cliOn=lineAi([row('alpha'),row('beta'),row('openai',{on:false,key:'none'})],{version:'v2',key_input:true,
+        providers:[...base,{...oaEntry(false,'none'),saved:{enabled:false,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:300,limits:{}}}]});
+      answers=[json(cliOn),json(lineAi([row('alpha'),row('beta'),row('openai',{key:'none'})],{version:'v3',key_input:true,
+        providers:[...base,{...oaEntry(true,'none'),saved:{enabled:true,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:300,limits:{}}}]}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual(steps().map(s=>[s[0],s[1]]),[['/api/providers','create'],['/api/providers','enabled']],'a CLI draft: made, then on, no key');
+      // #863: a place the form no longer offers (the AI after which it was to go turned off) is last.
+      await pickOpenAI();
+      choose(simple('catalog.place'),'after:beta');
+      answers=[json(lineAi([row('alpha'),row('beta',{on:false})],{version:'v2',key_input:true,providers:base}))];
+      flip(simple('on:beta'),false);await settled(8);
+      assert.equal(simple('catalog.place').value,'last','its place no longer offered: last');
       // The key typed: masked as every key field; kept through a redraw; not put back once the
       // draft's address changed in More settings (#807).
       await pickOpenAI();
