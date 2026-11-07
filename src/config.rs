@@ -638,8 +638,14 @@ fn default_budget() -> u32 {
 }
 /// OpenRouter's API.
 pub const OPENROUTER: &str = "https://openrouter.ai/api/v1";
-/// OpenAI's own API (decision 80).
-pub const OPENAI: &str = "https://api.openai.com/v1";
+/// OpenAI's own API's host (decision 80).
+const OPENAI_HOST: &str = "api.openai.com";
+#[cfg(test)]
+thread_local! {
+    /// A loopback URL a test calls and bills as OpenAI's own API.
+    pub(crate) static OPENAI_AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 /// What OpenAI's GPT-5.6 and later bill a prompt token written to their cache, in input prices
 /// (developers.openai.com, the prompt caching guide, 2026-11-07).
 const OPENAI_CACHE_WRITE: f64 = 1.25;
@@ -1168,13 +1174,18 @@ pub(crate) fn openrouter(base_url: &str) -> bool {
         .eq_ignore_ascii_case(OPENROUTER)
 }
 
-/// Whether an entry's calls go to OpenAI's own API, by the URL as written in any case (decision
-/// 80).
+/// Whether an entry's calls go to OpenAI's own API (decision 80): by its URL's host in any case,
+/// whatever its port or path, as the page knows its prices and the viewer reads its model list
+/// (Codex's review of 80a: `https://api.openai.com:443/v1` is OpenAI's too).
 pub(crate) fn openai_api(base_url: &str) -> bool {
-    base_url
-        .trim()
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(OPENAI)
+    #[cfg(test)]
+    if OPENAI_AT.with(|at| at.borrow().as_deref() == Some(base_url)) {
+        return true;
+    }
+    base_url.trim().parse::<ureq::http::Uri>().is_ok_and(|u| {
+        u.host()
+            .is_some_and(|h| h.eq_ignore_ascii_case(OPENAI_HOST))
+    })
 }
 
 fn is_free(model: &str) -> bool {

@@ -5995,8 +5995,12 @@ async function providerWrite(action, button, body, path, target = null) {
   }
 }
 
-// The services added off from "Add an AI" in this page, waiting for their first key (decision 80).
-const keyTurnsOn = new Set();
+// The entry "Add an AI" made off in this page, waiting for its first key (decision 80): its selector,
+// and the settings' version its creation answered with. Its first key save turns it on only while
+// the settings are still at that version: a write since (it turned on or off, removed, another entry
+// added) or a read that found them changed ends the wait, as its save's refusal or lost answer does
+// (Codex's review of 80a).
+let keyTurnsOn = null;
 
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
 // form state; a redraw puts one being typed back into the field drawn for the same entry
@@ -6036,10 +6040,15 @@ function providerKeyField(provider, simple = false) {
     i.value = '';
     void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key',
       simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` })).then((saved) => {
-      // Decision 80: the first key saved to a service added off turns it on; a key changed later
-      // does not.
-      if (!saved || !keyTurnsOn.delete(provider.name)) return;
+      // Decision 80: the first key saved to the entry added off turns that entry on; a key changed
+      // later does not.
+      const wait = keyTurnsOn;
+      if (wait?.selector !== selectorKey(provider.selector)) return;
+      keyTurnsOn = null;
+      if (!saved || form?.version !== wait.version) return;
       const on = [...$('panel').querySelectorAll('input')].find((n) => n.dataset.simpleFocus === `on:${provider.name}`);
+      // Unchanged since its creation, the name has no other entry: "Add an AI" adds none to a name
+      // it has.
       if (on) void simpleProviderToggle(provider.name, true, on);
     });
   });
@@ -7660,7 +7669,10 @@ function simpleCatalog(f) {
   save.addEventListener('click', () => {
     if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
     void providerOperation({ op: 'create', entry: providerBody(draft) }, save, null, '', () => createdFocus(draft.name)).then((made) => {
-      if (made && entry.key_file && !draft.enabled) keyTurnsOn.add(draft.name);
+      // The entry made, found as `createdFocus` finds it: the last one not Gemini's automatic one.
+      const created = made && entry.key_file && !draft.enabled ? form.providers.findLast((p) => p.selector.source !== 'gemini') : null;
+      keyTurnsOn = created?.name === draft.name && !created.saved.enabled
+        ? { selector: selectorKey(created.selector), version: form.version } : null;
     });
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));

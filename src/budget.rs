@@ -1740,12 +1740,27 @@ mod tests {
         assert!((usd - 0.00675).abs() < 1e-12, "{usd}");
     }
 
-    /// Decision 80: an entry of OpenAI's own API is counted as billed: of its reported prompt, the
-    /// tokens written to its cache at 1.25 times the input price and those read at a tenth; where
-    /// its usage is not known its input is priced at 1.25 times, so a request at the edge of the
-    /// month's cap is refused rather than overspent.
+    /// Decision 80: an entry of OpenAI's own API, its host in any case and its port written or not,
+    /// is counted as billed: of its reported prompt, the tokens written to its cache at 1.25 times
+    /// the input price and those read at a tenth; wherever its usage is not known (admission, the
+    /// reservation, a call whose usage never comes back, recuration's estimate) its input at 1.25
+    /// times, so a request at the edge of the month's cap is refused rather than overspent.
     #[test]
     fn an_openai_calls_cache_writes_are_counted_as_billed() {
+        for url in [
+            "https://api.openai.com/v1",
+            "https://API.OpenAI.com:443/v1/",
+            " https://api.openai.com/v1",
+        ] {
+            assert!(crate::config::openai_api(url), "{url}");
+        }
+        for url in [
+            "https://api.openai.com.example.net/v1",
+            "https://openrouter.ai/api/v1",
+            "not a url",
+        ] {
+            assert!(!crate::config::openai_api(url), "{url}");
+        }
         let limits = Limits {
             max_output_tokens: 100,
             usd_per_mtok_in: 1.0,
@@ -1756,7 +1771,7 @@ mod tests {
         let db = open(home.path()).unwrap();
         let mut p = entry("p", limits);
         if let Provider::Openai { base_url, .. } = &mut p {
-            *base_url = crate::config::OPENAI.into();
+            *base_url = "https://api.openai.com:443/v1".into();
         }
         assert_eq!(p.input_weight(), 1.25);
         // 60,000 tokens in and 100 out at USD 1 a million each: USD 0.0601 at the input price,
@@ -1766,9 +1781,20 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let reservation = reserve(&db, &p, "curator", "s", 10_000, 5.0, &[])
+        let reservation = reserve(&db, &p, "curator", "s", 60_000, 5.0, &[])
             .unwrap()
             .unwrap();
+        let priced = [
+            providers_db::reserved_usd_this_month(&db).unwrap(),
+            reservation.cost(&p, Usage::default(), true).unwrap(),
+            most_usd(None, std::slice::from_ref(&p), 60_000, 1)
+                .unwrap()
+                .unwrap(),
+        ];
+        assert!(
+            priced.iter().all(|u| (u - 0.0751).abs() < 1e-12),
+            "{priced:?}"
+        );
         let usage = Usage {
             prompt: Some(10_000),
             completion: Some(100),

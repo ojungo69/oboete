@@ -393,7 +393,7 @@ pub(crate) fn probe_estimate(p: &Provider) -> u32 {
         } => budget::estimate(
             &request(
                 *api,
-                reaches_openai(base_url),
+                config::openai_api(base_url),
                 model,
                 PROBE_PROMPT,
                 &probe_schema(),
@@ -2042,21 +2042,6 @@ fn reaches_openrouter(base_url: &str) -> bool {
     config::openrouter(base_url)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// A loopback URL a test calls as OpenAI's.
-    static OPENAI_AT: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn reaches_openai(base_url: &str) -> bool {
-    #[cfg(test)]
-    if OPENAI_AT.with(|at| at.borrow().as_deref() == Some(base_url)) {
-        return true;
-    }
-    config::openai_api(base_url)
-}
-
 /// `http_call`'s request, as it is given.
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
 fn http_send(
@@ -2072,7 +2057,8 @@ fn http_send(
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
 ) -> Result<Answer, CallError> {
-    let body = request(api, reaches_openai(base_url), model, prompt, schema, extra);
+    let openai = config::openai_api(base_url);
+    let body = request(api, openai, model, prompt, schema, extra);
     let url = endpoint(base_url, api);
     // ureq drops `Authorization` on a redirect, not the Messages API's `x-api-key`: none is
     // followed, so the key reaches no host but `base_url`'s.
@@ -2174,7 +2160,12 @@ fn http_send(
     if api == Api::Anthropic {
         return anthropic_answer(&v, rate);
     }
-    let usage = usage_openai(&v);
+    let mut usage = usage_openai(&v);
+    // Decision 80: tokens written to a prompt cache are billed as OpenAI's own API bills them;
+    // another host's are not read, so its spend is counted as before (Codex's review of 80a).
+    if !openai {
+        usage.written = None;
+    }
     let choice = &v["choices"][0];
     // claude-mem 15.0.2 (#2995): a model that spends its whole output on reasoning answers
     // nothing, cut at its length limit, and fails as such.
@@ -6832,23 +6823,30 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     }
 
     /// Decision 80: the connection test to OpenAI's own API sends the same shape, its 128-token
-    /// bound as `max_completion_tokens`; and a usage that names the tokens written to the cache is
-    /// read with them.
+    /// bound as `max_completion_tokens`, and its cost counts the tokens its usage says were written
+    /// to the cache; another host's request and cost are as before, a written count in its usage
+    /// left out (Codex's review of 80a).
     #[test]
-    fn an_openai_connection_test_sends_its_shape_and_reads_its_cache_writes() {
+    fn an_openai_connection_test_sends_its_shape_and_counts_its_cache_writes() {
         let home = tempfile::tempdir().unwrap();
         let conn = providers_db::open(home.path()).unwrap();
         let body = json!({"choices": [{"message": {"content": "{\"ok\":true}"}}],
             "usage": {"prompt_tokens": 1200, "completion_tokens": 4,
                 "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1100}}});
+        let priced = |url: String| {
+            let mut p = stub(url);
+            if let Provider::Openai { model, limits, .. } = &mut p {
+                *model = "gpt-6-luna".into();
+                limits.usd_per_mtok_in = 1.0;
+                limits.usd_per_mtok_out = 1.0;
+            }
+            p
+        };
+        let usd = |result: &Value| result["usd"].as_f64().unwrap_or(f64::NAN);
         let (url, request) = serve_once(body.to_string().into_bytes(), "");
-        OPENAI_AT.set(Some(url.clone()));
-        let mut p = stub(url);
-        if let Provider::Openai { model, .. } = &mut p {
-            *model = "gpt-6-luna".into();
-        }
-        let result = probe(&conn, &p, 5.0, &|| Ok(None)).unwrap();
-        OPENAI_AT.set(None);
+        config::OPENAI_AT.set(Some(url.clone()));
+        let result = probe(&conn, &priced(url), 5.0, &|| Ok(None)).unwrap();
+        config::OPENAI_AT.set(None);
         assert_eq!(result["status"], "ok", "{result}");
         let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
         let sent: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
@@ -6862,7 +6860,18 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         );
         assert!(sent.get("max_tokens").is_none(), "{sent}");
         assert_eq!(sent["prompt_cache_options"], json!({"mode": "explicit"}));
-        assert_eq!(usage_openai(&body).written, Some(1100));
+        // 100 fresh and 1,100 written at 1.25 times, and 4 out, at USD 1 a million: USD 0.001479.
+        assert!((usd(&result) - 0.001479).abs() < 1e-12, "{result}");
+        let (url, request) = serve_once(body.to_string().into_bytes(), "");
+        let result = probe(&conn, &priced(url), 5.0, &|| Ok(None)).unwrap();
+        let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            [&sent["max_tokens"], &sent["temperature"]],
+            [&json!(128), &json!(0.2)]
+        );
+        // Its 1,200 prompt tokens once, and 4 out: USD 0.001204.
+        assert!((usd(&result) - 0.001204).abs() < 1e-12, "{result}");
     }
 
     #[test]

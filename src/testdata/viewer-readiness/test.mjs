@@ -2589,19 +2589,46 @@ console.log('PASS: the caps\' No cap switches');
         'added off, with its prices and its largest request');
       assert(options('openai').some(o=>o[0]==='gpt-6.1-terra'),'its line chooses among its priced models');
       assert(text(lineOf('openai')).includes('gpt-6.1-terra ($1.00 / $5.00)'),'with their prices');
-      answers=[json({...withOa(false,{version:'v3'}),key_saved:{durable:true}}),json(withOa(true,{version:'v4'})),json(withOa(true,{version:'v5'}))];
+      // A key save writes no config.toml: its answer keeps the version (settings::save_key).
+      answers=[json({...withOa(false,{version:'v2'}),key_saved:{durable:true}}),json(withOa(true,{version:'v3'})),json(withOa(true,{version:'v4'}))];
       typeIn(simple('key:openai'),'made-up-openai-key-1108');
       simple('key-save:openai').click();await settled(8);
       const keyAt=posted.findIndex(p=>p.url==='/api/providers/key');
       const onAt=sent().findIndex(b=>b.action?.op==='enabled');
       assert.deepEqual([keyAt>=0,onAt>keyAt,sent()[onAt]?.action.enabled,sent()[onAt]?.action.selector],[true,true,true,{source:'config',index:1}],
         'its first key saved, then it is turned on');
-      f=draw(withOa(false,{version:'v6',chain:[row('alpha'),row('openai',{on:false,key:'missing',model_rule:'fixed',effective_model:'gpt-6-luna'})]}));
-      const before=posted.length;
-      answers=[json({...withOa(false,{version:'v7'}),key_saved:{durable:true}}),json(withOa(true,{version:'v8'})),json(withOa(true,{version:'v9'}))];
-      typeIn(simple('key:openai'),'made-up-openai-key-1109');
-      simple('key-save:openai').click();await settled(8);
-      assert.deepEqual([posted.length-before,posted.at(-1)?.url],[1,'/api/providers/key'],'a key saved later turns nothing on');
+      const offOa={on:false,key:'missing',model_rule:'fixed',effective_model:'gpt-6-luna'};
+      // Saved again, from each key save on: what it posted.
+      const keySave=async(name,version,answer=null)=>{
+        const from=posted.length;
+        answers=[answer??json({...withOa(false,{version}),key_saved:{durable:true}}),json(withOa(true,{version:version+'-on'})),json(withOa(true,{version:version+'-chain'}))];
+        typeIn(simple(`key:${name}`),'made-up-key-1110');
+        simple(`key-save:${name}`).click();await settled(8);
+        return posted.slice(from).map(p=>p.url);
+      };
+      f=draw(withOa(false,{version:'v6',chain:[row('alpha'),row('openai',offOa)]}));
+      assert.deepEqual(await keySave('openai','v6'),['/api/providers/key'],'a key saved later turns nothing on');
+      // Added again from "Add an AI": its wait ends with any write since, with a key saved to another
+      // entry it goes on, and its own save's lost answer ends it.
+      const addOa=async(version,chain=[row('alpha'),row('openai',offOa)])=>{
+        f=draw(lineAi([row('alpha')],{key_input:true}));
+        panel.querySelectorAll('button').find(b=>text(b)===ctx.t('simple_catalog_choose',{name:ctx.t('simple_catalog_openai')})).click();
+        await settled();
+        answers=[json(withOa(false,{version,chain}))];
+        simple('catalog.save').click();await settled();
+      };
+      await addOa('v10');
+      f=draw(withOa(false,{version:'v11',chain:[row('alpha'),row('openai',offOa)]}));
+      assert.deepEqual(await keySave('openai','v11'),['/api/providers/key'],'a write since its creation: its key turns nothing on');
+      await addOa('v20',[row('alpha',{key:'missing'}),row('openai',offOa)]);
+      assert.deepEqual(await keySave('alpha','v20'),['/api/providers/key'],'a key saved to another entry turns nothing on');
+      f=draw(withOa(false,{version:'v20',chain:[row('alpha'),row('openai',offOa)]}));
+      assert.deepEqual(await keySave('openai','v20'),['/api/providers/key','/api/providers'],'its own first key still turns it on');
+      await addOa('v30');
+      assert.deepEqual(await keySave('openai','v30',Promise.reject(new Error('invented lost answer'))),['/api/providers/key'],
+        'a lost answer turns nothing on');
+      f=draw(withOa(false,{version:'v30',chain:[row('alpha'),row('openai',offOa)]}));
+      assert.deepEqual(await keySave('openai','v30'),['/api/providers/key'],'nor a key saved after it');
       // The page's own models a list read no longer has are not offered (a service retires models).
       vm.runInContext('forgetModelLists()',ctx);
       f=draw(one({effective_model:'model-alpha'}));
