@@ -7694,7 +7694,8 @@ function simpleCatalog(f) {
     // Its prices and largest request with it, as a line's choice sets them (`linePricedModel`): the
     // model's step, or the draft's own where it is tighter or the model has none. The draft then holds
     // them, so what More settings changes after is what "Add" sends.
-    const known = prices[draft.model];
+    // Looked up at the draft's address now: More settings may have changed it since the form was drawn.
+    const known = MODEL_PRICES[urlHost(draft.base_url)]?.[draft.model];
     if (!known) return;
     const [usdIn, usdOut, step] = known;
     const own = draft.limits.max_request_tokens.trim() === '' ? null : Number(draft.limits.max_request_tokens);

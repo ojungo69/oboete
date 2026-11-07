@@ -2707,7 +2707,7 @@ console.log('PASS: the caps\' No cap switches');
       assert.deepEqual([madeNow.base_url,madeNow.limits.usd_per_mtok_in,madeNow.model],['https://proxy.example/v1',3,'gpt-6.1-terra'],
         'an address and a price typed after: sent as typed');
       await pickOpenAI();
-      typeIn(newField('providers.base_url'),'https://proxy.example/v1');ctx.ui.drawSettings();
+      typeIn(newField('providers.base_url'),'https://proxy.example/v1');
       choose(simple('catalog.model'),'gpt-6.1-terra');
       madeNow=await createdBody();
       assert.deepEqual([madeNow.base_url,madeNow.limits.usd_per_mtok_in],['https://proxy.example/v1',0.1],
