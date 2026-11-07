@@ -609,6 +609,9 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .provider-key input { -webkit-text-security: disc; max-width: 100%; min-width: 0; }
 .provider-test { margin-top: 12px; }
 .provider-test > button { margin-top: 6px; }
+/* Decision 79: what a line changes less often, in one fold, nothing folded within it. */
+.settings .simple-advanced { margin-top: 12px; }
+.provider-limits h5 { margin: 14px 0 4px; font-size: 13px; font-weight: 600; }
 .test-preview { padding: 10px 14px; margin-top: 10px; background: var(--surface-2); border-radius: var(--radius-m); }
 .test-preview p, .test-result p { margin: 6px 0; }
 .test-preview pre { max-height: 10rem; overflow: auto; }
