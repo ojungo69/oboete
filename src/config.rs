@@ -844,12 +844,14 @@ fn default_providers() -> Vec<Provider> {
         "openrouter",
         OPENROUTER,
         "OPENROUTER_API_KEY.md",
-        "nvidia/nemotron-3-super-120b-a12b:free",
+        // Its free models, each answering the connection test's strict schema four times in four
+        // (2026-11-08); the ones named before left OpenRouter's list.
+        "nvidia/nemotron-3.5-super-vl:free",
         // Unset: its calls a day are a fifth of what its key may request, and a fifth of the
         // least OpenRouter gives any account until that is read (#238).
         None,
         false,
-        serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
+        serde_json::json!({"models": ["dots-studio/dots-3-note-preview:free"], "provider": {"require_parameters": true}}),
     );
     let mut chain = vec![
         openai(

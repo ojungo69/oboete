@@ -2587,89 +2587,111 @@ console.log('PASS: the caps\' No cap switches');
       assert(text(lineOf('anthropic')).includes('百万トークンあたりの米ドル'),'both languages');
       ctx.ui.setLang('en');
     }
-    // Decision 80: OpenAI's API is offered after Anthropic, added off with its prices and its
-    // largest request under its price step, and turned on by the first key saved to it; a key
-    // changed later turns nothing on.
+    // Decision 80: "Add AI" shows the services as buttons, OpenAI's right after Anthropic's, one
+    // already added marked and going to its line. A chosen one asks its key, model and place; "Add"
+    // creates it off, saves its key, turns it on and saves its place, each with the version the
+    // answer before gave; a step refused or unanswered stops there, its line open on what is missing.
     {
       vm.runInContext('forgetModelLists()',ctx);
       const open=name=>{const fold=lineOf(name).querySelector('details');fold.open=true;fold.isConnected=true;
         for(const cb of fold.listeners.toggle||[])cb({target:fold});};
       const options=name=>simple(`model:${name}`).options.map(o=>[o.value,o.disabled]);
+      const choose=(node,value)=>{node.value=value;for(const cb of node.listeners.change||[])cb({target:node});};
+      const focusKey=()=>document.activeElement?.dataset?.simpleFocus;
       const names=vm.runInContext('AI_CATALOG.map(e=>e.name)',ctx);
       assert.equal(names.indexOf('openai'),names.indexOf('anthropic')+1,'OpenAI right after Anthropic');
-      const oaLimits={max_request_tokens:272000,daily_tokens:null,usd_per_mtok_in:0.1,usd_per_mtok_out:0.5,max_output_tokens:4000};
-      const oa=on=>({name:'openai',selector:{source:'config',index:1},saved:{enabled:on,kind:'openai',base_url:'https://api.openai.com/v1',
-        api:'openai',model:'gpt-6-luna',key:on?'ok':'missing',timeout_s:90,subscription:false,daily_budget:null,limits:oaLimits},
-        effective:{on,order:1,model:'gpt-6-luna',timeout_s:90}});
-      const withOa=(on,more={})=>lineAi([row('alpha'),row('openai',{on,key:on?'ok':'missing',model_rule:'fixed',effective_model:'gpt-6-luna'})],
-        {key_input:true,providers:[entry('alpha',0),oa(on)],...more});
-      f=draw(lineAi([row('alpha')],{key_input:true}));
-      const choose=panel.querySelectorAll('button').find(b=>text(b)===ctx.t('simple_catalog_choose',{name:ctx.t('simple_catalog_openai')}));
-      choose.click();await settled();
-      answers=[json(withOa(false,{version:'v2'}))];
-      simple('catalog.save').click();await settled();
-      const made=sent().at(-1).action;
-      assert.deepEqual([made.op,made.entry.enabled,made.entry.base_url,made.entry.api,made.entry.model,made.entry.limits.max_request_tokens,
-        made.entry.limits.usd_per_mtok_in,made.entry.limits.usd_per_mtok_out],['create',false,'https://api.openai.com/v1','openai','gpt-6-luna',272000,0.1,0.5],
-        'added off, with its prices and its largest request');
-      assert(options('openai').some(o=>o[0]==='gpt-6.1-terra'),'its line chooses among its priced models');
-      assert(text(lineOf('openai')).includes('gpt-6.1-terra ($1.00 / $5.00)'),'with their prices');
-      // A key save writes config.toml (the entry's managed key file): its answer has another version.
-      answers=[json({...withOa(false,{version:'v3'}),key_saved:{durable:true}}),json(withOa(true,{version:'v4'})),json(withOa(true,{version:'v5'}))];
-      typeIn(simple('key:openai'),'made-up-openai-key-1108');
-      simple('key-save:openai').click();await settled(8);
-      const keyAt=posted.findIndex(p=>p.url==='/api/providers/key');
-      const onAt=sent().findIndex(b=>b.action?.op==='enabled');
-      assert.deepEqual([keyAt>=0,onAt>keyAt,sent()[onAt]?.action.enabled,sent()[onAt]?.action.selector],[true,true,true,{source:'config',index:1}],
-        'its first key saved, then it is turned on');
-      const offOa={on:false,key:'missing',model_rule:'fixed',effective_model:'gpt-6-luna'};
-      // Saved again, from each key save on: what it posted.
-      const keySave=async(name,version,answer=null)=>{
-        const from=posted.length;
-        answers=[answer??json({...withOa(false,{version:version+'-key'}),key_saved:{durable:true}}),json(withOa(true,{version:version+'-on'})),
-          json(withOa(true,{version:version+'-chain'}))];
-        typeIn(simple(`key:${name}`),'made-up-key-1110');
-        simple(`key-save:${name}`).click();await settled(8);
-        return posted.slice(from).map(p=>p.url);
-      };
-      f=draw(withOa(false,{version:'v6',chain:[row('alpha'),row('openai',offOa)]}));
-      assert.deepEqual(await keySave('openai','v6'),['/api/providers/key'],'a key saved later turns nothing on');
-      // Added again from "Add an AI": its key turns it on only as the page's next write since.
-      const addOa=async(version,more={})=>{
-        f=draw(lineAi([row('alpha')],{key_input:true}));
-        panel.querySelectorAll('button').find(b=>text(b)===ctx.t('simple_catalog_choose',{name:ctx.t('simple_catalog_openai')})).click();
-        await settled();
-        answers=[json(withOa(false,{version,chain:[row('alpha'),row('openai',offOa)],...more}))];
-        simple('catalog.save').click();await settled();
-      };
-      await addOa('v10');
-      answers=[json(withOa(true,{version:'v11'}))];
-      flip(simple('on:openai'),true);await settled(8);
-      answers=[json(withOa(false,{version:'v10',chain:[row('alpha'),row('openai',offOa)]}))];
-      flip(simple('on:openai'),false);await settled(8);
-      assert.deepEqual(await keySave('openai','v12'),['/api/providers/key'],'a write since its creation, even one undone: its key turns nothing on');
-      await addOa('v15');
-      answers=[json(withOa(false,{version:'v16',chain:[row('alpha',{on:false}),row('openai',offOa)]}))];
-      flip(simple('on:alpha'),false);await settled(8);
-      assert.deepEqual(await keySave('openai','v16'),['/api/providers/key'],'a settings write since its creation: its key turns nothing on');
-      await addOa('v20');
-      // A model list's 409 reads the settings again.
-      reread=withOa(false,{version:'v21',chain:[row('alpha'),row('openai',offOa)]});answers=[json({code:'stale',field:''},409)];
-      open('alpha');await settled();
+      const oaLimits={max_request_tokens:272000,daily_tokens:null,usd_per_mtok_in:1,usd_per_mtok_out:5,max_output_tokens:4000};
+      const oaEntry=(on,key)=>({name:'openai',selector:{source:'config',index:2},saved:{enabled:on,kind:'openai',base_url:'https://api.openai.com/v1',
+        api:'openai',model:'gpt-6.1-terra',key,timeout_s:90,subscription:false,daily_budget:null,limits:oaLimits},
+        effective:{on,order:2,model:'gpt-6.1-terra',timeout_s:90}});
+      const oaRow=(on,key)=>row('openai',{on,key,model_rule:'fixed',effective_model:'gpt-6.1-terra'});
+      const base=[entry('alpha',0),entry('beta',1)];
+      const before=()=>lineAi([row('alpha'),row('beta')],{key_input:true,providers:base});
+      const state=(version,{on=false,key='missing',order=['alpha','beta','openai']}={})=>lineAi(
+        order.map(n=>n==='openai'?oaRow(on,key):row(n)),{version,key_input:true,providers:[...base,oaEntry(on,key)]});
+      const choice=name=>simple(`catalog:${name}`);
+      const steps=()=>posted.map(p=>{const b=JSON.parse(p.body);return [p.url,b.action?.op??null,b.version];});
+      const pickOpenAI=async()=>{f=draw(before());choice('openai').click();await settled();};
+      // Chosen: its key field focused; its models with their prices; its place last, first, or after
+      // each AI in use.
+      await pickOpenAI();
+      const v0=ctx.ui.getForm().version;
+      assert.deepEqual([focusKey(),text(choice('openai')).includes(ctx.t('simple_catalog_added'))],['catalog.key',false],'chosen: its key field');
+      assert.deepEqual(simple('catalog.model').options.map(o=>[o.value,text(o)]),
+        [['gpt-6-luna','gpt-6-luna ($0.10 / $0.50)'],['gpt-6.1-terra','gpt-6.1-terra ($1.00 / $5.00)']],'its models with their prices');
+      assert.deepEqual(simple('catalog.place').options.map(o=>o.value),['last','first','after:alpha','after:beta'],'its place');
+      // Added with its key, Terra, after alpha.
+      choose(simple('catalog.model'),'gpt-6.1-terra');choose(simple('catalog.place'),'after:alpha');
+      typeIn(simple('catalog.key'),'made-up-add-key-1112');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json(state('v4',{on:true,key:'ok'})),
+        json(state('v5',{on:true,key:'ok',order:['alpha','openai','beta']}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual(steps(),[['/api/providers','create',v0],['/api/providers/key',null,'v2'],['/api/providers','enabled','v3'],['/api/settings',null,'v4']],
+        'create, key, on, place: each with the version the answer before gave');
+      const [made,keyed,on,placedBody]=posted.map(p=>JSON.parse(p.body));
+      assert.deepEqual([made.action.entry.enabled,made.action.entry.model,made.action.entry.limits.usd_per_mtok_in,
+        made.action.entry.limits.usd_per_mtok_out,made.action.entry.limits.max_request_tokens],[false,'gpt-6.1-terra',1,5,272000],
+        'made off, with its model, its prices and its largest request');
+      assert.deepEqual([keyed.selector,on.action.selector,on.action.enabled,placedBody.chain.map(r=>r.name)],
+        [{source:'config',index:2},{source:'config',index:2},true,['alpha','openai','beta']],'its key, then on, then after alpha');
+      assert.deepEqual(posted.filter(p=>p.body.includes('made-up-add-key-1112')).map(p=>p.url),['/api/providers/key'],'the key in its own save alone');
+      assert.deepEqual([focusKey(),Boolean(simple('catalog.key'))],['model:openai',false],'done: its line on its model');
+      assert(text(choice('openai')).includes(ctx.t('simple_catalog_added')),'marked added');
+      choice('openai').click();
+      assert.equal(focusKey(),'on:openai','an added one goes to its line');
+      // Its key refused: stopped there, on its key field; adding it again goes to its line.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1113');
+      answers=[json(state('v2')),json({code:'bad_key',field:'providers.key'},422)];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),focusKey()],[['/api/providers','/api/providers/key'],'key:openai'],'a key refused: stopped, its key field');
+      // Its switch refused: stopped there, on its switch.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1114');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json({code:'bad_request'},400)];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[1]),focusKey()],[['create',null,'enabled'],'on:openai'],'its switch refused: stopped, its switch');
+      // Its place's answer lost: stopped there, on its arrows.
+      await pickOpenAI();posted.length=0;
+      choose(simple('catalog.place'),'first');typeIn(simple('catalog.key'),'made-up-add-key-1115');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json(state('v4',{on:true,key:'ok'})),
+        Promise.reject(new Error('invented lost answer'))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),steps().at(-1)&&JSON.parse(posted.at(-1).body).chain.map(r=>r.name),focusKey()],
+        [['/api/providers','/api/providers/key','/api/providers','/api/settings'],['openai','alpha','beta'],'move:openai:-1'],
+        'first: its place sent; lost, stopped on its arrows');
+      // No key typed: made off, its place saved, nothing turned on, its line on its key field.
+      await pickOpenAI();posted.length=0;
+      choose(simple('catalog.place'),'first');
+      answers=[json(state('v2')),json(state('v3',{order:['openai','alpha','beta']}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>[s[0],s[1]]),focusKey()],[[['/api/providers','create'],['/api/settings',null]],'key:openai'],
+        'no key: made, placed, off, on its key field');
+      // A version the file no longer has, at its creation: the settings read again, nothing else sent.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1116');
+      reread=before();answers=[json({code:'stale',field:''},409)];
+      simple('catalog.save').click();await settled(16);
       reread=null;
-      assert.equal(ctx.ui.getForm().version,'v21','the settings read again');
-      assert.deepEqual(await keySave('openai','v21'),['/api/providers/key'],'a settings read since its creation: its key turns nothing on');
-      const alphaOff={...entry('alpha',0)};alphaOff.saved={...alphaOff.saved,enabled:false};
-      const alphaWaits={chain:[row('alpha',{on:false,key:'missing'}),row('openai',offOa)],providers:[alphaOff,oa(false)]};
-      await addOa('v30',alphaWaits);
-      assert.deepEqual(await keySave('alpha','v30',json({...withOa(false,{...alphaWaits,version:'v30-key'}),key_saved:{durable:true}})),
-        ['/api/providers/key'],'a key saved to another entry turns nothing on');
-      assert.deepEqual(await keySave('openai','v31'),['/api/providers/key'],'nor, after it, its own key');
-      await addOa('v40');
-      assert.deepEqual(await keySave('openai','v40',Promise.reject(new Error('invented lost answer'))),['/api/providers/key'],
-        'a lost answer turns nothing on');
-      f=draw(withOa(false,{version:'v40',chain:[row('alpha'),row('openai',offOa)]}));
-      assert.deepEqual(await keySave('openai','v41'),['/api/providers/key'],'nor a key saved after it');
+      assert.deepEqual([steps().map(s=>s[1]),posted.some(p=>p.body.includes('made-up-add-key-1116'))],[['create'],false],
+        'a 409 at its creation: nothing more sent, the key never');
+      // Its creation refused: stopped; the form stays, its key field not filled again (#807).
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1117');
+      answers=[json({code:'bad_request',field:'providers.model'},400)];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[1]),simple('catalog.key')?.value],[['create'],''],'its creation refused: stopped, its key field empty');
+      // A subscription takes no key: made on, no key step.
+      f=draw(before());choice('claude').click();await settled();posted.length=0;
+      assert.deepEqual([focusKey(),Boolean(simple('catalog.key'))],['catalog.model',false],'a subscription: no key field, its model focused');
+      const claudeEntry={...entry('claude',2),saved:{enabled:true,kind:'cli',cli:'claude',model:'haiku',key:'on-path',timeout_s:300,limits:{}}};
+      answers=[json(lineAi([row('alpha'),row('beta'),row('claude')],{version:'v2',key_input:true,providers:[...base,claudeEntry]}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[1]),JSON.parse(posted[0].body).action.entry.enabled,focusKey()],[['create'],true,'model:claude'],
+        'a subscription: made on, its line on its model');
+      ctx.ui.setLang('ja');f=draw(before());choice('openai').click();await settled();
+      assert(text(panel).includes('使う順番')&&text(panel).includes('API キー'),'both languages');
+      ctx.ui.setLang('en');
       // The page's own models a list read no longer has are not offered (a service retires models).
       vm.runInContext('forgetModelLists()',ctx);
       f=draw(one({effective_model:'model-alpha'}));
@@ -3461,7 +3483,7 @@ console.log('PASS: the caps\' No cap switches');
       simple('catalog.save').focus();simple('catalog.save').click();await settle();
       give(json(ai(['alpha','claude'],{version:'v2',key_input:true,providers:[at('alpha',0),
         at('claude',1,{saved:{enabled:true,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:60,limits:{}}})]})));await settled();
-      assert.equal(focused(),'on:claude','a CLI added from Add AI: its line\'s switch');
+      assert.equal(focused(),'model:claude','a CLI added from Add AI: its line on its model (decision 80)');
     }
     // A line's key saved while its field stays (its key still missing): the field; gone: its "Change
     // the key" (cubic on #820; decision 79).
@@ -4438,10 +4460,11 @@ assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later en
   assert.equal(unused.open,false,'folded until opened');
   assert(!panel.querySelectorAll('button').some(node=>node.dataset.simpleFocus?.startsWith('move:groq-20b')),'an AI turned off has no place to move');
   assert.deepEqual(panel.querySelectorAll('.simple-order').map(text),['1','2'],'the AI in use are numbered in their order');
-  // The catalog's "find it in the list" opens the folds around an AI turned off and focuses its
-  // switch (Codex, cubic and CodeRabbit on #801).
-  const listed=panel.querySelector('.simple-catalog').querySelectorAll('li').find(li=>text(li.querySelector('strong'))==='Groq・GPT OSS 20B');
-  listed.querySelector('button').click();
+  // The catalog's button of an AI added, marked so, opens the folds around it turned off and focuses
+  // its switch (Codex, cubic and CodeRabbit on #801; decision 80).
+  const listed=panel.querySelector('.simple-catalog').querySelectorAll('button').find(b=>b.dataset.simpleFocus==='catalog:groq-20b');
+  assert(text(listed).includes('Groq・GPT OSS 20B')&&text(listed).includes('追加済み'),text(listed));
+  listed.click();
   const offRow=panel.querySelector('.simple-unused').querySelectorAll('.simple-provider').find(node=>node.dataset.providerName==='groq-20b');
   assert.equal(panel.querySelector('.simple-unused').open,true,'the AI not in use open');
   assert.equal(offRow.querySelector('details').open,true,'and the AI\'s own line');
