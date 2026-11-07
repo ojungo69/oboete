@@ -162,3 +162,35 @@ id = "pypi-token"
 description = "A PyPI API token of pypi.org or test.pypi.org: gitleaks' rule takes pypi.org's alone"
 regex = '''\b(pypi-AgE[A-Za-z0-9_-]{50,})'''
 keywords = ["pypi-"]
+
+# claude-mem 15.10's shapes the bundled gitleaks.toml lacks (its src/utils/redaction.ts).
+
+[[rules]]
+id = "google-oauth-access-token"
+description = "A Google OAuth 2.0 access token, the GCE metadata server's ya29.c. form too"
+regex = '''\b(ya29\.(?:c\.)?[0-9A-Za-z_-]{20,})'''
+keywords = ["ya29."]
+
+[[rules]]
+id = "runcrate-api-key"
+description = "A Runcrate API key"
+regex = '''\b(rc_live_[A-Za-z0-9_-]{24,})'''
+keywords = ["rc_live_"]
+
+[[rules]]
+id = "supabase-access-token"
+description = "A Supabase personal access token (what supabase login stores)"
+regex = '''\b(sbp_[a-f0-9]{40})\b'''
+keywords = ["sbp_"]
+
+[[rules]]
+id = "notion-integration-token"
+description = "A Notion integration token: ntn_ and 46 characters of any kind, or the older secret_ and 43"
+regex = '''\b(ntn_[A-Za-z0-9]{46}|secret_[A-Za-z0-9]{43})\b'''
+keywords = ["ntn_", "secret_"]
+
+[[rules]]
+id = "sentry-org-auth-token"
+description = "A Sentry organization auth token of any payload: gitleaks' rule asks for the payload's own start"
+regex = '''\b(sntrys_[A-Za-z0-9+/]{20,}={0,2}_[A-Za-z0-9+/]{43})(?:[^A-Za-z0-9+/_]|$)'''
+keywords = ["sntrys_"]
