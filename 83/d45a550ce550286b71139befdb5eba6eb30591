@@ -1,0 +1,21 @@
+assets/viewer/app.js
+  s_70102dd6ea5599::t_7eaf6e5c118e9a 4476-4480
+docs/resident.md
+  s_70102dd6ea5599::t_d49883c32cf02f 340-343
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "83d45a550ce550286b71139befdb5eba6eb30591",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
