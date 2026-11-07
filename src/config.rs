@@ -1421,7 +1421,10 @@ pub(crate) fn inject_with_language(home: &Path) -> Result<(Inject, bool)> {
         Ok(text) => {
             parse_inject_with_language(&text).with_context(|| format!("parse {}", path.display()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Inject::default(), true)),
+        // No config.toml: the computer's language, as for a file that sets none (decision 81).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok((Inject::default(), notes_japanese(&os_language())))
+        }
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
@@ -2880,8 +2883,17 @@ model = { gone = "m" }
         assert!(!notes_japanese("conversation"));
         let (_, japanese) = parse_inject_with_language("").unwrap();
         assert!(!japanese, "no language set: the computer's, German");
+        let none = tempfile::tempdir().unwrap();
+        assert!(
+            !inject_with_language(none.path()).unwrap().1,
+            "no config.toml: German"
+        );
         OS_LOCALE.with(|l| *l.borrow_mut() = "ja_JP.UTF-8".into());
         assert!(notes_japanese("conversation"));
+        assert!(
+            inject_with_language(none.path()).unwrap().1,
+            "no config.toml: Japanese"
+        );
         assert_eq!(write_in(" French "), "in French");
         assert_eq!(
             write_in("Conversation"),
