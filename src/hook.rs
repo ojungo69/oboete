@@ -106,6 +106,9 @@ fn run_io(
     // Task 8 Step 6: what this call's prompt gets (spec 4.2, 4.6), and the session the shown set
     // is kept under.
     let mut prompted: Option<Prompted> = None;
+    // Whether the prompt point ran, and for a prompt: Grok's tool call shows what its turn's
+    // prompt kept, and that prompt was counted when it kept it (doctor's counts).
+    let mut asked: Option<bool> = None;
     let mut session = String::new();
     // A compaction flag this call took (Cursor's at a prompt, a Codex thread's at a tool call:
     // Codex on #532, the Codex root's at a SessionStart that shows the manifest: CodeRabbit on
@@ -332,6 +335,7 @@ fn run_io(
                 });
         }
         if let Some(ask) = ask.filter(|_| fence.is_some()) {
+            asked = Some(!matches!(ask, Ask::Turn));
             prompted = prompt_point(
                 home,
                 &store,
@@ -462,6 +466,13 @@ fn run_io(
             }
         });
         let (text, kept) = assembled(agent, line, &blocks);
+        // What the prompt point injected, counted for doctor (docs/prompt-context.md): the
+        // characters of its blocks that came, after the cut.
+        if let Some(prompt) = asked {
+            let kept = kept.get(first_prompted..).unwrap_or_default();
+            let chars = prompted.as_ref().map_or(0, |p| came_chars(&p.blocks, kept));
+            note_block(home, usize::from(prompt), chars);
+        }
         // The shown set follows what the agent gets: a line a cut dropped or the fence changed is
         // not found, so its claim may be shown again, never counted as shown unseen (as
         // `consumer::manifest::text` does after its gate).
@@ -2584,6 +2595,94 @@ pub(crate) fn last_side(home: &Path) -> Option<(i64, String)> {
     let text = std::fs::read_to_string(home.join("state").join("prompt-side")).ok()?;
     let (at, side) = text.trim().split_once(' ')?;
     Some((at.parse().ok()?, side.to_owned()))
+}
+
+/// The characters of the prompt point's blocks that came: each block's text up to where the
+/// hook's cut kept it (`assembled`).
+fn came_chars(blocks: &[(&'static str, String)], kept: &[usize]) -> usize {
+    (blocks.iter().zip(kept))
+        .map(|((_, text), &end)| text[..end.min(text.len())].chars().count())
+        .sum()
+}
+
+/// Days `state/prompt-blocks` keeps: what doctor sums.
+const PROMPT_DAYS: usize = 7;
+
+/// Each day's prompts that reached the prompt point, those of them that took a block and the
+/// characters injected, in `state/prompt-blocks` for doctor: what per-prompt injection costs was
+/// never counted (docs/session-start.md, "Not in this change"). Counts, never text.
+// shortcut: a prompt that finds another holding the lock is not counted; a statistic, not a record.
+fn note_block(home: &Path, prompts: usize, chars: usize) {
+    if prompts > 0 || chars > 0 {
+        note_block_on(
+            home,
+            &crate::db::utc(crate::db::now_ms())[..10],
+            prompts,
+            chars,
+        );
+    }
+}
+
+fn note_block_on(home: &Path, day: &str, prompts: usize, chars: usize) {
+    let state = home.join("state");
+    let lock = std::fs::create_dir_all(&state).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(state.join("prompt-blocks.lock"))
+    });
+    let Ok(lock) = lock else { return };
+    if crate::worker::try_lock(&lock).is_err() {
+        return;
+    }
+    let path = state.join("prompt-blocks");
+    let mut days = prompt_days(&std::fs::read_to_string(&path).unwrap_or_default());
+    let took = usize::from(chars > 0);
+    match days.iter_mut().find(|d| d.0 == day) {
+        Some(d) => (d.1, d.2, d.3) = (d.1 + prompts, d.2 + took, d.3 + chars),
+        None => days.push((day.to_owned(), prompts, took, chars)),
+    }
+    days.sort();
+    let kept = &days[days.len().saturating_sub(PROMPT_DAYS)..];
+    let text: String = (kept.iter())
+        .map(|(day, prompts, blocks, chars)| format!("{day} {prompts} {blocks} {chars}\n"))
+        .collect();
+    let next = state.join(format!("prompt-blocks.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&next, text).and_then(|()| std::fs::rename(&next, &path)) {
+        eprintln!("oboete: the prompt's count is not kept: {e}");
+    }
+}
+
+/// `state/prompt-blocks` as days: the date, prompts, blocks and characters; a line that does not
+/// read is passed over.
+fn prompt_days(text: &str) -> Vec<(String, usize, usize, usize)> {
+    (text.lines())
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            Some((
+                f.next()?.to_owned(),
+                f.next()?.parse().ok()?,
+                f.next()?.parse().ok()?,
+                f.next()?.parse().ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// Doctor's line: the prompts that reached the prompt point in the last 7 days (today among
+/// them), those that took a block, and the characters injected.
+pub(crate) fn prompt_blocks_line(home: &Path, now: i64) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("state").join("prompt-blocks")).ok()?;
+    let since = crate::db::utc(now - 6 * 86_400_000)[..10].to_owned();
+    let (prompts, blocks, chars) = (prompt_days(&text).iter())
+        .filter(|d| d.0 >= since)
+        .fold((0, 0, 0), |a, d| (a.0 + d.1, a.1 + d.2, a.2 + d.3));
+    (prompts > 0).then(|| {
+        format!(
+            "  in the last 7 days: {prompts} prompts, {blocks} took a block, {chars} characters injected"
+        )
+    })
 }
 
 /// Grok's turn (D9, G23): what its prompt kept, still to show.
@@ -7999,6 +8098,120 @@ mod tests {
         assert!(!text.contains(&bravo[..12]), "{text}");
         assert_eq!(p.prompt("a", "anything new"), "");
         assert!(session_start_note(false, Handed::Rebuilding).contains("being rebuilt"));
+    }
+
+    /// docs/prompt-context.md, doctor: each prompt that reaches the prompt point is counted by
+    /// day, with whether it took a block and its characters; the last 7 days are kept, and doctor
+    /// sums those within a week of now.
+    #[test]
+    fn the_prompt_points_blocks_are_counted_by_day() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        assert_eq!(prompt_blocks_line(h, 0), None);
+        for day in 1..=9 {
+            note_block_on(h, &format!("2026-11-{day:02}"), 1, 0);
+        }
+        note_block_on(h, "2026-11-09", 1, 120);
+        note_block_on(h, "2026-11-09", 0, 30);
+        let text = std::fs::read_to_string(h.join("state/prompt-blocks")).unwrap();
+        assert_eq!(text.lines().count(), 7, "{text}");
+        assert!(
+            text.starts_with("2026-11-03 1 0 0\n") && text.ends_with("2026-11-09 2 2 150\n"),
+            "{text}"
+        );
+        // 2026-11-09 12:00 UTC: the 7 days from 2026-11-03; a day later, from 2026-11-04.
+        let noon = 1_794_225_600_000;
+        assert_eq!(
+            prompt_blocks_line(h, noon).as_deref(),
+            Some("  in the last 7 days: 8 prompts, 2 took a block, 150 characters injected")
+        );
+        assert_eq!(
+            prompt_blocks_line(h, noon + 86_400_000).as_deref(),
+            Some("  in the last 7 days: 7 prompts, 2 took a block, 150 characters injected")
+        );
+    }
+
+    /// A block the hook's cut shortened or dropped counts what came of it.
+    #[test]
+    fn a_cut_block_counts_what_came() {
+        let blocks = [("a", "ab\ncd\n".to_owned()), ("b", "éf\n".to_owned())];
+        assert_eq!(came_chars(&blocks, &[6, 4]), 9);
+        assert_eq!(came_chars(&blocks, &[3, 0]), 3);
+        assert_eq!(came_chars(&blocks, &[]), 0);
+    }
+
+    /// The same, through the hook: a prompt that takes a block and one that takes none.
+    #[test]
+    fn a_prompts_block_is_counted_for_doctor() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let first = p.prompt("a", "where do the parser errors go");
+        assert!(first.contains("Parser errors go to stderr."), "{first}");
+        assert_eq!(
+            p.prompt("a", "where do the parser errors go"),
+            "",
+            "shown once"
+        );
+        let text = std::fs::read_to_string(p.s.home.path().join("state/prompt-blocks")).unwrap();
+        let day = &crate::db::utc(crate::db::now_ms())[..10];
+        let counts: Vec<usize> = (text
+            .strip_prefix(&format!("{day} "))
+            .unwrap()
+            .split_whitespace())
+        .map(|n| n.parse().unwrap())
+        .collect();
+        assert_eq!(counts[..2], [2, 1], "{text}");
+        assert!(counts[2] > 0 && counts[2] < first.chars().count(), "{text}");
+    }
+
+    /// Grok's turn is one prompt, counted when its prompt keeps the picks, whose block is counted
+    /// at the tool call that shows it; a later tool call of the turn adds nothing.
+    #[test]
+    fn a_grok_turn_is_counted_once_with_the_block_its_tool_call_shows() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let c = p.c.clone();
+        let prompt = |text: &str| {
+            let payload = json!({"sessionId": "g", "workspaceRoot": c,
+                                 "hookEventName": "UserPromptSubmit", "prompt": text});
+            hook(&home, "grok", "UserPromptSubmit", &payload)
+        };
+        let tool = || {
+            let payload = json!({"sessionId": "g", "workspaceRoot": c,
+                                 "hookEventName": "PreToolUse", "toolName": "Read"});
+            injected("grok", &hook(&home, "grok", "PreToolUse", &payload))
+        };
+        let counts = || {
+            let text = std::fs::read_to_string(home.join("state/prompt-blocks")).unwrap();
+            let day = &crate::db::utc(crate::db::now_ms())[..10];
+            (text
+                .strip_prefix(&format!("{day} "))
+                .unwrap()
+                .split_whitespace())
+            .map(|n| n.parse().unwrap())
+            .collect::<Vec<usize>>()
+        };
+        assert_eq!(prompt("where do the parser errors go"), "");
+        assert_eq!(counts(), [1, 0, 0]);
+        // The session's first tool call shows the manifest, which has the claim: no block.
+        assert!(tool().contains(crate::manifest::MEMORY));
+        assert_eq!(tool(), "");
+        assert_eq!(counts(), [1, 0, 0]);
+        p.decided(2, "Lexer warnings go to the log.", &[]);
+        p.s.run();
+        assert_eq!(prompt("where do the lexer warnings go"), "");
+        let shown = tool();
+        assert!(shown.contains("Lexer warnings go to the log."), "{shown}");
+        assert_eq!(tool(), "");
+        let after = counts();
+        assert_eq!(after[..2], [2, 1]);
+        assert!(
+            after[2] > 0 && after[2] < shown.chars().count(),
+            "{after:?}"
+        );
     }
 
     /// docs/cards.md S1: the line counts the cards session start handed over beside the claims.
