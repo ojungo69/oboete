@@ -5180,6 +5180,7 @@ pub(crate) const FENCE_SENTENCE: &str = "The fence lines are `";
 /// window of a size (the cards it may give: `MAX_CARDS`, more for a grown window, decision 72)
 /// and a provider's prefix cache can serve them (G09).
 pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str, cards: usize) -> String {
+    let written = crate::config::write_in(language);
     let fence = format!(
         "=== RECORD {} ===",
         &sha256_hex(&format!("{text}{candidates}{carried}"))[..16]
@@ -5248,7 +5249,7 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str, cards
          - files_read, files_modified: paths as the lines give them.\n\
          Say what the system now does or what was learned (\"Login now uses OAuth2 with PKCE\"), \
          not that it was looked at (\"Analyzed the login code\").\n\
-         Write every body, the summary and each card in {language}; a type and a concept stay \
+         Write every body, the summary and each card {written}; a type and a concept stay \
          as written above.\n\
          {FENCE_SENTENCE}{fence}`.\n\n\
          {fence}\n{text}\n## Already known: kept claims these lines may replace or reverse (uid: \
@@ -13876,5 +13877,17 @@ curate = false
         let prompts = sent.into_inner();
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("Open work.") && !prompts[0].contains("Secret"));
+    }
+
+    /// Decision 81: the prompt writes in the language set, or each conversation's own.
+    #[test]
+    fn its_prompt_writes_in_the_language_set() {
+        for language in ["English", "conversation"] {
+            let asked = crate::curate::prompt(language, "records", "", "", 0);
+            assert!(
+                asked.contains(&crate::config::write_in(language)),
+                "{language}: {asked}"
+            );
+        }
     }
 }

@@ -493,6 +493,7 @@ fn previous_text(op: &crate::my_work_ops::MyWorkOp, rules: &Rules) -> (String, V
 }
 
 fn prompt(language: &str, data: &str) -> String {
+    let written = crate::config::write_in(language);
     let fence = format!(
         "=== PROGRESS {} ===",
         &crate::curate::sha256_hex(data)[..16]
@@ -519,7 +520,7 @@ fn prompt(language: &str, data: &str) -> String {
          a statement of at most {STATEMENT} characters and a quote of at most {QUOTE} characters \
          copied exactly from one of the developer's asks shown. An ask marked [agent prompt] was \
          written by an agent, not the developer: never quote it.\n\
-         Write the summary, narrative, milestones and statements in {language}.\n\
+         Write the summary, narrative, milestones and statements {written}.\n\
          {FENCE}{fence}`.\n\n\
          {fence}\n{data}{fence}",
         FENCE = crate::curate::FENCE_SENTENCE,

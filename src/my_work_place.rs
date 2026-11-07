@@ -459,6 +459,7 @@ impl Shown {
 }
 
 fn prompt(question: Question, language: &str, data: &str) -> String {
+    let written = crate::config::write_in(language);
     let shown = "At the end of this prompt, between two fence lines, are the developer's focus \
          areas that take requests, each with its id, its status (kept by the developer, or \
          suggested), its name, goal and what it is about; the areas the developer dismissed, never \
@@ -469,8 +470,8 @@ fn prompt(question: Question, language: &str, data: &str) -> String {
         "a name of at most {NAME_CHARS} characters that is no word of the page (My Focus, My \
          Work, My Rules, Other, Suggested, Past focus, Monitor, Steer), a goal and what it is \
          about, at most {GOAL_CHARS} characters each, same_as: the id of a listed area it already \
-         is, or an empty string, and evidence: why, at most {EVIDENCE} characters. Write in \
-         {language}."
+         is, or an empty string, and evidence: why, at most {EVIDENCE} characters. Write \
+         {written}."
     );
     let instructions = match question {
         Question::Place => format!(
@@ -482,8 +483,8 @@ fn prompt(question: Question, language: &str, data: &str) -> String {
              Place every request shown exactly once: in the one listed area it belongs to, by \
              the area's id, or in `{OTHER}` when no area fits. A request belongs to an area when \
              its work serves that area's goal; the same repository alone is not enough. Give \
-             each placement evidence: why it belongs there, at most {EVIDENCE} characters, in \
-             {language}.\n\
+             each placement evidence: why it belongs there, at most {EVIDENCE} characters, \
+             {written}.\n\
              A request whose conversations hold several separate asks, each a piece of work of \
              its own, may be proposed as an area of its own: kind `promote`, its label alone in \
              requests, {proposal} Propose nothing else; most answers propose nothing."

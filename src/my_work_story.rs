@@ -418,6 +418,7 @@ impl Shown {
 }
 
 fn prompt(language: &str, data: &str) -> String {
+    let written = crate::config::write_in(language);
     let fence = format!("=== STORY {} ===", &crate::curate::sha256_hex(data)[..16]);
     format!(
         "You write the build story of a developer's work with coding agents: one chapter a week \
@@ -434,7 +435,7 @@ fn prompt(language: &str, data: &str) -> String {
          so far, and change what the facts move;\n\
          - recap: at most {RECAP_CHARS} characters, how fast the work ships and where it stands.\n\
          Use only the dated facts shown. Name the developer \"the owner\", never a pronoun but \
-         \"they\". Write in {language}.\n\
+         \"they\". Write {written}.\n\
          {FENCE}{fence}`.\n\n\
          {fence}\n{data}{fence}",
         FENCE = crate::curate::FENCE_SENTENCE,

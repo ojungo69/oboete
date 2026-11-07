@@ -8008,12 +8008,39 @@ mod tests {
         );
     }
 
+    /// Decision 81: the terminal's note is in Japanese for any spelling of it (and, for a value
+    /// that is no language, as the computer's: Japanese in these tests), else in English.
     #[test]
     fn session_start_note_uses_english_for_other_summary_languages() {
         let mut p = Prompts::new(false);
         p.decided(1, "Parser errors go to stderr.", &[]);
         p.s.run();
-        for language in ["\"English\"", "\"French\"", "\"japanese\"", "3"] {
+        for language in ["\"japanese\"", "\" ja \"", "3"] {
+            std::fs::write(
+                p.s.home.path().join("config.toml"),
+                format!("[summary]\nlanguage = {language}\ncurate = \"wrong type\"\n"),
+            )
+            .unwrap();
+            let out = hook(
+                p.s.home.path(),
+                "claude",
+                "SessionStart",
+                &json!({"session_id": "note", "cwd": p.c, "source": "startup"}),
+            );
+            let v: Value = serde_json::from_str(&out).unwrap();
+            let last = v["systemMessage"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned();
+            assert!(
+                last.starts_with("oboete: 記憶は有効です。"),
+                "{language}: {last}"
+            );
+        }
+        for language in ["\"English\"", "\"French\""] {
             std::fs::write(
                 p.s.home.path().join("config.toml"),
                 format!(

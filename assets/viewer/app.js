@@ -1550,8 +1550,13 @@ const TEXT = {
   simple_my_work: ['Write My Work with AI', 'My Work を AI で書く'],
   summary_language: ['Language of summaries', '要約を書く言語'],
   summary_language_desc: [
-    'Write the language you want, such as English. Default: Japanese. Changing the language does not start a call.',
-    '要約を書いてほしい言語を自由に入力します。例: English。既定は Japanese(日本語)です。言語を変えても呼び出しは始まりません。',
+    'Write the language you want, such as English. Left empty, this computer’s language ({language}). Changing the language does not start a call.',
+    '要約を書いてほしい言語を自由に入力します。例: English。空のときは、このパソコンの言語 ({language}) で書きます。言語を変えても呼び出しは始まりません。',
+  ],
+  summary_language_conversation: ['The language of each conversation', '会話ごとの言語'],
+  summary_language_conversation_desc: [
+    'Each summary is written in the language its conversation is written in, for those who work in several languages.',
+    '要約を、もとの会話と同じ言語で書きます。いくつかの言語で作業する人向けです。',
   ],
   window_tokens: ['Text per request ({min} to {max} estimated tokens)', '一度に送る大きさ(推定トークン数、{min}〜{max})'],
   window_tokens_desc: [
@@ -3501,6 +3506,11 @@ function loadedForm(s) {
 // for its turn is not sent across one (`keySave`).
 let formLoads = 0;
 
+// Whether `[summary] language` is each conversation's own (decision 81), any case.
+function conversationLanguage(language) {
+  return typeof language === 'string' && language.trim().toLowerCase() === 'conversation';
+}
+
 function formOf(s) {
   if (s.error) return null;
   // Saved settings invalidate consent and cached display text. Keep known effects and unknown
@@ -3525,6 +3535,8 @@ function formOf(s) {
     saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
       worker: { resident: s.worker?.resident ?? false }, view: { port: s.view?.port }, my_work: { ...s.my_work } },
     firstRun: s.first_run === true,
+    // Decision 81: the computer's language, the summaries' when none is set.
+    languageDefault: s.language_default || 'English',
     residentSupported: s.resident_supported === true,
     worker: { resident: s.first_run && s.resident_supported ? true : s.worker?.resident ?? false },
     view: { port: String(s.view?.port ?? '') },
@@ -8035,8 +8047,18 @@ function drawSettings() {
   [myWorkCalls.min, myWorkCalls.max] = f.ranges.my_work_calls;
   const myWorkOff = noCapSwitch(f.my_work.noCap, 'my_work', t('my_work_h'), myWorkCalls, 'no_cap_calls_warning', (v) => { f.my_work.noCap = v; });
   const savedCalls = f.saved.my_work.calls_a_day === f.ranges.no_cap ? t('no_cap') : f.saved.my_work.calls_a_day;
-  const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
+  const summaryLanguage = input('textarea', f.summary.language, f.languageDefault, 'summary.language', (v) => { f.summary.language = v; });
   summaryLanguage.className = 'summary-language';
+  // Decision 81: each conversation's own language, the value `conversation`; off, the language
+  // typed before it comes back, else the computer's.
+  const own = conversationLanguage(f.summary.language);
+  summaryLanguage.disabled = own;
+  const ownLanguage = checkbox(own, (on) => {
+    if (on) [f.summaryLanguageBefore, f.summary.language] = [f.summary.language, 'conversation'];
+    else f.summary.language = f.summaryLanguageBefore && !conversationLanguage(f.summaryLanguageBefore) ? f.summaryLanguageBefore : f.languageDefault;
+    drawSettings();
+  });
+  ownLanguage.dataset.field = 'summary.language_conversation';
   const summarySize = (key) => {
     const i = input('number', f.summary[key], '', `summary.${key}`, (v) => { f.summary[key] = v; });
     const [min, max] = f.ranges[key];
@@ -8160,7 +8182,9 @@ function drawSettings() {
       el('section', null,
         el('h3', null, t('summary_h')),
         el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
-          saved(f.saved.summary.language), note(t('summary_language_desc'))),
+          saved(conversationLanguage(f.saved.summary.language) ? t('summary_language_conversation') : f.saved.summary.language),
+          note(t('summary_language_desc', { language: f.languageDefault }))),
+        el('label', 'check', ownLanguage, t('summary_language_conversation')), note(t('summary_language_conversation_desc')),
         el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes'))),
       el('section', null,
         el('label', 'field', el('span', null, t('gemini_label')), gemini,

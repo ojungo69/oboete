@@ -4425,6 +4425,27 @@ assert.equal(field('my_work.curate').checked,true,'the saved switch shows');
 type(field('paid_usd_per_month'),'3.5');for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
 assert.equal(requests.at(-1).body.paid_usd_per_month,3.5);
 assert.equal(requests.at(-1).body.summary.language,'Japanese');
+{
+  // Decision 81: "The language of each conversation" sets `conversation`, the language field
+  // disabled; off, the language typed before comes back, else the computer's.
+  const shownWith=language=>({...plain(saved),language_default:'Japanese',summary:{...plain(saved).summary,language}});
+  ctx.ui.setForm(ctx.simpleUi.formOf(shownWith('English')));ctx.ui.setView('settings');ctx.ui.setLang('en');ctx.ui.drawSettings();
+  const own=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='summary.language_conversation');
+  const typed=()=>panel.querySelectorAll('textarea').find(n=>n.dataset.field==='summary.language');
+  const turn=v=>{own().checked=v;for(const cb of own().listeners.change||[])cb({target:own()});};
+  assert.deepEqual([own().checked,typed().disabled,typed().placeholder],[false,false,'Japanese'],
+    'off: the language field, the computer\'s as its placeholder');
+  turn(true);
+  assert.deepEqual([ctx.ui.getForm().summary.language,typed().disabled],['conversation',true],'on: conversation, the field disabled');
+  turn(false);
+  assert.equal(ctx.ui.getForm().summary.language,'English','off: the language typed before');
+  ctx.ui.setForm(ctx.simpleUi.formOf(shownWith('Conversation')));ctx.ui.drawSettings();
+  assert.equal(own().checked,true,'saved as conversation, any case: on');
+  turn(false);
+  assert.equal(ctx.ui.getForm().summary.language,'Japanese','off with nothing typed before: the computer\'s');
+  ctx.ui.setLang('ja');ctx.ui.drawSettings();
+  assert(text(panel).includes('会話ごとの言語'),'both languages');
+}
 type(field('paid_usd_per_month'),'4.25');ctx.ui.drawSettings();
 assert.equal(field('paid_usd_per_month').value,'4.25','a typed limit survives a redraw before it is saved');
 for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
