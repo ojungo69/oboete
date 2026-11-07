@@ -2119,7 +2119,8 @@ mod tests {
         let notion = format!("ntn_{r20}{r20}{}", "Ab3dEf");
         let notion_old = format!("secret_{b43}");
         let sentry = format!("sntrys_{r20}{}==_{b43}", "Mb2Xs7");
-        for secret in [
+        // A failure names the case by its number: its text holds the made-up secret.
+        let secrets = [
             &google,
             &gce,
             &runcrate,
@@ -2127,15 +2128,14 @@ mod tests {
             &notion,
             &notion_old,
             &sentry,
-        ] {
+        ];
+        for (i, secret) in secrets.into_iter().enumerate() {
             let text = format!("the token in the log was {secret} this morning");
             let (stored, found) = scan(&text, &Rules::default());
-            assert!(!found.is_empty(), "{text}: nothing found");
+            assert!(!found.is_empty(), "case {i}: nothing found");
             check(&stored, &found, secret);
-            assert_eq!(
-                stored,
-                format!("the token in the log was {MASK} this morning")
-            );
+            let whole = format!("the token in the log was {MASK} this morning");
+            assert!(stored == whole, "case {i}: not masked whole");
         }
         for text in [
             "the ya29. prefix marks Google's OAuth tokens".to_owned(),
@@ -2149,10 +2149,8 @@ mod tests {
         ] {
             // A generic rule may still take a random-looking payload; the new rules must not.
             let (_, found) = scan(&text, &Rules::default());
-            assert!(
-                !found.iter().any(|f| NEW.contains(&f.rule.as_str())),
-                "{text}: {found:?}"
-            );
+            let rules: Vec<&str> = found.iter().map(|f| f.rule.as_str()).collect();
+            assert!(!rules.iter().any(|r| NEW.contains(r)), "{rules:?}");
         }
     }
 
