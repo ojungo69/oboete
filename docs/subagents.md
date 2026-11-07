@@ -190,27 +190,40 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
   (`deliverables::candidates`), so a foreground subagent's calls, inside its parent's turn, are its
   parent turn's. A background subagent's calls after its parent's reply and before the session's
   next prompt or harness message belong to no turn, and nothing copies their files. Slice 3 copies
-  those at the subagent's stop. Of the calls the subagent made since its previous stop (its `step`
-  facts in knowledge.db, of this device's hook records, after the newest stop of the same subagent
-  before this one), it takes those with no prompt or harness message of the session between the
-  session's newest reply before the call (its first record, with none) and the call. A call is so
-  taken once: by its turn's end, or by the first stop after it; a stop taken again, after an
-  interruption, takes the same range.
+  those at the subagent's stop. A stop looks at the subagent's calls (its `step` facts in
+  knowledge.db, of this device's hook records) after its previous stop and before it: the newer of
+  the newest stop of the same subagent the phase took (`subagent_scan` in deliverables.db, which a
+  forget or a mask of that stop leaves) and the newest the facts hold (a hook's, of this device).
+  Of those it takes a call in a gap: the session's newest hook reply before the call is there and
+  not forgotten, and no prompt or harness message of the session lies between them (nor a purged
+  record of this device that was one, its session gone). A call is so taken once, by its turn's
+  end or by the first stop after it the phase took; a stop it did not take (forgotten or masked
+  before the phase read it) leaves its calls to the next. A raw.db restored below the phase's
+  checkpoint empties the device's `subagent_scan` as the checkpoint moves.
 - **Whose.** Only a subagent launched from a turn the hooks saw public: its launch record (the
-  parent's `Agent` or `Task` call that `launched` it, the newest before the stop) is marked public,
-  and a prompt or harness message of the session comes before it in its own turn, as a turn's copy
-  asks of a call. A subagent with no launch record, or launched from a private or unobserved turn,
-  copies nothing, though a later public prompt has cleared the session's private flag; and each
-  call must be marked public too.
+  parent's `Agent` or `Task` call that `launched` it, the newest before the stop, a hook record of
+  this device and session) reads now as an event marked public, and a prompt or harness message of
+  the session reads before it in its own turn, as a turn's copy asks of a call. A subagent with no
+  launch record, or one forgotten, masked or expired, or launched from a private or unobserved
+  turn, copies nothing, though a later public prompt has cleared the session's private flag; and
+  each call must be marked public too.
 - **When.** The deliverables phase takes a Claude Code hook `subagent_stop` record (the hook's, or
   the owner's Mark finished) as it takes a turn end, in seq order. As it reads the subagent's calls,
   stops and launch from `consumer::subagents`' facts, it takes a stop only once that consumer's
-  checkpoint for this device has reached it; else it stops just before the stop, its own checkpoint
-  below it, and a later round takes it, the consumers draining before the phase.
-- **What.** The files those calls wrote or declared, as `candidates` finds a turn's (no failed call,
-  `MAX_FILES` at most), copied as a turn's: the row's turn the stop's record (`turn_seq`,
-  `turn_ts`), its call the call that wrote or declared the file, by which My Work links the copy to
-  that call's request; `copy_into` keeps one file for one content.
+  checkpoint for this device has reached it with no rebuild owed (no checkpoint is none reached);
+  else it stops just before the stop, its own checkpoint below it, and a later round takes it, the
+  consumers draining before the phase.
+- **What.** The files those calls wrote or declared, found in one pass as `candidates` finds a
+  turn's (one path, its last write's call; no failed call; `MAX_FILES` at most), copied as a
+  turn's: the row's turn the gap's reply (`turn_seq`, `turn_ts`), its call the call that wrote or
+  declared the file, by which My Work links the copy to that call's request. Two gaps' rows stay
+  apart under the table's unique key, identical content at two paths too, and `copy_into` keeps one
+  file for one content. A forget of the call or of the gap's reply denies the row from its
+  registration on; a forget of the stop alone does not. After the rows, the stop's seq goes into
+  `subagent_scan`, then the phase's checkpoint: a stop taken again after an interruption makes the
+  same rows (unique) or none.
+- **Kept.** `subagent_scan` holds a subagent's device, session, id and a seq, nothing said in it; a
+  forget of the session leaves the row, as its denial keeps the session's id.
 - **Not covered.** A foreground subagent's call is its parent turn's: a parent that never ends its
   turn (no reply, no session end) leaves it uncopied, where claude-mem's SubagentStop copies it.
 - **Not as claude-mem.** claude-mem's SubagentStop hook copies from the last 2 MiB of the
@@ -281,22 +294,34 @@ Slice 2:
 Slice 3:
 
 - A file a background subagent wrote after its parent's reply, with no prompt or harness message
-  between, is copied at the subagent's stop, once, its row the stop's turn and the writing call's;
-  a foreground subagent's file, written inside its parent's turn, is copied by the turn's end and
-  not again at its stop; a subagent whose calls straddle the reply has each copied once, by the
-  turn or the stop; a stop after the session's next prompt still takes the gap's calls.
-- A second stop of the same subagent takes only its calls since the first; a stop taken again
-  takes the same range; a resumed subagent's new file is copied though its earlier calls named
-  `MAX_FILES` files.
+  between, is copied at the subagent's stop, once, its row the gap's reply's turn and the writing
+  call's; a foreground subagent's file, written inside its parent's turn, is copied by the turn's
+  end and not again at its stop; a subagent whose calls straddle the reply has each copied once, by
+  the turn or the stop; a stop after the session's next prompt still takes the gap's calls; a
+  session's end with no reply copies the prompt-backed file, and the stop nothing again.
+- One stop over two gaps: identical content at two paths gives two rows, each its gap's turn and
+  its call's request on the page and the card; one path written in both gives one row, the last
+  write's; a forget of either call leaves the other's row and file.
+- A second stop of the same subagent takes only its calls since the first, also when the first
+  was forgotten or masked after the phase took it (its copy kept, its origins the call and the
+  reply), and after its copy was swept; a first stop forgotten before the phase read it leaves its
+  calls to the second; a stop taken again after an interruption makes no row twice; a resumed
+  subagent's new file is copied though its earlier calls named `MAX_FILES` files; a stop with no
+  call copies nothing and moves the checkpoint; a replay's or a transcript's stop between a call
+  and the hook's stop is no boundary.
 - A subagent launched from a private turn copies nothing, though a later public prompt cleared the
-  flag; one with no launch record, or launched from a turn with no prompt observed, copies nothing;
-  a failed call and a call not marked public name nothing; a Codex record, a replay's and a
-  transcript's stop copy nothing.
+  flag (through the hooks); one with no launch record, a launch forgotten or masked, or launched
+  from a turn with no prompt observed copies nothing; a failed call and a call not marked public
+  name nothing; a Codex record, another device's records, a replay's and a transcript's stop or
+  launch copy nothing. Each beside a control that copies.
+- A gap whose reply was forgotten takes nothing (purged too); a prompt forgotten and purged between
+  the reply and a call makes it no gap's.
 - With the `subagents` consumer behind: reply A, a stop it has not reached, reply B: A is taken, the
   stop and B wait, the phase's checkpoint below the stop; once the consumer has reached it, both are
-  taken, with no row twice.
-- Identical content written by two calls of the session gives two rows, each linked to its call's
-  request; a forget of one call's record leaves the other's row and file.
+  taken, with no row twice; with no checkpoint, or a rebuild owed, the stop waits too.
+- A forget of a stop's copy's call or reply hides its link and card at once and the sweep removes
+  it; retention that expires the call, the reply and the stop keeps the copy; a raw.db restored
+  below the checkpoint empties the device's `subagent_scan`.
 
 ## As built
 
