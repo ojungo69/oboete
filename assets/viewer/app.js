@@ -5963,6 +5963,7 @@ function providerKeyLine(action, path) {
 
 async function providerWrite(action, button, body, path, target = null) {
   const mine = form;
+  pageWrites += 1;
   clearSimpleReceipt();
   const fields = $('panel').querySelector('.settings');
   const scope = providerScope(fields, button, action);
@@ -5996,11 +5997,14 @@ async function providerWrite(action, button, body, path, target = null) {
 }
 
 // The entry "Add an AI" made off in this page, waiting for its first key (decision 80): its selector,
-// and the settings' version its creation answered with. Its first key save turns it on only while
-// the settings are still at that version: a write since (it turned on or off, removed, another entry
-// added) or a read that found them changed ends the wait, as its save's refusal or lost answer does
-// (Codex's review of 80a).
+// and the page's writes and settings reads when its creation was answered. Its key turns it on only
+// when that key's save is the next of them: any write since (it turned on or off, removed, another
+// entry's key or another write) or settings read since ends the wait, and so does the save itself,
+// refused, lost or answered. Not by the settings' version: a key save writes config.toml (the
+// entry's managed key file), and a write undone gives the version again (Codex's reviews of 80a).
 let keyTurnsOn = null;
+// The writes this page sent, of the providers' entries or of the settings (`keyTurnsOn`).
+let pageWrites = 0;
 
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
 // form state; a redraw puts one being typed back into the field drawn for the same entry
@@ -6038,17 +6042,16 @@ function providerKeyField(provider, simple = false) {
   save.addEventListener('click', () => {
     const body = JSON.stringify({ version: form.version, selector: provider.selector, key: i.value });
     i.value = '';
+    // Decision 80: the entry "Add an AI" made off, this key's save the page's next write since, is
+    // turned on once it is saved; a key changed later is not (`keyTurnsOn`).
+    const wait = keyTurnsOn;
+    const turnsOn = wait?.selector === selectorKey(provider.selector) && wait.writes === pageWrites && wait.loads === formLoads;
     void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key',
       simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` })).then((saved) => {
-      // Decision 80: the first key saved to the entry added off turns that entry on; a key changed
-      // later does not.
-      const wait = keyTurnsOn;
-      if (wait?.selector !== selectorKey(provider.selector)) return;
-      keyTurnsOn = null;
-      if (!saved || form?.version !== wait.version) return;
+      if (!saved || !turnsOn) return;
       const on = [...$('panel').querySelectorAll('input')].find((n) => n.dataset.simpleFocus === `on:${provider.name}`);
-      // Unchanged since its creation, the name has no other entry: "Add an AI" adds none to a name
-      // it has.
+      // Unchanged but for its key since its creation, the name has no other entry: "Add an AI" adds
+      // none to a name it has.
       if (on) void simpleProviderToggle(provider.name, true, on);
     });
   });
@@ -6611,6 +6614,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
     setStatus(t(field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
     return;
   }
+  pageWrites += 1;
   const mine = form;
   // The whole panel, the language picker too: what is typed, or drawn again in another language,
   // while the save is on its way would not survive its answer. A change saved at once (decision
@@ -7672,7 +7676,7 @@ function simpleCatalog(f) {
       // The entry made, found as `createdFocus` finds it: the last one not Gemini's automatic one.
       const created = made && entry.key_file && !draft.enabled ? form.providers.findLast((p) => p.selector.source !== 'gemini') : null;
       keyTurnsOn = created?.name === draft.name && !created.saved.enabled
-        ? { selector: selectorKey(created.selector), version: form.version } : null;
+        ? { selector: selectorKey(created.selector), writes: pageWrites, loads: formLoads } : null;
     });
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));
