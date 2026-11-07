@@ -162,8 +162,13 @@ fn default_embedding_usd() -> f64 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Summary {
-    /// Language of observations and summaries, as written into the prompt. Never inferred.
-    #[serde(default = "default_language")]
+    /// Language of observations and summaries, as written into the prompt (`write_in`): a
+    /// language's name, or `conversation` for the language each conversation is written in.
+    /// Unset or blank, the computer's (decision 81).
+    #[serde(
+        default = "default_language",
+        deserialize_with = "language_or_computers"
+    )]
     pub language: String,
     /// Whether the worker curates windows (milestone 3). Off until the cut-over (spec 7.5): only
     /// a home that asks for it sends anything to a provider.
@@ -678,7 +683,99 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 fn default_language() -> String {
-    "Japanese".into()
+    os_language()
+}
+
+/// A language left blank is the computer's, as one not set (decision 81; cubic on #864).
+fn language_or_computers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let language = String::deserialize(d)?;
+    Ok(if language.trim().is_empty() {
+        default_language()
+    } else {
+        language
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The locale a test reads as the computer's: Japanese unless a test sets another, as the
+    /// default language was before decision 81.
+    pub(crate) static OS_LOCALE: std::cell::RefCell<String> =
+        std::cell::RefCell::new("ja_JP.UTF-8".into());
+}
+
+/// The computer's language as an English name (decision 81): the user's locale as the OS gives it,
+/// by its language part; English when it gives none or one not named here.
+pub(crate) fn os_language() -> String {
+    #[cfg(test)]
+    let locale = OS_LOCALE.with(|l| l.borrow().clone());
+    #[cfg(not(test))]
+    let locale = sys_locale::get_locale().unwrap_or_default();
+    language_of(&locale)
+}
+
+/// An English language name for a locale (`ja_JP.UTF-8`, `zh-Hans-CN`, `C`): its language part.
+fn language_of(locale: &str) -> String {
+    let code = locale
+        .split(['_', '-', '.', '@'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match code.as_str() {
+        "ja" => "Japanese",
+        "zh" => "Chinese",
+        "ko" => "Korean",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "pt" => "Portuguese",
+        "it" => "Italian",
+        "ru" => "Russian",
+        "nl" => "Dutch",
+        "pl" => "Polish",
+        "tr" => "Turkish",
+        "uk" => "Ukrainian",
+        "vi" => "Vietnamese",
+        "th" => "Thai",
+        "id" => "Indonesian",
+        "sv" => "Swedish",
+        "ar" => "Arabic",
+        "hi" => "Hindi",
+        _ => "English",
+    }
+    .into()
+}
+
+/// Whether `[summary] language` asks for each conversation's own language (decision 81).
+pub fn conversation(language: &str) -> bool {
+    language.trim().eq_ignore_ascii_case("conversation")
+}
+
+/// How a prompt names the language it is to write in (decision 81): `in Japanese`, or, for
+/// `conversation`, the language of the records the prompt gives.
+pub fn write_in(language: &str) -> String {
+    if conversation(language) {
+        "in the language the developer writes in, in the records below".into()
+    } else {
+        format!("in {}", language.trim())
+    }
+}
+
+/// Whether a language, as `[summary] language` may spell it, is Japanese: its name, or a locale
+/// whose language part is `ja`, read as `language_of` reads the computer's (`ja_JP.UTF-8`, `ja@x`).
+pub(crate) fn is_japanese(language: &str) -> bool {
+    let l = language.trim();
+    l.eq_ignore_ascii_case("japanese") || l == "日本語" || language_of(l) == "Japanese"
+}
+
+/// Whether oboete's own words (the terminal's note, the judge's evidence) go in Japanese: the
+/// summaries' language, or the computer's when that is each conversation's own (decision 81).
+pub(crate) fn notes_japanese(language: &str) -> bool {
+    if conversation(language) {
+        is_japanese(&os_language())
+    } else {
+        is_japanese(language)
+    }
 }
 fn default_embedding() -> String {
     "none".into()
@@ -1333,7 +1430,10 @@ pub(crate) fn inject_with_language(home: &Path) -> Result<(Inject, bool)> {
         Ok(text) => {
             parse_inject_with_language(&text).with_context(|| format!("parse {}", path.display()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Inject::default(), true)),
+        // No config.toml: the computer's language, as for a file that sets none (decision 81).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok((Inject::default(), notes_japanese(&os_language())))
+        }
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
@@ -1378,12 +1478,13 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
             range.end()
         );
     }
-    let japanese = file.summary.as_ref().is_none_or(|s| {
-        s.as_table().is_some_and(|t| {
-            t.get("language")
-                .is_none_or(|l| l.as_str() == Some("Japanese"))
-        })
-    });
+    // As `[summary] language` is set, any spelling of it, else the computer's (decision 81).
+    let set = (file.summary.as_ref())
+        .and_then(|s| s.as_table())
+        .and_then(|t| t.get("language"))
+        .and_then(|l| l.as_str().map(str::to_owned))
+        .filter(|l| !l.trim().is_empty());
+    let japanese = notes_japanese(&set.unwrap_or_else(os_language));
     Ok((i, japanese))
 }
 
@@ -2769,5 +2870,76 @@ model = { gone = "m" }
             (0.10, 0.50, Some(100_000))
         );
         assert_eq!(p.declared_output(), limits.max_output_tokens);
+    }
+
+    /// Decision 81: the summaries' language is the computer's when none is set, by the locale's
+    /// language part; `conversation` asks for each conversation's own; oboete's own words go in
+    /// Japanese for any spelling of it, and for `conversation` on a Japanese computer.
+    #[test]
+    fn the_summary_language_follows_the_computer_unless_set() {
+        for (locale, language) in [
+            ("ja_JP.UTF-8", "Japanese"),
+            ("en_US.UTF-8", "English"),
+            ("C", "English"),
+            ("", "English"),
+            ("zh-Hans-CN", "Chinese"),
+            ("fr-FR", "French"),
+            ("xx_YY", "English"),
+        ] {
+            assert_eq!(language_of(locale), language, "{locale}");
+        }
+        OS_LOCALE.with(|l| *l.borrow_mut() = "de_DE.UTF-8".into());
+        assert_eq!(Summary::default().language, "German");
+        assert!(!notes_japanese("conversation"));
+        let (_, japanese) = parse_inject_with_language("").unwrap();
+        assert!(!japanese, "no language set: the computer's, German");
+        let none = tempfile::tempdir().unwrap();
+        assert!(
+            !inject_with_language(none.path()).unwrap().1,
+            "no config.toml: German"
+        );
+        // Left blank, the computer's, as unset (cubic on #864).
+        let blank = "[summary]\nlanguage = \"  \"\n";
+        assert!(
+            !parse_inject_with_language(blank).unwrap().1,
+            "blank: German"
+        );
+        let summary: Summary = toml::from_str("language = \" \"").unwrap();
+        assert_eq!(summary.language, "German");
+        OS_LOCALE.with(|l| *l.borrow_mut() = "ja_JP.UTF-8".into());
+        assert!(notes_japanese("conversation"));
+        assert!(
+            parse_inject_with_language(blank).unwrap().1,
+            "blank: the computer's, Japanese"
+        );
+        assert!(
+            inject_with_language(none.path()).unwrap().1,
+            "no config.toml: Japanese"
+        );
+        assert_eq!(write_in(" French "), "in French");
+        assert_eq!(
+            write_in("Conversation"),
+            "in the language the developer writes in, in the records below"
+        );
+        for (language, japanese) in [
+            ("Japanese", true),
+            ("japanese", true),
+            (" ja ", true),
+            ("ja-JP", true),
+            ("日本語", true),
+            ("ja.UTF-8", true),
+            ("ja@x", true),
+            ("English", false),
+            ("javanese", false),
+            ("jav", false),
+        ] {
+            assert_eq!(is_japanese(language), japanese, "{language}");
+            let text = format!("[summary]\nlanguage = {language:?}\n");
+            assert_eq!(
+                parse_inject_with_language(&text).unwrap().1,
+                japanese,
+                "{language}"
+            );
+        }
     }
 }

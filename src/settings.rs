@@ -236,7 +236,7 @@ pub fn show(home: &Path) -> Value {
             entry(&same, &cfg.chain, rule, db)
         })
         .collect();
-    json!({
+    let mut shown = json!({
         "version": version,
         "first_run": bytes.is_none(),
         "resident_supported": cfg!(target_os = "linux"),
@@ -321,7 +321,10 @@ pub fn show(home: &Path) -> Value {
             // Calls a day that no day reaches: the no cap of each calls-a-day field (decision 64).
             "no_cap": config::no_daily_cap(),
         },
-    })
+    });
+    // Decision 81: the summaries' language when `[summary] language` is not set.
+    shown["language_default"] = config::os_language().into();
+    shown
 }
 
 /// docs/my-work-model.md A6: what My Work's jobs would cost on this home, priced at the chain's
@@ -1116,7 +1119,17 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
     if s.curate != now.summary.curate {
         put(&mut doc, "summary", "curate", s.curate.into());
     }
-    if s.language != now.summary.language {
+    // Decision 81: left empty, the computer's language: the key goes, not an empty language, its
+    // comment kept as the other removals keep theirs (cubic on #864).
+    if s.language.trim().is_empty() {
+        let comments = (doc.get("summary").and_then(|t| t.as_table_like()))
+            .map(|table| key_comments(table, "language"))
+            .unwrap_or_default();
+        if let Some(t) = doc.get_mut("summary").and_then(|t| t.as_table_like_mut()) {
+            t.remove("language");
+        }
+        keep_comments(&mut doc, &comments);
+    } else if s.language != now.summary.language {
         put(&mut doc, "summary", "language", s.language.as_str().into());
     }
     for (key, value, was) in [
@@ -1275,6 +1288,47 @@ pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
         "config.toml changed while the port was written; try again"
     );
     staged.commit()
+}
+
+/// Decision 81: the computer's language written as `[summary] language` into a config.toml that
+/// has none (`oboete setup`), so a later change of the computer's locale changes no summary's
+/// language. A value already there is kept, and a home with no config.toml is left without one:
+/// `oboete migrate` copies v1's settings only into a home that has none. The language written, if
+/// any.
+pub fn pin_language(home: &Path) -> anyhow::Result<Option<String>> {
+    let _config = config_lock(home)?;
+    let path = home.join("config.toml");
+    let Some(was) = bytes(home)? else {
+        return Ok(None);
+    };
+    let text = utf8(Some(&was)).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
+    // As the other config writers: a file one of its readers refuses is left as it is, and the error
+    // names none of its values, a header's key or a masking rule (Codex on decision 81).
+    anyhow::ensure!(parsed(&path, text).is_some(), "config.toml is invalid");
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|_| anyhow::anyhow!("config.toml is invalid"))?;
+    // A language left blank is not set, as `config` reads it (cubic on #864).
+    let set = (doc.get("summary").and_then(|t| t.as_table_like()))
+        .and_then(|t| t.get("language")?.as_str())
+        .is_some_and(|l| !l.trim().is_empty());
+    if set {
+        return Ok(None);
+    }
+    let language = config::os_language();
+    put(&mut doc, "summary", "language", language.as_str().into());
+    let candidate = doc.to_string();
+    anyhow::ensure!(
+        parsed(&path, &candidate).is_some(),
+        "config.toml is invalid"
+    );
+    let staged = crate::setup::stage(&path, &candidate)?;
+    anyhow::ensure!(
+        version(bytes(home)?.as_deref()) == version(Some(&was)),
+        "config.toml changed while the language was written; try again"
+    );
+    staged.commit()?;
+    Ok(Some(language))
 }
 
 /// `[embedding] provider` set to `provider`, the rest of config.toml as it was (`oboete setup
@@ -1991,6 +2045,77 @@ mod tests {
 
     fn file(home: &tempfile::TempDir) -> Option<String> {
         std::fs::read_to_string(home.path().join("config.toml")).ok()
+    }
+
+    /// Codex on decision 81: setup's language is not written into a file one of its readers refuses,
+    /// which neither stops setup (a `[summary]` of another type) nor shows a value of the file (a
+    /// line that does not parse).
+    #[test]
+    fn the_computers_language_is_not_written_into_a_file_a_reader_refuses() {
+        for text in [
+            "summary = \"wrong\"\n",
+            "[summary]\ncurate = true\nnote = \"made-up-canary-5523\" more\n",
+            "[redaction]\nrules = 'made-up-canary-5523'\n",
+        ] {
+            let home = home_with(Some(text));
+            let error = format!("{:#}", pin_language(home.path()).unwrap_err());
+            assert!(!error.contains("canary"), "{error}");
+            assert_eq!(file(&home).as_deref(), Some(text));
+        }
+    }
+
+    /// Decision 81: setup writes the computer's language into a config.toml without one, or with
+    /// one left blank, keeps a value set, and makes no config.toml; the page is told the computer's
+    /// language, and a language saved empty takes the key out, its comment kept, back to the
+    /// computer's.
+    #[test]
+    fn the_computers_language_is_written_once_and_an_empty_one_is_its_default() {
+        let none = home_with(None);
+        assert_eq!(pin_language(none.path()).unwrap(), None);
+        assert_eq!(file(&none), None);
+        let set = "[summary]\nlanguage = \"French\" # mine\n";
+        let kept = home_with(Some(set));
+        assert_eq!(pin_language(kept.path()).unwrap(), None);
+        assert_eq!(file(&kept).as_deref(), Some(set));
+        // Left blank, it is not set (cubic on #864): the computer's is written over it.
+        let blank = home_with(Some("[summary]\nlanguage = \" \" # mine\n"));
+        assert_eq!(
+            pin_language(blank.path()).unwrap().as_deref(),
+            Some("Japanese")
+        );
+        assert_eq!(
+            file(&blank).as_deref(),
+            Some("[summary]\nlanguage = \"Japanese\" # mine\n")
+        );
+        let shown = show(kept.path());
+        let body = posted(&shown, |v| v["summary"]["language"] = json!(""));
+        save_to(&kept, &body).unwrap();
+        assert_eq!(file(&kept).as_deref(), Some("[summary]\n\n # mine\n"));
+        let unset = home_with(Some("# mine\n[summary]\ncurate = true\n"));
+        assert_eq!(
+            pin_language(unset.path()).unwrap().as_deref(),
+            Some("Japanese")
+        );
+        assert_eq!(
+            file(&unset).as_deref(),
+            Some("# mine\n[summary]\ncurate = true\nlanguage = \"Japanese\"\n")
+        );
+        let shown = show(unset.path());
+        assert_eq!(shown["language_default"], "Japanese");
+        let body = posted(&shown, |v| v["summary"]["language"] = json!(" "));
+        let saved = save_to(&unset, &body).unwrap();
+        assert_eq!(saved["summary"]["language"], "Japanese");
+        assert_eq!(
+            file(&unset).as_deref(),
+            Some("# mine\n[summary]\ncurate = true\n")
+        );
+        let body = posted(&saved, |v| v["summary"]["language"] = json!("conversation"));
+        save_to(&unset, &body).unwrap();
+        assert!(
+            file(&unset)
+                .unwrap()
+                .contains("language = \"conversation\"")
+        );
     }
 
     /// The page's body for the values `show` gave, with `change` applied to it.
@@ -2905,9 +3030,10 @@ mod tests {
         let home = home_with(Some(
             "[summary]\ncurate = true\nlanguage = \"\"\nwindow_tokens = 0\nidle_minutes = 4294967295\n",
         ));
+        // A blank language is the computer's, as one not set (decision 81; cubic on #864).
         assert_eq!(
             show(home.path())["summary"],
-            json!({"curate": true, "language": "", "window_tokens": 0,
+            json!({"curate": true, "language": "Japanese", "window_tokens": 0,
                 "idle_minutes": 4_294_967_295_u32})
         );
     }

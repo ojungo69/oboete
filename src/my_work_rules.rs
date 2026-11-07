@@ -551,7 +551,7 @@ impl Job for Suggestions {
             rules: s.rules.clone(),
         };
         Ok(Some(Ask {
-            prompt: prompt(&data),
+            prompt: prompt(&s.summary.language, &data),
             schema: schema(),
             read: Read {
                 spans: vec![],
@@ -565,7 +565,9 @@ impl Job for Suggestions {
     }
 }
 
-fn prompt(data: &str) -> String {
+fn prompt(language: &str, data: &str) -> String {
+    // Decision 81: as `[summary] language` says, not the developer's language guessed.
+    let written = crate::config::write_in(language);
     let instructions = format!(
         "You keep a list of suggested rules for how a developer likes coding agents to work, \
          learned from the preferences their requests showed. At the end of this prompt, between \
@@ -577,7 +579,7 @@ fn prompt(data: &str) -> String {
          Answer with preferences: one entry for each new preference, its label, and joins: the id \
          of the suggestion it says the same as, rejected ones included, or an empty string when it \
          says something none does; with an empty joins, statement: the suggestion it makes, an \
-         actionable rule of at most {STATEMENT} characters in the developer's language, else an \
+         actionable rule of at most {STATEMENT} characters {written}, else an \
          empty string. Drop nothing.",
     );
     crate::my_work_run::fenced("RULES", &instructions, data)
@@ -1935,5 +1937,17 @@ mod tests {
             (409, "rule_decided"),
             "applied, it holds"
         );
+    }
+
+    /// Decision 81: the prompt writes in the language set, or each conversation's own.
+    #[test]
+    fn its_prompt_writes_in_the_language_set() {
+        for language in ["English", "conversation"] {
+            let asked = prompt(language, "## The new preferences\n");
+            assert!(
+                asked.contains(&crate::config::write_in(language)),
+                "{language}: {asked}"
+            );
+        }
     }
 }

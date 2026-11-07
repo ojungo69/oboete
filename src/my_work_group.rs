@@ -775,6 +775,7 @@ impl Batch {
 }
 
 fn prompt(language: &str, data: &str) -> String {
+    let written = crate::config::write_in(language);
     let fence = format!(
         "=== GROUPING {} ===",
         &crate::curate::sha256_hex(data)[..16]
@@ -802,7 +803,7 @@ fn prompt(language: &str, data: &str) -> String {
          conversations because they share only a repository or a topic word. An opening ask \
          marked [agent prompt] was written by an agent, not typed by the developer.\n\
          Give each group a title of at most {TITLE} characters naming the work, and keep reasons \
-         and evidence under {REASON} characters. Write titles, reasons and evidence in {language}.\n\
+         and evidence under {REASON} characters. Write titles, reasons and evidence {written}.\n\
          {FENCE}{fence}`.\n\n\
          {fence}\n{data}{fence}",
         FENCE = crate::curate::FENCE_SENTENCE,

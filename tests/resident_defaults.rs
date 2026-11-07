@@ -77,7 +77,7 @@ fn setup_waits_for_the_shared_config_writer_before_reading_defaults() {
     );
     assert!(setup.0.try_wait().unwrap().is_none());
     // The first writer's explicit choice is what the waiting setup must read and retain.
-    let chosen = "[summary]\ncurate = false\n[worker]\nresident = false\n[view]\nport = 17374\n";
+    let chosen = "[summary]\ncurate = false\nlanguage = \"Japanese\"\n[worker]\nresident = false\n[view]\nport = 17374\n";
     std::fs::write(h.join("config.toml"), chosen).unwrap();
     fence.unlock().unwrap();
     assert!(setup.0.wait().unwrap().success());
@@ -292,19 +292,38 @@ fn broken_corpus_settings_do_not_prevent_agent_wiring_but_keep_setup_failed() {
 fn setup_fills_resident_defaults_without_overwriting_an_explicit_choice() {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    let out = run(h, &["setup", "claude"]);
+    // Setup under a computer's locale (sys-locale reads these variables on Linux).
+    let in_locale = |lang: &str| {
+        let mut setup = command(h, &["setup", "claude"]);
+        setup
+            .env_remove("LANGUAGE")
+            .env_remove("LC_ALL")
+            .env_remove("LC_MESSAGES");
+        let out = setup.env("LANG", lang).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    let out = in_locale("de_DE.UTF-8");
     let config = h.join("config.toml");
     let first = std::fs::read_to_string(&config).expect("setup writes resident defaults");
     let parsed: toml::Value = toml::from_str(&first).unwrap();
     assert_eq!(parsed["worker"]["resident"].as_bool(), Some(true));
     assert_eq!(parsed["view"]["port"].as_integer(), Some(17373));
+    // Decision 81: the computer's language, written once: another locale later changes nothing
+    // (cubic on #864).
+    assert_eq!(parsed["summary"]["language"].as_str(), Some("German"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("summaries are written in German"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("http://127.0.0.1:17373"));
     assert!(!h.join("state/worker.lock").exists());
     assert!(!h.join("state/view.lock").exists());
-    run(h, &["setup", "claude"]);
+    in_locale("fr_FR.UTF-8");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), first);
 
-    let chosen = "# Keep the owner's choices\n[summary]\ncurate = false\n[worker]\nresident = false # intentionally off\n[view]\nport = 17374 # another home\n";
+    let chosen = "# Keep the owner's choices\n[summary]\ncurate = false\nlanguage = \"French\" # mine\n[worker]\nresident = false # intentionally off\n[view]\nport = 17374 # another home\n";
     std::fs::write(&config, chosen).unwrap();
     let out = run(h, &["setup", "claude"]);
     assert_eq!(std::fs::read_to_string(&config).unwrap(), chosen);

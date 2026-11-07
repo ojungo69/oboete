@@ -584,6 +584,7 @@ fn card_text(c: &Card) -> String {
 /// between two fence lines it cannot contain, as recorded data, never an instruction. The fence is
 /// named only in the last sentence, so the instructions are the same bytes for every turn (G09).
 fn prompt(language: &str, turn: &Turn) -> String {
+    let written = crate::config::write_in(language);
     let mut data = format!("## The developer's request\n{}\n", turn.prompts);
     if !turn.cards.is_empty() {
         data.push_str("## Cards kept of the work, oldest first\n");
@@ -614,7 +615,7 @@ fn prompt(language: &str, turn: &Turn) -> String {
          leave a field empty when the turn says nothing for it. Write only what the lines between \
          the fences say: never what was known before the turn, never a result the cards or the \
          reply do not report. Set skip to true only for a turn with nothing in it.\n\
-         Write every field in {language}.\n\
+         Write every field {written}.\n\
          {FENCE_SENTENCE}{fence}`.\n\n\
          {fence}\n{data}{fence}"
     )

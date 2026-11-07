@@ -229,6 +229,19 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
             }
         }
     };
+    // Decision 81: the summaries' language, the computer's, written where config.toml has none, so
+    // a later change of the computer's locale does not change it. Before config.lock is held below.
+    if !remove {
+        match crate::settings::pin_language(home) {
+            Ok(Some(language)) => {
+                println!(
+                    "summaries are written in {language}, this computer's language (Settings changes it)"
+                )
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("summary language not written: {error:#}"),
+        }
+    }
     let cmd = HookCommand::current(home)?;
     let _integration_hold = integration_lock(home)?;
     // A broken corpus lock must not prevent independent agent wiring. The separate

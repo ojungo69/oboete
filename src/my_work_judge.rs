@@ -73,6 +73,8 @@ pub(crate) fn request(
     now: i64,
 ) -> Result<Vec<MyWorkOp>> {
     let (entry, who) = (judge.entry, judge.label);
+    // Decision 81: its evidence in oboete's own words' language.
+    let ja = crate::config::notes_japanese(&s.summary.language);
     let device = s.raw.device();
     let candidates = crate::my_work_group::candidates(seen, groups, device, now);
     let Some(c) = (candidates.values().flatten())
@@ -127,16 +129,12 @@ pub(crate) fn request(
     let (links, linked) = crate::my_work_group::proven(repo, &[c], &open, &by_key, &senders);
     if let [anchor] = linked.iter().collect::<Vec<_>>()[..] {
         let proof = (links.iter()).find_map(|(proof, ends)| ends.contains(anchor).then_some(proof));
-        let how = match proof {
-            Some(Proof::Sent(record)) => {
-                shown.spans.insert(*record);
-                "a conversation of it sent this conversation's opening ask in a tool call"
-            }
-            _ => "a work list both wrote",
-        };
+        let sent = matches!(proof, Some(Proof::Sent(_)));
+        if let Some(Proof::Sent(record)) = proof {
+            shown.spans.insert(*record);
+        }
         group_ops(anchor, &mut shown);
-        let evidence =
-            format!("Joined with no call: one proven link, to this request alone: {how}.");
+        let evidence = rules_evidence(ja, sent);
         return decided(
             shown,
             RULES,
@@ -165,16 +163,7 @@ pub(crate) fn request(
     let mut ranked: Vec<&(&Key, &Group)> = open.iter().collect();
     ranked.sort_by_key(|(a, g)| std::cmp::Reverse(newest(a, g)));
     ranked.truncate(CANDIDATES);
-    let considered = if ranked.len() == open.len() {
-        let s = if open.len() == 1 { "" } else { "s" };
-        format!("{} open request{s}", open.len())
-    } else {
-        format!(
-            "the {} most recently active of {} open requests",
-            ranked.len(),
-            open.len()
-        )
-    };
+    let considered = considered(ja, ranked.len(), open.len());
     let conversation = context(s, c, &mut shown);
     let mut requests = serde_json::Map::new();
     let mut criteria = serde_json::Map::new();
@@ -213,12 +202,7 @@ pub(crate) fn request(
         labels.insert(label, (*anchor, request));
     }
     criteria.insert("none".into(), json!(NONE));
-    let evidence = |p: f64, score: f64| {
-        format!(
-            "{who}: picked over {considered} (p {p:.2}); the check \"continues that request\" \
-             scored {score:.2}."
-        )
-    };
+    let evidence = |p: f64, score: f64| picked_evidence(ja, who, &considered, p, score);
     // Nothing is paid for that could not be kept: the largest decision this read can make.
     let largest = vec![
         ("outcome", json!("suggested")),
@@ -295,6 +279,41 @@ fn left(
         return Ok(Vec::new());
     }
     decided(shown, entry, vec![("outcome", json!(why))])
+}
+
+/// The rules judge's evidence (decision 81: Japanese when oboete's own words are, else English):
+/// the one proven link, a sent opening ask or a work list both wrote.
+fn rules_evidence(ja: bool, sent: bool) -> String {
+    match (ja, sent) {
+        (true, true) => "呼び出しなしでまとめました: この依頼だけにつながる確かな手がかりが 1 つあります (この依頼の会話が、この会話の最初の依頼をツール呼び出しで送った)。".into(),
+        (true, false) => "呼び出しなしでまとめました: この依頼だけにつながる確かな手がかりが 1 つあります (両方が同じ作業リストに書いた)。".into(),
+        (false, true) => "Joined with no call: one proven link, to this request alone: a conversation of it sent this conversation's opening ask in a tool call.".into(),
+        (false, false) => "Joined with no call: one proven link, to this request alone: a work list both wrote.".into(),
+    }
+}
+
+/// The open requests the judge was shown, of all those open.
+fn considered(ja: bool, shown: usize, open: usize) -> String {
+    match (ja, shown == open) {
+        (true, true) => format!("開いている依頼 {open} 件"),
+        (true, false) => format!("開いている依頼 {open} 件のうち最近動いた {shown} 件"),
+        (false, true) => format!("{open} open request{}", if open == 1 { "" } else { "s" }),
+        (false, false) => format!("the {shown} most recently active of {open} open requests"),
+    }
+}
+
+/// The judge's pick, with its probability and the check's score.
+fn picked_evidence(ja: bool, who: &str, considered: &str, p: f64, score: f64) -> String {
+    if ja {
+        format!(
+            "{who}: {considered}の中から選びました (確率 {p:.2})。「その依頼の続き」の確認は {score:.2} でした。"
+        )
+    } else {
+        format!(
+            "{who}: picked over {considered} (p {p:.2}); the check \"continues that request\" \
+             scored {score:.2}."
+        )
+    }
 }
 
 /// A conversation as claude-mem's `contextReader` gives it (J2): its repository, the minute it
@@ -468,8 +487,17 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
             .ok_or_else(|| refused(409, "suggestion_target_gone", "request"))?;
         let ends = json!([key(target), key(c)]);
         let members: Vec<Value> = [key(target), key(c)].into_iter().chain(others).collect();
+        let ja = crate::config::load(home).map_or_else(
+            |_| crate::config::notes_japanese(&crate::config::os_language()),
+            |c| crate::config::notes_japanese(&c.summary.language),
+        );
+        let evidence = if ja {
+            "判定役の提案を受けて、あなたがまとめました。"
+        } else {
+            "Joined by the owner on the judge's suggestion."
+        };
         json!([{"conversations": members, "title": null, "links": [{"conversations": ends,
-            "kind": "judge", "evidence": "Joined by the owner on the judge's suggestion."}]}])
+            "kind": "judge", "evidence": evidence}]}])
     } else {
         let members: Vec<Value> = std::iter::once(key(c)).chain(others).collect();
         json!([{"conversations": members, "title": null, "links": []}])
@@ -828,10 +856,10 @@ mod tests {
         assert_eq!(bodies(&rx).len(), 2);
         let op = &h.judged()[0];
         assert_eq!(op.entry, "judge:d1-local");
+        // In Japanese, as the summaries' language is here (decision 81).
         assert_eq!(
             op.fields["groups"][0]["links"][0]["evidence"],
-            "d1 on this PC: picked over 1 open request (p 0.94); the check \"continues that \
-             request\" scored 0.90."
+            "d1 on this PC: 開いている依頼 1 件の中から選びました (確率 0.94)。「その依頼の続き」の確認は 0.90 でした。"
         );
         let row = ("judge:d1-local".into(), "judge".into(), "ok".into());
         assert_eq!(h.ledger(), vec![row.clone(), row]);
@@ -862,8 +890,7 @@ mod tests {
                     assert_eq!(link["kind"], "judge");
                     assert_eq!(
                         link["evidence"],
-                        "Jev: picked over 1 open request (p 0.94); the check \"continues that \
-                         request\" scored 0.90."
+                        "Jev: 開いている依頼 1 件の中から選びました (確率 0.94)。「その依頼の続き」の確認は 0.90 でした。"
                     );
                     assert!(!op.fields.contains_key("suggestion"));
                 }
@@ -1022,7 +1049,7 @@ mod tests {
         let link = &h.judged()[0].fields["groups"][0]["links"][0];
         assert!(
             (link["evidence"].as_str().unwrap())
-                .contains("over the 19 most recently active of 21 open requests"),
+                .contains("開いている依頼 21 件のうち最近動いた 19 件の中から選びました"),
             "{link}"
         );
         assert_eq!(h.groups().of.get(&key("s2")), Some(&key("o20")));
@@ -1758,5 +1785,23 @@ mod tests {
         let own = h.request_of("s2");
         assert_eq!(own["title"], "Trailing commas");
         assert_eq!(h.request_of("s3")["id"], own["id"]);
+    }
+
+    /// Decision 81: the judge's own evidence in Japanese when oboete's words are, else English,
+    /// whatever the language the summaries are written in.
+    #[test]
+    fn the_judges_evidence_is_in_the_notes_language() {
+        assert_eq!(
+            picked_evidence(false, "Jev", &considered(false, 19, 21), 0.94, 0.9),
+            "Jev: picked over the 19 most recently active of 21 open requests (p 0.94); the check \
+             \"continues that request\" scored 0.90."
+        );
+        assert_eq!(considered(false, 1, 1), "1 open request");
+        assert_eq!(considered(true, 2, 2), "開いている依頼 2 件");
+        assert!(rules_evidence(true, true).contains("ツール呼び出し"));
+        assert!(rules_evidence(false, false).ends_with("a work list both wrote."));
+        for (language, ja) in [("Japanese", true), ("English", false), ("French", false)] {
+            assert_eq!(config::notes_japanese(language), ja, "{language}");
+        }
     }
 }

@@ -430,6 +430,7 @@ fn fill(
 }
 
 fn prompt(language: &str, data: &str) -> String {
+    let written = crate::config::write_in(language);
     let fence = format!("=== GOALS {} ===", &crate::curate::sha256_hex(data)[..16]);
     format!(
         "You keep a developer's goals from the prompts they typed to coding agents in the last 31 \
@@ -460,7 +461,7 @@ fn prompt(language: &str, data: &str) -> String {
          one area); for an ask, the id of the focus area it belongs under, or an empty string. A \
          priority's title is no word of the page (My Focus, My Work, My Rules, Other, Suggested, \
          Past focus, Monitor, Steer).\n\
-         Write the titles, products and summary in {language}.\n\
+         Write the titles, products and summary {written}.\n\
          {FENCE}{fence}`.\n\n\
          {fence}\n{data}{fence}",
         FENCE = crate::curate::FENCE_SENTENCE,

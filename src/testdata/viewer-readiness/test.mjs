@@ -1695,6 +1695,22 @@ console.log('PASS: the caps\' No cap switches');
   assert(clean(),'after it, nothing waits');
   assert.equal(general('worker.resident').checked,true,'and the switch shows what is saved');
 
+  // Decision 81: "The language of each conversation" is saved at once; turned off after that save's
+  // answer, the language typed before it comes back, not the computer's.
+  {
+    const spoken=(language,version)=>ai(['alpha'],{version,summary:{...base.summary,language},language_default:'French'});
+    draw(spoken('Spanish','l1'));
+    const own=()=>general('summary.language_conversation');
+    answers=[json(spoken('conversation','l2'))];
+    flip(own(),true);fire('change',{target:own()});await settled(8);
+    assert.deepEqual([sent().at(-1).summary.language,general('summary.language').disabled],['conversation',true],
+      'on: conversation, saved at once');
+    answers=[json(spoken('Spanish','l3'))];
+    flip(own(),false);fire('change',{target:own()});await settled(8);
+    assert.deepEqual([sent().length,sent().at(-1).version,sent().at(-1).summary.language],[2,'l2','Spanish'],
+      'off after its answer: the language before it, with the answer\'s version');
+  }
+
   // Decision 3: after each kind of simple save, the general save has nothing to send.
   {
     let saved=ai(['groq','beta'],{version:'s1',paid_usd_per_month:5,redaction:masked([])});
@@ -2717,6 +2733,30 @@ console.log('PASS: the caps\' No cap switches');
       choose(simple('catalog.model'),'claude-sonnet-5-5');
       madeNow=await createdBody();
       assert.deepEqual([madeNow.limits.usd_per_mtok_in,madeNow.limits.max_request_tokens],[2,null],'Sonnet: its prices, no cap of its own and none set');
+      // #863: a key saved but not kept safely stops "Add" at its key.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1126');
+      // The key is registered (its state ok); the disk did not confirm the write.
+      answers=[json(state('v2')),json({...state('v3',{key:'ok'}),key_saved:{durable:false}})];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),Boolean(simple('key:openai')),focusKey()],
+        [['/api/providers','/api/providers/key'],true,'key:openai'],'a key not kept: stopped, its key field open and focused');
+      // #863: a draft switched to a CLI in More settings takes no key and is made on.
+      await pickOpenAI();posted.length=0;
+      choose(panel.querySelector('.new-provider').querySelectorAll('select')[0],'claude');await settled();
+      assert.equal(simple('catalog.key'),undefined,'a CLI draft: no key field');
+      const cliOn=lineAi([row('alpha'),row('beta'),row('openai',{on:false,key:'none'})],{version:'v2',key_input:true,
+        providers:[...base,{...oaEntry(false,'none'),saved:{enabled:false,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:300,limits:{}}}]});
+      answers=[json(cliOn),json(lineAi([row('alpha'),row('beta'),row('openai',{key:'none'})],{version:'v3',key_input:true,
+        providers:[...base,{...oaEntry(true,'none'),saved:{enabled:true,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:300,limits:{}}}]}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual(steps().map(s=>[s[0],s[1]]),[['/api/providers','create'],['/api/providers','enabled']],'a CLI draft: made, then on, no key');
+      // #863: a place the form no longer offers (the AI after which it was to go turned off) is last.
+      await pickOpenAI();
+      choose(simple('catalog.place'),'after:beta');
+      answers=[json(lineAi([row('alpha'),row('beta',{on:false})],{version:'v2',key_input:true,providers:base}))];
+      flip(simple('on:beta'),false);await settled(8);
+      assert.equal(simple('catalog.place').value,'last','its place no longer offered: last');
       // The key typed: masked as every key field; kept through a redraw; not put back once the
       // draft's address changed in More settings (#807).
       await pickOpenAI();
@@ -4425,6 +4465,27 @@ assert.equal(field('my_work.curate').checked,true,'the saved switch shows');
 type(field('paid_usd_per_month'),'3.5');for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();
 assert.equal(requests.at(-1).body.paid_usd_per_month,3.5);
 assert.equal(requests.at(-1).body.summary.language,'Japanese');
+{
+  // Decision 81: "The language of each conversation" sets `conversation`, the language field
+  // disabled; off, the language typed before comes back, else the computer's.
+  const shownWith=language=>({...plain(saved),language_default:'Japanese',summary:{...plain(saved).summary,language}});
+  ctx.ui.setForm(ctx.simpleUi.formOf(shownWith('English')));ctx.ui.setView('settings');ctx.ui.setLang('en');ctx.ui.drawSettings();
+  const own=()=>panel.querySelectorAll('input').find(n=>n.dataset.field==='summary.language_conversation');
+  const typed=()=>panel.querySelectorAll('textarea').find(n=>n.dataset.field==='summary.language');
+  const turn=v=>{own().checked=v;for(const cb of own().listeners.change||[])cb({target:own()});};
+  assert.deepEqual([own().checked,typed().disabled,typed().placeholder],[false,false,'Japanese'],
+    'off: the language field, the computer\'s as its placeholder');
+  turn(true);
+  assert.deepEqual([ctx.ui.getForm().summary.language,typed().disabled],['conversation',true],'on: conversation, the field disabled');
+  turn(false);
+  assert.equal(ctx.ui.getForm().summary.language,'English','off: the language typed before');
+  ctx.ui.setForm(ctx.simpleUi.formOf(shownWith('Conversation')));ctx.ui.drawSettings();
+  assert.equal(own().checked,true,'saved as conversation, any case: on');
+  turn(false);
+  assert.equal(ctx.ui.getForm().summary.language,'Japanese','off with nothing typed before: the computer\'s');
+  ctx.ui.setLang('ja');ctx.ui.drawSettings();
+  assert(text(panel).includes('会話ごとの言語'),'both languages');
+}
 type(field('paid_usd_per_month'),'4.25');ctx.ui.drawSettings();
 assert.equal(field('paid_usd_per_month').value,'4.25','a typed limit survives a redraw before it is saved');
 for(const cb of field('paid_usd_per_month').listeners.blur)cb();await settle();

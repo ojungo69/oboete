@@ -26,6 +26,13 @@ fn only_the_work_state_section(out: &[u8]) -> serde_json::Value {
     v
 }
 
+/// A config.toml with `rest` whose notes are in Japanese: unset, the note's language is the
+/// computer's (decision 81), which differs between the machines the tests run on.
+fn japanese(home: &std::path::Path, rest: &str) {
+    let config = format!("{rest}[summary]\nlanguage = \"Japanese\"\n");
+    std::fs::write(home.join("config.toml"), config).unwrap();
+}
+
 fn hook_output(
     home: &std::path::Path,
     agent: &str,
@@ -54,6 +61,7 @@ fn hook_output(
 #[test]
 fn session_start_note_says_in_japanese_that_there_is_no_memory_yet() {
     let home = tempfile::tempdir().unwrap();
+    japanese(home.path(), "");
     let out = hook_output(
         home.path(),
         "claude",
@@ -70,11 +78,7 @@ fn session_start_note_says_in_japanese_that_there_is_no_memory_yet() {
 #[test]
 fn session_start_note_reports_injection_off_in_japanese() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        home.path().join("config.toml"),
-        "[inject]\nsession_start = false\n",
-    )
-    .unwrap();
+    japanese(home.path(), "[inject]\nsession_start = false\n");
     let out = hook_output(
         home.path(),
         "claude",
@@ -141,6 +145,7 @@ fn inject_settings_that_do_not_load_give_no_note() {
 #[test]
 fn session_start_note_says_when_memory_could_not_be_read() {
     let home = tempfile::tempdir().unwrap();
+    japanese(home.path(), "");
     std::fs::create_dir(home.path().join("knowledge.db")).unwrap();
     let out = hook_output(
         home.path(),

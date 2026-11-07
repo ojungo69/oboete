@@ -1550,8 +1550,13 @@ const TEXT = {
   simple_my_work: ['Write My Work with AI', 'My Work を AI で書く'],
   summary_language: ['Language of summaries', '要約を書く言語'],
   summary_language_desc: [
-    'Write the language you want, such as English. Default: Japanese. Changing the language does not start a call.',
-    '要約を書いてほしい言語を自由に入力します。例: English。既定は Japanese(日本語)です。言語を変えても呼び出しは始まりません。',
+    'Write the language you want, such as English. Left empty, this computer’s language ({language}). Changing the language does not start a call.',
+    '要約を書いてほしい言語を自由に入力します。例: English。空のときは、このパソコンの言語 ({language}) で書きます。言語を変えても呼び出しは始まりません。',
+  ],
+  summary_language_conversation: ['The language of each conversation', '会話ごとの言語'],
+  summary_language_conversation_desc: [
+    'Each summary is written in the language its conversation is written in, for those who work in several languages.',
+    '要約を、もとの会話と同じ言語で書きます。いくつかの言語で作業する人向けです。',
   ],
   window_tokens: ['Text per request ({min} to {max} estimated tokens)', '一度に送る大きさ(推定トークン数、{min}〜{max})'],
   window_tokens_desc: [
@@ -3501,6 +3506,11 @@ function loadedForm(s) {
 // for its turn is not sent across one (`keySave`).
 let formLoads = 0;
 
+// Whether `[summary] language` is each conversation's own (decision 81), any case.
+function conversationLanguage(language) {
+  return typeof language === 'string' && language.trim().toLowerCase() === 'conversation';
+}
+
 function formOf(s) {
   if (s.error) return null;
   // Saved settings invalidate consent and cached display text. Keep known effects and unknown
@@ -3525,6 +3535,8 @@ function formOf(s) {
     saved: { summary: { ...s.summary }, capture: { ...s.capture }, paid_usd_per_month: s.paid_usd_per_month, gemini: s.gemini,
       worker: { resident: s.worker?.resident ?? false }, view: { port: s.view?.port }, my_work: { ...s.my_work } },
     firstRun: s.first_run === true,
+    // Decision 81: the computer's language, the summaries' when none is set.
+    languageDefault: s.language_default || 'English',
     residentSupported: s.resident_supported === true,
     worker: { resident: s.first_run && s.resident_supported ? true : s.worker?.resident ?? false },
     view: { port: String(s.view?.port ?? '') },
@@ -5804,6 +5816,8 @@ function mergeProviderSettings(answer, mine, action) {
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
   next.simplePlace = action.op === 'create' ? null : mine.simplePlace;
+  // The language typed before "The language of each conversation" outlives that switch's own save (decision 81).
+  next.summaryLanguageBefore = mine.summaryLanguageBefore;
   preserveProviderDrafts(next, mine, action);
   preserveCreatedSubscriptionDraft(next, mine, action);
   return next;
@@ -5956,13 +5970,17 @@ function providerTarget(taken, target, mine, action) {
 // Whether an AI line shows its key field after a provider's write: no longer after a key saved; after
 // a creation, for the created entry only when it is the first of its name, as the line's field is the
 // first entry's (CodeRabbit on #820). Each creation sets it anew.
-function providerKeyLine(action, path, mine) {
+function providerKeyLine(action, path, mine, kept = true) {
   if (path === '/key') {
     simpleKeyName = null;
     // The line's "Change the key" closes when its own key, its first entry's, was saved; another
     // line's, or this line's while a later entry's key was saved, stays with what is typed there.
+    // A key the disk did not confirm leaves its field open, to be saved again (#863).
     const saved = mine.providers.find((p) => selectorKey(p.selector) === selectorKey(action.selector));
-    if (saved && mine.providers.find((p) => p.name === saved.name) === saved) keyChanging.delete(saved.name);
+    if (saved && mine.providers.find((p) => p.name === saved.name) === saved) {
+      if (kept) keyChanging.delete(saved.name);
+      else keyChanging.add(saved.name);
+    }
   }
   if (action.op !== 'create') return;
   const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
@@ -5986,12 +6004,13 @@ async function providerWrite(action, button, body, path, target = null) {
     providerTarget(taken, target, mine, action);
     const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
     simpleReceipt = kept ? 'ai' : null;
-    providerKeyLine(action, path, mine);
+    providerKeyLine(action, path, mine, kept);
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();
     void refreshRests();
-    return true;
+    // A key saved but not kept safely is said so, and is no success to go on from (#863).
+    return kept;
   } catch {
     if (currentSettings(mine)) {
       if (action.op === 'enabled') drawSettings();
@@ -7665,7 +7684,9 @@ function simpleCatalog(f) {
   const field = (name, control, ...notes) => el('label', 'field', el('span', null, t(name)), control, ...notes);
   // 1. Its key: only in its field until "Add" sends it, as every key field's (#807).
   let key = null;
-  if (entry.key_file) {
+  // A key for an HTTP draft of a service that takes one: a draft More settings switched to a CLI
+  // takes none (#863).
+  if (entry.key_file && draft.kind === 'openai') {
     key = el('input');
     key.type = 'text';
     key.autocomplete = 'off';
@@ -7707,7 +7728,9 @@ function simpleCatalog(f) {
   const option = (value, text) => { const node = el('option', null, text); node.value = value; return node; };
   const place = el('select', null, option('last', t('simple_place_last')), option('first', t('simple_place_first')),
     ...simpleSavedChain(f).filter((row) => row.on).map((row) => option(`after:${row.name}`, t('simple_place_after', { name: simpleLabel(row.name) }))));
-  place.value = f.simplePlace ?? 'last';
+  // A place the form no longer offers (the AI it was after turned off since) is last (#863).
+  if (![...place.options].some((node) => node.value === f.simplePlace)) f.simplePlace = 'last';
+  place.value = f.simplePlace;
   place.dataset.simpleFocus = 'catalog.place';
   place.addEventListener('change', () => { f.simplePlace = place.value; });
   const save = el('button', 'small', t('simple_add_save'));
@@ -7757,8 +7780,9 @@ async function simpleAdd(entry, draft, key, place, button) {
   const created = form.providers.findLast((p) => p.selector.source !== 'gemini');
   if (created?.name !== name) return;
   // Its key not typed: it stays off, and its place is still saved.
-  const missing = entry.key_file && !key ? `key:${name}` : null;
-  if (entry.key_file && key) {
+  const keyed = Boolean(entry.key_file) && draft.kind === 'openai';
+  const missing = keyed && !key ? `key:${name}` : null;
+  if (keyed && key) {
     const body = JSON.stringify({ version: form.version, selector: created.selector, key });
     if (!await providerOperation({ op: 'key', selector: created.selector }, control(`key-save:${name}`) ?? button, body, '/key')) {
       return stop(`key:${name}`);
@@ -8035,8 +8059,18 @@ function drawSettings() {
   [myWorkCalls.min, myWorkCalls.max] = f.ranges.my_work_calls;
   const myWorkOff = noCapSwitch(f.my_work.noCap, 'my_work', t('my_work_h'), myWorkCalls, 'no_cap_calls_warning', (v) => { f.my_work.noCap = v; });
   const savedCalls = f.saved.my_work.calls_a_day === f.ranges.no_cap ? t('no_cap') : f.saved.my_work.calls_a_day;
-  const summaryLanguage = input('textarea', f.summary.language, 'Japanese', 'summary.language', (v) => { f.summary.language = v; });
+  const summaryLanguage = input('textarea', f.summary.language, f.languageDefault, 'summary.language', (v) => { f.summary.language = v; });
   summaryLanguage.className = 'summary-language';
+  // Decision 81: each conversation's own language, the value `conversation`; off, the language
+  // typed before it comes back, else the computer's.
+  const own = conversationLanguage(f.summary.language);
+  summaryLanguage.disabled = own;
+  const ownLanguage = checkbox(own, (on) => {
+    if (on) [f.summaryLanguageBefore, f.summary.language] = [f.summary.language, 'conversation'];
+    else f.summary.language = f.summaryLanguageBefore && !conversationLanguage(f.summaryLanguageBefore) ? f.summaryLanguageBefore : f.languageDefault;
+    drawSettings();
+  });
+  ownLanguage.dataset.field = 'summary.language_conversation';
   const summarySize = (key) => {
     const i = input('number', f.summary[key], '', `summary.${key}`, (v) => { f.summary[key] = v; });
     const [min, max] = f.ranges[key];
@@ -8160,7 +8194,9 @@ function drawSettings() {
       el('section', null,
         el('h3', null, t('summary_h')),
         el('label', 'field', el('span', null, t('summary_language')), summaryLanguage,
-          saved(f.saved.summary.language), note(t('summary_language_desc'))),
+          saved(conversationLanguage(f.saved.summary.language) ? t('summary_language_conversation') : f.saved.summary.language),
+          note(t('summary_language_desc', { language: f.languageDefault }))),
+        el('label', 'check', ownLanguage, t('summary_language_conversation')), note(t('summary_language_conversation_desc')),
         el('div', 'grid', summarySize('window_tokens'), summarySize('idle_minutes'))),
       el('section', null,
         el('label', 'field', el('span', null, t('gemini_label')), gemini,
