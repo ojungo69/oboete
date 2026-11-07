@@ -2097,6 +2097,63 @@ mod tests {
         }
     }
 
+    /// claude-mem 15.10's key shapes (its src/utils/redaction.ts) are masked whole where no key
+    /// name stands beside them; shorter look-alikes and the prefixes in prose are not.
+    #[test]
+    fn the_key_shapes_claude_mem_15_10_masks_are_masked_too() {
+        const NEW: [&str; 5] = [
+            "google-oauth-access-token",
+            "runcrate-api-key",
+            "supabase-access-token",
+            "notion-integration-token",
+            "sentry-org-auth-token",
+        ];
+        // Split literals: secret scanners flag whole ones in the repository.
+        let r20 = format!("Q7wE9rT2yU{}", "4iO6pA8sD1");
+        let hex20 = format!("0f1e2d3c4b{}", "5a69788796");
+        let b43 = format!("{r20}{r20}{}", "Xy7");
+        let google = format!("ya29.{r20}{}", "-Ab_9");
+        let gce = format!("ya29.c.{r20}{}", "Kp4Q");
+        let runcrate = format!("rc_live_{r20}{}", "Zx3Cv5");
+        let supabase = format!("sbp_{hex20}{hex20}");
+        let notion = format!("ntn_{r20}{r20}{}", "Ab3dEf");
+        let notion_old = format!("secret_{b43}");
+        let sentry = format!("sntrys_{r20}{}==_{b43}", "Mb2Xs7");
+        // A failure names the case by its number: its text holds the made-up secret.
+        let secrets = [
+            &google,
+            &gce,
+            &runcrate,
+            &supabase,
+            &notion,
+            &notion_old,
+            &sentry,
+        ];
+        for (i, secret) in secrets.into_iter().enumerate() {
+            let text = format!("the token in the log was {secret} this morning");
+            let (stored, found) = scan(&text, &Rules::default());
+            assert!(!found.is_empty(), "case {i}: nothing found");
+            check(&stored, &found, secret);
+            let whole = format!("the token in the log was {MASK} this morning");
+            assert!(stored == whole, "case {i}: not masked whole");
+        }
+        for text in [
+            "the ya29. prefix marks Google's OAuth tokens".to_owned(),
+            format!("too short: ya29.{}", "Ab3dEf"),
+            format!("too short: rc_live_{}", "Ab3dEf9h"),
+            format!("one short: sbp_{hex20}{}", &hex20[..19]),
+            format!("not hex: sbp_{r20}{r20}"),
+            "the secret_key_base setting and the ntn_ prefix".to_owned(),
+            format!("one short: secret_{}", &b43[..42]),
+            format!("no secret part: sntrys_{r20}"),
+        ] {
+            // A generic rule may still take a random-looking payload; the new rules must not.
+            let (_, found) = scan(&text, &Rules::default());
+            let rules: Vec<&str> = found.iter().map(|f| f.rule.as_str()).collect();
+            assert!(!rules.iter().any(|r| NEW.contains(r)), "{rules:?}");
+        }
+    }
+
     /// A value masked takes no word after it: the next argument of a command line, the next line of
     /// an env file; a second secret there is still masked (Codex on #826).
     #[test]
