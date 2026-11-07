@@ -2132,8 +2132,10 @@ mod tests {
             let (stored, found) = scan(&text, &Rules::default());
             assert!(!found.is_empty(), "{text}: nothing found");
             check(&stored, &found, secret);
-            let tail = &secret[secret.len() - 6..];
-            assert!(!stored.contains(tail), "{text}: {stored}");
+            assert_eq!(
+                stored,
+                format!("the token in the log was {MASK} this morning")
+            );
         }
         for text in [
             "the ya29. prefix marks Google's OAuth tokens".to_owned(),

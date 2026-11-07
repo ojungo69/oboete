@@ -5,7 +5,7 @@ comparison; decision 37 sets the scope based on it. Decision 50: claude-mem come
 table, brought up to date against claude-mem's current release, shows every difference closed or
 accepted by the owner.
 
-## Status against claude-mem 13.40.0 (2026-10-17), new features to 15.9.0 (2026-11-03)
+## Status against claude-mem 13.40.0 (2026-10-17), new features to 15.9.0 (2026-11-03), masking to 15.10.0 (2026-11-07)
 
 ### How it was checked
 
