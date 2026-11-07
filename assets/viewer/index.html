@@ -5,13 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>oboete</title>
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
 <link rel="stylesheet" href="/app.css">
 <script type="module" src="/app.js"></script>
 </head>
 <body>
+<!-- The brand symbol (assets/brand): drawn once, used by the header and the welcome. -->
+<svg hidden aria-hidden="true" focusable="false"><defs><path id="oboete-symbol" fill-rule="evenodd" d="M662.5 158.02C632.5 158.58 602.13 160.23 572.5 165.18C514.1 174.93 456.48 196.01 405.5 226.13C366.69 249.07 331.32 278.4 299.69 310.33C284.95 325.2 270.58 340.3 257.28 356.5C224.91 395.91 197.2 443.75 179.26 491.5C176.34 499.28 174.14 507.42 171.6 515.33C164.73 536.71 158.71 558.27 155.21 580.5C153.71 589.98 152.98 599.66 151.88 609.2C144.93 669 149.33 730.34 169.1 787.5C188.15 842.54 217.89 894.56 254.84 939.5C293.63 986.68 338.95 1027.91 391.8 1058.82C454.09 1095.26 510.86 1112.59 582.5 1119.72C602.7 1121.73 623.05 1121.05 643.25 1119.74C805.96 1109.17 953.21 1005.77 1034.79 867.2C1049.51 842.19 1062.93 815.89 1072.71 788.5C1080.52 766.66 1087.61 742.33 1091.78 719.5C1093.05 712.56 1093.55 705.38 1094.43 698.38C1095.55 689.46 1097.14 680.46 1097.81 671.5C1100.99 628.53 1096.56 576.4 1086.73 534.5C1080.78 509.14 1071.52 479.75 1057.89 457.5C1044.52 435.67 1022.56 414.37 1004.76 395.85L925.75 313.68C898.52 285.36 871.75 256.49 843.96 228.72C825.55 210.33 807.34 190.82 783.5 179.44C748.85 162.91 700.71 157.31 662.5 158.02ZM750.5 224.8L749.28 225.5C748.48 246.57 749.22 267.8 749.23 288.89C749.26 338.08 749.73 387.31 749.21 436.5L748.5 437.26C717.6 418.38 690.16 404.43 653.5 400.24C559.22 389.48 471.61 440.14 419.83 517C406.5 536.79 394.87 558.48 388.09 581.5C381.29 604.6 377.33 629.42 377.27 653.5C377.11 717.16 402.95 770.23 444.52 817.06C453.39 827.05 462.26 837.09 472.5 845.74C502.94 871.45 539.05 890.75 578.5 897.9C592.43 900.43 606.54 900.75 620.64 900.35C630.97 900.05 641.31 899.75 651.5 897.88C724.91 884.46 785.99 830.7 822.78 767.72C834.49 747.67 845.33 726.27 850.78 703.5C853.7 691.31 855.09 678.84 856.16 666.39C856.69 660.16 857.73 653.75 857.78 647.5C857.82 641.75 856.97 635.84 856.58 630.1C853.36 583.65 836.84 547.79 815.08 507.5L815.48 506.5C885.81 506.53 956.18 507.3 1026.5 506.37L1027.07 505.5C1024.04 498.57 1021.43 491.18 1017.89 484.5C1008.07 465.96 992.92 448.73 974.5 438.4C954.29 427.07 931.01 428.82 908.66 428.77L805.2 428.5C804.07 421.99 804.5 415.32 804.5 408.72L804.5 377.15L804.49 278.5C789.28 258.28 770.92 239.77 750.5 224.8Z"/></defs></svg>
 <header class="bar">
   <div class="top">
-    <h1 class="brand" aria-labelledby="brand-name"><span id="brand-mark" class="mark-wrap"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-tile" width="32" height="32" rx="9"/><circle class="mark-ring" cx="16" cy="16" r="8.5" stroke-width="3"/><circle class="mark-dot" cx="16" cy="16" r="3"/></svg><span id="queue" class="queue" role="img" hidden></span></span><span id="brand-name">oboete</span></h1>
+    <h1 class="brand" aria-labelledby="brand-name"><span id="brand-mark" class="mark-wrap"><svg class="mark" viewBox="137 152 975 975" aria-hidden="true" focusable="false"><use href="#oboete-symbol"/><circle class="mark-ring" cx="617" cy="650" r="150"/></svg><span id="queue" class="queue" role="img" hidden></span></span><span id="brand-name">oboete</span></h1>
     <span id="live" class="live" title="Checks for new memory every few seconds">Live</span>
     <button type="button" id="theme" class="quiet small" title="Follow the system, or force light or dark">Theme: auto</button>
     <button type="button" id="help" class="quiet small" aria-label="Show welcome" title="Show welcome">?</button>
@@ -72,7 +77,7 @@
 <div id="welcome" class="welcome-backdrop" hidden>
   <article id="welcome-dialog" class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1">
     <header class="welcome-header">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-tile" width="32" height="32" rx="9"/><circle class="mark-ring" cx="16" cy="16" r="8.5" stroke-width="3"/><circle class="mark-dot" cx="16" cy="16" r="3"/></svg>
+      <svg class="mark" viewBox="137 152 975 975" aria-hidden="true" focusable="false"><use href="#oboete-symbol"/></svg>
       <h2 id="welcome-title">Welcome to oboete</h2>
       <button type="button" id="welcome-close" class="quiet" aria-label="Close welcome" title="Close (Esc)">×</button>
     </header>

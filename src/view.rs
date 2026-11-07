@@ -23,6 +23,11 @@ use crate::{redact, search};
 const INDEX: &str = include_str!("../assets/viewer/index.html");
 const APP_JS: &str = include_str!("../assets/viewer/app.js");
 const APP_CSS: &str = include_str!("../assets/viewer/app.css");
+/// The brand kit's favicons (assets/brand, DESIGN.md "Brand"): the ink symbol on a white tile, so it
+/// shows on a light or a dark tab alike.
+const FAVICON_ICO: &[u8] = include_bytes!("../assets/brand/favicon/favicon.ico");
+const FAVICON_SVG: &str = include_str!("../assets/brand/favicon/favicon.svg");
+const TOUCH_ICON: &[u8] = include_bytes!("../assets/brand/favicon/apple-touch-icon.png");
 /// Request line and headers; a browser's GET is well under 2 KB.
 const MAX_HEAD: usize = 16 * 1024;
 /// A settings save's body; the page's is under 2 KB.
@@ -2473,7 +2478,9 @@ impl Viewer {
             "/" => return Response::new(200, "text/html; charset=utf-8", INDEX),
             "/app.js" => return Response::new(200, "text/javascript; charset=utf-8", APP_JS),
             "/app.css" => return Response::new(200, "text/css; charset=utf-8", APP_CSS),
-            "/favicon.ico" => return Response::new(204, "text/plain", ""),
+            "/favicon.ico" => return Response::new(200, "image/x-icon", FAVICON_ICO),
+            "/favicon.svg" => return Response::new(200, "image/svg+xml", FAVICON_SVG),
+            "/apple-touch-icon.png" => return Response::new(200, "image/png", TOUCH_ICON),
             p if !p.starts_with("/api/") => return Response::text(404, "not found"),
             _ => {}
         }
@@ -7351,6 +7358,21 @@ curate = false
         for page in ["/", "/app.js", "/app.css"] {
             assert_eq!(v.route("GET", page, &[HOST]).status, 200, "{page}");
         }
+        // The favicons, as the page's links name them: no token, their own types and bytes.
+        for (icon, ctype, body) in [
+            ("/favicon.ico", "image/x-icon", FAVICON_ICO),
+            ("/favicon.svg", "image/svg+xml", FAVICON_SVG.as_bytes()),
+            ("/apple-touch-icon.png", "image/png", TOUCH_ICON),
+        ] {
+            let r = v.route("GET", icon, &[HOST]);
+            assert_eq!(
+                (r.status, r.ctype, r.body.as_slice()),
+                (200, ctype, body),
+                "{icon}"
+            );
+            assert!(INDEX.contains(&format!("href=\"{icon}\"")), "{icon}");
+        }
+        assert!(FAVICON_ICO.starts_with(&[0, 0, 1, 0]) && TOUCH_ICON.starts_with(b"\x89PNG"));
         assert_eq!(
             v.route("GET", "/api/claim?id=nope", &[HOST, TOKEN]).status,
             404

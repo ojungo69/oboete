@@ -144,12 +144,13 @@ a:hover { text-decoration-color: currentColor; }
   font: 400 20px/1 var(--mono);
   letter-spacing: -0.04em;
 }
-.mark { width: 24px; height: 24px; flex: none; }
-.mark-tile { fill: var(--text); }
-.mark-ring { fill: none; stroke: var(--bg); }
-.mark-dot { fill: var(--bg); }
+/* The brand symbol (assets/brand): a lowercase o whose upper right folds in like a page's corner,
+   in ink (--text is the kit's #2C2C2B, and #F0EFED dark), so it follows the theme chosen. */
+.mark { width: 24px; height: 24px; flex: none; fill: var(--text); }
+/* An arc drawn in the o's hole only while records are curated. */
+.mark-ring { display: none; fill: none; stroke: var(--text); stroke-width: 64; }
 /* claude-mem's queue bubble: how many records wait to be curated (decision 67). While they are
-   curated the ring opens and turns; held, the count stays and the mark stands still. */
+   curated an arc turns in the mark's hole; held, the count stays and the mark stands still. */
 .mark-wrap { position: relative; display: inline-flex; flex: none; }
 .queue {
   position: absolute;
@@ -169,7 +170,7 @@ a:hover { text-decoration-color: currentColor; }
   font-variant-numeric: tabular-nums;
 }
 .queue.held { background: var(--yellow-bg); color: var(--yellow); }
-.mark-wrap.busy .mark-ring { stroke-dasharray: 40 13.4; transform-box: fill-box; transform-origin: center; }
+.mark-wrap.busy .mark-ring { display: inline; stroke-dasharray: 707 235; transform-box: fill-box; transform-origin: center; }
 
 .top #theme { margin-left: auto; }
 .top button { white-space: nowrap; }

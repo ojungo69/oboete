@@ -341,9 +341,17 @@ The header 10; the sticky status line, My Work's banner and My Focus's menu 5; t
 
 ## Shapes
 
-Gently rounded rectangles on one scale: 4px (`--radius-s`) for tags, facts/narrative toggles and counts; 6px (`--radius-m`) for buttons, fields, segments, chips and inner panels (narrative, details); 8px (`--radius-l`) for cards, rows, callouts, the segmented track and floating bars; 12px (`--radius-xl`) for the welcome dialog. The agent pill is fully round (999px); the switch is a 34x20px capsule. The mark is an inline SVG: a tile (rx 9 on 32) in ink, a ring and a dot in the ground colour.
+Gently rounded rectangles on one scale: 4px (`--radius-s`) for tags, facts/narrative toggles and counts; 6px (`--radius-m`) for buttons, fields, segments, chips and inner panels (narrative, details); 8px (`--radius-l`) for cards, rows, callouts, the segmented track and floating bars; 12px (`--radius-xl`) for the welcome dialog. The agent pill is fully round (999px); the switch is a 34x20px capsule. The mark is the brand symbol (see Brand), drawn once in the page as one path and used inline in ink.
 
 Shapes the page draws without images are made from borders and flat single-stop gradients: chevrons are two-sided borders rotated 45deg; the live dot and the "new" dot are 6px circles; the empty state is a 32px ring in Strong Line; the loading skeleton is four flat Grey Fill bars painted with `linear-gradient(var(--gray-bg) 0 0)`; the switch's knob is a 16px `radial-gradient` circle in the ground colour (in Text on Blue when on).
+
+## Brand
+
+The brand kit of 2026-11-07 is in `assets/brand`: the symbol, a lowercase o whose upper right folds in like a page's corner, and the logo, the symbol beside a lowercase "oboete", each as an SVG in dark ink (#2C2C2B, for light grounds) and light ink (#F0EFED, for dark grounds), with no gradient; the favicon is the dark symbol on a white tile, so it shows on light and dark tabs alike.
+
+- **In the page:** the symbol alone, beside the word "oboete" where the word is already set (the header, the welcome), never the logo too. It is one path (`#oboete-symbol`, the kit's 1254 square cropped to the symbol: viewBox `137 152 975 975`) filled with Ink, which is the kit's dark ink in light and its light ink in dark, so it follows the theme the page shows.
+- **While records are curated:** a three-quarter arc in Ink, 64 units wide on a 150 radius, turns in the o's hole (1.5s a turn) unless reduced motion; still, it is hidden. The queue's count sits over the top right.
+- **The tab:** the viewer serves `/favicon.ico` (16, 32 and 48px), `/favicon.svg` and `/apple-touch-icon.png` (180px) from the binary; the page links them. 16px keeps the o and its corner; the fold's inner cut reads from 32px.
 
 ## Components
 
