@@ -337,9 +337,10 @@ page say "rebuilding" for good. While it is held, the hooks that report on the w
 nothing from knowledge.db, the store it fills (#855): SessionStart hands nothing over and its note
 says the memory is being rebuilt (a compaction's shown set is replaced by what it handed over, as
 always), and the per-prompt and correction blocks and the file notes are empty, so no claim the new
-store has not reached yet is reported as withdrawn. The MCP tools and the memory lookup still answer
-from the store as far as it is filled: fewer results, nothing reported as changed. Each checks the lock after raw is open, so a set-aside, which
-waits for raw's lock, never comes between the check and the read. A file a failed rebuild left behind
+store has not reached yet is reported as withdrawn. These readers check the lock after raw is open, so
+a set-aside, which waits for raw's lock, never comes between the check and the read. The MCP tools
+and the memory lookup still answer from the store as far as it is filled: fewer results, nothing
+reported as changed. A file a failed rebuild left behind
 is no rebuild. The rebuild and the purge's lock (`state/purge.lock`, which a retention pass takes too)
 set their taking time as their lock file's modification time, through the handle that holds it (its
 bytes are not written: Windows lets no other handle read a file locked whole); while either is held,

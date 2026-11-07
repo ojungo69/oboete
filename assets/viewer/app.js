@@ -4473,7 +4473,11 @@ async function recoveryAction(action) {
   try {
     if(action==='inspect') {
       const settings=await api('settings');
-      if(view==='settings' && form===mine && generation===mineGeneration)form=loadedForm(settings);
+      if(view==='settings' && form===mine && generation===mineGeneration){
+        form=loadedForm(settings);
+        // The rests the page last read stay until its next read, as every read again keeps them (#855).
+        if(form)Object.assign(form,{stopped:mine.stopped,resting:mine.resting,paused:mine.paused});
+      }
       // This reads current configuration, without claiming the previous request succeeded.
       d.unknown=false;
       return;
