@@ -1373,7 +1373,7 @@ console.log('PASS: the caps\' No cap switches');
   assert(panel.querySelectorAll('.simple-block').every(n=>!n.closest('form')),'no simple control is inside a form');
   ctx.ui.setLang('ja');ctx.ui.drawSettings();
   assert(text(panel).includes('細かい設定')&&text(panel).includes('このパソコン')&&text(panel).includes('診断と保守'),'Japanese');
-  for(const key of ['more_settings','never_recorded_none','never_repos_h','simple_never_more','simple_entry','simple_entries','simple_entry_of','simple_entries_desc','simple_entries_order','inject_chars','per_prompt_chars']){
+  for(const key of ['more_settings','never_recorded_none','never_repos_h','simple_never_more','simple_advanced','simple_key_change','simple_entry_of','simple_entries_desc','simple_entries_order','inject_chars','per_prompt_chars']){
     const [en,ja]=[ctx.tier.text(key,'en'),ctx.tier.text(key,'ja')];
     assert(en&&ja&&en!==ja,`${key} in both languages`);
   }
@@ -1387,20 +1387,28 @@ console.log('PASS: the caps\' No cap switches');
     for(let d=node.parentElement?.closest('details');d;d=d.parentElement?.closest('details'))if(!d.open)return false;
     return true;
   };
-  // Each AI line ends with its entries' fold, closed (69b-3c-2). Its one entry's block has no switch,
-  // arrows or test of its own (the line's are its), and has its key panel (the line shows no key
-  // field), its Edit fold and Remove, named by its selector.
+  // Decision 79: each AI line ends with its "Advanced settings", closed: its calls a day and timeout,
+  // then its one entry's block, with no switch, arrows or test of its own (the line's are its), no
+  // key panel (the line shows its key), its editor open with no fold within it, and Remove, named by
+  // its selector. Outside it the line shows its switch, arrows, model, key, test and resume only.
   const named=(root,key)=>[...root.querySelectorAll('button'),...root.querySelectorAll('input'),...root.querySelectorAll('select'),
     ...root.querySelectorAll('summary')].find(n=>n.dataset.simpleFocus===key);
   const lineFold=name=>panel.querySelectorAll('.simple-provider').find(n=>n.dataset.providerName===name).querySelector('.simple-provider-fold');
-  const entriesOf=name=>lineFold(name).children.filter(n=>n&&typeof n==='object').at(-1);
-  f=draw(ai(['alpha']));
-  assert.deepEqual([entriesOf('alpha').className,entriesOf('alpha').open,entriesOf('alpha').querySelectorAll('.provider-entry').map(n=>n.dataset.selector)],
-    ['simple-entries',false,['config:0']],'the line ends with its entries, closed');
-  assert.deepEqual(['entry-on:config:0','entry-move:config:0:1','entry-move:config:0:-1','entry-test:config:0'].map(k=>Boolean(named(entriesOf('alpha'),k))),
+  const advancedOf=name=>lineFold(name).children.filter(n=>n&&typeof n==='object').at(-1);
+  f=draw(ai(['alpha'],{key_input:true}));
+  assert.deepEqual([advancedOf('alpha').className,advancedOf('alpha').open,advancedOf('alpha').querySelectorAll('.provider-entry').map(n=>n.dataset.selector)],
+    ['simple-advanced',false,['config:0']],'the line ends with its Advanced settings, closed');
+  assert.deepEqual(['budget:alpha','timeout:alpha','entry-save:config:0','entry-remove:config:0'].map(k=>Boolean(named(advancedOf('alpha'),k))),
+    [true,true,true,true],'in it its calls a day, timeout, editor and Remove');
+  assert.deepEqual(['entry-on:config:0','entry-move:config:0:1','entry-move:config:0:-1','entry-test:config:0'].map(k=>Boolean(named(advancedOf('alpha'),k))),
     [false,false,false,false],'one entry: no switch, arrows or test of its own');
-  assert.deepEqual([Boolean(entriesOf('alpha').querySelector('.provider-key')),Boolean(named(entriesOf('alpha'),'entry-edit:config:0')),
-    Boolean(named(entriesOf('alpha'),'entry-remove:config:0'))],[true,true,true],'its key panel, its Edit fold and Remove');
+  assert.deepEqual([Boolean(advancedOf('alpha').querySelector('.provider-key')),advancedOf('alpha').querySelectorAll('details').length],[false,0],
+    'no key panel of its own, and no fold within');
+  const outside=lineFold('alpha').children.filter(n=>n&&typeof n==='object'&&n!==advancedOf('alpha'));
+  assert.deepEqual(outside.flatMap(n=>[n,...n.querySelectorAll('button'),...n.querySelectorAll('input'),...n.querySelectorAll('select')])
+    .map(n=>n.dataset?.simpleFocus).filter(Boolean).sort(),
+    ['key-change:alpha','model-list:alpha','model:alpha','move:alpha:-1','move:alpha:1','on:alpha','test:alpha'],
+    'outside it: its switch, arrows, model (and its list\'s refresh), key and test');
   assert(!lineFold('alpha').querySelectorAll('button').some(b=>b.className.includes('simple-link')),'no link to More settings');
   f=draw(ai(['alpha']));
   const customAt=vm.runInContext('AI_CATALOG.findIndex(entry=>!entry.name)',ctx);
@@ -1549,29 +1557,42 @@ console.log('PASS: the caps\' No cap switches');
   simple('model:alpha').focus();ctx.ui.drawSettings();
   assert.equal(document.activeElement,simple('model:alpha'),'the AI line\'s model choice keeps its own');
   // A field each AI entry repeats goes back to its own entry's, not to another's or the AI line's. The
-  // line that shows its key field has no second one in its entry's block (69b-3c-2).
-  f=draw(ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')]}));
-  const keyOf=name=>entriesOf(name).querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
-  assert.deepEqual([Boolean(simple('key:alpha')),Boolean(keyOf('alpha')),Boolean(simple('key:beta')),Boolean(keyOf('beta'))],[true,false,false,true],
-    'alpha\'s key on its line, beta\'s in its entry\'s block');
-  keyOf('beta').focus();ctx.ui.drawSettings();
-  assert.equal(document.activeElement,keyOf('beta'),'the entry\'s key field has the focus back');
-  const modelOf=name=>entriesOf(name).querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
+  // line shows its first entry's key (decision 79): its field while missing, else "Change the key";
+  // a second entry's key is in its block.
+  f=draw(ai(['alpha','beta'],{key_input:true,providers:[entry('alpha',0),entry('beta',1),entry('beta',2)],
+    chain:[row('alpha',{key:'missing'}),row('beta',{entries:2})]}));
+  const blockOf=sel=>panel.querySelectorAll('.provider-entry').find(n=>n.dataset.selector===sel);
+  const keyOf=sel=>blockOf(sel).querySelectorAll('input').find(n=>n.dataset.field==='providers.key');
+  assert.deepEqual([Boolean(simple('key:alpha')),Boolean(keyOf('config:0')),Boolean(simple('key-change:beta')),Boolean(simple('key:beta')),
+    Boolean(keyOf('config:1')),Boolean(keyOf('config:2'))],[true,false,true,false,false,true],
+    'alpha\'s key on its line; beta\'s first on its line behind "Change the key", its second in its block');
+  keyOf('config:2').focus();ctx.ui.drawSettings();
+  assert.equal(document.activeElement,keyOf('config:2'),'the entry\'s key field has the focus back');
+  const modelOf=sel=>blockOf(sel).querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
   // A key refused is marked on the field it was typed in: the AI line's, or an entry's (Codex's
   // review of 69b-2a).
   answers=[json({code:'bad_key',field:'providers.key'},422)];
   const lineKey=()=>simple('key:alpha');
   typeIn(lineKey(),'a made-up wrong key');simple('key-save:alpha').click();await settled();
   assert.equal(posted.at(-1).url,'/api/providers/key');
-  assert.deepEqual([lineKey().attrs['aria-invalid'],keyOf('beta').attrs['aria-invalid'],document.activeElement===lineKey()],['true',undefined,true],
+  assert.deepEqual([lineKey().attrs['aria-invalid'],keyOf('config:2').attrs['aria-invalid'],document.activeElement===lineKey()],['true',undefined,true],
     'the AI line\'s key field is marked and focused');
   answers=[json({code:'bad_key',field:'providers.key'},422)];
-  typeIn(keyOf('beta'),'another made-up key');named(entriesOf('beta'),'key-save:entry:config:1').click();await settled();
-  assert.deepEqual([keyOf('beta').attrs['aria-invalid'],document.activeElement===keyOf('beta')],['true',true],'and an entry\'s on the entry');
+  typeIn(keyOf('config:2'),'another made-up key');named(blockOf('config:2'),'key-save:entry:config:2').click();await settled();
+  assert.deepEqual([keyOf('config:2').attrs['aria-invalid'],document.activeElement===keyOf('config:2')],['true',true],'and an entry\'s on the entry');
   posted.length=0;document.activeElement=null;
-  modelOf('beta').focus();modelOf('beta').setSelectionRange(2,4);ctx.ui.drawSettings();
-  assert.deepEqual([document.activeElement===modelOf('beta'),modelOf('beta').selectionStart],[true,2],
+  modelOf('config:2').focus();modelOf('config:2').setSelectionRange(2,4);ctx.ui.drawSettings();
+  assert.deepEqual([document.activeElement===modelOf('config:2'),modelOf('config:2').selectionStart],[true,2],
     'and so does its editor\'s model, which each entry repeats');
+  // "Change the key" shows the line's field, focused; a key saved there gives it back to the button.
+  simple('key-change:beta').click();
+  assert.deepEqual([Boolean(simple('key:beta')),document.activeElement===simple('key:beta')],[true,true],'"Change the key": its field, focused');
+  answers=[json({...ai(['alpha','beta'],{version:'v2',key_input:true,providers:[entry('alpha',0),entry('beta',1),entry('beta',2)],
+    chain:[row('alpha',{key:'missing'}),row('beta',{entries:2})]}),key_saved:{durable:true}})];
+  typeIn(simple('key:beta'),'made-up-changed-key-1111');simple('key-save:beta').focus();simple('key-save:beta').click();await settled();
+  assert.deepEqual([Boolean(simple('key:beta')),document.activeElement?.dataset?.simpleFocus],[false,'key-change:beta'],
+    'saved: "Change the key" again, focused');
+  posted.length=0;document.activeElement=null;
   // The guide's phrase and the preferences' text, typed while a general save is on its way, keep
   // their text, focus and caret through its answer, and start no save.
   f=draw(ai(['alpha']));
@@ -1882,7 +1903,9 @@ console.log('PASS: the caps\' No cap switches');
     // #807: a secret being typed stays in its field, its button enabled, through the privacy read's
     // answer (drawn in place) and the page drawn again by a save's; it is in no form, storage,
     // request or attribute but its own save's.
-    const keyed=(extra={})=>ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing'}),row('beta')],...extra});
+    // Alpha's second entry keeps its key field in its block: a line shows its first entry's (decision 79).
+    const keyed=(extra={})=>ai(['alpha','beta'],{key_input:true,providers:[entry('alpha',0),entry('alpha',1),entry('beta',2)],
+      chain:[row('alpha',{key:'missing',entries:2}),row('beta')],...extra});
     settingsNow=keyed();
     const stored=[];const setItem=ctx.localStorage.setItem;ctx.localStorage.setItem=(k,v)=>{stored.push(`${k}=${v}`);};
     [privacyAnswer,givePrivacy]=later();
@@ -1930,12 +1953,12 @@ console.log('PASS: the caps\' No cap switches');
     givePrivacy(json(privacy));await settled();
     assert.equal(entryKey('config:1').value,'','nothing put into an entry whose API changed');
     // An entry whose place now holds another entry, or whose address changed, gets nothing back:
-    // a key never goes where it was not typed for. (Alpha's key is its line's, 69b-3c-2: beta's
-    // entry field is the one typed in.)
+    // a key never goes where it was not typed for. (Alpha's first key is its line's, decision 79: its
+    // second entry's field is the one typed in.)
     typeIn(entryKey('config:1'),'made-up-entry-key-0004');
     [privacyAnswer,givePrivacy]=later();
     const moved=keyed({version:'v3',inject:sized(4000)});
-    moved.providers=[{...moved.providers[1],selector:{source:'config',index:0}},{...moved.providers[0],selector:{source:'config',index:1},
+    moved.providers=[{...moved.providers[2],selector:{source:'config',index:0}},{...moved.providers[0],selector:{source:'config',index:1},
       saved:{...moved.providers[0].saved,base_url:'http://127.0.0.1:9/other'}}];
     answers=[json(moved)];
     typeIn(general('inject.session_start_chars'),'4100');leave(general('inject.session_start_chars'));await settled();
@@ -1971,12 +1994,14 @@ console.log('PASS: the caps\' No cap switches');
     [privacyAnswer,givePrivacy]=later();
     (await ctx.ui.showSettings())();posted.length=0;
     givePrivacy(json(privacy));await settled();
-    typeIn(entryKey('config:0'),'made-up-twin-key-0008');
+    // The first entry's field is its line's, behind "Change the key" (decision 79).
+    simple('key-change:alpha').click();
+    typeIn(lineKey(),'made-up-twin-key-0008');typeIn(entryKey('config:1'),'made-up-twin-key-0012');
     [privacyAnswer,givePrivacy]=later();
     answers=[json(twins({version:'v6',inject:sized(4000)}))];
     typeIn(general('inject.session_start_chars'),'4000');leave(general('inject.session_start_chars'));await settled();
     givePrivacy(json(privacy));await settled();
-    assert.deepEqual([posted.length,entryKey('config:0').value,entryKey('config:1').value],[1,'',''],
+    assert.deepEqual([posted.length,lineKey()?.value??'',entryKey('config:1').value],[1,'',''],
       'an entry whose address is not shown keeps no key');
     // The judge's key is kept too, with its destination: another destination chosen, its field is
     // empty. Search's Workers AI key is not kept: its endpoint may be set in config.toml beyond what
@@ -2562,89 +2587,208 @@ console.log('PASS: the caps\' No cap switches');
       assert(text(lineOf('anthropic')).includes('百万トークンあたりの米ドル'),'both languages');
       ctx.ui.setLang('en');
     }
-    // Decision 80: OpenAI's API is offered after Anthropic, added off with its prices and its
-    // largest request under its price step, and turned on by the first key saved to it; a key
-    // changed later turns nothing on.
+    // Decision 80: "Add AI" shows the services as buttons, OpenAI's right after Anthropic's, one
+    // already added marked and going to its line. A chosen one asks its key, model and place; "Add"
+    // creates it off, saves its key, turns it on and saves its place, each with the version the
+    // answer before gave; a step refused or unanswered stops there, its line open on what is missing.
     {
       vm.runInContext('forgetModelLists()',ctx);
       const open=name=>{const fold=lineOf(name).querySelector('details');fold.open=true;fold.isConnected=true;
         for(const cb of fold.listeners.toggle||[])cb({target:fold});};
       const options=name=>simple(`model:${name}`).options.map(o=>[o.value,o.disabled]);
+      const choose=(node,value)=>{node.value=value;for(const cb of node.listeners.change||[])cb({target:node});};
+      const focusKey=()=>document.activeElement?.dataset?.simpleFocus;
       const names=vm.runInContext('AI_CATALOG.map(e=>e.name)',ctx);
       assert.equal(names.indexOf('openai'),names.indexOf('anthropic')+1,'OpenAI right after Anthropic');
-      const oaLimits={max_request_tokens:272000,daily_tokens:null,usd_per_mtok_in:0.1,usd_per_mtok_out:0.5,max_output_tokens:4000};
-      const oa=on=>({name:'openai',selector:{source:'config',index:1},saved:{enabled:on,kind:'openai',base_url:'https://api.openai.com/v1',
-        api:'openai',model:'gpt-6-luna',key:on?'ok':'missing',timeout_s:90,subscription:false,daily_budget:null,limits:oaLimits},
-        effective:{on,order:1,model:'gpt-6-luna',timeout_s:90}});
-      const withOa=(on,more={})=>lineAi([row('alpha'),row('openai',{on,key:on?'ok':'missing',model_rule:'fixed',effective_model:'gpt-6-luna'})],
-        {key_input:true,providers:[entry('alpha',0),oa(on)],...more});
-      f=draw(lineAi([row('alpha')],{key_input:true}));
-      const choose=panel.querySelectorAll('button').find(b=>text(b)===ctx.t('simple_catalog_choose',{name:ctx.t('simple_catalog_openai')}));
-      choose.click();await settled();
-      answers=[json(withOa(false,{version:'v2'}))];
-      simple('catalog.save').click();await settled();
-      const made=sent().at(-1).action;
-      assert.deepEqual([made.op,made.entry.enabled,made.entry.base_url,made.entry.api,made.entry.model,made.entry.limits.max_request_tokens,
-        made.entry.limits.usd_per_mtok_in,made.entry.limits.usd_per_mtok_out],['create',false,'https://api.openai.com/v1','openai','gpt-6-luna',272000,0.1,0.5],
-        'added off, with its prices and its largest request');
-      assert(options('openai').some(o=>o[0]==='gpt-6.1-terra'),'its line chooses among its priced models');
-      assert(text(lineOf('openai')).includes('gpt-6.1-terra ($1.00 / $5.00)'),'with their prices');
-      // A key save writes config.toml (the entry's managed key file): its answer has another version.
-      answers=[json({...withOa(false,{version:'v3'}),key_saved:{durable:true}}),json(withOa(true,{version:'v4'})),json(withOa(true,{version:'v5'}))];
-      typeIn(simple('key:openai'),'made-up-openai-key-1108');
-      simple('key-save:openai').click();await settled(8);
-      const keyAt=posted.findIndex(p=>p.url==='/api/providers/key');
-      const onAt=sent().findIndex(b=>b.action?.op==='enabled');
-      assert.deepEqual([keyAt>=0,onAt>keyAt,sent()[onAt]?.action.enabled,sent()[onAt]?.action.selector],[true,true,true,{source:'config',index:1}],
-        'its first key saved, then it is turned on');
-      const offOa={on:false,key:'missing',model_rule:'fixed',effective_model:'gpt-6-luna'};
-      // Saved again, from each key save on: what it posted.
-      const keySave=async(name,version,answer=null)=>{
-        const from=posted.length;
-        answers=[answer??json({...withOa(false,{version:version+'-key'}),key_saved:{durable:true}}),json(withOa(true,{version:version+'-on'})),
-          json(withOa(true,{version:version+'-chain'}))];
-        typeIn(simple(`key:${name}`),'made-up-key-1110');
-        simple(`key-save:${name}`).click();await settled(8);
-        return posted.slice(from).map(p=>p.url);
-      };
-      f=draw(withOa(false,{version:'v6',chain:[row('alpha'),row('openai',offOa)]}));
-      assert.deepEqual(await keySave('openai','v6'),['/api/providers/key'],'a key saved later turns nothing on');
-      // Added again from "Add an AI": its key turns it on only as the page's next write since.
-      const addOa=async(version,more={})=>{
-        f=draw(lineAi([row('alpha')],{key_input:true}));
-        panel.querySelectorAll('button').find(b=>text(b)===ctx.t('simple_catalog_choose',{name:ctx.t('simple_catalog_openai')})).click();
-        await settled();
-        answers=[json(withOa(false,{version,chain:[row('alpha'),row('openai',offOa)],...more}))];
-        simple('catalog.save').click();await settled();
-      };
-      await addOa('v10');
-      answers=[json(withOa(true,{version:'v11'}))];
-      flip(simple('on:openai'),true);await settled(8);
-      answers=[json(withOa(false,{version:'v10',chain:[row('alpha'),row('openai',offOa)]}))];
-      flip(simple('on:openai'),false);await settled(8);
-      assert.deepEqual(await keySave('openai','v12'),['/api/providers/key'],'a write since its creation, even one undone: its key turns nothing on');
-      await addOa('v15');
-      answers=[json(withOa(false,{version:'v16',chain:[row('alpha',{on:false}),row('openai',offOa)]}))];
-      flip(simple('on:alpha'),false);await settled(8);
-      assert.deepEqual(await keySave('openai','v16'),['/api/providers/key'],'a settings write since its creation: its key turns nothing on');
-      await addOa('v20');
-      // A model list's 409 reads the settings again.
-      reread=withOa(false,{version:'v21',chain:[row('alpha'),row('openai',offOa)]});answers=[json({code:'stale',field:''},409)];
-      open('alpha');await settled();
+      const oaLimits={max_request_tokens:272000,daily_tokens:null,usd_per_mtok_in:1,usd_per_mtok_out:5,max_output_tokens:4000};
+      const oaEntry=(on,key)=>({name:'openai',selector:{source:'config',index:2},saved:{enabled:on,kind:'openai',base_url:'https://api.openai.com/v1',
+        api:'openai',model:'gpt-6.1-terra',key,timeout_s:90,subscription:false,daily_budget:null,limits:oaLimits},
+        effective:{on,order:2,model:'gpt-6.1-terra',timeout_s:90}});
+      const oaRow=(on,key)=>row('openai',{on,key,model_rule:'fixed',effective_model:'gpt-6.1-terra'});
+      const base=[entry('alpha',0),entry('beta',1)];
+      const before=()=>lineAi([row('alpha'),row('beta')],{key_input:true,providers:base});
+      const state=(version,{on=false,key='missing',order=['alpha','beta','openai']}={})=>lineAi(
+        order.map(n=>n==='openai'?oaRow(on,key):row(n)),{version,key_input:true,providers:[...base,oaEntry(on,key)]});
+      const choice=name=>simple(`catalog:${name}`);
+      const steps=()=>posted.map(p=>{const b=JSON.parse(p.body);return [p.url,b.action?.op??null,b.version];});
+      const pickOpenAI=async()=>{f=draw(before());choice('openai').click();await settled();};
+      // Chosen: its key field focused; its models with their prices; its place last, first, or after
+      // each AI in use.
+      await pickOpenAI();
+      const v0=ctx.ui.getForm().version;
+      assert.deepEqual([focusKey(),text(choice('openai')).includes(ctx.t('simple_catalog_added'))],['catalog.key',false],'chosen: its key field');
+      assert.deepEqual(simple('catalog.model').options.map(o=>[o.value,text(o)]),
+        [['gpt-6-luna','gpt-6-luna ($0.10 / $0.50)'],['gpt-6.1-terra','gpt-6.1-terra ($1.00 / $5.00)']],'its models with their prices');
+      assert.deepEqual(simple('catalog.place').options.map(o=>o.value),['last','first','after:alpha','after:beta'],'its place');
+      // Added with its key, Terra, after alpha.
+      choose(simple('catalog.model'),'gpt-6.1-terra');choose(simple('catalog.place'),'after:alpha');
+      typeIn(simple('catalog.key'),'made-up-add-key-1112');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json(state('v4',{on:true,key:'ok'})),
+        json(state('v5',{on:true,key:'ok',order:['alpha','openai','beta']}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual(steps(),[['/api/providers','create',v0],['/api/providers/key',null,'v2'],['/api/providers','enabled','v3'],['/api/settings',null,'v4']],
+        'create, key, on, place: each with the version the answer before gave');
+      const [made,keyed,on,placedBody]=posted.map(p=>JSON.parse(p.body));
+      assert.deepEqual([made.action.entry.enabled,made.action.entry.model,made.action.entry.limits.usd_per_mtok_in,
+        made.action.entry.limits.usd_per_mtok_out,made.action.entry.limits.max_request_tokens],[false,'gpt-6.1-terra',1,5,272000],
+        'made off, with its model, its prices and its largest request');
+      assert.deepEqual([keyed.selector,on.action.selector,on.action.enabled,placedBody.chain.map(r=>r.name)],
+        [{source:'config',index:2},{source:'config',index:2},true,['alpha','openai','beta']],'its key, then on, then after alpha');
+      assert.deepEqual(posted.filter(p=>p.body.includes('made-up-add-key-1112')).map(p=>p.url),['/api/providers/key'],'the key in its own save alone');
+      assert.deepEqual([focusKey(),Boolean(simple('catalog.key'))],['model:openai',false],'done: its line on its model');
+      assert(text(choice('openai')).includes(ctx.t('simple_catalog_added')),'marked added');
+      choice('openai').click();
+      assert.equal(focusKey(),'on:openai','an added one goes to its line');
+      // Its key refused: stopped there, on its key field; adding it again goes to its line.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1113');
+      answers=[json(state('v2')),json({code:'bad_key',field:'providers.key'},422)];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),focusKey()],[['/api/providers','/api/providers/key'],'key:openai'],'a key refused: stopped, its key field');
+      // Its switch refused: stopped there, on its switch.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1114');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json({code:'bad_request'},400)];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[1]),focusKey()],[['create',null,'enabled'],'on:openai'],'its switch refused: stopped, its switch');
+      // Its place's answer lost: stopped there, on its arrows.
+      await pickOpenAI();posted.length=0;
+      choose(simple('catalog.place'),'first');typeIn(simple('catalog.key'),'made-up-add-key-1115');
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json(state('v4',{on:true,key:'ok'})),
+        Promise.reject(new Error('invented lost answer'))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),steps().at(-1)&&JSON.parse(posted.at(-1).body).chain.map(r=>r.name),focusKey()],
+        [['/api/providers','/api/providers/key','/api/providers','/api/settings'],['openai','alpha','beta'],'move:openai:-1'],
+        'first: its place sent; lost, stopped on its arrows');
+      // No key typed: made off, its place saved, nothing turned on, its line on its key field.
+      await pickOpenAI();posted.length=0;
+      choose(simple('catalog.place'),'first');
+      answers=[json(state('v2')),json(state('v3',{order:['openai','alpha','beta']}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>[s[0],s[1]]),focusKey()],[[['/api/providers','create'],['/api/settings',null]],'key:openai'],
+        'no key: made, placed, off, on its key field');
+      // A version the file no longer has, at its creation: the settings read again, nothing else sent.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1116');
+      reread=before();answers=[json({code:'stale',field:''},409)];
+      simple('catalog.save').click();await settled(16);
       reread=null;
-      assert.equal(ctx.ui.getForm().version,'v21','the settings read again');
-      assert.deepEqual(await keySave('openai','v21'),['/api/providers/key'],'a settings read since its creation: its key turns nothing on');
-      const alphaOff={...entry('alpha',0)};alphaOff.saved={...alphaOff.saved,enabled:false};
-      const alphaWaits={chain:[row('alpha',{on:false,key:'missing'}),row('openai',offOa)],providers:[alphaOff,oa(false)]};
-      await addOa('v30',alphaWaits);
-      assert.deepEqual(await keySave('alpha','v30',json({...withOa(false,{...alphaWaits,version:'v30-key'}),key_saved:{durable:true}})),
-        ['/api/providers/key'],'a key saved to another entry turns nothing on');
-      assert.deepEqual(await keySave('openai','v31'),['/api/providers/key'],'nor, after it, its own key');
-      await addOa('v40');
-      assert.deepEqual(await keySave('openai','v40',Promise.reject(new Error('invented lost answer'))),['/api/providers/key'],
-        'a lost answer turns nothing on');
-      f=draw(withOa(false,{version:'v40',chain:[row('alpha'),row('openai',offOa)]}));
-      assert.deepEqual(await keySave('openai','v41'),['/api/providers/key'],'nor a key saved after it');
+      assert.deepEqual([steps().map(s=>s[1]),posted.some(p=>p.body.includes('made-up-add-key-1116'))],[['create'],false],
+        'a 409 at its creation: nothing more sent, the key never');
+      // Its creation refused: stopped; the form stays, its key field not filled again (#807).
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1117');
+      answers=[json({code:'bad_request',field:'providers.model'},400)];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[1]),simple('catalog.key')?.value],[['create'],''],'its creation refused: stopped, its key field empty');
+      // A subscription takes no key: made on, no key step.
+      f=draw(before());choice('claude').click();await settled();posted.length=0;
+      assert.deepEqual([focusKey(),Boolean(simple('catalog.key'))],['catalog.model',false],'a subscription: no key field, its model focused');
+      const claudeEntry={...entry('claude',2),saved:{enabled:true,kind:'cli',cli:'claude',model:'haiku',key:'on-path',timeout_s:300,limits:{}}};
+      answers=[json(lineAi([row('alpha'),row('beta'),row('claude')],{version:'v2',key_input:true,providers:[...base,claudeEntry]}))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[1]),JSON.parse(posted[0].body).action.entry.enabled,focusKey()],[['create'],true,'model:claude'],
+        'a subscription: made on, its line on its model');
+      // The draft as More settings leaves it is what "Add" sends: a model chosen sets its prices
+      // and its largest request then (the step, or the draft's own where tighter or the model has
+      // none); an address and prices typed after are kept.
+      const newField=key=>panel.querySelector('.new-provider').querySelectorAll('input').find(n=>n.dataset.field===key);
+      const createdBody=async()=>{posted.length=0;answers=[json(state('v2'))];simple('catalog.save').click();await settled(16);
+        return JSON.parse(posted[0].body).action.entry;};
+      await pickOpenAI();
+      typeIn(newField('providers.limits.max_request_tokens'),'10000');
+      choose(simple('catalog.model'),'gpt-6.1-terra');
+      let madeNow=await createdBody();
+      assert.deepEqual([madeNow.limits.usd_per_mtok_in,madeNow.limits.max_request_tokens],[1,10000],'Terra: its prices, the draft\'s tighter cap kept');
+      await pickOpenAI();
+      choose(simple('catalog.model'),'gpt-6.1-terra');
+      typeIn(newField('providers.base_url'),'https://proxy.example/v1');typeIn(newField('providers.limits.usd_per_mtok_in'),'3');
+      madeNow=await createdBody();
+      assert.deepEqual([madeNow.base_url,madeNow.limits.usd_per_mtok_in,madeNow.model],['https://proxy.example/v1',3,'gpt-6.1-terra'],
+        'an address and a price typed after: sent as typed');
+      await pickOpenAI();
+      typeIn(newField('providers.base_url'),'https://proxy.example/v1');
+      choose(simple('catalog.model'),'gpt-6.1-terra');
+      madeNow=await createdBody();
+      assert.deepEqual([madeNow.base_url,madeNow.limits.usd_per_mtok_in],['https://proxy.example/v1',0.1],
+        'another address first: no prices the page knows, the draft\'s kept');
+      f=draw(before());choice('anthropic').click();await settled();
+      typeIn(newField('providers.limits.max_request_tokens'),'');
+      choose(simple('catalog.model'),'claude-sonnet-5-5');
+      madeNow=await createdBody();
+      assert.deepEqual([madeNow.limits.usd_per_mtok_in,madeNow.limits.max_request_tokens],[2,null],'Sonnet: its prices, no cap of its own and none set');
+      // The key typed: masked as every key field; kept through a redraw; not put back once the
+      // draft's address changed in More settings (#807).
+      await pickOpenAI();
+      typeIn(simple('catalog.key'),'made-up-add-key-1118');
+      assert(simple('catalog.key').closest('.provider-key'),'masked as every key field');
+      ctx.ui.drawSettings();
+      assert.equal(simple('catalog.key').value,'made-up-add-key-1118','kept through a redraw');
+      vm.runInContext("form.newProvider.base_url='https://elsewhere.example/v1'",ctx);ctx.ui.drawSettings();
+      assert.equal(simple('catalog.key').value,'','its address changed: not put back');
+      // Its address changed in More settings with no redraw since: "Add" sends the key nowhere.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1123');
+      typeIn(panel.querySelector('.new-provider').querySelectorAll('input').find(n=>n.dataset.field==='providers.base_url'),'https://elsewhere.example/v1');
+      answers=[json(state('v2'))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),posted.some(p=>p.body.includes('made-up-add-key-1123'))],[['/api/providers'],false],
+        'its address changed before "Add": made, its key sent nowhere');
+      // Last, the name held at the front by an order an entry removed before left: saved last.
+      await pickOpenAI();posted.length=0;
+      answers=[json(state('v2',{order:['openai','alpha','beta']})),json(state('v3'))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),JSON.parse(posted.at(-1).body).chain?.map(r=>r.name)],
+        [['/api/providers','/api/settings'],['alpha','beta','openai']],'last: saved last when the order held it elsewhere');
+      // Its place chosen, then a switch saved elsewhere: the form keeps its place.
+      await pickOpenAI();
+      choose(simple('catalog.place'),'first');
+      answers=[json(lineAi([row('alpha'),row('beta',{on:false})],{version:'v2',key_input:true,providers:base}))];
+      flip(simple('on:beta'),false);await settled(8);
+      assert.equal(simple('catalog.place').value,'first','its place kept through another save');
+      // Its name's switch answered 409, the settings read again showing it on: stopped on its switch,
+      // its place not sent.
+      await pickOpenAI();posted.length=0;
+      choose(simple('catalog.place'),'first');typeIn(simple('catalog.key'),'made-up-add-key-1122');
+      const nameOff=v=>lineAi([row('alpha'),row('beta'),oaRow(false,'ok')],{version:v,key_input:true,providers:[...base,oaEntry(true,'ok')]});
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json(nameOff('v4')),json({code:'stale',field:''},409)];
+      reread=state('v5',{on:true,key:'ok'});
+      simple('catalog.save').click();await settled(16);
+      reread=null;
+      assert.deepEqual([steps().map(s=>s[0]),focusKey()],[['/api/providers','/api/providers/key','/api/providers','/api/settings'],'on:openai'],
+        'its switch\'s 409: stopped, its place not sent');
+      // Left while its key's answer is on its way: nothing more written, nothing drawn over.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1121');
+      const [keyAnswer,giveKey]=later();
+      answers=[json(state('v2')),keyAnswer];
+      simple('catalog.save').click();await settled(8);
+      vm.runInContext("view='records';generation+=1",ctx);document.activeElement=null;
+      giveKey(json({...state('v3'),key_saved:{durable:true}}));await settled(8);
+      assert.deepEqual([steps().map(s=>s[0]),document.activeElement],[['/api/providers','/api/providers/key'],null],'left: nothing more');
+      vm.runInContext("view='settings'",ctx);
+      // Two lines' "Change the key" open: a key saved in one leaves the other open, its key kept.
+      f=draw(lineAi([row('alpha'),row('beta')],{key_input:true,providers:base}));
+      simple('key-change:alpha').click();simple('key-change:beta').click();
+      typeIn(simple('key:alpha'),'made-up-unsent-key-1119');
+      answers=[json({...lineAi([row('alpha'),row('beta')],{version:'v2',key_input:true,providers:base}),key_saved:{durable:true}})];
+      typeIn(simple('key:beta'),'made-up-sent-key-1120');simple('key-save:beta').click();await settled(8);
+      assert.deepEqual([simple('key:alpha')?.value,Boolean(simple('key:beta')),Boolean(simple('key-change:beta'))],
+        ['made-up-unsent-key-1119',false,true],'a key saved in one line: another\'s field open, its key kept');
+      // A later entry's key saved in Advanced settings: its line's "Change the key", its first
+      // entry's, stays open with what is typed there.
+      vm.runInContext('keyChanging.clear()',ctx);
+      f=draw(lineAi([row('alpha',{entries:2})],{key_input:true,providers:[entry('alpha',0),entry('alpha',1)]}));
+      simple('key-change:alpha').click();
+      typeIn(simple('key:alpha'),'made-up-unsent-key-1124');
+      answers=[json({...lineAi([row('alpha',{entries:2})],{version:'v2',key_input:true,providers:[entry('alpha',0),entry('alpha',1)]}),
+        key_saved:{durable:true}})];
+      typeIn(simple('key:entry:config:1'),'made-up-sent-key-1125');simple('key-save:entry:config:1').click();await settled(8);
+      assert.equal(simple('key:alpha')?.value,'made-up-unsent-key-1124','a later entry\'s key saved: the line\'s field stays, its key kept');
+      vm.runInContext('keyChanging.clear()',ctx);
+      ctx.ui.setLang('ja');f=draw(before());choice('openai').click();await settled();
+      assert(text(panel).includes('使う順番')&&text(panel).includes('API キー'),'both languages');
+      ctx.ui.setLang('en');
       // The page's own models a list read no longer has are not offered (a service retires models).
       vm.runInContext('forgetModelLists()',ctx);
       f=draw(one({effective_model:'model-alpha'}));
@@ -3016,8 +3160,8 @@ console.log('PASS: the caps\' No cap switches');
       assert.deepEqual([held(),focused(),Boolean(simple('entry-test-run:config:1'))],[false,'entry-test:config:1',ok],
         `an entry's preview ${ok?'drawn':'refused'}: its button has the focus`);
     }
-    // A provider's write, an AI line's key: saved, the line's switch (its field is gone); refused,
-    // its button.
+    // A provider's write, an AI line's key: saved, its "Change the key" (its field is gone, decision
+    // 79); refused, its button.
     for(const ok of [true,false]){
       f=draw(ai(['alpha'],{chain:[row('alpha',{key:'missing'})],key_input:true}));
       [answer,give]=later();answers=[answer];
@@ -3025,7 +3169,7 @@ console.log('PASS: the caps\' No cap switches');
       const save=simple('key-save:alpha');save.focus();save.click();await settle();
       assert.deepEqual([posted.at(-1)?.url.endsWith('/key'),held(),document.activeElement],[true,true,document.body],`a line's key ${ok?'saved':'refused'}: held`);
       give(ok?json({...ai(['alpha'],{version:'v2',key_input:true}),key_saved:{durable:true}}):json({code:'bad_request'},400));await settled();
-      assert.deepEqual([held(),focused()],[false,ok?'on:alpha':'key-save:alpha'],`a line's key ${ok?'saved: the line\'s switch':'refused: its button'}`);
+      assert.deepEqual([held(),focused()],[false,ok?'key-change:alpha':'key-save:alpha'],`a line's key ${ok?'saved: its "Change the key"':'refused: its button'}`);
     }
     // The masking rule's hash, by its button or by Enter in the value's field: the field, emptied,
     // takes the focus back (the button is drawn again disabled).
@@ -3112,7 +3256,7 @@ console.log('PASS: the caps\' No cap switches');
       // A line's key saved: its key is there now, so its field goes (the judge's line keeps its own).
       const saved=kind==='line key'?ai(['alpha'],{version:'v3',key_input:true,judge,chain:[row('alpha',{timeout_s:120,effective_timeout_s:120})]}):lineBody('v3');
       giveOwn(kind==='switch'?lineDone('v3'):json({...saved,key_saved:{durable:true}}));await settled();
-      const back={'switch':focused()==='inject.session_start','judge key':document.activeElement===general('judge.key'),'line key':focused()==='on:alpha'}[kind];
+      const back={'switch':focused()==='inject.session_start','judge key':document.activeElement===general('judge.key'),'line key':focused()==='key-change:alpha'}[kind];
       assert.deepEqual([held(),back,ctx.ui.getForm().version],[false,true,'v3'],`${kind}: answered, the focus is back`);
       if(kind!=='switch')assert(status().startsWith('The key was registered'),`${kind}: saved, as its status says`);
     }
@@ -3220,7 +3364,6 @@ console.log('PASS: the caps\' No cap switches');
     const focused=()=>document.activeElement?.dataset?.simpleFocus??null;
     const named=key=>[...all('button'),...all('input'),...all('select'),...all('summary')].find(n=>n.dataset.simpleFocus===key);
     const block=sel=>all('.provider-entry').find(n=>n.dataset.selector===sel);
-    const editOf=sel=>block(sel).querySelector('.provider-edit');
     const lineOf=name=>all('.simple-provider').find(n=>n.dataset.providerName===name);
     const at=(name,i,extra={})=>({...entry(name,i),...extra});
     // Alpha's two entries with beta's between them in config.toml.
@@ -3274,37 +3417,35 @@ console.log('PASS: the caps\' No cap switches');
     give(json(split({version:'v2'})));await settled();
     assert.deepEqual([focused(),scrolled.splice(0)],['entry-on:config:2',[['entry-on:config:2','center']]],'under the status line, brought to the middle');
     delete Node.prototype.scrollIntoView;delete Node.prototype.getBoundingClientRect;delete ctx.window.innerHeight;
-    // Edit and Save: answered before the hold took the focus off, or after: its Edit summary, the
-    // editor closed; refused on a field, the field.
+    // Save, its editor open in "Advanced settings" (decision 79): answered before the hold took the
+    // focus off, or after: its Save at its place then; refused on a field, the field.
     for(const when of ['at once','after the hold']){
       f=draw(ai(['alpha']));
-      ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
-      assert(lineOf('alpha').querySelector('.simple-entries').open&&editOf('config:0').open,'an entry edited opens its fold and its editor');
       [answer,give]=later();answers=[answer];
       named('entry-save:config:0').focus();named('entry-save:config:0').click();
       if(when==='after the hold'){await settle();assert.equal(document.activeElement,document.body,'the hold took the focus off');}
       give(json(ai(['alpha'],{version:'v2'})));await settled();
       assert.equal(JSON.parse(posted.at(-1).body).action.op,'edit','Save sends edit');
-      assert.deepEqual([focused(),editOf('config:0').open],['entry-edit:config:0',false],`saved ${when}: its Edit summary, the editor closed`);
+      assert.equal(focused(),'entry-save:config:0',`saved ${when}: its Save`);
     }
     f=draw(ai(['alpha']));
-    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
     [answer,give]=later();answers=[answer];
     named('entry-save:config:0').focus();named('entry-save:config:0').click();await settle();
     give(json({code:'bad_request',field:'providers.model'},400));await settled();
     assert.equal(document.activeElement?.dataset.field,'providers.model','refused on a field: the field');
-    // Cancel with the focus on it: its Edit summary, the editor closed.
+    // Cancel with the focus on it: its editor back to the saved values, the focus kept, nothing sent.
     f=draw(ai(['alpha']));
-    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
+    const modelField=()=>block('config:0').querySelectorAll('input').find(n=>n.dataset.field==='providers.model');
+    typeIn(modelField(),'made-up-unsaved-model');
     named('entry-cancel:config:0').focus();named('entry-cancel:config:0').click();await settled();
-    assert.deepEqual([focused(),editOf('config:0').open,posted.length],['entry-edit:config:0',false,0],'cancelled: its Edit summary, closed, nothing sent');
-    // A rename takes the entry to its new name's line, its Edit summary there.
+    assert.deepEqual([focused(),modelField().value,posted.length],['entry-cancel:config:0','model-alpha',0],
+      'cancelled: its saved values back, its Cancel focused, nothing sent');
+    // A rename takes the entry to its new name's line, its Save there.
     f=draw(ai(['alpha']));
-    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
     [answer,give]=later();answers=[answer];
     named('entry-save:config:0').focus();named('entry-save:config:0').click();await settle();
     give(json(ai(['gamma'],{version:'v2'})));await settled();
-    assert.deepEqual([focused(),Boolean(lineOf('gamma')?.querySelector('.provider-entry'))],['entry-edit:config:0',true],'renamed: its Edit summary in its new line');
+    assert.deepEqual([focused(),Boolean(lineOf('gamma')?.querySelector('.provider-entry'))],['entry-save:config:0',true],'renamed: its Save in its new line');
     // Remove: cancelled sends nothing; done, the line's switch, though beta's entry took its place;
     // the last entry of a name, "Add AI".
     f=draw(split());confirmed=false;
@@ -3323,7 +3464,9 @@ console.log('PASS: the caps\' No cap switches');
     assert.equal(focused(),'catalog.open','the last entry of a name removed: "Add AI"');
     // An entry's key saved: its key field; a built-in entry's at its file place after the write.
     for(const source of ['config','builtin']){
-      const keyedEntry=(v,src)=>ai(['alpha','beta'],{version:v,key_input:true,providers:[at('alpha',0,{selector:{source:src,index:0}}),at('beta',1,{selector:{source:src,index:1}})]});
+      // Alpha's second entry: its key field is its block's (a line shows its first entry's, decision 79).
+      const keyedEntry=(v,src)=>ai(['alpha'],{version:v,key_input:true,chain:[row('alpha',{entries:2})],
+        providers:[at('alpha',0,{selector:{source:src,index:0}}),at('alpha',1,{selector:{source:src,index:1}})]});
       f=draw(keyedEntry('v1',source));
       [answer,give]=later();answers=[answer];
       typeIn(named(`key:entry:${source}:1`),'made-up-entry-key-0819');
@@ -3331,30 +3474,29 @@ console.log('PASS: the caps\' No cap switches');
       give(json({...keyedEntry('v2',source==='builtin'?'file':source),key_saved:{durable:true}}));await settled();
       assert.equal(focused(),`key:entry:${source==='builtin'?'file':source}:1`,`a ${source} entry's key saved: its key field`);
     }
-    // A built-in entry saved: its Edit summary at its file place.
+    // A built-in entry saved: its Save at its file place.
     f=draw(ai(['alpha'],{providers:[at('alpha',0,{selector:{source:'builtin',index:0}})]}));
-    ctx.ui.getForm().providers[0].editing=true;ctx.ui.drawSettings();
     [answer,give]=later();answers=[answer];
     named('entry-save:builtin:0').focus();named('entry-save:builtin:0').click();await settle();
     assert.deepEqual(JSON.parse(posted.at(-1).body).action.selector,{source:'builtin',index:0},'a built-in entry is edited by its selector');
     give(json(ai(['alpha'],{version:'v2',providers:[at('alpha',0,{selector:{source:'file',index:0}})]})));await settled();
-    assert.deepEqual([focused(),editOf('file:0').open],['entry-edit:file:0',false],'saved: its Edit summary at file:0');
+    assert.equal(focused(),'entry-save:file:0','saved: its Save at file:0');
     // An automatic Gemini entry beside another of its name cannot move; a Codex CLI entry's editor has
-    // its credits box; an unsupported CLI entry says so, with no Edit fold.
+    // its credits box; an unsupported CLI entry says so, with no editor.
     f=draw(ai(['alpha'],{providers:[at('alpha',0),at('alpha',1,{selector:{source:'gemini',index:0}})],chain:[row('alpha',{entries:2})]}));
     assert.deepEqual([named('entry-move:config:0:1').disabled,named('entry-move:gemini:0:-1').disabled],[true,true],'no move beside an automatic Gemini entry');
     f=draw(ai(['alpha'],{providers:[at('alpha',0,{saved:{enabled:true,kind:'cli',cli:'codex',model:null,key:'on-path',timeout_s:60,limits:{}}})]}));
     assert(block('config:0').querySelectorAll('input').some(n=>n.dataset.field==='providers.credits'),'a Codex entry\'s editor has its credits box');
     f=draw(ai(['alpha'],{providers:[at('alpha',0,{saved:{enabled:true,kind:'cli',cli:'made-up-cli',model:null,key:'on-path',timeout_s:60,limits:{}}})]}));
-    assert.deepEqual([text(block('config:0')).includes(ctx.t('provider_unsupported_cli')),Boolean(block('config:0').querySelector('.provider-edit'))],
-      [true,false],'an unsupported CLI entry says so, with no Edit fold');
-    // The entries' fold keeps its open state through a redraw.
+    assert.deepEqual([text(block('config:0')).includes(ctx.t('provider_unsupported_cli')),Boolean(block('config:0').querySelector('.provider-editor'))],
+      [true,false],'an unsupported CLI entry says so, with no editor');
+    // "Advanced settings" keeps its open state through a redraw.
     f=draw(ai(['alpha']));
-    const fold=lineOf('alpha').querySelector('.simple-entries');fold.open=true;fold.isConnected=true;
+    const fold=lineOf('alpha').querySelector('.simple-advanced');fold.open=true;fold.isConnected=true;
     for(const cb of fold.listeners.toggle||[])cb({target:fold});
     ctx.ui.drawSettings();
-    assert(lineOf('alpha').querySelector('.simple-entries').open,'its fold stays open');
-    vm.runInContext("groupOpen.delete('entries:alpha')",ctx);
+    assert(lineOf('alpha').querySelector('.simple-advanced').open,'its fold stays open');
+    vm.runInContext("groupOpen.delete('advanced:alpha')",ctx);
     // The guide's "AI for summaries" opens the AI group at its lines, with AI and with none.
     for(const names of [['alpha'],[]]){
       f=draw(ai(names));
@@ -3364,24 +3506,26 @@ console.log('PASS: the caps\' No cap switches');
       let open=true;for(let d=panel.querySelector('.simple-providers').closest('details');d;d=d.parentElement?.closest('details'))open&&=d.open;
       assert(open,`the guide's button opens the AI lines (${names.length} AI)`);
     }
-    // A key being typed into the first entry's field goes to the line's field when the line takes it
-    // over (an answer says its key is missing), and back when the line gives it back (its key there
-    // again); never to another entry, never sent (Codex's review of 69b-3c-2).
+    // A key being typed into the line's field, opened by "Change the key" (decision 79), stays there
+    // when an answer says its key is missing, and when another says it is there again; never in
+    // another entry's, never sent (Codex's review of 69b-3c-2).
     {
       const typed='made-up-moving-key-0821';
       const two=(v,key='ok')=>ai(['alpha'],{version:v,key_input:true,providers:[at('alpha',0),at('alpha',1)],chain:[row('alpha',{entries:2,key})]});
       f=draw(two('v1'));
-      typeIn(named('key:entry:config:0'),typed);
+      simple('key-change:alpha').click();
+      typeIn(simple('key:alpha'),typed);
       [answer,give]=later();answers=[answer];
       flip(simple('inject.session_start'),false);await settle();
       give(json(two('v2','missing')));await settled();
       assert.deepEqual([simple('key:alpha')?.value,named('key:entry:config:0'),named('key:entry:config:1')?.value],[typed,undefined,''],
-        'the line takes the field over with the key typed; the other entry\'s stays empty');
+        'its key missing: the line keeps the key typed; the other entry\'s stays empty');
       [answer,give]=later();answers=[answer];
       flip(simple('inject.session_start'),true);await settle();
       give(json(two('v3')));await settled();
-      assert.deepEqual([simple('key:alpha'),named('key:entry:config:0')?.value],[undefined,typed],'given back to the first entry\'s field');
+      assert.deepEqual([simple('key:alpha')?.value,named('key:entry:config:0')],[typed,undefined],'its key there again: still the line\'s');
       assert(!posted.some(p=>p.body.includes(typed)),'never sent');
+      vm.runInContext('keyChanging.clear()',ctx);
     }
     // A new entry created: the focus on its own key field. A later entry of a name has it in its block,
     // its line showing none for it, and a key saved there is the new entry's; the first of a name has
@@ -3390,20 +3534,21 @@ console.log('PASS: the caps\' No cap switches');
       const createButton=()=>panel.querySelector('.new-provider').querySelectorAll('button').find(b=>text(b)===ctx.t('provider_create'));
       const typed='made-up-kept-key-0824';
       f=draw(ai(['alpha'],{key_input:true}));
-      typeIn(named('key:entry:config:0'),typed);
+      simple('key-change:alpha').click();
+      typeIn(simple('key:alpha'),typed);
       vm.runInContext("form.newProvider=providerEdit('alpha',{kind:'openai',base_url:'http://127.0.0.1:9/v1',model:'model-alpha',limits:{}})",ctx);
       ctx.ui.drawSettings();
       [answer,give]=later();answers=[answer];
       createButton().focus();createButton().click();await settle();
       give(json(ai(['alpha'],{version:'v2',key_input:true,providers:[at('alpha',0),at('alpha',1)],chain:[row('alpha',{entries:2})]})));await settled();
-      assert.deepEqual([focused(),simple('key:alpha'),named('key:entry:config:0')?.value],['key:entry:config:1',undefined,typed],
-        'another alpha entry created: its own key field; no line field; the first entry\'s key being typed stays');
+      assert.deepEqual([focused(),simple('key:alpha')?.value,named('key:entry:config:0')],['key:entry:config:1',typed,undefined],
+        'another alpha entry created: its own key field; the line\'s key being typed stays');
       [answer,give]=later();answers=[answer];
       typeIn(named('key:entry:config:1'),'made-up-new-entry-key-0825');
       named('key-save:entry:config:1').click();await settle();
       assert.deepEqual([posted.at(-1).url,JSON.parse(posted.at(-1).body).selector],['/api/providers/key',{source:'config',index:1}],'saved for the new entry');
       assert(!posted.some(p=>p.body.includes(typed)),'the first entry\'s key never sent');
-      vm.runInContext('saveRun=null',ctx);
+      vm.runInContext('saveRun=null;keyChanging.clear()',ctx);
       // The first entry of its name: its line's key field.
       f=draw(ai(['alpha'],{key_input:true}));
       vm.runInContext("form.newProvider=providerEdit('gamma',{kind:'openai',base_url:'http://127.0.0.1:9/v1',model:'model-gamma',limits:{}})",ctx);
@@ -3417,7 +3562,8 @@ console.log('PASS: the caps\' No cap switches');
       vm.runInContext("form.newProvider=providerEdit('gamma',{kind:'cli',cli:'claude',limits:{}})",ctx);ctx.ui.drawSettings();
       [answer,give]=later();answers=[answer];
       createButton().focus();createButton().click();await settle();
-      give(json(ai(['alpha','gamma'],{version:'v2',key_input:true})));await settled();
+      const cliGamma=at('gamma',1,{saved:{enabled:true,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:60,limits:{}}});
+      give(json(ai(['alpha','gamma'],{version:'v2',key_input:true,providers:[at('alpha',0),cliGamma]})));await settled();
       assert.equal(focused(),'on:gamma','a CLI entry created: its line\'s switch');
       f=draw(ai(['alpha'],{key_input:true}));
       vm.runInContext("form.simpleCatalog=AI_CATALOG.find(e=>e.name==='groq');form.newProvider=providerEdit('groq',{...form.simpleCatalog,model:form.simpleCatalog.models[0]})",ctx);
@@ -3432,13 +3578,14 @@ console.log('PASS: the caps\' No cap switches');
       ctx.ui.drawSettings();
       [answer,give]=later();answers=[answer];
       simple('catalog.save').focus();simple('catalog.save').click();await settle();
-      give(json(ai(['alpha','claude'],{version:'v2',key_input:true})));await settled();
-      assert.equal(focused(),'on:claude','a CLI added from Add AI: its line\'s switch');
+      give(json(ai(['alpha','claude'],{version:'v2',key_input:true,providers:[at('alpha',0),
+        at('claude',1,{saved:{enabled:true,kind:'cli',cli:'claude',model:null,key:'on-path',timeout_s:60,limits:{}}})]})));await settled();
+      assert.equal(focused(),'model:claude','a CLI added from Add AI: its line on its model (decision 80)');
     }
-    // A line's key saved while its field stays (its key still missing): the field; gone: the switch
-    // (cubic on #820).
+    // A line's key saved while its field stays (its key still missing): the field; gone: its "Change
+    // the key" (cubic on #820; decision 79).
     {
-      for(const [key,expected] of [['missing','key:alpha'],['ok','on:alpha']]){
+      for(const [key,expected] of [['missing','key:alpha'],['ok','key-change:alpha']]){
         f=draw(ai(['alpha'],{key_input:true,chain:[row('alpha',{key:'missing'})]}));
         [answer,give]=later();answers=[answer];
         typeIn(simple('key:alpha'),'made-up-line-key-0826');
@@ -3453,7 +3600,7 @@ console.log('PASS: the caps\' No cap switches');
     {
       const file='/home/made-up/SHARED_KEY.md';
       f=draw(ai(['alpha','beta'],{key_input:true,chain:[row('alpha',{key:'missing',key_file:file}),row('beta',{key:'missing',key_file:file})]}));
-      const lineKey=name=>lineOf(name).querySelectorAll('input').some(n=>n.dataset.field==='providers.key'&&!n.closest('.simple-entries'));
+      const lineKey=name=>lineOf(name).querySelectorAll('input').some(n=>n.dataset.field==='providers.key'&&!n.closest('.simple-advanced'));
       assert.deepEqual([lineKey('alpha'),lineKey('beta'),Boolean(named('key:entry:config:0')),Boolean(named('key:entry:config:1'))],
         [true,false,false,true],'alpha\'s line takes the key; beta\'s says whose it reads, and its entry keeps its own field');
       assert(text(lineOf('beta')).includes(ctx.t('simple_key_shared',{name:'alpha'})),'beta says whose key it reads');
@@ -4363,7 +4510,7 @@ saved.providers=[saved.providers[0],{...saved.providers[0],name:'groq-20b',selec
 ctx.ui.setForm(ctx.simpleUi.formOf(plain(saved)));ctx.ui.setLang('ja');ctx.ui.drawSettings();
 const rowOf=name=>panel.querySelectorAll('.simple-provider').find(node=>node.dataset.providerName===name);
 // The line's own field: its entries' blocks keep theirs (69b-3c-2).
-const keyInput=row=>row.querySelectorAll('input').some(node=>node.dataset.field==='providers.key'&&!node.closest('.simple-entries'));
+const keyInput=row=>row.querySelectorAll('input').some(node=>node.dataset.field==='providers.key'&&!node.closest('.simple-advanced'));
 assert(keyInput(rowOf('groq')),'the first entry of a key file takes the key');
 assert(!keyInput(rowOf('groq-20b')),'a later entry of the same key file has no second key field');
 assert(rowOf('groq-20b').querySelector('.provider-entry').querySelectorAll('input').some(node=>node.dataset.field==='providers.key'),
@@ -4410,10 +4557,11 @@ assert(!keyInput(rowOf('groq-20b')),'a pending detailed order gives the later en
   assert.equal(unused.open,false,'folded until opened');
   assert(!panel.querySelectorAll('button').some(node=>node.dataset.simpleFocus?.startsWith('move:groq-20b')),'an AI turned off has no place to move');
   assert.deepEqual(panel.querySelectorAll('.simple-order').map(text),['1','2'],'the AI in use are numbered in their order');
-  // The catalog's "find it in the list" opens the folds around an AI turned off and focuses its
-  // switch (Codex, cubic and CodeRabbit on #801).
-  const listed=panel.querySelector('.simple-catalog').querySelectorAll('li').find(li=>text(li.querySelector('strong'))==='Groq・GPT OSS 20B');
-  listed.querySelector('button').click();
+  // The catalog's button of an AI added, marked so, opens the folds around it turned off and focuses
+  // its switch (Codex, cubic and CodeRabbit on #801; decision 80).
+  const listed=panel.querySelector('.simple-catalog').querySelectorAll('button').find(b=>b.dataset.simpleFocus==='catalog:groq-20b');
+  assert(text(listed).includes('Groq・GPT OSS 20B')&&text(listed).includes('追加済み'),text(listed));
+  listed.click();
   const offRow=panel.querySelector('.simple-unused').querySelectorAll('.simple-provider').find(node=>node.dataset.providerName==='groq-20b');
   assert.equal(panel.querySelector('.simple-unused').open,true,'the AI not in use open');
   assert.equal(offRow.querySelector('details').open,true,'and the AI\'s own line');

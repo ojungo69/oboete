@@ -1102,18 +1102,21 @@ const TEXT = {
   simple_calls_subscription: ['Calls a day: {n}', '1 日の回数: {n}'],
   simple_calls_differ: ['Calls a day: its entries differ', '1 日の回数: 項目ごとに違います'],
   simple_for_entries: ['These settings apply to all {n} entries of this name.', 'この設定は、この名前の {n} 個の項目すべてに使います。'],
-  simple_entry: ['Entry settings', '項目の設定'],
-  simple_entries: ['Its {n} entries', '{n} 件の項目'],
+  simple_advanced: ['Advanced settings', '詳しい設定'],
+  simple_key_change: ['Change the key', 'キーを変更'],
   simple_entry_of: ['Entry {n} of {of}', '項目 {n}/{of}'],
   simple_entries_desc: ['Each entry keeps its own settings; the fields above set every entry of this AI while they are set. “Save provider” changes only its entry and sends no test request.', '各項目は自分の設定を持ちます。上の欄は、設定している間、この AI のすべての項目に使われます。「要約役を保存」はその項目だけを変更し、接続テストは行いません。'],
   simple_entries_order: ['The arrows set which of its entries is tried first.', '矢印で、どの項目を先に使うかを決めます。'],
   simple_differs: ['These entries have different settings; check their details.', '同じ名前の接続先で設定が異なるため、詳しい設定をご確認ください。'],
   simple_add_ai: ['Add AI', 'AI を追加する'],
-  simple_catalog_choose: ['Choose {name}', '{name} を選ぶ'],
-  simple_catalog_listed: ['Already in the list', '一覧に追加されています'],
-  simple_catalog_open: ['Find it in the list', '一覧で確認する'],
+  simple_catalog_added: ['Added', '追加済み'],
   simple_add_save: ['Add this AI', 'この AI を追加する'],
-  simple_add_key: ['After adding an API service, register its key in the list.', 'API を使う接続先を追加したら、一覧でキーを登録してください。'],
+  simple_add_key_h: ['API key', 'API キー'],
+  simple_add_key_later: ['Added without one, the AI stays off: save its key in its line, then turn it on.', 'キーを入れずに追加すると、オフのままになります。一覧の行でキーを保存してから、オンにしてください。'],
+  simple_place: ['Its place in the order', '使う順番'],
+  simple_place_first: ['First', '最初'],
+  simple_place_after: ['After {name}', '{name} の次'],
+  simple_place_last: ['Last', '最後'],
   simple_catalog_groq: ['Groq · GPT OSS 120B', 'Groq・GPT OSS 120B'],
   simple_catalog_groq_20b: ['Groq · GPT OSS 20B', 'Groq・GPT OSS 20B'],
   simple_catalog_groq_qwen: ['Groq · Qwen', 'Groq・Qwen'],
@@ -1864,7 +1867,6 @@ const TEXT = {
   provider_create: ['Create provider', '要約役を登録'],
   provider_save: ['Save provider', '要約役を保存'],
   provider_cancel: ['Cancel', 'キャンセル'],
-  provider_edit: ['Edit provider', '要約役を編集'],
   provider_remove: ['Remove provider', '要約役を削除'],
   provider_remove_confirm: ['Remove only “{name}” ({source} #{index})? Other entries with this name keep their settings. Removing the final Gemini entry also stops its automatic placement.', '「{name}」({source} #{index}) だけを削除しますか？ 同名のほかの項目の設定は維持されます。最後の Gemini を削除すると、自動追加も解除します。'],
   provider_name: ['Name', '名前'],
@@ -3484,6 +3486,7 @@ function promptSide(side) {
 // against what was saved before, go with it (69b-3c).
 function loadedForm(s) {
   lineDrafts.clear();
+  keyChanging.clear();
   formLoads += 1;
   // Settings read afresh may hold another key or entry: the lists read before go, and a list on
   // its way is dropped (Codex and cubic on #857).
@@ -5770,8 +5773,6 @@ function preserveProviderDrafts(next, mine, action) {
     if (!row || row.name !== old.name) continue;
     row.edit = old.edit;
     row.edit.enabled = row.saved.enabled;
-    row.editing = old.editing;
-    row.advanced = old.advanced;
   }
 }
 
@@ -5802,6 +5803,7 @@ function mergeProviderSettings(answer, mine, action) {
   next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
+  next.simplePlace = action.op === 'create' ? null : mine.simplePlace;
   preserveProviderDrafts(next, mine, action);
   preserveCreatedSubscriptionDraft(next, mine, action);
   return next;
@@ -5954,8 +5956,14 @@ function providerTarget(taken, target, mine, action) {
 // Whether an AI line shows its key field after a provider's write: no longer after a key saved; after
 // a creation, for the created entry only when it is the first of its name, as the line's field is the
 // first entry's (CodeRabbit on #820). Each creation sets it anew.
-function providerKeyLine(action, path) {
-  if (path === '/key') simpleKeyName = null;
+function providerKeyLine(action, path, mine) {
+  if (path === '/key') {
+    simpleKeyName = null;
+    // The line's "Change the key" closes when its own key, its first entry's, was saved; another
+    // line's, or this line's while a later entry's key was saved, stays with what is typed there.
+    const saved = mine.providers.find((p) => selectorKey(p.selector) === selectorKey(action.selector));
+    if (saved && mine.providers.find((p) => p.name === saved.name) === saved) keyChanging.delete(saved.name);
+  }
   if (action.op !== 'create') return;
   const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
   simpleKeyName = first ? action.entry.name : null;
@@ -5963,7 +5971,6 @@ function providerKeyLine(action, path) {
 
 async function providerWrite(action, button, body, path, target = null) {
   const mine = form;
-  pageWrites += 1;
   clearSimpleReceipt();
   const fields = $('panel').querySelector('.settings');
   const scope = providerScope(fields, button, action);
@@ -5979,7 +5986,7 @@ async function providerWrite(action, button, body, path, target = null) {
     providerTarget(taken, target, mine, action);
     const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
     simpleReceipt = kept ? 'ai' : null;
-    providerKeyLine(action, path);
+    providerKeyLine(action, path, mine);
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();
@@ -5996,15 +6003,6 @@ async function providerWrite(action, button, body, path, target = null) {
   }
 }
 
-// The entry "Add an AI" made off in this page, waiting for its first key (decision 80): its selector,
-// and the page's writes and settings reads when its creation was answered. Its key turns it on only
-// when that key's save is the next of them: any write since (it turned on or off, removed, another
-// entry's key or another write) or settings read since ends the wait, and so does the save itself,
-// refused, lost or answered. Not by the settings' version: a key save writes config.toml (the
-// entry's managed key file), and a write undone gives the version again (Codex's reviews of 80a).
-let keyTurnsOn = null;
-// The writes this page sent, of the providers' entries or of the settings (`keyTurnsOn`).
-let pageWrites = 0;
 
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
 // form state; a redraw puts one being typed back into the field drawn for the same entry
@@ -6042,18 +6040,8 @@ function providerKeyField(provider, simple = false) {
   save.addEventListener('click', () => {
     const body = JSON.stringify({ version: form.version, selector: provider.selector, key: i.value });
     i.value = '';
-    // Decision 80: the entry "Add an AI" made off, this key's save the page's next write since, is
-    // turned on once it is saved; a key changed later is not (`keyTurnsOn`).
-    const wait = keyTurnsOn;
-    const turnsOn = wait?.selector === selectorKey(provider.selector) && wait.writes === pageWrites && wait.loads === formLoads;
     void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key',
-      simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` })).then((saved) => {
-      if (!saved || !turnsOn) return;
-      const on = [...$('panel').querySelectorAll('input')].find((n) => n.dataset.simpleFocus === `on:${provider.name}`);
-      // Unchanged but for its key since its creation, the name has no other entry: "Add an AI" adds
-      // none to a name it has.
-      if (on) void simpleProviderToggle(provider.name, true, on);
-    });
+      simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` }));
   });
   return el('div', 'key-input', i, save);
 }
@@ -6214,9 +6202,8 @@ function providerEditor(draft, provider, card) {
   const main = el('div', 'grid', field('name', 'provider_name'), endpoint,
     http ? el('label', 'field', el('span', null, t('provider_api')), api, note(t('provider_api_desc'))) : null,
     field('model', 'col_model'), field('timeout_s', 'col_timeout', 'number'));
-  const limits = el('details', 'provider-limits', el('summary', null, t('provider_advanced')));
-  limits.open = provider?.advanced ?? false;
-  if (provider) limits.addEventListener('toggle', () => { provider.advanced = limits.open; });
+  // No fold within "Advanced settings" (decision 79).
+  const limits = el('div', 'provider-limits', el('h5', null, t('provider_advanced')));
   const grid = providerLimitGrid(draft, unsupported);
   const daily = field('daily_budget', 'col_budget', 'number');
   [daily.querySelector('input').min, daily.querySelector('input').max] = form.ranges.daily_budget;
@@ -6249,20 +6236,17 @@ function providerEditor(draft, provider, card) {
       setStatus(t(message), true, lang);
       return;
     }
-    // Saved, its Edit summary at its place then, its editor closed; created, its line (69b-3c-2).
+    // Saved, its Save at its place then; created, its line (69b-3c-2).
     void providerOperation({ op: provider ? 'edit' : 'create', ...(provider ? { selector: provider.selector } : {}), entry: providerBody(draft) }, save,
-      null, '', provider ? (map) => ({ simple: `entry-edit:${selectorKey(map(provider.selector))}` }) : () => createdFocus(draft.name));
+      null, '', provider ? (map) => ({ simple: `entry-save:${selectorKey(map(provider.selector))}` }) : () => createdFocus(draft.name));
   });
   const cancel = el('button', 'quiet small', t('provider_cancel'));
   cancel.type = 'button';
   if (provider) cancel.dataset.simpleFocus = `entry-cancel:${selectorKey(provider.selector)}`;
   cancel.addEventListener('click', () => {
-    if (provider) {
-      provider.edit = providerEdit(provider.name, provider.saved);
-      provider.editing = false;
-      // The redraw keeps the focused control by name: its Edit summary keeps it, its editor closed.
-      card?.querySelector('.provider-edit')?.querySelector('summary')?.focus();
-    } else form.newProvider = null;
+    // An entry's editor goes back to its saved values, its Cancel keeping the focus by name.
+    if (provider) provider.edit = providerEdit(provider.name, provider.saved);
+    else form.newProvider = null;
     drawSettings();
   });
   return el('div', 'provider-editor', main,
@@ -6305,12 +6289,6 @@ function providerEntry(provider, line) {
       void providerOperation({ op: 'remove', selector: provider.selector }, remove, null, '', () => ({ simple: [`on:${name}`, 'catalog.open'] }));
     }
   });
-  const summary = el('summary', null, t('provider_edit'));
-  summary.dataset.simpleFocus = `entry-edit:${sel}`;
-  const edit = el('details', 'provider-edit', summary);
-  edit.open = provider.editing;
-  edit.addEventListener('toggle', () => { provider.editing = edit.open; });
-  edit.append(providerEditor(provider.edit, provider, card));
   card.append(...present([
     several ? el('h4', null, t('simple_entry_of', { n: at + 1, of: entries.length })) : null,
     several || provider.selector.source !== 'file' ? note(position) : null,
@@ -6318,7 +6296,7 @@ function providerEntry(provider, line) {
       arrows.length ? el('div', 'move', ...arrows) : null, remove),
     ...entryNotes(provider, unsupported),
     keyShown ? null : providerKeyPanel(provider),
-    unsupported ? null : edit,
+    unsupported ? null : providerEditor(provider.edit, provider, card),
     at === 0 ? null : providerTest(provider)]));
   return card;
 }
@@ -6337,13 +6315,24 @@ function createdFocus(name) {
   return { simple: first ? [`key:${name}`, own, 'catalog.open'] : [own, `on:${name}`, 'catalog.open'] };
 }
 
-// An AI line's key part: the note of a key file another AI reads first, or the key field for its
-// first entry while it needs one, or the note that keys cannot be typed here.
+// An AI line's key part (decision 79): the note of a key file another AI reads first; else its first
+// entry's key: the field while it needs one or once "Change the key" asks for it, else the key's
+// state and that button; or the note that keys cannot be typed here.
 function lineKeyPart(f, provider, { shared, keyShown, keyOwner }) {
   if (shared) return el('p', 'desc', t('simple_key_shared', { name: simpleLabel(keyOwner.name) }));
-  if (!keyShown) return null;
-  return el('div', 'provider-key', f.keyInput ? providerKeyField(provider, true) : note(t('provider_key_unsupported')));
+  if (provider?.saved.kind !== 'openai') return null;
+  if (!f.keyInput) return el('div', 'provider-key', note(t('provider_key_unsupported')));
+  if (keyShown || keyChanging.has(provider.name)) return el('div', 'provider-key', providerKeyField(provider, true));
+  const change = el('button', 'quiet small', t('simple_key_change'));
+  change.type = 'button';
+  change.dataset.simpleFocus = `key-change:${provider.name}`;
+  change.addEventListener('click', () => { keyChanging.add(provider.name); drawSettings(); simpleFocus(`key:${provider.name}`); });
+  const saved = provider.saved.key;
+  return el('div', 'provider-key', note(t(saved === 'none' ? 'provider_key_none' : `key_${saved.replaceAll('-', '_')}`)), change);
 }
+// The names whose line shows its key field after "Change the key", until a key is saved or the
+// settings are read again.
+const keyChanging = new Set();
 
 // An entry's notes: what is saved, what is in effect, its address or command, and its key.
 function entryNotes(provider, unsupported) {
@@ -6390,14 +6379,15 @@ function entryArrow(provider, { entries, at }, position, direction, after) {
 
 // An AI line's entries, in config order, in a fold at the line's end (69b-3c-2), open while one of
 // them is edited, or as last left.
-function lineEntries(row, providers, keyShown) {
-  if (!providers.length) return null;
+function lineAdvanced(row, providers, lineKey, ...parts) {
   const several = providers.length > 1;
-  const fold = el('details', 'simple-entries', el('summary', null, t(several ? 'simple_entries' : 'simple_entry', { n: providers.length })),
-    note(t('simple_entries_desc')), several ? note(t('simple_entries_order')) : null,
-    ...providers.map((provider, at) => providerEntry(provider, { name: row.name, entries: providers, at, keyShown: keyShown && at === 0 })));
-  const key = `entries:${row.name}`;
-  fold.open = providers.some((provider) => provider.editing) || (groupOpen.get(key) ?? false);
+  const summary = el('summary', null, t('simple_advanced'));
+  summary.dataset.simpleFocus = `advanced:${row.name}`;
+  const fold = el('details', 'simple-advanced', summary, ...parts,
+    providers.length ? note(t('simple_entries_desc')) : null, several ? note(t('simple_entries_order')) : null,
+    ...providers.map((provider, at) => providerEntry(provider, { name: row.name, entries: providers, at, keyShown: lineKey && at === 0 })));
+  const key = `advanced:${row.name}`;
+  fold.open = groupOpen.get(key) ?? false;
   fold.addEventListener('toggle', () => { if (fold.isConnected) groupOpen.set(key, fold.open); });
   return fold;
 }
@@ -6614,7 +6604,6 @@ async function saveSettings(button, simple = null, autosaved = false) {
     setStatus(t(field.startsWith('redaction.') ? 'redaction_invalid' : 'range'), true, lang);
     return;
   }
-  pageWrites += 1;
   const mine = form;
   // The whole panel, the language picker too: what is typed, or drawn again in another language,
   // while the save is on its way would not survive its answer. A change saved at once (decision
@@ -6642,7 +6631,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
       applySavedSettings(answer, mine, current, simple, autosaved ? bodyKey(body) : null);
-      return;
+      return res.ok;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
     const code = answer.code || byStatus[res.status] || 'other';
@@ -6827,7 +6816,7 @@ const AI_CATALOG = [
     limits: { max_request_tokens: 8000, daily_tokens: 40000 } },
   { name: 'openrouter', label: 'simple_catalog_openrouter', kind: 'openai', base_url: 'https://openrouter.ai/api/v1', api: 'openai',
     key_file: 'OPENROUTER_API_KEY.md', subscription: false, timeout_s: 90,
-    models: ['nvidia/nemotron-3-super-120b-a12b:free', 'qwen/qwen3.8-27b:free'] },
+    models: ['nvidia/nemotron-3.5-super-vl:free', 'dots-studio/dots-3-note-preview:free'] },
   { name: 'nim', label: 'simple_catalog_nim', kind: 'openai', base_url: 'https://integrate.api.nvidia.com/v1', api: 'openai',
     key_file: 'NVIDIA_NIM_KEY.md', subscription: false, timeout_s: 160, daily_budget: 500, models: ['nvidia/nemotron-3-ultra-550b-a55b'] },
   { name: 'opencode-go', label: 'simple_catalog_opencode_go', kind: 'openai', base_url: 'https://opencode.ai/zen/go/v1', api: 'openai',
@@ -7137,6 +7126,8 @@ const FOCUS_FALLBACKS = [
   // A key saved: its save is drawn disabled with its field emptied, or its field is gone (69b-3c-2;
   // cubic on #820).
   [(key) => key.startsWith('key-save:'), (key) => key.replace('key-save:', 'key:')],
+  // A line's key saved: its field gives way to "Change the key" (decision 79).
+  [(key) => /^key(-save)?:/.test(key), (key) => key.replace(/^key(-save)?:/, 'key-change:')],
   [(key) => /^(resume|resume-more|key|key-save):/.test(key), (key) => key.replace(/^[^:]+:/, 'on:')],
   [(key) => key.startsWith('test-run:'), (key) => key.replace('test-run:', 'test:')],
   [(key) => key === 'context.again' || key === 'context.repo', () => 'context.open'],
@@ -7453,10 +7444,11 @@ function simpleProviderRow(f, row, index, chain, position) {
       simpleToggle(on, `on:${row.name}`, t('simple_ai_on', { name: label }),
         (button, value) => void simpleProviderToggle(row.name, value, button), t('simple_use')),
       el('div', 'move', ...arrows)),
-    model, calls, timeout, row.entries > 1 ? el('p', 'desc', t('simple_for_entries', { n: row.entries })) : null,
-    row.differs?.length ? el('p', 'desc', t('simple_differs')) : null,
-    lineKeyPart(f, provider, { shared, keyShown, keyOwner }),
-    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null, lineEntries(row, providers, keyShown));
+    model, lineKeyPart(f, provider, { shared, keyShown, keyOwner }),
+    el('div', 'simple-resume', resume), provider ? providerTest(provider, true) : null,
+    lineAdvanced(row, providers, !shared && provider?.saved.kind === 'openai', calls, timeout,
+      row.entries > 1 ? el('p', 'desc', t('simple_for_entries', { n: row.entries })) : null,
+      row.differs?.length ? el('p', 'desc', t('simple_differs')) : null));
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
   fold.open = groupOpen.get(key) ?? needs;
@@ -7644,48 +7636,180 @@ function lineCalls(f, row, savedRow, label) {
 }
 
 function simpleCatalog(f) {
-  const rows = AI_CATALOG.map(entry => {
+  const buttons = AI_CATALOG.map(entry => {
     const listed = catalogHasProvider(entry, f.chain);
-    const choose = el('button', 'quiet small', t(listed ? 'simple_catalog_open' : 'simple_catalog_choose', { name: t(entry.label) }));
+    const choose = el('button', 'quiet catalog-choice', el('span', null, t(entry.label)),
+      listed ? el('span', 'catalog-added', t('simple_catalog_added')) : null);
     choose.type = 'button';
+    choose.dataset.simpleFocus = `catalog:${entry.name || 'other'}`;
     choose.addEventListener('click', () => {
       if (listed) {
         const row = [...$('panel').querySelectorAll('.simple-provider')].find(row => row.dataset.providerName === entry.name);
         // Opened before it is scrolled to: an AI turned off waits in a closed fold.
         simpleFocus(`on:${entry.name}`); row?.scrollIntoView?.({ block: 'center' }); return;
       }
-      // Decision 80: a service that takes a key is added off, and its first key saved turns it on
-      // (`keyTurnsOn`): no call goes to it without one.
+      // A service that takes a key is made off; its key, saved next, lets it be turned on (`simpleAdd`).
       f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0], enabled: !entry.key_file });
       f.simpleCatalog = entry;
+      f.simplePlace = 'last';
       if (!entry.name) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
-      drawSettings(); simpleFocus('catalog.save');
+      drawSettings(); simpleFocus(entry.key_file ? 'catalog.key' : 'catalog.model');
     });
-    return el('li', null, el('strong', null, t(entry.label)), listed ? note(t('simple_catalog_listed')) : null, choose);
+    return el('li', null, choose);
   });
   const add = el('summary', null, t('simple_add_ai'));
   add.dataset.simpleFocus = 'catalog.open';
-  const catalog = el('details', 'simple-catalog', add, el('ul', null, ...rows));
+  const catalog = el('details', 'simple-catalog', add, el('ul', 'catalog-choices', ...buttons));
   if (!f.newProvider || !f.simpleCatalog?.name) return catalog;
-  const draft = f.newProvider, entry = f.simpleCatalog;
+  const draft = f.newProvider, entry = f.simpleCatalog, label = t(entry.label);
+  const field = (name, control, ...notes) => el('label', 'field', el('span', null, t(name)), control, ...notes);
+  // 1. Its key: only in its field until "Add" sends it, as every key field's (#807).
+  let key = null;
+  if (entry.key_file) {
+    key = el('input');
+    key.type = 'text';
+    key.autocomplete = 'off';
+    key.spellcheck = false;
+    key.autocapitalize = 'off';
+    key.placeholder = t('key_placeholder');
+    key.dataset.field = 'catalog.key';
+    key.dataset.simpleFocus = 'catalog.key';
+    key.setAttribute('aria-label', t('key_label', { name: label }));
+    // Named by where "Add" sends it as the draft is now: an address or API changed in More
+    // settings gets nothing back (#807), and "Add" sends it only to the destination it was typed for.
+    keepSecret(key, addTarget(draft), () => {});
+  }
+  // 2. Its model, with its prices where the page knows them at the draft's address.
+  const prices = MODEL_PRICES[urlHost(draft.base_url)] || {};
+  const model = el('select', null, ...entry.models.map((name) => {
+    const option = el('option', null, prices[name]
+      ? t('model_priced', { model: name, input: perMillion(prices[name][0]), output: perMillion(prices[name][1]) }) : name);
+    option.value = name; return option;
+  }));
+  model.value = draft.model;
+  model.dataset.simpleFocus = 'catalog.model';
+  model.setAttribute('aria-label', t('simple_model', { name: label }));
+  model.addEventListener('change', () => {
+    draft.model = model.value;
+    // Its prices and largest request with it, as a line's choice sets them (`linePricedModel`): the
+    // model's step, or the draft's own where it is tighter or the model has none. The draft then holds
+    // them, so what More settings changes after is what "Add" sends.
+    // Looked up at the draft's address now: More settings may have changed it since the form was drawn.
+    const known = MODEL_PRICES[urlHost(draft.base_url)]?.[draft.model];
+    if (!known) return;
+    const [usdIn, usdOut, step] = known;
+    const own = draft.limits.max_request_tokens.trim() === '' ? null : Number(draft.limits.max_request_tokens);
+    draft.limits.usd_per_mtok_in = String(usdIn);
+    draft.limits.usd_per_mtok_out = String(usdOut);
+    draft.limits.max_request_tokens = providerText(step === null ? own : own === null ? step : Math.min(step, own));
+  });
+  // 3. Its place among the AI in use.
+  const option = (value, text) => { const node = el('option', null, text); node.value = value; return node; };
+  const place = el('select', null, option('last', t('simple_place_last')), option('first', t('simple_place_first')),
+    ...simpleSavedChain(f).filter((row) => row.on).map((row) => option(`after:${row.name}`, t('simple_place_after', { name: simpleLabel(row.name) }))));
+  place.value = f.simplePlace ?? 'last';
+  place.dataset.simpleFocus = 'catalog.place';
+  place.addEventListener('change', () => { f.simplePlace = place.value; });
   const save = el('button', 'small', t('simple_add_save'));
   save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
   save.addEventListener('click', () => {
     if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
-    void providerOperation({ op: 'create', entry: providerBody(draft) }, save, null, '', () => createdFocus(draft.name)).then((made) => {
-      // The entry made, found as `createdFocus` finds it: the last one not Gemini's automatic one.
-      const created = made && entry.key_file && !draft.enabled ? form.providers.findLast((p) => p.selector.source !== 'gemini') : null;
-      keyTurnsOn = created?.name === draft.name && !created.saved.enabled
-        ? { selector: selectorKey(created.selector), writes: pageWrites, loads: formLoads } : null;
-    });
+    // A key typed before the draft's destination changed in More settings is not sent (#807).
+    const typed = key && key.dataset.secret === addTarget(draft) ? key.value : '';
+    if (key) key.value = '';
+    void simpleAdd(entry, draft, typed, f.simplePlace ?? 'last', save);
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));
-  cancel.type = 'button'; cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; drawSettings(); });
-  return el('div', null, catalog, el('div', 'simple-add', el('h4', null, t(entry.label)),
-    el('p', 'desc', draft.base_url || t('simple_model_default')), el('p', null, draft.model),
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; f.simplePlace = null; drawSettings(); });
+  return el('div', null, catalog, el('div', 'simple-add', el('h4', null, label),
+    el('p', 'desc', draft.base_url || t('simple_model_default')),
+    // In `.provider-key`, masked as every key field is.
+    key ? el('label', 'field provider-key', el('span', null, t('simple_add_key_h')), key, note(t('provider_key_desc')),
+      note(t('simple_add_key_later'))) : null,
+    field('simple_model_short', model), field('simple_place', place),
     entry.name === 'gemini' ? el('p', 'desc', t('simple_gemini_warning')) : null,
-    draft.kind === 'openai' ? el('p', 'desc', t('simple_add_key')) : null, el('div', 'actions', save, cancel)));
+    el('div', 'actions', save, cancel)));
 }
+
+// Where the add form's key goes: the draft's name, kind, API and address as they are now.
+function addTarget(draft) {
+  return JSON.stringify(['add', draft.name, draft.kind, draft.api, draft.base_url]);
+}
+
+// Decision 80: "Add" makes the AI chosen in "Add AI": it creates the entry (off when it takes a key),
+// saves its key, turns it on, then puts it at its place, each step sent with the version the answer
+// before gave (`providerOperation` and `simpleSettingsSave` read it as they send). A step refused or
+// unanswered stops there, its line open on what is missing (its key, its switch, its arrows); adding
+// it again finds it in the list. Done, its line opens on its model.
+async function simpleAdd(entry, draft, key, place, button) {
+  const name = draft.name;
+  // Only while this visit of the settings lasts: left, nothing more is written or drawn.
+  const visit = generation;
+  const here = () => view === 'settings' && Boolean(form) && generation === visit;
+  if (!await providerOperation({ op: 'create', entry: providerBody(draft) }, button, null, '', () => createdFocus(name)) || !here()) return;
+  const control = (focus) => [...$('panel').querySelectorAll('button, input, select')].find((n) => n.dataset.simpleFocus === focus);
+  const stop = (focus) => {
+    if (!here()) return;
+    groupOpen.set(`ai:${name}`, true); drawSettings(); simpleFocus(focus);
+  };
+  // Found as `createdFocus` finds it: the last entry made, not Gemini's automatic one.
+  const created = form.providers.findLast((p) => p.selector.source !== 'gemini');
+  if (created?.name !== name) return;
+  // Its key not typed: it stays off, and its place is still saved.
+  const missing = entry.key_file && !key ? `key:${name}` : null;
+  if (entry.key_file && key) {
+    const body = JSON.stringify({ version: form.version, selector: created.selector, key });
+    if (!await providerOperation({ op: 'key', selector: created.selector }, control(`key-save:${name}`) ?? button, body, '/key')) {
+      return stop(`key:${name}`);
+    }
+    if (!here()) return;
+  }
+  if (!missing) {
+    const made = form.providers.find((p) => selectorKey(p.selector) === selectorKey(created.selector));
+    if (made && !made.saved.enabled) {
+      if (!await providerOperation({ op: 'enabled', selector: made.selector, enabled: true }, control(`on:${name}`) ?? button)) {
+        return stop(`on:${name}`);
+      }
+      if (!here()) return;
+    }
+    if (form.chain.find((row) => row.name === name)?.on !== true) {
+      const on = control(`on:${name}`);
+      if (!on || !await simpleChainSave(on, name, 'on', true)) return stop(`on:${name}`);
+      if (!here()) return;
+    }
+  }
+  // Its place, last included: `[chain] order` may still hold the name from an entry removed before.
+  if (!placed(form.savedSettings.chain, name, place)) {
+    const on = control(`on:${name}`);
+    const saved = on && await simpleSettingsSave(on, (body) => placeIn(body.chain, name, place), (next, answer) => {
+      const rows = new Map(next.chain.map((row) => [row.name, row]));
+      next.chain = answer.chain.map((row) => rows.get(row.name));
+    });
+    if (!saved) return stop(missing ?? `move:${name}:-1`);
+  }
+  stop(missing ?? `model:${name}`);
+}
+
+// `chain` with `name` moved to `place` (first, last, or right after another name), by name; false
+// when that other name is gone.
+function placeIn(chain, name, place) {
+  const at = chain.findIndex((row) => row.name === name);
+  const after = place.slice('after:'.length);
+  if (at < 0 || (place.startsWith('after:') && !chain.some((row) => row.name === after && row.name !== name))) return false;
+  const [row] = chain.splice(at, 1);
+  const to = { first: 0, last: chain.length }[place] ?? chain.findIndex((other) => other.name === after) + 1;
+  chain.splice(to, 0, row);
+}
+
+// Whether `name` is at `place` in `chain`.
+function placed(chain, name, place) {
+  const at = chain.findIndex((row) => row.name === name);
+  if (place === 'first') return at === 0;
+  if (place === 'last') return at >= 0 && at === chain.length - 1;
+  return at > 0 && chain[at - 1].name === place.slice('after:'.length);
+}
+
 
 function simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, consent }) {
   preview.dataset.simpleFocus = 'embedding.preview';

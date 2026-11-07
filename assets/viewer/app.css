@@ -609,6 +609,9 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .provider-key input { -webkit-text-security: disc; max-width: 100%; min-width: 0; }
 .provider-test { margin-top: 12px; }
 .provider-test > button { margin-top: 6px; }
+/* Decision 79: what a line changes less often, in one fold, nothing folded within it. */
+.settings .simple-advanced { margin-top: 12px; }
+.provider-limits h5 { margin: 14px 0 4px; font-size: 13px; font-weight: 600; }
 .test-preview { padding: 10px 14px; margin-top: 10px; background: var(--surface-2); border-radius: var(--radius-m); }
 .test-preview p, .test-result p { margin: 6px 0; }
 .test-preview pre { max-height: 10rem; overflow: auto; }
@@ -674,7 +677,11 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .simple-provider .provider-key input { flex: 1 1 12rem; width: 100%; }
 .simple-link { color: var(--accent); }
 .settings .simple-catalog li, .simple-agents li, .simple-places li { padding: 10px 0; border-bottom: 1px solid var(--line); }
-.simple-catalog li > strong { display: block; font-size: 14px; }
+/* Decision 80: the services as buttons, side by side as the width allows. */
+.settings .simple-catalog .catalog-choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 168px), 1fr)); gap: 8px; }
+.settings .simple-catalog .catalog-choices li { padding: 0; border-bottom: 0; }
+.catalog-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-height: 44px; text-align: left; }
+.catalog-added { color: var(--muted); font-size: 12px; font-weight: 400; }
 .simple-add { margin-top: 12px; padding: 12px 16px; background: var(--surface-2); border-radius: var(--radius-l); overflow-wrap: anywhere; }
 .simple-search-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; cursor: pointer; }
 .simple-search-option input { margin-top: 5px; flex-shrink: 0; }

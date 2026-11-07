@@ -513,8 +513,8 @@ impl Provider {
     /// less (Claude's models), and one written at 1.25 times for oboete's own five-minute marker;
     /// at twice when its `extra` asks for a cache of its own anywhere (`own_cache`), whose lifetime
     /// the usage does not tell apart (Codex on #636). OpenAI's own API bills a written token at
-    /// 1.25 times and a read one at a tenth or less (decision 80). Elsewhere a written token counts
-    /// twice and a read one once.
+    /// 1.25 times and a read one as its model's (`openai_cached_rate`, decision 80). Elsewhere a
+    /// written token counts twice and a read one once.
     pub fn billed_input(&self, prompt: i64, cached: Option<i64>, written: Option<i64>) -> f64 {
         let (cached, written) = (cached.unwrap_or(0).max(0), written.unwrap_or(0).max(0));
         match self {
@@ -528,10 +528,14 @@ impl Provider {
                 fresh as f64 + written as f64 * write + cached as f64 * 0.1
             }
             // Decision 80: OpenAI bills each input token once, at its uncached, cache-write or
-            // cached rate: a write at 1.25 times, a read at a tenth or less.
-            Provider::Openai { base_url, .. } if openai_api(base_url) => {
+            // cached rate: a write at 1.25 times, a read as its model's (`openai_cached_rate`).
+            Provider::Openai {
+                base_url, model, ..
+            } if openai_api(base_url) => {
                 let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
-                fresh as f64 + written as f64 * OPENAI_CACHE_WRITE + cached as f64 * 0.1
+                fresh as f64
+                    + written as f64 * OPENAI_CACHE_WRITE
+                    + cached as f64 * openai_cached_rate(model)
             }
             _ => prompt.saturating_add(written) as f64,
         }
@@ -844,12 +848,14 @@ fn default_providers() -> Vec<Provider> {
         "openrouter",
         OPENROUTER,
         "OPENROUTER_API_KEY.md",
-        "nvidia/nemotron-3-super-120b-a12b:free",
+        // Its free models, each answering the connection test's strict schema four times in four
+        // (2026-11-08); the ones named before left OpenRouter's list.
+        "nvidia/nemotron-3.5-super-vl:free",
         // Unset: its calls a day are a fifth of what its key may request, and a fifth of the
         // least OpenRouter gives any account until that is read (#238).
         None,
         false,
-        serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
+        serde_json::json!({"models": ["dots-studio/dots-3-note-preview:free"], "provider": {"require_parameters": true}}),
     );
     let mut chain = vec![
         openai(
@@ -1186,6 +1192,28 @@ pub(crate) fn openai_api(base_url: &str) -> bool {
         u.host()
             .is_some_and(|h| h.eq_ignore_ascii_case(OPENAI_HOST))
     })
+}
+
+/// Whether `model` is one of OpenAI's GPT-6 models: `gpt-6` itself or a name going on with `-` or
+/// `.` (a snapshot, GPT-6.1), not `gpt-60` (#861).
+pub(crate) fn gpt6(model: &str) -> bool {
+    model
+        .strip_prefix("gpt-6")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.']))
+}
+
+/// What OpenAI's own API bills a cached input token, in input prices: a twentieth on GPT-6.1 Sol and
+/// Terra, a tenth on its other GPT-6 models, and on any other model, whose rate differs (a quarter
+/// on GPT-4.1), the full input price (developers.openai.com, 2026-11-07; #861).
+fn openai_cached_rate(model: &str) -> f64 {
+    let of = |m: &str| model == m || model.starts_with(&format!("{m}-"));
+    if of("gpt-6.1-sol") || of("gpt-6.1-terra") {
+        0.05
+    } else if gpt6(model) {
+        0.1
+    } else {
+        1.0
+    }
 }
 
 fn is_free(model: &str) -> bool {
