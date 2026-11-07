@@ -1,0 +1,31 @@
+assets/viewer/app.css
+  s_70102dd6ea5599::t_3948e2b7abc2a7 680-684
+assets/viewer/app.js
+  s_70102dd6ea5599::t_e17b39179d11be 1112,1114-1119,6037,6812,7632,7634-7635,7637,7644,7647,7649,7651,7655,7657-7690,7695-7697,7700-7705,7707-7776
+docs/m1.md
+  s_70102dd6ea5599::t_8c40d34d06b2ad 38-39
+docs/settings-ai-models.md
+  s_70102dd6ea5599::t_6fb2172772940c 61-66
+docs/settings-redo.md
+  s_70102dd6ea5599::t_e2e10ca0378f5a 121
+src/config.rs
+  s_70102dd6ea5599::t_2bd2fc621cdebe 847-849,854
+src/testdata/viewer-readiness/test.mjs
+  s_70102dd6ea5599::t_d89486a96096c9 2590-2593,2599-2600,2603-2674,2676-2694,3486,4463-4467
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b10bff355cc2eefaf977c8c9cabf494b7ae23184",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
