@@ -528,10 +528,14 @@ impl Provider {
                 fresh as f64 + written as f64 * write + cached as f64 * 0.1
             }
             // Decision 80: OpenAI bills each input token once, at its uncached, cache-write or
-            // cached rate: a write at 1.25 times, a read at a tenth or less.
-            Provider::Openai { base_url, .. } if openai_api(base_url) => {
+            // cached rate: a write at 1.25 times, a read as its model's (`openai_cached_rate`).
+            Provider::Openai {
+                base_url, model, ..
+            } if openai_api(base_url) => {
                 let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
-                fresh as f64 + written as f64 * OPENAI_CACHE_WRITE + cached as f64 * 0.1
+                fresh as f64
+                    + written as f64 * OPENAI_CACHE_WRITE
+                    + cached as f64 * openai_cached_rate(model)
             }
             _ => prompt.saturating_add(written) as f64,
         }
@@ -1188,6 +1192,28 @@ pub(crate) fn openai_api(base_url: &str) -> bool {
         u.host()
             .is_some_and(|h| h.eq_ignore_ascii_case(OPENAI_HOST))
     })
+}
+
+/// Whether `model` is one of OpenAI's GPT-6 models: `gpt-6` itself or a name going on with `-` or
+/// `.` (a snapshot, GPT-6.1), not `gpt-60` (#861).
+pub(crate) fn gpt6(model: &str) -> bool {
+    model
+        .strip_prefix("gpt-6")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.']))
+}
+
+/// What OpenAI's own API bills a cached input token, in input prices: a twentieth on GPT-6.1 Sol and
+/// Terra, a tenth on its other GPT-6 models, and on any other model, whose rate differs (a quarter
+/// on GPT-4.1), the full input price (developers.openai.com, 2026-11-07; #861).
+fn openai_cached_rate(model: &str) -> f64 {
+    let of = |m: &str| model == m || model.starts_with(&format!("{m}-"));
+    if of("gpt-6.1-sol") || of("gpt-6.1-terra") {
+        0.05
+    } else if gpt6(model) {
+        0.1
+    } else {
+        1.0
+    }
 }
 
 fn is_free(model: &str) -> bool {

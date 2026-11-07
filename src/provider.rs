@@ -2398,7 +2398,7 @@ fn openai_request(
         {
             body["reasoning_effort"] = "none".into();
         }
-        if model.starts_with("gpt-6") {
+        if config::gpt6(model) {
             body["prompt_cache_options"] = json!({"mode": "explicit"});
         }
     }
@@ -6797,6 +6797,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             "{older}"
         );
         assert_eq!(older["max_completion_tokens"], 4000);
+        // A name only like GPT-6's: no cache option (#861).
+        assert!(shaped("gpt-60", max).get("prompt_cache_options").is_none());
         // The entry's own `extra` wins: an effort of its own sends no temperature, and its own bound
         // is kept.
         let own =
