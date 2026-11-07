@@ -31,6 +31,41 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// docs/subagents.md, slice 3: whether the facts hold every record of `device` up to `seq`: the
+/// consumer's checkpoint has reached it with no rebuild owed (none is reached with no checkpoint).
+pub(crate) fn reached(k: &Connection, device: &str, seq: i64) -> Result<bool> {
+    schema(k)?;
+    if crate::knowledge::checkpoint::get(k, NAME, device)? < seq {
+        return Ok(false);
+    }
+    let owed: bool = k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM subagent_rebuild WHERE device = ?1)",
+        [device],
+        |r| r.get(0),
+    )?;
+    Ok(!owed)
+}
+
+/// The seqs of one subagent's (agent, session, id) `fact` rows on `device` strictly between two
+/// seqs, oldest first.
+pub(crate) fn fact_seqs(
+    k: &Connection,
+    device: &str,
+    (agent, session, agent_id): (&str, &str, &str),
+    fact: &str,
+    (after, before): (i64, i64),
+) -> Result<Vec<i64>> {
+    let mut q = k.prepare_cached(
+        "SELECT seq FROM subagent_facts WHERE device = ?1 AND fact = ?2 AND agent = ?3
+           AND session = ?4 AND agent_id = ?5 AND seq > ?6 AND seq < ?7 ORDER BY seq",
+    )?;
+    let rows = q.query_map(
+        params![device, fact, agent, session, agent_id, after, before],
+        |r| r.get(0),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// One thing a record says of a subagent.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Fact {

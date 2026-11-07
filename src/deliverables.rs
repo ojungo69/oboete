@@ -64,6 +64,12 @@ CREATE INDEX IF NOT EXISTS deliverables_session ON deliverables(agent, session);
 CREATE TABLE IF NOT EXISTS deliverable_scan(
   device TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER, file TEXT
 );
+-- docs/subagents.md, slice 3: the newest stop the phase took of each Claude Code subagent on each
+-- device, so a later stop takes only the calls after it, though that stop is forgotten since.
+CREATE TABLE IF NOT EXISTS subagent_scan(
+  device TEXT NOT NULL, session TEXT NOT NULL, agent_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  PRIMARY KEY(device, session, agent_id)
+);
 ";
 
 /// The copies' rows (docs/deliverables.md), made when first needed, readable by this user alone.
@@ -101,8 +107,9 @@ pub(crate) fn open(home: &Path) -> Result<Connection> {
 }
 
 /// The wholly private prompt's turn of one session (docs/deliverables.md): its flag is a file under
-/// `state/private-turns/`, set by the prompt hook and cleared by the session's next public prompt,
-/// its reply and its end. It holds no text.
+/// `state/private-turns/`, set by the prompt hook and cleared by the session's next public prompt
+/// and its end, not by a reply (a turn a task's notification starts after it goes on with the
+/// private work). It holds no text.
 pub(crate) struct PrivateTurn(PathBuf);
 
 impl PrivateTurn {
@@ -1006,14 +1013,15 @@ fn is_work_state_write(tool: &str) -> bool {
 /// claude-mem reads as a turn of its own too; and only when the hooks marked it as of a public
 /// prompt's turn: a wholly private prompt is recorded as nothing, and a mark a rule masked stops
 /// the copy rather than allows it. The events come one at a time and only what a copy needs is
-/// kept of each, so a long turn is never held whole.
+/// kept of each, so a long turn is never held whole. `prompted`: a subagent's calls in a gap,
+/// whose launch's turn had its prompt (`stop_calls`).
 fn candidates(
     events: impl IntoIterator<Item = Result<(i64, Event)>>,
+    mut prompted: bool,
     aside: &dyn Fn() -> bool,
 ) -> Result<Option<Vec<Candidate>>> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
-    let mut prompted = false;
     for event in events {
         let (seq, e) = event?;
         prompted |= matches!(e.kind.as_str(), "prompt" | "envelope");
@@ -1100,12 +1108,14 @@ fn candidates(
 }
 
 /// The phase (docs/deliverables.md): each turn end recorded on this device since its checkpoint,
-/// copied from. True when it took one; it stops when a command asks the worker to step aside, the
-/// turn then taken again whole (names are by content and rows unique). `db` is opened when first
-/// needed.
+/// copied from, and each Claude Code subagent's stop (docs/subagents.md, slice 3), whose facts it
+/// reads in `k`, knowledge.db. True when it took one; it stops when a command asks the worker to
+/// step aside, the turn then taken again whole (names are by content and rows unique), and before
+/// a stop the `subagents` consumer has not reached. `db` is opened when first needed.
 pub(crate) fn run(
     home: &Path,
     raw: &Raw,
+    k: &Connection,
     db: &mut Option<Connection>,
     aside: &dyn Fn() -> bool,
 ) -> Result<bool> {
@@ -1127,8 +1137,10 @@ pub(crate) fn run(
             }
             c.seq
         }
-        // The first run, or a raw.db restored below the checkpoint: nothing older is copied.
+        // The first run, or a raw.db restored below the checkpoint: nothing older is copied, and
+        // the stops taken before name seqs other records may hold now.
         _ => {
+            db.execute("DELETE FROM subagent_scan WHERE device = ?1", [&device])?;
             set_checkpoint(db, raw, newest, time_at(raw, newest)?)?;
             return Ok(false);
         }
@@ -1140,29 +1152,60 @@ pub(crate) fn run(
     let mut took = false;
     for r in records {
         let Item::Event(e) = &r.item else { continue };
-        if !matches!(e.kind.as_str(), "reply" | "end")
-            || e.source != "hook"
-            || !AGENTS.contains(&e.agent.as_str())
-        {
+        if e.source != "hook" || !AGENTS.contains(&e.agent.as_str()) {
             continue;
         }
-        let start = raw.hook_turn_start(&e.agent, &e.session, r.seq)?;
-        let seqs = raw.turn_seqs(&e.agent, &e.session, start - 1, r.seq)?;
-        let events = (seqs.into_iter())
-            .filter_map(|seq| raw.event_at(seq).transpose().map(|e| e.map(|e| (seq, e))));
+        // Each file found with the turn its row is of, and a stop's subagent.
+        let (found, stopped): (Vec<(Candidate, (i64, i64))>, _) = match e.kind.as_str() {
+            "reply" | "end" => {
+                let start = raw.hook_turn_start(&e.agent, &e.session, r.seq)?;
+                let seqs = raw.turn_seqs(&e.agent, &e.session, start - 1, r.seq)?;
+                let events = (seqs.into_iter())
+                    .filter_map(|seq| raw.event_at(seq).transpose().map(|e| e.map(|e| (seq, e))));
+                let Some(found) = candidates(events, false, aside)? else {
+                    return Ok(true);
+                };
+                (
+                    found.into_iter().map(|c| (c, (r.seq, e.ts))).collect(),
+                    None,
+                )
+            }
+            crate::raw::SUBAGENT_STOP => {
+                // One with no id to know its subagent by (none, masked, not Claude Code's) is read
+                // past.
+                let Some(stop) = crate::consumer::subagents::facts(e).into_iter().next() else {
+                    continue;
+                };
+                let Some(calls) = stop_calls(raw, k, db, (r.seq, e), &stop.agent_id)? else {
+                    // A later round takes it, once the consumer has: the checkpoint stays below.
+                    return Ok(took);
+                };
+                let turns: HashMap<i64, (i64, i64)> =
+                    calls.iter().map(|((seq, _), turn)| (*seq, *turn)).collect();
+                let events = calls.into_iter().map(|(call, _)| Ok(call));
+                let Some(found) = candidates(events, true, aside)? else {
+                    return Ok(true);
+                };
+                let found = (found.into_iter())
+                    .filter_map(|c| {
+                        let turn = *turns.get(&c.call.0)?;
+                        Some((c, turn))
+                    })
+                    .collect();
+                (found, Some(stop.agent_id))
+            }
+            _ => continue,
+        };
         let folder = folder_name(
             e.repo
                 .as_deref()
                 .and_then(|k| k.rsplit(['/', '\\']).find(|p| !p.is_empty()))
                 .unwrap_or(""),
         );
-        // At most `MAX_FILES` a turn, of those that open as a file inside a root, as claude-mem
-        // counts the ones that resolve.
+        // At most `MAX_FILES` a turn or a stop, of those that open as a file inside a root, as
+        // claude-mem counts the ones that resolve.
         let mut opened = 0;
-        let Some(found) = candidates(events, aside)? else {
-            return Ok(true);
-        };
-        for c in found {
+        for (c, turn) in found {
             if opened == MAX_FILES {
                 eprintln!(
                     "oboete: over {MAX_FILES} files for one turn: {} not copied",
@@ -1196,8 +1239,8 @@ pub(crate) fn run(
                     e.agent,
                     e.session,
                     e.repo,
-                    r.seq,
-                    e.ts,
+                    turn.0,
+                    turn.1,
                     c.call.0,
                     c.call.1,
                     c.title,
@@ -1213,6 +1256,13 @@ pub(crate) fn run(
                 ],
             )?;
         }
+        if let Some(agent_id) = stopped {
+            db.execute(
+                "INSERT INTO subagent_scan(device, session, agent_id, seq) VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(device, session, agent_id) DO UPDATE SET seq = excluded.seq",
+                params![device, e.session, agent_id, r.seq],
+            )?;
+        }
         set_checkpoint(db, raw, r.seq, Some(e.ts))?;
         took = true;
     }
@@ -1222,6 +1272,97 @@ pub(crate) fn run(
     }
     // Records read past is progress too: more may wait behind them.
     Ok(took || last > from)
+}
+
+/// A subagent's call in a gap, its seq and event, with the reply its gap follows (seq and time).
+type GapCall = ((i64, Event), (i64, i64));
+
+/// A subagent's stop (docs/subagents.md, slice 3): once the `subagents` consumer has reached it
+/// (None before), its calls in a gap since its previous stop, each with the reply its gap follows
+/// (seq and time), as raw reads them now; none for a subagent not launched from a turn the hooks
+/// saw public.
+fn stop_calls(
+    raw: &Raw,
+    k: &Connection,
+    db: &Connection,
+    (stop, e): (i64, &Event),
+    agent_id: &str,
+) -> Result<Option<Vec<GapCall>>> {
+    let device = raw.device();
+    if !crate::consumer::subagents::reached(k, device, stop)? {
+        return Ok(None);
+    }
+    let who = (e.agent.as_str(), e.session.as_str(), agent_id);
+    let facts = |fact: &str, after: i64| {
+        crate::consumer::subagents::fact_seqs(k, device, who, fact, (after, stop))
+    };
+    // A hook's record, as raw reads it now: the facts keep no source.
+    let hook = |seq: i64| -> Result<Option<Event>> {
+        Ok(raw.event_at(seq)?.filter(|x| x.source == "hook"))
+    };
+    // Its launch, the newest: marked public, after a prompt or a harness message of its turn.
+    let public = match facts("launch", 0)?.last() {
+        Some(&seq) => match hook(seq)? {
+            Some(launch) => {
+                serde_json::from_str::<Value>(&launch.body).is_ok_and(|b| b["public_turn"] == true)
+                    && prompted_before(raw, &e.agent, &e.session, seq)?
+            }
+            None => false,
+        },
+        None => false,
+    };
+    if !public {
+        return Ok(Some(Vec::new()));
+    }
+    // After the newest stop taken, or the newest a hook's record the facts hold.
+    let taken: i64 = db
+        .query_row(
+            "SELECT seq FROM subagent_scan WHERE device = ?1 AND session = ?2 AND agent_id = ?3",
+            params![device, e.session, agent_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let mut since = taken;
+    for seq in facts("stop", taken)?.into_iter().rev() {
+        if hook(seq)?.is_some() {
+            since = seq;
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    for seq in facts("step", since)? {
+        let Some(reply) = raw.gap_reply(&e.agent, &e.session, seq)? else {
+            continue;
+        };
+        if raw.forgets(
+            device,
+            &e.agent,
+            &e.session,
+            e.repo.as_deref(),
+            reply.0,
+            reply.1,
+        )? {
+            continue;
+        }
+        if let Some(call) = hook(seq)? {
+            out.push(((seq, call), reply));
+        }
+    }
+    Ok(Some(out))
+}
+
+/// Whether a prompt or a harness message of the session reads before `seq` in its own turn, as a
+/// turn's copy asks of a call (`candidates`).
+fn prompted_before(raw: &Raw, agent: &str, session: &str, seq: i64) -> Result<bool> {
+    let start = raw.hook_turn_start(agent, session, seq)?;
+    for s in raw.turn_seqs(agent, session, start - 1, seq)? {
+        let read = raw.event_at(s)?;
+        if read.is_some_and(|x| matches!(x.kind.as_str(), "prompt" | "envelope")) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The rows forget's denials cover (docs/deliverables.md): the origin of the call or the turn end
@@ -1702,12 +1843,21 @@ mod tests {
     fn ready() -> (tempfile::TempDir, Raw) {
         let home = tempfile::tempdir().unwrap();
         let raw = crate::raw::open(home.path()).unwrap();
-        assert!(!run(home.path(), &raw, &mut None, &|| false).unwrap());
+        assert!(!step(home.path(), &raw));
         (home, raw)
     }
 
+    /// knowledge.db with the `subagents` consumer drained, as the worker's round has it.
+    fn drained(home: &Path, raw: &Raw) -> Connection {
+        let mut consumers: Vec<Box<dyn crate::worker::Consumer>> =
+            vec![Box::new(crate::consumer::subagents::Subagents)];
+        let mut k = crate::knowledge::open(home).unwrap();
+        crate::worker::drain(raw, &mut k, &mut consumers).unwrap();
+        k
+    }
+
     fn step(home: &Path, raw: &Raw) -> bool {
-        run(home, raw, &mut None, &|| false).unwrap()
+        run(home, raw, &drained(home, raw), &mut None, &|| false).unwrap()
     }
 
     /// Each row's title, its copy's path and whether it was declared.
@@ -2776,7 +2926,16 @@ mod tests {
             w,
             &[("mcp__oboete__work_state_write", declare)],
         );
-        assert!(run(home.path(), &raw, &mut None, &|| true).unwrap());
+        assert!(
+            run(
+                home.path(),
+                &raw,
+                &drained(home.path(), &raw),
+                &mut None,
+                &|| true
+            )
+            .unwrap()
+        );
         assert!(copies(home.path()).is_empty());
         assert!(step(home.path(), &raw));
         assert_eq!(copies(home.path()).len(), 1);
@@ -3005,5 +3164,603 @@ mod tests {
             &file,
             &mut HashMap::new()
         ));
+    }
+
+    /// Slice 3 (docs/subagents.md): subagent `id`'s call, marked public as the hooks mark one.
+    fn sub_call(session: &str, id: &str, file: &Path, cwd: &Path) -> Event {
+        let input = json!({"file_path": file}).to_string();
+        let body = json!({"tool": "Write", "input": input, "output": "", "failed": false,
+            "agent_id": id, "agent_type": "general-purpose"});
+        let mut e = ev(session, "tool", body, cwd);
+        mark_public(&mut e);
+        e
+    }
+
+    /// The parent's call that launched subagent `id`, in a public turn: in the background, or
+    /// returned with it.
+    fn launch_of(session: &str, id: &str, background: bool, cwd: &Path) -> Event {
+        let input = json!({"description": "Draw the chart", "prompt": "Draw it."}).to_string();
+        let status = if background {
+            "async_launched"
+        } else {
+            "completed"
+        };
+        let body = json!({"tool": "Agent", "input": input, "output": "", "failed": false,
+            "launched": {"agent_id": id, "async": background, "status": status}});
+        let mut e = ev(session, "tool", body, cwd);
+        mark_public(&mut e);
+        e
+    }
+
+    /// Subagent `id`'s stop, as the hook keeps one.
+    fn stop_of(session: &str, id: &str, cwd: &Path) -> Event {
+        let body = json!({"agent_id": id, "agent_type": "general-purpose"});
+        ev(session, crate::raw::SUBAGENT_STOP, body, cwd)
+    }
+
+    fn said(raw: &mut Raw, session: &str, kind: &str, cwd: &Path) -> i64 {
+        raw.append(&ev(session, kind, json!({"text": "Go on."}), cwd))
+            .unwrap()
+    }
+
+    /// Each row's title, its turn's seq and its call's seq, by id.
+    fn origins(home: &Path) -> Vec<(String, i64, i64)> {
+        let db = open(home).unwrap();
+        db.prepare("SELECT title, turn_seq, call_seq FROM deliverables ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// The owner's forget of one record of this device: registered, and when `purge`, purged as
+    /// the worker finishes one (its row rewritten without its labels, its copies swept).
+    fn forget_record(home: &Path, raw: Raw, seq: i64, purge: bool) -> Raw {
+        let device = raw.device().to_owned();
+        drop(raw);
+        let target = crate::forget::Target::Record { device, seq };
+        let preview = crate::forget::preview(home, target).unwrap();
+        crate::forget::start(home, &preview).unwrap();
+        if purge {
+            crate::forget::purge(home).unwrap();
+        }
+        crate::raw::open(home).unwrap()
+    }
+
+    fn files(dir: &Path, names: &[&str]) {
+        for name in names {
+            if let Some(parent) = dir.join(name).parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(dir.join(name), name.as_bytes()).unwrap();
+        }
+    }
+
+    /// Slice 3: a file a background subagent wrote after its parent's reply, with no prompt
+    /// between, is copied at its stop, once, its row the reply's turn and the writing call's; one
+    /// it wrote inside its parent's turn is the turn's, a foreground subagent's too, and not taken
+    /// again at its stop; a stop after the parent's next prompt still takes the gap's call; a
+    /// session's end with no reply copies the prompt-backed file, and the stop nothing again.
+    #[test]
+    fn a_background_subagents_file_is_copied_at_its_stop_once() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(
+            w,
+            &[
+                "in.pdf", "out.pdf", "fore.pdf", "mid.pdf", "late.pdf", "end.pdf",
+            ],
+        );
+        // Straddling its parent's reply.
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        let inside = raw
+            .append(&sub_call("s1", "a1", &w.join("in.pdf"), w))
+            .unwrap();
+        let reply = said(&mut raw, "s1", "reply", w);
+        let gap = raw
+            .append(&sub_call("s1", "a1", &w.join("out.pdf"), w))
+            .unwrap();
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        // A foreground one: it stops before the call that started it returns.
+        said(&mut raw, "s2", "prompt", w);
+        let fore = raw
+            .append(&sub_call("s2", "f1", &w.join("fore.pdf"), w))
+            .unwrap();
+        raw.append(&stop_of("s2", "f1", w)).unwrap();
+        raw.append(&launch_of("s2", "f1", false, w)).unwrap();
+        let reply2 = said(&mut raw, "s2", "reply", w);
+        // One that writes in its parent's next turn too, and stops after it.
+        said(&mut raw, "s3", "prompt", w);
+        raw.append(&launch_of("s3", "l1", true, w)).unwrap();
+        let reply3 = said(&mut raw, "s3", "reply", w);
+        let late = raw
+            .append(&sub_call("s3", "l1", &w.join("late.pdf"), w))
+            .unwrap();
+        said(&mut raw, "s3", "prompt", w);
+        let mid = raw
+            .append(&sub_call("s3", "l1", &w.join("mid.pdf"), w))
+            .unwrap();
+        let next = said(&mut raw, "s3", "reply", w);
+        raw.append(&stop_of("s3", "l1", w)).unwrap();
+        // A session that ends with no reply.
+        said(&mut raw, "s4", "prompt", w);
+        raw.append(&launch_of("s4", "e1", true, w)).unwrap();
+        let ended = raw
+            .append(&sub_call("s4", "e1", &w.join("end.pdf"), w))
+            .unwrap();
+        let end = said(&mut raw, "s4", "end", w);
+        raw.append(&stop_of("s4", "e1", w)).unwrap();
+        while step(home.path(), &raw) {}
+        let expected: Vec<(String, i64, i64)> = vec![
+            ("in.pdf".into(), reply, inside),
+            ("out.pdf".into(), reply, gap),
+            ("fore.pdf".into(), reply2, fore),
+            ("mid.pdf".into(), next, mid),
+            ("late.pdf".into(), reply3, late),
+            ("end.pdf".into(), end, ended),
+        ];
+        assert_eq!(origins(home.path()), expected);
+        let db = open(home.path()).unwrap();
+        set_checkpoint(&db, &raw, 0, None).unwrap();
+        while step(home.path(), &raw) {}
+        assert_eq!(origins(home.path()), expected, "nothing twice");
+    }
+
+    /// Slice 3: one stop over two gaps keeps each gap's copies apart under the unique key:
+    /// identical content at two paths is two rows, each its gap's reply's and its call's; one path
+    /// written in both is one row, the last write's (the bytes on disk are its). A forget of either
+    /// call leaves the other's row and the file; of both, neither.
+    #[test]
+    fn one_stop_over_two_gaps_keeps_each_gaps_copies_apart() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["notes.pdf"]);
+        for d in ["one", "two"] {
+            std::fs::create_dir(w.join(d)).unwrap();
+            std::fs::write(w.join(d).join("report.pdf"), b"the same bytes").unwrap();
+        }
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        let r1 = said(&mut raw, "s1", "reply", w);
+        let c1 = (raw.append(&sub_call("s1", "a1", &w.join("one/report.pdf"), w))).unwrap();
+        (raw.append(&sub_call("s1", "a1", &w.join("notes.pdf"), w))).unwrap();
+        said(&mut raw, "s1", "prompt", w);
+        let r2 = said(&mut raw, "s1", "reply", w);
+        let c3 = (raw.append(&sub_call("s1", "a1", &w.join("two/report.pdf"), w))).unwrap();
+        let c4 = (raw.append(&sub_call("s1", "a1", &w.join("notes.pdf"), w))).unwrap();
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        step(home.path(), &raw);
+        let expected: Vec<(String, i64, i64)> = vec![
+            ("report.pdf".into(), r1, c1),
+            ("notes.pdf".into(), r2, c4),
+            ("report.pdf".into(), r2, c3),
+        ];
+        assert_eq!(origins(home.path()), expected);
+        let copy = copies(home.path())[0].1.clone();
+        assert_eq!(copies(home.path())[2].1, copy, "one file for one content");
+        let file = home.path().join(FOLDER).join(&copy);
+        let raw = forget_record(home.path(), raw, c1, true);
+        assert_eq!(origins(home.path()), expected[1..]);
+        assert!(file.is_file(), "the other call's row names it");
+        drop(forget_record(home.path(), raw, c3, true));
+        assert_eq!(origins(home.path()), expected[1..2]);
+        assert!(!file.exists());
+    }
+
+    /// Slice 3: a later stop takes only the calls after the one the phase took, though that stop
+    /// is forgotten since (its copies stay: their origins are the calls and the reply) and a
+    /// source changed since; so a resumed subagent's new file is copied though its earlier calls
+    /// named `MAX_FILES` files. A stop with no call since copies nothing; a replay's and a
+    /// transcript's stop are no boundary; a stop taken again after an interruption, before its
+    /// place was kept or after, makes no row twice; a restore empties the places kept.
+    #[test]
+    fn a_later_stop_takes_only_the_calls_after_the_one_taken() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        let names: Vec<String> = (0..MAX_FILES).map(|i| format!("f{i}.pdf")).collect();
+        files(w, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        files(w, &["new.pdf", "after.pdf"]);
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        let reply = said(&mut raw, "s1", "reply", w);
+        for name in &names {
+            raw.append(&sub_call("s1", "a1", &w.join(name), w)).unwrap();
+        }
+        let first = raw.append(&stop_of("s1", "a1", w)).unwrap();
+        step(home.path(), &raw);
+        assert_eq!(origins(home.path()).len(), MAX_FILES);
+        let mut raw = forget_record(home.path(), raw, first, true);
+        assert_eq!(origins(home.path()).len(), MAX_FILES, "the copies stay");
+        std::fs::write(w.join("f0.pdf"), b"changed since").unwrap();
+        let resumed = raw
+            .append(&sub_call("s1", "a1", &w.join("new.pdf"), w))
+            .unwrap();
+        let second = raw.append(&stop_of("s1", "a1", w)).unwrap();
+        step(home.path(), &raw);
+        let rows = origins(home.path());
+        assert_eq!(rows.len(), MAX_FILES + 1);
+        assert_eq!(rows[MAX_FILES], ("new.pdf".into(), reply, resumed));
+        // No call since: nothing, the stop read past.
+        let empty = raw.append(&stop_of("s1", "a1", w)).unwrap();
+        step(home.path(), &raw);
+        assert_eq!(origins(home.path()).len(), MAX_FILES + 1);
+        let db = open(home.path()).unwrap();
+        assert_eq!(checkpoint(&db, raw.device()).unwrap().unwrap().seq, empty);
+        // Taken again: before its place was kept, and after.
+        for kept in [first, second] {
+            (db.execute("UPDATE subagent_scan SET seq = ?1", [kept])).unwrap();
+            set_checkpoint(&db, &raw, resumed, time_at(&raw, resumed).unwrap()).unwrap();
+            while step(home.path(), &raw) {}
+            assert_eq!(origins(home.path()).len(), MAX_FILES + 1);
+        }
+        // A replay's and a transcript's stop between a call and the hook's stop.
+        let after = raw
+            .append(&sub_call("s1", "a1", &w.join("after.pdf"), w))
+            .unwrap();
+        for source in ["replay", "transcript"] {
+            let mut other = stop_of("s1", "a1", w);
+            other.source = source.into();
+            raw.append(&other).unwrap();
+        }
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        while step(home.path(), &raw) {}
+        let rows = origins(home.path());
+        assert_eq!(rows.last().unwrap(), &("after.pdf".into(), reply, after));
+        let kept = |db: &Connection| -> i64 {
+            (db.query_row("SELECT count(*) FROM subagent_scan", [], |r| r.get(0))).unwrap()
+        };
+        assert_eq!(kept(&db), 1);
+        drop(db);
+        let raw = rebuilt_below(home.path(), raw, resumed);
+        step(home.path(), &raw);
+        assert_eq!(kept(&open(home.path()).unwrap()), 0);
+    }
+
+    /// Slice 3: a stop the phase did not take, forgotten before it read it, leaves its calls to
+    /// the next stop.
+    #[test]
+    fn a_stop_forgotten_before_the_phase_read_it_leaves_its_calls_to_the_next() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["one.pdf", "two.pdf"]);
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        let reply = said(&mut raw, "s1", "reply", w);
+        let one = raw
+            .append(&sub_call("s1", "a1", &w.join("one.pdf"), w))
+            .unwrap();
+        let first = raw.append(&stop_of("s1", "a1", w)).unwrap();
+        let mut raw = forget_record(home.path(), raw, first, true);
+        let two = raw
+            .append(&sub_call("s1", "a1", &w.join("two.pdf"), w))
+            .unwrap();
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        while step(home.path(), &raw) {}
+        let expected: Vec<(String, i64, i64)> = vec![
+            ("one.pdf".into(), reply, one),
+            ("two.pdf".into(), reply, two),
+        ];
+        assert_eq!(origins(home.path()), expected);
+    }
+
+    /// Slice 3, through the hooks: a subagent launched from a wholly private prompt's turn copies
+    /// nothing, though a later public prompt cleared the session's flag before it wrote; one
+    /// launched from a public turn copies its file.
+    #[test]
+    fn a_subagent_launched_from_a_private_turn_copies_nothing() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["secret.pdf", "public.pdf"]);
+        let settings = crate::capture::Settings::default();
+        let hook = |raw: &mut Raw, session: &str, event: &str, mut payload: Value| {
+            payload["session_id"] = json!(session);
+            payload["cwd"] = json!(w);
+            let (mut failed, mut back) = (0, 0);
+            let ts = crate::db::now_ms();
+            crate::hook::record(
+                home.path(),
+                raw,
+                "claude",
+                event,
+                &payload,
+                ts,
+                &settings,
+                &mut failed,
+                &mut back,
+            )
+            .unwrap();
+        };
+        let cases = [
+            ("s1", "<private>the real plan</private>", "secret.pdf"),
+            ("s2", "Draw the chart.", "public.pdf"),
+        ];
+        for (session, first, file) in cases {
+            let id = format!("{session}a");
+            hook(
+                &mut raw,
+                session,
+                "UserPromptSubmit",
+                json!({ "prompt": first }),
+            );
+            let launched = json!({"tool_name": "Agent",
+                "tool_input": {"description": "Draw", "prompt": "Draw it."},
+                "tool_response": {"agentId": id, "status": "async_launched", "isAsync": true}});
+            hook(&mut raw, session, "PostToolUse", launched);
+            hook(
+                &mut raw,
+                session,
+                "Stop",
+                json!({"last_assistant_message": "On it."}),
+            );
+            hook(
+                &mut raw,
+                session,
+                "UserPromptSubmit",
+                json!({"prompt": "And a legend?"}),
+            );
+            hook(
+                &mut raw,
+                session,
+                "Stop",
+                json!({"last_assistant_message": "Soon."}),
+            );
+            let wrote = json!({"tool_name": "Write", "agent_id": id,
+                "tool_input": {"file_path": w.join(file), "content": "x"},
+                "tool_response": {"type": "create"}});
+            hook(&mut raw, session, "PostToolUse", wrote);
+            hook(&mut raw, session, "SubagentStop", json!({ "agent_id": id }));
+        }
+        while step(home.path(), &raw) {}
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["public.pdf"]);
+    }
+
+    /// Slice 3: with no launch record, its launch forgotten or its id masked, launched from a turn
+    /// with no prompt observed, a call that failed or is not marked public, or a Codex session's,
+    /// a stop copies nothing; beside them a subagent launched as the hooks see a public turn
+    /// copies its file.
+    #[test]
+    fn a_subagent_with_no_public_launch_or_call_copies_nothing() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        let cases = [
+            "nolaunch",
+            "forgotten",
+            "masked",
+            "unseen",
+            "failed",
+            "unmarked",
+            "codex",
+            "notified",
+            "control",
+        ];
+        let names: Vec<String> = cases.iter().map(|c| format!("{c}.pdf")).collect();
+        files(w, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut launches = HashMap::new();
+        for case in cases {
+            let agent = |mut e: Event| {
+                if case == "codex" {
+                    e.agent = "codex".into();
+                }
+                e
+            };
+            match case {
+                "unseen" => {}
+                // A turn a task's notification starts.
+                "notified" => {
+                    said(&mut raw, case, "envelope", w);
+                }
+                _ => {
+                    let prompt = ev(case, "prompt", json!({"prompt": "Go."}), w);
+                    raw.append(&agent(prompt)).unwrap();
+                }
+            }
+            if case != "nolaunch" {
+                let seq = raw.append(&agent(launch_of(case, case, true, w))).unwrap();
+                launches.insert(case, seq);
+            }
+            raw.append(&agent(ev(case, "reply", json!({"assistant": "On it."}), w)))
+                .unwrap();
+            let mut call = sub_call(case, case, &w.join(format!("{case}.pdf")), w);
+            if case == "failed" {
+                call.body = call.body.replace("\"failed\":false", "\"failed\":true");
+            }
+            if case == "unmarked" {
+                let body = json!({"tool": "Write",
+                    "input": json!({"file_path": w.join("unmarked.pdf")}).to_string(),
+                    "output": "", "failed": false, "agent_id": case});
+                call = ev(case, "tool", body, w);
+            }
+            raw.append(&agent(call)).unwrap();
+            raw.append(&agent(stop_of(case, case, w))).unwrap();
+        }
+        let device = raw.device().to_owned();
+        let masked = launches["masked"];
+        let body = match &raw.after(&device, masked - 1, 1).unwrap()[0].item {
+            Item::Event(e) => e.body.clone(),
+            _ => panic!("an event"),
+        };
+        let at = body.find("\"agent_id\":\"masked\"").unwrap() + "\"agent_id\":\"".len();
+        let target = crate::raw::Target::Range {
+            device,
+            seq: masked,
+            offset: at as i64,
+            length: "masked".len() as i64,
+        };
+        raw.append_tombstone(target).unwrap();
+        let raw = forget_record(home.path(), raw, launches["forgotten"], true);
+        while step(home.path(), &raw) {}
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["notified.pdf", "control.pdf"]);
+    }
+
+    /// Slice 3: the phase's first run copies nothing older; a stop after it takes no call before
+    /// the subagent's earlier stop, which the facts hold though the phase never took it.
+    #[test]
+    fn a_stop_after_the_first_run_takes_no_call_before_an_earlier_stop() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["old.pdf", "new.pdf"]);
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        let reply = said(&mut raw, "s1", "reply", w);
+        raw.append(&sub_call("s1", "a1", &w.join("old.pdf"), w))
+            .unwrap();
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        assert!(!step(home.path(), &raw));
+        let new = raw
+            .append(&sub_call("s1", "a1", &w.join("new.pdf"), w))
+            .unwrap();
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        while step(home.path(), &raw) {}
+        let expected: Vec<(String, i64, i64)> = vec![("new.pdf".into(), reply, new)];
+        assert_eq!(origins(home.path()), expected);
+    }
+
+    /// Slice 3: a gap whose reply a forget denies takes nothing, registered (its labels still
+    /// there) or purged; a prompt forgotten and purged between the reply and a call makes the call
+    /// no gap's, as it is no copy of its turn's; beside them a gap copies.
+    #[test]
+    fn a_gap_whose_reply_or_prompt_was_forgotten_takes_nothing() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(
+            w,
+            &["denied.pdf", "purged.pdf", "prompt.pdf", "control.pdf"],
+        );
+        let (mut purged, mut denied) = (Vec::new(), 0);
+        for case in ["denied", "purged", "prompt", "control"] {
+            said(&mut raw, case, "prompt", w);
+            raw.append(&launch_of(case, case, true, w)).unwrap();
+            let reply = said(&mut raw, case, "reply", w);
+            if case == "prompt" {
+                purged.push(said(&mut raw, case, "prompt", w));
+            }
+            let file = w.join(format!("{case}.pdf"));
+            raw.append(&sub_call(case, case, &file, w)).unwrap();
+            if case == "prompt" {
+                said(&mut raw, case, "reply", w);
+            }
+            raw.append(&stop_of(case, case, w)).unwrap();
+            match case {
+                "denied" => denied = reply,
+                "purged" => purged.push(reply),
+                _ => {}
+            }
+        }
+        for seq in purged {
+            raw = forget_record(home.path(), raw, seq, true);
+        }
+        // Registered, not yet purged: the reply's labels are still read.
+        let raw = forget_record(home.path(), raw, denied, false);
+        let db = Connection::open(home.path().join("raw.db")).unwrap();
+        let labels: Option<String> = (db.query_row(
+            "SELECT session FROM records WHERE device = ?1 AND seq = ?2",
+            params![raw.device(), denied],
+            |r| r.get(0),
+        ))
+        .unwrap();
+        assert_eq!(labels.as_deref(), Some("denied"));
+        while step(home.path(), &raw) {}
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["control.pdf"]);
+    }
+
+    /// Slice 3: with the `subagents` consumer behind, reply A is taken and the stop waits with
+    /// reply B behind it, the phase's checkpoint below the stop; with no checkpoint, or a rebuild
+    /// owed, it waits too; once the consumer has reached it, both are taken, no row twice.
+    #[test]
+    fn a_stop_waits_for_the_subagents_facts() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["a.pdf", "gap.pdf", "b.pdf"]);
+        let parent = |file: &str| tool("s1", "Write", json!({"file_path": w.join(file)}), w);
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&parent("a.pdf")).unwrap();
+        raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        let a = said(&mut raw, "s1", "reply", w);
+        raw.append(&sub_call("s1", "a1", &w.join("gap.pdf"), w))
+            .unwrap();
+        let behind = drained(home.path(), &raw);
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        said(&mut raw, "s1", "prompt", w);
+        raw.append(&parent("b.pdf")).unwrap();
+        said(&mut raw, "s1", "reply", w);
+        let titles = || -> Vec<String> { copies(home.path()).into_iter().map(|c| c.0).collect() };
+        let at = || {
+            checkpoint(&open(home.path()).unwrap(), raw.device())
+                .unwrap()
+                .unwrap()
+                .seq
+        };
+        assert!(run(home.path(), &raw, &behind, &mut None, &|| false).unwrap());
+        assert_eq!(titles(), ["a.pdf"]);
+        assert_eq!(at(), a);
+        assert!(!run(home.path(), &raw, &behind, &mut None, &|| false).unwrap());
+        let empty = tempfile::tempdir().unwrap();
+        let none = crate::knowledge::open(empty.path()).unwrap();
+        assert!(!run(home.path(), &raw, &none, &mut None, &|| false).unwrap());
+        let owed = drained(home.path(), &raw);
+        let mut consumer = crate::consumer::subagents::Subagents;
+        crate::worker::Consumer::rewind(&mut consumer, &owed, raw.device(), 0).unwrap();
+        assert!(!run(home.path(), &raw, &owed, &mut None, &|| false).unwrap());
+        assert_eq!((titles(), at()), (vec!["a.pdf".to_owned()], a));
+        while step(home.path(), &raw) {}
+        assert_eq!(titles(), ["a.pdf", "gap.pdf", "b.pdf"]);
+        let db = open(home.path()).unwrap();
+        set_checkpoint(&db, &raw, a, time_at(&raw, a).unwrap()).unwrap();
+        while step(home.path(), &raw) {}
+        assert_eq!(titles(), ["a.pdf", "gap.pdf", "b.pdf"]);
+    }
+
+    /// Slice 3: a stop's copy goes with a forget of its call or of its gap's reply, not with one
+    /// of the stop alone, and stays through retention that expires its call, its reply, its
+    /// launch and its stop.
+    #[test]
+    fn a_stops_copy_goes_with_its_call_or_reply_and_stays_through_retention() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        let cases = ["call", "reply", "stop", "expired"];
+        let names: Vec<String> = cases.iter().map(|c| format!("{c}.pdf")).collect();
+        files(w, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut seqs = HashMap::new();
+        for case in cases {
+            said(&mut raw, case, "prompt", w);
+            let launch = raw.append(&launch_of(case, case, true, w)).unwrap();
+            let reply = said(&mut raw, case, "reply", w);
+            let file = w.join(format!("{case}.pdf"));
+            let call = raw.append(&sub_call(case, case, &file, w)).unwrap();
+            let stop = raw.append(&stop_of(case, case, w)).unwrap();
+            seqs.insert(case, (launch, reply, call, stop));
+        }
+        step(home.path(), &raw);
+        assert_eq!(copies(home.path()).len(), 4);
+        let (launch, reply, call, stop) = seqs["expired"];
+        raw.expire_for_test(&[launch, reply, call, stop]);
+        sweep(home.path(), &raw, true).unwrap();
+        assert_eq!(copies(home.path()).len(), 4);
+        let raw = forget_record(home.path(), raw, seqs["call"].2, true);
+        let raw = forget_record(home.path(), raw, seqs["reply"].1, true);
+        let raw = forget_record(home.path(), raw, seqs["stop"].3, true);
+        sweep(home.path(), &raw, true).unwrap();
+        let left = copies(home.path());
+        let titles: Vec<&str> = left.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(titles, ["stop.pdf", "expired.pdf"]);
+        for (_, copy, _) in &left {
+            assert!(home.path().join(FOLDER).join(copy).is_file());
+        }
     }
 }

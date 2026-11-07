@@ -10907,8 +10907,9 @@ curate = false
         let work = tempfile::tempdir().unwrap();
         std::fs::write(work.path().join("page.html"), bytes).unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
+        let k = crate::knowledge::open(home.path()).unwrap();
         // The phase's first run starts after what is there.
-        assert!(!crate::deliverables::run(home.path(), &raw, &mut None, &|| false).unwrap());
+        assert!(!crate::deliverables::run(home.path(), &raw, &k, &mut None, &|| false).unwrap());
         let event = |kind: &str, body: Value| crate::raw::Event {
             agent: "claude".into(),
             session: "s1".into(),
@@ -10934,7 +10935,7 @@ curate = false
         raw.append(&call).unwrap();
         raw.append(&event("reply", json!({"assistant": "Done."})))
             .unwrap();
-        assert!(crate::deliverables::run(home.path(), &raw, &mut None, &|| false).unwrap());
+        assert!(crate::deliverables::run(home.path(), &raw, &k, &mut None, &|| false).unwrap());
         drop(raw);
         let db = crate::deliverables::open_read(home.path())
             .unwrap()

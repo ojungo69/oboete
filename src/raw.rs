@@ -5656,6 +5656,40 @@ impl Raw {
         )?)
     }
 
+    /// docs/subagents.md, slice 3: the reply a call at `seq` of `agent`'s `session` follows in a
+    /// gap, its seq and time: the session's newest hook reply before it, with no prompt or harness
+    /// message of the session between them, nor a purged record of this device that was one (its
+    /// session gone, it may have been). None when the call lies in a turn, or before any reply.
+    pub(crate) fn gap_reply(
+        &self,
+        agent: &str,
+        session: &str,
+        seq: i64,
+    ) -> Result<Option<(i64, i64)>> {
+        use rusqlite::OptionalExtension;
+        let reply: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT seq, ts FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
+                   AND session = ?3 AND kind = 'reply' AND seq < ?4 AND source = 'hook'
+                 ORDER BY seq DESC LIMIT 1",
+                params![self.device, agent, session, seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((reply, ts)) = reply else {
+            return Ok(None);
+        };
+        let prompted: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+               AND source = 'hook' AND kind IN ('prompt', 'envelope')
+               AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))",
+            params![self.device, reply, seq, agent, session],
+            |r| r.get(0),
+        )?;
+        Ok((!prompted).then_some((reply, ts)))
+    }
+
     /// The seqs of `agent`'s `session` hook events on this device strictly between two seqs
     /// (docs/deliverables.md: a turn's records; a replay's paths are not this machine's), to be
     /// read one at a time (`event_at`), so a long turn is never held whole.
