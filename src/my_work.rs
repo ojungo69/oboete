@@ -921,7 +921,12 @@ fn read_held(
     for (key, _) in requests.iter().flat_map(|r| &r.owns) {
         *holders.entry(key).or_default() += 1;
     }
+    // Slice 2 of docs/subagents.md: every request's conversations, for their subagents, whatever
+    // the range, as Mark finished looks a subagent up (the page reads all and filters itself;
+    // Codex and cubic on #850).
+    let mut listed: BTreeSet<Key> = BTreeSet::new();
     for r in &requests {
+        listed.extend(r.owns.iter().map(|(key, _)| key.clone()));
         let stores = (&raw, &k, &rules, &hidden);
         let found = answer(
             r,
@@ -1002,9 +1007,79 @@ fn read_held(
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
+    // The page's read alone (`listed`): `reviewing`, which the owner's actions read under the
+    // reviews' lock, takes no readers' hold, which a purge holds while it waits for that lock
+    // (Codex on slice 2).
+    let subagents = match cards {
+        Some(_) => subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?,
+        None => Vec::new(),
+    };
     let answer = json!({"requests": answers, "unlinked": unlinked, "story": story,
-        "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words()});
+        "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words(),
+        "subagents": subagents});
     Ok((answer, held))
+}
+
+/// Slice 2 of docs/subagents.md: the subagents of the `listed` conversations as the answer gives
+/// them, each conversation by the id its request's `sessions` give it. Read in the readers' hold,
+/// taken here: a forget registers before this read or after it.
+fn subagents_of(
+    home: &Path,
+    (raw, k, rules): (&Raw, &Connection, &Rules),
+    listed: &BTreeSet<Key>,
+    now: i64,
+    key: &mut Option<Vec<u8>>,
+) -> Result<Vec<Value>> {
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let found =
+        crate::my_work_subagents::read(raw, k, &listed.iter().cloned().collect::<Vec<_>>(), rules)?;
+    let mut conversations: HashMap<Key, (String, Option<String>)> = HashMap::new();
+    for s in &found {
+        if !conversations.contains_key(&s.conversation) {
+            let id = shown_id(&Id::Conversation(s.conversation.clone()), rules, home, key)?;
+            conversations.insert(s.conversation.clone(), id);
+        }
+    }
+    crate::my_work_subagents::answer(
+        &found,
+        &conversations,
+        &mut |s| {
+            Ok(format!(
+                "s:{}",
+                keyed_print(&crate::my_work_subagents::held(s), home, key)?
+            ))
+        },
+        rules,
+        now,
+    )
+}
+
+/// Slice 2: the listed subagent the page names `id`, read afresh from `raw` and `k`, with the folder
+/// its conversation's newest record was recorded in (none when that label is gone or masked). The
+/// caller holds the readers' hold, taken after it opened them.
+pub(crate) fn subagent(
+    home: &Path,
+    (raw, k): (&Raw, &Connection),
+    id: &str,
+) -> Result<Option<(crate::my_work_subagents::Subagent, Option<String>)>> {
+    let rules = Rules::load(home)?;
+    let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+    let Built { requests, .. } = build(raw, k, &rules, &reading)?;
+    let listed: Vec<Key> = (requests.iter().flat_map(|r| &r.owns))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut key = None;
+    for s in crate::my_work_subagents::read(raw, k, &listed, &rules)? {
+        let shown = format!(
+            "s:{}",
+            keyed_print(&crate::my_work_subagents::held(&s), home, &mut key)?
+        );
+        if shown == id {
+            let folder = crate::my_work_subagents::recorded_folder(raw, &s)?;
+            return Ok(Some((s, folder)));
+        }
+    }
+    Ok(None)
 }
 
 /// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any
@@ -1815,15 +1890,72 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
 pub(crate) struct ReviewsLock(#[allow(dead_code)] std::fs::File);
 
 pub(crate) fn reviews_lock(home: &Path) -> Result<ReviewsLock> {
+    let lock = state_file(home, "my-work-reviews.lock")?;
+    lock.lock()?;
+    Ok(ReviewsLock(lock))
+}
+
+/// Slice 2 of docs/subagents.md: Mark finished's own hold, taken before anything else, so two at
+/// once append one stop. No other path takes it: it waits on nothing a forget's purge holds, as
+/// the reviews' lock would (Codex on slice 2). Waited for `wait` at most, none past it, and by
+/// `FINISHED_WAITERS` at most at once, so requests do not keep the viewer's connections waiting
+/// (CodeRabbit on #850).
+pub(crate) fn finished_lock(
+    home: &Path,
+    wait: std::time::Duration,
+) -> Result<Option<std::fs::File>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WAITING: AtomicUsize = AtomicUsize::new(0);
+    struct Waiting;
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            WAITING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if WAITING.fetch_add(1, Ordering::SeqCst) >= FINISHED_WAITERS {
+        WAITING.fetch_sub(1, Ordering::SeqCst);
+        return Ok(None);
+    }
+    let _waiting = Waiting;
+    let lock = state_file(home, "my-work-finished.lock")?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(Some(lock)),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                #[cfg(test)]
+                if let Some(blocked) = FINISHED_BLOCKED.with(|hook| hook.borrow_mut().take()) {
+                    blocked();
+                }
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(std::time::Duration::from_millis(20).min(left));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+}
+
+/// How many Mark finished requests may hold or wait for its lock at once, well under the viewer's
+/// 32 connections; one more is answered at once (CodeRabbit on #850).
+const FINISHED_WAITERS: usize = 4;
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot for this thread's next wait for Mark finished's lock: a test's sign that it waits.
+    pub(crate) static FINISHED_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `state/<name>`, opened to be locked.
+fn state_file(home: &Path, name: &str) -> Result<std::fs::File> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let lock = options.open(state.join("my-work-reviews.lock"))?;
-    lock.lock()?;
-    Ok(ReviewsLock(lock))
+    Ok(options.open(state.join(name))?)
 }
 
 /// The checks as `change` leaves them, written whole when it says they changed, under the hold.
@@ -3193,6 +3325,92 @@ mod tests {
         let v = h.read(Range::All, h.t);
         assert_eq!(v["unlinked"], 0);
         assert_eq!(tasks(by_id(&v, "c:claude:s1")), Vec::<&str>::new());
+    }
+
+    /// Slice 2 of docs/subagents.md: the answer lists the subagents of the conversations its
+    /// requests list, each with its conversation's id as the request's `sessions` give it and an
+    /// id of its own, its type, state and its launch's task; a subagent of a conversation no
+    /// request lists is not shown, and a forget of the conversation leaves none.
+    #[test]
+    fn a_listed_conversations_subagents_are_in_its_answer() {
+        let mut h = Home::new();
+        let asked = h.said("s1", -60_000, "Fix the parser.");
+        let input = json!({"description": "Find the parser"}).to_string();
+        let launched = json!({"tool": "Agent", "input": input, "launched": {"agent_id": "agent-x1",
+            "status": "async_launched", "async": true}});
+        h.s.event("tool", "s1", (R, "main"), h.t - 55_000, launched);
+        let step = json!({"tool": "Read", "agent_id": "agent-x1", "agent_type": "Explore"});
+        h.s.event("tool", "s1", (R, "main"), h.t - 50_000, step);
+        let other = json!({"tool": "Read", "agent_id": "agent-x2"});
+        h.s.event("tool", "s9", (R, "main"), h.t - 50_000, other);
+        let tag = |_: &crate::deliverables::Row| Ok(String::new());
+        let page = |h: &Home| {
+            h.run_read();
+            listed(h.s.home.path(), Range::All, h.t, &tag).unwrap()
+        };
+        assert_eq!(h.read(Range::All, h.t)["subagents"], json!([]));
+        let v = page(&h);
+        let subagents = v["subagents"].as_array().unwrap();
+        assert_eq!(subagents.len(), 1, "{v}");
+        let s = &subagents[0];
+        assert_eq!(
+            s["conversation"]["id"],
+            by_id(&v, "c:claude:s1")["sessions"][0]["id"]
+        );
+        assert_eq!(s["conversation"]["id"], "c:claude:s1");
+        let id = s["id"].as_str().unwrap();
+        assert!(id.starts_with("s:") && !id.contains("agent-x1"), "{s}");
+        // Read for a day, a conversation older than that lists its subagents still, as Mark
+        // finished looks them up (Codex and cubic on #850): the page reads all and filters.
+        h.said("s2", -3 * 86_400_000, "Rename the module.");
+        let old = json!({"tool": "Read", "agent_id": "agent-x3"});
+        h.s.event("tool", "s2", (R, "main"), h.t - 3 * 86_400_000 + 1_000, old);
+        h.run_read();
+        let day = listed(h.s.home.path(), Range::Day, h.t, &tag).unwrap();
+        assert!(ids(&day).iter().all(|id| id != "c:claude:s2"), "{day}");
+        assert_eq!(day["subagents"].as_array().unwrap().len(), 2, "{day}");
+        assert_eq!(
+            (&s["type"], &s["state"], &s["task"], &s["can_mark"]),
+            (
+                &json!("Explore"),
+                &json!("working"),
+                &json!("Find the parser"),
+                &json!(true)
+            )
+        );
+        let home = h.s.home.path();
+        let device = h.s.raw.device().to_owned();
+        let target = crate::forget::session_target(home, &format!("{device}:{asked}")).unwrap();
+        crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+        let v = page(&h);
+        let left = (v["subagents"].as_array().unwrap().iter())
+            .filter(|s| s["conversation"]["id"] == "c:claude:s1")
+            .count();
+        assert_eq!(left, 0, "{v}");
+    }
+
+    /// Slice 2 (Codex on slice 2): the owner's actions read My Work under the reviews' lock, which
+    /// a purge waits for while it holds the readers' hold; their read takes no readers' hold.
+    #[test]
+    fn the_actions_read_takes_no_readers_hold() {
+        let mut h = Home::new();
+        h.said("s1", -60_000, "Fix the parser.");
+        h.run_read();
+        let home = h.s.home.path();
+        let purging = crate::dispatch::exclusive(home).unwrap();
+        std::thread::scope(|scope| {
+            let reading = scope.spawn(|| reviewing(home, h.t).map(|(v, _)| v));
+            for _ in 0..50 {
+                if reading.is_finished() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let done = reading.is_finished();
+            drop(purging);
+            reading.join().unwrap().unwrap();
+            assert!(done, "the actions' read waits for no readers' hold");
+        });
     }
 
     /// The design's 1: two `request_id`s in a session make two requests with its original ask,

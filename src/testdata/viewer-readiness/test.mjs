@@ -4779,6 +4779,64 @@ answer={requests:[req('e1')],unlinked:0};
 ctx.fetch=()=>Promise.resolve(response(answer));
 document.activeElement=null;await run('myWorkLive()');
 assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includes('New update'),'an empty first answer is a baseline too');
+// docs/subagents.md slice 2: after each conversation's card in the agents view, a card per
+// subagent: the agent and its type ("Subagent" with none), "Subagent · " and its conversation's
+// title, its state, its task, and Mark finished while it is not Finished; a poll that changes only
+// a subagent redraws it; Mark finished posts the subagent's id, is disabled while it is saved,
+// reads My Work again and says so, and a refusal is said. Both languages.
+{
+  const sub=(id,conversation,over={})=>({conversation:{id:conversation,fingerprint:null},id,type:null,state:'working',
+    finished_at:null,last_step:now-60000,task:null,can_mark:true,...over});
+  const asked=[req('m1',{title:'Fix the parser',sessions:[{agent:'claude',id:'c:claude:s1'}],updated:now-60000}),
+    req('m2',{title:'Tidy the notes',sessions:[{agent:'claude',id:'c:claude:s2'}],updated:now-120000})];
+  const finished=sub('s:3','c:claude:s2',{type:'Plan',state:'finished',finished_at:now-30000,can_mark:false});
+  const listing=subagents=>({requests:asked,unlinked:0,subagents});
+  ctx.__subagents=listing([sub('s:1','c:claude:s1',{type:'Explore',task:'Find the parser'}),sub('s:2','c:claude:s1',{state:'quiet'}),finished]);
+  run('Object.assign(mw,{rows:null,filter:"all",query:"",project:"",range:"day",sort:"attention",agent:null,request:null,work:null,back:null,pending:null,layout:"agents"});mw.changed.clear();mw.unread.clear()');
+  run('myWorkAccept(globalThis.__subagents);myWorkDraw()');
+  const shownCards=()=>panel.querySelectorAll('article').filter(n=>n.className.includes('my-work-agent'));
+  assert.deepEqual(shownCards().map(n=>n.dataset.subagent??n.dataset.session),['c:claude:s1','s:1','s:2','c:claude:s2','s:3'],
+    'each subagent after its conversation');
+  const of=id=>shownCards().find(n=>n.dataset.subagent===id);
+  const named=id=>flat(of(id).querySelectorAll('h3')[0]);
+  assert(named('s:1')==='Claude Code · Explore'&&flat(of('s:1')).includes('Subagent · Fix the parser'),flat(of('s:1')));
+  assert(flat(of('s:1')).includes('Working')&&flat(of('s:1')).includes('Find the parser'),'its state and task');
+  assert(named('s:2')==='Claude Code · Subagent'&&flat(of('s:2')).includes('No recent step'),'"Subagent" with no type');
+  assert(flat(of('s:3')).includes(`Finished · ${new Date(now-30000).toLocaleString('en')}`)&&flat(of('s:3')).includes('Subagent · Tidy the notes'),
+    flat(of('s:3')));
+  const finish=id=>of(id).querySelectorAll('button').find(n=>n.className.includes('my-work-finish'));
+  assert(finish('s:1')&&finish('s:2')&&!finish('s:3'),'Mark finished while it is not Finished');
+  const heading=of('s:1').querySelectorAll('h3')[0];
+  assert.equal(finish('s:1').attrs['aria-describedby'],heading.id,'each button is told apart by its card\'s heading');
+  // A poll that changes only a subagent redraws it.
+  ctx.fetch=()=>Promise.resolve(response(listing([sub('s:1','c:claude:s1',{type:'Explore',task:'Find the parser',state:'quiet'}),
+    sub('s:2','c:claude:s1',{state:'quiet'}),finished])));
+  document.activeElement=null;await run('myWorkLive()');
+  assert(flat(of('s:1')).includes('No recent step'),'a poll that changes only a subagent redraws it');
+  let sent=[],refusal=null;
+  ctx.fetch=(url,options)=>{
+    if(options?.method==='POST'){sent.push([url,JSON.parse(options.body)]);return Promise.resolve(refusal?posted(409,{code:refusal,field:''}):posted(200,{}));}
+    return Promise.resolve(response(listing([sub('s:1','c:claude:s1',{type:'Explore',state:'finished',finished_at:now,can_mark:false}),
+      sub('s:2','c:claude:s1',{state:'quiet'}),finished])));
+  };
+  finish('s:1').click();
+  assert(finish('s:1').disabled&&finish('s:2').disabled,'disabled while it is saved');
+  await ticks();
+  assert.deepEqual(sent,[['/api/my-work/finished',{id:'s:1'}]],'Mark finished posts the subagent\'s id');
+  assert(flat(of('s:1')).includes('Finished ·')&&!finish('s:1'),'the card reads Finished');
+  assert.equal(document.getElementById('status').textContent,'Marked finished.');
+  refusal='not_recorded';
+  finish('s:2').click();await ticks();
+  assert.equal(document.getElementById('status').textContent,'Not marked finished: its conversation’s folder is gone, or records nothing now.');
+  refusal='finished';
+  finish('s:2').click();await ticks();
+  assert.equal(document.getElementById('status').textContent,'This subagent had already finished, or is no longer listed.');
+  ctx.ui.setLang('ja');
+  run('myWorkDraw()');
+  assert(flat(of('s:2')).includes('サブエージェント · Fix the parser')&&text(finish('s:2'))==='完了にする',flat(of('s:2')));
+  ctx.ui.setLang('en');
+  run('mw.layout="cards"');
+}
 // J4: the request of a conversation the judge suggested shows "Looks like part of <title>" with
 // Join and Not this on its card, its row and its page; each posts its answer, reads My Work again
 // and says so; a Join from the request's page shows the request it joined; a refusal is said.

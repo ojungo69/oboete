@@ -4731,6 +4731,59 @@ impl Raw {
         )?)
     }
 
+    /// Slice 2 (docs/subagents.md): the seqs of `device`'s `subagent_stop` records after `seq`,
+    /// picked by their rows, so only their bodies are read after.
+    pub(crate) fn stops_after(&self, device: &str, seq: i64) -> Result<Vec<i64>> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND type = 'event'
+                   AND kind = 'subagent_stop' ORDER BY seq",
+            )?
+            .query_map(params![device, seq], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Slice 2: which of `device`'s `seqs` are events whose text retention removed.
+    pub(crate) fn expired_among(&self, device: &str, seqs: &[i64]) -> Result<Vec<i64>> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT seq FROM records WHERE device = ?1 AND type = 'event'
+                   AND expired IS NOT NULL AND seq IN (SELECT value FROM json_each(?2))",
+            )?
+            .query_map(params![device, serde_json::to_string(seqs)?], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Slice 2: the fields of each imported work state write (an op of an import's source) to
+    /// `list` whose `content_session_id` is one of `sessions`, as `oboete import claude-mem`
+    /// brought them in: the rows of the conversations asked about alone (cubic on #850).
+    pub(crate) fn imported_list_fields(
+        &self,
+        list: &str,
+        sessions: &[&str],
+    ) -> Result<Vec<serde_json::Value>> {
+        let bodies: Vec<String> = self
+            .conn
+            .prepare_cached(
+                "SELECT body FROM ops WHERE type = 'work_state'
+                   AND json_extract(body, '$.source') IS NOT NULL
+                   AND json_extract(body, '$.list') = ?1
+                   AND json_extract(body, '$.fields.content_session_id')
+                     IN (SELECT value FROM json_each(?2))",
+            )?
+            .query_map(params![list, serde_json::to_string(sessions)?], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((bodies.iter())
+            .filter_map(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .map(|v| v["fields"].clone())
+            .filter(serde_json::Value::is_object)
+            .collect())
+    }
+
     /// The targets of `device`'s tombstones after `seq`: what a reader must hide itself until
     /// its consumer has reached them.
     pub fn tombstones_after(&self, device: &str, seq: i64) -> Result<Vec<(String, i64)>> {

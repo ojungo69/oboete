@@ -11,4 +11,5 @@ pub mod manifest;
 pub mod my_work;
 pub mod products;
 pub mod rescan;
+pub mod subagents;
 pub mod turns;

@@ -1224,6 +1224,9 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
 pub struct Recorded {
     pub events: Vec<(i64, crate::raw::Event)>,
     pub prompt: Option<String>,
+    /// The call's events were kept to be written back behind older kept files (docs/unwritten.md
+    /// U3), not appended now.
+    pub kept: bool,
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
@@ -1241,6 +1244,33 @@ pub fn record(
     settings: &crate::capture::Settings,
     failed: &mut i64,
     written_back: &mut usize,
+) -> Result<Recorded> {
+    let all = |_: &crate::raw::Event| true;
+    record_if(
+        home,
+        raw,
+        agent,
+        event,
+        payload,
+        (ts, settings),
+        (failed, written_back),
+        &all,
+    )
+}
+
+/// `record`, appending and keeping nothing of the call unless every event it builds `keeps`: the
+/// viewer's Mark finished (slice 2 of docs/subagents.md) keeps the session and the subagent it
+/// names, which the gate's rules of now may change (Codex on slice 2).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_if(
+    home: &Path,
+    raw: &mut crate::raw::Raw,
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    (ts, settings): (i64, &crate::capture::Settings),
+    (failed, written_back): (&mut i64, &mut usize),
+    keeps: &dyn Fn(&crate::raw::Event) -> bool,
 ) -> Result<Recorded> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
     // ponytail: one recovery lock per home; use per-session locks if end hooks contend.
@@ -1261,6 +1291,11 @@ pub fn record(
     let back;
     (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
     let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
+    let built = if built.iter().all(|b| keeps(&b.captured.event)) {
+        built
+    } else {
+        Vec::new()
+    };
     match back {
         Ok(()) => {}
         // A damaged raw.db goes on to `run_io`, which asks the worker to restore it; this call's
@@ -1285,6 +1320,7 @@ pub fn record(
         return Ok(Recorded {
             events: Vec::new(),
             prompt,
+            kept: true,
         });
     }
     let mut appended = Vec::new();
@@ -1304,6 +1340,7 @@ pub fn record(
     Ok(Recorded {
         events: appended,
         prompt,
+        kept: false,
     })
 }
 
@@ -3641,7 +3678,7 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
 #[cfg(test)]
 thread_local! {
     /// How many times this thread asked for a worker: a test's look at `start_worker`.
-    static WORKER_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    pub(crate) static WORKER_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// After every append (D6): start a worker when none holds the lock, unless `[worker] autostart =

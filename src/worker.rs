@@ -262,6 +262,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::fts::Fts),
         // Where the tool calls that may have made something are, for My Work (docs/my-work.md).
         Box::new(crate::consumer::products::Products),
+        // What the records say of each Claude Code subagent, for My Work (docs/subagents.md).
+        Box::new(crate::consumer::subagents::Subagents),
         // The op log's claims (milestone 3 D4), in op_seqs of every device that has ops.
         Box::new(crate::consumer::claims::Claims),
         // Claims whose quote a later tombstone masked or removed.
