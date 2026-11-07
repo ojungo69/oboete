@@ -1,0 +1,32 @@
+docs/m1.md
+  s_70102dd6ea5599::t_3edfd0529d6fdd 59-60
+docs/settings-ai-models.md
+  s_70102dd6ea5599::t_aa2ad6e6aa45d5 35
+docs/spec.md
+  s_70102dd6ea5599::t_ab21c8272e1ab9 108
+tests/resident_defaults.rs
+  s_70102dd6ea5599::t_f95c65d5570807 295-310,316-319,323
+src/config.rs
+  s_70102dd6ea5599::t_c7b689d34189d8 167-171,689-698,764-765,768,1485-1486,2901-2908,2911-2914,2930-2931,2934
+src/settings.rs
+  s_70102dd6ea5599::t_c6ea41a868e373 1122-1123,1125-1127,1131,1311,1313-1314,2067-2070,2080-2093
+  s_70102dd6ea5599::t_17eeb924f2da40 3033,3036
+src/my_work_judge.rs
+  s_70102dd6ea5599::t_505a9278813b0d 319-321
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5b3c3ef75785062a386101b2801b7f97bbb54d62",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
