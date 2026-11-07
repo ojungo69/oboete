@@ -95,6 +95,9 @@ fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS manifest_facts_seq
            ON manifest_facts(device, repo, branch, fact, seq);
          CREATE INDEX IF NOT EXISTS manifest_facts_ts ON manifest_facts(device, repo, fact, ts);
+         -- A turn's reply and the session's next prompt, whatever the branch (a seek).
+         CREATE INDEX IF NOT EXISTS manifest_facts_turn
+           ON manifest_facts(device, repo, session, fact, seq);
          -- A failure and the success of the same call (a seek, not a scan of later successes).
          CREATE INDEX IF NOT EXISTS manifest_facts_label
            ON manifest_facts(device, repo, branch, fact, label, seq);
@@ -1312,19 +1315,23 @@ fn build(
             continue;
         }
         p.last_prompt = Some(one_line(&gate(text), CLIP));
-        // Its turn's reply: the first of its session after it, before the session's next prompt,
-        // on whichever branch or checkout the session had moved to (Codex's review of #854).
+        // Its turn's reply: the first of its session in the repository after it, before the
+        // session's next prompt there, on whichever branch the session had moved to (Codex's
+        // review of #854). Not another repository's: a record there rebuilds and a forget there
+        // reaches the repository's own checkouts only. An agent's own: a session id is the agent's.
         let reply: Option<i64> = k.query_row(
             "SELECT MIN(seq) FROM manifest_facts
-             WHERE device = ?1 AND fact = 'reply' AND session = ?2 AND seq > ?3
+             WHERE device = ?1 AND repo = ?2 AND session = ?3 AND fact = 'reply' AND seq > ?4
                AND seq < COALESCE((SELECT MIN(seq) FROM manifest_facts
-                 WHERE device = ?1 AND fact = 'prompt' AND session = ?2 AND seq > ?3),
-                 9223372036854775807)",
-            params![device, session, seq],
+                 WHERE device = ?1 AND repo = ?2 AND session = ?3 AND fact = 'prompt'
+                   AND seq > ?4), 9223372036854775807)",
+            params![device, repo, session, seq],
             |r| r.get(0),
         )?;
-        if let Some(e) = reply.map(|s| event(raw, device, s)).transpose()?.flatten() {
-            p.last_reply = Some(one_line(&gate(str_at(&body(&e), "assistant")), CLIP));
+        if let Some(r) = reply.map(|s| event(raw, device, s)).transpose()?.flatten()
+            && r.agent == e.agent
+        {
+            p.last_reply = Some(one_line(&gate(str_at(&body(&r), "assistant")), CLIP));
         }
         break;
     }
@@ -3121,6 +3128,59 @@ extra_rules = [
         assert_eq!(
             exchange(&store),
             ["- prompt: Split the module.", "- reply: Split on a branch."]
+        );
+        // A session that moved to another repository, or another agent's session of the same id:
+        // no reply from there (Codex and cubic on #854).
+        let elsewhere = |e: Event| Event {
+            repo: Some("other".into()),
+            ..e
+        };
+        for e in [
+            prompt(
+                "s7",
+                20 * min,
+                serde_json::json!({"prompt": "Move the tests."}),
+            ),
+            elsewhere(reply("s7", 21 * min, "Moved in the other repository.")),
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert_eq!(exchange(&store), ["- prompt: Move the tests."]);
+        for e in [
+            prompt(
+                "s8",
+                22 * min,
+                serde_json::json!({"prompt": "Name the types."}),
+            ),
+            Event {
+                agent: "grok".into(),
+                ..reply("s8", 23 * min, "Another agent's answer.")
+            },
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert_eq!(exchange(&store), ["- prompt: Name the types."]);
+    }
+
+    /// The turn's reply is found by a seek, not a scan of the device's facts (cubic on #854).
+    #[test]
+    fn the_turns_reply_is_a_seek() {
+        let k = rusqlite::Connection::open_in_memory().unwrap();
+        schema(&k).unwrap();
+        let plan: Vec<String> = k
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT MIN(seq) FROM manifest_facts
+                 WHERE device = 'd' AND repo = 'r' AND session = 's' AND fact = 'reply'
+                   AND seq > 1",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|l| l.contains("manifest_facts_turn")),
+            "{plan:?}"
         );
     }
 
