@@ -1022,7 +1022,11 @@ fn candidates(
 ) -> Result<Option<Vec<Candidate>>> {
     let mut declared_list: Vec<Candidate> = Vec::new();
     let mut writes: Vec<(PathBuf, (i64, i64), PathBuf)> = Vec::new();
-    for event in events {
+    for (n, event) in events.into_iter().enumerate() {
+        // A long run of records is read with an eye on a step aside.
+        if n % 256 == 255 && aside() {
+            return Ok(None);
+        }
         let (seq, e) = event?;
         prompted |= matches!(e.kind.as_str(), "prompt" | "envelope");
         if e.kind != "tool" || !prompted {
@@ -1256,6 +1260,8 @@ pub(crate) fn run(
                     {
                         continue;
                     }
+                    #[cfg(test)]
+                    seam(Stage::Fenced);
                     Some(read)
                 }
                 None => None,
@@ -1837,6 +1843,8 @@ enum Stage {
     Partial,
     /// A stop's copy made, its row not yet written.
     Row,
+    /// A stop's row looked at again under the read fence, not yet written.
+    Fenced,
 }
 
 /// A test's act at each stage.
@@ -3941,9 +3949,17 @@ mod tests {
         }
         let stop = raw.append(&stop_of("s2", "b1", w)).unwrap();
         let k = drained(home.path(), &raw);
-        // The phase reads `BATCH` records a round: the stop is in the second.
-        for _ in 0..3 {
-            assert!(run(home.path(), &raw, &k, &mut None, &|| true).unwrap());
+        // The phase reads `BATCH` records a round: the stop is in the second. Asked at once, the
+        // labels' pass steps aside; asked from the reading of the calls on, that pass does.
+        for asked_from in [1, 2] {
+            let asked = std::cell::Cell::new(0);
+            let aside = || {
+                asked.set(asked.get() + 1);
+                asked.get() >= asked_from
+            };
+            for _ in 0..3 {
+                assert!(run(home.path(), &raw, &k, &mut None, &aside).unwrap());
+            }
         }
         let at = || {
             checkpoint(&open(home.path()).unwrap(), raw.device())
@@ -4035,36 +4051,113 @@ mod tests {
         assert_eq!(origins(home.path()), expected);
     }
 
-    /// Slice 3: a forget of the launch registered between a stop's copy and its row leaves no
-    /// row: the row is written under the read fence once the launch is looked at again.
+    /// Slice 3: a forget of the launch registered between a stop's two copies leaves the first its
+    /// row and the second none: each row is written under the read fence, held from the launch's
+    /// second look to the row (a forget's registration cannot take the fence then).
     #[test]
-    fn a_launch_forgotten_while_its_stops_file_is_copied_leaves_no_row() {
+    fn a_launch_forgotten_while_its_stops_files_are_copied_leaves_no_row_after() {
         let (home, mut raw) = ready();
         let work = tempfile::tempdir().unwrap();
         let w = work.path();
-        files(w, &["late.pdf"]);
+        files(w, &["first.pdf", "second.pdf"]);
         said(&mut raw, "s1", "prompt", w);
         let launch = raw.append(&launch_of("s1", "a1", true, w)).unwrap();
         said(&mut raw, "s1", "reply", w);
-        raw.append(&sub_call("s1", "a1", &w.join("late.pdf"), w))
-            .unwrap();
+        for f in ["first.pdf", "second.pdf"] {
+            raw.append(&sub_call("s1", "a1", &w.join(f), w)).unwrap();
+        }
         raw.append(&stop_of("s1", "a1", w)).unwrap();
         let k = drained(home.path(), &raw);
         let (dir, device) = (home.path().to_owned(), raw.device().to_owned());
-        let mut once = true;
-        let act = move |stage| {
-            if stage == Stage::Row && std::mem::take(&mut once) {
-                let target = crate::forget::Target::Record {
-                    device: device.clone(),
-                    seq: launch,
-                };
-                let preview = crate::forget::preview(&dir, target).unwrap();
-                crate::forget::start(&dir, &preview).unwrap();
+        let held = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = held.clone();
+        let mut rows = 0;
+        let act = move |stage| match stage {
+            Stage::Fenced => {
+                let taken =
+                    crate::dispatch::exclusive_within(&dir, std::time::Duration::from_millis(50));
+                if taken.is_err_and(|e| crate::dispatch::busy(&e)) {
+                    seen.set(seen.get() + 1);
+                }
             }
+            Stage::Row => {
+                rows += 1;
+                if rows == 2 {
+                    let target = crate::forget::Target::Record {
+                        device: device.clone(),
+                        seq: launch,
+                    };
+                    let preview = crate::forget::preview(&dir, target).unwrap();
+                    crate::forget::start(&dir, &preview).unwrap();
+                }
+            }
+            _ => {}
         };
         with_seam(act, || {
             run(home.path(), &raw, &k, &mut None, &|| false).unwrap();
         });
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["first.pdf"]);
+        assert_eq!(held.get(), 1, "the fence was held at the first row");
+    }
+
+    /// Slice 3: a purged reply ends its turn and its gap, its session gone: a turn after it copies
+    /// none of the forgotten turn's files again; a call after two replies whose newer one is
+    /// purged is no gap of the older one; a subagent launched after a reply since purged is
+    /// launched from no prompt's turn still. Beside them a gap copies.
+    #[test]
+    fn a_purged_reply_still_ends_its_turn_and_gap() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(
+            w,
+            &[
+                "first.pdf",
+                "second.pdf",
+                "older.pdf",
+                "nested.pdf",
+                "control.pdf",
+            ],
+        );
+        let write = |s: &str, f: &str| tool(s, "Write", json!({"file_path": w.join(f)}), w);
+        // A turn whose reply is forgotten, then the next turn.
+        said(&mut raw, "turns", "prompt", w);
+        raw.append(&write("turns", "first.pdf")).unwrap();
+        let first = said(&mut raw, "turns", "reply", w);
+        step(home.path(), &raw);
+        let mut raw = forget_record(home.path(), raw, first, true);
         assert!(copies(home.path()).is_empty());
+        said(&mut raw, "turns", "prompt", w);
+        raw.append(&write("turns", "second.pdf")).unwrap();
+        said(&mut raw, "turns", "reply", w);
+        // Two replies, the newer purged.
+        said(&mut raw, "older", "prompt", w);
+        raw.append(&launch_of("older", "o1", true, w)).unwrap();
+        said(&mut raw, "older", "reply", w);
+        let newer = said(&mut raw, "older", "reply", w);
+        let file = w.join("older.pdf");
+        raw.append(&sub_call("older", "o1", &file, w)).unwrap();
+        raw.append(&stop_of("older", "o1", w)).unwrap();
+        // Launched after a reply, which is purged since.
+        said(&mut raw, "nested", "prompt", w);
+        let reply = said(&mut raw, "nested", "reply", w);
+        raw.append(&launch_of("nested", "n1", true, w)).unwrap();
+        said(&mut raw, "nested", "prompt", w);
+        said(&mut raw, "nested", "reply", w);
+        let file = w.join("nested.pdf");
+        raw.append(&sub_call("nested", "n1", &file, w)).unwrap();
+        raw.append(&stop_of("nested", "n1", w)).unwrap();
+        said(&mut raw, "control", "prompt", w);
+        raw.append(&launch_of("control", "c1", true, w)).unwrap();
+        said(&mut raw, "control", "reply", w);
+        let file = w.join("control.pdf");
+        raw.append(&sub_call("control", "c1", &file, w)).unwrap();
+        raw.append(&stop_of("control", "c1", w)).unwrap();
+        let raw = forget_record(home.path(), raw, newer, true);
+        let raw = forget_record(home.path(), raw, reply, true);
+        while step(home.path(), &raw) {}
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["second.pdf", "control.pdf"]);
     }
 }

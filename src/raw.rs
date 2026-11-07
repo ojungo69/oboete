@@ -5641,16 +5641,18 @@ impl Raw {
 
     /// docs/deliverables.md: `turn_start` by live hook records alone, so a replay's reply in the
     /// same session is no boundary of a live turn. A subagent's stop begins no turn here either
-    /// (Sourcery on #847).
+    /// (Sourcery on #847). A purged hook reply of this device ends a turn too, its session gone:
+    /// it may have been this session's, and a forgotten turn's records are then no later turn's.
     pub(crate) fn hook_turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MIN(seq), ?4) FROM records
              WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
                AND seq <= ?4 AND source = 'hook' AND kind <> 'subagent_stop'
                AND seq > COALESCE(
-                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND type = 'event'
-                    AND agent = ?2 AND session = ?3 AND kind = 'reply' AND seq < ?4
-                    AND source = 'hook'), 0)",
+                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND kind = 'reply'
+                    AND seq < ?4 AND source = 'hook'
+                    AND (type = 'removed' OR (type = 'event' AND agent = ?2 AND session = ?3))),
+                 0)",
             params![self.device, agent, session, reply],
             |r| r.get(0),
         )?)
@@ -5658,8 +5660,9 @@ impl Raw {
 
     /// docs/subagents.md, slice 3: the reply a call at `seq` of `agent`'s `session` follows in a
     /// gap, its seq and time: the session's newest hook reply before it, with no prompt or harness
-    /// message of the session between them, nor a purged record of this device that was one (its
-    /// session gone, it may have been). None when the call lies in a turn, or before any reply.
+    /// message of the session between them, nor a purged record of this device that was one or was
+    /// a reply (its session gone, it may have been one of this session's, the gap then a forgotten
+    /// reply's). None when the call lies in a turn, or before any reply.
     pub(crate) fn gap_reply(
         &self,
         agent: &str,
@@ -5680,14 +5683,16 @@ impl Raw {
         let Some((reply, ts)) = reply else {
             return Ok(None);
         };
-        let prompted: bool = self.conn.query_row(
+        let ended: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
-               AND source = 'hook' AND kind IN ('prompt', 'envelope')
-               AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))",
+               AND source = 'hook' AND (
+                 (kind IN ('prompt', 'envelope')
+                   AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))
+                 OR (kind = 'reply' AND type = 'removed')))",
             params![self.device, reply, seq, agent, session],
             |r| r.get(0),
         )?;
-        Ok((!prompted).then_some((reply, ts)))
+        Ok((!ended).then_some((reply, ts)))
     }
 
     /// docs/subagents.md, slice 3: whether a hook reply, prompt or harness message of `agent`'s
