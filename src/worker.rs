@@ -1219,8 +1219,9 @@ fn serve(
         // docs/deliverables.md: copies of what each turn that ended made, the worker's own (a
         // command that borrows the loop copies nothing), not while a command waits for it.
         if yields && !hold {
-            match crate::deliverables::run(home, &raw, &mut deliverables_db, &|| asked_aside(home))
-            {
+            match crate::deliverables::run(home, &raw, &k, &mut deliverables_db, &|| {
+                asked_aside(home)
+            }) {
                 Ok(took) => again |= took,
                 Err(e) => eprintln!("oboete worker: deliverables: {e:#}"),
             }
