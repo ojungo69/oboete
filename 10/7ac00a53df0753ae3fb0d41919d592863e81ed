@@ -1,0 +1,20 @@
+docs/subagents.md
+  s_70102dd6ea5599::t_edb9a3896eef67 193-202,204-209,213-226
+  s_70102dd6ea5599::t_9f6319a7681a45 297-311,313-318,321-324
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "107ac00a53df0753ae3fb0d41919d592863e81ed",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
