@@ -804,7 +804,7 @@ to fit.
 
 | | claude-mem 15.2 | oboete | Why |
 |---|---|---|---|
-| Who writes | the first logged-in agent CLI (Sonnet, Haiku) | the curator chain, its order, cooldowns and cap | decision 57 |
+| Who writes | the first logged-in agent CLI (Sonnet, Haiku); since 15.11 the one its provider names first, since 15.12 only that one unless set otherwise | the curator chain, its order, cooldowns and cap | decision 57 |
 | When | every 10 minutes, whatever is due | one call a round; 30 minutes, 1 hour, 3 hours, 1 day per job | at most 100 calls a day (decision 57) |
 | Cost | no record, no cap, no backoff | estimate before it runs, a daily bound, the ledger, holds | shown first |
 | Default | on | off until the owner turns it on | money |
