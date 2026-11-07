@@ -185,10 +185,27 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 
 ### Slice 3: a subagent's files
 
-- A subagent's stop record makes the worker copy the files that subagent's records wrote (its
-  `agent_id` in the session), as a turn's copies are made, so a subagent that finishes after its
-  parent's reply has its files copied too. A file its records already had copied is not copied
+- **Which calls.** A turn end copies the files of the calls between the session's previous reply
+  and it, from the turn's first prompt or harness message on (`deliverables::candidates`), so a
+  foreground subagent's calls, inside its parent's turn, are its parent turn's. A background
+  subagent's calls after its parent's reply and before the session's next prompt or harness
+  message belong to no turn, and nothing copies their files. Slice 3 copies those at the
+  subagent's stop: the calls the subagent made (its `step` facts in knowledge.db, this device's)
+  with no prompt or harness message of its session between the session's newest reply before the
+  call and the call.
+- **When.** The deliverables phase takes a Claude Code hook `subagent_stop` record as it takes a
+  turn end, in seq order. As it reads the subagent's calls from `consumer::subagents`' facts, it
+  takes a stop only once that consumer's checkpoint for this device has reached it; else it
+  stops just before the stop, which a later round takes, the consumers draining before the phase.
+- **What.** The files those calls wrote or declared, as `candidates` finds a turn's: only calls
+  the hooks marked public (a wholly private prompt's subagent's are not, and name nothing), no
+  failed call, `MAX_FILES` at most. They are copied as a turn's, the row's turn the stop's record
+  (`turn_seq`, `turn_ts`). A copy the session already has a row of (the same content, copies being
+  named by it) is not recorded again: a file the parent's turn copied, unchanged, is not copied
   twice.
+- **Not as claude-mem.** claude-mem's SubagentStop hook copies from the last 2 MiB of the
+  subagent's transcript, the files the subagent wrote inside its parent's turn too; oboete's parent
+  turn copies those, and the stop the rest.
 
 ## Acceptance tests
 
@@ -253,8 +270,13 @@ Slice 2:
 
 Slice 3:
 
-- A file a subagent wrote and its parent's turn never copied is copied at the subagent's stop, once;
-  one already copied is not copied again; a private turn's subagent copies nothing.
+- A file a background subagent wrote after its parent's reply, with no prompt or harness message
+  between, is copied at the subagent's stop, once, its row the stop's; a foreground subagent's
+  file, written inside its parent's turn, is copied by the turn's end and not again at its stop; a
+  file the session already has a copy of, unchanged, is not recorded again; a private turn's
+  subagent copies nothing; a Codex record and a replay's stop copy nothing.
+- A stop the `subagents` consumer has not reached is taken after it has, nothing before it lost;
+  the phase's checkpoint goes past a stop only once it is taken.
 
 ## As built
 
