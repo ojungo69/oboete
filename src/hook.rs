@@ -1575,6 +1575,7 @@ pub fn start_text_read(
             inject
                 .session_start_chars
                 .saturating_sub(work_units + if memory_use { use_units } else { 0 }),
+            inject.session_start_index,
             now,
         )?,
         None => None,
@@ -4055,6 +4056,7 @@ mod tests {
             &session,
             &settings.rules,
             usize::MAX,
+            crate::consumer::manifest::INDEX,
             crate::db::now_ms(),
         )
         .unwrap()
@@ -5328,6 +5330,8 @@ mod tests {
 
     impl Prompts {
         fn new(per_prompt: bool) -> Self {
+            // Its claims are dated in 1970: decision 76 measures their age from 14 days after.
+            crate::consumer::manifest::FOLD_AT.set(Some(14 * 86_400_000));
             let s = crate::search::b::fixture::Store::new();
             let cwd = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
@@ -7433,6 +7437,7 @@ mod tests {
     #[test]
     fn session_start_keeps_the_claims_it_showed() {
         const DAY: i64 = 86_400_000;
+        crate::consumer::manifest::FOLD_AT.set(Some(14 * DAY));
         let mut s = crate::search::b::fixture::Store::new();
         let home = s.home.path().to_owned();
         let cwd = tempfile::tempdir().unwrap();
@@ -7464,6 +7469,7 @@ mod tests {
                 "a",
                 &settings.rules,
                 crate::config::inject(&home).unwrap().session_start_chars,
+                crate::config::inject(&home).unwrap().session_start_index,
                 crate::db::now_ms(),
             )
             .unwrap()

@@ -266,6 +266,7 @@ pub fn show(home: &Path) -> Value {
             "session_start_note": inject.session_start_note,
             "session_start_list": inject.session_start_list,
             "session_start_chars": inject.session_start_chars,
+            "session_start_index": inject.session_start_index,
             "per_prompt": inject.per_prompt,
             "per_prompt_chars": inject.per_prompt_chars,
             "per_prompt_wait_ms": inject.per_prompt_wait_ms,
@@ -307,6 +308,7 @@ pub fn show(home: &Path) -> Value {
             // No finite upper limit in config.toml; JSON cannot carry infinity.
             "paid_usd_per_month": [0, null],
             "session_start_chars": range(config::SESSION_START_CHARS),
+            "session_start_index": range(config::SESSION_START_INDEX),
             "per_prompt_chars": range(config::PER_PROMPT_CHARS),
             "per_prompt_wait_ms": range(config::PER_PROMPT_WAIT_MS),
             "correction_chars": range(config::CORRECTION_CHARS),
@@ -768,6 +770,8 @@ struct InjectIn {
     /// Older pages omit the terminal list choice and keep its saved value (decision 51).
     session_start_list: Option<bool>,
     session_start_chars: usize,
+    /// Older pages omit the index's lines and keep their saved value (decision 75).
+    session_start_index: Option<usize>,
     per_prompt: bool,
     per_prompt_chars: usize,
     /// Older pages omit it and keep its saved value (G23).
@@ -1167,6 +1171,11 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
             inject.session_start_chars,
         ),
         (
+            "session_start_index",
+            i.session_start_index.unwrap_or(inject.session_start_index),
+            inject.session_start_index,
+        ),
+        (
             "per_prompt_chars",
             i.per_prompt_chars,
             inject.per_prompt_chars,
@@ -1413,6 +1422,12 @@ fn checked(posted: &Save, base: &config::Config, now: &config::Config) -> Result
             "inject.session_start_chars",
             i.session_start_chars,
             config::SESSION_START_CHARS,
+        ),
+        (
+            "inject.session_start_index",
+            i.session_start_index
+                .unwrap_or(*config::SESSION_START_INDEX.start()),
+            config::SESSION_START_INDEX,
         ),
         (
             "inject.per_prompt_chars",
@@ -3671,6 +3686,10 @@ mod tests {
             (422, "range", "inject.session_start_chars".into())
         );
         assert_eq!(
+            refusal(&|v| v["inject"]["session_start_index"] = json!(51)),
+            (422, "range", "inject.session_start_index".into())
+        );
+        assert_eq!(
             refusal(&named("groq", "daily_budget", json!(0))),
             (422, "range", "chain.groq.daily_budget".into())
         );
@@ -3765,10 +3784,12 @@ mod tests {
         let shown = show(home.path());
         assert_eq!(
             shown["inject"],
-            json!({"session_start": true, "session_start_note": true, "session_start_list": true, "session_start_chars": 9000, "per_prompt": false,
+            json!({"session_start": true, "session_start_note": true, "session_start_list": true, "session_start_chars": 9000,
+                "session_start_index": 10, "per_prompt": false,
                 "per_prompt_chars": 2500, "per_prompt_wait_ms": 2000, "memory_lookup": true,
                 "memory_instructions": true, "correction": true, "correction_chars": 800})
         );
+        assert_eq!(shown["ranges"]["session_start_index"], json!([0, 50]));
         assert_eq!(shown["ranges"]["per_prompt_chars"], json!([500, 6000]));
         assert_eq!(shown["ranges"]["per_prompt_wait_ms"], json!([100, 3000]));
         assert_eq!(shown["ranges"]["correction_chars"], json!([300, 3000]));
@@ -3803,6 +3824,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config::inject(home.path()).unwrap().per_prompt_wait_ms, 800);
+        // Decision 75: the index's lines save alone; a page from before it keeps them.
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| v["inject"]["session_start_index"] = json!(4)),
+        )
+        .unwrap();
+        assert!(file(&home).unwrap().contains("session_start_index = 4\n"));
+        let shown = show(home.path());
+        save_to(
+            &home,
+            &posted(&shown, |v| {
+                v["inject"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("session_start_index");
+                v["inject"]["per_prompt"] = json!(true);
+            }),
+        )
+        .unwrap();
+        assert_eq!(config::inject(home.path()).unwrap().session_start_index, 4);
         // The memory lookup's switch saves alone; a page that omits it keeps it.
         let shown = show(home.path());
         save_to(

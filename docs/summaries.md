@@ -103,7 +103,7 @@ S8. **The newest one's fields** after the timeline, `**Investigated**: …`, `**
 shown (claude-mem's rule; Notes since #403, as claude-mem 13.34.2 shows them: a qualification the
 summary role put in notes, such as "the agent says it was not verified", reaches the session). The legend gains `🎯session`.
 
-S9. **Fitting.** claude-mem's order: the fields go first, then the rows are halved, then the cards.
+S9. **Fitting.** claude-mem's order: the fields go first, then the rows are halved, then the cards; since decision 75 the cards then take back as many as fit (docs/cards.md S5).
 
 S10. **`get S<op seq>`** shows one summary whole, as `get <op seq>.<n>` shows a card.
 
@@ -120,7 +120,8 @@ and its ops stay in the log, unread; the spec's sections that named it (1.1, 1.4
    newest card shown, and not otherwise.
 3. Session start shows the repository's summaries and the newest one's fields in the block.
 4. When the block does not fit: the fields go first, then the summary rows halve, the newest
-   kept, then the cards.
+   kept, then the cards; since decision 75 the cards then take back the newest that fit below the
+   count that did not, the most that fit whatever their sizes.
 5. `get S<op seq>` shows a summary in full; an ID of no summary gives none.
 6. The digest is gone from session start, the worker and `oboete rebuild`.
 

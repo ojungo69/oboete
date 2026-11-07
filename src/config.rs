@@ -1199,6 +1199,9 @@ pub struct Inject {
     /// The packet's size in characters (`SESSION_START_CHARS`); the manifest in it is stored rendered
     /// at 6,000, so the cards have room (docs/cards.md S5).
     pub session_start_chars: usize,
+    /// The claims its one-line index lists, after the ones with bodies (`SESSION_START_INDEX`,
+    /// decision 75): what it leaves goes to the cards.
+    pub session_start_index: usize,
     /// Delivered claims picked for each prompt (D9): off until the Inject harness has measured it.
     pub per_prompt: bool,
     /// Their block's size in characters (`PER_PROMPT_CHARS`).
@@ -1221,6 +1224,7 @@ pub struct Inject {
 /// `[inject]`'s sizes, which the settings page shows and checks too.
 pub const SESSION_START_CHARS: std::ops::RangeInclusive<usize> =
     1_000..=crate::consumer::manifest::CAP;
+pub const SESSION_START_INDEX: std::ops::RangeInclusive<usize> = 0..=50;
 pub const PER_PROMPT_CHARS: std::ops::RangeInclusive<usize> = 500..=6_000;
 /// Within the 5 seconds `oboete setup` gives each agent's prompt hook, with room for the rest of
 /// the hook (its record, its read fence, the block).
@@ -1234,6 +1238,7 @@ impl Default for Inject {
             session_start_note: true,
             session_start_list: true,
             session_start_chars: crate::consumer::manifest::CAP,
+            session_start_index: crate::consumer::manifest::INDEX,
             per_prompt: false,
             // Five lines of `consumer::manifest::CLIP` characters with their labels and heading:
             // each card shows its whole narrative (parity row 31).
@@ -1287,6 +1292,11 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
             "session_start_chars",
             i.session_start_chars,
             SESSION_START_CHARS,
+        ),
+        (
+            "session_start_index",
+            i.session_start_index,
+            SESSION_START_INDEX,
         ),
         ("per_prompt_chars", i.per_prompt_chars, PER_PROMPT_CHARS),
         (
@@ -2371,11 +2381,17 @@ model = { gone = "m" }
                 .session_start_chars,
             6_000
         );
+        // Decision 75: none to 50 index lines.
+        for lines in [0, 50] {
+            let text = format!("[inject]\nsession_start_index = {lines}\n");
+            assert_eq!(at(&text).unwrap().session_start_index, lines);
+        }
         // Out of range, the wrong type, an unknown key, a file that is not TOML: an error, never
         // the defaults, which would inject for a user who turned it off.
         for bad in [
             "[inject]\nsession_start = false\nsession_start_chars = 999\n",
             "[inject]\nsession_start = false\nsession_start_chars = 9001\n",
+            "[inject]\nsession_start = false\nsession_start_index = 51\n",
             "[inject]\nsession_start = \"false\"\n",
             "[inject]\nsesion_start = false\n",
             "[inject]\nsession_start = false\n[inject\n",
