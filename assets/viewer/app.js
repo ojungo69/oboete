@@ -5803,6 +5803,7 @@ function mergeProviderSettings(answer, mine, action) {
   next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
+  next.simplePlace = action.op === 'create' ? null : mine.simplePlace;
   preserveProviderDrafts(next, mine, action);
   preserveCreatedSubscriptionDraft(next, mine, action);
   return next;
@@ -5955,8 +5956,13 @@ function providerTarget(taken, target, mine, action) {
 // Whether an AI line shows its key field after a provider's write: no longer after a key saved; after
 // a creation, for the created entry only when it is the first of its name, as the line's field is the
 // first entry's (CodeRabbit on #820). Each creation sets it anew.
-function providerKeyLine(action, path) {
-  if (path === '/key') { simpleKeyName = null; keyChanging.clear(); }
+function providerKeyLine(action, path, mine) {
+  if (path === '/key') {
+    simpleKeyName = null;
+    // Its own line's "Change the key" closes; another line's stays, with what is typed there.
+    const saved = mine.providers.find((p) => selectorKey(p.selector) === selectorKey(action.selector));
+    if (saved) keyChanging.delete(saved.name);
+  }
   if (action.op !== 'create') return;
   const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
   simpleKeyName = first ? action.entry.name : null;
@@ -5979,7 +5985,7 @@ async function providerWrite(action, button, body, path, target = null) {
     providerTarget(taken, target, mine, action);
     const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
     simpleReceipt = kept ? 'ai' : null;
-    providerKeyLine(action, path);
+    providerKeyLine(action, path, mine);
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();
@@ -6624,7 +6630,7 @@ async function saveSettings(button, simple = null, autosaved = false) {
     if (view !== 'settings' || form !== mine) return;
     if (res.ok || current) {
       applySavedSettings(answer, mine, current, simple, autosaved ? bodyKey(body) : null);
-      return;
+      return res.ok;
     }
     const byStatus = { 400: 'bad_request', 401: 'unauthorized', 403: 'forbidden', 413: 'too_large' };
     const code = answer.code || byStatus[res.status] || 'other';
@@ -7668,7 +7674,9 @@ function simpleCatalog(f) {
     key.dataset.field = 'catalog.key';
     key.dataset.simpleFocus = 'catalog.key';
     key.setAttribute('aria-label', t('key_label', { name: label }));
-    keepSecret(key, JSON.stringify(['add', entry.name, entry.base_url]), () => {});
+    // Named by where "Add" sends it as the draft is now: an address or API changed in More
+    // settings gets nothing back (#807).
+    keepSecret(key, JSON.stringify(['add', draft.name, draft.kind, draft.api, draft.base_url]), () => {});
   }
   // 2. Its model, with its prices where the page knows them.
   const prices = MODEL_PRICES[urlHost(entry.base_url)] || {};
@@ -7701,7 +7709,9 @@ function simpleCatalog(f) {
   cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; f.simplePlace = null; drawSettings(); });
   return el('div', null, catalog, el('div', 'simple-add', el('h4', null, label),
     el('p', 'desc', draft.base_url || t('simple_model_default')),
-    key ? field('simple_add_key_h', key, note(t('provider_key_desc')), note(t('simple_add_key_later'))) : null,
+    // In `.provider-key`, masked as every key field is.
+    key ? el('label', 'field provider-key', el('span', null, t('simple_add_key_h')), key, note(t('provider_key_desc')),
+      note(t('simple_add_key_later'))) : null,
     field('simple_model_short', model), field('simple_place', place),
     entry.name === 'gemini' ? el('p', 'desc', t('simple_gemini_warning')) : null,
     el('div', 'actions', save, cancel)));
@@ -7714,6 +7724,9 @@ function simpleCatalog(f) {
 // it again finds it in the list. Done, its line opens on its model.
 async function simpleAdd(entry, draft, key, place, button) {
   const name = draft.name;
+  // Only while this visit of the settings lasts: left, nothing more is written or drawn.
+  const visit = generation;
+  const here = () => view === 'settings' && Boolean(form) && generation === visit;
   // A model whose prices the page knows goes with them and its largest request (`linePricedModel`).
   const priced = MODEL_PRICES[urlHost(entry.base_url)]?.[draft.model];
   if (priced) {
@@ -7721,9 +7734,12 @@ async function simpleAdd(entry, draft, key, place, button) {
     draft.limits.usd_per_mtok_out = String(priced[1]);
     draft.limits.max_request_tokens = providerText(priced[2]);
   }
-  if (!await providerOperation({ op: 'create', entry: providerBody(draft) }, button, null, '', () => createdFocus(name))) return;
+  if (!await providerOperation({ op: 'create', entry: providerBody(draft) }, button, null, '', () => createdFocus(name)) || !here()) return;
   const control = (focus) => [...$('panel').querySelectorAll('button, input, select')].find((n) => n.dataset.simpleFocus === focus);
-  const stop = (focus) => { groupOpen.set(`ai:${name}`, true); drawSettings(); simpleFocus(focus); };
+  const stop = (focus) => {
+    if (!here()) return;
+    groupOpen.set(`ai:${name}`, true); drawSettings(); simpleFocus(focus);
+  };
   // Found as `createdFocus` finds it: the last entry made, not Gemini's automatic one.
   const created = form.providers.findLast((p) => p.selector.source !== 'gemini');
   if (created?.name !== name) return;
@@ -7734,47 +7750,53 @@ async function simpleAdd(entry, draft, key, place, button) {
     if (!await providerOperation({ op: 'key', selector: created.selector }, control(`key-save:${name}`) ?? button, body, '/key')) {
       return stop(`key:${name}`);
     }
+    if (!here()) return;
   }
   if (!missing) {
     const made = form.providers.find((p) => selectorKey(p.selector) === selectorKey(created.selector));
-    if (made && !made.saved.enabled
-      && !await providerOperation({ op: 'enabled', selector: made.selector, enabled: true }, control(`on:${name}`) ?? button)) {
-      return stop(`on:${name}`);
+    if (made && !made.saved.enabled) {
+      if (!await providerOperation({ op: 'enabled', selector: made.selector, enabled: true }, control(`on:${name}`) ?? button)) {
+        return stop(`on:${name}`);
+      }
+      if (!here()) return;
     }
     if (form.chain.find((row) => row.name === name)?.on !== true) {
       const on = control(`on:${name}`);
-      if (on) await simpleChainSave(on, name, 'on', true);
-      if (form.chain.find((row) => row.name === name)?.on !== true) return stop(`on:${name}`);
+      if (!on || !await simpleChainSave(on, name, 'on', true)) return stop(`on:${name}`);
+      if (!here()) return;
     }
   }
-  if (place !== 'last') {
+  // Its place, last included: `[chain] order` may still hold the name from an entry removed before.
+  if (!placed(form.savedSettings.chain, name, place)) {
     const on = control(`on:${name}`);
-    if (on) {
-      await simpleSettingsSave(on, (body) => placeIn(body.chain, name, place), (next, answer) => {
-        const rows = new Map(next.chain.map((row) => [row.name, row]));
-        next.chain = answer.chain.map((row) => rows.get(row.name));
-      });
-    }
-    if (!placed(form.savedSettings.chain, name, place)) return stop(missing ?? `move:${name}:-1`);
+    const saved = on && await simpleSettingsSave(on, (body) => placeIn(body.chain, name, place), (next, answer) => {
+      const rows = new Map(next.chain.map((row) => [row.name, row]));
+      next.chain = answer.chain.map((row) => rows.get(row.name));
+    });
+    if (!saved) return stop(missing ?? `move:${name}:-1`);
   }
   stop(missing ?? `model:${name}`);
 }
 
-// `chain` with `name` moved to `place`, built by name: first, or right after another name; false when
-// that name is gone.
+// `chain` with `name` moved to `place` (first, last, or right after another name), by name; false
+// when that other name is gone.
 function placeIn(chain, name, place) {
   const at = chain.findIndex((row) => row.name === name);
   const after = place.slice('after:'.length);
-  if (at < 0 || (place !== 'first' && !chain.some((row) => row.name === after && row.name !== name))) return false;
+  if (at < 0 || (place.startsWith('after:') && !chain.some((row) => row.name === after && row.name !== name))) return false;
   const [row] = chain.splice(at, 1);
-  chain.splice(place === 'first' ? 0 : chain.findIndex((other) => other.name === after) + 1, 0, row);
+  const to = { first: 0, last: chain.length }[place] ?? chain.findIndex((other) => other.name === after) + 1;
+  chain.splice(to, 0, row);
 }
 
 // Whether `name` is at `place` in `chain`.
 function placed(chain, name, place) {
   const at = chain.findIndex((row) => row.name === name);
-  return place === 'first' ? at === 0 : at > 0 && chain[at - 1].name === place.slice('after:'.length);
+  if (place === 'first') return at === 0;
+  if (place === 'last') return at >= 0 && at === chain.length - 1;
+  return at > 0 && chain[at - 1].name === place.slice('after:'.length);
 }
+
 
 function simpleEmbeddingChoice(f, { locked, choice, reviewed, preview, start, consent }) {
   preview.dataset.simpleFocus = 'embedding.preview';

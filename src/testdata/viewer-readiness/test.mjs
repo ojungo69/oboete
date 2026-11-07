@@ -2689,6 +2689,57 @@ console.log('PASS: the caps\' No cap switches');
       simple('catalog.save').click();await settled(16);
       assert.deepEqual([steps().map(s=>s[1]),JSON.parse(posted[0].body).action.entry.enabled,focusKey()],[['create'],true,'model:claude'],
         'a subscription: made on, its line on its model');
+      // The key typed: masked as every key field; kept through a redraw; not put back once the
+      // draft's address changed in More settings (#807).
+      await pickOpenAI();
+      typeIn(simple('catalog.key'),'made-up-add-key-1118');
+      assert(simple('catalog.key').closest('.provider-key'),'masked as every key field');
+      ctx.ui.drawSettings();
+      assert.equal(simple('catalog.key').value,'made-up-add-key-1118','kept through a redraw');
+      vm.runInContext("form.newProvider.base_url='https://elsewhere.example/v1'",ctx);ctx.ui.drawSettings();
+      assert.equal(simple('catalog.key').value,'','its address changed: not put back');
+      // Last, the name held at the front by an order an entry removed before left: saved last.
+      await pickOpenAI();posted.length=0;
+      answers=[json(state('v2',{order:['openai','alpha','beta']})),json(state('v3'))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),JSON.parse(posted.at(-1).body).chain?.map(r=>r.name)],
+        [['/api/providers','/api/settings'],['alpha','beta','openai']],'last: saved last when the order held it elsewhere');
+      // Its place chosen, then a switch saved elsewhere: the form keeps its place.
+      await pickOpenAI();
+      choose(simple('catalog.place'),'first');
+      answers=[json(lineAi([row('alpha'),row('beta',{on:false})],{version:'v2',key_input:true,providers:base}))];
+      flip(simple('on:beta'),false);await settled(8);
+      assert.equal(simple('catalog.place').value,'first','its place kept through another save');
+      // Its name's switch answered 409, the settings read again showing it on: stopped on its switch,
+      // its place not sent.
+      await pickOpenAI();posted.length=0;
+      choose(simple('catalog.place'),'first');typeIn(simple('catalog.key'),'made-up-add-key-1122');
+      const nameOff=v=>lineAi([row('alpha'),row('beta'),oaRow(false,'ok')],{version:v,key_input:true,providers:[...base,oaEntry(true,'ok')]});
+      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:true}}),json(nameOff('v4')),json({code:'stale',field:''},409)];
+      reread=state('v5',{on:true,key:'ok'});
+      simple('catalog.save').click();await settled(16);
+      reread=null;
+      assert.deepEqual([steps().map(s=>s[0]),focusKey()],[['/api/providers','/api/providers/key','/api/providers','/api/settings'],'on:openai'],
+        'its switch\'s 409: stopped, its place not sent');
+      // Left while its key's answer is on its way: nothing more written, nothing drawn over.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1121');
+      const [keyAnswer,giveKey]=later();
+      answers=[json(state('v2')),keyAnswer];
+      simple('catalog.save').click();await settled(8);
+      vm.runInContext("view='records';generation+=1",ctx);document.activeElement=null;
+      giveKey(json({...state('v3'),key_saved:{durable:true}}));await settled(8);
+      assert.deepEqual([steps().map(s=>s[0]),document.activeElement],[['/api/providers','/api/providers/key'],null],'left: nothing more');
+      vm.runInContext("view='settings'",ctx);
+      // Two lines' "Change the key" open: a key saved in one leaves the other open, its key kept.
+      f=draw(lineAi([row('alpha'),row('beta')],{key_input:true,providers:base}));
+      simple('key-change:alpha').click();simple('key-change:beta').click();
+      typeIn(simple('key:alpha'),'made-up-unsent-key-1119');
+      answers=[json({...lineAi([row('alpha'),row('beta')],{version:'v2',key_input:true,providers:base}),key_saved:{durable:true}})];
+      typeIn(simple('key:beta'),'made-up-sent-key-1120');simple('key-save:beta').click();await settled(8);
+      assert.deepEqual([simple('key:alpha')?.value,Boolean(simple('key:beta')),Boolean(simple('key-change:beta'))],
+        ['made-up-unsent-key-1119',false,true],'a key saved in one line: another\'s field open, its key kept');
+      vm.runInContext('keyChanging.clear()',ctx);
       ctx.ui.setLang('ja');f=draw(before());choice('openai').click();await settled();
       assert(text(panel).includes('使う順番')&&text(panel).includes('API キー'),'both languages');
       ctx.ui.setLang('en');

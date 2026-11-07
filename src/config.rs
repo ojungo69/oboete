@@ -513,8 +513,8 @@ impl Provider {
     /// less (Claude's models), and one written at 1.25 times for oboete's own five-minute marker;
     /// at twice when its `extra` asks for a cache of its own anywhere (`own_cache`), whose lifetime
     /// the usage does not tell apart (Codex on #636). OpenAI's own API bills a written token at
-    /// 1.25 times and a read one at a tenth or less (decision 80). Elsewhere a written token counts
-    /// twice and a read one once.
+    /// 1.25 times and a read one as its model's (`openai_cached_rate`, decision 80). Elsewhere a
+    /// written token counts twice and a read one once.
     pub fn billed_input(&self, prompt: i64, cached: Option<i64>, written: Option<i64>) -> f64 {
         let (cached, written) = (cached.unwrap_or(0).max(0), written.unwrap_or(0).max(0));
         match self {
