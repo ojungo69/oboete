@@ -36,9 +36,9 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
   later step after a stop means it resumed. Mark finished, shown on a subagent no stop covers,
   writes the same row with `stop_source` `owner-marked-finished`. A main agent's card shows no
   state.
-- **A subagent's files (rows X17, X23).** At its SubagentStop claude-mem reads the subagent's own
-  transcript (`agent_transcript_path`) whole and copies the files it wrote or declared, as a turn's
-  at Stop, under the session's privacy; a failure there still keeps the stop.
+- **A subagent's files (rows X17, X23).** At its SubagentStop claude-mem reads the last 2 MiB of
+  the subagent's own transcript (`agent_transcript_path`) and copies the files it wrote or
+  declared, as a turn's at Stop, under the session's privacy; a failure there still keeps the stop.
 - **A Codex subagent's memory at its start (row X26).** Codex starts a spawned subagent with
   `SubagentStart`, never `SessionStart`. claude-mem's Codex hooks hold seven events: SessionStart,
   UserPromptSubmit, PreToolUse, PostToolUse, Stop, PostCompact and SubagentStart (no matcher, 20 s).
@@ -185,24 +185,34 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
 
 ### Slice 3: a subagent's files
 
-- **Which calls.** A turn end copies the files of the calls between the session's previous reply
-  and it, from the turn's first prompt or harness message on (`deliverables::candidates`), so a
-  foreground subagent's calls, inside its parent's turn, are its parent turn's. A background
-  subagent's calls after its parent's reply and before the session's next prompt or harness
-  message belong to no turn, and nothing copies their files. Slice 3 copies those at the
-  subagent's stop: the calls the subagent made (its `step` facts in knowledge.db, this device's)
-  with no prompt or harness message of its session between the session's newest reply before the
-  call and the call.
-- **When.** The deliverables phase takes a Claude Code hook `subagent_stop` record as it takes a
-  turn end, in seq order. As it reads the subagent's calls from `consumer::subagents`' facts, it
-  takes a stop only once that consumer's checkpoint for this device has reached it; else it
-  stops just before the stop, which a later round takes, the consumers draining before the phase.
-- **What.** The files those calls wrote or declared, as `candidates` finds a turn's: only calls
-  the hooks marked public (a wholly private prompt's subagent's are not, and name nothing), no
-  failed call, `MAX_FILES` at most. They are copied as a turn's, the row's turn the stop's record
-  (`turn_seq`, `turn_ts`). A copy the session already has a row of (the same content, copies being
-  named by it) is not recorded again: a file the parent's turn copied, unchanged, is not copied
-  twice.
+- **Which calls.** A turn end (a reply, or the session's end) copies the files of the calls between
+  the session's previous reply and it, from the turn's first prompt or harness message on
+  (`deliverables::candidates`), so a foreground subagent's calls, inside its parent's turn, are its
+  parent turn's. A background subagent's calls after its parent's reply and before the session's
+  next prompt or harness message belong to no turn, and nothing copies their files. Slice 3 copies
+  those at the subagent's stop. Of the calls the subagent made since its previous stop (its `step`
+  facts in knowledge.db, of this device's hook records, after the newest stop of the same subagent
+  before this one), it takes those with no prompt or harness message of the session between the
+  session's newest reply before the call (its first record, with none) and the call. A call is so
+  taken once: by its turn's end, or by the first stop after it; a stop taken again, after an
+  interruption, takes the same range.
+- **Whose.** Only a subagent launched from a turn the hooks saw public: its launch record (the
+  parent's `Agent` or `Task` call that `launched` it, the newest before the stop) is marked public,
+  and a prompt or harness message of the session comes before it in its own turn, as a turn's copy
+  asks of a call. A subagent with no launch record, or launched from a private or unobserved turn,
+  copies nothing, though a later public prompt has cleared the session's private flag; and each
+  call must be marked public too.
+- **When.** The deliverables phase takes a Claude Code hook `subagent_stop` record (the hook's, or
+  the owner's Mark finished) as it takes a turn end, in seq order. As it reads the subagent's calls,
+  stops and launch from `consumer::subagents`' facts, it takes a stop only once that consumer's
+  checkpoint for this device has reached it; else it stops just before the stop, its own checkpoint
+  below it, and a later round takes it, the consumers draining before the phase.
+- **What.** The files those calls wrote or declared, as `candidates` finds a turn's (no failed call,
+  `MAX_FILES` at most), copied as a turn's: the row's turn the stop's record (`turn_seq`,
+  `turn_ts`), its call the call that wrote or declared the file, by which My Work links the copy to
+  that call's request; `copy_into` keeps one file for one content.
+- **Not covered.** A foreground subagent's call is its parent turn's: a parent that never ends its
+  turn (no reply, no session end) leaves it uncopied, where claude-mem's SubagentStop copies it.
 - **Not as claude-mem.** claude-mem's SubagentStop hook copies from the last 2 MiB of the
   subagent's transcript, the files the subagent wrote inside its parent's turn too; oboete's parent
   turn copies those, and the stop the rest.
@@ -271,12 +281,22 @@ Slice 2:
 Slice 3:
 
 - A file a background subagent wrote after its parent's reply, with no prompt or harness message
-  between, is copied at the subagent's stop, once, its row the stop's; a foreground subagent's
-  file, written inside its parent's turn, is copied by the turn's end and not again at its stop; a
-  file the session already has a copy of, unchanged, is not recorded again; a private turn's
-  subagent copies nothing; a Codex record and a replay's stop copy nothing.
-- A stop the `subagents` consumer has not reached is taken after it has, nothing before it lost;
-  the phase's checkpoint goes past a stop only once it is taken.
+  between, is copied at the subagent's stop, once, its row the stop's turn and the writing call's;
+  a foreground subagent's file, written inside its parent's turn, is copied by the turn's end and
+  not again at its stop; a subagent whose calls straddle the reply has each copied once, by the
+  turn or the stop; a stop after the session's next prompt still takes the gap's calls.
+- A second stop of the same subagent takes only its calls since the first; a stop taken again
+  takes the same range; a resumed subagent's new file is copied though its earlier calls named
+  `MAX_FILES` files.
+- A subagent launched from a private turn copies nothing, though a later public prompt cleared the
+  flag; one with no launch record, or launched from a turn with no prompt observed, copies nothing;
+  a failed call and a call not marked public name nothing; a Codex record, a replay's and a
+  transcript's stop copy nothing.
+- With the `subagents` consumer behind: reply A, a stop it has not reached, reply B: A is taken, the
+  stop and B wait, the phase's checkpoint below the stop; once the consumer has reached it, both are
+  taken, with no row twice.
+- Identical content written by two calls of the session gives two rows, each linked to its call's
+  request; a forget of one call's record leaves the other's row and file.
 
 ## As built
 
