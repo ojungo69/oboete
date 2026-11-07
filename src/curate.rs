@@ -1003,8 +1003,12 @@ impl<'r> Prepared<'r> {
         let (head, role) = match e.kind.as_str() {
             "prompt" => {
                 // A prompt another agent sent is not the developer's words: the gates read its
-                // line as the assistant's (#273).
-                let (head, role) = if body["agent_sent"] == true {
+                // line as the assistant's (#273). Nor is Codex's review template, recorded unmarked
+                // before capture marked it (docs/session-start.md).
+                let preset = body["prompt"]
+                    .as_str()
+                    .is_some_and(crate::typed::codex_review_preset);
+                let (head, role) = if body["agent_sent"] == true || preset {
                     ("[agent prompt]", Role::Assistant)
                 } else {
                     ("[user]", Role::User)
@@ -6474,6 +6478,22 @@ mod tests {
                 "{kind}"
             );
         }
+    }
+
+    /// docs/session-start.md: Codex's review template, recorded before capture marked it, is read
+    /// as a program's prompt, as a marked one is; the owner's own review request stays theirs.
+    #[test]
+    fn a_codex_review_template_is_read_as_an_agents_prompt() {
+        let rules = Rules::default();
+        let template = "Review the code changes introduced by commit 1a2b3c4d. Provide \
+                        prioritized, actionable findings.";
+        let shown = render(&prompt(template), 1, 0, None, &rules).text;
+        assert!(shown.contains("[agent prompt]"), "{shown}");
+        let own = render(&prompt("Review the parser changes."), 1, 0, None, &rules).text;
+        assert!(
+            own.contains("[user]") && !own.contains("[agent prompt]"),
+            "{own}"
+        );
     }
 
     #[test]

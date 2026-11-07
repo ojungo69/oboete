@@ -96,6 +96,59 @@ pub(crate) fn assigns_a_role(prompt: &str) -> bool {
         && prompt.chars().count() > 400
 }
 
+/// Whether `prompt` is a review prompt Codex builds itself (`/review`, `codex review --base` or
+/// `--commit`, 0.166.0's five templates): the whole text as a template renders it, its branch,
+/// commit and title filled in, never the owner's words. Text given to `codex review` is sent as
+/// it was typed and stays the owner's, even where it opens and closes as a template does.
+pub(crate) fn codex_review_preset(prompt: &str) -> bool {
+    const FINDINGS: &str = " Provide prioritized, actionable findings.";
+    let p = prompt.trim();
+    if p == "Review the current code changes (staged, unstaged, and untracked files) and provide \
+             prioritized findings."
+    {
+        return true;
+    }
+    let word = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace);
+    if let Some(rest) = p.strip_prefix("Review the code changes introduced by commit ") {
+        // `{sha}.` or `{sha} ("{title}").`, then the closing sentence.
+        let Some(commit) = rest
+            .strip_suffix(FINDINGS)
+            .and_then(|r| r.strip_suffix('.'))
+        else {
+            return false;
+        };
+        return word(commit)
+            || commit.split_once(" (\"").is_some_and(|(sha, title)| {
+                word(sha) && title.strip_suffix("\")").is_some_and(|t| !t.contains('\n'))
+            });
+    }
+    let Some(rest) = p.strip_prefix("Review the code changes against the base branch '") else {
+        return false;
+    };
+    let Some((branch, _)) = rest.split_once("'. ") else {
+        return false;
+    };
+    let head = format!("Review the code changes against the base branch '{branch}'.");
+    let upstream = format!(
+        "{head} Start by finding the merge diff between the current branch and {branch}'s \
+         upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \
+         \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes \
+         we would merge into the {branch} branch.{FINDINGS}"
+    );
+    let merge_base = |sha: &str| {
+        format!(
+            "{head} The merge base commit for this comparison is {sha}. Run `git diff {sha}` to \
+             inspect the changes relative to {branch}.{FINDINGS}"
+        )
+    };
+    p == upstream
+        || p.strip_prefix(&format!(
+            "{head} The merge base commit for this comparison is "
+        ))
+        .and_then(|r| r.split_once(". Run `git diff "))
+        .is_some_and(|(sha, _)| p == merge_base(sha))
+}
+
 /// The agent text a record of `kind` holds for the text tests (O3): a reply's text, or a tool's
 /// input with JSON's escapes of line breaks and tabs undone, as claude-mem's readers undo a line
 /// break's, so a prompt an agent wrote into a command or a file is found across its lines.
@@ -253,10 +306,12 @@ impl AgentText {
     }
 
     /// Whether the prompt `text`, typed at `ts`, is an agent's (O3): its opening was in agent text
-    /// written in the `LOOKBACK_MS` before it, or it assigns a role.
+    /// written in the `LOOKBACK_MS` before it, it assigns a role, or it is Codex's review template.
     pub(crate) fn agent_written(&self, ts: i64, text: &str) -> bool {
         let opening = fingerprint(text).map(|f| (f.chars().collect::<Vec<_>>(), ts));
-        opening.is_some_and(|key| self.found.contains(&key)) || assigns_a_role(text)
+        opening.is_some_and(|key| self.found.contains(&key))
+            || assigns_a_role(text)
+            || codex_review_preset(text)
     }
 }
 
@@ -278,6 +333,65 @@ mod tests {
         let mut body = json!({"prompt": "Fix the parser."});
         (body.as_object_mut().unwrap()).extend(extra.as_object().unwrap().clone());
         body
+    }
+
+    /// Codex's five review templates (0.166.0) are a program's; the owner's own review request,
+    /// and text that only opens or only closes as a template does, are not.
+    #[test]
+    fn codex_review_templates_are_a_programs() {
+        let findings = "Provide prioritized, actionable findings.";
+        for p in [
+            "Review the current code changes (staged, unstaged, and untracked files) and provide \
+             prioritized findings."
+                .to_owned(),
+            format!("Review the code changes introduced by commit 1a2b3c4d. {findings}"),
+            format!(
+                "Review the code changes introduced by commit 1a2b3c4d (\"Fix the parser\"). \
+                 {findings}"
+            ),
+            format!(
+                "Review the code changes against the base branch 'main'. The merge base commit \
+                 for this comparison is 1a2b3c4d. Run `git diff 1a2b3c4d` to inspect the changes \
+                 relative to main. {findings}"
+            ),
+            format!(
+                "Review the code changes against the base branch 'main'. Start by finding the \
+                 merge diff between the current branch and main's upstream e.g. (`git merge-base \
+                 HEAD \"$(git rev-parse --abbrev-ref \"main@{{upstream}}\")\"`), then run `git \
+                 diff` against that SHA to see what changes we would merge into the main branch. \
+                 {findings}\n"
+            ),
+        ] {
+            assert!(codex_review_preset(&p), "{p}");
+            assert!(AgentText::new([]).agent_written(0, &p), "{p}");
+        }
+        for p in [
+            "Review the code changes against the base branch 'main' and say whether the parser \
+             keeps its tables."
+                .to_owned(),
+            format!("Look at the parser first. {findings}"),
+            "Review the current code changes and provide prioritized findings.".to_owned(),
+            "レビューして: Review the code changes introduced by commit 1a2b3c4d.".to_owned(),
+            format!(
+                "Review the code changes against the base branch 'main'. Focus only on parser \
+                 compatibility. {findings}"
+            ),
+            format!(
+                "Review the code changes against the base branch 'main'. The merge base commit \
+                 for this comparison is 1a2b3c4d. Run `git diff 1a2b3c4d` to inspect the changes \
+                 relative to main. {findings} Then check the tests."
+            ),
+            format!(
+                "Review the code changes against the base branch 'main'. The merge base commit \
+                 for this comparison is 1a2b3c4d. Run `git diff 9f8e7d6c` to inspect the changes \
+                 relative to main. {findings}"
+            ),
+            format!(
+                "Review the code changes introduced by commit 1a2b3c4d and the tests. {findings}"
+            ),
+        ] {
+            assert!(!codex_review_preset(&p), "{p}");
+        }
     }
 
     /// C3: a prompt's sender is the conversation, other than its own, whose tool input held its

@@ -1834,6 +1834,7 @@ mod tests {
             "other",
             &rules,
             crate::consumer::manifest::CAP,
+            crate::consumer::manifest::INDEX,
             crate::db::now_ms(),
         )
         .unwrap()

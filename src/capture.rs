@@ -503,9 +503,9 @@ fn shaped(event: &str, payload: &Value, settings: &Settings) -> Option<(&'static
                 return None;
             }
             // A prompt another agent sent, as the hook adapter or the transcript parser read it
-            // (#273): never the developer's words.
+            // (#273), or a review template Codex built: never the developer's words.
             let sent = |mut body: Value| {
-                if payload[AGENT_SENT] == true {
+                if payload[AGENT_SENT] == true || crate::typed::codex_review_preset(&prompt) {
                     body["agent_sent"] = json!(true);
                 }
                 // Where a Claude Code prompt was typed, or sent from (O2): what My Work's goals read.
@@ -1984,6 +1984,23 @@ mod tests {
             &Settings::default(),
         );
         assert!(on.is_empty());
+    }
+
+    /// docs/session-start.md: Codex's review template is stored as a program's prompt, from any
+    /// agent and with prompts kept or not; the owner's own review request is not marked.
+    #[test]
+    fn a_codex_review_template_is_stored_as_a_programs_prompt() {
+        let template = "Review the code changes introduced by commit 1a2b3c4d. Provide \
+                        prioritized, actionable findings.";
+        let off = with("[capture]\nstore_prompts = false\n");
+        for (agent, s) in [("codex", &Settings::default()), ("claude", &off)] {
+            let payload = json!({"session_id": "s", "prompt": template});
+            let v = events(agent, "UserPromptSubmit", &payload, 0, s);
+            assert_eq!(body(&v[0].event)["agent_sent"], true, "{agent}");
+            let own = json!({"session_id": "s", "prompt": "Review the parser changes."});
+            let v = events(agent, "UserPromptSubmit", &own, 0, s);
+            assert_eq!(body(&v[0].event)["agent_sent"], Value::Null, "{agent}");
+        }
     }
 
     #[test]

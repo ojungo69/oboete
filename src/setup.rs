@@ -3023,8 +3023,8 @@ pub fn doctor(home: &Path) -> Result<()> {
         Ok(i) => {
             if i.session_start {
                 println!(
-                    "injection: the manifest, up to {} characters",
-                    i.session_start_chars
+                    "injection: the manifest, up to {} characters, its index {} lines",
+                    i.session_start_chars, i.session_start_index
                 );
             } else {
                 println!("injection: off, no manifest is shown to an agent");

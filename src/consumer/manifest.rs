@@ -40,7 +40,16 @@ const DIRECTIVES: usize = 10;
 /// Delivered claims SessionStart shows with their bodies, and at most this many more one line each
 /// (spec 4.4: about 10, then an index).
 const BODIES: usize = 10;
-const INDEX: usize = 20;
+/// The index's lines by default (`[inject] session_start_index`, decision 75).
+pub const INDEX: usize = 10;
+/// Decision 76: a decision or an open item this much older than the read gets no body.
+const STALE_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+#[cfg(test)]
+thread_local! {
+    /// Where decision 76 measures a claim's age from in a test whose claims are dated in 1970 and
+    /// read at the clock's time (the hooks' tests); none, the read's own time.
+    pub(crate) static FOLD_AT: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
 /// The newest delivered claims SessionStart chooses from.
 // ponytail: an older claim reaches SessionStart only through search; a larger pool if M22's
 // scale check leaves room.
@@ -57,6 +66,10 @@ const CARDS: usize = 50;
 /// The newest session summaries session start shows, claude-mem's default (docs/summaries.md S7).
 const SUMMARIES: usize = 10;
 const TODOS: usize = 20;
+/// The checkout's newest prompts the build reads for the owner's last one.
+// shortcut: a checkout whose last 200 prompts were all a program's shows no last prompt; read
+// further back if that is seen.
+const PROMPTS: i64 = 200;
 const SESSIONS: usize = 5;
 /// ponytail: the owner lines a build reads (a negation older than these no longer matters); a
 /// claims table replaces the scan in milestone 3.
@@ -66,8 +79,9 @@ pub(crate) const ACTIVE_MS: i64 = 30 * 60 * 1000;
 /// MUST-M9: the backlog is shown once its oldest record has waited this long.
 const LAG_MS: i64 = 2 * 60 * 1000;
 /// The stored ruleset's format: a row built before the read-time lines (Task 8) holds the other
-/// sessions and the backlog count in its text, so it is built again.
-const FORMAT: &str = "m4";
+/// sessions and the backlog count in its text, and one before `m5` another program's prompt as
+/// the last exchange (docs/session-start.md), so it is built again.
+const FORMAT: &str = "m5";
 /// D9's `git status` in the worker, given up after this.
 const GIT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -152,8 +166,9 @@ pub fn fingerprint(body: &str) -> String {
 /// read from knowledge.db's indexes, and the checkout's backlog and the repository's other live sessions
 /// read at `now` (`live`; MUST-M9, M8). Each field read is gated with `rules` before it is
 /// formatted, so a rule anchored to a field still matches it, the whole is gated again and cut to
-/// `cap` at a line. Read-only: a hook never writes knowledge.db, and none is made when the worker
-/// has not run yet. `session` is the reader's, which is no other session.
+/// `cap` at a line, with at most `index` claims in its one-line index (decision 75). Read-only: a
+/// hook never writes knowledge.db, and none is made when the worker has not run yet. `session` is
+/// the reader's, which is no other session.
 #[allow(clippy::too_many_arguments)]
 pub fn text(
     home: &Path,
@@ -163,6 +178,7 @@ pub fn text(
     session: &str,
     rules: &crate::redact::Rules,
     cap: usize,
+    index: usize,
     now: i64,
 ) -> Result<Option<Start>> {
     let path = home.join("knowledge.db");
@@ -172,7 +188,7 @@ pub fn text(
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?.unwrap_or_default();
     let live = live(&k, raw, repo, branch, session, rules, now)?;
-    let parts = delivered(&k, raw, repo, &manifest, rules)?;
+    let parts = delivered(&k, raw, repo, &manifest, rules, (index, now))?;
     // The cards after the decisions (docs/cards.md S1): the most, halved each time, whose packet
     // stays within `cap` as it leaves, gated and escaped inside the fence, in UTF-16 units, the
     // measure Cursor cuts by (S5); the rest is never cut for them. Each count is judged on the
@@ -444,13 +460,16 @@ type Body = (std::ops::Range<usize>, Shown);
 /// Read when the text is (D3): claims come from curation, which runs while the owner is idle and
 /// appends no record this consumer steps on, so a section built with the text would miss the last
 /// session's decisions; and what the worker has not applied yet (`claims::Pending`) is left out.
-/// Unchanged where curation never ran (no claims view).
+/// Unchanged where curation never ran (no claims view). At most `lines` claims are in the index,
+/// and a decision or an open item older than 14 days at `now` is one of them, never a body
+/// (decisions 75 and 76).
 fn delivered(
     k: &Connection,
     raw: &Raw,
     repo: &str,
     manifest: &str,
     rules: &crate::redact::Rules,
+    (lines, now): (usize, i64),
 ) -> Result<Delivered> {
     use crate::claims::{self, Claim};
     let mut d = Delivered::default();
@@ -481,8 +500,24 @@ fn delivered(
         ranked.truncate(POOL);
         // Stable: among claims that share as many words, the newest first.
         ranked.sort_by_cached_key(|c| std::cmp::Reverse(shared(&c.body, &words)));
-        let (mut units, rest) = claims::place(claims::units(k, &ranked, hidden)?, BODIES);
-        let (mut index, _) = claims::place(rest, INDEX);
+        #[cfg(test)]
+        let now = FOLD_AT.get().unwrap_or(now);
+        // `claims::place` with decision 76: a stale unit keeps its rank among the index's lines.
+        let stale = |unit: &[Claim]| {
+            unit.first().is_some_and(|c| {
+                matches!(c.kind.as_str(), "decision" | "open item") && c.valid_from < now - STALE_MS
+            })
+        };
+        let (mut left, mut units, mut rest) = (BODIES, Vec::new(), Vec::new());
+        for unit in claims::units(k, &ranked, hidden)? {
+            if !stale(&unit) && unit.len() <= left {
+                left -= unit.len();
+                units.push(unit);
+            } else {
+                rest.push(unit);
+            }
+        }
+        let (mut index, _) = claims::place(rest, lines);
         claims::newest_first(&mut units);
         claims::newest_first(&mut index);
         let gate = |s: &str, n: usize| crate::redact::flattened_with(s, rules, n, one_line);
@@ -1178,6 +1213,10 @@ fn build(
     let mut lines = Vec::new();
     for (seq, session, ts) in owner {
         if let Some(e) = event(raw, device, seq)? {
+            // A template recorded before capture marked it holds no directive of the owner's.
+            if crate::typed::codex_review_preset(str_at(&body(&e), "prompt")) {
+                continue;
+            }
             let prompt = gate(str_at(&body(&e), "prompt"));
             for text in prompt.split(['\n', '。']).map(str::trim) {
                 if manifest::is_owner_line(text) {
@@ -1214,19 +1253,46 @@ fn build(
             })
             .collect();
     }
-    if let Some(e) = last("prompt")?
-        .map(|s| event(raw, device, s))
-        .transpose()?
-        .flatten()
-    {
-        p.last_prompt = Some(one_line(&gate(str_at(&body(&e), "prompt")), CLIP));
-    }
-    if let Some(e) = last("reply")?
-        .map(|s| event(raw, device, s))
-        .transpose()?
-        .flatten()
-    {
-        p.last_reply = Some(one_line(&gate(str_at(&body(&e), "assistant")), CLIP));
+    // The last prompt the owner typed, and the reply that ended its turn: a prompt another program
+    // sent, Codex's review templates among them, is not the owner's (docs/session-start.md).
+    let prompts: Vec<(i64, String)> = k
+        .prepare(
+            "SELECT seq, session FROM manifest_facts
+             WHERE device = ?1 AND repo = ?2 AND fact = 'prompt' AND branch = ?3
+             ORDER BY seq DESC LIMIT ?4",
+        )?
+        .query_map(params![device, repo, branch, PROMPTS], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (seq, session) in prompts {
+        let Some(e) = event(raw, device, seq)? else {
+            continue;
+        };
+        let b = body(&e);
+        let text = str_at(&b, "prompt");
+        if !crate::typed::typed(&e.kind, &e.agent, &e.source, &b)
+            || crate::typed::assigns_a_role(text)
+            || crate::typed::codex_review_preset(text)
+        {
+            continue;
+        }
+        p.last_prompt = Some(one_line(&gate(text), CLIP));
+        // Its turn's reply: the first of its session after it, before the session's next prompt.
+        let reply: Option<i64> = k.query_row(
+            "SELECT MIN(seq) FROM manifest_facts
+             WHERE device = ?1 AND repo = ?2 AND fact = 'reply' AND branch = ?3
+               AND session = ?4 AND seq > ?5
+               AND seq < COALESCE((SELECT MIN(seq) FROM manifest_facts
+                 WHERE device = ?1 AND repo = ?2 AND fact = 'prompt' AND branch = ?3
+                   AND session = ?4 AND seq > ?5), 9223372036854775807)",
+            params![device, repo, branch, session, seq],
+            |r| r.get(0),
+        )?;
+        if let Some(e) = reply.map(|s| event(raw, device, s)).transpose()?.flatten() {
+            p.last_reply = Some(one_line(&gate(str_at(&body(&e), "assistant")), CLIP));
+        }
+        break;
     }
     p.files = k
         .prepare(
@@ -1909,9 +1975,19 @@ extra_rules = [
         worker::run_once(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let start = |cap| {
-            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap()
+            text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap()
         };
         let all = start(usize::MAX);
         let shown = |start: &Start, body: bool| {
@@ -1968,9 +2044,19 @@ extra_rules = [
         worker::run_once(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let start = |cap| {
-            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap()
+            text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap()
         };
         let all = start(usize::MAX);
         let lines = lines_of(&all.text, "Decisions and open items");
@@ -2063,8 +2149,10 @@ extra_rules = [
         );
     }
 
-    /// When `shown` reads: a year after the tests' records, so no session is live then.
-    const NOW: i64 = 365 * DAY;
+    /// When `shown` reads: after most tests' records, so no session is live then, and 14 days
+    /// after the epoch, so no claim of theirs is older than 14 days and loses its body (decision
+    /// 76).
+    const NOW: i64 = 14 * DAY;
 
     /// The manifest SessionStart shows for checkout (r, main) under the rules the home has now.
     fn shown(home: &Path, store: &Raw) -> Option<String> {
@@ -2074,7 +2162,18 @@ extra_rules = [
     /// `text` for checkout (r, main), uncut, read by `session` at `now`.
     fn shown_at(home: &Path, store: &Raw, session: &str, now: i64) -> Option<Start> {
         let rules = crate::capture::Settings::load(home).unwrap().rules;
-        text(home, store, "r", "main", session, &rules, usize::MAX, now).unwrap()
+        text(
+            home,
+            store,
+            "r",
+            "main",
+            session,
+            &rules,
+            usize::MAX,
+            INDEX,
+            now,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2871,6 +2970,189 @@ extra_rules = [
     }
 
     /// The lines under `text`'s heading `title`.
+    /// docs/session-start.md: "Last exchange" is the owner's last typed prompt and the reply that
+    /// ended its turn. A later prompt another program sent, in its session or another, Codex's
+    /// review template among them, and its reply are not shown, nor is a reply before the prompt;
+    /// an unanswered prompt shows alone, and a template's words are no directive of the owner's.
+    #[test]
+    fn the_last_exchange_is_the_owners_last_typed_prompt_and_its_turns_reply() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let min = 60_000;
+        let template = "Review the code changes introduced by commit 1a2b3c4d (\"Always run the \
+                        linter first\"). Provide prioritized, actionable findings.";
+        let prompt = |s: &str, ts: i64, body: Value| ev("prompt", s, ts, cwd.path(), body);
+        let reply = |s: &str, ts: i64, text: &str| {
+            ev(
+                "reply",
+                s,
+                ts,
+                cwd.path(),
+                serde_json::json!({ "assistant": text }),
+            )
+        };
+        let exchange = |store: &Raw| {
+            worker::run_once(home.path()).unwrap();
+            lines_of(&shown(home.path(), store).unwrap(), "Last exchange")
+        };
+        // Only programs' prompts: no exchange, and the template's "always" is no directive.
+        for e in [
+            prompt(
+                "s1",
+                min,
+                serde_json::json!({"prompt": "Check it.", "agent_sent": true}),
+            ),
+            reply("s1", 2 * min, "Checked by request."),
+            Event {
+                agent: "codex".into(),
+                ..prompt("s2", 3 * min, serde_json::json!({ "prompt": template }))
+            },
+            reply("s2", 4 * min, "A review's findings."),
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert!(exchange(&store).is_empty());
+        let text = shown(home.path(), &store).unwrap();
+        assert!(!text.contains("linter"), "{text}");
+        for e in [
+            reply("s3", 5 * min, "An answer before the owner's prompt."),
+            prompt(
+                "s3",
+                6 * min,
+                serde_json::json!({"prompt": "Fix the parser."}),
+            ),
+            reply("s3", 7 * min, "The parser is fixed."),
+            reply("s3", 8 * min, "A second reply in the same turn."),
+            prompt(
+                "s3",
+                9 * min,
+                serde_json::json!({"prompt": "Check it.", "agent_sent": true}),
+            ),
+            reply("s3", 10 * min, "Checked by request."),
+            Event {
+                agent: "codex".into(),
+                ..prompt("s4", 11 * min, serde_json::json!({ "prompt": template }))
+            },
+            reply("s4", 12 * min, "A review's findings."),
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert_eq!(
+            exchange(&store),
+            ["- prompt: Fix the parser.", "- reply: The parser is fixed."]
+        );
+        // Unanswered, then a program's prompt in its session and that prompt's reply: alone.
+        for e in [
+            prompt(
+                "s5",
+                13 * min,
+                serde_json::json!({"prompt": "Now the lexer."}),
+            ),
+            prompt(
+                "s5",
+                14 * min,
+                serde_json::json!({"prompt": "Lint it.", "agent_sent": true}),
+            ),
+            reply("s5", 15 * min, "Linted by request."),
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert_eq!(exchange(&store), ["- prompt: Now the lexer."]);
+    }
+
+    /// Decision 76: a decision or an open item whose unit's newest claim is older than 14 days at
+    /// the read has no body; it is an index line, where its rank put it. A lesson keeps its body at
+    /// any age, a pair whose later claim is fresh keeps both bodies, a pair whose later claim is
+    /// stale is two index lines, and a claim of 14 days exactly is not older.
+    #[test]
+    fn a_decision_or_open_item_older_than_14_days_is_an_index_line() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let now = 100 * DAY;
+        let mut ops = Vec::new();
+        let mut claim = |ago: i64, text: &str, kind: &str, supersedes: Vec<String>| {
+            let e = said(cwd.path(), now - ago * DAY, text);
+            let (op, uid) = claimed(&mut store, e, kind, "decided", supersedes);
+            ops.push(op);
+            uid
+        };
+        claim(15, "Ship the beta on Friday.", "decision", vec![]);
+        claim(14, "Keep the parser small.", "decision", vec![]);
+        claim(30, "Logs rotate daily.", "lesson", vec![]);
+        claim(15, "Fix the flaky CI test.", "open item", vec![]);
+        let tabs = claim(40, "Use tabs.", "decision", vec![]);
+        claim(1, "Use spaces instead.", "decision", vec![tabs]);
+        let mondays = claim(50, "Deploy on Mondays.", "decision", vec![]);
+        claim(20, "Deploy on Tuesdays.", "decision", vec![mondays]);
+        store.append_ops(&ops).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = shown_at(home.path(), &store, "none", now).unwrap().text;
+        let bodies = lines_of(&text, "Decisions and open items");
+        let index = lines_of(&text, "More from memory");
+        let body = |t: &str| bodies.iter().any(|l| l.contains(t));
+        let line = |t: &str| index.iter().any(|l| l.contains(t));
+        for t in [
+            "Keep the parser small.",
+            "Logs rotate daily.",
+            "Use tabs.",
+            "Use spaces instead.",
+        ] {
+            assert!(body(t) && !line(t), "{t}: {text}");
+        }
+        for t in [
+            "Ship the beta on Friday.",
+            "Fix the flaky CI test.",
+            "Deploy on Mondays.",
+            "Deploy on Tuesdays.",
+        ] {
+            assert!(line(t) && !body(t), "{t}: {text}");
+        }
+    }
+
+    /// Decision 75: the index lists as many claims as it is given; with none, the bodies and the
+    /// line naming the tools stay.
+    #[test]
+    fn the_index_lists_as_many_claims_as_it_is_given() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let mut ops = Vec::new();
+        for i in 0..BODIES as i64 + 5 {
+            let e = said(cwd.path(), DAY + i, &format!("Rule {i} holds."));
+            ops.push(claimed(&mut store, e, "decision", "decided", vec![]).0);
+        }
+        store.append_ops(&ops).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
+        let read = |index: usize| {
+            let s = text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                usize::MAX,
+                index,
+                NOW,
+            );
+            let s = s.unwrap().unwrap().text;
+            let lines = |t: &str| lines_of(&s, t).into_iter().filter(|l| l.starts_with("- "));
+            (
+                lines("Decisions and open items").count(),
+                lines("More from memory").count(),
+                s,
+            )
+        };
+        assert_eq!(read(INDEX).1, 5);
+        assert_eq!(read(3).1, 3);
+        let (bodies, lines, s) = read(0);
+        assert_eq!((bodies, lines), (BODIES, 0), "{s}");
+        assert!(s.contains(TOOLS), "{s}");
+    }
+
     fn lines_of(text: &str, title: &str) -> Vec<String> {
         text.split(&format!("## {title}\n"))
             .nth(1)
@@ -3067,10 +3349,20 @@ extra_rules = [
         let store = raw::open(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let at = |cap: usize| {
-            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap()
-                .text
+            text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap()
+            .text
         };
         let whole = at(usize::MAX);
         assert!(
@@ -3113,9 +3405,19 @@ extra_rules = [
         let store = raw::open(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let shows = |cap: usize| {
-            let s = text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap();
+            let s = text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap();
             (s.text, s.cards)
         };
         let (whole, cards) = shows(usize::MAX);
@@ -3160,9 +3462,19 @@ extra_rules = [
         let store = raw::open(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let shows = |cap: usize| {
-            let s = text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap();
+            let s = text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap();
             (s.text, s.cards)
         };
         let (whole, cards) = shows(usize::MAX);
@@ -3192,10 +3504,20 @@ extra_rules = [
         worker::run_once(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let at = |cap: usize| {
-            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap()
-                .text
+            text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap()
+            .text
         };
         // The packet's text as the fence holds it, in UTF-16 units, without the fence's own.
         let units = |t: &str| {
@@ -3248,10 +3570,20 @@ extra_rules = [
         );
         const { assert!(MANIFEST < CAP) };
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
-        let packet = text(home.path(), &store, "r", "main", "none", &rules, CAP, NOW)
-            .unwrap()
-            .unwrap()
-            .text;
+        let packet = text(
+            home.path(),
+            &store,
+            "r",
+            "main",
+            "none",
+            &rules,
+            CAP,
+            INDEX,
+            NOW,
+        )
+        .unwrap()
+        .unwrap()
+        .text;
         assert!(
             packet.contains(" ● The todo list was written\n"),
             "{packet}"
@@ -3273,9 +3605,19 @@ extra_rules = [
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         // The packet, and how many cards it shows (the terminal line counts them).
         let shows = |cap: usize| {
-            let s = text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap();
+            let s = text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap();
             (s.text, s.cards)
         };
         let at = |cap: usize| shows(cap).0;
@@ -3373,10 +3715,20 @@ extra_rules = [
         worker::run_once(home.path()).unwrap();
         let rules = crate::capture::Settings::load(home.path()).unwrap().rules;
         let at = |cap: usize| {
-            text(home.path(), &store, "r", "main", "none", &rules, cap, NOW)
-                .unwrap()
-                .unwrap()
-                .text
+            text(
+                home.path(),
+                &store,
+                "r",
+                "main",
+                "none",
+                &rules,
+                cap,
+                INDEX,
+                NOW,
+            )
+            .unwrap()
+            .unwrap()
+            .text
         };
         let less = |shown: &str| at(shown.chars().count() - 1);
         let whole = at(usize::MAX);
@@ -3432,6 +3784,7 @@ extra_rules = [
             "none",
             &rules,
             usize::MAX,
+            INDEX,
             NOW,
         )
         .unwrap()
@@ -3921,6 +4274,7 @@ extra_rules = [
             "none",
             &rules,
             usize::MAX,
+            INDEX,
             NOW,
         )
         .unwrap()

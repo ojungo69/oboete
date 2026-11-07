@@ -1570,6 +1570,8 @@ const TEXT = {
   session_list_on: ['Also show the list of memories handed over, as claude-mem does', '渡した記憶の一覧も表示する (claude-mem と同じ表示)'],
   session_list_desc: ['The list shows the titles and summaries from your memory that the agent gets. Off, only the status line is shown.', '一覧には、AI に渡したのと同じ記憶の題名や要約が表示されます。オフにすると、状態の 1 行だけを表示します。'],
   inject_chars: ['Size given at session start, in characters ({min} to {max})', 'セッション開始時に渡す大きさ(文字数、{min}〜{max})'],
+  inject_index: ['Lines in the index of earlier memories at session start ({min} to {max})', 'セッション開始時の「過去の記憶の索引」の行数({min}〜{max})'],
+  inject_index_desc: ['Each line names one earlier memory by its first words. Fewer lines leave more room for recent cards.', '1 行に 1 件、過去の記憶の書き出しを示します。少なくすると、そのぶん最近のカードを多く出せます。'],
   per_prompt_chars: ['Size given with each prompt, in characters ({min} to {max})', '入力のたびに渡す大きさ(文字数、{min}〜{max})'],
   per_prompt_wait_ms: ['How long each prompt waits for search by meaning, in milliseconds ({min} to {max}); past it, what its words match is used', '各プロンプトで意味の検索を待つ上限(ミリ秒、{min}〜{max})。過ぎたら言葉の一致だけを使います'],
   prompt_side_meaning: ['The last prompt ({time}) also took search by meaning.', '直近のプロンプト({time})は意味の検索も使いました。'],
@@ -3447,7 +3449,7 @@ function maintenanceStatus(run) {
 
 let preferenceDraft = { text: '', confirmed: false, result: null };
 // `[inject]`'s sizes, each checked against the range the server states for it.
-const SIZES = ['session_start_chars', 'per_prompt_chars', 'per_prompt_wait_ms', 'correction_chars'];
+const SIZES = ['session_start_chars', 'session_start_index', 'per_prompt_chars', 'per_prompt_wait_ms', 'correction_chars'];
 
 /** G23: how the last prompt that could ask search by meaning took its block, or nothing. */
 function promptSide(side) {
@@ -7777,6 +7779,7 @@ function drawSettings() {
   const groups = simpleGroups(f, {
     inject: more('inject', generalForm(el('section', null,
       size('session_start_chars', 'inject_chars'),
+      size('session_start_index', 'inject_index'), note(t('inject_index_desc')),
       el('label', 'check', terminalNote, t('session_note_on')), note(t('session_note_desc')),
       el('label', 'check', terminalList, t('session_list_on')), note(t('session_list_desc')),
       size('per_prompt_chars', 'per_prompt_chars'), size('per_prompt_wait_ms', 'per_prompt_wait_ms'), promptSide(f.prompt_side),
