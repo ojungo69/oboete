@@ -1,0 +1,22 @@
+docs/session-start.md
+  s_70102dd6ea5599::t_063503ec670219 24,40
+src/consumer/manifest.rs
+  s_70102dd6ea5599::t_ca8fc085ba30ed 98-100,1318-1321,1324,1326-1328,1331-1334,3132-3183
+  s_70102dd6ea5599::t_f91fa63f445b58 3184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "57edd2a17629a8dbd3f94de82e00578c13e1797f",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
