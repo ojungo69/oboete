@@ -5959,9 +5959,10 @@ function providerTarget(taken, target, mine, action) {
 function providerKeyLine(action, path, mine) {
   if (path === '/key') {
     simpleKeyName = null;
-    // Its own line's "Change the key" closes; another line's stays, with what is typed there.
+    // The line's "Change the key" closes when its own key, its first entry's, was saved; another
+    // line's, or this line's while a later entry's key was saved, stays with what is typed there.
     const saved = mine.providers.find((p) => selectorKey(p.selector) === selectorKey(action.selector));
-    if (saved) keyChanging.delete(saved.name);
+    if (saved && mine.providers.find((p) => p.name === saved.name) === saved) keyChanging.delete(saved.name);
   }
   if (action.op !== 'create') return;
   const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
@@ -7675,8 +7676,8 @@ function simpleCatalog(f) {
     key.dataset.simpleFocus = 'catalog.key';
     key.setAttribute('aria-label', t('key_label', { name: label }));
     // Named by where "Add" sends it as the draft is now: an address or API changed in More
-    // settings gets nothing back (#807).
-    keepSecret(key, JSON.stringify(['add', draft.name, draft.kind, draft.api, draft.base_url]), () => {});
+    // settings gets nothing back (#807), and "Add" sends it only to the destination it was typed for.
+    keepSecret(key, addTarget(draft), () => {});
   }
   // 2. Its model, with its prices where the page knows them.
   const prices = MODEL_PRICES[urlHost(entry.base_url)] || {};
@@ -7700,7 +7701,8 @@ function simpleCatalog(f) {
   save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
   save.addEventListener('click', () => {
     if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
-    const typed = key?.value ?? '';
+    // A key typed before the draft's destination changed in More settings is not sent (#807).
+    const typed = key && key.dataset.secret === addTarget(draft) ? key.value : '';
     if (key) key.value = '';
     void simpleAdd(entry, draft, typed, f.simplePlace ?? 'last', save);
   });
@@ -7715,6 +7717,11 @@ function simpleCatalog(f) {
     field('simple_model_short', model), field('simple_place', place),
     entry.name === 'gemini' ? el('p', 'desc', t('simple_gemini_warning')) : null,
     el('div', 'actions', save, cancel)));
+}
+
+// Where the add form's key goes: the draft's name, kind, API and address as they are now.
+function addTarget(draft) {
+  return JSON.stringify(['add', draft.name, draft.kind, draft.api, draft.base_url]);
 }
 
 // Decision 80: "Add" makes the AI chosen in "Add AI": it creates the entry (off when it takes a key),

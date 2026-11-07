@@ -2698,6 +2698,14 @@ console.log('PASS: the caps\' No cap switches');
       assert.equal(simple('catalog.key').value,'made-up-add-key-1118','kept through a redraw');
       vm.runInContext("form.newProvider.base_url='https://elsewhere.example/v1'",ctx);ctx.ui.drawSettings();
       assert.equal(simple('catalog.key').value,'','its address changed: not put back');
+      // Its address changed in More settings with no redraw since: "Add" sends the key nowhere.
+      await pickOpenAI();posted.length=0;
+      typeIn(simple('catalog.key'),'made-up-add-key-1123');
+      typeIn(panel.querySelector('.new-provider').querySelectorAll('input').find(n=>n.dataset.field==='providers.base_url'),'https://elsewhere.example/v1');
+      answers=[json(state('v2'))];
+      simple('catalog.save').click();await settled(16);
+      assert.deepEqual([steps().map(s=>s[0]),posted.some(p=>p.body.includes('made-up-add-key-1123'))],[['/api/providers'],false],
+        'its address changed before "Add": made, its key sent nowhere');
       // Last, the name held at the front by an order an entry removed before left: saved last.
       await pickOpenAI();posted.length=0;
       answers=[json(state('v2',{order:['openai','alpha','beta']})),json(state('v3'))];
@@ -2739,6 +2747,16 @@ console.log('PASS: the caps\' No cap switches');
       typeIn(simple('key:beta'),'made-up-sent-key-1120');simple('key-save:beta').click();await settled(8);
       assert.deepEqual([simple('key:alpha')?.value,Boolean(simple('key:beta')),Boolean(simple('key-change:beta'))],
         ['made-up-unsent-key-1119',false,true],'a key saved in one line: another\'s field open, its key kept');
+      // A later entry's key saved in Advanced settings: its line's "Change the key", its first
+      // entry's, stays open with what is typed there.
+      vm.runInContext('keyChanging.clear()',ctx);
+      f=draw(lineAi([row('alpha',{entries:2})],{key_input:true,providers:[entry('alpha',0),entry('alpha',1)]}));
+      simple('key-change:alpha').click();
+      typeIn(simple('key:alpha'),'made-up-unsent-key-1124');
+      answers=[json({...lineAi([row('alpha',{entries:2})],{version:'v2',key_input:true,providers:[entry('alpha',0),entry('alpha',1)]}),
+        key_saved:{durable:true}})];
+      typeIn(simple('key:entry:config:1'),'made-up-sent-key-1125');simple('key-save:entry:config:1').click();await settled(8);
+      assert.equal(simple('key:alpha')?.value,'made-up-unsent-key-1124','a later entry\'s key saved: the line\'s field stays, its key kept');
       vm.runInContext('keyChanging.clear()',ctx);
       ctx.ui.setLang('ja');f=draw(before());choice('openai').click();await settled();
       assert(text(panel).includes('使う順番')&&text(panel).includes('API キー'),'both languages');
