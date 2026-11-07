@@ -7443,7 +7443,10 @@ curate = false
             .open(home.path().join("state/rebuild.lock"))
             .unwrap();
         lock.lock().unwrap();
-        std::fs::write(home.path().join("state/rebuild.lock"), "1700000000000").unwrap();
+        lock.set_modified(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000),
+        )
+        .unwrap();
         let _contending = crate::worker::contending();
         assert_eq!(
             get(&v, "/api/rests")["paused"],

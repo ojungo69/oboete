@@ -5872,7 +5872,7 @@ function currentSettings(mine) {
 function reloadProviderSettings(current) {
   const shown = form;
   form = loadedForm(current);
-  if (form && shown) Object.assign(form, { stopped: shown.stopped, resting: shown.resting });
+  if (form && shown) Object.assign(form, { stopped: shown.stopped, resting: shown.resting, paused: shown.paused });
   if (form) form.privacy = privacyPending();
   drawSettings();
   setStatus(t('stale'), true, lang);

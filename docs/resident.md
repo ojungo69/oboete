@@ -333,13 +333,17 @@ two locks: "worker: resident, running" or "not running now (the next hook starts
 http://127.0.0.1:<port> is up" or "not running: <view-outcome>; run `oboete view`". Neither "not
 running" line is a failure. `oboete rebuild` holds a lock of its own (`state/rebuild.lock`) while it
 runs and the stats route reports `rebuilding` from that lock, so a resident worker cannot make the
-page say "rebuilding" for good. While it is held, hooks read nothing from knowledge.db, the store it
-fills (#855): SessionStart hands nothing over and its note says the memory is being rebuilt, and the
-per-prompt and correction blocks and the file notes are empty, so no claim the new store has not
-reached yet is reported as withdrawn. Each checks the lock after raw is open, so a set-aside, which
+page say "rebuilding" for good. While it is held, the hooks that report on the whole store read
+nothing from knowledge.db, the store it fills (#855): SessionStart hands nothing over and its note
+says the memory is being rebuilt (a compaction's shown set is replaced by what it handed over, as
+always), and the per-prompt and correction blocks and the file notes are empty, so no claim the new
+store has not reached yet is reported as withdrawn. The MCP tools and the memory lookup still answer
+from the store as far as it is filled: fewer results, nothing reported as changed. Each checks the lock after raw is open, so a set-aside, which
 waits for raw's lock, never comes between the check and the read. A file a failed rebuild left behind
 is no rebuild. The rebuild and the purge's lock (`state/purge.lock`, which a retention pass takes too)
-write their taking time into their lock file; while either is held, doctor and the settings page say
+set their taking time as their lock file's modification time, through the handle that holds it (its
+bytes are not written: Windows lets no other handle read a file locked whole); while either is held,
+doctor and the settings page say
 that curation is paused, for which of the two and since when (`/api/rests` gives it, the page reading
 it as it reads the chain's rests).
 

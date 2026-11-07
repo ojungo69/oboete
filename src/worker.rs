@@ -1890,15 +1890,13 @@ pub(crate) fn rebuilding(home: &Path) -> bool {
     lock_held(&home.join("state/rebuild.lock"))
 }
 
-/// A lock file's taking time, written into it once it is held (#855): when the pause it causes
-/// began, read only while it is held (`curation_pause`), so a number a crash left is never shown.
+/// A lock file's taking time, as its modification time, set through the handle that holds it
+/// (#855): when the pause it causes began, read only while it is held (`curation_pause`), so a time
+/// a crash left is never shown. Its bytes are not written: Windows lets no other handle read the
+/// bytes of a file locked whole, while its metadata stays readable, and a lock file that is a link
+/// would carry the write to its target.
 pub(crate) fn stamp(lock: &std::fs::File) {
-    use std::io::{Seek, Write};
-    let mut file = lock;
-    let _ = file
-        .set_len(0)
-        .and_then(|()| file.seek(std::io::SeekFrom::Start(0)))
-        .and_then(|_| file.write_all(crate::db::now_ms().to_string().as_bytes()));
+    let _ = lock.set_modified(std::time::SystemTime::now());
 }
 
 /// Why curation is paused now, and since when (#855): `rebuild` while a rebuild fills a new
@@ -1912,8 +1910,11 @@ pub(crate) fn curation_pause(home: &Path) -> Option<(&'static str, Option<i64>)>
         .find_map(|(kind, name)| {
             let path = state.join(name);
             lock_held(&path).then(|| {
-                let since = std::fs::read_to_string(&path).ok();
-                (kind, since.and_then(|t| t.trim().parse().ok()))
+                let since = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                let ms = since
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|d| i64::try_from(d.as_millis()).ok());
+                (kind, ms)
             })
         })
 }
@@ -5764,8 +5765,8 @@ mod tests {
     }
 
     /// #855: curation is paused while a rebuild or a rewrite of the stored records holds its lock,
-    /// since the time stamped in it; a stamped lock not held is no pause, and one held with no stamp
-    /// gives no time. A rebuild and the purge's lock stamp their file when they take it.
+    /// since the time set on it as its modification time; a lock not held is no pause, whatever its
+    /// time. A rebuild and the purge's lock set it when they take their lock.
     #[test]
     fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
         let _contending = contending();
@@ -5774,7 +5775,9 @@ mod tests {
         assert_eq!(curation_pause(p), None);
         assert_eq!(paused_line(p), None);
         std::fs::create_dir_all(p.join("state")).unwrap();
-        let held = |name: &str, text: &str| {
+        // Taken as a rebuild or a purge takes it, its time set through the handle that holds it, as
+        // Windows allows.
+        let held = |name: &str, ms: u64| {
             let path = p.join("state").join(name);
             let lock = std::fs::OpenOptions::new()
                 .create(true)
@@ -5783,10 +5786,11 @@ mod tests {
                 .open(&path)
                 .unwrap();
             lock.lock().unwrap();
-            std::fs::write(&path, text).unwrap();
+            lock.set_modified(std::time::UNIX_EPOCH + Duration::from_millis(ms))
+                .unwrap();
             lock
         };
-        let rebuild = held("rebuild.lock", "1700000000000");
+        let rebuild = held("rebuild.lock", 1_700_000_000_000);
         assert_eq!(
             curation_pause(p),
             Some(("rebuild", Some(1_700_000_000_000)))
@@ -5799,13 +5803,14 @@ mod tests {
         );
         drop(rebuild);
         assert_eq!(curation_pause(p), None, "a stamped lock not held");
-        let rewrite = held("purge.lock", "");
-        assert_eq!(curation_pause(p), Some(("rewrite", None)));
-        assert!(
-            paused_line(p)
-                .unwrap()
-                .ends_with("(a forget, the retention period or new masks)")
+        let rewrite = held("purge.lock", 1_700_000_060_000);
+        assert_eq!(
+            curation_pause(p),
+            Some(("rewrite", Some(1_700_000_060_000)))
         );
+        assert!(paused_line(p).unwrap().ends_with(
+            "(a forget, the retention period or new masks), since 2023-11-14 22:14 UTC"
+        ));
         drop(rewrite);
         // The purge's lock stamps its file when it takes it.
         let before = crate::db::now_ms();

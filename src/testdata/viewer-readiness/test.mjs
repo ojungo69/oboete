@@ -2585,10 +2585,13 @@ console.log('PASS: the caps\' No cap switches');
       // A version the file no longer has: the page reads the settings again, as after any provider request.
       vm.runInContext('forgetModelLists()',ctx);
       f=draw(one());
+      // #855: a pause shown before stays through the settings read again (the rests unanswered).
+      f.paused={kind:'rebuild',since:null};
       reread=one({},{version:'v9'});answers=[json({code:'stale',field:''},409)];
       open('alpha');await settled();
       assert.deepEqual([ctx.ui.getForm().version,status().includes('config.toml was changed elsewhere'),
         text(lineOf('alpha')).includes('could not be read')],['v9',true,false],'a 409 reads the settings again and says so once');
+      assert.equal(panel.querySelector('.simple-paused')?.hidden,false,'the pause stays through the read again');
       reread=null;
       answers=[json({models:['model-alpha'],from:'service'})];
       open('alpha');await settled();

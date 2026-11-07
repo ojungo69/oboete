@@ -7943,8 +7943,9 @@ mod tests {
     /// #855: while a rebuild fills a new knowledge.db, hooks read nothing from it: a claim not
     /// rebuilt yet is not reported as no longer delivered, a correction past the new store's
     /// checkpoint is not reported as withdrawn, and the session's shown set stays; once the rebuild
-    /// has ended, the real change is named once. SessionStart then hands over nothing, keeps its
-    /// shown set, and its note says the memory is being rebuilt, not that there is none.
+    /// has ended, the real change is named once. SessionStart then hands over nothing (a new
+    /// session's shown set stays empty) and its note says the memory is being rebuilt, not that
+    /// there is none.
     #[test]
     fn hooks_read_nothing_from_a_store_being_rebuilt() {
         let mut p = Prompts::new(false);
