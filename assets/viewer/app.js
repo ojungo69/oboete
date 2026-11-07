@@ -5970,13 +5970,17 @@ function providerTarget(taken, target, mine, action) {
 // Whether an AI line shows its key field after a provider's write: no longer after a key saved; after
 // a creation, for the created entry only when it is the first of its name, as the line's field is the
 // first entry's (CodeRabbit on #820). Each creation sets it anew.
-function providerKeyLine(action, path, mine) {
+function providerKeyLine(action, path, mine, kept = true) {
   if (path === '/key') {
     simpleKeyName = null;
     // The line's "Change the key" closes when its own key, its first entry's, was saved; another
     // line's, or this line's while a later entry's key was saved, stays with what is typed there.
+    // A key the disk did not confirm leaves its field open, to be saved again (#863).
     const saved = mine.providers.find((p) => selectorKey(p.selector) === selectorKey(action.selector));
-    if (saved && mine.providers.find((p) => p.name === saved.name) === saved) keyChanging.delete(saved.name);
+    if (saved && mine.providers.find((p) => p.name === saved.name) === saved) {
+      if (kept) keyChanging.delete(saved.name);
+      else keyChanging.add(saved.name);
+    }
   }
   if (action.op !== 'create') return;
   const first = action.entry.kind === 'openai' && form.providers.filter((p) => p.name === action.entry.name).length === 1;
@@ -6000,7 +6004,7 @@ async function providerWrite(action, button, body, path, target = null) {
     providerTarget(taken, target, mine, action);
     const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
     simpleReceipt = kept ? 'ai' : null;
-    providerKeyLine(action, path, mine);
+    providerKeyLine(action, path, mine, kept);
     drawSettings();
     setStatus(t(providerSuccessKey(action, path, answer)), !kept, lang);
     askHeldAgain();

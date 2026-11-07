@@ -1297,7 +1297,12 @@ pub fn pin_language(home: &Path) -> anyhow::Result<Option<String>> {
         return Ok(None);
     };
     let text = utf8(Some(&was)).ok_or_else(|| anyhow::anyhow!("config.toml is not UTF-8"))?;
-    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    // As the other config writers: a file one of its readers refuses is left as it is, and the error
+    // names none of its values, a header's key or a masking rule (Codex on decision 81).
+    anyhow::ensure!(parsed(&path, text).is_some(), "config.toml is invalid");
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|_| anyhow::anyhow!("config.toml is invalid"))?;
     let set = (doc.get("summary").and_then(|t| t.as_table_like()))
         .is_some_and(|t| t.contains_key("language"));
     if set {
@@ -1306,7 +1311,10 @@ pub fn pin_language(home: &Path) -> anyhow::Result<Option<String>> {
     let language = config::os_language();
     put(&mut doc, "summary", "language", language.as_str().into());
     let candidate = doc.to_string();
-    config::parse_capture(Some(&candidate))?;
+    anyhow::ensure!(
+        parsed(&path, &candidate).is_some(),
+        "config.toml is invalid"
+    );
     let staged = crate::setup::stage(&path, &candidate)?;
     anyhow::ensure!(
         version(bytes(home)?.as_deref()) == version(Some(&was)),
@@ -2035,6 +2043,23 @@ mod tests {
     /// Decision 81: setup writes the computer's language into a config.toml without one, keeps a
     /// value set, and makes no config.toml; the page is told the computer's language, and a
     /// language saved empty takes the key out, back to the computer's.
+    /// Codex on decision 81: setup's language is not written into a file one of its readers refuses,
+    /// which neither stops setup (a `[summary]` of another type) nor shows a value of the file (a
+    /// line that does not parse).
+    #[test]
+    fn the_computers_language_is_not_written_into_a_file_a_reader_refuses() {
+        for text in [
+            "summary = \"wrong\"\n",
+            "[summary]\ncurate = true\nnote = \"made-up-canary-5523\" more\n",
+            "[redaction]\nrules = 'made-up-canary-5523'\n",
+        ] {
+            let home = home_with(Some(text));
+            let error = format!("{:#}", pin_language(home.path()).unwrap_err());
+            assert!(!error.contains("canary"), "{error}");
+            assert_eq!(file(&home).as_deref(), Some(text));
+        }
+    }
+
     #[test]
     fn the_computers_language_is_written_once_and_an_empty_one_is_its_default() {
         let none = home_with(None);

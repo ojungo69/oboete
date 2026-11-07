@@ -2736,10 +2736,11 @@ console.log('PASS: the caps\' No cap switches');
       // #863: a key saved but not kept safely stops "Add" at its key.
       await pickOpenAI();posted.length=0;
       typeIn(simple('catalog.key'),'made-up-add-key-1126');
-      answers=[json(state('v2')),json({...state('v3'),key_saved:{durable:false}})];
+      // The key is registered (its state ok); the disk did not confirm the write.
+      answers=[json(state('v2')),json({...state('v3',{key:'ok'}),key_saved:{durable:false}})];
       simple('catalog.save').click();await settled(16);
-      assert.deepEqual([steps().map(s=>s[0]),focusKey()],[['/api/providers','/api/providers/key'],'key:openai'],
-        'a key not kept: stopped, its key field');
+      assert.deepEqual([steps().map(s=>s[0]),Boolean(simple('key:openai')),focusKey()],
+        [['/api/providers','/api/providers/key'],true,'key:openai'],'a key not kept: stopped, its key field open and focused');
       // #863: a draft switched to a CLI in More settings takes no key and is made on.
       await pickOpenAI();posted.length=0;
       choose(panel.querySelector('.new-provider').querySelectorAll('select')[0],'claude');await settled();
