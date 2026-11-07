@@ -2964,6 +2964,30 @@ console.log('PASS: the caps\' No cap switches');
     await read(lists([],[]));
     assert.equal(said('alpha'),'Ready to use','a rest ended');
     assert(page().every((fold,i)=>fold===folds[i]),'the lines are not drawn again');
+    // #855: a rebuild or a rewrite of the stored records pauses curation: said above the groups,
+    // in place, in both languages, gone once it ends.
+    const paused=()=>panel.querySelector('.simple-paused');
+    assert(paused()&&paused().hidden,'no pause: hidden');
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:noon.getTime()}}));
+    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused while the memory is rebuilt, since ')
+      &&text(paused()).includes('12:00'),text(paused()));
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rewrite',since:null}}));
+    assert.equal(text(paused()),'Summaries are paused while the stored records are rewritten (a forget, the retention period or new masks). They start again by themselves when it is done.');
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();
+    assert.deepEqual([paused().hidden,text(paused())],[false,'保存した記録を書き直している間 (忘れる操作、保存期間、伏せ字の適用)、要約は止まっています。終わると自動で再開します。'],
+      'drawn again: shown, in Japanese');
+    ctx.ui.setLang('en');ctx.ui.drawSettings();
+    // Through a save's answer, which draws the page from it: the pause stays, with no rests read
+    // answering meanwhile.
+    restsAnswer=null;
+    answers=[json(ai(['alpha','beta'],{stopped:[],resting:[],chain:[row('alpha'),row('beta',{on:false})]}))];
+    flip(simple('on:beta'),false);await settled(8);
+    assert.equal(posted.at(-1)?.url,'/api/settings','a save went');
+    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused'),'kept through the answer');
+    answers=[json(ai(['alpha','beta'],{stopped:[],resting:[]}))];
+    flip(simple('on:beta'),true);await settled(8);
+    await read(lists([],[]));
+    assert(paused().hidden,'ended: hidden');
     // Timed, then the owner's hold (its Resume shown and its fold opened), resumed elsewhere, then
     // timed again.
     await read(lists([],[{name:'alpha',until:noon.getTime()}]));

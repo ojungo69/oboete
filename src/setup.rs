@@ -2749,6 +2749,10 @@ pub fn doctor(home: &Path) -> Result<()> {
     if let Some(line) = crate::worker::left_line(home) {
         println!("  {line}");
     }
+    // #855: a pause while a rebuild or a rewrite of the stored records holds its lock; no failure.
+    if let Some(line) = crate::worker::paused_line(home) {
+        println!("  {line}");
+    }
     match (config::worker(home), config::view(home)) {
         (Ok(worker), Ok(view)) if worker.resident => {
             if cfg!(target_os = "linux") {

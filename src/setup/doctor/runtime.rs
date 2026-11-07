@@ -233,6 +233,8 @@ fn worker_last(source: &Observed, running: &Flag) -> Last {
     };
     let kind = if why.is_empty() {
         "clean"
+    } else if why == crate::worker::ASIDE {
+        "stepped_aside"
     } else if why == crate::worker::STOPPED {
         match running.value {
             Some(true) => "running",

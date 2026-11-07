@@ -1061,6 +1061,9 @@ const TEXT = {
   simple_ai_h: ['AI for summaries', '要約に使う AI'],
   simple_ai_desc: ['The enabled AI services are tried in this order and receive the records needed to write a summary.', 'オンにした AI がこの順番で使われ、要約に必要な記録が送られます。'],
   simple_no_ai: ['No AI for summaries can be used yet; add a key below or add an AI.', '要約に使える AI がまだないため、下の一覧でキーを登録するか、AI を追加してください。'],
+  curation_paused_rebuild: ['Summaries are paused while the memory is rebuilt{since}. They start again by themselves when it is done.', '記憶を作り直している間、要約は止まっています{since}。終わると自動で再開します。'],
+  curation_paused_rewrite: ['Summaries are paused while the stored records are rewritten (a forget, the retention period or new masks){since}. They start again by themselves when it is done.', '保存した記録を書き直している間 (忘れる操作、保存期間、伏せ字の適用)、要約は止まっています{since}。終わると自動で再開します。'],
+  curation_paused_since: [', since {time}', ' ({time} から)'],
   simple_curate: ['Create summaries', '記録を要約する'],
   simple_status_missing: ['Needs an API key', 'API キーの登録が必要です'],
   simple_status_not_installed: ['Not installed', 'インストールされていません'],
@@ -2190,6 +2193,7 @@ const TEXT = {
   doctor_yes: ['yes', 'はい'],
   doctor_no: ['no', 'いいえ'],
   doctor_last_clean: ['completed cleanly', '正常に終了'],
+  doctor_last_stepped_aside: ['stepped aside for a command', 'コマンドに処理を譲りました'],
   doctor_last_running: ['in progress', '処理中'],
   doctor_last_interrupted: ['interrupted', '中断'],
   doctor_last_failed: ['failed', '失敗'],
@@ -5811,7 +5815,7 @@ function mergeProviderSettings(answer, mine, action) {
   next.simpleCapOn = Boolean(mine.simpleCapOn) && answer.paid_usd_per_month === null;
   next.privacy = mine.privacy;
   // The rests shown are the last read's (69b-3c-1b), not the older lists an answer carries.
-  Object.assign(next, { stopped: mine.stopped, resting: mine.resting });
+  Object.assign(next, { stopped: mine.stopped, resting: mine.resting, paused: mine.paused });
   next.preference = mine.preference;
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
@@ -6568,7 +6572,7 @@ function applySavedSettings(answer, mine, current, simple = null, sent = null) {
   const moved = runtime?.mode === 'resident' && runtime.port !== (Number(location.port) || 80);
   if (moved && movePage(runtime.url || '')) return;
   form = current ? loadedForm(current) : mergeProviderSettings(answer, mine, { op: simple ? 'simple' : 'settings' });
-  if (current && form) Object.assign(form, { stopped: mine.stopped, resting: mine.resting });
+  if (current && form) Object.assign(form, { stopped: mine.stopped, resting: mine.resting, paused: mine.paused });
   // Decision 69: the owner went on typing while a change saved at once was on its way. The drafts
   // stay, with the answer's saved values, version and key, and are saved when their field is left.
   if (sent !== null && !current && form) {
@@ -7070,16 +7074,24 @@ async function refreshRests() {
   const lists = await api('rests').catch(() => ({}));
   if (asked !== restsAsked || view !== 'settings' || !form) return;
   const f = form;
-  const [stopped, resting] = [lists.stopped ?? null, lists.resting ?? null];
-  if (JSON.stringify([f.stopped, f.resting]) === JSON.stringify([stopped, resting])) return;
+  const [stopped, resting, paused] = [lists.stopped ?? null, lists.resting ?? null, lists.paused ?? null];
+  if (JSON.stringify([f.stopped, f.resting, f.paused ?? null]) === JSON.stringify([stopped, resting, paused])) return;
   const was = f.stopped;
-  Object.assign(f, { stopped, resting });
+  Object.assign(f, { stopped, resting, paused });
   renderRests(f, JSON.stringify(was) !== JSON.stringify(stopped));
 }
 
 // The rests drawn in place: each AI line's state and its Resume (its fold opened for a hold only the
 // owner ends, as a new draw opens it), and the stopped list in More settings. Nothing else of a line
 // is drawn again, so what is typed, a draft, a confirmation, a write's hold and the focus stay.
+// Why curation is paused, and since when, as `/api/rests` gives it (#855); empty while it is not.
+function pausedText(f) {
+  const p = f.paused;
+  if (!p) return '';
+  const since = p.since ? t('curation_paused_since', { time: new Date(p.since).toLocaleString(lang) }) : '';
+  return t(p.kind === 'rebuild' ? 'curation_paused_rebuild' : 'curation_paused_rewrite', { since });
+}
+
 function renderRests(f, stoppedChanged) {
   if (view !== 'settings' || form !== f) return;
   const keep = focusKeep();
@@ -7103,6 +7115,11 @@ function renderRests(f, stoppedChanged) {
   }
   const empty = $('panel').querySelector('.simple-empty');
   if (empty) empty.hidden = chain.some((r) => simpleProviderStatus(r, f.stopped, f.resting) === 'ready');
+  const paused = $('panel').querySelector('.simple-paused');
+  if (paused) {
+    paused.hidden = !f.paused;
+    paused.replaceChildren(pausedText(f));
+  }
   // The stopped list only when the owner's holds changed: its Resume keeps the focus otherwise.
   if (stoppedChanged) $('panel').querySelector('.stopped-state')?.replaceChildren(...[...stoppedState().childNodes]);
   if ([null, document.body].includes(document.activeElement)) focusBack(keep);
@@ -7972,7 +7989,10 @@ function simpleGroups(f, more) {
   // Drawn always, shown while no AI can be used: a rests read changes it in place (`renderRests`).
   const empty = el('p', 'simple-empty', t('simple_no_ai'));
   empty.hidden = ready;
-  return present([empty,
+  // Drawn always, shown while a rebuild or a rewrite of the stored records pauses curation (#855).
+  const paused = el('p', 'simple-paused', pausedText(f));
+  paused.hidden = !f.paused;
+  return present([paused, empty,
     foldGroup('s-inject', true, t('simple_inject_h'),
       t('simple_state_inject', { start: state(s.inject.session_start), prompt: state(s.inject.per_prompt) }),
       simpleBody('inject', ...inject, contextPreviewFold(f)), more.inject),
@@ -8468,7 +8488,7 @@ function askHeld(held, confirmed) {
     // What is saved holds no privacy state: the one read stays (cubic and CodeRabbit on #806).
     form = formOf(mine.savedSettings);
     form.privacy = mine.privacy;
-    Object.assign(form, { stopped: mine.stopped, resting: mine.resting });
+    Object.assign(form, { stopped: mine.stopped, resting: mine.resting, paused: mine.paused });
     void refreshRests();
     drawSettings();
     setStatus('');
