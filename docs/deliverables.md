@@ -57,7 +57,8 @@ none.
   leave no reply (capture.rs: an empty Stop and transcript tail), so its records are read with the
   next reply or the session's end. A reply a forget purged (its session gone) still ends its turn:
   the next turn's end takes none of the forgotten turn's records again (a purged reply of another
-  session ends it too, which copies less, never more). A resident worker sees a reply within a
+  session ends it too, which copies less, never more), as does a record a restore brought back with
+  no kind (CodeRabbit on #851). A resident worker sees a reply within a
   second or two, so the copy is the file as the turn left it; a worker that comes later copies the
   file as it is then (a difference: claude-mem copies in the Stop hook).
 - **A subagent's stop** (docs/subagents.md, slice 3). The phase also reads a Claude Code hook
@@ -281,7 +282,8 @@ call's folder as a root by its identity, recorded by the hook) in a PR of its ow
 
 - A foreground subagent's files are its parent turn's: a parent turn that never ends (no reply, no
   session end) copies none, where claude-mem's SubagentStop copies them. A subagent launched by
-  another in a gap (after the parent's reply) copies none: its launch's turn had no prompt.
+  another in a gap (after the parent's reply, with no prompt or harness message before the launch
+  in its turn) copies none: its launch's turn had no prompt.
 - Codex writes files through `apply_patch` and shell commands, and Grok through shell commands as
   well as its `search_replace` and `write`; claude-mem reads neither `apply_patch` nor a shell
   command: a file so written is copied only when the turn declares it.

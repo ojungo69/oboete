@@ -491,7 +491,8 @@ Slice 3:
   the stop's arrival after the round's start wakes, takes it.
 - **The launch** (`deliverables::stop_calls`, `launched_public`): the subagent's newest `launch`
   fact before the stop, read in raw as a hook's event (the facts keep no source; a forget's
-  registration tombstones it at once, before its purge), its `public_turn` mark there, and a prompt
+  registration tombstones it at once, before its purge) that still names the subagent (a mask of
+  its id names none: `consumer::subagents::facts`), its `public_turn` mark there, and a prompt
   or harness message read before it in its own turn (`prompted_before`, through
   `Raw::hook_turn_start` and `Raw::turn_seqs`). Else the stop copies nothing, and counts as taken.
 - **The calls**: its `step` facts after the newer of `subagent_scan`'s seq and the newest `stop`
@@ -509,8 +510,11 @@ Slice 3:
   sweep's). Then `subagent_scan` takes the stop's seq with the phase's checkpoint, in one
   transaction. A restore below the checkpoint empties the device's `subagent_scan` as it moves the
   checkpoint.
-- **Not covered**, besides the plan's: a subagent launched by another after the parent's reply
-  copies nothing, its launch's turn having no prompt; claude-mem's SubagentStop copies its files.
+- **Not covered**, besides the plan's: a subagent launched by another in a gap (after the parent's
+  reply, with no prompt or harness message before the launch in its turn) copies nothing, its
+  launch's turn having no prompt; claude-mem's SubagentStop copies its files. The owner's Mark
+  finished is a stop as a hook's is: a subagent marked long after its calls copies its files as
+  they are then, as a worker that comes late copies a turn's.
 - **Reviewed.** A local Codex review of the code found the launch looked at before a forget could
   register while the files were copied, the kept seq committed apart from the checkpoint (a restore
   that kept the checkpoint then skipped a new file at a seq given again), every call of a stop held
@@ -521,13 +525,17 @@ Slice 3:
   turn, and a call after two replies whose newer one was purged as in the older one's gap. A purged
   hook reply of the device now ends a turn (`Raw::hook_turn_start`, which ends a turn's copies
   there too) and a gap (`Raw::gap_reply`); a step aside is looked for while the calls are read too
-  (`candidates`), and a test holds the read fence at the row.
-- **Mutation runs**: 24 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
+  (`candidates`), and a test holds the read fence at the row. On #851 Sourcery found a launch
+  masked while the files were copied still authorizing them, and CodeRabbit a restored record of no
+  kind (a backup line that carried none) passed over as a boundary; both are fixed, with a test,
+  and the parity row's wording names the harness message that ends a gap.
+- **Mutation runs**: 27 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
   boundary, the turn, the gap's purged prompt and denied reply, the launch's mark, prompt and
   harness message, the hook source, the wait and its rebuild, the restore, the kept seq and its
   transaction, the row's fence (looked at and held), the wait's return, the step aside in each
-  pass, the gap's bound and its purged records, a purged reply ending a turn and a gap, and
-  `prompted` makes a test fail. The launch's mark survived the first run, the private
+  pass, the gap's bound and its purged records, a purged reply or a restored record of no kind
+  ending a turn and a gap, the launch read again naming its subagent, and `prompted` makes a test
+  fail. The launch's mark survived the first run, the private
   turn's launch having no prompt either; the notification's turn after it, which has one, kills it.
   A check of the launch's denial survived the second, a forget's registration tombstoning the
   launch already, and is gone.
@@ -546,6 +554,8 @@ Slice 3:
   `deliverables::tests::a_stops_row_is_denied_by_its_reply_not_by_its_stop_or_launch`,
   `deliverables::tests::a_taken_stop_masked_since_still_bounds_the_next`,
   `deliverables::tests::a_launch_forgotten_while_its_stops_files_are_copied_leaves_no_row_after`,
-  `deliverables::tests::a_purged_reply_still_ends_its_turn_and_gap`. My Work
+  `deliverables::tests::a_purged_reply_still_ends_its_turn_and_gap`,
+  `deliverables::tests::a_launch_masked_while_its_stops_file_is_copied_leaves_no_row`,
+  `deliverables::tests::a_restored_record_of_no_kind_ends_a_turn_and_a_gap`. My Work
   links a stop's copy to the request whose prompt span holds its call (`my_work::copies_of`, as for
   a turn's copy, `my_work::tests::a_requests_copies_join_its_work_product`).
