@@ -125,10 +125,10 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
     returned with it (`status` `completed` and not async, claude-mem's foreground call). A
     subagent's own call that starts another is a step of the one and a launch of the other.
   - A tombstone's target loses its rows, made again from what raw gives now (none once removed), as
-    the manifest's facts are; a rewind drops the device's rows and builds them again from seq 1.
+    the manifest's facts are; a rewind drops every device's rows and builds them again from seq 1.
     `oboete rebuild` makes them from raw alone. An expired record gives no fact, its body being gone:
     a subagent whose records expired leaves My Work with its conversation's other work.
-  - It runs after `rescan` and before `compress`, and reads every device raw holds, as `fts-text`
+  - It runs after `products` and before `compress`, and reads every device raw holds, as `fts-text`
     does. Its first run walks raw once; 60,725 of this PC's records are Claude Code hook tool calls
     (2026-11-07).
 - **My Work's read.** The subagents part takes the read fence (`dispatch::reading`) itself, after
@@ -193,13 +193,14 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
   those at the subagent's stop. A stop looks at the subagent's calls (its `step` facts in
   knowledge.db, of this device's hook records) after its previous stop and before it: the newer of
   the newest stop of the same subagent the phase took (`subagent_scan` in deliverables.db, which a
-  forget or a mask of that stop leaves) and the newest the facts hold (a hook's, of this device).
-  Of those it takes a call in a gap: the session's newest hook reply before the call is there and
-  not forgotten, and no prompt or harness message of the session lies between them (nor a purged
-  record of this device that was one, its session gone). A call is so taken once, by its turn's
-  end or by the first stop after it the phase took; a stop it did not take (forgotten or masked
-  before the phase read it) leaves its calls to the next. A raw.db restored below the phase's
-  checkpoint empties the device's `subagent_scan` as the checkpoint moves.
+  forget or a mask of that stop leaves) and the newest the facts hold that raw reads as a hook's
+  of this device (the facts keep no source). Of those it takes a call in a gap: the session's
+  newest hook reply before the call is there and not forgotten, and no prompt or harness message
+  of the session lies between them (nor a purged record of this device that was one, its session
+  gone). A call is so taken once, by its turn's end or by the first stop after it the phase took;
+  a stop it did not take (forgotten or masked before the phase read it) leaves its calls to the
+  next. A raw.db restored below the phase's checkpoint empties the device's `subagent_scan` as the
+  checkpoint moves.
 - **Whose.** Only a subagent launched from a turn the hooks saw public: its launch record (the
   parent's `Agent` or `Task` call that `launched` it, the newest before the stop, a hook record of
   this device and session) reads now as an event marked public, and a prompt or harness message of
@@ -217,8 +218,9 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
   turn's (one path, its last write's call; no failed call; `MAX_FILES` at most), copied as a
   turn's: the row's turn the gap's reply (`turn_seq`, `turn_ts`), its call the call that wrote or
   declared the file, by which My Work links the copy to that call's request. Two gaps' rows stay
-  apart under the table's unique key, identical content at two paths too, and `copy_into` keeps one
-  file for one content. A forget of the call or of the gap's reply denies the row from its
+  apart under the table's unique key, identical content at two paths too; a gap's row whose copy its
+  reply's own turn made is that turn's row, as two calls of one turn are one; and `copy_into` keeps
+  one file for one content. A forget of the call or of the gap's reply denies the row from its
   registration on; a forget of the stop alone does not. After the rows, the stop's seq goes into
   `subagent_scan`, then the phase's checkpoint: a stop taken again after an interruption makes the
   same rows (unique) or none.
