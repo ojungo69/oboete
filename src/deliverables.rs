@@ -1249,12 +1249,12 @@ pub(crate) fn run(
             #[cfg(test)]
             seam(Stage::Row);
             let _read = match &stopped {
-                Some((_, launch)) => {
+                Some((agent_id, launch)) => {
                     let read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
                     let forgets = |(seq, ts): (i64, i64)| {
                         raw.forgets(&device, &e.agent, &e.session, e.repo.as_deref(), seq, ts)
                     };
-                    if !launched_public(raw, &e.agent, &e.session, *launch)?
+                    if !launched_public(raw, (&e.agent, &e.session, agent_id), *launch)?
                         || forgets(c.call)?
                         || forgets(turn)?
                     {
@@ -1349,7 +1349,7 @@ fn stop_calls(
     };
     // Its launch, the newest.
     let launch = match facts("launch", 0)?.last() {
-        Some(&seq) if launched_public(raw, &e.agent, &e.session, seq)? => seq,
+        Some(&seq) if launched_public(raw, who, seq)? => seq,
         _ => return Ok(Stop::Unseen),
     };
     // After the newest stop taken, or the newest the facts hold that raw reads as a hook's (the
@@ -1405,16 +1405,23 @@ fn stop_calls(
     Ok(Stop::Calls(launch, out))
 }
 
-/// Whether the call at `seq` that launched a subagent is seen public now: a hook's record as raw
-/// reads it (a forget's registration tombstones it at once), marked public, after a prompt or a
-/// harness message of its own turn.
-fn launched_public(raw: &Raw, agent: &str, session: &str, seq: i64) -> Result<bool> {
+/// Whether the call at `seq` launched subagent `agent_id` and is seen public now: a hook's record
+/// as raw reads it (a forget's registration tombstones it at once) that still names the subagent
+/// (a mask of its id since names none), marked public, after a prompt or a harness message of its
+/// own turn.
+fn launched_public(
+    raw: &Raw,
+    (agent, session, agent_id): (&str, &str, &str),
+    seq: i64,
+) -> Result<bool> {
     let Some(launch) = raw.event_at(seq)?.filter(|x| x.source == "hook") else {
         return Ok(false);
     };
+    let names = (crate::consumer::subagents::facts(&launch).iter())
+        .any(|f| f.fact == "launch" && f.agent_id == agent_id);
     let marked =
         serde_json::from_str::<Value>(&launch.body).is_ok_and(|b| b["public_turn"] == true);
-    Ok(marked && prompted_before(raw, agent, session, seq)?)
+    Ok(names && marked && prompted_before(raw, agent, session, seq)?)
 }
 
 /// Whether a prompt or a harness message of the session reads before `seq` in its own turn, as a
@@ -3695,27 +3702,40 @@ mod tests {
     }
 
     /// Slice 3: the phase's first run copies nothing older; a stop after it takes no call before
-    /// the subagent's earlier stop, which the facts hold though the phase never took it.
+    /// the subagent's earlier stop, which the facts hold though the phase never took it. A
+    /// subagent that ran across the first run and stops after it takes its calls since its launch,
+    /// as a turn that ends after the first run takes its records from before it, and as
+    /// claude-mem's SubagentStop reads the subagent's transcript.
     #[test]
     fn a_stop_after_the_first_run_takes_no_call_before_an_earlier_stop() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
         let work = tempfile::tempdir().unwrap();
         let w = work.path();
-        files(w, &["old.pdf", "new.pdf"]);
+        files(w, &["old.pdf", "new.pdf", "across.pdf"]);
         said(&mut raw, "s1", "prompt", w);
         raw.append(&launch_of("s1", "a1", true, w)).unwrap();
         let reply = said(&mut raw, "s1", "reply", w);
         raw.append(&sub_call("s1", "a1", &w.join("old.pdf"), w))
             .unwrap();
         raw.append(&stop_of("s1", "a1", w)).unwrap();
+        said(&mut raw, "s2", "prompt", w);
+        raw.append(&launch_of("s2", "b1", true, w)).unwrap();
+        let reply2 = said(&mut raw, "s2", "reply", w);
+        let across = raw
+            .append(&sub_call("s2", "b1", &w.join("across.pdf"), w))
+            .unwrap();
         assert!(!step(home.path(), &raw));
         let new = raw
             .append(&sub_call("s1", "a1", &w.join("new.pdf"), w))
             .unwrap();
         raw.append(&stop_of("s1", "a1", w)).unwrap();
+        raw.append(&stop_of("s2", "b1", w)).unwrap();
         while step(home.path(), &raw) {}
-        let expected: Vec<(String, i64, i64)> = vec![("new.pdf".into(), reply, new)];
+        let expected: Vec<(String, i64, i64)> = vec![
+            ("new.pdf".into(), reply, new),
+            ("across.pdf".into(), reply2, across),
+        ];
         assert_eq!(origins(home.path()), expected);
     }
 
@@ -4099,6 +4119,96 @@ mod tests {
         let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
         assert_eq!(titles, ["first.pdf"]);
         assert_eq!(held.get(), 1, "the fence was held at the first row");
+    }
+
+    /// Slice 3: a launch whose id a mask takes between a stop's copy and its row names the
+    /// subagent no more: the copy gets no row.
+    #[test]
+    fn a_launch_masked_while_its_stops_file_is_copied_leaves_no_row() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["late.pdf"]);
+        said(&mut raw, "s1", "prompt", w);
+        let launch = raw.append(&launch_of("s1", "a1", true, w)).unwrap();
+        said(&mut raw, "s1", "reply", w);
+        raw.append(&sub_call("s1", "a1", &w.join("late.pdf"), w))
+            .unwrap();
+        raw.append(&stop_of("s1", "a1", w)).unwrap();
+        let device = raw.device().to_owned();
+        let body = match &raw.after(&device, launch - 1, 1).unwrap()[0].item {
+            Item::Event(e) => e.body.clone(),
+            _ => panic!("an event"),
+        };
+        let at = body.find("\"agent_id\":\"a1\"").unwrap() + "\"agent_id\":\"".len();
+        let k = drained(home.path(), &raw);
+        let dir = home.path().to_owned();
+        let mut once = true;
+        let act = move |stage| {
+            if stage == Stage::Row && std::mem::take(&mut once) {
+                let target = crate::raw::Target::Range {
+                    device: device.clone(),
+                    seq: launch,
+                    offset: at as i64,
+                    length: 2,
+                };
+                let mut raw = crate::raw::open(&dir).unwrap();
+                raw.append_tombstone(target).unwrap();
+            }
+        };
+        with_seam(act, || {
+            run(home.path(), &raw, &k, &mut None, &|| false).unwrap();
+        });
+        assert!(copies(home.path()).is_empty());
+    }
+
+    /// Slice 3: a record a restore brings back with no kind (a backup line that carried none)
+    /// ends a turn and a gap, as it may have been a reply: a turn after it copies none of the
+    /// turn before it again, and a call after it is no gap of an older reply. Beside them a gap
+    /// copies.
+    #[test]
+    fn a_restored_record_of_no_kind_ends_a_turn_and_a_gap() {
+        let (home, mut raw) = ready();
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        files(w, &["first.pdf", "second.pdf", "older.pdf", "control.pdf"]);
+        let write = |s: &str, f: &str| tool(s, "Write", json!({"file_path": w.join(f)}), w);
+        let stub = |raw: &Raw, seq: i64| {
+            let db = Connection::open(home.path().join("raw.db")).unwrap();
+            db.execute(
+                "UPDATE records SET type = 'removed', source = 'restore', kind = NULL,
+                   agent = NULL, session = NULL, repo = NULL, cwd = NULL, body = NULL,
+                   enc = 'plain', original_bytes = NULL
+                 WHERE device = ?1 AND seq = ?2",
+                params![raw.device(), seq],
+            )
+            .unwrap();
+        };
+        said(&mut raw, "turns", "prompt", w);
+        raw.append(&write("turns", "first.pdf")).unwrap();
+        let first = said(&mut raw, "turns", "reply", w);
+        step(home.path(), &raw);
+        stub(&raw, first);
+        said(&mut raw, "turns", "prompt", w);
+        raw.append(&write("turns", "second.pdf")).unwrap();
+        said(&mut raw, "turns", "reply", w);
+        said(&mut raw, "older", "prompt", w);
+        raw.append(&launch_of("older", "o1", true, w)).unwrap();
+        said(&mut raw, "older", "reply", w);
+        let newer = said(&mut raw, "older", "reply", w);
+        let file = w.join("older.pdf");
+        raw.append(&sub_call("older", "o1", &file, w)).unwrap();
+        raw.append(&stop_of("older", "o1", w)).unwrap();
+        said(&mut raw, "control", "prompt", w);
+        raw.append(&launch_of("control", "c1", true, w)).unwrap();
+        said(&mut raw, "control", "reply", w);
+        let file = w.join("control.pdf");
+        raw.append(&sub_call("control", "c1", &file, w)).unwrap();
+        raw.append(&stop_of("control", "c1", w)).unwrap();
+        stub(&raw, newer);
+        while step(home.path(), &raw) {}
+        let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
+        assert_eq!(titles, ["first.pdf", "second.pdf", "control.pdf"]);
     }
 
     /// Slice 3: a purged reply ends its turn and its gap, its session gone: a turn after it copies

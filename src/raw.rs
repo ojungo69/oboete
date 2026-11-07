@@ -5642,16 +5642,18 @@ impl Raw {
     /// docs/deliverables.md: `turn_start` by live hook records alone, so a replay's reply in the
     /// same session is no boundary of a live turn. A subagent's stop begins no turn here either
     /// (Sourcery on #847). A purged hook reply of this device ends a turn too, its session gone:
-    /// it may have been this session's, and a forgotten turn's records are then no later turn's.
+    /// it may have been this session's, and a forgotten turn's records are then no later turn's;
+    /// so does a restored record whose kind its backup line did not carry (CodeRabbit on #851).
     pub(crate) fn hook_turn_start(&self, agent: &str, session: &str, reply: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MIN(seq), ?4) FROM records
              WHERE device = ?1 AND type = 'event' AND agent = ?2 AND session = ?3
                AND seq <= ?4 AND source = 'hook' AND kind <> 'subagent_stop'
                AND seq > COALESCE(
-                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND kind = 'reply'
-                    AND seq < ?4 AND source = 'hook'
-                    AND (type = 'removed' OR (type = 'event' AND agent = ?2 AND session = ?3))),
+                 (SELECT MAX(seq) FROM records WHERE device = ?1 AND seq < ?4
+                    AND ((kind = 'reply' AND source = 'hook'
+                          AND (type = 'removed' OR (type = 'event' AND agent = ?2 AND session = ?3)))
+                         OR (type = 'removed' AND kind IS NULL))),
                  0)",
             params![self.device, agent, session, reply],
             |r| r.get(0),
@@ -5662,7 +5664,8 @@ impl Raw {
     /// gap, its seq and time: the session's newest hook reply before it, with no prompt or harness
     /// message of the session between them, nor a purged record of this device that was one or was
     /// a reply (its session gone, it may have been one of this session's, the gap then a forgotten
-    /// reply's). None when the call lies in a turn, or before any reply.
+    /// reply's), nor a restored one of no known kind. None when the call lies in a turn, or before
+    /// any reply.
     pub(crate) fn gap_reply(
         &self,
         agent: &str,
@@ -5685,10 +5688,11 @@ impl Raw {
         };
         let ended: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
-               AND source = 'hook' AND (
-                 (kind IN ('prompt', 'envelope')
-                   AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))
-                 OR (kind = 'reply' AND type = 'removed')))",
+               AND ((source = 'hook' AND (
+                   (kind IN ('prompt', 'envelope')
+                     AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))
+                   OR (kind = 'reply' AND type = 'removed')))
+                 OR (type = 'removed' AND kind IS NULL)))",
             params![self.device, reply, seq, agent, session],
             |r| r.get(0),
         )?;
@@ -5696,8 +5700,8 @@ impl Raw {
     }
 
     /// docs/subagents.md, slice 3: whether a hook reply, prompt or harness message of `agent`'s
-    /// `session`, or a purged record of this device that was one, lies strictly between two seqs:
-    /// past none, a later call's `gap_reply` is the earlier one's.
+    /// `session`, a purged record of this device that was one, or a restored one of no known kind,
+    /// lies strictly between two seqs: past none, a later call's `gap_reply` is the earlier one's.
     pub(crate) fn gap_bound_between(
         &self,
         agent: &str,
@@ -5707,8 +5711,9 @@ impl Raw {
     ) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
-               AND source = 'hook' AND kind IN ('reply', 'prompt', 'envelope')
-               AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))",
+               AND ((source = 'hook' AND kind IN ('reply', 'prompt', 'envelope')
+                     AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))
+                    OR (type = 'removed' AND kind IS NULL)))",
             params![self.device, after, before, agent, session],
             |r| r.get(0),
         )?)
