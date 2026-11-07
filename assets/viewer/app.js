@@ -4476,7 +4476,8 @@ async function recoveryAction(action) {
       if(view==='settings' && form===mine && generation===mineGeneration){
         form=loadedForm(settings);
         // The rests the page last read stay until its next read, as every read again keeps them (#855).
-        if(form)Object.assign(form,{stopped:mine.stopped,resting:mine.resting,paused:mine.paused});
+        // None shown before when the settings did not read (Codex and cubic on #868).
+        if(form&&mine)Object.assign(form,{stopped:mine.stopped,resting:mine.resting,paused:mine.paused});
       }
       // This reads current configuration, without claiming the previous request succeeded.
       d.unknown=false;
@@ -7078,7 +7079,9 @@ async function refreshRests() {
   const lists = await api('rests').catch(() => ({}));
   if (asked !== restsAsked || view !== 'settings' || !form) return;
   const f = form;
-  const [stopped, resting, paused] = [lists.stopped ?? null, lists.resting ?? null, lists.paused ?? null];
+  // A read that failed says nothing of a pause: the one shown stays (cubic on #868).
+  const paused = Object.hasOwn(lists, 'paused') ? lists.paused : f.paused ?? null;
+  const [stopped, resting] = [lists.stopped ?? null, lists.resting ?? null];
   if (JSON.stringify([f.stopped, f.resting, f.paused ?? null]) === JSON.stringify([stopped, resting, paused])) return;
   const was = f.stopped;
   Object.assign(f, { stopped, resting, paused });

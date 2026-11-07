@@ -1905,18 +1905,23 @@ pub(crate) fn stamp(lock: &std::fs::File) {
 /// page's stores-free route and doctor with a damaged store can ask.
 pub(crate) fn curation_pause(home: &Path) -> Option<(&'static str, Option<i64>)> {
     let state = home.join("state");
-    [("rebuild", "rebuild.lock"), ("rewrite", "purge.lock")]
-        .into_iter()
-        .find_map(|(kind, name)| {
-            let path = state.join(name);
-            lock_held(&path).then(|| {
-                let since = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                let ms = since
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .and_then(|d| i64::try_from(d.as_millis()).ok());
-                (kind, ms)
+    let held: Vec<(&'static str, Option<i64>)> =
+        [("rebuild", "rebuild.lock"), ("rewrite", "purge.lock")]
+            .into_iter()
+            .filter_map(|(kind, name)| {
+                let path = state.join(name);
+                lock_held(&path).then(|| {
+                    let since = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    let ms = since
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|d| i64::try_from(d.as_millis()).ok());
+                    (kind, ms)
+                })
             })
-        })
+            .collect();
+    let (kind, _) = *held.first()?;
+    // A purge's rebuild holds both: the pause began when the first was taken (cubic on #868).
+    Some((kind, held.iter().filter_map(|h| h.1).min()))
 }
 
 /// Doctor's line while curation is paused (#855).
@@ -5803,6 +5808,14 @@ mod tests {
         );
         drop(rebuild);
         assert_eq!(curation_pause(p), None, "a stamped lock not held");
+        // A purge's rebuild: both held, the rebuild named, since the purge's earlier time.
+        let both = held("rebuild.lock", 1_700_000_120_000);
+        let purging = held("purge.lock", 1_700_000_060_000);
+        assert_eq!(
+            curation_pause(p),
+            Some(("rebuild", Some(1_700_000_060_000)))
+        );
+        drop((both, purging));
         let rewrite = held("purge.lock", 1_700_000_060_000);
         assert_eq!(
             curation_pause(p),
