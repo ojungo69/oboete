@@ -279,6 +279,8 @@ S5. **Size.** The packet's cap rises from 6,000 to 9,000 characters: claude-mem'
 may take 10,000, and Cursor drops a context over 10,000 (oboete keeps it under its 9,500 units).
 The block gets the room the rest of the packet leaves and is fitted as claude-mem fits its own:
 the number of cards halves until it fits, down to one; with no room for one there is no block.
+Since decision 75 (2026-11-07) the cards then take back what the halving left unused: as many of
+the newest as fit below the count that did not (docs/session-start.md).
 It is measured as the packet leaves, each count on the gated packet: a mask can make the rest
 longer or shorter than it was read, and a row shorter only as the block composes it (Codex on #370),
 with each closing tag escaped as the fence escapes it, in UTF-16 units, the measure Cursor cuts by
@@ -366,8 +368,8 @@ built: its default output is what oboete shows.
    time and offset, the legend, the format and fetch lines, the days oldest first, a row per card
    with its ID, local time (`"` in the minute of the row before it), icon and title, and `📝` for a
    card without a type.
-2. The block halves its cards, the newest kept, until it fits its room; with no room for one, or
-   no card, there is none.
+2. The block halves its cards, the newest kept, until it fits its room, then takes back as many as
+   fit below the count that did not (decision 75); with no room for one, or no card, there is none.
 3. Session start shows the repository's cards after the decisions and before the state lines, and
    not another repository's.
 4. The cards take only the room the rest of the packet leaves, and the rest is not cut for them;

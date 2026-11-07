@@ -29,7 +29,9 @@ In `delivered`, a unit (a claim with the later claims that ended it, `claims::un
 
 ### 4. Decision 75: the index shows `[inject] session_start_index` lines, 10 by default
 
-`INDEX` becomes `[inject] session_start_index` (0 to 50, default 10), passed to `manifest::text` beside the size. The settings page shows it with the session start's size, in English and Japanese. The cards take the freed room through the loop that already fits them (docs/cards.md S1, docs/summaries.md S9): the index is the packet's last part and inside the cap, so the loop stops halving sooner. Measured before and after with `oboete inject` here: the count of cards and each section's characters. If 50 cards still do not fit where 25 did, that is reported, not changed here: the halving is claude-mem's order.
+`INDEX` becomes `[inject] session_start_index` (0 to 50, default 10), passed to `manifest::text` beside the size. The settings page shows it with the session start's size, in English and Japanese. The cards take the freed room: the loop that fits them (docs/cards.md S1, docs/summaries.md S9) halves them until the packet fits, as claude-mem does, which would leave the room unused when 50 cards are just too many; so once only the cards are left to halve, it then takes back as many of the newest as fit below the count that did not (a binary search, at most about five more packets).
+
+Measured here with `oboete inject` (2026-11-07): the index went from 22 lines and 2,322 characters to 12 lines and 1,256; the cards from 25 to 49.
 
 ## Acceptance tests
 
@@ -40,6 +42,7 @@ In `delivered`, a unit (a claim with the later claims that ended it, `claims::un
 5. A stored manifest of format `m4` is built again.
 6. With `now` fixed: a decision of 15 days ago shows as an index line, not a body; one of 14 days exactly keeps its body; a lesson of 30 days ago keeps its body; an open item of 15 days ago is an index line; a pair whose later claim is a day old keeps both bodies, and a pair whose later claim is 20 days old is two index lines.
 7. With 15 claims, the default index shows 5 lines and 3 shows 3; 0 shows none, with the 10 bodies and the tools line kept; the default is 10.
+10. One character short of the room for 8 cards, 7 are shown (halved to 4, then 3 taken back), the newest; with no room for one, none.
 8. The settings page reads and saves `session_start_index`, refusing a value outside 0 to 50.
 9. `the_manifest_is_the_same_bytes_for_the_same_records` stays true with `now` fixed. The tests' read time is 14 days after the epoch (it was a year), so their claims keep their bodies; the hooks' tests, whose claims are dated in 1970 and which read at the clock's time, measure decision 76's age from the same day (`FOLD_AT`, a test-only seam).
 

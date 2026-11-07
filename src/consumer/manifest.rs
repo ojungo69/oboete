@@ -189,7 +189,8 @@ pub fn text(
     let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?.unwrap_or_default();
     let live = live(&k, raw, repo, branch, session, rules, now)?;
     let parts = delivered(&k, raw, repo, &manifest, rules, (index, now))?;
-    // The cards after the decisions (docs/cards.md S1): the most, halved each time, whose packet
+    // The cards after the decisions (docs/cards.md S1): the most, halved each time and then as
+    // many back as fit (decision 75), whose packet
     // stays within `cap` as it leaves, gated and escaped inside the fence, in UTF-16 units, the
     // measure Cursor cuts by (S5); the rest is never cut for them. Each count is judged on the
     // gated packet: the gate can free room in the rest, or in a row only as the block composes it,
@@ -202,8 +203,9 @@ pub fn text(
     let fence = manifest::fenced("").encode_utf16().count();
     // docs/summaries.md S9, claude-mem's order when the block does not fit: the newest summary's
     // fields go first, then the summary rows halve, then the cards, here down to none.
-    let (mut fields, mut n_s, mut n) = (true, sessions.len(), cards.len());
-    let (bodies, gated, from) = loop {
+    // The packet with the newest summary's fields or not, `n_s` summary rows and `n` cards, gated,
+    // and whether it fits; none when there is nothing to show.
+    let attempt = |fields: bool, n_s: usize, n: usize| {
         let latest = sessions.first().filter(|_| fields);
         let empty = n == 0 && n_s == 0 && latest.is_none();
         let block = if empty {
@@ -221,15 +223,37 @@ pub fn text(
                 &chrono::Local,
             )
         };
-        let Some((packet, bodies)) = parts.packet(&manifest, &live, &block) else {
+        let (packet, bodies) = parts.packet(&manifest, &live, &block)?;
+        let (gated, from) = packet.outbound(rules);
+        let fits = empty || manifest::fenced(gated.trim()).encode_utf16().count() - fence <= cap;
+        Some((bodies, gated, from, fits))
+    };
+    let (mut fields, mut n_s, mut n) = (true, sessions.len(), cards.len());
+    // The last count of cards found too many, once only the cards are left to halve.
+    let mut over = None;
+    let (mut bodies, mut gated, mut from) = loop {
+        let Some((bodies, gated, from, fits)) = attempt(fields, n_s, n) else {
             return Ok(None);
         };
-        let (gated, from) = packet.outbound(rules);
-        if empty || manifest::fenced(gated.trim()).encode_utf16().count() - fence <= cap {
+        if fits {
             break (bodies, gated, from);
+        }
+        if !fields && n_s == 0 {
+            over = Some(n);
         }
         shrink(&mut fields, &mut n_s, &mut n);
     };
+    // Decision 75: what the rest leaves goes to the cards, as many back as fit below the count
+    // that did not.
+    if let Some(mut over) = over {
+        while over - n > 1 {
+            let mid = n + (over - n) / 2;
+            match attempt(fields, n_s, mid) {
+                Some((b, g, f, true)) => (n, bodies, gated, from) = (mid, b, g, f),
+                _ => over = mid,
+            }
+        }
+    }
     let text = manifest::cut(&gated, cap);
     // Match the surviving occurrence, not another claim with the same rendered line.
     let shown = bodies
@@ -3590,8 +3614,8 @@ extra_rules = [
         );
     }
 
-    /// S5: the cards take only the room the rest of the packet leaves, halved until they fit, and
-    /// the rest is not cut for them.
+    /// S5: the cards take only the room the rest of the packet leaves, halved until they fit and
+    /// then as many back as fit (decision 75), and the rest is not cut for them.
     #[test]
     fn the_cards_take_only_the_room_the_packet_leaves() {
         let home = tempfile::tempdir().unwrap();
@@ -3629,11 +3653,12 @@ extra_rules = [
         assert!(block.contains(".7 ") && block.contains(".0 "), "{block}");
         let rest = whole.chars().count() - block.chars().count();
         let fitted = at(rest + block.chars().count() - 1);
+        // One character short of the 8: halved to 4, then 3 of the 4 left out taken back.
         assert!(
-            fitted.contains(".3 ") && !fitted.contains(".4 "),
+            fitted.contains(".6 ") && !fitted.contains(".7 "),
             "{fitted}"
         );
-        assert_eq!(shows(rest + block.chars().count() - 1).1, 4);
+        assert_eq!(shows(rest + block.chars().count() - 1).1, 7);
         assert!(fitted.ends_with(&whole[end..]), "{fitted}");
         assert!(fitted.chars().count() < rest + block.chars().count());
         // No room for one card: no block, and the rest as it was.

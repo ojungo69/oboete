@@ -103,7 +103,7 @@ S8. **The newest one's fields** after the timeline, `**Investigated**: …`, `**
 shown (claude-mem's rule; Notes since #403, as claude-mem 13.34.2 shows them: a qualification the
 summary role put in notes, such as "the agent says it was not verified", reaches the session). The legend gains `🎯session`.
 
-S9. **Fitting.** claude-mem's order: the fields go first, then the rows are halved, then the cards.
+S9. **Fitting.** claude-mem's order: the fields go first, then the rows are halved, then the cards; since decision 75 the cards then take back as many as fit (docs/cards.md S5).
 
 S10. **`get S<op seq>`** shows one summary whole, as `get <op seq>.<n>` shows a card.
 
