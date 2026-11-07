@@ -1695,6 +1695,22 @@ console.log('PASS: the caps\' No cap switches');
   assert(clean(),'after it, nothing waits');
   assert.equal(general('worker.resident').checked,true,'and the switch shows what is saved');
 
+  // Decision 81: "The language of each conversation" is saved at once; turned off after that save's
+  // answer, the language typed before it comes back, not the computer's.
+  {
+    const spoken=(language,version)=>ai(['alpha'],{version,summary:{...base.summary,language},language_default:'French'});
+    draw(spoken('Spanish','l1'));
+    const own=()=>general('summary.language_conversation');
+    answers=[json(spoken('conversation','l2'))];
+    flip(own(),true);fire('change',{target:own()});await settled(8);
+    assert.deepEqual([sent().at(-1).summary.language,general('summary.language').disabled],['conversation',true],
+      'on: conversation, saved at once');
+    answers=[json(spoken('Spanish','l3'))];
+    flip(own(),false);fire('change',{target:own()});await settled(8);
+    assert.deepEqual([sent().length,sent().at(-1).version,sent().at(-1).summary.language],[2,'l2','Spanish'],
+      'off after its answer: the language before it, with the answer\'s version');
+  }
+
   // Decision 3: after each kind of simple save, the general save has nothing to send.
   {
     let saved=ai(['groq','beta'],{version:'s1',paid_usd_per_month:5,redaction:masked([])});

@@ -5816,6 +5816,8 @@ function mergeProviderSettings(answer, mine, action) {
   next.newProvider = action.op === 'create' ? null : mine.newProvider;
   next.simpleCatalog = action.op === 'create' ? null : mine.simpleCatalog;
   next.simplePlace = action.op === 'create' ? null : mine.simplePlace;
+  // The language typed before "The language of each conversation" outlives that switch's own save (decision 81).
+  next.summaryLanguageBefore = mine.summaryLanguageBefore;
   preserveProviderDrafts(next, mine, action);
   preserveCreatedSubscriptionDraft(next, mine, action);
   return next;
