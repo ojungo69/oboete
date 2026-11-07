@@ -1121,6 +1121,7 @@ const TEXT = {
   simple_catalog_nim: ['NVIDIA NIM', 'NVIDIA NIM'],
   simple_catalog_opencode_go: ['OpenCode Go', 'OpenCode Go'],
   simple_catalog_anthropic: ['Anthropic API', 'Anthropic API'],
+  simple_catalog_openai: ['OpenAI API', 'OpenAI API'],
   simple_catalog_codex: ['Codex subscription', 'Codex のサブスクリプション'],
   simple_catalog_claude: ['Claude subscription', 'Claude のサブスクリプション'],
   simple_catalog_gemini: ['Gemini API', 'Gemini API'],
@@ -5994,6 +5995,9 @@ async function providerWrite(action, button, body, path, target = null) {
   }
 }
 
+// The services added off from "Add an AI" in this page, waiting for their first key (decision 80).
+const keyTurnsOn = new Set();
+
 // Secrets belong only to the live field and the single outgoing body. They are not copied into
 // form state; a redraw puts one being typed back into the field drawn for the same entry
 // (`keepSecret`), and the selected field is emptied before fetch is called.
@@ -6031,7 +6035,13 @@ function providerKeyField(provider, simple = false) {
     const body = JSON.stringify({ version: form.version, selector: provider.selector, key: i.value });
     i.value = '';
     void providerOperation({ op: 'key', selector: provider.selector }, save, body, '/key',
-      simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` }));
+      simple ? null : (map) => ({ simple: `key:entry:${selectorKey(map(provider.selector))}` })).then((saved) => {
+      // Decision 80: the first key saved to a service added off turns it on; a key changed later
+      // does not.
+      if (!saved || !keyTurnsOn.delete(provider.name)) return;
+      const on = [...$('panel').querySelectorAll('input')].find((n) => n.dataset.simpleFocus === `on:${provider.name}`);
+      if (on) void simpleProviderToggle(provider.name, true, on);
+    });
   });
   return el('div', 'key-input', i, save);
 }
@@ -6812,6 +6822,12 @@ const AI_CATALOG = [
   { name: 'anthropic', label: 'simple_catalog_anthropic', kind: 'openai', base_url: 'https://api.anthropic.com/v1', api: 'anthropic',
     key_file: 'ANTHROPIC_API_KEY.md', subscription: false, timeout_s: 90, models: ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'],
     limits: { max_request_tokens: 100000, usd_per_mtok_in: 0.10, usd_per_mtok_out: 0.50 } },
+  // Decision 80: OpenAI's own API, its requests kept under the 272,000 input tokens past which it
+  // doubles its price (the viewer shapes them as its models take them, `openai_request`). GPT-6.1
+  // Sol, which takes no reasoning of `none`, is not offered.
+  { name: 'openai', label: 'simple_catalog_openai', kind: 'openai', base_url: 'https://api.openai.com/v1', api: 'openai',
+    key_file: 'OPENAI_API_KEY.md', subscription: false, timeout_s: 90, models: ['gpt-6-luna', 'gpt-6.1-terra'],
+    limits: { max_request_tokens: 272000, usd_per_mtok_in: 0.10, usd_per_mtok_out: 0.50 } },
   // The subscriptions run a program with no list to read: the models Codex 0.166.0 and Claude Code name.
   { name: 'codex', label: 'simple_catalog_codex', kind: 'cli', cli: 'codex', base_url: '', api: null,
     key_file: null, subscription: true, timeout_s: 300, models: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] },
@@ -6829,6 +6845,7 @@ const AI_CATALOG = [
 // (the services' price pages, 2026-11-07; docs/settings-ai-models.md). Choosing one of them saves
 // the entry's model and prices as one edit.
 const MODEL_PRICES = {
+  'api.openai.com': { 'gpt-6-luna': [0.10, 0.50, 272000], 'gpt-6.1-terra': [1, 5, 272000] },
   'api.anthropic.com': { 'claude-haiku-5-5': [0.10, 0.50, 100000], 'claude-sonnet-5-5': [2, 10, null],
     'claude-opus-5-5': [4, 20, null] },
   'generativelanguage.googleapis.com': { 'gemini-3.1-flash-lite': [0.25, 1.50, null], 'gemini-3.5-flash-lite': [0.30, 2.50, null] },
@@ -6908,6 +6925,11 @@ async function readModelList(provider, refresh = false) {
   else drawModelLists();
 }
 
+// The models of `known` a list read still has, all of them while none is read.
+function inList(known, listed) {
+  return listed?.state === 'ok' ? known.filter(model => listed.models.includes(model)) : known;
+}
+
 // What a line says of its model list: read, failed and why, or nothing.
 function modelListNote(list) {
   if (!list || list.state === 'ok') return null;
@@ -6944,7 +6966,7 @@ function linePricedModel(row, provider, listed, label) {
   const option = (model, text, disabled = false) => {
     const node = el('option', null, text); node.value = model; node.disabled = disabled; return node;
   };
-  const priced = Object.keys(prices);
+  const priced = inList(Object.keys(prices), listed);
   const unpriced = (listed?.models || []).filter(model => !Object.hasOwn(prices, model) && model !== current);
   const select = el('select', null,
     ...(priced.includes(current) ? [] : [option(current, current)]),
@@ -7307,13 +7329,15 @@ function simpleProviderRow(f, row, index, chain, position) {
     }));
     return button;
   });
-  const models = simpleProviderModels(row, catalog?.models || []);
   // Decision 78: what its service lists, read when the line opens (`readModelList`), after the models
   // the page knows. They are not checked: a model may not write the summaries' JSON.
   const http = provider?.saved.kind === 'openai';
   // Not of a destination the page does not show: the viewer refuses it as it refuses its test.
   const listable = http && row.key !== 'missing' && provider.saved.endpoint_supported !== false;
   const listed = listable ? modelLists.get(modelListKey(provider)) : null;
+  // Of the page's own models, a list read leaves those its service still has: a service retires
+  // models (OpenRouter's free ones, 2026-11-08).
+  const models = simpleProviderModels(row, inList(catalog?.models || [], listed));
   const fromList = simpleProviderModels({ ...row, effective_model: null }, listed?.models || []);
   const unchecked = fromList.filter(model => !models.includes(model));
   // The page's own are checked; any other the list gives, the current one too, is not (cubic on #857).
@@ -7617,7 +7641,9 @@ function simpleCatalog(f) {
         // Opened before it is scrolled to: an AI turned off waits in a closed fold.
         simpleFocus(`on:${entry.name}`); row?.scrollIntoView?.({ block: 'center' }); return;
       }
-      f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0] });
+      // Decision 80: a service that takes a key is added off, and its first key saved turns it on
+      // (`keyTurnsOn`): no call goes to it without one.
+      f.newProvider = providerEdit(entry.name, { ...entry, model: entry.models[0], enabled: !entry.key_file });
       f.simpleCatalog = entry;
       if (!entry.name) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
       drawSettings(); simpleFocus('catalog.save');
@@ -7633,7 +7659,9 @@ function simpleCatalog(f) {
   save.type = 'button'; save.dataset.simpleFocus = 'catalog.save';
   save.addEventListener('click', () => {
     if (providerValidation(draft)) { detailedSettingsLink('more_settings', '.new-provider').click(); return; }
-    void providerOperation({ op: 'create', entry: providerBody(draft) }, save, null, '', () => createdFocus(draft.name));
+    void providerOperation({ op: 'create', entry: providerBody(draft) }, save, null, '', () => createdFocus(draft.name)).then((made) => {
+      if (made && entry.key_file && !draft.enabled) keyTurnsOn.add(draft.name);
+    });
   });
   const cancel = el('button', 'quiet small', t('simple_cancel'));
   cancel.type = 'button'; cancel.addEventListener('click', () => { f.newProvider = null; f.simpleCatalog = null; drawSettings(); });

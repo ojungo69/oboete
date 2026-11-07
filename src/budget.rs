@@ -1740,6 +1740,47 @@ mod tests {
         assert!((usd - 0.00675).abs() < 1e-12, "{usd}");
     }
 
+    /// Decision 80: an entry of OpenAI's own API is counted as billed: of its reported prompt, the
+    /// tokens written to its cache at 1.25 times the input price and those read at a tenth; where
+    /// its usage is not known its input is priced at 1.25 times, so a request at the edge of the
+    /// month's cap is refused rather than overspent.
+    #[test]
+    fn an_openai_calls_cache_writes_are_counted_as_billed() {
+        let limits = Limits {
+            max_output_tokens: 100,
+            usd_per_mtok_in: 1.0,
+            usd_per_mtok_out: 1.0,
+            ..Default::default()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let mut p = entry("p", limits);
+        if let Provider::Openai { base_url, .. } = &mut p {
+            *base_url = crate::config::OPENAI.into();
+        }
+        assert_eq!(p.input_weight(), 1.25);
+        // 60,000 tokens in and 100 out at USD 1 a million each: USD 0.0601 at the input price,
+        // 0.0751 at 1.25 times, so a cap of USD 0.07 refuses it.
+        assert!(
+            admit_with_history(&db, (&p, &p), 60_000.0, 0.07, &[])
+                .unwrap()
+                .is_some()
+        );
+        let reservation = reserve(&db, &p, "curator", "s", 10_000, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        let usage = Usage {
+            prompt: Some(10_000),
+            completion: Some(100),
+            cached: Some(2_000),
+            written: Some(3_000),
+            ..Default::default()
+        };
+        // 5,000 fresh, 3,000 written at 1.25, 2,000 read at 0.1, and 100 out: USD 0.00905.
+        let usd = reservation.cost(&p, usage, true).unwrap();
+        assert!((usd - 0.00905).abs() < 1e-12, "{usd}");
+    }
+
     /// Codex on #409: a Messages entry prices each input token at what a cache write may bill,
     /// 1.25 times its input price for a fenced prompt's instructions and twice with a cache of its
     /// own (`cache_control`), wherever its usage is not known: admission, the reservation, a call
