@@ -55,9 +55,11 @@ none.
   are not this machine's) and the turn's records before it (`Raw::turn_start`), one at a time
   (`Raw::turn_seqs`, `Raw::event_at`), keeping only what a copy needs of each (#836). A Codex turn may
   leave no reply (capture.rs: an empty Stop and transcript tail), so its records are read with the
-  next reply or the session's end. A resident worker sees a reply within a second or two, so the copy
-  is the file as the turn left it; a worker that comes later copies the file as it is then (a
-  difference: claude-mem copies in the Stop hook).
+  next reply or the session's end. A reply a forget purged (its session gone) still ends its turn:
+  the next turn's end takes none of the forgotten turn's records again (a purged reply of another
+  session ends it too, which copies less, never more). A resident worker sees a reply within a
+  second or two, so the copy is the file as the turn left it; a worker that comes later copies the
+  file as it is then (a difference: claude-mem copies in the Stop hook).
 - **A subagent's stop** (docs/subagents.md, slice 3). The phase also reads a Claude Code hook
   `subagent_stop` record, in seq order with the turn ends, and copies the files of the subagent's
   calls that no turn's end covers: those after its parent's reply and before the session's next

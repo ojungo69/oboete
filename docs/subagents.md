@@ -516,12 +516,18 @@ Slice 3:
   that kept the checkpoint then skipped a new file at a seq given again), every call of a stop held
   whole until it was copied, each step's gap scanned from its reply (a gap of N steps read N times)
   with no step aside, and tests missing for these and for a registered forget, a taken stop masked
-  since, and a replay's or a transcript's launch. Each is fixed as above, with a test.
-- **Mutation runs**: 20 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
+  since, and a replay's or a transcript's launch. Each is fixed as above, with a test. A second
+  review found a purged reply passed over: a launch after it then read as in the earlier prompt's
+  turn, and a call after two replies whose newer one was purged as in the older one's gap. A purged
+  hook reply of the device now ends a turn (`Raw::hook_turn_start`, which ends a turn's copies
+  there too) and a gap (`Raw::gap_reply`); a step aside is looked for while the calls are read too
+  (`candidates`), and a test holds the read fence at the row.
+- **Mutation runs**: 24 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
   boundary, the turn, the gap's purged prompt and denied reply, the launch's mark, prompt and
   harness message, the hook source, the wait and its rebuild, the restore, the kept seq and its
-  transaction, the row's fence, the wait's return, the step aside, the gap's bound and its purged
-  records, and `prompted` makes a test fail. The launch's mark survived the first run, the private
+  transaction, the row's fence (looked at and held), the wait's return, the step aside in each
+  pass, the gap's bound and its purged records, a purged reply ending a turn and a gap, and
+  `prompted` makes a test fail. The launch's mark survived the first run, the private
   turn's launch having no prompt either; the notification's turn after it, which has one, kills it.
   A check of the launch's denial survived the second, a forget's registration tombstoning the
   launch already, and is gone.
@@ -539,6 +545,7 @@ Slice 3:
   `deliverables::tests::a_stop_stepped_aside_is_taken_again_whole`,
   `deliverables::tests::a_stops_row_is_denied_by_its_reply_not_by_its_stop_or_launch`,
   `deliverables::tests::a_taken_stop_masked_since_still_bounds_the_next`,
-  `deliverables::tests::a_launch_forgotten_while_its_stops_file_is_copied_leaves_no_row`. My Work
+  `deliverables::tests::a_launch_forgotten_while_its_stops_files_are_copied_leaves_no_row_after`,
+  `deliverables::tests::a_purged_reply_still_ends_its_turn_and_gap`. My Work
   links a stop's copy to the request whose prompt span holds its call (`my_work::copies_of`, as for
   a turn's copy, `my_work::tests::a_requests_copies_join_its_work_product`).
