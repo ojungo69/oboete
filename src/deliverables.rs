@@ -1399,19 +1399,16 @@ fn stop_calls(
     Ok(Stop::Calls(launch, out))
 }
 
-/// Whether the call at `seq` that launched a subagent is seen public now: a hook's record no forget
-/// denies, marked public, after a prompt or a harness message of its own turn.
+/// Whether the call at `seq` that launched a subagent is seen public now: a hook's record as raw
+/// reads it (a forget's registration tombstones it at once), marked public, after a prompt or a
+/// harness message of its own turn.
 fn launched_public(raw: &Raw, agent: &str, session: &str, seq: i64) -> Result<bool> {
     let Some(launch) = raw.event_at(seq)?.filter(|x| x.source == "hook") else {
         return Ok(false);
     };
     let marked =
         serde_json::from_str::<Value>(&launch.body).is_ok_and(|b| b["public_turn"] == true);
-    let device = raw.device();
-    let repo = launch.repo.as_deref();
-    Ok(marked
-        && !raw.forgets(device, agent, session, repo, seq, launch.ts)?
-        && prompted_before(raw, agent, session, seq)?)
+    Ok(marked && prompted_before(raw, agent, session, seq)?)
 }
 
 /// Whether a prompt or a harness message of the session reads before `seq` in its own turn, as a

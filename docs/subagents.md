@@ -221,9 +221,10 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
   apart under the table's unique key, identical content at two paths too; a gap's row whose copy its
   reply's own turn made is that turn's row, as two calls of one turn are one; and `copy_into` keeps
   one file for one content. A forget of the call or of the gap's reply denies the row from its
-  registration on; a forget of the stop alone does not. After the rows, the stop's seq goes into
-  `subagent_scan`, then the phase's checkpoint: a stop taken again after an interruption makes the
-  same rows (unique) or none.
+  registration on; a forget of the stop or of the launch alone does not (the launch is looked at
+  again before each row is written). After the rows, the stop's seq goes into `subagent_scan` with
+  the phase's checkpoint: a stop taken again after an interruption makes the same rows (unique) or
+  none.
 - **Kept.** `subagent_scan` holds a subagent's device, session, id and a seq, nothing said in it; a
   forget of the session leaves the row, as its denial keeps the session's id.
 - **Not covered.** A foreground subagent's call is its parent turn's: a parent that never ends its
@@ -488,26 +489,42 @@ Slice 3:
   stop or past it, with no rebuild owed (`subagent_rebuild`); else the phase returns before its
   batch's last move, its checkpoint at the last turn end it took, and the worker's next round, which
   the stop's arrival after the round's start wakes, takes it.
-- **The launch** (`deliverables::stop_calls`): the subagent's newest `launch` fact before the stop,
-  read in raw as a hook's event (the facts keep no source), its `public_turn` mark there, and a
-  prompt or harness message read before it in its own turn (`prompted_before`, through
+- **The launch** (`deliverables::stop_calls`, `launched_public`): the subagent's newest `launch`
+  fact before the stop, read in raw as a hook's event (the facts keep no source; a forget's
+  registration tombstones it at once, before its purge), its `public_turn` mark there, and a prompt
+  or harness message read before it in its own turn (`prompted_before`, through
   `Raw::hook_turn_start` and `Raw::turn_seqs`). Else the stop copies nothing, and counts as taken.
 - **The calls**: its `step` facts after the newer of `subagent_scan`'s seq and the newest `stop`
   fact raw reads as a hook's, and before the stop; of those, each in a gap (`Raw::gap_reply`: the
   session's newest hook reply before it, by raw's labels, with no hook prompt or envelope of the
   session between them, nor a purged record that was one, whose kind the purge keeps), whose reply
-  no forget denies (`Raw::forgets`), read as a hook's event. One `candidates` pass, `prompted` from
-  its start.
-- **Rows** as a turn's, the turn the gap's reply; then `subagent_scan` takes the stop's seq, then
-  the phase's checkpoint. A restore below the checkpoint empties the device's `subagent_scan` as it
-  moves the checkpoint.
+  no forget denies (`Raw::forgets`). A step's gap is looked up again only past a record that may
+  end one (`Raw::gap_bound_between`: a hook reply, prompt or envelope of the session, or a purged
+  one), so a gap of many steps is read once, and a step aside is looked for every 256 steps. The
+  calls go to one `candidates` pass, `prompted` from its start, read one at a time as a hook's
+  events, so a long run of them is never held whole.
+- **Rows** as a turn's, the turn the gap's reply, each written under the read fence
+  (`dispatch::reading`) once the launch is seen public again and neither the call nor the reply is
+  forgotten: a forget registered while the file was copied leaves it no row (the copy is the idle
+  sweep's). Then `subagent_scan` takes the stop's seq with the phase's checkpoint, in one
+  transaction. A restore below the checkpoint empties the device's `subagent_scan` as it moves the
+  checkpoint.
 - **Not covered**, besides the plan's: a subagent launched by another after the parent's reply
   copies nothing, its launch's turn having no prompt; claude-mem's SubagentStop copies its files.
-- **Mutation run**: 15 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
+- **Reviewed.** A local Codex review of the code found the launch looked at before a forget could
+  register while the files were copied, the kept seq committed apart from the checkpoint (a restore
+  that kept the checkpoint then skipped a new file at a seq given again), every call of a stop held
+  whole until it was copied, each step's gap scanned from its reply (a gap of N steps read N times)
+  with no step aside, and tests missing for these and for a registered forget, a taken stop masked
+  since, and a replay's or a transcript's launch. Each is fixed as above, with a test.
+- **Mutation runs**: 20 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
   boundary, the turn, the gap's purged prompt and denied reply, the launch's mark, prompt and
-  harness message, the hook source, the wait and its rebuild, the restore, the kept seq, the wait's
-  return and `prompted` makes a test fail. The launch's mark survived the first run, the private
+  harness message, the hook source, the wait and its rebuild, the restore, the kept seq and its
+  transaction, the row's fence, the wait's return, the step aside, the gap's bound and its purged
+  records, and `prompted` makes a test fail. The launch's mark survived the first run, the private
   turn's launch having no prompt either; the notification's turn after it, which has one, kills it.
+  A check of the launch's denial survived the second, a forget's registration tombstoning the
+  launch already, and is gone.
 - **Tests:** `deliverables::tests::a_background_subagents_file_is_copied_at_its_stop_once`,
   `deliverables::tests::one_stop_over_two_gaps_keeps_each_gaps_copies_apart`,
   `deliverables::tests::a_later_stop_takes_only_the_calls_after_the_one_taken`,
@@ -517,4 +534,11 @@ Slice 3:
   `deliverables::tests::a_subagent_with_no_public_launch_or_call_copies_nothing`,
   `deliverables::tests::a_gap_whose_reply_or_prompt_was_forgotten_takes_nothing`,
   `deliverables::tests::a_stop_waits_for_the_subagents_facts`,
-  `deliverables::tests::a_stops_copy_goes_with_its_call_or_reply_and_stays_through_retention`.
+  `deliverables::tests::a_stops_copy_goes_with_its_call_or_reply_and_stays_through_retention`,
+  `deliverables::tests::a_stops_seq_is_kept_with_the_checkpoint`,
+  `deliverables::tests::a_stop_stepped_aside_is_taken_again_whole`,
+  `deliverables::tests::a_stops_row_is_denied_by_its_reply_not_by_its_stop_or_launch`,
+  `deliverables::tests::a_taken_stop_masked_since_still_bounds_the_next`,
+  `deliverables::tests::a_launch_forgotten_while_its_stops_file_is_copied_leaves_no_row`. My Work
+  links a stop's copy to the request whose prompt span holds its call (`my_work::copies_of`, as for
+  a turn's copy, `my_work::tests::a_requests_copies_join_its_work_product`).
