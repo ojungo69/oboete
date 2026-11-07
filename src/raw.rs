@@ -5690,6 +5690,25 @@ impl Raw {
         Ok((!prompted).then_some((reply, ts)))
     }
 
+    /// docs/subagents.md, slice 3: whether a hook reply, prompt or harness message of `agent`'s
+    /// `session`, or a purged record of this device that was one, lies strictly between two seqs:
+    /// past none, a later call's `gap_reply` is the earlier one's.
+    pub(crate) fn gap_bound_between(
+        &self,
+        agent: &str,
+        session: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+               AND source = 'hook' AND kind IN ('reply', 'prompt', 'envelope')
+               AND (type = 'removed' OR (type = 'event' AND agent = ?4 AND session = ?5)))",
+            params![self.device, after, before, agent, session],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The seqs of `agent`'s `session` hook events on this device strictly between two seqs
     /// (docs/deliverables.md: a turn's records; a replay's paths are not this machine's), to be
     /// read one at a time (`event_at`), so a long turn is never held whole.
