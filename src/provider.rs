@@ -385,10 +385,15 @@ fn probe_extra(limits: &config::Limits) -> serde_json::Map<String, Value> {
 pub(crate) fn probe_estimate(p: &Provider) -> u32 {
     match p {
         Provider::Openai {
-            api, model, limits, ..
+            api,
+            base_url,
+            model,
+            limits,
+            ..
         } => budget::estimate(
             &request(
                 *api,
+                config::openai_api(base_url),
                 model,
                 PROBE_PROMPT,
                 &probe_schema(),
@@ -2052,7 +2057,8 @@ fn http_send(
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
 ) -> Result<Answer, CallError> {
-    let body = request(api, model, prompt, schema, extra);
+    let openai = config::openai_api(base_url);
+    let body = request(api, openai, model, prompt, schema, extra);
     let url = endpoint(base_url, api);
     // ureq drops `Authorization` on a redirect, not the Messages API's `x-api-key`: none is
     // followed, so the key reaches no host but `base_url`'s.
@@ -2154,7 +2160,12 @@ fn http_send(
     if api == Api::Anthropic {
         return anthropic_answer(&v, rate);
     }
-    let usage = usage_openai(&v);
+    let mut usage = usage_openai(&v);
+    // Decision 80: tokens written to a prompt cache are billed as OpenAI's own API bills them;
+    // another host's are not read, so its spend is counted as before (Codex's review of 80a).
+    if !openai {
+        usage.written = None;
+    }
     let choice = &v["choices"][0];
     // claude-mem 15.0.2 (#2995): a model that spends its whole output on reasoning answers
     // nothing, cut at its length limit, and fails as such.
@@ -2194,13 +2205,14 @@ pub(crate) fn endpoint(base_url: &str, api: Api) -> String {
 
 fn request(
     api: Api,
+    openai: bool,
     model: &str,
     prompt: &str,
     schema: &Value,
     extra: &serde_json::Map<String, Value>,
 ) -> Value {
     match api {
-        Api::Openai => openai_request(model, prompt, schema, extra),
+        Api::Openai => openai_request(model, prompt, schema, extra, openai),
         Api::Anthropic => anthropic_request(model, prompt, schema, extra),
     }
 }
@@ -2353,20 +2365,53 @@ fn anthropic_answer(v: &Value, rate: Option<providers_db::RateLeft>) -> Result<A
     })
 }
 
+/// OpenAI's models that take `reasoning_effort: "none"`, the one effort under which they take a
+/// temperature; GPT-6.1 Sol and GPT-6 Astra take none ("Using GPT-6", developers.openai.com,
+/// 2026-11-07). A snapshot (`gpt-6-luna-2026-...`) is its model's.
+const OPENAI_NO_REASONING: [&str; 3] = ["gpt-6-luna", "gpt-6.1-terra", "gpt-6-sol"];
+
+/// A Chat Completions request. To OpenAI's own API (`openai`, decision 80) it is shaped as its
+/// GPT-5 and later models take one: `max_completion_tokens` in place of `max_tokens`, which they
+/// refuse; `reasoning_effort: "none"` and the temperature for the models that take `none`, and no
+/// temperature for the others, which refuse it; and for GPT-6 no implicit cache write, which they
+/// bill at 1.25 times the input price and oboete's requests, each new, never read back (the
+/// prompt caching guide and the Chat Completions reference, 2026-11-07). An entry's `extra` still
+/// wins.
 fn openai_request(
     model: &str,
     prompt: &str,
     schema: &Value,
     extra: &serde_json::Map<String, Value>,
+    openai: bool,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
         "response_format": {"type": "json_schema", "json_schema": {"name": "memory", "strict": true, "schema": schema}}
     });
+    if !openai {
+        body["temperature"] = 0.2.into();
+    } else {
+        if OPENAI_NO_REASONING
+            .iter()
+            .any(|m| model == *m || model.starts_with(&format!("{m}-")))
+        {
+            body["reasoning_effort"] = "none".into();
+        }
+        if model.starts_with("gpt-6") {
+            body["prompt_cache_options"] = json!({"mode": "explicit"});
+        }
+    }
     for (k, v) in extra {
         body[k] = v.clone();
+    }
+    if openai && let Some(o) = body.as_object_mut() {
+        if let Some(n) = o.remove("max_tokens") {
+            o.entry("max_completion_tokens").or_insert(n);
+        }
+        if o.get("reasoning_effort") == Some(&json!("none")) && !o.contains_key("temperature") {
+            o.insert("temperature".into(), 0.2.into());
+        }
     }
     body
 }
@@ -2384,7 +2429,8 @@ fn usage_openai(v: &Value) -> Usage {
         completion: tokens(&u["completion_tokens"]),
         cached: tokens(&u["prompt_tokens_details"]["cached_tokens"]),
         reasoning: tokens(&u["completion_tokens_details"]["reasoning_tokens"]),
-        written: None,
+        // OpenAI's GPT-5.6 and later name the prompt tokens written to their cache (decision 80).
+        written: tokens(&u["prompt_tokens_details"]["cache_write_tokens"]),
     }
 }
 
@@ -6708,6 +6754,124 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             assert!(sent.get(forbidden).is_none(), "{forbidden}");
         }
         assert_eq!(outcomes(&conn), ["ok"]);
+    }
+
+    /// Decision 80: a request to OpenAI's own API is shaped as its models take one:
+    /// `max_completion_tokens` in place of `max_tokens`; for the models that take
+    /// `reasoning_effort: "none"`, that and the temperature, for the others neither; for GPT-6 no
+    /// implicit cache write; an entry's `extra` wins; any other host's request as before.
+    #[test]
+    fn an_openai_request_is_shaped_as_its_models_take_it() {
+        let schema = json!({"type": "object"});
+        let max = json!({"max_tokens": 4000});
+        let max = max.as_object().unwrap();
+        let shaped = |model: &str, extra: &serde_json::Map<String, Value>| {
+            openai_request(model, "p", &schema, extra, true)
+        };
+        let luna = shaped("gpt-6-luna", max);
+        assert_eq!(
+            [
+                &luna["reasoning_effort"],
+                &luna["temperature"],
+                &luna["max_completion_tokens"]
+            ],
+            [&json!("none"), &json!(0.2), &json!(4000)]
+        );
+        assert_eq!(luna["prompt_cache_options"], json!({"mode": "explicit"}));
+        assert!(luna.get("max_tokens").is_none(), "{luna}");
+        assert_eq!(
+            shaped("gpt-6.1-terra-2026-10-01", max)["reasoning_effort"],
+            "none"
+        );
+        // GPT-6.1 Sol takes no `none`: no reasoning effort is sent, nor a temperature.
+        let sol = shaped("gpt-6.1-sol", max);
+        assert!(
+            sol.get("reasoning_effort").is_none() && sol.get("temperature").is_none(),
+            "{sol}"
+        );
+        assert_eq!(sol["prompt_cache_options"], json!({"mode": "explicit"}));
+        // An older model: no cache option, no temperature, its bound renamed.
+        let older = shaped("gpt-4.1", max);
+        assert!(
+            older.get("prompt_cache_options").is_none() && older.get("temperature").is_none(),
+            "{older}"
+        );
+        assert_eq!(older["max_completion_tokens"], 4000);
+        // The entry's own `extra` wins: an effort of its own sends no temperature, and its own bound
+        // is kept.
+        let own =
+            json!({"reasoning_effort": "low", "max_completion_tokens": 900, "max_tokens": 4000});
+        let low = shaped("gpt-6-luna", own.as_object().unwrap());
+        assert_eq!(
+            [&low["reasoning_effort"], &low["max_completion_tokens"]],
+            [&json!("low"), &json!(900)]
+        );
+        assert!(
+            low.get("temperature").is_none() && low.get("max_tokens").is_none(),
+            "{low}"
+        );
+        // Another host: as before.
+        let other = openai_request("gpt-6-luna", "p", &schema, max, false);
+        assert_eq!(
+            [&other["temperature"], &other["max_tokens"]],
+            [&json!(0.2), &json!(4000)]
+        );
+        assert!(
+            other.get("reasoning_effort").is_none() && other.get("prompt_cache_options").is_none(),
+            "{other}"
+        );
+    }
+
+    /// Decision 80: the connection test to OpenAI's own API sends the same shape, its 128-token
+    /// bound as `max_completion_tokens`, and its cost counts the tokens its usage says were written
+    /// to the cache; another host's request and cost are as before, a written count in its usage
+    /// left out (Codex's review of 80a).
+    #[test]
+    fn an_openai_connection_test_sends_its_shape_and_counts_its_cache_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let body = json!({"choices": [{"message": {"content": "{\"ok\":true}"}}],
+            "usage": {"prompt_tokens": 1200, "completion_tokens": 4,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1100}}});
+        let priced = |url: String| {
+            let mut p = stub(url);
+            if let Provider::Openai { model, limits, .. } = &mut p {
+                *model = "gpt-6-luna".into();
+                limits.usd_per_mtok_in = 1.0;
+                limits.usd_per_mtok_out = 1.0;
+            }
+            p
+        };
+        let usd = |result: &Value| result["usd"].as_f64().unwrap_or(f64::NAN);
+        let (url, request) = serve_once(body.to_string().into_bytes(), "");
+        config::OPENAI_AT.set(Some(url.clone()));
+        let result = probe(&conn, &priced(url), 5.0, &|| Ok(None)).unwrap();
+        config::OPENAI_AT.set(None);
+        assert_eq!(result["status"], "ok", "{result}");
+        let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            [
+                &sent["max_completion_tokens"],
+                &sent["reasoning_effort"],
+                &sent["temperature"]
+            ],
+            [&json!(128), &json!("none"), &json!(0.2)]
+        );
+        assert!(sent.get("max_tokens").is_none(), "{sent}");
+        assert_eq!(sent["prompt_cache_options"], json!({"mode": "explicit"}));
+        // 100 fresh and 1,100 written at 1.25 times, and 4 out, at USD 1 a million: USD 0.001479.
+        assert!((usd(&result) - 0.001479).abs() < 1e-12, "{result}");
+        let (url, request) = serve_once(body.to_string().into_bytes(), "");
+        let result = probe(&conn, &priced(url), 5.0, &|| Ok(None)).unwrap();
+        let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            [&sent["max_tokens"], &sent["temperature"]],
+            [&json!(128), &json!(0.2)]
+        );
+        // Its 1,200 prompt tokens once, and 4 out: USD 0.001204.
+        assert!((usd(&result) - 0.001204).abs() < 1e-12, "{result}");
     }
 
     #[test]

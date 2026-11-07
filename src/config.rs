@@ -483,7 +483,8 @@ impl Provider {
     /// The most one input token may be billed, in input prices. A Messages entry writes its prompt
     /// cache: a fenced prompt's instructions (`provider::anthropic_request`) at 1.25 times the input
     /// price, for five minutes' cache, and at up to twice when its `extra` asks for a cache of its
-    /// own anywhere (`own_cache`); any other entry once. Only prices: a paid call's input is priced
+    /// own anywhere (`own_cache`); an entry of OpenAI's own API at 1.25 times (decision 80); any
+    /// other entry once. Only prices: a paid call's input is priced
     /// at this where its usage is not known (admission, the reservation, a call whose usage never
     /// comes back, recuration's estimate), and its tokens count once against every token limit
     /// (Codex on #409).
@@ -498,6 +499,10 @@ impl Provider {
                 api: Api::Anthropic,
                 ..
             } => 1.25,
+            // Decision 80: oboete's request asks OpenAI for no implicit cache write, but an entry's
+            // `extra` can ask for one and an older model's usage does not say: an input whose
+            // usage is unknown is priced as if written.
+            Provider::Openai { base_url, .. } if openai_api(base_url) => OPENAI_CACHE_WRITE,
             _ => 1.0,
         }
     }
@@ -507,8 +512,9 @@ impl Provider {
     /// A Messages entry bills a token read from its prompt cache at a tenth of the input price or
     /// less (Claude's models), and one written at 1.25 times for oboete's own five-minute marker;
     /// at twice when its `extra` asks for a cache of its own anywhere (`own_cache`), whose lifetime
-    /// the usage does not tell apart (Codex on #636). Elsewhere a written token counts twice and a
-    /// read one once.
+    /// the usage does not tell apart (Codex on #636). OpenAI's own API bills a written token at
+    /// 1.25 times and a read one at a tenth or less (decision 80). Elsewhere a written token counts
+    /// twice and a read one once.
     pub fn billed_input(&self, prompt: i64, cached: Option<i64>, written: Option<i64>) -> f64 {
         let (cached, written) = (cached.unwrap_or(0).max(0), written.unwrap_or(0).max(0));
         match self {
@@ -520,6 +526,12 @@ impl Provider {
                 let write = if own_cache(extra) { 2.0 } else { 1.25 };
                 let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
                 fresh as f64 + written as f64 * write + cached as f64 * 0.1
+            }
+            // Decision 80: OpenAI bills each input token once, at its uncached, cache-write or
+            // cached rate: a write at 1.25 times, a read at a tenth or less.
+            Provider::Openai { base_url, .. } if openai_api(base_url) => {
+                let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
+                fresh as f64 + written as f64 * OPENAI_CACHE_WRITE + cached as f64 * 0.1
             }
             _ => prompt.saturating_add(written) as f64,
         }
@@ -626,6 +638,17 @@ fn default_budget() -> u32 {
 }
 /// OpenRouter's API.
 pub const OPENROUTER: &str = "https://openrouter.ai/api/v1";
+/// OpenAI's own API's host (decision 80).
+const OPENAI_HOST: &str = "api.openai.com";
+#[cfg(test)]
+thread_local! {
+    /// A loopback URL a test calls and bills as OpenAI's own API.
+    pub(crate) static OPENAI_AT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// What OpenAI's GPT-5.6 and later bill a prompt token written to their cache, in input prices
+/// (developers.openai.com, the prompt caching guide, 2026-11-07).
+const OPENAI_CACHE_WRITE: f64 = 1.25;
 /// A fifth of the 50 requests a day that OpenRouter gives all `:free` models of an account that
 /// bought less than 10 credits (1,000 after that; openrouter.ai/docs/api/reference/limits,
 /// 2026-09-29): the cost line (spec 8.2) for any account, until its key's own limit is read.
@@ -1149,6 +1172,20 @@ pub(crate) fn openrouter(base_url: &str) -> bool {
         .trim()
         .trim_end_matches('/')
         .eq_ignore_ascii_case(OPENROUTER)
+}
+
+/// Whether an entry's calls go to OpenAI's own API (decision 80): by its URL's host in any case,
+/// whatever its port or path, as the page knows its prices and the viewer reads its model list
+/// (Codex's review of 80a: `https://api.openai.com:443/v1` is OpenAI's too).
+pub(crate) fn openai_api(base_url: &str) -> bool {
+    #[cfg(test)]
+    if OPENAI_AT.with(|at| at.borrow().as_deref() == Some(base_url)) {
+        return true;
+    }
+    base_url.trim().parse::<ureq::http::Uri>().is_ok_and(|u| {
+        u.host()
+            .is_some_and(|h| h.eq_ignore_ascii_case(OPENAI_HOST))
+    })
 }
 
 fn is_free(model: &str) -> bool {
