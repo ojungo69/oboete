@@ -95,9 +95,12 @@ fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS manifest_facts_seq
            ON manifest_facts(device, repo, branch, fact, seq);
          CREATE INDEX IF NOT EXISTS manifest_facts_ts ON manifest_facts(device, repo, fact, ts);
-         -- A turn's reply and the session's next prompt, whatever the branch (a seek).
+         -- A turn's reply, whatever the branch (a seek).
          CREATE INDEX IF NOT EXISTS manifest_facts_turn
            ON manifest_facts(device, repo, session, fact, seq);
+         -- The session's next prompt, in any repository, that ends a turn (a seek; #856).
+         CREATE INDEX IF NOT EXISTS manifest_facts_session
+           ON manifest_facts(device, session, fact, seq);
          -- A failure and the success of the same call (a seek, not a scan of later successes).
          CREATE INDEX IF NOT EXISTS manifest_facts_label
            ON manifest_facts(device, repo, branch, fact, label, seq);
@@ -1316,15 +1319,16 @@ fn build(
         }
         p.last_prompt = Some(one_line(&gate(text), CLIP));
         // Its turn's reply: the first of its session in the repository after it, before the
-        // session's next prompt there, on whichever branch the session had moved to (Codex's
-        // review of #854). Not another repository's: a record there rebuilds and a forget there
-        // reaches the repository's own checkouts only. An agent's own: a session id is the agent's.
+        // session's next prompt in any repository (#856), on whichever branch the session had
+        // moved to (Codex's review of #854). Not another repository's: a record there rebuilds and
+        // a forget there reaches the repository's own checkouts only. An agent's own: a session id
+        // is the agent's.
         let reply: Option<i64> = k.query_row(
             "SELECT MIN(seq) FROM manifest_facts
              WHERE device = ?1 AND repo = ?2 AND session = ?3 AND fact = 'reply' AND seq > ?4
                AND seq < COALESCE((SELECT MIN(seq) FROM manifest_facts
-                 WHERE device = ?1 AND repo = ?2 AND session = ?3 AND fact = 'prompt'
-                   AND seq > ?4), 9223372036854775807)",
+                 WHERE device = ?1 AND session = ?3 AND fact = 'prompt' AND seq > ?4),
+                 9223372036854775807)",
             params![device, repo, session, seq],
             |r| r.get(0),
         )?;
@@ -3146,6 +3150,24 @@ extra_rules = [
             store.append(&e).unwrap();
         }
         assert_eq!(exchange(&store), ["- prompt: Move the tests."]);
+        // The turn ends at the session's next prompt in any repository: a reply recorded here after
+        // the session's prompt in another repository is not this prompt's (cubic on #854, #856).
+        for e in [
+            prompt(
+                "s9",
+                20 * min + 30_000,
+                serde_json::json!({"prompt": "Rename the crate."}),
+            ),
+            elsewhere(prompt(
+                "s9",
+                20 * min + 40_000,
+                serde_json::json!({"prompt": "Look at the other repository."}),
+            )),
+            reply("s9", 20 * min + 50_000, "A reply after the other prompt."),
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert_eq!(exchange(&store), ["- prompt: Rename the crate."]);
         for e in [
             prompt(
                 "s8",
@@ -3162,26 +3184,34 @@ extra_rules = [
         assert_eq!(exchange(&store), ["- prompt: Name the types."]);
     }
 
-    /// The turn's reply is found by a seek, not a scan of the device's facts (cubic on #854).
+    /// The turn's reply, and the session's next prompt in any repository that ends its turn, are
+    /// each found by a seek, not a scan of the device's facts (cubic on #854, #856).
     #[test]
     fn the_turns_reply_is_a_seek() {
         let k = rusqlite::Connection::open_in_memory().unwrap();
         schema(&k).unwrap();
-        let plan: Vec<String> = k
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT MIN(seq) FROM manifest_facts
+        for (query, index) in [
+            (
+                "SELECT MIN(seq) FROM manifest_facts
                  WHERE device = 'd' AND repo = 'r' AND session = 's' AND fact = 'reply'
                    AND seq > 1",
-            )
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert!(
-            plan.iter().any(|l| l.contains("manifest_facts_turn")),
-            "{plan:?}"
-        );
+                "manifest_facts_turn",
+            ),
+            (
+                "SELECT MIN(seq) FROM manifest_facts
+                 WHERE device = 'd' AND session = 's' AND fact = 'prompt' AND seq > 1",
+                "manifest_facts_session",
+            ),
+        ] {
+            let plan: Vec<String> = k
+                .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(plan.iter().any(|l| l.contains(index)), "{plan:?}");
+        }
     }
 
     /// Decision 76: a decision or an open item whose unit's newest claim is older than 14 days at
