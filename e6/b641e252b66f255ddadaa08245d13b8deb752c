@@ -1,0 +1,43 @@
+assets/viewer/app.css
+  s_70102dd6ea5599::t_6d62664a25cca0 625
+assets/viewer/app.js
+  s_70102dd6ea5599::t_d61d6df8bdd0c9 1064-1066,2191,5806,6556,7058-7059,7061,7068-7075,7099-7103,7968-7971,8455
+docs/resident.md
+  s_70102dd6ea5599::t_dcbc3ebfcd544f 319,336-344
+src/consumer/manifest.rs
+  s_70102dd6ea5599::t_0f993c16b2ba95 188-189
+src/forget.rs
+  s_70102dd6ea5599::t_9c37172ddcf67c 1155-1159
+src/hook.rs
+  s_70102dd6ea5599::t_d38e2850a98106 453,800-803,1124-1125,1209,1227,1970-1975,5324-5350,7943-8001
+src/settings.rs
+  s_70102dd6ea5599::t_124d6c52f95cb6 160-162,164,167
+src/setup.rs
+  s_70102dd6ea5599::t_f60fa5578d6bd0 2739-2742
+src/setup/doctor.rs
+  s_70102dd6ea5599::t_5992dc781c0e46 1869-1902
+src/setup/doctor/runtime.rs
+  s_70102dd6ea5599::t_4bb6468618f21c 236-237
+src/testdata/viewer-readiness/test.mjs
+  s_70102dd6ea5599::t_c2f3bd7162cf78 2927-2940
+src/view.rs
+  s_70102dd6ea5599::t_06945e41d72f73 3608,7400-7403,7414,7426,7434-7450,7452-7453
+src/worker.rs
+  s_70102dd6ea5599::t_adff111341dc1e 862-867,916-917,1181,1305,1608-1610,1675,1884-1936,2128-2131,5737-5813,5838-5839
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e6b641e252b66f255ddadaa08245d13b8deb752c",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
