@@ -164,8 +164,11 @@ fn default_embedding_usd() -> f64 {
 pub struct Summary {
     /// Language of observations and summaries, as written into the prompt (`write_in`): a
     /// language's name, or `conversation` for the language each conversation is written in.
-    /// Unset, the computer's (decision 81).
-    #[serde(default = "default_language")]
+    /// Unset or blank, the computer's (decision 81).
+    #[serde(
+        default = "default_language",
+        deserialize_with = "language_or_computers"
+    )]
     pub language: String,
     /// Whether the worker curates windows (milestone 3). Off until the cut-over (spec 7.5): only
     /// a home that asks for it sends anything to a provider.
@@ -683,6 +686,16 @@ fn default_language() -> String {
     os_language()
 }
 
+/// A language left blank is the computer's, as one not set (decision 81; cubic on #864).
+fn language_or_computers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let language = String::deserialize(d)?;
+    Ok(if language.trim().is_empty() {
+        default_language()
+    } else {
+        language
+    })
+}
+
 #[cfg(test)]
 thread_local! {
     /// The locale a test reads as the computer's: Japanese unless a test sets another, as the
@@ -748,15 +761,11 @@ pub fn write_in(language: &str) -> String {
     }
 }
 
-/// Whether a language, as `[summary] language` may spell it, is Japanese.
+/// Whether a language, as `[summary] language` may spell it, is Japanese: its name, or a locale
+/// whose language part is `ja`, read as `language_of` reads the computer's (`ja_JP.UTF-8`, `ja@x`).
 pub(crate) fn is_japanese(language: &str) -> bool {
     let l = language.trim();
-    ["japanese", "ja", "日本語"]
-        .iter()
-        .any(|j| l.eq_ignore_ascii_case(j))
-        || ["ja_", "ja-"]
-            .iter()
-            .any(|p| l.to_ascii_lowercase().starts_with(p))
+    l.eq_ignore_ascii_case("japanese") || l == "日本語" || language_of(l) == "Japanese"
 }
 
 /// Whether oboete's own words (the terminal's note, the judge's evidence) go in Japanese: the
@@ -1473,7 +1482,8 @@ pub(crate) fn parse_inject_with_language(text: &str) -> Result<(Inject, bool)> {
     let set = (file.summary.as_ref())
         .and_then(|s| s.as_table())
         .and_then(|t| t.get("language"))
-        .and_then(|l| l.as_str().map(str::to_owned));
+        .and_then(|l| l.as_str().map(str::to_owned))
+        .filter(|l| !l.trim().is_empty());
     let japanese = notes_japanese(&set.unwrap_or_else(os_language));
     Ok((i, japanese))
 }
@@ -2888,8 +2898,20 @@ model = { gone = "m" }
             !inject_with_language(none.path()).unwrap().1,
             "no config.toml: German"
         );
+        // Left blank, the computer's, as unset (cubic on #864).
+        let blank = "[summary]\nlanguage = \"  \"\n";
+        assert!(
+            !parse_inject_with_language(blank).unwrap().1,
+            "blank: German"
+        );
+        let summary: Summary = toml::from_str("language = \" \"").unwrap();
+        assert_eq!(summary.language, "German");
         OS_LOCALE.with(|l| *l.borrow_mut() = "ja_JP.UTF-8".into());
         assert!(notes_japanese("conversation"));
+        assert!(
+            parse_inject_with_language(blank).unwrap().1,
+            "blank: the computer's, Japanese"
+        );
         assert!(
             inject_with_language(none.path()).unwrap().1,
             "no config.toml: Japanese"
@@ -2905,8 +2927,11 @@ model = { gone = "m" }
             (" ja ", true),
             ("ja-JP", true),
             ("日本語", true),
+            ("ja.UTF-8", true),
+            ("ja@x", true),
             ("English", false),
             ("javanese", false),
+            ("jav", false),
         ] {
             assert_eq!(is_japanese(language), japanese, "{language}");
             let text = format!("[summary]\nlanguage = {language:?}\n");

@@ -1119,11 +1119,16 @@ pub(crate) fn stage_held(home: &Path, body: &[u8]) -> Result<Option<StagedSettin
     if s.curate != now.summary.curate {
         put(&mut doc, "summary", "curate", s.curate.into());
     }
-    // Decision 81: left empty, the computer's language: the key goes, not an empty language.
+    // Decision 81: left empty, the computer's language: the key goes, not an empty language, its
+    // comment kept as the other removals keep theirs (cubic on #864).
     if s.language.trim().is_empty() {
+        let comments = (doc.get("summary").and_then(|t| t.as_table_like()))
+            .map(|table| key_comments(table, "language"))
+            .unwrap_or_default();
         if let Some(t) = doc.get_mut("summary").and_then(|t| t.as_table_like_mut()) {
             t.remove("language");
         }
+        keep_comments(&mut doc, &comments);
     } else if s.language != now.summary.language {
         put(&mut doc, "summary", "language", s.language.as_str().into());
     }
@@ -1303,8 +1308,10 @@ pub fn pin_language(home: &Path) -> anyhow::Result<Option<String>> {
     let mut doc: toml_edit::DocumentMut = text
         .parse()
         .map_err(|_| anyhow::anyhow!("config.toml is invalid"))?;
+    // A language left blank is not set, as `config` reads it (cubic on #864).
     let set = (doc.get("summary").and_then(|t| t.as_table_like()))
-        .is_some_and(|t| t.contains_key("language"));
+        .and_then(|t| t.get("language")?.as_str())
+        .is_some_and(|l| !l.trim().is_empty());
     if set {
         return Ok(None);
     }
@@ -2040,9 +2047,6 @@ mod tests {
         std::fs::read_to_string(home.path().join("config.toml")).ok()
     }
 
-    /// Decision 81: setup writes the computer's language into a config.toml without one, keeps a
-    /// value set, and makes no config.toml; the page is told the computer's language, and a
-    /// language saved empty takes the key out, back to the computer's.
     /// Codex on decision 81: setup's language is not written into a file one of its readers refuses,
     /// which neither stops setup (a `[summary]` of another type) nor shows a value of the file (a
     /// line that does not parse).
@@ -2060,6 +2064,10 @@ mod tests {
         }
     }
 
+    /// Decision 81: setup writes the computer's language into a config.toml without one, or with
+    /// one left blank, keeps a value set, and makes no config.toml; the page is told the computer's
+    /// language, and a language saved empty takes the key out, its comment kept, back to the
+    /// computer's.
     #[test]
     fn the_computers_language_is_written_once_and_an_empty_one_is_its_default() {
         let none = home_with(None);
@@ -2069,6 +2077,20 @@ mod tests {
         let kept = home_with(Some(set));
         assert_eq!(pin_language(kept.path()).unwrap(), None);
         assert_eq!(file(&kept).as_deref(), Some(set));
+        // Left blank, it is not set (cubic on #864): the computer's is written over it.
+        let blank = home_with(Some("[summary]\nlanguage = \" \" # mine\n"));
+        assert_eq!(
+            pin_language(blank.path()).unwrap().as_deref(),
+            Some("Japanese")
+        );
+        assert_eq!(
+            file(&blank).as_deref(),
+            Some("[summary]\nlanguage = \"Japanese\" # mine\n")
+        );
+        let shown = show(kept.path());
+        let body = posted(&shown, |v| v["summary"]["language"] = json!(""));
+        save_to(&kept, &body).unwrap();
+        assert_eq!(file(&kept).as_deref(), Some("[summary]\n\n # mine\n"));
         let unset = home_with(Some("# mine\n[summary]\ncurate = true\n"));
         assert_eq!(
             pin_language(unset.path()).unwrap().as_deref(),
@@ -3008,9 +3030,10 @@ mod tests {
         let home = home_with(Some(
             "[summary]\ncurate = true\nlanguage = \"\"\nwindow_tokens = 0\nidle_minutes = 4294967295\n",
         ));
+        // A blank language is the computer's, as one not set (decision 81; cubic on #864).
         assert_eq!(
             show(home.path())["summary"],
-            json!({"curate": true, "language": "", "window_tokens": 0,
+            json!({"curate": true, "language": "Japanese", "window_tokens": 0,
                 "idle_minutes": 4_294_967_295_u32})
         );
     }

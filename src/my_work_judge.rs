@@ -281,9 +281,6 @@ fn left(
     decided(shown, entry, vec![("outcome", json!(why))])
 }
 
-/// A conversation as claude-mem's `contextReader` gives it (J2): its repository, the minute it
-/// started, its first asks and its first cards' titles, each cut at the attached files, its white
-/// space collapsed, gated and cut; what it reads of this device's records and ops in `shown`.
 /// The rules judge's evidence (decision 81: Japanese when oboete's own words are, else English):
 /// the one proven link, a sent opening ask or a work list both wrote.
 fn rules_evidence(ja: bool, sent: bool) -> String {
@@ -319,6 +316,9 @@ fn picked_evidence(ja: bool, who: &str, considered: &str, p: f64, score: f64) ->
     }
 }
 
+/// A conversation as claude-mem's `contextReader` gives it (J2): its repository, the minute it
+/// started, its first asks and its first cards' titles, each cut at the attached files, its white
+/// space collapsed, gated and cut; what it reads of this device's records and ops in `shown`.
 pub(crate) fn context(s: &Stores, c: &Seen, shown: &mut Shown) -> Value {
     let device = s.raw.device();
     let mut asks = Vec::new();
