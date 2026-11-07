@@ -2689,6 +2689,34 @@ console.log('PASS: the caps\' No cap switches');
       simple('catalog.save').click();await settled(16);
       assert.deepEqual([steps().map(s=>s[1]),JSON.parse(posted[0].body).action.entry.enabled,focusKey()],[['create'],true,'model:claude'],
         'a subscription: made on, its line on its model');
+      // The draft as More settings leaves it is what "Add" sends: a model chosen sets its prices
+      // and its largest request then (the step, or the draft's own where tighter or the model has
+      // none); an address and prices typed after are kept.
+      const newField=key=>panel.querySelector('.new-provider').querySelectorAll('input').find(n=>n.dataset.field===key);
+      const createdBody=async()=>{posted.length=0;answers=[json(state('v2'))];simple('catalog.save').click();await settled(16);
+        return JSON.parse(posted[0].body).action.entry;};
+      await pickOpenAI();
+      typeIn(newField('providers.limits.max_request_tokens'),'10000');
+      choose(simple('catalog.model'),'gpt-6.1-terra');
+      let madeNow=await createdBody();
+      assert.deepEqual([madeNow.limits.usd_per_mtok_in,madeNow.limits.max_request_tokens],[1,10000],'Terra: its prices, the draft\'s tighter cap kept');
+      await pickOpenAI();
+      choose(simple('catalog.model'),'gpt-6.1-terra');
+      typeIn(newField('providers.base_url'),'https://proxy.example/v1');typeIn(newField('providers.limits.usd_per_mtok_in'),'3');
+      madeNow=await createdBody();
+      assert.deepEqual([madeNow.base_url,madeNow.limits.usd_per_mtok_in,madeNow.model],['https://proxy.example/v1',3,'gpt-6.1-terra'],
+        'an address and a price typed after: sent as typed');
+      await pickOpenAI();
+      typeIn(newField('providers.base_url'),'https://proxy.example/v1');ctx.ui.drawSettings();
+      choose(simple('catalog.model'),'gpt-6.1-terra');
+      madeNow=await createdBody();
+      assert.deepEqual([madeNow.base_url,madeNow.limits.usd_per_mtok_in],['https://proxy.example/v1',0.1],
+        'another address first: no prices the page knows, the draft\'s kept');
+      f=draw(before());choice('anthropic').click();await settled();
+      typeIn(newField('providers.limits.max_request_tokens'),'');
+      choose(simple('catalog.model'),'claude-sonnet-5-5');
+      madeNow=await createdBody();
+      assert.deepEqual([madeNow.limits.usd_per_mtok_in,madeNow.limits.max_request_tokens],[2,null],'Sonnet: its prices, no cap of its own and none set');
       // The key typed: masked as every key field; kept through a redraw; not put back once the
       // draft's address changed in More settings (#807).
       await pickOpenAI();

@@ -7679,8 +7679,8 @@ function simpleCatalog(f) {
     // settings gets nothing back (#807), and "Add" sends it only to the destination it was typed for.
     keepSecret(key, addTarget(draft), () => {});
   }
-  // 2. Its model, with its prices where the page knows them.
-  const prices = MODEL_PRICES[urlHost(entry.base_url)] || {};
+  // 2. Its model, with its prices where the page knows them at the draft's address.
+  const prices = MODEL_PRICES[urlHost(draft.base_url)] || {};
   const model = el('select', null, ...entry.models.map((name) => {
     const option = el('option', null, prices[name]
       ? t('model_priced', { model: name, input: perMillion(prices[name][0]), output: perMillion(prices[name][1]) }) : name);
@@ -7689,7 +7689,19 @@ function simpleCatalog(f) {
   model.value = draft.model;
   model.dataset.simpleFocus = 'catalog.model';
   model.setAttribute('aria-label', t('simple_model', { name: label }));
-  model.addEventListener('change', () => { draft.model = model.value; });
+  model.addEventListener('change', () => {
+    draft.model = model.value;
+    // Its prices and largest request with it, as a line's choice sets them (`linePricedModel`): the
+    // model's step, or the draft's own where it is tighter or the model has none. The draft then holds
+    // them, so what More settings changes after is what "Add" sends.
+    const known = prices[draft.model];
+    if (!known) return;
+    const [usdIn, usdOut, step] = known;
+    const own = draft.limits.max_request_tokens.trim() === '' ? null : Number(draft.limits.max_request_tokens);
+    draft.limits.usd_per_mtok_in = String(usdIn);
+    draft.limits.usd_per_mtok_out = String(usdOut);
+    draft.limits.max_request_tokens = providerText(step === null ? own : own === null ? step : Math.min(step, own));
+  });
   // 3. Its place among the AI in use.
   const option = (value, text) => { const node = el('option', null, text); node.value = value; return node; };
   const place = el('select', null, option('last', t('simple_place_last')), option('first', t('simple_place_first')),
@@ -7734,13 +7746,6 @@ async function simpleAdd(entry, draft, key, place, button) {
   // Only while this visit of the settings lasts: left, nothing more is written or drawn.
   const visit = generation;
   const here = () => view === 'settings' && Boolean(form) && generation === visit;
-  // A model whose prices the page knows goes with them and its largest request (`linePricedModel`).
-  const priced = MODEL_PRICES[urlHost(entry.base_url)]?.[draft.model];
-  if (priced) {
-    draft.limits.usd_per_mtok_in = String(priced[0]);
-    draft.limits.usd_per_mtok_out = String(priced[1]);
-    draft.limits.max_request_tokens = providerText(priced[2]);
-  }
   if (!await providerOperation({ op: 'create', entry: providerBody(draft) }, button, null, '', () => createdFocus(name)) || !here()) return;
   const control = (focus) => [...$('panel').querySelectorAll('button, input, select')].find((n) => n.dataset.simpleFocus === focus);
   const stop = (focus) => {
