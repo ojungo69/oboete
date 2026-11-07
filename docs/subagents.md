@@ -478,3 +478,43 @@ Slice 3:
   page's in `src/testdata/viewer-readiness/test.mjs`;
   `my_work::tests::imported_work_state_is_neither_read_nor_counted` keeps an imported row out of the
   requests.
+
+### Slice 3: a subagent's files (2026-11-07)
+
+- **The phase** (`deliverables::run`): beside a turn end it takes a Claude Code hook `subagent_stop`
+  record, in seq order; one whose id names no subagent in the facts (none, masked, another agent's:
+  `consumer::subagents::facts`) is read past. The worker hands it its knowledge.db connection.
+- **The wait** (`consumer::subagents::reached`): the consumer's checkpoint for this device at the
+  stop or past it, with no rebuild owed (`subagent_rebuild`); else the phase returns before its
+  batch's last move, its checkpoint at the last turn end it took, and the worker's next round, which
+  the stop's arrival after the round's start wakes, takes it.
+- **The launch** (`deliverables::stop_calls`): the subagent's newest `launch` fact before the stop,
+  read in raw as a hook's event (the facts keep no source), its `public_turn` mark there, and a
+  prompt or harness message read before it in its own turn (`prompted_before`, through
+  `Raw::hook_turn_start` and `Raw::turn_seqs`). Else the stop copies nothing, and counts as taken.
+- **The calls**: its `step` facts after the newer of `subagent_scan`'s seq and the newest `stop`
+  fact raw reads as a hook's, and before the stop; of those, each in a gap (`Raw::gap_reply`: the
+  session's newest hook reply before it, by raw's labels, with no hook prompt or envelope of the
+  session between them, nor a purged record that was one, whose kind the purge keeps), whose reply
+  no forget denies (`Raw::forgets`), read as a hook's event. One `candidates` pass, `prompted` from
+  its start.
+- **Rows** as a turn's, the turn the gap's reply; then `subagent_scan` takes the stop's seq, then
+  the phase's checkpoint. A restore below the checkpoint empties the device's `subagent_scan` as it
+  moves the checkpoint.
+- **Not covered**, besides the plan's: a subagent launched by another after the parent's reply
+  copies nothing, its launch's turn having no prompt; claude-mem's SubagentStop copies its files.
+- **Mutation run**: 15 mutants of the new code, each built and run alone (6 GB, 240 s): each of the
+  boundary, the turn, the gap's purged prompt and denied reply, the launch's mark, prompt and
+  harness message, the hook source, the wait and its rebuild, the restore, the kept seq, the wait's
+  return and `prompted` makes a test fail. The launch's mark survived the first run, the private
+  turn's launch having no prompt either; the notification's turn after it, which has one, kills it.
+- **Tests:** `deliverables::tests::a_background_subagents_file_is_copied_at_its_stop_once`,
+  `deliverables::tests::one_stop_over_two_gaps_keeps_each_gaps_copies_apart`,
+  `deliverables::tests::a_later_stop_takes_only_the_calls_after_the_one_taken`,
+  `deliverables::tests::a_stop_forgotten_before_the_phase_read_it_leaves_its_calls_to_the_next`,
+  `deliverables::tests::a_stop_after_the_first_run_takes_no_call_before_an_earlier_stop`,
+  `deliverables::tests::a_subagent_launched_from_a_private_turn_copies_nothing` (through the hooks),
+  `deliverables::tests::a_subagent_with_no_public_launch_or_call_copies_nothing`,
+  `deliverables::tests::a_gap_whose_reply_or_prompt_was_forgotten_takes_nothing`,
+  `deliverables::tests::a_stop_waits_for_the_subagents_facts`,
+  `deliverables::tests::a_stops_copy_goes_with_its_call_or_reply_and_stays_through_retention`.

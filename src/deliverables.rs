@@ -3449,15 +3449,16 @@ mod tests {
         assert_eq!(origins(home.path()), expected);
     }
 
-    /// Slice 3, through the hooks: a subagent launched from a wholly private prompt's turn copies
-    /// nothing, though a later public prompt cleared the session's flag before it wrote; one
-    /// launched from a public turn copies its file.
+    /// Slice 3, through the hooks: a subagent launched from a wholly private prompt's turn, or from
+    /// the turn a task's notification starts after it, copies nothing, though a later public
+    /// prompt cleared the session's flag before it wrote; one launched from a public turn copies
+    /// its file.
     #[test]
     fn a_subagent_launched_from_a_private_turn_copies_nothing() {
         let (home, mut raw) = ready();
         let work = tempfile::tempdir().unwrap();
         let w = work.path();
-        files(w, &["secret.pdf", "public.pdf"]);
+        files(w, &["secret.pdf", "notified.pdf", "public.pdf"]);
         let settings = crate::capture::Settings::default();
         let hook = |raw: &mut Raw, session: &str, event: &str, mut payload: Value| {
             payload["session_id"] = json!(session);
@@ -3477,18 +3478,29 @@ mod tests {
             )
             .unwrap();
         };
-        let cases = [
-            ("s1", "<private>the real plan</private>", "secret.pdf"),
-            ("s2", "Draw the chart.", "public.pdf"),
+        // The prompts before the launch: a wholly private one; the same, then the turn a task's
+        // notification starts after it, private still though its record is there; a public one.
+        let private = "<private>the real plan</private>";
+        let note = "<task-notification>\n<status>completed</status>";
+        let cases: [(&str, &[&str], &str); 3] = [
+            ("s1", &[private], "secret.pdf"),
+            ("s2", &[private, note], "notified.pdf"),
+            ("s3", &["Draw the chart."], "public.pdf"),
         ];
-        for (session, first, file) in cases {
+        for (session, prompts, file) in cases {
             let id = format!("{session}a");
-            hook(
-                &mut raw,
-                session,
-                "UserPromptSubmit",
-                json!({ "prompt": first }),
-            );
+            for (i, prompt) in prompts.iter().enumerate() {
+                if i > 0 {
+                    let done = json!({"last_assistant_message": "Done."});
+                    hook(&mut raw, session, "Stop", done);
+                }
+                hook(
+                    &mut raw,
+                    session,
+                    "UserPromptSubmit",
+                    json!({ "prompt": prompt }),
+                );
+            }
             let launched = json!({"tool_name": "Agent",
                 "tool_input": {"description": "Draw", "prompt": "Draw it."},
                 "tool_response": {"agentId": id, "status": "async_launched", "isAsync": true}});
