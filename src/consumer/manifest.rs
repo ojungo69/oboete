@@ -245,14 +245,13 @@ pub fn text(
     };
     // Decision 75: what the rest leaves goes to the cards, as many back as fit below the count
     // that did not.
-    if let Some(mut over) = over {
-        while over - n > 1 {
-            let mid = n + (over - n) / 2;
-            match attempt(fields, n_s, mid) {
-                Some((b, g, f, true)) => (n, bodies, gated, from) = (mid, b, g, f),
-                _ => over = mid,
-            }
-        }
+    if let Some(over) = over
+        && let Some((m, (b, g, f))) = fill_back(n, over, |m| match attempt(fields, n_s, m) {
+            Some((b, g, f, true)) => Some((b, g, f)),
+            _ => None,
+        })
+    {
+        (n, bodies, gated, from) = (m, b, g, f);
     }
     let text = manifest::cut(&gated, cap);
     // Match the surviving occurrence, not another claim with the same rendered line.
@@ -278,6 +277,17 @@ pub fn text(
         docs,
         memory_use: false,
     }))
+}
+
+/// Decision 75: the largest count above `n` and below `over` whose packet `fits` takes, tried
+/// from the largest down. A block's size need not grow with its cards: it drops its savings line
+/// once the cards shown cost as much to read as the work recorded (Codex's review of #854).
+fn fill_back<T>(
+    n: usize,
+    over: usize,
+    mut fits: impl FnMut(usize) -> Option<T>,
+) -> Option<(usize, T)> {
+    (n + 1..over).rev().find_map(|m| fits(m).map(|t| (m, t)))
 }
 
 /// The block's next step down (docs/summaries.md S9): the newest summary's fields, then the
@@ -1302,15 +1312,15 @@ fn build(
             continue;
         }
         p.last_prompt = Some(one_line(&gate(text), CLIP));
-        // Its turn's reply: the first of its session after it, before the session's next prompt.
+        // Its turn's reply: the first of its session after it, before the session's next prompt,
+        // on whichever branch or checkout the session had moved to (Codex's review of #854).
         let reply: Option<i64> = k.query_row(
             "SELECT MIN(seq) FROM manifest_facts
-             WHERE device = ?1 AND repo = ?2 AND fact = 'reply' AND branch = ?3
-               AND session = ?4 AND seq > ?5
+             WHERE device = ?1 AND fact = 'reply' AND session = ?2 AND seq > ?3
                AND seq < COALESCE((SELECT MIN(seq) FROM manifest_facts
-                 WHERE device = ?1 AND repo = ?2 AND fact = 'prompt' AND branch = ?3
-                   AND session = ?4 AND seq > ?5), 9223372036854775807)",
-            params![device, repo, branch, session, seq],
+                 WHERE device = ?1 AND fact = 'prompt' AND session = ?2 AND seq > ?3),
+                 9223372036854775807)",
+            params![device, session, seq],
             |r| r.get(0),
         )?;
         if let Some(e) = reply.map(|s| event(raw, device, s)).transpose()?.flatten() {
@@ -3083,6 +3093,35 @@ extra_rules = [
             store.append(&e).unwrap();
         }
         assert_eq!(exchange(&store), ["- prompt: Now the lexer."]);
+        // A turn whose session moved to another branch: its reply there, before the program's
+        // prompt on that branch, not the later reply here (Codex's review of #854).
+        let on = |branch: &str, e: Event| Event {
+            branch: Some(branch.into()),
+            ..e
+        };
+        for e in [
+            prompt(
+                "s6",
+                16 * min,
+                serde_json::json!({"prompt": "Split the module."}),
+            ),
+            on("feature", reply("s6", 17 * min, "Split on a branch.")),
+            on(
+                "feature",
+                prompt(
+                    "s6",
+                    18 * min,
+                    serde_json::json!({"prompt": "Check.", "agent_sent": true}),
+                ),
+            ),
+            reply("s6", 19 * min, "Checked by request."),
+        ] {
+            store.append(&e).unwrap();
+        }
+        assert_eq!(
+            exchange(&store),
+            ["- prompt: Split the module.", "- reply: Split on a branch."]
+        );
     }
 
     /// Decision 76: a decision or an open item whose unit's newest claim is older than 14 days at
@@ -3133,6 +3172,19 @@ extra_rules = [
         ] {
             assert!(line(t) && !body(t), "{t}: {text}");
         }
+    }
+
+    /// Decision 75: the cards taken back are the most that fit, whatever their sizes: a block
+    /// without its savings line can be shorter with more cards (Codex's review of #854).
+    #[test]
+    fn the_cards_taken_back_are_the_most_that_fit_whatever_their_sizes() {
+        let size = |m: usize| [0, 0, 0, 0, 462, 485, 507, 470, 494][m];
+        let room = |most: usize| move |m: usize| (size(m) <= most).then_some(m);
+        assert_eq!(fill_back(4, 8, room(470)), Some((7, 7)));
+        assert_eq!(fill_back(4, 8, room(490)), Some((7, 7)));
+        assert_eq!(fill_back(4, 8, room(486)), Some((7, 7)));
+        assert_eq!(fill_back(4, 8, room(469)), None);
+        assert_eq!(fill_back(4, 5, |_| Some(())), None);
     }
 
     /// Decision 75: the index lists as many claims as it is given; with none, the bodies and the

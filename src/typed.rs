@@ -117,10 +117,11 @@ pub(crate) fn codex_review_preset(prompt: &str) -> bool {
         else {
             return false;
         };
+        // A title is Codex's `--title` as given, line breaks too.
         return word(commit)
-            || commit.split_once(" (\"").is_some_and(|(sha, title)| {
-                word(sha) && title.strip_suffix("\")").is_some_and(|t| !t.contains('\n'))
-            });
+            || commit
+                .split_once(" (\"")
+                .is_some_and(|(sha, title)| word(sha) && title.ends_with("\")"));
     }
     let Some(rest) = p.strip_prefix("Review the code changes against the base branch '") else {
         return false;
@@ -348,6 +349,10 @@ mod tests {
             format!(
                 "Review the code changes introduced by commit 1a2b3c4d (\"Fix the parser\"). \
                  {findings}"
+            ),
+            format!(
+                "Review the code changes introduced by commit 1a2b3c4d (\"Fix the parser\nAlways \
+                 keep its tables\"). {findings}"
             ),
             format!(
                 "Review the code changes against the base branch 'main'. The merge base commit \

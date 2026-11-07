@@ -2381,12 +2381,11 @@ model = { gone = "m" }
                 .session_start_chars,
             6_000
         );
-        assert_eq!(
-            at("[inject]\nsession_start_index = 0\n")
-                .unwrap()
-                .session_start_index,
-            0
-        );
+        // Decision 75: none to 50 index lines.
+        for lines in [0, 50] {
+            let text = format!("[inject]\nsession_start_index = {lines}\n");
+            assert_eq!(at(&text).unwrap().session_start_index, lines);
+        }
         // Out of range, the wrong type, an unknown key, a file that is not TOML: an error, never
         // the defaults, which would inject for a user who turned it off.
         for bad in [

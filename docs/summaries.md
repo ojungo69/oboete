@@ -120,7 +120,8 @@ and its ops stay in the log, unread; the spec's sections that named it (1.1, 1.4
    newest card shown, and not otherwise.
 3. Session start shows the repository's summaries and the newest one's fields in the block.
 4. When the block does not fit: the fields go first, then the summary rows halve, the newest
-   kept, then the cards.
+   kept, then the cards; since decision 75 the cards then take back the newest that fit below the
+   count that did not, the most that fit whatever their sizes.
 5. `get S<op seq>` shows a summary in full; an ID of no summary gives none.
 6. The digest is gone from session start, the worker and `oboete rebuild`.
 
