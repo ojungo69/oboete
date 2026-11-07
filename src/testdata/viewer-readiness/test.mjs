@@ -85,7 +85,7 @@ document.body=new Node('body');
 const ctx=vm.createContext({document,location:{hash:'#t=0123456789abcdef0123456789abcdef',port:'17373',
   replaced:[],replace(url){this.replaced.push(url);}},URL,URLSearchParams,navigator:{language:'en'},
   localStorage:{getItem(){return null;},setItem(){}},window:{addEventListener(){}},
-  setInterval(){},TextEncoder,Uint8Array,console});
+  setInterval(){},setTimeout,TextEncoder,Uint8Array,console});
 const sourcePath=fs.realpathSync(process.argv[2]||new URL('../../../assets/viewer/app.js',import.meta.url));
 const source=fs.readFileSync(sourcePath,'utf8');
 vm.runInContext(source.replace('await start();',''),ctx,{filename:sourcePath});
@@ -2403,6 +2403,141 @@ console.log('PASS: the caps\' No cap switches');
     pickModel('__other');enterLine(typedModel());await settled();
     typeIn(typedModel(),'pinned-model-2');ctx.ui.drawSettings();
     assert.deepEqual([posted.length,typedModel()?.value],[0,'pinned-model-2'],'typed on after an Enter that changed nothing, it stays open');
+    // Decision 78: a line's models are its service's list, read when the line opens, after the
+    // models the page knows; a paid entry's model is chosen with its prices, one edit.
+    {
+      vm.runInContext('forgetModelLists()',ctx);
+      const open=name=>{const fold=lineOf(name).querySelector('details');fold.open=true;fold.isConnected=true;
+        for(const cb of fold.listeners.toggle||[])cb({target:fold});};
+      const pick=(name,value)=>{const s=simple(`model:${name}`);s.value=value;for(const cb of s.listeners.change||[])cb({target:s});};
+      const options=name=>simple(`model:${name}`).options.map(o=>[o.value,o.disabled]);
+      const paidLimits={max_request_tokens:100000,daily_tokens:null,usd_per_mtok_in:0.1,usd_per_mtok_out:0.5,max_output_tokens:4000};
+      const paid=(model='claude-haiku-5-5',limits=paidLimits)=>({name:'anthropic',selector:{source:'config',index:0},
+        saved:{enabled:true,kind:'openai',base_url:'https://api.anthropic.com/v1',api:'anthropic',model,key:'ok',timeout_s:90,
+          subscription:false,daily_budget:null,limits},effective:{on:true,order:0,model,timeout_s:90}});
+      const paidLine=(model,limits,more={})=>lineAi([row('anthropic',{model_rule:'fixed',effective_model:model})],
+        {providers:[paid(model,limits)],...more});
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      assert.deepEqual(options('anthropic'),[['claude-haiku-5-5',false],['claude-sonnet-5-5',false],['claude-opus-5-5',false]],
+        'a paid line chooses among the models whose prices the page knows, before any list is read');
+      assert.deepEqual([simple('model:anthropic').value,text(lineOf('anthropic')).includes('claude-sonnet-5-5 ($2.00 / $10.00)')],
+        ['claude-haiku-5-5',true],'its model chosen, each shown with its prices');
+      answers=[json({models:['claude-haiku-5-5','claude-sonnet-5-5','claude-mystery-9'],from:'service'})];
+      open('anthropic');await settled();
+      assert.deepEqual([posted.length,posted[0].url,sent()[0]],[1,'/api/providers/models',{version:f.version,
+        selector:{source:'config',index:0},refresh:false}],'opened, the line reads its service\'s list once, by the page\'s version');
+      assert.deepEqual(options('anthropic').at(-1),['claude-mystery-9',true],'a listed model without a known price is shown, not chosen');
+      assert(text(lineOf('anthropic')).includes('claude-mystery-9 (price not known)'),'and said so');
+      open('anthropic');await settled();
+      assert.equal(posted.length,1,'opened again, the list kept is not read again');
+      answers=[json(paidLine('claude-sonnet-5-5',{...paidLimits,usd_per_mtok_in:2,usd_per_mtok_out:10},{version:'v2'}))];
+      pick('anthropic','claude-sonnet-5-5');await settled();
+      assert.deepEqual([posted[1].url,sent()[1].action.op,sent()[1].action.entry.model,sent()[1].action.entry.limits],
+        ['/api/providers','edit','claude-sonnet-5-5',{...paidLimits,usd_per_mtok_in:2,usd_per_mtok_out:10}],
+        'a priced model chosen is one edit of the model and its prices, its largest request kept');
+      // The largest request: the model's price step where the entry has none, the entry's own when tighter.
+      for(const [own,model,bound] of [[null,'claude-haiku-5-5',100000],[50000,'claude-haiku-5-5',50000],[null,'claude-opus-5-5',null]]){
+        f=draw(paidLine('claude-sonnet-5-5',{...paidLimits,max_request_tokens:own,usd_per_mtok_in:2,usd_per_mtok_out:10}));
+        answers=[json(paidLine(model,paidLimits,{version:'v2'}))];
+        pick('anthropic',model);await settled();
+        assert.equal(sent().at(-1).action.entry.limits.max_request_tokens,bound,`${own} then ${model}: ${bound}`);
+      }
+      // A refused edit shows the saved model again.
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      answers=[json({code:'bad_model',field:'providers.model'},422)];
+      pick('anthropic','claude-opus-5-5');await settled();
+      assert.equal(simple('model:anthropic').value,'claude-haiku-5-5','a refused choice shows the saved model again');
+      // An any rule's line: the service's other models after the known ones, marked not checked, saved
+      // to `[chain]` as before.
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(one());
+      answers=[json({models:['model-alpha','listed-model'],from:'service'})];
+      open('alpha');await settled();
+      assert.deepEqual(options('alpha').map(o=>o[0]).filter(v=>!v.startsWith('__')),['model-alpha','listed-model'],
+        'the known models, then the listed ones not known');
+      assert(text(lineOf('alpha')).includes('listed-model (from the list, not checked)'),'a listed model is marked not checked');
+      assert(text(lineOf('alpha')).includes('run the connection test'),'and how to check it is said');
+      answers=[json(one({model:'listed-model',effective_model:'listed-model'},{version:'v2'}))];
+      pick('alpha','listed-model');await settled();
+      assert.equal(sent().at(-1).chain[0].model,'listed-model','a listed model chosen is saved to [chain]');
+      // A list read again by its button; a list refused says why.
+      f=draw(one());
+      answers=[json({code:'key_refused',field:'providers.models'},502)];
+      simple('model-list:alpha').click();await settled();
+      assert.deepEqual([sent().at(-1).refresh,text(lineOf('alpha')).includes('The service refused the key')],[true,true],
+        'read again on its button, a key refused is said');
+      // A provider write forgets the lists: a list read before it is dropped, and the line reads
+      // its list again when it opens (Codex's review of 78a).
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      [answer,give]=later();answers=[answer,json(paidLine('claude-sonnet-5-5',{...paidLimits,usd_per_mtok_in:2,usd_per_mtok_out:10},{version:'v2'}))];
+      open('anthropic');await settled();
+      pick('anthropic','claude-sonnet-5-5');await settled();
+      give(json({models:['claude-haiku-5-5','claude-mystery-9'],from:'service'}));await settled();
+      assert(!options('anthropic').some(o=>o[0]==='claude-mystery-9'),'a list read before a provider write is dropped');
+      answers=[json({models:['claude-mystery-9'],from:'cache'})];
+      open('anthropic');await settled();
+      assert.deepEqual([posted.filter(p=>p.url==='/api/providers/models').length,options('anthropic').some(o=>o[0]==='claude-mystery-9')],
+        [2,true],'after the write the line reads its list again');
+      // The edit is built when its turn comes, from the entry as saved then: a write on its way that
+      // lowers the largest request is not undone by a model chosen meanwhile (Codex's review of 78a).
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      [answer,give]=later();answers=[answer];
+      typeIn(timeout('anthropic'),'120');enterLine(timeout('anthropic'));await settled();
+      answers=[json(paidLine('claude-sonnet-5-5',{...paidLimits,max_request_tokens:50000,usd_per_mtok_in:2,usd_per_mtok_out:10},{version:'v3'}))];
+      pick('anthropic','claude-sonnet-5-5');await settled();
+      assert.equal(posted.length,1,'the model chosen waits for the write on its way');
+      give(json(paidLine('claude-haiku-5-5',{...paidLimits,max_request_tokens:50000},{version:'v2'})));await settled();
+      assert.deepEqual([sent()[1].version,sent()[1].action.entry.limits.max_request_tokens],['v2',50000],
+        'then sent with that write\'s version and its largest request');
+      // A list's draw waits out a write's hold, then draws the page shown then.
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      [answer,give]=later();answers=[answer];
+      open('anthropic');await settled();
+      const held=panel.querySelector('.settings');held.inert=true;
+      give(json({models:['claude-haiku-5-5','claude-mystery-9'],from:'service'}));await settled();
+      assert(!options('anthropic').some(o=>o[0]==='claude-mystery-9'),'a held page is not drawn again');
+      held.inert=false;await new Promise(r=>setTimeout(r,250));await settled();
+      assert(options('anthropic').some(o=>o[0]==='claude-mystery-9'),'the hold ended, the list is drawn');
+      // The page left and read again while a list is on its way: the list is drawn on the page shown.
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      [answer,give]=later();answers=[answer];
+      open('anthropic');await settled();
+      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      give(json({models:['claude-mystery-9'],from:'service'}));await settled();
+      assert(options('anthropic').some(o=>o[0]==='claude-mystery-9'),'a list that comes after the page is read again is drawn on it');
+      // A read again that fails offers none of the earlier list's models.
+      answers=[json({code:'unavailable',field:'providers.models'},502)];
+      simple('model-list:anthropic').click();await settled();
+      assert(!options('anthropic').some(o=>o[0]==='claude-mystery-9'),'a failed read keeps none of the earlier list');
+      // A key missing: no list is asked for.
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(one({key:'missing'}));
+      open('alpha');await settled();
+      assert.equal(posted.length,0,'a line without its key asks for no list');
+      // A version the file no longer has: the page reads the settings again, as after any provider request.
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(one());
+      reread=one({},{version:'v9'});answers=[json({code:'stale',field:''},409)];
+      open('alpha');await settled();
+      assert.deepEqual([ctx.ui.getForm().version,status().includes('config.toml was changed elsewhere'),
+        text(lineOf('alpha')).includes('could not be read')],['v9',true,false],'a 409 reads the settings again and says so once');
+      reread=null;
+      answers=[json({models:['model-alpha'],from:'service'})];
+      open('alpha');await settled();
+      assert.equal(posted.filter(p=>p.url==='/api/providers/models').length,2,'the settings read again, the line reads its list again');
+      // A destination the page does not show: no list is asked for, as no test is.
+      vm.runInContext('forgetModelLists()',ctx);
+      const hidden={...entry('alpha',0)};hidden.saved={...hidden.saved,base_url:null,endpoint_supported:false};
+      f=draw(one({},{providers:[hidden]}));
+      open('alpha');await settled();
+      assert.equal(posted.length,0,'an entry whose destination the page does not show asks for no list');
+      ctx.ui.setLang('ja');f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      assert(text(lineOf('anthropic')).includes('百万トークンあたりの米ドル'),'both languages');
+      ctx.ui.setLang('en');
+    }
     // An AI the guide's Apply turns on or off in the form keeps that through a line's answer, its own
     // line's included, and the general save after it sends it (Codex's review of 69b-3c-1a).
     f=draw(lineAi([row('alpha'),row('beta')]));

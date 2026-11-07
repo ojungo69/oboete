@@ -1002,6 +1002,11 @@ pub fn test_provider(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     providers::test(home, body)
 }
 
+/// Decision 78: an entry's model list.
+pub fn provider_models(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    providers::models(home, body)
+}
+
 /// `save_held` with its holds taken, as the tests save.
 #[cfg(test)]
 pub fn save(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {

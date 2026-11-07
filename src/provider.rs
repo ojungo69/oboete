@@ -1655,6 +1655,218 @@ fn free_limit(url: &str, key: &str) -> Option<u32> {
     Some(u32::try_from(limit).unwrap_or(u32::MAX))
 }
 
+/// Decision 78: how long a service's model list is kept, how long its read may take, how much of
+/// it is read, and how many models are kept.
+const MODELS_TTL: Duration = Duration::from_secs(600);
+const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const MODELS_MAX_BYTES: u64 = 8 << 20;
+#[cfg(test)]
+const MODELS_MAX_BYTES: u64 = 4 << 10;
+const MODELS_MAX: usize = 1_000;
+
+/// Why an entry's model list was not read (decision 78).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListError {
+    /// A subscription's program, which has no list to call.
+    Unsupported,
+    /// The entry names a key file that cannot be read, or holds no key.
+    NoKey,
+    /// The service refused the key (401 or 403).
+    KeyRefused,
+    /// Any other failure: another status, a redirect, a timeout, a body that is no list.
+    Unavailable,
+}
+
+impl ListError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            ListError::Unsupported => "unsupported",
+            ListError::NoKey => "no_key",
+            ListError::KeyRefused => "key_refused",
+            ListError::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// The lists read in the last `MODELS_TTL`, by what a list depends on: the entry's name, URL, key
+/// (as `key_id`), API kind and whether it takes free models only.
+type ModelLists =
+    std::collections::HashMap<(String, String, String, bool, bool), (Instant, Vec<String>)>;
+static MODEL_LISTS: std::sync::LazyLock<std::sync::Mutex<ModelLists>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Decision 78: the models `p`'s service lists (`GET {base}/models`), with the entry's key and
+/// headers as its requests send them, filtered to what a summary can use there; with whether they
+/// came from the last ten minutes' read, which `refresh` skips. No redirect is followed: one would
+/// carry the key to another host. A keyless entry (a server on this machine) is asked without one.
+pub(crate) fn list_models(
+    p: &Provider,
+    refresh: bool,
+) -> std::result::Result<(Vec<String>, bool), ListError> {
+    let Provider::Openai {
+        name,
+        base_url,
+        api,
+        key_file,
+        headers,
+        ..
+    } = p
+    else {
+        return Err(ListError::Unsupported);
+    };
+    let key = match key_file {
+        Some(file) => Some(
+            config::read_key(file)
+                .ok()
+                .filter(|k| !k.trim().is_empty())
+                .ok_or(ListError::NoKey)?,
+        ),
+        None => None,
+    };
+    let free = p.model_rule() == config::ModelRule::Free;
+    let at = (
+        name.clone(),
+        base_url.clone(),
+        key_id(key.as_deref()),
+        *api == Api::Anthropic,
+        free,
+    );
+    let lists = || MODEL_LISTS.lock().unwrap_or_else(|e| e.into_inner());
+    if !refresh
+        && let Some((read, ids)) = lists().get(&at)
+        && read.elapsed() < MODELS_TTL
+    {
+        return Ok((ids.clone(), true));
+    }
+    let mut url = format!("{}/models", base_url.trim_end_matches('/'));
+    if *api == Api::Anthropic {
+        url.push_str("?limit=1000");
+    }
+    let mut req = agent(&url, MODELS_TIMEOUT, 0).get(&url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    if let Some(key) = &key {
+        req = match api {
+            Api::Openai => req.header("Authorization", &format!("Bearer {key}")),
+            Api::Anthropic => req.header("x-api-key", key),
+        };
+    }
+    if *api == Api::Anthropic {
+        req = req.header("anthropic-version", ANTHROPIC_VERSION);
+    }
+    let mut resp = req.call().map_err(|_| ListError::Unavailable)?;
+    match resp.status().as_u16() {
+        200 => {}
+        401 | 403 => return Err(ListError::KeyRefused),
+        _ => return Err(ListError::Unavailable),
+    }
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(resp.body_mut().as_reader(), MODELS_MAX_BYTES + 1),
+        &mut raw,
+    )
+    .map_err(|_| ListError::Unavailable)?;
+    if raw.len() as u64 > MODELS_MAX_BYTES {
+        return Err(ListError::Unavailable);
+    }
+    let v: Value = serde_json::from_slice(&raw).map_err(|_| ListError::Unavailable)?;
+    let data = v["data"].as_array().ok_or(ListError::Unavailable)?;
+    let ids = models_of(base_url, free, data);
+    lists().insert(at, (Instant::now(), ids.clone()));
+    Ok((ids, false))
+}
+
+/// The ids of a model list's `data`: Gemini's `models/` prefix taken off (Gemini's alone: another
+/// server's id is the model it answers), each 1 to 200 letters,
+/// digits and `._:/@+-` (others dropped, as text a page shows), each once, at most `MODELS_MAX`,
+/// and only those the service at `base_url` answers a summary's request with (`suits`).
+fn models_of(base_url: &str, free: bool, data: &[Value]) -> Vec<String> {
+    let host = host_of(base_url);
+    let mut out: Vec<String> = Vec::new();
+    for m in data {
+        let Some(id) = m["id"].as_str() else {
+            continue;
+        };
+        let id = match host.as_str() {
+            "generativelanguage.googleapis.com" => id.strip_prefix("models/").unwrap_or(id),
+            _ => id,
+        };
+        let clean = (1..=200).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:/@+-".contains(&b));
+        if clean && suits(&host, id, m, free) && !out.iter().any(|o| o == id) {
+            out.push(id.to_owned());
+            if out.len() == MODELS_MAX {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The host of `url`, lower case.
+fn host_of(url: &str) -> String {
+    url.parse::<ureq::http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(str::to_ascii_lowercase))
+        .unwrap_or_default()
+}
+
+/// Whether the service at `host` can answer a summary's request with model `id` (`m`, its entry in
+/// the list): a chat model that writes text, not one for speech, images, embeddings or the
+/// Responses API alone, nor one its list says refuses the temperature a summary's request sends
+/// (`openai_request`); for OpenRouter's free entry, a free one. A list's mark of structured output
+/// is not asked for: Groq marks none on qwen3.8-27b, which has answered oboete's strict schema
+/// there (157 summaries in the 30 days to 2026-11-07), so the page marks every listed model as not
+/// checked instead. A host it does not know keeps every model.
+fn suits(host: &str, id: &str, m: &Value, free: bool) -> bool {
+    let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
+    match host {
+        "api.openai.com" => {
+            let o_series = id
+                .strip_prefix('o')
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()));
+            (id.starts_with("gpt-") || o_series)
+                && !has(&[
+                    "audio",
+                    "realtime",
+                    "tts",
+                    "transcribe",
+                    "image",
+                    "search",
+                    "embedding",
+                    "moderation",
+                    "codex",
+                    "-pro",
+                    "instruct",
+                ])
+        }
+        "generativelanguage.googleapis.com" => {
+            id.starts_with("gemini") && !has(&["embedding", "image", "tts", "live", "audio"])
+        }
+        // `output_modalities` is `text`, `speech` or `transcription` (2026-11-07).
+        "api.groq.com" => {
+            m["active"] != false
+                && m["output_modalities"]
+                    .as_array()
+                    .is_none_or(|o| o.iter().any(|o| o == "text"))
+                && !has(&["whisper", "tts", "guard", "playai"])
+        }
+        "openrouter.ai" => !free || id.ends_with(":free"),
+        // `api` names the APIs a model answers (`chat-completions`, `responses`, `messages`, ...).
+        "opencode.ai" => {
+            m.get("api")
+                .is_none_or(|a| a.get("chat-completions").is_some())
+                && m["capabilities"]["temperature"] != false
+        }
+        "integrate.api.nvidia.com" => !has(&["embed", "rerank", "reward", "guard", "safety"]),
+        _ => true,
+    }
+}
+
 /// An agent for requests to `url`: `timeout` in all, any status as an answer, at most
 /// `redirects` redirects, and a server on this machine (Ollama, the tests' servers) never reached
 /// through the environment's proxy.
@@ -8086,6 +8298,205 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
 
     fn leak(text: String) -> &'static str {
         Box::leak(text.into_boxed_str())
+    }
+
+    /// An entry of `api` at `url` with the key `key` in a key file of `home`.
+    fn keyed(home: &Path, url: String, api: Api, key: &str) -> Provider {
+        let key_file = home.join("LIST_KEY.md");
+        std::fs::write(&key_file, format!("# synthetic only\n{key}\n")).unwrap();
+        let mut p = stub(url);
+        if let Provider::Openai {
+            api: a,
+            key_file: k,
+            ..
+        } = &mut p
+        {
+            *a = api;
+            *k = Some(key_file);
+        }
+        p
+    }
+
+    /// Decision 78: an entry's model list is read with its key as its requests send it (Bearer,
+    /// or the Messages API's `x-api-key` and version, `limit` there), following no redirect, ids
+    /// only, kept ten minutes and read again on `refresh`.
+    #[test]
+    fn an_entrys_model_list_is_read_with_its_key_and_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let list = json!({"object": "list", "data": [{"id": "model-b"}, {"id": "model-a"},
+            {"id": "model-b"}, {"id": "bad id"}, {"x": 1}]});
+        let (url, request) = serve_each(
+            vec![
+                ("200 OK", list.to_string().into_bytes()),
+                ("200 OK", list.to_string().into_bytes()),
+            ],
+            "",
+        );
+        let p = keyed(home.path(), url, Api::Openai, "list-test-key");
+        assert_eq!(
+            list_models(&p, false).unwrap(),
+            (vec!["model-b".to_owned(), "model-a".to_owned()], false)
+        );
+        let head = request.recv().unwrap().to_lowercase();
+        assert!(head.starts_with("get /models "), "{head}");
+        assert!(
+            head.contains("authorization: bearer list-test-key\r\n"),
+            "{head}"
+        );
+        // Kept: no second request until `refresh`.
+        assert!(list_models(&p, false).unwrap().1);
+        assert!(!list_models(&p, true).unwrap().1);
+        assert!(request.recv().is_ok());
+        // Each key's list is its own: another key at the same URL reads the service again, and
+        // the first key's list is still kept (Codex's review of 78a).
+        let (url, request) = serve_each(
+            vec![
+                ("200 OK", list.to_string().into_bytes()),
+                ("200 OK", list.to_string().into_bytes()),
+            ],
+            "",
+        );
+        let first = keyed(home.path(), url, Api::Openai, "first-list-key");
+        let mut second = first.clone();
+        if let Provider::Openai { key_file, .. } = &mut second {
+            let other = home.path().join("OTHER_LIST_KEY.md");
+            std::fs::write(&other, "# synthetic only\nsecond-list-key\n").unwrap();
+            *key_file = Some(other);
+        }
+        assert!(!list_models(&first, false).unwrap().1);
+        assert!(
+            request
+                .recv()
+                .unwrap()
+                .to_lowercase()
+                .contains("bearer first-list-key")
+        );
+        assert!(!list_models(&second, false).unwrap().1);
+        assert!(
+            request
+                .recv()
+                .unwrap()
+                .to_lowercase()
+                .contains("bearer second-list-key")
+        );
+        assert!(list_models(&first, false).unwrap().1);
+        let messages = json!({"data": [{"id": "claude-haiku-5-5", "type": "model"}]});
+        let (url, request) = serve_once(messages.to_string().into_bytes(), "");
+        let p = keyed(home.path(), url, Api::Anthropic, "messages-list-key");
+        assert_eq!(list_models(&p, false).unwrap().0, ["claude-haiku-5-5"]);
+        let head = request.recv().unwrap().to_lowercase();
+        assert!(head.starts_with("get /models?limit=1000 "), "{head}");
+        assert!(head.contains("x-api-key: messages-list-key\r\n"), "{head}");
+        assert!(head.contains("anthropic-version: 2023-06-01\r\n"), "{head}");
+        assert!(!head.contains("authorization"), "{head}");
+    }
+
+    /// Decision 78: each failure has its code, and no redirect is followed with the key.
+    #[test]
+    fn an_entrys_model_list_fails_by_its_cause() {
+        let home = tempfile::tempdir().unwrap();
+        let read = |status: &'static str, body: &str, headers: &'static str| {
+            let (url, _) = serve(status, body.as_bytes().to_vec(), headers);
+            list_models(&keyed(home.path(), url, Api::Openai, "k"), false).unwrap_err()
+        };
+        assert_eq!(read("401 Unauthorized", "{}", ""), ListError::KeyRefused);
+        assert_eq!(read("403 Forbidden", "{}", ""), ListError::KeyRefused);
+        assert_eq!(read("500 Oops", "{}", ""), ListError::Unavailable);
+        assert_eq!(read("200 OK", "not json", ""), ListError::Unavailable);
+        assert_eq!(read("200 OK", "{\"data\": 1}", ""), ListError::Unavailable);
+        let big = format!("{{\"data\": [{{\"id\": \"{}\"}}]}}", "a".repeat(5 << 10));
+        assert_eq!(read("200 OK", &big, ""), ListError::Unavailable);
+        assert_eq!(
+            read("302 Found", "", "location: http://127.0.0.1:9/models\r\n"),
+            ListError::Unavailable
+        );
+        // A key file that holds no key, and a subscription's program.
+        let (url, _) = serve_once(b"{}".to_vec(), "");
+        let mut p = keyed(home.path(), url, Api::Openai, "");
+        assert_eq!(list_models(&p, false).unwrap_err(), ListError::NoKey);
+        if let Provider::Openai { key_file, .. } = &mut p {
+            *key_file = Some(home.path().join("missing.md"));
+        }
+        assert_eq!(list_models(&p, false).unwrap_err(), ListError::NoKey);
+        let cli = config::from_text(&home.path().join("config.toml"), "")
+            .unwrap()
+            .providers
+            .into_iter()
+            .find(|p| matches!(p, Provider::Cli { .. }))
+            .unwrap();
+        assert_eq!(
+            list_models(&cli, false).unwrap_err(),
+            ListError::Unsupported
+        );
+    }
+
+    /// Decision 78: each service's list is cut to what a summary's request can use there.
+    #[test]
+    fn a_model_list_keeps_what_its_service_answers_a_summary_with() {
+        let ids =
+            |url: &str, free: bool, data: Value| models_of(url, free, data.as_array().unwrap());
+        let openai = json!([{"id": "gpt-6-luna"}, {"id": "o4-mini"}, {"id": "gpt-6-audio-preview"},
+            {"id": "gpt-6.1-codex"}, {"id": "gpt-5.5-pro"}, {"id": "text-embedding-3-small"},
+            {"id": "dall-e-3"}, {"id": "omni-moderation-latest"}, {"id": "gpt-realtime"}]);
+        assert_eq!(
+            ids("https://api.openai.com/v1", false, openai),
+            ["gpt-6-luna", "o4-mini"]
+        );
+        let gemini = json!([{"id": "models/gemini-3.1-flash-lite"},
+            {"id": "models/gemini-embedding-001"}, {"id": "models/imagen-4"},
+            {"id": "models/gemini-3.5-flash-image"}]);
+        assert_eq!(
+            ids(
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                false,
+                gemini
+            ),
+            ["gemini-3.1-flash-lite"]
+        );
+        // Groq's list says what a model writes (api.groq.com/openai/v1/models, 2026-11-07); a
+        // model without its mark of structured output is kept.
+        let groq = json!([
+            {"id": "openai/gpt-oss-20b", "active": true, "output_modalities": ["text"],
+                "supported_features": ["json_mode", "structured_outputs"]},
+            {"id": "qwen/qwen3.8-27b", "output_modalities": ["text"], "supported_features": ["json_mode"]},
+            {"id": "canopylabs/orpheus-v1-english", "output_modalities": ["speech"]},
+            {"id": "whisper-large-v3", "output_modalities": ["transcription"]},
+            {"id": "whisper-large-v3-turbo"}, {"id": "meta-llama/llama-prompt-guard-2-86m"},
+            {"id": "old", "active": false}]);
+        assert_eq!(
+            ids("https://api.groq.com/openai/v1", false, groq),
+            ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        );
+        let router = json!([{"id": "a/b:free"}, {"id": "anthropic/claude-haiku-5.5"}]);
+        assert_eq!(
+            ids("https://openrouter.ai/api/v1", true, router.clone()),
+            ["a/b:free"]
+        );
+        assert_eq!(ids("https://openrouter.ai/api/v1", false, router).len(), 2);
+        // OpenCode Go's names the APIs a model answers, as keys, and what it takes
+        // (opencode.ai/zen/go/v1/models, 2026-11-07).
+        let chat =
+            json!({"chat-completions": {"base_url": "https://opencode.ai/inference/go/openai/v1"}});
+        let go = json!([
+            {"id": "deepseek-v4.1-flash", "api": chat,
+                "capabilities": {"structured_output": true, "temperature": true}},
+            {"id": "claude-haiku-5-5", "api": {"messages": {}}, "capabilities": {"structured_output": true}},
+            {"id": "grok-4.7", "api": {"responses": {}}},
+            {"id": "hy3", "api": chat, "capabilities": {"temperature": true}},
+            {"id": "kimi-k3", "api": chat, "capabilities": {"structured_output": true, "temperature": false}},
+            {"id": "glm-5.3-flash"}]);
+        assert_eq!(
+            ids("https://opencode.ai/zen/go/v1", false, go),
+            ["deepseek-v4.1-flash", "hy3", "glm-5.3-flash"]
+        );
+        // Another server's id is kept whole, `models/` and all (Codex's review of 78a).
+        let other = json!([{"id": "llama3"}, {"id": "nomic-embed"}, {"id": "models/llama3"}]);
+        assert_eq!(
+            ids("http://127.0.0.1:11434/v1", false, other),
+            ["llama3", "nomic-embed", "models/llama3"]
+        );
+        let many: Vec<Value> = (0..1_200).map(|i| json!({"id": format!("m{i}")})).collect();
+        assert_eq!(ids("http://x", false, Value::Array(many)).len(), MODELS_MAX);
     }
 
     /// The owner, 2026-10-09: an entry with `api = "anthropic"` speaks the Messages API: its key

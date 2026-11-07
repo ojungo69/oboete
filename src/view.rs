@@ -1597,6 +1597,7 @@ impl Viewer {
                 (MAX_BODY, |v, b, _| v.preview_provider_test(b))
             }
             ("POST", "/api/providers/test") => (MAX_BODY, |v, b, _| v.test_provider(b)),
+            ("POST", "/api/providers/models") => (MAX_BODY, |v, b, _| v.provider_models(b)),
             ("POST", "/api/key") => (MAX_KEY_BODY, |v, b, _| v.save_key(b)),
             ("POST", "/api/embedding/preview") => (MAX_BODY, |v, b, _| v.embedding_preview(b)),
             ("POST", "/api/embedding") => (MAX_BODY, Self::embedding_start),
@@ -2069,6 +2070,11 @@ impl Viewer {
 
     fn test_provider(&self, body: &[u8]) -> Response {
         saved(crate::settings::test_provider(&self.home, body))
+    }
+
+    /// Decision 78: an entry's model list, ids only.
+    fn provider_models(&self, body: &[u8]) -> Response {
+        saved(crate::settings::provider_models(&self.home, body))
     }
 
     /// A key written to its entry's key file (#94 part 3); the answer never holds it.
@@ -8681,6 +8687,7 @@ curate = false
             ("/api/providers/key", MAX_KEY_BODY),
             ("/api/providers/test/preview", MAX_BODY),
             ("/api/providers/test", MAX_BODY),
+            ("/api/providers/models", MAX_BODY),
             ("/api/embedding/preview", MAX_BODY),
             ("/api/embedding", MAX_BODY),
             ("/api/embedding/key", MAX_KEY_BODY),
@@ -8704,6 +8711,7 @@ curate = false
             "/api/providers/key?x=1",
             "/api/providers/test/preview?x=1",
             "/api/providers/test?x=1",
+            "/api/providers/models?x=1",
             "/api/embedding?x=1",
             "/api/embedding/key?x=1",
             "/api/judge/key?x=1",
