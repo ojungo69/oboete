@@ -1075,6 +1075,25 @@ const TEXT = {
   simple_model_default: ['The app’s default model', 'アプリの標準モデル'],
   simple_other_model: ['Another model…', 'ほかのモデルを選ぶ…'],
   simple_model_own: ['The entry’s own model', '項目のモデル'],
+  // Decision 78: the models each service lists, and a paid entry's prices with its model.
+  model_list_loading: ['Reading the service’s list of models…', 'サービスのモデル一覧を読み込んでいます…'],
+  model_list_no_key: ['The key is not saved, so the service’s list of models cannot be read.',
+    'キーが保存されていないため、サービスのモデル一覧を読めません。'],
+  model_list_key_refused: ['The service refused the key, so its list of models could not be read.',
+    'サービスがキーを受け付けなかったため、モデル一覧を読めませんでした。'],
+  model_list_failed: ['The service’s list of models could not be read. The models shown are the ones this page knows.',
+    'サービスのモデル一覧を読めませんでした。表示しているのは、この画面が知っているモデルです。'],
+  model_list_refresh: ['Read the list again', '一覧を読み直す'],
+  model_list_refresh_named: ['Read the list of models for {name} again', '{name} のモデル一覧を読み直す'],
+  model_unchecked: ['{model} (from the list, not checked)', '{model}（一覧から・未確認）'],
+  model_unchecked_desc: ['Models marked “not checked” come from the service’s list. After choosing one, run the connection test to see that it can write summaries.',
+    '「未確認」のモデルはサービスの一覧から取得したものです。選んだら、要約を書けるかを接続テストで確かめてください。'],
+  model_priced: ['{model} ({input} / {output})', '{model}（{input} / {output}）'],
+  model_prices_desc: ['Prices: input / output, in US dollars per million tokens. Choosing a model saves its prices with it.',
+    '料金は入力 / 出力の順で、百万トークンあたりの米ドルです。モデルを選ぶと、料金も一緒に保存します。'],
+  model_unpriced: ['{model} (price not known)', '{model}（料金不明）'],
+  model_unpriced_desc: ['A model whose price this page does not know can be set, with its prices, in “Entry settings”. Then run the connection test to see that it can write summaries.',
+    '料金が分からないモデルは、「項目の設定」で料金と一緒に設定できます。設定したら、要約を書けるかを接続テストで確かめてください。'],
   simple_model_typed: ['Model name', 'モデル名'],
   simple_model_typed_label: ['Model name for {name}', '{name} のモデル名'],
   simple_model_overlay: ['The model set for this name, {model}, is not used by every entry of it.', 'この名前に設定したモデル ({model}) を使わない項目があります。'],
@@ -3465,6 +3484,9 @@ function promptSide(side) {
 function loadedForm(s) {
   lineDrafts.clear();
   formLoads += 1;
+  // Settings read afresh may hold another key or entry: the lists read before go, and a list on
+  // its way is dropped (Codex and cubic on #857).
+  forgetModelLists();
   // A rests read started before is older than this form's lists (Codex's review of 69b-3c-1b), and
   // the poll does not wait for one of its own (Codex's review of 69b-3c-1c).
   restsAsked += 1;
@@ -5951,6 +5973,7 @@ async function providerWrite(action, button, body, path, target = null) {
     if (current) return reloadProviderSettings(current);
     if (!res.ok) return providerOperationFailure(action, path, res, answer, fields, scope);
     form = mergeProviderSettings(answer, mine, action);
+    forgetModelLists();
     providerTarget(taken, target, mine, action);
     const kept = path !== '/key' || Boolean(answer.key_saved?.durable);
     simpleReceipt = kept ? 'ai' : null;
@@ -6787,18 +6810,175 @@ const AI_CATALOG = [
   { name: 'opencode-go', label: 'simple_catalog_opencode_go', kind: 'openai', base_url: 'https://opencode.ai/zen/go/v1', api: 'openai',
     key_file: 'OPENCODE_API_KEY.md', subscription: true, timeout_s: 150, models: ['glm-5.3-flash'] },
   { name: 'anthropic', label: 'simple_catalog_anthropic', kind: 'openai', base_url: 'https://api.anthropic.com/v1', api: 'anthropic',
-    key_file: 'ANTHROPIC_API_KEY.md', subscription: false, timeout_s: 90, models: ['claude-haiku-5-5', 'claude-haiku-4-5-20251001'],
+    key_file: 'ANTHROPIC_API_KEY.md', subscription: false, timeout_s: 90, models: ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'],
     limits: { max_request_tokens: 100000, usd_per_mtok_in: 0.10, usd_per_mtok_out: 0.50 } },
+  // The subscriptions run a program with no list to read: the models Codex 0.166.0 and Claude Code name.
   { name: 'codex', label: 'simple_catalog_codex', kind: 'cli', cli: 'codex', base_url: '', api: null,
-    key_file: null, subscription: true, timeout_s: 300, models: ['gpt-6-luna'] },
+    key_file: null, subscription: true, timeout_s: 300, models: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] },
   { name: 'claude', label: 'simple_catalog_claude', kind: 'cli', cli: 'claude', base_url: '', api: null,
-    key_file: null, subscription: true, timeout_s: 300, models: ['haiku', 'sonnet'] },
+    key_file: null, subscription: true, timeout_s: 300, models: ['haiku', 'sonnet', 'opus'] },
   { name: 'gemini', label: 'simple_catalog_gemini', kind: 'openai', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai', api: 'openai',
-    key_file: 'GEMINI_API_KEY.md', subscription: false, timeout_s: 90, daily_budget: 30, models: ['gemini-3.1-flash-lite'],
+    key_file: 'GEMINI_API_KEY.md', subscription: false, timeout_s: 90, daily_budget: 30, models: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
     limits: { usd_per_mtok_in: 0.25, usd_per_mtok_out: 1.50 } },
   { name: '', label: 'simple_catalog_custom', kind: 'openai', base_url: '', api: 'openai',
     key_file: null, subscription: false, models: [] },
 ];
+
+// Decision 78: what each paid service charges for the models the page offers, by its host: USD a
+// million tokens in and out, and the largest request kept below a price step, or null for none
+// (the services' price pages, 2026-11-07; docs/settings-ai-models.md). Choosing one of them saves
+// the entry's model and prices as one edit.
+const MODEL_PRICES = {
+  'api.anthropic.com': { 'claude-haiku-5-5': [0.10, 0.50, 100000], 'claude-sonnet-5-5': [2, 10, null],
+    'claude-opus-5-5': [4, 20, null] },
+  'generativelanguage.googleapis.com': { 'gemini-3.1-flash-lite': [0.25, 1.50, null], 'gemini-3.5-flash-lite': [0.30, 2.50, null] },
+};
+
+function urlHost(url) {
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
+}
+
+// The prices the page knows for an entry's service, by model.
+function modelPrices(provider) {
+  return MODEL_PRICES[urlHost(provider?.saved?.base_url || '')] || {};
+}
+
+// Decision 78: each entry's model list as its service gave it, by the entry's name, URL and API
+// kind (`modelListKey`): `state` is loading, ok or failed (with the refusal's `code`). It outlives
+// the form: the list is the service's, and the line's refresh reads it again.
+const modelLists = new Map();
+
+function modelListKey(provider) {
+  return JSON.stringify([provider.name, provider.saved?.base_url ?? '', provider.saved?.api ?? '']);
+}
+
+// Every provider write and every settings read again (`loadedForm`) forgets the lists, and drops a
+// read begun before it: a key saved may read a list refused before, and a write may give a line
+// another first entry of its name (Codex's review of 78a). A list is read again, too, once it is ten
+// minutes old (cubic on #857); the viewer keeps one as long, so reading it sooner costs no call to
+// its service.
+let modelListsRead = 0;
+const MODEL_LIST_MS = 10 * 60 * 1000;
+function forgetModelLists() {
+  modelListsRead += 1;
+  modelLists.clear();
+}
+
+// A list's draw waits out a write's hold: a new page would end the hold (`holdSettings`) and free
+// the controls the write keeps still (Codex's review of 78a). It draws the page shown then, which
+// may be a later read of it than the one that asked.
+let modelListsDraw = null;
+function drawModelLists() {
+  if (modelListsDraw) return;
+  const draw = () => {
+    modelListsDraw = null;
+    if (view !== 'settings' || !form) return;
+    if ($('panel').querySelector('.settings')?.inert) { modelListsDraw = setTimeout(draw, 100); return; }
+    drawSettings();
+  };
+  draw();
+}
+
+async function readModelList(provider, refresh = false) {
+  const key = modelListKey(provider);
+  const was = modelLists.get(key);
+  if (was?.state === 'loading' || (was && !refresh && Date.now() - was.at < MODEL_LIST_MS)) return;
+  const mine = form, read = modelListsRead;
+  modelLists.set(key, { state: 'loading', models: [] });
+  drawModelLists();
+  let next, current = null;
+  try {
+    const sent = await providerRequest('/models', JSON.stringify({ version: mine.version, selector: provider.selector, refresh }));
+    const { res, answer } = sent;
+    current = sent.current;
+    // A list not read offers none of its models: the page's own, and typing (Codex's review of 78a).
+    next = res.ok && Array.isArray(answer.models)
+      ? { state: 'ok', models: answer.models.filter(m => typeof m === 'string' && m.length <= 200).slice(0, 1000) }
+      : { state: 'failed', models: [], code: current ? 'stale' : answer.code || 'unavailable' };
+  } catch {
+    next = { state: 'failed', models: [], code: 'network' };
+  }
+  next.at = Date.now();
+  // A list read before a write or a settings read since is not the page's now.
+  if (read !== modelListsRead) return;
+  modelLists.set(key, next);
+  // Settings changed elsewhere: the page reads them again, as after any provider request, unless a
+  // write holds it, whose own answer brings them.
+  if (current && currentSettings(mine) && !$('panel').querySelector('.settings')?.inert) reloadProviderSettings(current);
+  else drawModelLists();
+}
+
+// What a line says of its model list: read, failed and why, or nothing.
+function modelListNote(list) {
+  if (!list || list.state === 'ok') return null;
+  if (list.state === 'loading') return el('p', 'desc', t('model_list_loading'));
+  // A version the file no longer has is said on the status line, the page read again.
+  if (list.code === 'stale') return null;
+  const key = { no_key: 'model_list_no_key', key_refused: 'model_list_key_refused' }[list.code] ?? 'model_list_failed';
+  return el('p', 'desc', t(key));
+}
+
+// A list read again on the owner's word, as its service may have new models.
+function modelListRefresh(provider, label) {
+  const button = el('button', 'quiet small', t('model_list_refresh'));
+  button.type = 'button';
+  button.dataset.simpleFocus = `model-list:${provider.name}`;
+  button.setAttribute('aria-label', t('model_list_refresh_named', { name: label }));
+  button.disabled = modelLists.get(modelListKey(provider))?.state === 'loading';
+  button.addEventListener('click', () => void readModelList(provider, true));
+  return button;
+}
+
+function perMillion(value) {
+  return new Intl.NumberFormat(lang, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 3 })
+    .format(value);
+}
+
+// Decision 78: a paid entry's model, chosen with its prices: the models whose prices the page knows,
+// then those its service lists without them, shown and not chosen here. One edit saves the model,
+// its prices and its largest request, kept at or below the model's price step and never above the
+// entry's own (the entry's saved values, not a draft of its editor).
+function linePricedModel(row, provider, listed, label) {
+  const prices = modelPrices(provider);
+  const current = provider.saved.model;
+  const option = (model, text, disabled = false) => {
+    const node = el('option', null, text); node.value = model; node.disabled = disabled; return node;
+  };
+  const priced = Object.keys(prices);
+  const unpriced = (listed?.models || []).filter(model => !Object.hasOwn(prices, model) && model !== current);
+  const select = el('select', null,
+    ...(priced.includes(current) ? [] : [option(current, current)]),
+    ...priced.map(model => option(model, t('model_priced', { model, input: perMillion(prices[model][0]), output: perMillion(prices[model][1]) }))),
+    ...unpriced.map(model => option(model, t('model_unpriced', { model }), true)));
+  select.value = current;
+  select.dataset.simpleFocus = `model:${row.name}`;
+  select.setAttribute('aria-label', t('simple_model', { name: label }));
+  select.addEventListener('change', async () => {
+    const chosen = select.value;
+    if (chosen === current || !Object.hasOwn(prices, chosen)) return;
+    // Built when its turn comes, from the entry as saved then: a write on its way may change it, and
+    // the edit sends every value it shows (Codex's review of 78a).
+    while (saveRun) await saveRun;
+    const now = view === 'settings' && form ? form.providers.filter(p => p.name === provider.name) : [];
+    const known = now.length === 1 ? modelPrices(now[0]) : {};
+    if (!Object.hasOwn(known, chosen) || now[0].saved.model === chosen) {
+      if (view === 'settings' && form) drawSettings();
+      return;
+    }
+    const entry = now[0];
+    const [usdIn, usdOut, step] = known[chosen];
+    const own = entry.saved.limits?.max_request_tokens ?? null;
+    const draft = providerEdit(entry.name, entry.saved);
+    draft.model = chosen;
+    draft.limits.usd_per_mtok_in = String(usdIn);
+    draft.limits.usd_per_mtok_out = String(usdOut);
+    draft.limits.max_request_tokens = providerText(step === null ? own : own === null ? step : Math.min(step, own));
+    const sent = await providerOperation({ op: 'edit', selector: entry.selector, entry: providerBody(draft) }, select);
+    if (!sent && view === 'settings' && form) drawSettings();
+  });
+  return el('div', 'simple-line-model', el('label', 'field simple-model', el('span', null, t('simple_model_short')), select),
+    note(t('model_prices_desc')), unpriced.length ? note(t('model_unpriced_desc')) : null);
+}
 
 // A rest until a time (69b-3c-1b) after a key missing, not installed and the owner's hold, before
 // off and ready; a list not read (`null`) leaves the state not known, but a key missing, not
@@ -7128,6 +7308,18 @@ function simpleProviderRow(f, row, index, chain, position) {
     return button;
   });
   const models = simpleProviderModels(row, catalog?.models || []);
+  // Decision 78: what its service lists, read when the line opens (`readModelList`), after the models
+  // the page knows. They are not checked: a model may not write the summaries' JSON.
+  const http = provider?.saved.kind === 'openai';
+  // Not of a destination the page does not show: the viewer refuses it as it refuses its test.
+  const listable = http && row.key !== 'missing' && provider.saved.endpoint_supported !== false;
+  const listed = listable ? modelLists.get(modelListKey(provider)) : null;
+  const fromList = simpleProviderModels({ ...row, effective_model: null }, listed?.models || []);
+  const unchecked = fromList.filter(model => !models.includes(model));
+  // The page's own are checked; any other the list gives, the current one too, is not (cubic on #857).
+  const notChecked = new Set(fromList.filter(model => !(catalog?.models || []).includes(model)));
+  const listParts = listable ? [modelListNote(listed), notChecked.size ? note(t('model_unchecked_desc')) : null,
+    modelListRefresh(provider, label)] : [];
   // What `[chain]` saves for this name, which the line's fields set (69b-3c).
   const savedRow = f.savedSettings.chain.find((entry) => entry.name === row.name) ?? row;
   // The model: a list for an any or free rule, the entry's own (`[chain]` back to none), or another
@@ -7148,7 +7340,10 @@ function simpleProviderRow(f, row, index, chain, position) {
   let model = null;
   if (row.model_rule !== 'fixed') {
     const select = el('select', null, ...models.map(model => {
-      const option = el('option', null, model); option.value = model; return option;
+      const option = el('option', null, notChecked.has(model) ? t('model_unchecked', { model }) : model);
+      option.value = model; return option;
+    }), ...unchecked.map(model => {
+      const option = el('option', null, t('model_unchecked', { model })); option.value = model; return option;
     }));
     if (!models.includes(row.effective_model)) {
       const current = el('option', null, row.effective_model ?? t('simple_model_default'));
@@ -7196,7 +7391,10 @@ function simpleProviderRow(f, row, index, chain, position) {
       typed = el('label', 'field simple-model', el('span', null, t('simple_model_typed')), text);
     }
     model = el('div', 'simple-line-model', el('label', 'field simple-model', el('span', null, t('simple_model_short')), select), typed,
-      overlay, remove);
+      overlay, remove, ...listParts);
+  } else if (http && providers.length === 1 && Object.keys(modelPrices(provider)).length) {
+    // One entry: a paid name of several is changed entry by entry in its settings.
+    model = el('div', null, linePricedModel(row, provider, listed, label), overlay, remove, ...listParts);
   } else if (overlay) model = el('div', 'simple-line-model', overlay, remove);
   const calls = lineCalls(f, row, savedRow, label);
   // A timeout its entries differ in, with none set for the name, is not shown as the first entry's.
@@ -7225,7 +7423,11 @@ function simpleProviderRow(f, row, index, chain, position) {
   // Open while it needs the owner (a key to enter, a rest only the owner ends), or as last left.
   const key = `ai:${row.name}`;
   fold.open = groupOpen.get(key) ?? needs;
-  fold.addEventListener('toggle', () => { if (fold.isConnected) groupOpen.set(key, fold.open); });
+  fold.addEventListener('toggle', () => {
+    if (!fold.isConnected) return;
+    groupOpen.set(key, fold.open);
+    if (fold.open && listable) void readModelList(provider);
+  });
   const item = el('li', 'simple-provider', fold);
   item.dataset.providerName = row.name;
   return item;

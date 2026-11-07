@@ -50,6 +50,16 @@ struct TestSelection {
     selector: Selector,
 }
 
+/// Decision 78: an entry's model list, read again when `refresh`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelsRequest {
+    version: String,
+    selector: Selector,
+    #[serde(default)]
+    refresh: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestRun {
@@ -871,6 +881,33 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     )
 }
 
+/// Decision 78: the models the selected entry's service lists, ids only, from its own URL with its
+/// key (`provider::list_models`); `from` says whether they were read now or kept from the last ten
+/// minutes. The URL and headers pass the connection test's rules (`probe_provider`): no key goes to
+/// a destination the page does not show. Nothing of the entry's key or URL is in the answer.
+pub(super) fn models(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
+    let posted: ModelsRequest =
+        serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
+    let selected = read_selection(home, &posted.version, posted.selector)?;
+    let p = crate::provider::probe_provider(&selected.provider)
+        .map_err(|code| refused(422, code, "providers.models"))?;
+    match crate::provider::list_models(&p, posted.refresh) {
+        Ok((models, kept)) => Ok(json!({
+            "models": models,
+            "from": if kept { "cache" } else { "service" },
+        })),
+        Err(e) => Err(refused(
+            if e == crate::provider::ListError::Unsupported {
+                422
+            } else {
+                502
+            },
+            e.code(),
+            "providers.models",
+        )),
+    }
+}
+
 pub(super) fn test(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
     let posted: TestRun =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
@@ -940,6 +977,114 @@ mod tests {
         json!({"kind": "cli", "name": name, "enabled": enabled, "cli": "claude", "model": model,
             "timeout_s": 90, "limits": {"max_request_tokens": null, "daily_tokens": null,
                 "usd_per_mtok_in": 0.0, "usd_per_mtok_out": 0.0, "max_output_tokens": 4000}})
+    }
+
+    /// Decision 78: an entry's model list is answered for the version the page read and the entry it
+    /// names, ids only, nothing of its key or URL; kept, then read again on `refresh`; refused by its
+    /// cause for a stale version, a subscription's program and a key file that holds no key.
+    #[test]
+    fn an_entrys_model_list_answers_ids_only_and_refuses_by_cause() {
+        let owner = tempfile::tempdir().unwrap();
+        let key = owner.path().join("LIST_KEY.md");
+        let secret = ["List", "Synthetic", "Key999"].concat();
+        std::fs::write(&key, format!("key\n{secret}\n")).unwrap();
+        let empty = owner.path().join("EMPTY_KEY.md");
+        std::fs::write(&empty, "key\n\n").unwrap();
+        let list = json!({"data": [{"id": "model-a"}, {"id": "model-b"}]})
+            .to_string()
+            .into_bytes();
+        let (url, requests) = crate::provider::tests::serve_each(
+            vec![("200 OK", list.clone()), ("200 OK", list)],
+            "",
+        );
+        let home = home(&format!(
+            "[[providers]]\nkind = \"openai\"\nname = \"listed\"\nbase_url = '{url}'\n\
+            model = \"synthetic\"\nkey_file = '{}'\n\
+            [[providers]]\nkind = \"openai\"\nname = \"empty\"\nbase_url = '{url}'\n\
+            model = \"synthetic\"\nkey_file = '{}'\n\
+            [[providers]]\nkind = \"cli\"\nname = \"sub\"\ncli = \"claude\"\n",
+            key.display(),
+            empty.display()
+        ));
+        let shown = show(home.path());
+        let ask = |name: &str, version: &Value, refresh: bool| {
+            let at = shown["providers"].as_array().unwrap().iter();
+            let selector = at.clone().find(|p| p["name"] == name).unwrap()["selector"].clone();
+            let body = json!({"version": version, "selector": selector, "refresh": refresh});
+            models(home.path(), &serde_json::to_vec(&body).unwrap())
+        };
+        let wait = std::time::Duration::from_secs(5);
+        let first = ask("listed", &shown["version"], false).unwrap();
+        assert_eq!(
+            first,
+            json!({"models": ["model-a", "model-b"], "from": "service"})
+        );
+        assert!(!first.to_string().contains(&secret) && !first.to_string().contains(&url));
+        assert!(requests.recv_timeout(wait).is_ok());
+        assert_eq!(
+            ask("listed", &shown["version"], false).unwrap()["from"],
+            "cache"
+        );
+        assert_eq!(
+            ask("listed", &shown["version"], true).unwrap()["from"],
+            "service"
+        );
+        assert!(requests.recv_timeout(wait).is_ok());
+        let refusal = |r: Result<Value, Refusal>| {
+            let r = r.unwrap_err();
+            (r.status, r.code)
+        };
+        assert_eq!(
+            refusal(ask("listed", &json!("stale"), false)),
+            (409, "stale")
+        );
+        assert_eq!(
+            refusal(ask("sub", &shown["version"], false)),
+            (422, "unsupported")
+        );
+        assert_eq!(
+            refusal(ask("empty", &shown["version"], false)),
+            (502, "no_key")
+        );
+        assert!(
+            requests
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+        );
+    }
+
+    /// Decision 78: a list is asked, as a connection test is, only of a destination the page shows
+    /// and with headers that leave its transport alone: plain HTTP to another host, or a header that
+    /// would carry or redirect a credential, is refused before anything is sent.
+    #[test]
+    fn an_entrys_model_list_keeps_the_connection_tests_rules() {
+        let owner = tempfile::tempdir().unwrap();
+        let key = owner.path().join("LIST_KEY.md");
+        std::fs::write(&key, "key\nSynthetic999\n").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let local = format!("http://{}/v1", listener.local_addr().unwrap());
+        let home = home(&format!(
+            "[[providers]]\nkind = \"openai\"\nname = \"plain\"\nbase_url = 'http://192.0.2.10/v1'\n\
+            model = \"synthetic\"\nkey_file = '{0}'\n\
+            [[providers]]\nkind = \"openai\"\nname = \"hosted\"\nbase_url = '{local}'\n\
+            model = \"synthetic\"\nkey_file = '{0}'\nheaders = {{ Host = \"elsewhere.invalid\" }}\n",
+            key.display()
+        ));
+        let shown = show(home.path());
+        for (name, code) in [("plain", "bad_endpoint"), ("hosted", "unsafe_headers")] {
+            let selector = shown["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap()["selector"]
+                .clone();
+            let body = json!({"version": shown["version"], "selector": selector});
+            let r = models(home.path(), &serde_json::to_vec(&body).unwrap()).unwrap_err();
+            assert_eq!((r.status, r.code), (422, code), "{name}");
+        }
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     }
 
     #[test]
@@ -1194,6 +1339,42 @@ mod tests {
         }
         assert!(!home.path().join("providers.db").exists());
         assert!(!home.path().join("worker.lock").exists());
+    }
+
+    /// Decision 78: a model chosen on the automatic Gemini's line is an edit of it as of any entry:
+    /// written into the file at its place with its model and prices, its key file kept, and no
+    /// second Gemini left beside it.
+    #[test]
+    fn the_automatic_geminis_model_and_prices_are_edited_in_place() {
+        let home = home("gemini = \"after-subscriptions\"\nproviders = []\n");
+        let shown = show(home.path());
+        let at = &shown["providers"][0];
+        assert_eq!(at["selector"]["source"], "gemini");
+        let s = &at["saved"];
+        let mut limits = s["limits"].clone();
+        limits["usd_per_mtok_in"] = json!(0.3);
+        limits["usd_per_mtok_out"] = json!(2.5);
+        let entry = json!({"kind": "openai", "name": "gemini", "enabled": s["enabled"],
+            "base_url": s["base_url"], "api": s["api"], "model": "gemini-3.5-flash-lite",
+            "timeout_s": s["timeout_s"], "subscription": s["subscription"],
+            "daily_budget": s["daily_budget"], "limits": limits});
+        let saved = send(
+            home.path(),
+            json!({"op": "edit", "selector": at["selector"], "entry": entry}),
+        )
+        .unwrap();
+        let geminis: Vec<&Value> = saved["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["name"] == "gemini")
+            .collect();
+        assert_eq!(geminis.len(), 1, "{saved}");
+        assert_eq!(geminis[0]["saved"]["model"], "gemini-3.5-flash-lite");
+        assert_eq!(geminis[0]["saved"]["limits"]["usd_per_mtok_in"], 0.3);
+        assert_eq!(geminis[0]["saved"]["limits"]["usd_per_mtok_out"], 2.5);
+        let text = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        assert!(text.contains("GEMINI_API_KEY"), "{text}");
     }
 
     #[test]
