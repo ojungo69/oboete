@@ -3484,6 +3484,9 @@ function promptSide(side) {
 function loadedForm(s) {
   lineDrafts.clear();
   formLoads += 1;
+  // Settings read afresh may hold another key or entry: the lists read before go, and a list on
+  // its way is dropped (Codex and cubic on #857).
+  forgetModelLists();
   // A rests read started before is older than this form's lists (Codex's review of 69b-3c-1b), and
   // the poll does not wait for one of its own (Codex's review of 69b-3c-1c).
   restsAsked += 1;
@@ -5846,7 +5849,6 @@ function currentSettings(mine) {
 }
 
 function reloadProviderSettings(current) {
-  forgetModelLists();
   const shown = form;
   form = loadedForm(current);
   if (form && shown) Object.assign(form, { stopped: shown.stopped, resting: shown.resting });
@@ -6850,11 +6852,13 @@ function modelListKey(provider) {
   return JSON.stringify([provider.name, provider.saved?.base_url ?? '', provider.saved?.api ?? '']);
 }
 
-// Every provider write and every settings read again forgets the lists, and drops a read begun
-// before it: a key saved may read a list refused before, and a write may give a line another first
-// entry of its name (Codex's review of 78a). The viewer keeps a list ten minutes, so reading one
-// again costs no call to its service.
+// Every provider write and every settings read again (`loadedForm`) forgets the lists, and drops a
+// read begun before it: a key saved may read a list refused before, and a write may give a line
+// another first entry of its name (Codex's review of 78a). A list is read again, too, once it is ten
+// minutes old (cubic on #857); the viewer keeps one as long, so reading it sooner costs no call to
+// its service.
 let modelListsRead = 0;
+const MODEL_LIST_MS = 10 * 60 * 1000;
 function forgetModelLists() {
   modelListsRead += 1;
   modelLists.clear();
@@ -6878,7 +6882,7 @@ function drawModelLists() {
 async function readModelList(provider, refresh = false) {
   const key = modelListKey(provider);
   const was = modelLists.get(key);
-  if (was?.state === 'loading' || (was && !refresh)) return;
+  if (was?.state === 'loading' || (was && !refresh && Date.now() - was.at < MODEL_LIST_MS)) return;
   const mine = form, read = modelListsRead;
   modelLists.set(key, { state: 'loading', models: [] });
   drawModelLists();
@@ -6894,6 +6898,7 @@ async function readModelList(provider, refresh = false) {
   } catch {
     next = { state: 'failed', models: [], code: 'network' };
   }
+  next.at = Date.now();
   // A list read before a write or a settings read since is not the page's now.
   if (read !== modelListsRead) return;
   modelLists.set(key, next);
@@ -7309,9 +7314,11 @@ function simpleProviderRow(f, row, index, chain, position) {
   // Not of a destination the page does not show: the viewer refuses it as it refuses its test.
   const listable = http && row.key !== 'missing' && provider.saved.endpoint_supported !== false;
   const listed = listable ? modelLists.get(modelListKey(provider)) : null;
-  const unchecked = simpleProviderModels({ ...row, effective_model: null }, listed?.models || [])
-    .filter(model => !models.includes(model));
-  const listParts = listable ? [modelListNote(listed), unchecked.length ? note(t('model_unchecked_desc')) : null,
+  const fromList = simpleProviderModels({ ...row, effective_model: null }, listed?.models || []);
+  const unchecked = fromList.filter(model => !models.includes(model));
+  // The page's own are checked; any other the list gives, the current one too, is not (cubic on #857).
+  const notChecked = new Set(fromList.filter(model => !(catalog?.models || []).includes(model)));
+  const listParts = listable ? [modelListNote(listed), notChecked.size ? note(t('model_unchecked_desc')) : null,
     modelListRefresh(provider, label)] : [];
   // What `[chain]` saves for this name, which the line's fields set (69b-3c).
   const savedRow = f.savedSettings.chain.find((entry) => entry.name === row.name) ?? row;
@@ -7333,7 +7340,8 @@ function simpleProviderRow(f, row, index, chain, position) {
   let model = null;
   if (row.model_rule !== 'fixed') {
     const select = el('select', null, ...models.map(model => {
-      const option = el('option', null, model); option.value = model; return option;
+      const option = el('option', null, notChecked.has(model) ? t('model_unchecked', { model }) : model);
+      option.value = model; return option;
     }), ...unchecked.map(model => {
       const option = el('option', null, t('model_unchecked', { model })); option.value = model; return option;
     }));

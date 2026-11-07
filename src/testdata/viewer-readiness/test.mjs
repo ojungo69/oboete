@@ -2456,6 +2456,14 @@ console.log('PASS: the caps\' No cap switches');
       assert.deepEqual(options('alpha').map(o=>o[0]).filter(v=>!v.startsWith('__')),['model-alpha','listed-model'],
         'the known models, then the listed ones not known');
       assert(text(lineOf('alpha')).includes('listed-model (from the list, not checked)'),'a listed model is marked not checked');
+      // Chosen, it stays marked: the current model the list gives, unknown to the page (cubic on #857).
+      answers=[json({models:['model-alpha','listed-model'],from:'service'})];
+      vm.runInContext('forgetModelLists()',ctx);
+      f=draw(one({effective_model:'listed-model',model:'listed-model'}));
+      open('alpha');await settled();
+      assert.equal(text(simple('model:alpha').options.find(o=>o.value==='listed-model')),'listed-model (from the list, not checked)',
+        'the current model the list gives is marked not checked');
+      f=draw(one());answers=[];
       assert(text(lineOf('alpha')).includes('run the connection test'),'and how to check it is said');
       answers=[json(one({model:'listed-model',effective_model:'listed-model'},{version:'v2'}))];
       pick('alpha','listed-model');await settled();
@@ -2500,14 +2508,30 @@ console.log('PASS: the caps\' No cap switches');
       assert(!options('anthropic').some(o=>o[0]==='claude-mystery-9'),'a held page is not drawn again');
       held.inert=false;await new Promise(r=>setTimeout(r,250));await settled();
       assert(options('anthropic').some(o=>o[0]==='claude-mystery-9'),'the hold ended, the list is drawn');
-      // The page left and read again while a list is on its way: the list is drawn on the page shown.
+      // Settings read afresh while a list is on its way (the page left and opened again): that list,
+      // of the settings read before, is dropped, the line is not left reading, and it reads its list
+      // again when it opens (Codex and cubic on #857).
       vm.runInContext('forgetModelLists()',ctx);
       f=draw(paidLine('claude-haiku-5-5',paidLimits));
       [answer,give]=later();answers=[answer];
       open('anthropic');await settled();
-      f=draw(paidLine('claude-haiku-5-5',paidLimits));
+      ctx.__fresh=paidLine('claude-haiku-5-5',paidLimits,{version:'v5'});
+      vm.runInContext('form=loadedForm(globalThis.__fresh);drawSettings();',ctx);
       give(json({models:['claude-mystery-9'],from:'service'}));await settled();
-      assert(options('anthropic').some(o=>o[0]==='claude-mystery-9'),'a list that comes after the page is read again is drawn on it');
+      assert.deepEqual([options('anthropic').some(o=>o[0]==='claude-mystery-9'),text(lineOf('anthropic')).includes('Reading the service')],
+        [false,false],'a list of the settings read before is dropped, the line not left reading');
+      answers=[json({models:['claude-mystery-9'],from:'cache'})];
+      open('anthropic');await settled();
+      assert.deepEqual([sent().at(-1).version,options('anthropic').some(o=>o[0]==='claude-mystery-9')],['v5',true],
+        'opened, the line reads its list again for the settings read afresh');
+      // A list ten minutes old is read again when its line opens (cubic on #857).
+      open('anthropic');await settled();
+      const reads=()=>posted.filter(p=>p.url==='/api/providers/models').length;
+      const before=reads();
+      vm.runInContext('for (const v of modelLists.values()) v.at -= 10 * 60 * 1000 + 1',ctx);
+      answers=[json({models:['claude-mystery-9'],from:'service'})];
+      open('anthropic');await settled();
+      assert.equal(reads(),before+1,'a list ten minutes old is read again');
       // A read again that fails offers none of the earlier list's models.
       answers=[json({code:'unavailable',field:'providers.models'},502)];
       simple('model-list:anthropic').click();await settled();

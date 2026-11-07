@@ -1689,10 +1689,19 @@ impl ListError {
     }
 }
 
-/// The lists read in the last `MODELS_TTL`, by what a list depends on: the entry's name, URL, key
-/// (as `key_id`), API kind and whether it takes free models only.
-type ModelLists =
-    std::collections::HashMap<(String, String, String, bool, bool), (Instant, Vec<String>)>;
+/// What a list depends on: the entry's name, URL, key (as `key_id`), API kind, whether it takes free
+/// models only, and its own headers (a project header can change the models a key sees; cubic on
+/// #857).
+type ListKey = (
+    String,
+    String,
+    String,
+    bool,
+    bool,
+    std::collections::BTreeMap<String, String>,
+);
+/// The lists read in the last `MODELS_TTL`, by what each depends on (`ListKey`).
+type ModelLists = std::collections::HashMap<ListKey, (Instant, Vec<String>)>;
 static MODEL_LISTS: std::sync::LazyLock<std::sync::Mutex<ModelLists>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -1731,6 +1740,7 @@ pub(crate) fn list_models(
         key_id(key.as_deref()),
         *api == Api::Anthropic,
         free,
+        headers.clone(),
     );
     let lists = || MODEL_LISTS.lock().unwrap_or_else(|e| e.into_inner());
     if !refresh
@@ -1774,7 +1784,11 @@ pub(crate) fn list_models(
     let v: Value = serde_json::from_slice(&raw).map_err(|_| ListError::Unavailable)?;
     let data = v["data"].as_array().ok_or(ListError::Unavailable)?;
     let ids = models_of(base_url, free, data);
-    lists().insert(at, (Instant::now(), ids.clone()));
+    // Lists past their time go as a new one comes: the map holds no more than the entries read in
+    // the last ten minutes (cubic on #857).
+    let mut kept = lists();
+    kept.retain(|_, (read, _)| read.elapsed() < MODELS_TTL);
+    kept.insert(at, (Instant::now(), ids.clone()));
     Ok((ids, false))
 }
 
@@ -8353,6 +8367,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             vec![
                 ("200 OK", list.to_string().into_bytes()),
                 ("200 OK", list.to_string().into_bytes()),
+                ("200 OK", list.to_string().into_bytes()),
             ],
             "",
         );
@@ -8380,6 +8395,14 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 .contains("bearer second-list-key")
         );
         assert!(list_models(&first, false).unwrap().1);
+        // An entry with a header of its own is a list of its own (cubic on #857).
+        let mut projected = first.clone();
+        if let Provider::Openai { headers, .. } = &mut projected {
+            headers.insert("OpenAI-Project".into(), "proj_synthetic".into());
+        }
+        assert!(!list_models(&projected, false).unwrap().1);
+        let head = request.recv().unwrap().to_lowercase();
+        assert!(head.contains("openai-project: proj_synthetic"), "{head}");
         let messages = json!({"data": [{"id": "claude-haiku-5-5", "type": "model"}]});
         let (url, request) = serve_once(messages.to_string().into_bytes(), "");
         let p = keyed(home.path(), url, Api::Anthropic, "messages-list-key");
