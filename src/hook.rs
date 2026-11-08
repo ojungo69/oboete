@@ -2744,7 +2744,8 @@ pub(crate) fn prompt_blocks_line(home: &Path, now: i64) -> Option<String> {
         .fold((0, 0, 0), |a, d| (a.0 + d.1, a.1 + d.2, a.2 + d.3));
     (prompts > 0).then(|| {
         format!(
-            "  in the last 7 days: {prompts} prompts, {blocks} took a block, {chars} characters injected"
+            "  in the last 7 days: {prompts} prompt{s}, {blocks} took a block, {chars} characters injected",
+            s = if prompts == 1 { "" } else { "s" }
         )
     })
 }
@@ -8341,6 +8342,10 @@ mod tests {
         );
         // A count weeks later keeps its own day alone: the days older than its week go.
         note_block_on(h, noon + 30 * 86_400_000, 1, 0);
+        assert_eq!(
+            prompt_blocks_line(h, noon + 30 * 86_400_000).as_deref(),
+            Some("  in the last 7 days: 1 prompt, 0 took a block, 0 characters injected")
+        );
         let text = std::fs::read_to_string(h.join("state/prompt-blocks")).unwrap();
         assert_eq!(text, "2026-12-09 1 0 0\n");
     }
