@@ -188,7 +188,8 @@ pub fn text(
     now: i64,
 ) -> Result<Option<Start>> {
     let path = home.join("knowledge.db");
-    if !path.exists() {
+    // Nothing from a store a rebuild is filling (#855): `raw` is open, so a set-aside waits.
+    if !path.exists() || crate::worker::rebuilding(home) {
         return Ok(None);
     }
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;

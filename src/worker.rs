@@ -859,7 +859,12 @@ fn run_holding_report(
     // A run that never took the lock did no work: another worker's outcome stands. And no
     // outcome goes into a home that is not this run's (R3).
     if holding.last > 0 && !gone(home, &holding) {
-        record(home, holding.last, &result);
+        // A run that stepped aside for a command says so, not that all is well (#855).
+        if holding.aside && result.is_ok() {
+            note(home, holding.last, ASIDE);
+        } else {
+            record(home, holding.last, &result);
+        }
     }
     result
 }
@@ -908,6 +913,8 @@ struct Holding {
     home: FileId,
     command: Option<crate::executable::CommandHome>,
     executable: crate::executable::Watch,
+    /// It stepped aside for a command (R12): its outcome says so (#855).
+    aside: bool,
 }
 
 fn serve_until_done(
@@ -1171,6 +1178,7 @@ fn serve(
             e.hold(hold);
         }
         if asked && !calling(phases) && steps_aside(home, &raw, holding) {
+            holding.aside = true;
             return Ok(false);
         }
         ran = true;
@@ -1294,6 +1302,7 @@ fn serve(
                     return Ok(true);
                 }
                 if yields && !calling(phases) && steps_aside(home, &raw, holding) {
+                    holding.aside = true;
                     return Ok(false);
                 }
                 // A call that came back is written at once. And a request that went away (its
@@ -1596,6 +1605,9 @@ fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
 /// A run's outcome until it ends.
 pub(crate) const STOPPED: &str = "it stopped before it finished (killed or crashed); the next worker a hook \
                        starts goes on from where it stopped";
+/// R12: a run that stepped aside for a command (a restore, a rebuild, a forget's purge, a retention
+/// pass, `worker stop`) ended for it, which is no failure and no kill (#855).
+pub(crate) const ASIDE: &str = "it stepped aside for a command that needed the lock";
 
 /// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
 /// good run clears it. `last` numbers the run's last taking of the worker lock: an outcome is
@@ -1660,7 +1672,7 @@ pub fn last_failure(home: &Path) -> Option<String> {
     if why == STOPPED && running(home) {
         return None;
     }
-    Some(why).filter(|why| !why.is_empty())
+    Some(why).filter(|why| !why.is_empty() && why != ASIDE)
 }
 
 /// Whether a process holds the worker lock now. It takes no number: this runs nothing.
@@ -1869,6 +1881,65 @@ pub fn restart(home: &Path) -> Result<()> {
 
 /// Read-only status readers share an existing regular lock; only the exclusive producer
 /// prevents them from taking it. Links and special files are never followed or waited on.
+/// Whether a rebuild is filling a new knowledge.db: `oboete rebuild`, the purge's among them, holds
+/// `state/rebuild.lock` from before the old store is set aside until its last consumer has run
+/// (docs/resident.md R13). Readers of knowledge.db that answer for the whole store check it after raw
+/// is open: a set-aside waits for raw's lock, so a reader that sees it free reads the old store
+/// (#855). A file a failed rebuild left behind is no rebuild.
+pub(crate) fn rebuilding(home: &Path) -> bool {
+    lock_held(&home.join("state/rebuild.lock"))
+}
+
+/// A lock file's taking time, as its modification time, set through the handle that holds it
+/// (#855): when the pause it causes began, read only while it is held (`curation_pause`), so a time
+/// a crash left is never shown. Its bytes are not written: Windows lets no other handle read the
+/// bytes of a file locked whole, while its metadata stays readable, and a lock file that is a link
+/// would carry the write to its target.
+pub(crate) fn stamp(lock: &std::fs::File) {
+    let _ = lock.set_modified(std::time::SystemTime::now());
+}
+
+/// Why curation is paused now, and since when (#855): `rebuild` while a rebuild fills a new
+/// knowledge.db, else `rewrite` while the stored records are rewritten (a forget's purge, a
+/// retention pass, masks applied), each while its lock is held. It reads lock files only, so the
+/// page's stores-free route and doctor with a damaged store can ask.
+pub(crate) fn curation_pause(home: &Path) -> Option<(&'static str, Option<i64>)> {
+    let state = home.join("state");
+    let held: Vec<(&'static str, Option<i64>)> =
+        [("rebuild", "rebuild.lock"), ("rewrite", "purge.lock")]
+            .into_iter()
+            .filter_map(|(kind, name)| {
+                let path = state.join(name);
+                lock_held(&path).then(|| {
+                    let since = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    let ms = since
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|d| i64::try_from(d.as_millis()).ok());
+                    (kind, ms)
+                })
+            })
+            .collect();
+    let (kind, _) = *held.first()?;
+    // A purge's rebuild holds both: the pause began when the first was taken (cubic on #868).
+    Some((kind, held.iter().filter_map(|h| h.1).min()))
+}
+
+/// Doctor's line while curation is paused (#855).
+pub(crate) fn paused_line(home: &Path) -> Option<String> {
+    let (kind, since) = curation_pause(home)?;
+    let what = match kind {
+        "rebuild" => "knowledge.db is being rebuilt",
+        _ => "the stored records are being rewritten (a forget, the retention period or new masks)",
+    };
+    Some(match since {
+        Some(at) => format!(
+            "curation is paused while {what}, since {}",
+            crate::db::utc(at)
+        ),
+        None => format!("curation is paused while {what}"),
+    })
+}
+
 pub(crate) fn lock_held(path: &Path) -> bool {
     if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
         return false;
@@ -2060,7 +2131,10 @@ pub(crate) fn rebuild_report(
         let start = Instant::now();
         loop {
             match _rebuilding.try_lock() {
-                Ok(()) => break,
+                Ok(()) => {
+                    stamp(&_rebuilding);
+                    break;
+                }
                 Err(std::fs::TryLockError::WouldBlock)
                     if start.elapsed() < Duration::from_millis(200) =>
                 {
@@ -5666,6 +5740,124 @@ mod tests {
     }
 
     /// R12: a command that needs the worker lock asks the worker that holds it to step aside.
+    /// #855: a worker a command asked before its first round steps aside there, and says so.
+    #[test]
+    fn a_worker_asked_before_its_round_says_it_stepped_aside() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("first"))
+            .unwrap();
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        std::fs::write(yield_request(p), "").unwrap();
+        let phases = Phases {
+            yields: true,
+            ..Phases::default()
+        };
+        run_holding(
+            p,
+            600_000,
+            vec![Box::new(Seen)],
+            || {},
+            lock(p).unwrap(),
+            phases,
+        )
+        .unwrap();
+        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(ASIDE));
+        assert!(last_failure(p).is_none());
+    }
+
+    /// #855: curation is paused while a rebuild or a rewrite of the stored records holds its lock,
+    /// since the time set on it as its modification time; a lock not held is no pause, whatever its
+    /// time. A rebuild and the purge's lock set it when they take their lock.
+    #[test]
+    fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        assert_eq!(curation_pause(p), None);
+        assert_eq!(paused_line(p), None);
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        // Taken as a rebuild or a purge takes it, its time set through the handle that holds it, as
+        // Windows allows.
+        let held = |name: &str, ms: u64| {
+            let path = p.join("state").join(name);
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            lock.lock().unwrap();
+            lock.set_modified(std::time::UNIX_EPOCH + Duration::from_millis(ms))
+                .unwrap();
+            lock
+        };
+        let rebuild = held("rebuild.lock", 1_700_000_000_000);
+        assert_eq!(
+            curation_pause(p),
+            Some(("rebuild", Some(1_700_000_000_000)))
+        );
+        assert_eq!(
+            paused_line(p).as_deref(),
+            Some(
+                "curation is paused while knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC"
+            )
+        );
+        drop(rebuild);
+        assert_eq!(curation_pause(p), None, "a stamped lock not held");
+        // A purge's rebuild: both held, the rebuild named, since the purge's earlier time.
+        let both = held("rebuild.lock", 1_700_000_120_000);
+        let purging = held("purge.lock", 1_700_000_060_000);
+        assert_eq!(
+            curation_pause(p),
+            Some(("rebuild", Some(1_700_000_060_000)))
+        );
+        drop((both, purging));
+        let rewrite = held("purge.lock", 1_700_000_060_000);
+        assert_eq!(
+            curation_pause(p),
+            Some(("rewrite", Some(1_700_000_060_000)))
+        );
+        assert!(paused_line(p).unwrap().ends_with(
+            "(a forget, the retention period or new masks), since 2023-11-14 22:14 UTC"
+        ));
+        drop(rewrite);
+        // The purge's lock stamps its file when it takes it.
+        let before = crate::db::now_ms();
+        let purge = crate::forget::purge_lock(p).unwrap().unwrap();
+        let (kind, since) = curation_pause(p).unwrap();
+        assert!(
+            kind == "rewrite" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
+        );
+        drop(purge);
+        // And a rebuild while it fills the new store, an old one set aside.
+        drop(raw::open(p).unwrap());
+        drop(knowledge::open(p).unwrap());
+        let shown = preview_rebuild(p).unwrap();
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let during = seen.clone();
+        let home_path = p.to_path_buf();
+        AFTER_CARRY.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || during.set(curation_pause(&home_path))))
+        });
+        let before = crate::db::now_ms();
+        rebuild_report(
+            p,
+            Some(&shown.key),
+            crate::executable::CommandCaller::Worker,
+            &mut |_| {},
+        )
+        .unwrap();
+        let (kind, since) = seen.get().unwrap();
+        assert!(
+            kind == "rebuild" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
+        );
+        assert_eq!(curation_pause(p), None);
+    }
+
     /// The worker backs up (a restore reads the backups), lets go and exits; the command runs.
     #[cfg(target_os = "linux")]
     #[test]
@@ -5690,6 +5882,8 @@ mod tests {
             "it let go without a backup"
         );
         assert!(!asked_aside(p));
+        // #855: it says it stepped aside, which is no failure.
+        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(ASIDE));
         assert!(last_failure(p).is_none());
         drop(held);
         // `oboete rebuild` is such a command: it swaps knowledge.db as soon as it has the lock,

@@ -1152,7 +1152,11 @@ pub(crate) fn purge_lock(home: &Path) -> Result<Option<std::fs::File>> {
         .write(true)
         .open(state.join("purge.lock"))?;
     match lock.try_lock() {
-        Ok(()) => Ok(Some(lock)),
+        Ok(()) => {
+            // When the pause it causes began, for doctor and the page (#855).
+            crate::worker::stamp(&lock);
+            Ok(Some(lock))
+        }
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }

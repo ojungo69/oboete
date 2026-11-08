@@ -316,7 +316,7 @@ than a minute, which a command that died left, is ignored and removed by the nex
 asks. The worker looks for a request at its start,
 between rounds and on the 200 ms tick beside the restore request: it backs up (a restore reads the
 backups) and, if the request is still there (a command whose wait ran out meanwhile took it away),
-closes its stores, releases the lock, records a clean outcome and exits. It does not
+closes its stores, releases the lock, records that it stepped aside (no failure: doctor's `stepped_aside`, #855) and exits. It does not
 step aside while an embedding call is out: the call is paid for and counted, so its answer is
 written first, and a command whose 30 s pass meanwhile says the worker is busy. Once a command
 has asked, the worker sends no other batch or query and curates no window, so a backlog cannot keep the command waiting
@@ -333,7 +333,20 @@ two locks: "worker: resident, running" or "not running now (the next hook starts
 http://127.0.0.1:<port> is up" or "not running: <view-outcome>; run `oboete view`". Neither "not
 running" line is a failure. `oboete rebuild` holds a lock of its own (`state/rebuild.lock`) while it
 runs and the stats route reports `rebuilding` from that lock, so a resident worker cannot make the
-page say "rebuilding" for good.
+page say "rebuilding" for good. While it is held, the hooks that report on the whole store read
+nothing from knowledge.db, the store it fills (#855): SessionStart hands nothing over and its note
+says the memory is being rebuilt (a compaction's shown set is replaced by what it handed over, as
+always), and the per-prompt and correction blocks and the file notes are empty, so no claim the new
+store has not reached yet is reported as withdrawn. These readers check the lock after raw is open, so
+a set-aside, which waits for raw's lock, never comes between the check and the read. The MCP tools
+and the memory lookup still answer from the store as far as it is filled: fewer results, nothing
+reported as changed. A file a failed rebuild left behind
+is no rebuild. The rebuild and the purge's lock (`state/purge.lock`, which a retention pass takes too)
+set their taking time as their lock file's modification time, through the handle that holds it (its
+bytes are not written: Windows lets no other handle read a file locked whole); while either is held,
+doctor and the settings page say
+that curation is paused, for which of the two and since when (`/api/rests` gives it, the page reading
+it as it reads the chain's rests).
 
 R14. **A worker whose loop makes no progress leaves (parity row 2).** Every `oboete worker` run
 starts a watchdog thread once it holds the lock. The loop marks each round, each consumer's batch

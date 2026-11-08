@@ -648,6 +648,19 @@ const button=()=>section()?.querySelectorAll('button').find(node=>node.dataset.a
 const field=name=>panel.querySelectorAll('input').find(node=>node.dataset.field===name);
 ctx.ui.setLang('en');ctx.ui.setView('settings');
 
+// Codex and cubic on #868: inspecting the settings after a recovery's lost answer, when none were
+// shown before (they did not read), shows those it reads and settles the recovery.
+{
+  ctx.ui.setForm(null);
+  vm.runInContext('recoveryDraft.unknown=true;recoveryDraft.busy=false;recoveryDraft.error=null;',ctx);
+  const was=ctx.fetch;
+  ctx.fetch=url=>url.startsWith('/api/settings?')?Promise.resolve(json(settings('resident'))):new Promise(()=>{});
+  await ctx.recoveryUi.action('inspect');
+  assert.deepEqual([ctx.recoveryUi.draft.unknown,ctx.recoveryUi.draft.error,Boolean(ctx.ui.getForm())],[false,null,true],
+    'the settings read are shown, and the recovery settled');
+  ctx.fetch=was;
+}
+
 // The port field shows what is saved; a save sends a port only when it changed.
 let f=w6.formOf(settings('resident'));ctx.ui.setForm(f);ctx.ui.drawSettings();
 assert.equal(field('view.port').value,'17373');
@@ -2585,10 +2598,13 @@ console.log('PASS: the caps\' No cap switches');
       // A version the file no longer has: the page reads the settings again, as after any provider request.
       vm.runInContext('forgetModelLists()',ctx);
       f=draw(one());
+      // #855: a pause shown before stays through the settings read again (the rests unanswered).
+      f.paused={kind:'rebuild',since:null};
       reread=one({},{version:'v9'});answers=[json({code:'stale',field:''},409)];
       open('alpha');await settled();
       assert.deepEqual([ctx.ui.getForm().version,status().includes('config.toml was changed elsewhere'),
         text(lineOf('alpha')).includes('could not be read')],['v9',true,false],'a 409 reads the settings again and says so once');
+      assert.equal(panel.querySelector('.simple-paused')?.hidden,false,'the pause stays through the read again');
       reread=null;
       answers=[json({models:['model-alpha'],from:'service'})];
       open('alpha');await settled();
@@ -2944,7 +2960,7 @@ console.log('PASS: the caps\' No cap switches');
       if(url.startsWith('/api/maintenance?'))return Promise.reject(new Error('not answered here'));
       return new Promise(()=>{});
     };
-    const lists=(stopped,resting)=>()=>json({stopped,resting});
+    const lists=(stopped,resting)=>()=>json({stopped,resting,paused:null});
     const read=async answer=>{restsAnswer=answer;await vm.runInContext('refreshRests()',ctx);await settled();};
     const lineOf=name=>all('.simple-provider').find(n=>n.dataset.providerName===name);
     const said=name=>text(lineOf(name).querySelector('.simple-state'));
@@ -2964,6 +2980,33 @@ console.log('PASS: the caps\' No cap switches');
     await read(lists([],[]));
     assert.equal(said('alpha'),'Ready to use','a rest ended');
     assert(page().every((fold,i)=>fold===folds[i]),'the lines are not drawn again');
+    // #855: a rebuild or a rewrite of the stored records pauses curation: said above the groups,
+    // in place, in both languages, gone once it ends.
+    const paused=()=>panel.querySelector('.simple-paused');
+    assert(paused()&&paused().hidden,'no pause: hidden');
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:noon.getTime()}}));
+    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused while the memory is rebuilt, since ')
+      &&text(paused()).includes('12:00'),text(paused()));
+    // A read that failed says nothing of it: the pause shown stays (cubic on #868).
+    await read(()=>Promise.reject(new Error('a lost read')));
+    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused while the memory is rebuilt'),'kept through a failed read');
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rewrite',since:null}}));
+    assert.equal(text(paused()),'Summaries are paused while the stored records are rewritten (a forget, the retention period or new masks). They start again by themselves when it is done.');
+    ctx.ui.setLang('ja');ctx.ui.drawSettings();
+    assert.deepEqual([paused().hidden,text(paused())],[false,'保存した記録を書き直している間 (忘れる操作、保存期間、伏せ字の適用)、要約は止まっています。終わると自動で再開します。'],
+      'drawn again: shown, in Japanese');
+    ctx.ui.setLang('en');ctx.ui.drawSettings();
+    // Through a save's answer, which draws the page from it: the pause stays, with no rests read
+    // answering meanwhile.
+    restsAnswer=null;
+    answers=[json(ai(['alpha','beta'],{stopped:[],resting:[],chain:[row('alpha'),row('beta',{on:false})]}))];
+    flip(simple('on:beta'),false);await settled(8);
+    assert.equal(posted.at(-1)?.url,'/api/settings','a save went');
+    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused'),'kept through the answer');
+    answers=[json(ai(['alpha','beta'],{stopped:[],resting:[]}))];
+    flip(simple('on:beta'),true);await settled(8);
+    await read(lists([],[]));
+    assert(paused().hidden,'ended: hidden');
     // Timed, then the owner's hold (its Resume shown and its fold opened), resumed elsewhere, then
     // timed again.
     await read(lists([],[{name:'alpha',until:noon.getTime()}]));

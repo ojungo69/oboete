@@ -450,6 +450,7 @@ fn run_io(
             let handed = match packet {
                 _ if !inject.session_start => Handed::Off,
                 _ if unread => Handed::Unread,
+                None if crate::worker::rebuilding(home) => Handed::Rebuilding,
                 Some(m) => Handed::Shown(m.shown.len(), m.cards),
                 None => Handed::Nothing,
             };
@@ -796,6 +797,10 @@ fn file_notes(
     if crate::capture::not_recorded_why(&cwd.to_string_lossy(), &list, &settings).is_some() {
         return Ok(None);
     }
+    // No note from a store a rebuild is filling (#855); raw is open, so a set-aside waits for this.
+    if crate::worker::rebuilding(home) {
+        return Ok(None);
+    }
     // #439: held until what the notes considered is recorded and they are written (Codex on #446).
     *fence = Some(crate::dispatch::reading(home, READ_WAIT)?);
     let k = rusqlite::Connection::open_with_flags(
@@ -1116,6 +1121,8 @@ enum Handed {
     Nothing,
     /// This many claim lines and cards.
     Shown(usize, usize),
+    /// A rebuild is filling a new knowledge.db: nothing was read from it (#855).
+    Rebuilding,
 }
 
 /// The most of the session start's terminal message, in UTF-16 units: Claude Code shows a hook
@@ -1199,6 +1206,7 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
             )
         }
         (true, Handed::Nothing) => "oboete: 記録は有効です。このリポジトリには、まだ渡せる記憶がありません。画面を開くには oboete view --open".into(),
+        (true, Handed::Rebuilding) => "oboete: 記録は有効です。記憶を作り直しているため、今回は渡していません。作り直しが終わると、次のセッションから渡します。".into(),
         (false, Handed::Off) => {
             "oboete: recording is on. Handing memory over at session start is switched off.".into()
         }
@@ -1216,6 +1224,7 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
             )
         }
         (false, Handed::Nothing) => "oboete: recording is on. This repository has no memory to hand over yet. Open the page with: oboete view --open".into(),
+        (false, Handed::Rebuilding) => "oboete: recording is on. Memory is being rebuilt, so none was handed over this time; it is handed over again from the next session once the rebuild ends.".into(),
     }
 }
 
@@ -1958,7 +1967,12 @@ fn prompt_point(
     };
     let correcting = inject.correction && !shown.is_empty() && manifest.is_none() && !keeping;
     let path = home.join("knowledge.db");
-    if !(inject.per_prompt || correcting || (keeping && inject.correction)) || !path.exists() {
+    // A store a rebuild is filling holds only what it reached: a claim missing from it is not
+    // withdrawn, and nothing of it is read (#855). Raw is open, so a set-aside waits for this read.
+    if !(inject.per_prompt || correcting || (keeping && inject.correction))
+        || !path.exists()
+        || crate::worker::rebuilding(home)
+    {
         return Ok(None);
     }
     let k =
@@ -5307,6 +5321,33 @@ mod tests {
         assert!(matches!(answer, Ok(Err(true))), "{answer:?}");
     }
 
+    /// The rebuild lock of `home` held until the guard drops, as `oboete rebuild` holds it while it
+    /// fills a new knowledge.db (#855).
+    fn rebuilding(home: &Path) -> std::fs::File {
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(home.join("state/rebuild.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        lock
+    }
+
+    /// #855: while a rebuild fills a new knowledge.db, a file read takes no note from it; once it
+    /// ends, the note comes back.
+    #[test]
+    fn a_file_read_during_a_rebuild_takes_no_note() {
+        let mut r = Reads::new();
+        r.cards(2, json!([Reads::card("Parser rewritten", &["src/a.rs"])]));
+        let _contending = crate::worker::contending();
+        let lock = rebuilding(r.s.home.path());
+        assert_eq!(r.read("s9", "src/a.rs"), "");
+        drop(lock);
+        assert!(r.read("s9", "src/a.rs").contains("Parser rewritten"));
+    }
+
     #[test]
     fn a_title_cannot_close_the_file_notes_fence() {
         let mut r = Reads::new();
@@ -7897,6 +7938,67 @@ mod tests {
         assert!(!note.contains("TERMINAL_PRIVATE_MEMORY_MARKER"));
         assert!(!note.contains("viewer-token-fixture"));
         assert!(!note.contains("token") && !note.contains("#t="));
+    }
+
+    /// #855: while a rebuild fills a new knowledge.db, hooks read nothing from it: a claim not
+    /// rebuilt yet is not reported as no longer delivered, a correction past the new store's
+    /// checkpoint is not reported as withdrawn, and the session's shown set stays; once the rebuild
+    /// has ended, the real change is named once. SessionStart then hands over nothing (a new
+    /// session's shown set stays empty) and its note says the memory is being rebuilt, not that
+    /// there is none.
+    #[test]
+    fn hooks_read_nothing_from_a_store_being_rebuilt() {
+        let mut p = Prompts::new(false);
+        let alpha = p.decided(1, "Alpha builds use the nightly toolchain.", &[]);
+        let bravo = p.decided(2, "Bravo tests run under valgrind.", &[]);
+        p.s.run();
+        let home = p.s.home.path().to_owned();
+        let start = p.hook("SessionStart", "a", json!({"source": "startup"}));
+        assert!(start.contains("Bravo tests"), "{start}");
+        let shown = shown_set(&home, "claude", "a");
+        assert_eq!(shown.len(), 2);
+        // A rebuild under way: its lock held, the store it fills without bravo yet, and alpha's
+        // retraction past its checkpoint.
+        let _contending = crate::worker::contending();
+        let lock = rebuilding(&home);
+        rusqlite::Connection::open(home.join("knowledge.db"))
+            .unwrap()
+            .execute("DELETE FROM claims WHERE uid = ?1", [&bravo])
+            .unwrap();
+        // SessionStart hands over nothing of it, though it holds alpha.
+        let out = hook(
+            &home,
+            "claude",
+            "SessionStart",
+            &json!({"session_id": "r", "cwd": p.c, "source": "startup"}),
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["systemMessage"],
+            "oboete: 記録は有効です。記憶を作り直しているため、今回は渡していません。作り直しが終わると、次のセッションから渡します。"
+        );
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(!context.contains("Alpha builds"), "{context}");
+        assert!(shown_set(&home, "claude", "r").is_empty());
+        p.s.correct(&alpha, Some("retracted"), None);
+        assert_eq!(p.prompt("a", "anything new"), "");
+        assert_eq!(shown_set(&home, "claude", "a"), shown);
+        // The rebuild ends: its lock free, a whole store filled from raw by the consumers.
+        drop(lock);
+        for name in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
+            let _ = std::fs::remove_file(home.join(name));
+        }
+        p.s.run();
+        let text = p.prompt("a", "anything new");
+        assert!(
+            text.contains(&alpha[..12]) && text.contains("was retracted"),
+            "{text}"
+        );
+        assert!(!text.contains(&bravo[..12]), "{text}");
+        assert_eq!(p.prompt("a", "anything new"), "");
+        assert!(session_start_note(false, Handed::Rebuilding).contains("being rebuilt"));
     }
 
     /// docs/cards.md S1: the line counts the cards session start handed over beside the claims.

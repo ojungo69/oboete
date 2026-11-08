@@ -1866,6 +1866,40 @@ mod tests {
         }
     }
 
+    /// #855: a worker that stepped aside for a command is no failure: its own kind, healthy; one
+    /// whose run stopped with no outcome still reads interrupted.
+    #[test]
+    fn a_worker_that_stepped_aside_is_healthy() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let state = p.join("state");
+        std::fs::create_dir(&state).unwrap();
+        // Its lock free: no worker runs.
+        std::fs::File::create(state.join("worker.lock")).unwrap();
+        for (why, kind, unhealthy) in [
+            (crate::worker::ASIDE, "stepped_aside", serde_json::json!([])),
+            (
+                crate::worker::STOPPED,
+                "interrupted",
+                serde_json::json!(["worker_failed"]),
+            ),
+        ] {
+            std::fs::write(state.join("worker-outcome"), format!("3\n{why}")).unwrap();
+            let report = serde_json::to_value(doctor_report(p)).unwrap();
+            assert_eq!(report["checks"]["runtime"]["worker"]["last"]["kind"], kind);
+            assert_eq!(
+                report["unhealthy"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| *c == "worker_failed")
+                    .count(),
+                unhealthy.as_array().unwrap().len(),
+                "{why}"
+            );
+        }
+    }
+
     #[test]
     fn w6d_runtime_invalidates_changed_lock_and_config_dependencies() {
         let home = tempfile::tempdir().unwrap();

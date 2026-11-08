@@ -150,13 +150,14 @@ fn write_back_counting(
         return Ok(());
     }
     // One call at a time: two calls at once would append a file twice. The other keeps its own
-    // events behind what remains (hook::record).
+    // events behind what remains (hook::record). Under `cargo test`, a lock a call just released
+    // can still be held by a child another test thread forked (`worker::try_lock`).
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join("write-back.lock"))?;
-    match lock.try_lock() {
+    match crate::worker::try_lock(&lock) {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),

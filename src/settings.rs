@@ -157,11 +157,14 @@ fn rest_lists(
 /// `GET /api/rests` (69b-3c-1b): the chain's rests alone, which the page polls while Settings is
 /// shown. A config.toml that does not read gives both null, as a ledger that does not read.
 pub fn rests(home: &Path) -> Value {
+    // #855: curation paused by a rebuild or a rewrite of the stored records, from lock files only.
+    let paused = crate::worker::curation_pause(home)
+        .map(|(kind, since)| json!({"kind": kind, "since": since}));
     let Ok(cfg) = config::load(home) else {
-        return json!({"stopped": null, "resting": null});
+        return json!({"stopped": null, "resting": null, "paused": paused});
     };
     let (stopped, resting) = rest_lists(&crate::providers_db::read_only(home), &cfg.providers);
-    json!({"stopped": stopped, "resting": resting})
+    json!({"stopped": stopped, "resting": resting, "paused": paused})
 }
 
 /// The page's GET: the values as they apply, and each chain entry's own state.
@@ -4397,7 +4400,9 @@ mod tests {
                 (&shown["stopped"], &shown["resting"]),
                 (&alone["stopped"], &alone["resting"])
             );
-            alone
+            // No rebuild or rewrite holds its lock here (#855).
+            assert!(alone["paused"].is_null());
+            json!({"stopped": alone["stopped"], "resting": alone["resting"]})
         };
         let later = crate::db::now_ms() + 3_600_000;
         let hold = crate::providers_db::OWNER_HOLD;

@@ -622,7 +622,7 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .more-settings[open] > summary { margin-bottom: 12px; }
 .simple-block-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 .simple-saved { color: var(--green); font-size: 12.5px; }
-.simple-empty { padding: 12px 16px; background: var(--blue-bg); border-radius: var(--radius-l); }
+.simple-empty, .simple-paused { padding: 12px 16px; background: var(--blue-bg); border-radius: var(--radius-l); }
 .simple-providers, .settings .simple-catalog ul, .settings .simple-agents, .settings .simple-places { list-style: none; padding: 0; margin: 12px 0; }
 .simple-provider { border-top: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
 .simple-provider-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }

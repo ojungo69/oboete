@@ -3605,7 +3605,7 @@ fn stats(home: &Path) -> Result<Value> {
     .map(|name| std::fs::metadata(home.join(name)).map_or(0, |m| m.len()))
     .sum();
     // R13: a resident worker and a file left by a failed rebuild are not a live rebuild.
-    let rebuilding = crate::worker::lock_held(&home.join("state/rebuild.lock"));
+    let rebuilding = crate::worker::rebuilding(home);
     let (records, claims, skips) = match search::b::stores(home)? {
         None => (Vec::new(), Vec::new(), Vec::new()),
         Some((raw, k)) => {
@@ -7397,7 +7397,10 @@ curate = false
         .unwrap();
         let v = Viewer::new(home.path(), None, 4321, Token::Run("t0k".into()));
         assert_eq!(v.route("GET", "/api/rests?x=1", &[HOST, TOKEN]).status, 400);
-        assert_eq!(get(&v, "/api/rests"), json!({"stopped": [], "resting": []}));
+        assert_eq!(
+            get(&v, "/api/rests"),
+            json!({"stopped": [], "resting": [], "paused": null})
+        );
         let db = crate::providers_db::open(home.path()).unwrap();
         let later = crate::db::now_ms() + 3_600_000;
         let rest = crate::providers_db::State {
@@ -7408,7 +7411,7 @@ curate = false
         drop(db);
         assert_eq!(
             get(&v, "/api/rests"),
-            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}]})
+            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}], "paused": null})
         );
         assert_eq!(
             get(&v, "/api/settings")["resting"],
@@ -7420,7 +7423,7 @@ curate = false
         drop(db);
         assert_eq!(
             get(&v, "/api/rests"),
-            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}]})
+            json!({"stopped": [], "resting": [{"name": "acme-rest", "until": later}], "paused": null})
         );
         for side in ["providers.db-wal", "providers.db-shm"] {
             let _ = std::fs::remove_file(home.path().join(side));
@@ -7428,8 +7431,29 @@ curate = false
         std::fs::write(home.path().join("providers.db"), "invented damaged ledger").unwrap();
         assert_eq!(
             get(&v, "/api/rests"),
-            json!({"stopped": null, "resting": null})
+            json!({"stopped": null, "resting": null, "paused": null})
         );
+        // #855: a rebuild that holds its lock pauses curation, since its stamp, the ledger read or
+        // not; the lock free, no pause.
+        std::fs::create_dir_all(home.path().join("state")).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(home.path().join("state/rebuild.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        lock.set_modified(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000),
+        )
+        .unwrap();
+        let _contending = crate::worker::contending();
+        assert_eq!(
+            get(&v, "/api/rests")["paused"],
+            json!({"kind": "rebuild", "since": 1_700_000_000_000_i64})
+        );
+        drop(lock);
+        assert_eq!(get(&v, "/api/rests")["paused"], json!(null));
     }
 
     #[test]
