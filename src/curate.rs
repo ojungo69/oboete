@@ -1004,11 +1004,17 @@ impl<'r> Prepared<'r> {
             "prompt" => {
                 // A prompt another agent sent is not the developer's words: the gates read its
                 // line as the assistant's (#273). Nor is Codex's review template, recorded unmarked
-                // before capture marked it (docs/session-start.md).
+                // before capture marked it (docs/session-start.md), nor a Claude Code prompt from
+                // an entry point no person types in (`claude -p` is `sdk-cli`), as `typed` reads it.
                 let preset = body["prompt"]
                     .as_str()
                     .is_some_and(crate::typed::codex_review_preset);
-                let (head, role) = if body["agent_sent"] == true || preset {
+                let untyped = e.agent == "claude"
+                    && body.get("entrypoint").is_some_and(|v| {
+                        crate::typed::entrypoint(v)
+                            .is_none_or(|x| !crate::typed::TYPED_ENTRYPOINTS.contains(&x))
+                    });
+                let (head, role) = if body["agent_sent"] == true || preset || untyped {
                     ("[agent prompt]", Role::Assistant)
                 } else {
                     ("[user]", Role::User)
@@ -6495,6 +6501,49 @@ mod tests {
             own.contains("[user]") && !own.contains("[agent prompt]"),
             "{own}"
         );
+    }
+
+    /// docs/session-start.md: a Claude Code prompt from an entry point no person types in (`claude
+    /// -p` is `sdk-cli`, a scheduled run `remote_trigger`) is read as a program's, as `typed` reads
+    /// it; one typed in the terminal, the desktop app or VS Code, or recorded before entry points
+    /// were kept, stays the developer's, and another agent's prompt has no entry point to read.
+    #[test]
+    fn a_claude_prompt_no_person_typed_is_read_as_an_agents_prompt() {
+        let rules = Rules::default();
+        let shown = |body: Value, agent: &str| {
+            let e = Event {
+                agent: agent.into(),
+                ..event("prompt", body)
+            };
+            render(&e, 1, 0, None, &rules).text
+        };
+        let words = "Summarize the session.";
+        for entry in ["sdk-cli", "sdk-ts", "remote_trigger", "Not An Entry Point"] {
+            let text = shown(
+                serde_json::json!({"prompt": words, "entrypoint": entry}),
+                "claude",
+            );
+            assert!(
+                text.contains("[agent prompt]") && !text.contains("[user]"),
+                "{entry}: {text}"
+            );
+        }
+        for body in [
+            serde_json::json!({"prompt": words, "entrypoint": "cli"}),
+            serde_json::json!({"prompt": words, "entrypoint": "claude-vscode"}),
+            serde_json::json!({"prompt": words}),
+        ] {
+            let text = shown(body.clone(), "claude");
+            assert!(
+                text.contains("[user]") && !text.contains("[agent prompt]"),
+                "{body}: {text}"
+            );
+        }
+        let codex = shown(
+            serde_json::json!({"prompt": words, "entrypoint": "sdk-cli"}),
+            "codex",
+        );
+        assert!(codex.contains("[user]"), "{codex}");
     }
 
     #[test]
