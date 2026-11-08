@@ -1,0 +1,25 @@
+docs/backup-points.md
+  s_70102dd6ea5599::t_24ef3dbbfe5461 33-39,52-55,63-65,96-102
+src/backup.rs
+  s_70102dd6ea5599::t_29fa20ecd4726b 344,346,988-1000,1002-1003,1010,1015-1028,1031,1036,1041,1046-1047,1061-1069,1081,1083,2177-2194,2289-2291,2298-2302,2379,2422-2425,4290,4293,4321,4388-4397,4409-4490
+src/main.rs
+  s_70102dd6ea5599::t_624228252d75c6 267,1023,1025,1028-1031,1037-1040
+src/raw.rs
+  s_70102dd6ea5599::t_4b42d2650d4c01 7215-7216,7280,7284-7290,7615-7617,7620,7625,7627,7634-7635,7641-7658,7661-7669,7671,7681
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1df84a488c4537ba1001f57b37153fccddcb9920",
+  "prompts": {},
+  "sessions": {
+    "s_70102dd6ea5599": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c63fdb3f-e4ea-40b3-8c02-0b89cf9efd57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
