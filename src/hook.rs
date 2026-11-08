@@ -2584,39 +2584,70 @@ pub(crate) fn post_json(
     body: &[u8],
     deadline: std::time::Instant,
 ) -> Option<Value> {
+    post_json_why(port, token, path, body, deadline).ok()
+}
+
+/// Why `post_json_why` has no answer: the deadline ended the wait, or the viewer refused, closed
+/// or broke its answer before it (#884).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Unanswered {
+    Late,
+    Failed,
+}
+
+/// `post_json`, saying why there is no answer, from what ended the wait rather than the clock.
+pub(crate) fn post_json_why(
+    port: u16,
+    token: &str,
+    path: &str,
+    body: &[u8],
+    deadline: std::time::Instant,
+) -> Result<Value, Unanswered> {
     let left = || {
         deadline
             .checked_duration_since(std::time::Instant::now())
             .filter(|d| !d.is_zero())
+            .ok_or(Unanswered::Late)
+    };
+    // A socket's own timeout is the deadline's: Unix says WouldBlock, Windows TimedOut.
+    let why = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => Unanswered::Late,
+        _ => Unanswered::Failed,
     };
     let at = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = std::net::TcpStream::connect_timeout(&at, left()?).ok()?;
-    stream.set_write_timeout(left()).ok()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&at, left()?).map_err(why)?;
+    stream.set_write_timeout(Some(left()?)).map_err(why)?;
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).ok()?;
-    stream.write_all(body).ok()?;
+    // One write, so the request leaves whole: a peer that answers after its first read and
+    // closes (a refusal) never cuts the body off into a failed write.
+    let mut request = head.into_bytes();
+    request.extend_from_slice(body);
+    stream.write_all(&request).map_err(why)?;
     let mut answer = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        stream.set_read_timeout(Some(left()?)).ok()?;
+        stream.set_read_timeout(Some(left()?)).map_err(why)?;
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) if answer.len() + n <= MAX_ANSWER => answer.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Ok(_) | Err(_) => return None,
+            Err(e) => return Err(why(e)),
+            Ok(_) => return Err(Unanswered::Failed),
         }
     }
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut response = httparse::Response::new(&mut headers);
-    let httparse::Status::Complete(at) = response.parse(&answer).ok()? else {
-        return None;
+    let Ok(httparse::Status::Complete(at)) = response.parse(&answer) else {
+        return Err(Unanswered::Failed);
     };
-    (response.code == Some(200)).then_some(())?;
-    serde_json::from_slice(&answer[at..]).ok()
+    if response.code != Some(200) {
+        return Err(Unanswered::Failed);
+    }
+    serde_json::from_slice(&answer[at..]).map_err(|_| Unanswered::Failed)
 }
 
 /// G23: how the last prompt that could ask the resident viewer took its block, for doctor and the
@@ -6261,6 +6292,60 @@ mod tests {
         );
     }
 
+    /// #884: `post_json_why` says what ended the wait, on every platform: a listener that never
+    /// answers is late, and one that answers 503, closes unanswered or is not there failed.
+    #[test]
+    fn post_json_says_which_ended_the_wait() {
+        use std::io::Read as _;
+        let ask = |port: u16, within: Duration| {
+            post_json_why(
+                port,
+                "t",
+                "/api/x",
+                b"{}",
+                std::time::Instant::now() + within,
+            )
+        };
+        let serve = |answer: Option<&'static [u8]>| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = conn.read(&mut buf);
+                match answer {
+                    Some(a) => {
+                        let _ = conn.write_all(a);
+                    }
+                    // Held open and never answered, until the test is over.
+                    None => std::thread::sleep(Duration::from_secs(5)),
+                }
+            });
+            port
+        };
+        let silent = serve(None);
+        assert_eq!(
+            ask(silent, Duration::from_millis(300)),
+            Err(Unanswered::Late)
+        );
+        let busy = serve(Some(
+            b"HTTP/1.1 503 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ));
+        assert_eq!(ask(busy, Duration::from_secs(2)), Err(Unanswered::Failed));
+        let closed = serve(Some(b""));
+        assert_eq!(ask(closed, Duration::from_secs(2)), Err(Unanswered::Failed));
+        let gone = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert_eq!(ask(gone, Duration::from_secs(2)), Err(Unanswered::Failed));
+        let ok = serve(Some(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{\"a\":1}",
+        ));
+        assert_eq!(ask(ok, Duration::from_secs(2)), Ok(json!({"a": 1})));
+    }
+
     /// #879: a viewer that refuses (a 503 while the memory is restored or rebuilt), or whose lock
     /// is held with nothing on its port, gives an error before the deadline; one that has not
     /// answered by the deadline gives a timeout.
@@ -6280,6 +6365,13 @@ mod tests {
         let _b = Resident::refusing(busy.path(), 503);
         assert_eq!(
             ask(busy.path(), Duration::from_secs(2)),
+            Some(Err(VectorSkip::Error))
+        );
+        // #884: within the last 100 ms of the deadline too (the whole wait is 95 ms here). The
+        // viewer's lock is checked at once, as outside tests (`contending`).
+        let _contending = crate::worker::contending();
+        assert_eq!(
+            ask(busy.path(), Duration::from_millis(95)),
             Some(Err(VectorSkip::Error))
         );
         let gone = tempfile::tempdir().unwrap();
