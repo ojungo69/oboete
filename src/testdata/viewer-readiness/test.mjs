@@ -2981,28 +2981,37 @@ console.log('PASS: the caps\' No cap switches');
     assert.equal(said('alpha'),'Ready to use','a rest ended');
     assert(page().every((fold,i)=>fold===folds[i]),'the lines are not drawn again');
     // #855: a rebuild or a rewrite of the stored records pauses curation: said above the groups,
-    // in place, in both languages, gone once it ends.
+    // in place, in both languages, gone once it ends. With summaries off (as here) nothing waits
+    // on it, so the page names what holds the lock alone (#871).
     const paused=()=>panel.querySelector('.simple-paused');
     assert(paused()&&paused().hidden,'no pause: hidden');
     await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:noon.getTime()}}));
-    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused while the memory is rebuilt, since ')
-      &&text(paused()).includes('12:00'),text(paused()));
+    assert(!paused().hidden&&text(paused()).startsWith('The memory is being rebuilt, since ')
+      &&text(paused()).includes('12:00')&&!text(paused()).includes('Summaries'),text(paused()));
     // A read that failed says nothing of it: the pause shown stays (cubic on #868).
     await read(()=>Promise.reject(new Error('a lost read')));
-    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused while the memory is rebuilt'),'kept through a failed read');
+    assert(!paused().hidden&&text(paused()).startsWith('The memory is being rebuilt'),'kept through a failed read');
     await read(()=>json({stopped:[],resting:[],paused:{kind:'rewrite',since:null}}));
-    assert.equal(text(paused()),'Summaries are paused while the stored records are rewritten (a forget, the retention period or new masks). They start again by themselves when it is done.');
+    assert.equal(text(paused()),'The stored records are being rewritten (a forget, the retention period or new masks).');
     ctx.ui.setLang('ja');ctx.ui.drawSettings();
-    assert.deepEqual([paused().hidden,text(paused())],[false,'保存した記録を書き直している間 (忘れる操作、保存期間、伏せ字の適用)、要約は止まっています。終わると自動で再開します。'],
+    assert.deepEqual([paused().hidden,text(paused())],[false,'保存した記録を書き直しています (忘れる操作、保存期間、伏せ字の適用)。'],
       'drawn again: shown, in Japanese');
+    // With summaries on, the pause is theirs, and they go on once it is done and a worker runs: no
+    // promise that they start by themselves (#871).
+    vm.runInContext('form.savedSettings.summary.curate=true',ctx);
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:null}}));
+    assert.equal(text(paused()),'記憶を作り直している間、要約は止まっています。終わったあと、ワーカーが動くと再開します。');
     ctx.ui.setLang('en');ctx.ui.drawSettings();
+    assert.equal(text(paused()),'Summaries are paused while the memory is rebuilt. They go on once it is done and the worker runs.');
+    vm.runInContext('form.savedSettings.summary.curate=false',ctx);
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rewrite',since:null}}));
     // Through a save's answer, which draws the page from it: the pause stays, with no rests read
     // answering meanwhile.
     restsAnswer=null;
     answers=[json(ai(['alpha','beta'],{stopped:[],resting:[],chain:[row('alpha'),row('beta',{on:false})]}))];
     flip(simple('on:beta'),false);await settled(8);
     assert.equal(posted.at(-1)?.url,'/api/settings','a save went');
-    assert(!paused().hidden&&text(paused()).startsWith('Summaries are paused'),'kept through the answer');
+    assert(!paused().hidden&&text(paused()).startsWith('The stored records are being rewritten'),'kept through the answer');
     answers=[json(ai(['alpha','beta'],{stopped:[],resting:[]}))];
     flip(simple('on:beta'),true);await settled(8);
     await read(lists([],[]));
