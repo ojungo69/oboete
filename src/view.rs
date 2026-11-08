@@ -7450,8 +7450,19 @@ curate = false
         let _contending = crate::worker::contending();
         assert_eq!(
             get(&v, "/api/rests")["paused"],
-            json!({"kind": "rebuild", "since": 1_700_000_000_000_i64})
+            json!({"kind": "rebuild", "since": 1_700_000_000_000_i64, "curate": false})
         );
+        // Whether curation is on follows config.toml as it is now; one that does not read counts
+        // as on, since it stops curation too.
+        let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[summary]\ncurate = true\n\n{config}"),
+        )
+        .unwrap();
+        assert_eq!(get(&v, "/api/rests")["paused"]["curate"], json!(true));
+        std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
+        assert_eq!(get(&v, "/api/rests")["paused"]["curate"], json!(true));
         drop(lock);
         assert_eq!(get(&v, "/api/rests")["paused"], json!(null));
     }

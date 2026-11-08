@@ -139,8 +139,9 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   a request the viewer failed before the wait was over, no viewer, or the viewer's reason for no
   vector); the settings page shows the same under the wait, in both languages.
 - **What it injected.** Each prompt that reaches the prompt point adds to its day's counts in
-  `state/prompt-blocks`: the prompt, whether a block came, and the characters of its blocks that
-  came after the hook's cut (counts, never text; the last 7 days kept). Grok's turn is one prompt,
+  `state/prompt-blocks`: the prompt, whether a block came, and the characters the agent got of its
+  blocks, each with its fence, after the hook's cut (counts, never text; the 7 calendar days ending
+  today kept). Grok's turn is one prompt,
   counted at its prompt, and its block at the tool call that shows it. Doctor's per-prompt part
   sums the last 7 days: `in the last 7 days: N prompts, B took a block, C characters injected`. A
   prompt that finds another writing the counts is not counted.

@@ -1932,9 +1932,11 @@ pub(crate) fn paused_line(home: &Path) -> Option<String> {
         "rebuild" => "knowledge.db is being rebuilt",
         _ => "the stored records are being rewritten (a forget, the retention period or new masks)",
     };
-    let line = match crate::config::load(home).is_ok_and(|c| c.summary.curate) {
-        true => format!("curation is paused while {what}"),
-        false => what.to_owned(),
+    // A config.toml that does not load stops curation too: only one read as off says less (cubic
+    // on #872).
+    let line = match crate::config::load(home) {
+        Ok(c) if !c.summary.curate => what.to_owned(),
+        _ => format!("curation is paused while {what}"),
     };
     Some(match since {
         Some(at) => format!("{line}, since {}", crate::db::utc(at)),
@@ -5806,6 +5808,13 @@ mod tests {
         assert_eq!(
             paused_line(p).as_deref(),
             Some("knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC")
+        );
+        std::fs::write(p.join("config.toml"), "[summary\n").unwrap();
+        assert!(
+            paused_line(p)
+                .unwrap()
+                .starts_with("curation is paused while"),
+            "a config.toml that does not load"
         );
         std::fs::write(p.join("config.toml"), "[summary]\ncurate = true\n").unwrap();
         assert_eq!(

@@ -2597,16 +2597,26 @@ pub(crate) fn last_side(home: &Path) -> Option<(i64, String)> {
     Some((at.parse().ok()?, side.to_owned()))
 }
 
-/// The characters of the prompt point's blocks that came: each block's text up to where the
-/// hook's cut kept it (`assembled`).
+/// The characters of the prompt point's blocks as the agent got them: each block that came, up to
+/// where the hook's cut kept it, with its fence, as `assembled` fences it (cubic on #872).
 fn came_chars(blocks: &[(&'static str, String)], kept: &[usize]) -> usize {
     (blocks.iter().zip(kept))
-        .map(|((_, text), &end)| text[..end.min(text.len())].chars().count())
+        .filter(|(_, end)| **end > 0)
+        .map(|((what, text), &end)| {
+            crate::manifest::fence(what, &text[..end.min(text.len())])
+                .chars()
+                .count()
+        })
         .sum()
 }
 
 /// Days `state/prompt-blocks` keeps: what doctor sums.
-const PROMPT_DAYS: usize = 7;
+const PROMPT_DAYS: i64 = 7;
+
+/// The first of the `PROMPT_DAYS` days (UTC) that end on `now`'s.
+fn week_from(now: i64) -> String {
+    crate::db::utc(now - (PROMPT_DAYS - 1) * 86_400_000)[..10].to_owned()
+}
 
 /// Each day's prompts that reached the prompt point, those of them that took a block and the
 /// characters injected, in `state/prompt-blocks` for doctor: what per-prompt injection costs was
@@ -2614,16 +2624,11 @@ const PROMPT_DAYS: usize = 7;
 // shortcut: a prompt that finds another holding the lock is not counted; a statistic, not a record.
 fn note_block(home: &Path, prompts: usize, chars: usize) {
     if prompts > 0 || chars > 0 {
-        note_block_on(
-            home,
-            &crate::db::utc(crate::db::now_ms())[..10],
-            prompts,
-            chars,
-        );
+        note_block_on(home, crate::db::now_ms(), prompts, chars);
     }
 }
 
-fn note_block_on(home: &Path, day: &str, prompts: usize, chars: usize) {
+fn note_block_on(home: &Path, now: i64, prompts: usize, chars: usize) {
     let state = home.join("state");
     let lock = std::fs::create_dir_all(&state).and_then(|()| {
         std::fs::OpenOptions::new()
@@ -2638,14 +2643,17 @@ fn note_block_on(home: &Path, day: &str, prompts: usize, chars: usize) {
     }
     let path = state.join("prompt-blocks");
     let mut days = prompt_days(&std::fs::read_to_string(&path).unwrap_or_default());
+    // The week ending today, by the calendar: a day older goes, however long nothing was counted
+    // (cubic on #872).
+    let (day, since) = (&crate::db::utc(now)[..10], week_from(now));
+    days.retain(|d| d.0 >= since);
     let took = usize::from(chars > 0);
     match days.iter_mut().find(|d| d.0 == day) {
         Some(d) => (d.1, d.2, d.3) = (d.1 + prompts, d.2 + took, d.3 + chars),
         None => days.push((day.to_owned(), prompts, took, chars)),
     }
     days.sort();
-    let kept = &days[days.len().saturating_sub(PROMPT_DAYS)..];
-    let text: String = (kept.iter())
+    let text: String = (days.iter())
         .map(|(day, prompts, blocks, chars)| format!("{day} {prompts} {blocks} {chars}\n"))
         .collect();
     let next = state.join(format!("prompt-blocks.{}", std::process::id()));
@@ -2674,7 +2682,7 @@ fn prompt_days(text: &str) -> Vec<(String, usize, usize, usize)> {
 /// them), those that took a block, and the characters injected.
 pub(crate) fn prompt_blocks_line(home: &Path, now: i64) -> Option<String> {
     let text = std::fs::read_to_string(home.join("state").join("prompt-blocks")).ok()?;
-    let since = crate::db::utc(now - 6 * 86_400_000)[..10].to_owned();
+    let since = week_from(now);
     let (prompts, blocks, chars) = (prompt_days(&text).iter())
         .filter(|d| d.0 >= since)
         .fold((0, 0, 0), |a, d| (a.0 + d.1, a.1 + d.2, a.2 + d.3));
@@ -8108,19 +8116,21 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
         assert_eq!(prompt_blocks_line(h, 0), None);
-        for day in 1..=9 {
-            note_block_on(h, &format!("2026-11-{day:02}"), 1, 0);
+        // 2026-11-09 12:00 UTC, and the days before it.
+        let noon = 1_794_225_600_000;
+        let day = |d: i64| noon - (9 - d) * 86_400_000;
+        for d in 1..=9 {
+            note_block_on(h, day(d), 1, 0);
         }
-        note_block_on(h, "2026-11-09", 1, 120);
-        note_block_on(h, "2026-11-09", 0, 30);
+        note_block_on(h, day(9), 1, 120);
+        note_block_on(h, day(9), 0, 30);
         let text = std::fs::read_to_string(h.join("state/prompt-blocks")).unwrap();
         assert_eq!(text.lines().count(), 7, "{text}");
         assert!(
             text.starts_with("2026-11-03 1 0 0\n") && text.ends_with("2026-11-09 2 2 150\n"),
             "{text}"
         );
-        // 2026-11-09 12:00 UTC: the 7 days from 2026-11-03; a day later, from 2026-11-04.
-        let noon = 1_794_225_600_000;
+        // The 7 days from 2026-11-03; a day later, from 2026-11-04.
         assert_eq!(
             prompt_blocks_line(h, noon).as_deref(),
             Some("  in the last 7 days: 8 prompts, 2 took a block, 150 characters injected")
@@ -8129,15 +8139,26 @@ mod tests {
             prompt_blocks_line(h, noon + 86_400_000).as_deref(),
             Some("  in the last 7 days: 7 prompts, 2 took a block, 150 characters injected")
         );
+        // A count weeks later keeps its own day alone: the days older than its week go.
+        note_block_on(h, noon + 30 * 86_400_000, 1, 0);
+        let text = std::fs::read_to_string(h.join("state/prompt-blocks")).unwrap();
+        assert_eq!(text, "2026-12-09 1 0 0\n");
     }
 
-    /// A block the hook's cut shortened or dropped counts what came of it.
+    /// A block counts as the agent got it, with its fence; one the hook's cut shortened counts
+    /// what came of it, one it dropped nothing; in characters, not bytes.
     #[test]
     fn a_cut_block_counts_what_came() {
         let blocks = [("a", "ab\ncd\n".to_owned()), ("b", "éf\n".to_owned())];
-        assert_eq!(came_chars(&blocks, &[6, 4]), 9);
-        assert_eq!(came_chars(&blocks, &[3, 0]), 3);
+        let first = came_chars(&blocks[..1], &[6]);
+        let second = came_chars(&blocks[1..], &[4]);
+        assert!(first > 6 && second > 3, "{first} {second}");
+        assert_eq!(came_chars(&blocks, &[6, 4]), first + second);
+        let cut = came_chars(&blocks, &[3, 0]);
+        assert!(cut > 3 && cut < first, "{cut} {first}");
         assert_eq!(came_chars(&blocks, &[]), 0);
+        let ascii = [("b", "ef\n".to_owned())];
+        assert_eq!(second, came_chars(&ascii, &[3]));
     }
 
     /// The same, through the hook: a prompt that takes a block and one that takes none.
@@ -8162,7 +8183,8 @@ mod tests {
         .map(|n| n.parse().unwrap())
         .collect();
         assert_eq!(counts[..2], [2, 1], "{text}");
-        assert!(counts[2] > 0 && counts[2] < first.chars().count(), "{text}");
+        // The block alone came, with its fence: what the agent got.
+        assert_eq!(counts[2], first.chars().count(), "{text}");
     }
 
     /// Grok's turn is one prompt, counted when its prompt keeps the picks, whose block is counted
@@ -8208,10 +8230,8 @@ mod tests {
         assert_eq!(tool(), "");
         let after = counts();
         assert_eq!(after[..2], [2, 1]);
-        assert!(
-            after[2] > 0 && after[2] < shown.chars().count(),
-            "{after:?}"
-        );
+        // The block alone came at that tool call, with its fence.
+        assert_eq!(after[2], shown.chars().count(), "{after:?}");
     }
 
     /// docs/cards.md S1: the line counts the cards session start handed over beside the claims.

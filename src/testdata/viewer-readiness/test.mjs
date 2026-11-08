@@ -2997,12 +2997,15 @@ console.log('PASS: the caps\' No cap switches');
     assert.deepEqual([paused().hidden,text(paused())],[false,'保存した記録を書き直しています (忘れる操作、保存期間、伏せ字の適用)。'],
       'drawn again: shown, in Japanese');
     // With summaries on, the pause is theirs, and they go on once it is done and a worker runs: no
-    // promise that they start by themselves (#871).
-    vm.runInContext('form.savedSettings.summary.curate=true',ctx);
-    await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:null}}));
+    // promise that they start by themselves (#871). The pause says whether they are on now, as
+    // config.toml does, over what the page read (CodeRabbit on #872).
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:null,curate:true}}));
     assert.equal(text(paused()),'記憶を作り直している間、要約は止まっています。終わったあと、ワーカーが動くと再開します。');
     ctx.ui.setLang('en');ctx.ui.drawSettings();
     assert.equal(text(paused()),'Summaries are paused while the memory is rebuilt. They go on once it is done and the worker runs.');
+    vm.runInContext('form.savedSettings.summary.curate=true',ctx);
+    await read(()=>json({stopped:[],resting:[],paused:{kind:'rebuild',since:null,curate:false}}));
+    assert.equal(text(paused()),'The memory is being rebuilt.','turned off elsewhere');
     vm.runInContext('form.savedSettings.summary.curate=false',ctx);
     await read(()=>json({stopped:[],resting:[],paused:{kind:'rewrite',since:null}}));
     // Through a save's answer, which draws the page from it: the pause stays, with no rests read

@@ -7098,9 +7098,10 @@ function pausedText(f) {
   const p = f.paused;
   if (!p) return '';
   const since = p.since ? t('curation_paused_since', { time: new Date(p.since).toLocaleString(lang) }) : '';
-  // With summaries off nothing waits on it: what holds the lock alone (#871).
+  // With summaries off nothing waits on it: what holds the lock alone (#871). Whether they are on
+  // comes with the pause, as config.toml says now, before what the page read.
   const rebuild = p.kind === 'rebuild';
-  const key = f.savedSettings?.summary?.curate
+  const key = (p.curate ?? f.savedSettings?.summary?.curate)
     ? (rebuild ? 'curation_paused_rebuild' : 'curation_paused_rewrite')
     : (rebuild ? 'memory_rebuilding' : 'records_rewriting');
   return t(key, { since });
