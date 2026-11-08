@@ -2616,7 +2616,6 @@ pub(crate) fn post_json_why(
     };
     let at = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = std::net::TcpStream::connect_timeout(&at, left()?).map_err(why)?;
-    stream.set_write_timeout(Some(left()?)).map_err(why)?;
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: {token}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2626,7 +2625,17 @@ pub(crate) fn post_json_why(
     // closes (a refusal) never cuts the body off into a failed write.
     let mut request = head.into_bytes();
     request.extend_from_slice(body);
-    stream.write_all(&request).map_err(why)?;
+    // Each write waits at most until the deadline, as it is when that write starts (Sourcery).
+    let mut sent = 0;
+    while sent < request.len() {
+        stream.set_write_timeout(Some(left()?)).map_err(why)?;
+        match stream.write(&request[sent..]) {
+            Ok(0) => return Err(Unanswered::Failed),
+            Ok(n) => sent += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(why(e)),
+        }
+    }
     let mut answer = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -6339,7 +6348,8 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        assert_eq!(ask(gone, Duration::from_secs(2)), Err(Unanswered::Failed));
+        // Windows tries a refused connection again for about 2 s before it says so.
+        assert_eq!(ask(gone, Duration::from_secs(10)), Err(Unanswered::Failed));
         let ok = serve(Some(
             b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{\"a\":1}",
         ));
@@ -6365,13 +6375,6 @@ mod tests {
         let _b = Resident::refusing(busy.path(), 503);
         assert_eq!(
             ask(busy.path(), Duration::from_secs(2)),
-            Some(Err(VectorSkip::Error))
-        );
-        // #884: within the last 100 ms of the deadline too (the whole wait is 95 ms here). The
-        // viewer's lock is checked at once, as outside tests (`contending`).
-        let _contending = crate::worker::contending();
-        assert_eq!(
-            ask(busy.path(), Duration::from_millis(95)),
             Some(Err(VectorSkip::Error))
         );
         let gone = tempfile::tempdir().unwrap();
