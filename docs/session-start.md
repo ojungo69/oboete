@@ -48,7 +48,7 @@ Measured here with `oboete inject` (2026-11-07): the index went from 22 lines an
 
 ## Not in this change
 
-- Counting the per-prompt block's injections and their size in `oboete doctor`.
+- Counting the per-prompt block's injections and their size in `oboete doctor` (since built: docs/prompt-context.md).
 - The parity table's reading of claude-mem 15.10 and 15.11 (rows X20, X22, 41, 33, 58, and decision 77's row).
 - Shorter MCP tool descriptions.
 - The curator's label for a Claude Code prompt from `claude -p` (`entrypoint` `sdk-cli`), which `typed` leaves out but the curator reads as `[user]` (since done: the curator labels a Claude Code prompt from an entry point no person types in `[agent prompt]`).

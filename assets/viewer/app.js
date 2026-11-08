@@ -1061,8 +1061,10 @@ const TEXT = {
   simple_ai_h: ['AI for summaries', '要約に使う AI'],
   simple_ai_desc: ['The enabled AI services are tried in this order and receive the records needed to write a summary.', 'オンにした AI がこの順番で使われ、要約に必要な記録が送られます。'],
   simple_no_ai: ['No AI for summaries can be used yet; add a key below or add an AI.', '要約に使える AI がまだないため、下の一覧でキーを登録するか、AI を追加してください。'],
-  curation_paused_rebuild: ['Summaries are paused while the memory is rebuilt{since}. They start again by themselves when it is done.', '記憶を作り直している間、要約は止まっています{since}。終わると自動で再開します。'],
-  curation_paused_rewrite: ['Summaries are paused while the stored records are rewritten (a forget, the retention period or new masks){since}. They start again by themselves when it is done.', '保存した記録を書き直している間 (忘れる操作、保存期間、伏せ字の適用)、要約は止まっています{since}。終わると自動で再開します。'],
+  curation_paused_rebuild: ['Summaries are paused while the memory is rebuilt{since}. They go on once it is done and the worker runs.', '記憶を作り直している間、要約は止まっています{since}。終わったあと、ワーカーが動くと再開します。'],
+  curation_paused_rewrite: ['Summaries are paused while the stored records are rewritten (a forget, the retention period or new masks){since}. They go on once it is done and the worker runs.', '保存した記録を書き直している間 (忘れる操作、保存期間、伏せ字の適用)、要約は止まっています{since}。終わったあと、ワーカーが動くと再開します。'],
+  memory_rebuilding: ['The memory is being rebuilt{since}.', '記憶を作り直しています{since}。'],
+  records_rewriting: ['The stored records are being rewritten (a forget, the retention period or new masks){since}.', '保存した記録を書き直しています (忘れる操作、保存期間、伏せ字の適用){since}。'],
   curation_paused_since: [', since {time}', ' ({time} から)'],
   simple_curate: ['Create summaries', '記録を要約する'],
   simple_status_missing: ['Needs an API key', 'API キーの登録が必要です'],
@@ -7096,7 +7098,13 @@ function pausedText(f) {
   const p = f.paused;
   if (!p) return '';
   const since = p.since ? t('curation_paused_since', { time: new Date(p.since).toLocaleString(lang) }) : '';
-  return t(p.kind === 'rebuild' ? 'curation_paused_rebuild' : 'curation_paused_rewrite', { since });
+  // With summaries off nothing waits on it: what holds the lock alone (#871). Whether they are on
+  // comes with the pause, as config.toml says now, before what the page read.
+  const rebuild = p.kind === 'rebuild';
+  const key = (p.curate ?? f.savedSettings?.summary?.curate)
+    ? (rebuild ? 'curation_paused_rebuild' : 'curation_paused_rewrite')
+    : (rebuild ? 'memory_rebuilding' : 'records_rewriting');
+  return t(key, { since });
 }
 
 function renderRests(f, stoppedChanged) {

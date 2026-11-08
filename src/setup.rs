@@ -3078,6 +3078,10 @@ pub fn doctor(home: &Path) -> Result<()> {
                     crate::db::utc(at)
                 );
             }
+            // What per-prompt injection injected in the last 7 days (docs/prompt-context.md).
+            if let Some(line) = crate::hook::prompt_blocks_line(home, crate::db::now_ms()) {
+                println!("{line}");
+            }
             match i.correction {
                 true => println!(
                     "corrections: on, up to {} characters at the next prompt",

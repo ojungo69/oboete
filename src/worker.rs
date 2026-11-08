@@ -1924,19 +1924,23 @@ pub(crate) fn curation_pause(home: &Path) -> Option<(&'static str, Option<i64>)>
     Some((kind, held.iter().filter_map(|h| h.1).min()))
 }
 
-/// Doctor's line while curation is paused (#855).
+/// Doctor's line while curation is paused (#855); with `[summary] curate` off no curation waits,
+/// so the line names what holds the lock alone (#871).
 pub(crate) fn paused_line(home: &Path) -> Option<String> {
     let (kind, since) = curation_pause(home)?;
     let what = match kind {
         "rebuild" => "knowledge.db is being rebuilt",
         _ => "the stored records are being rewritten (a forget, the retention period or new masks)",
     };
+    // A config.toml that does not load stops curation too: only one read as off says less (cubic
+    // on #872).
+    let line = match crate::config::load(home) {
+        Ok(c) if !c.summary.curate => what.to_owned(),
+        _ => format!("curation is paused while {what}"),
+    };
     Some(match since {
-        Some(at) => format!(
-            "curation is paused while {what}, since {}",
-            crate::db::utc(at)
-        ),
-        None => format!("curation is paused while {what}"),
+        Some(at) => format!("{line}, since {}", crate::db::utc(at)),
+        None => line,
     })
 }
 
@@ -5800,6 +5804,19 @@ mod tests {
             curation_pause(p),
             Some(("rebuild", Some(1_700_000_000_000)))
         );
+        // #871: with curation off (the default) nothing waits, so doctor names the rebuild alone.
+        assert_eq!(
+            paused_line(p).as_deref(),
+            Some("knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC")
+        );
+        std::fs::write(p.join("config.toml"), "[summary\n").unwrap();
+        assert!(
+            paused_line(p)
+                .unwrap()
+                .starts_with("curation is paused while"),
+            "a config.toml that does not load"
+        );
+        std::fs::write(p.join("config.toml"), "[summary]\ncurate = true\n").unwrap();
         assert_eq!(
             paused_line(p).as_deref(),
             Some(

@@ -157,10 +157,14 @@ fn rest_lists(
 /// `GET /api/rests` (69b-3c-1b): the chain's rests alone, which the page polls while Settings is
 /// shown. A config.toml that does not read gives both null, as a ledger that does not read.
 pub fn rests(home: &Path) -> Value {
-    // #855: curation paused by a rebuild or a rewrite of the stored records, from lock files only.
+    let cfg = config::load(home);
+    // #855: curation paused by a rebuild or a rewrite of the stored records, from lock files only,
+    // with whether curation is on now, so the page's words follow a change made elsewhere; a
+    // config.toml that does not read stops curation too (#871, CodeRabbit on #872).
+    let curate = !matches!(&cfg, Ok(c) if !c.summary.curate);
     let paused = crate::worker::curation_pause(home)
-        .map(|(kind, since)| json!({"kind": kind, "since": since}));
-    let Ok(cfg) = config::load(home) else {
+        .map(|(kind, since)| json!({"kind": kind, "since": since, "curate": curate}));
+    let Ok(cfg) = cfg else {
         return json!({"stopped": null, "resting": null, "paused": paused});
     };
     let (stopped, resting) = rest_lists(&crate::providers_db::read_only(home), &cfg.providers);

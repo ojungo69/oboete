@@ -345,8 +345,10 @@ is no rebuild. The rebuild and the purge's lock (`state/purge.lock`, which a ret
 set their taking time as their lock file's modification time, through the handle that holds it (its
 bytes are not written: Windows lets no other handle read a file locked whole); while either is held,
 doctor and the settings page say
-that curation is paused, for which of the two and since when (`/api/rests` gives it, the page reading
-it as it reads the chain's rests).
+that curation is paused, for which of the two and since when (`/api/rests` gives it, with whether
+curation is on now, the page reading it as it reads the chain's rests), and the page adds that it
+goes on once that is done and a worker runs; with `[summary] curate` off no curation waits, so both
+name the rebuild or the rewrite alone (#871).
 
 R14. **A worker whose loop makes no progress leaves (parity row 2).** Every `oboete worker` run
 starts a watchdog thread once it holds the lock. The loop marks each round, each consumer's batch
