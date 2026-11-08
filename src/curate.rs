@@ -6546,6 +6546,26 @@ mod tests {
         assert!(codex.contains("[user]"), "{codex}");
     }
 
+    /// X18 (docs/raw-adapter.md): a host with no adapter's records are curated as any agent's: its
+    /// prompt is the developer's and its answer the assistant's.
+    #[test]
+    fn a_host_with_no_adapter_is_curated_as_any_agent() {
+        let rules = Rules::default();
+        let said = |e: Event| Event {
+            agent: "kimi".into(),
+            session: "k1".into(),
+            ..e
+        };
+        let text = render(&said(prompt("Fix the parser.")), 1, 0, None, &rules).text;
+        assert!(text.contains("[user] Fix the parser."), "{text}");
+        let reply = event("reply", serde_json::json!({"assistant": "Fixed it."}));
+        let text = render(&said(reply), 1, 0, None, &rules).text;
+        assert!(
+            text.contains("[assistant]") && text.contains("Fixed it."),
+            "{text}"
+        );
+    }
+
     #[test]
     fn labels_binary_markers_and_masked_keys_are_shown_as_the_gate_allows() {
         let (h, mut raw, dev) = store();
