@@ -2259,14 +2259,15 @@ pub fn restore_to(home: &Path, point: &crate::backup::Point) -> Result<String> {
 /// aside, as for a restore). The segments written.
 pub fn backup_run(home: &Path) -> Result<Vec<std::path::PathBuf>> {
     let held = lock_asking(home)?;
-    let wrote = crate::backup::export_timed(home)?
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect();
+    let exported = crate::backup::export_timed(home);
     // A hook that appended while the worker stood aside started no other: what it wrote is
-    // indexed before the lock goes, as a restore's drain does, with no model call (Codex on #880).
-    run_once_holding_report(home, held, &mut |_| {}).1?;
-    Ok(wrote)
+    // indexed before the lock goes, whether the export went well or not, as a restore's drain
+    // does, with no model call (Codex and cubic on #880). A failed drain is said, and the
+    // segments written are still reported.
+    if let Err(e) = run_once_holding_report(home, held, &mut |_| {}).1 {
+        eprintln!("oboete: indexing what came during the backup: {e:#}");
+    }
+    Ok(exported?.into_iter().map(|(path, _)| path).collect())
 }
 
 pub(crate) fn restore_report_to(

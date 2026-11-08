@@ -357,11 +357,20 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
         after.extend(ops.iter().filter(|s| s.last > point.ops).cloned());
     }
     // A point noted before the first record keeps none, and a store gone back to such a point has
-    // ops segments only, none damaged (Codex on #880). Every record segment damaged still stops.
+    // ops segments only, none damaged, and its newest point keeps no record (Codex on #880). Record
+    // segments damaged or lost (a newest point that kept records) still stop it (cubic on #880).
+    let no_records_yet = || {
+        points(backup).is_ok_and(|all| {
+            all.iter()
+                .filter(|p| p.device == device)
+                .max_by_key(|p| p.at)
+                .is_some_and(|p| p.records == 0)
+        })
+    };
     anyhow::ensure!(
         !records.is_empty()
             || point.is_some_and(|p| p.records == 0)
-            || (bad_records.is_empty() && !ops.is_empty()),
+            || (bad_records.is_empty() && !ops.is_empty() && no_records_yet()),
         "no usable backup segment of device {device} in {}",
         backup.display()
     );
@@ -2030,8 +2039,6 @@ fn restore_file_change(
     }
 }
 
-/// The device whose history the backups hold: the damaged file's own id when it can still be
-/// read, else the one device the segments name. Never a guess between two.
 /// The segments a device is discovered from when raw.db cannot tell: the record segments, or the
 /// ops segments when there is no record segment (a store gone back to a point before its first
 /// record, Codex on #880). Ops segments of other devices a forget rewrote may share a directory
@@ -2045,6 +2052,8 @@ fn device_segments(dir: &Path) -> Result<Vec<Segment>> {
     }
 }
 
+/// The device whose history the backups hold: the damaged file's own id when it can still be
+/// read, else the one device the segments name. Never a guess between two.
 fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
     let from_file = rusqlite::Connection::open_with_flags(
         raw::path(home),
@@ -2433,7 +2442,17 @@ fn restore_locked(
     // it claimed are backed up again as they are reused. docs/backup-points.md B4: so is each one
     // that ends past the point, here and not at the next export, so that an automatic restore
     // in between cannot replay what was taken back.
-    set_aside_report(bad.iter().chain(&ops_bad).chain(&after), &mut |first| {
+    // So is each sound ops segment that holds an op past the ops the rebuild kept from the backups:
+    // the ops appended again after a cut take those op seqs with other bodies, so the segment no
+    // longer says what raw.db holds, though raw's highest op seq may not have fallen below its
+    // end (Codex on #880). The next export writes that range again from raw.db.
+    let mut aside: Vec<&Segment> = bad.iter().chain(&ops_bad).chain(&after).collect();
+    for s in ops_ok.iter().filter(|s| s.last > ops_through) {
+        if !aside.iter().any(|a| a.path == s.path) {
+            aside.push(s);
+        }
+    }
+    set_aside_report(aside, &mut |first| {
         receipt.effects.segments_quarantined += u64::from(first);
         receipt.backup_files_kept += 1;
         effect("segments_quarantined", committed)
@@ -4557,6 +4576,83 @@ pub(crate) mod tests {
         crate::worker::restore_to(p, &ten).unwrap();
         assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 5);
         assert_eq!(points(&dir).unwrap(), [five]);
+    }
+
+    /// Codex on #880: when a restore cuts the ops (records lost) and appends exclusions again in
+    /// the op seqs it freed, the old ops segment over those seqs is set aside at the swap, so the
+    /// backups hold what raw.db holds; a later restore brings back both exclusions.
+    #[test]
+    fn ops_appended_again_after_a_cut_replace_the_old_ops_segment() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 5); // record segments 1-5 and 6-10
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        raw.append_ops(&[window(10)]).unwrap(); // op 1, made from records 6-10
+        raw.exclude("github.com/o/a", false).unwrap(); // op 2
+        drop(raw);
+        export(p).unwrap(); // ops segment 1-2
+        let mut raw = raw::open(p).unwrap();
+        raw.exclude("github.com/o/b", false).unwrap(); // op 3, never backed up
+        drop(raw);
+        let newest = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(1)
+            .path;
+        std::fs::write(&newest, b"damaged").unwrap();
+        crate::worker::restore(p).unwrap();
+        let raw = raw::open(p).unwrap();
+        use raw::OpKind::Exclusion;
+        assert_eq!(op_kinds(&raw, &dev), [(1, Exclusion), (2, Exclusion)]);
+        drop(raw);
+        let held: String = segments(&p.join("backups"), Kind::Ops)
+            .unwrap()
+            .iter()
+            .map(|s| read_segment(&s.path).unwrap())
+            .collect();
+        assert!(
+            held.contains("github.com/o/b") && !held.contains("\"window\""),
+            "{held}"
+        );
+        damage_raw(p);
+        let mut excluded = open_raw(p).unwrap().exclusions().unwrap();
+        excluded.sort();
+        assert_eq!(excluded, ["github.com/o/a", "github.com/o/b"]);
+    }
+
+    /// cubic on #880: a backup whose record segments were lost, its newest point having kept
+    /// records, is not restored from its ops alone: that would leave a store with no record.
+    #[test]
+    fn ops_alone_are_not_restored_when_records_were_lost() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 5, 5);
+        let mut raw = raw::open(p).unwrap();
+        raw.exclude("github.com/o/a", false).unwrap();
+        drop(raw);
+        export(p).unwrap(); // a point at (5, 1)
+        for s in segments(&p.join("backups"), Kind::Records).unwrap() {
+            std::fs::remove_file(format!("{}.sha256", s.path.display())).unwrap();
+            std::fs::remove_file(&s.path).unwrap();
+        }
+        let why = crate::worker::restore(p).unwrap_err().to_string();
+        assert!(why.contains("no usable backup segment"), "{why}");
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 5);
+    }
+
+    /// cubic on #880: a backup run whose export fails still indexes what came while it held the
+    /// lock, then says the export failed.
+    #[test]
+    fn a_backup_run_that_fails_to_export_still_indexes() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("backups"), b"a file where the folder would be").unwrap();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("came during a failed backup zf1"))
+            .unwrap();
+        drop(raw);
+        assert!(crate::worker::backup_run(p).is_err());
+        assert_eq!(crate::worker::backlog(p).unwrap(), 0);
     }
 
     /// docs/backup-points.md test 7: a segment the point cuts is replayed up to it and set aside,
