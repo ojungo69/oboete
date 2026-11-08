@@ -71,10 +71,12 @@ back, because forget and retention already rewrite the segments.
   choice about noise, never a gate (spec 6.1, Mute).
 - B6. **No point outlives what it names.** The seqs past a cut are used again by new records, so a
   point past them would name other records. A restore keeps in `points.jsonl` only the points whose
-  seq and op seq it brought back: those through the highest seq it replayed (at most the point's)
-  and through the op prefix it kept. A gap below that seq (a damaged segment skipped) is never used
-  again, so a point past the gap still names the records it named, less those that segment lost. An export that sets aside segments
-  past raw's end (MUST-M14) drops the points past that end too.
+  seq and op seq it brought back: those through the highest seq it replayed, as the lines give it
+  (a segment's name can overstate it, when the segment spans a range raw.db had lost), and through
+  the op prefix it kept. A gap below that seq (a damaged segment skipped) is never used again, so
+  a point past the gap still names the records it named, less those that segment lost. Every
+  export drops the points past raw's end (raw lost commits, MUST-M14) before it sets aside the
+  segments past it, so a stop between the two leaves the points to the next export.
 - B7. **doctor** prints the newest point's time and how many records and ops came after it. When
   that point is more than two days old and raw.db holds records or ops past it, the line is a
   warning naming `oboete backup run`, and doctor turns red. The age is measured from the export's
@@ -120,3 +122,6 @@ back, because forget and retention already rewrite the segments.
     afterwards hold those exclusions in place of the old ops, and a later restore brings them back.
 19. A backup whose record segments were lost, its newest point having kept records, is not
     restored from its ops alone.
+20. A restore keeps no point past the highest seq it replayed, though a segment's name goes further.
+21. An export drops the points past raw's end even when the segments past it were set aside
+    before.

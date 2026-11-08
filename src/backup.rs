@@ -1140,14 +1140,16 @@ fn cursor_report(
         .filter(|s| s.device == raw.device())
         .collect();
     mine.sort_by_key(|s| s.first);
+    // docs/backup-points.md B6: the seqs past raw's end are used again by new records, so the
+    // points past it go: at every export and before the segments past it, so that a stop or a
+    // failure between the two is retried by the next export (Codex on #880).
+    keep_points(dir, raw.device(), |p| match kind {
+        Kind::Records => p.records <= max,
+        Kind::Ops => p.ops <= max,
+    })?;
     if mine.iter().any(|s| s.last > max) {
         set_aside_report(mine.iter().filter(|s| s.last > max), &mut |_| {
             effect("backup_quarantined", committed)
-        })?;
-        // docs/backup-points.md B6: the seqs past raw's end are used again by new records.
-        keep_points(dir, raw.device(), |p| match kind {
-            Kind::Records => p.records <= max,
-            Kind::Ops => p.ops <= max,
         })?;
     }
     mine.retain(|s| s.last <= max);
@@ -2376,6 +2378,10 @@ fn restore_locked(
         // each one progress (CodeRabbit on #613).
         crate::watchdog::progressed();
     }
+    // B6: the highest seq replayed, as the lines gave it: past it, seqs are used again. A
+    // segment's name can overstate it, when the segment spans a range raw.db had lost (Codex on
+    // #880). A gap below it is never used again, so a point past the gap still names what it named.
+    let replayed = rebuild.max_seq()?;
     // The ops after the records, in op order up to the first segment that is damaged or does not
     // start where the one before it ended. The op log after such a hole is set aside with it: its
     // windows would move the curation checkpoint past the lost ones, whose claims go with
@@ -2458,12 +2464,8 @@ fn restore_locked(
         effect("segments_quarantined", committed)
     })?;
     // B6: before the swap, so a restore that stops leaves no point past what raw.db will hold.
-    // The highest seq replayed: past it, seqs are used again. A gap below it (a damaged segment
-    // skipped) is never used again, so a point past the gap still names what it named.
-    let replayed = ok.iter().map(|s| s.last).max().unwrap_or(0);
-    let records_through = point.map_or(replayed, |p| p.records.min(replayed));
     keep_points(&dir, &device, |p| {
-        p.records <= records_through && p.ops <= ops_through
+        p.records <= replayed && p.ops <= ops_through
     })?;
     let kept = quarantine_report(home, "raw.db", guard, &mut |event| {
         restore_file_change(receipt, "raw.db", event, committed)
@@ -4653,6 +4655,70 @@ pub(crate) mod tests {
         drop(raw);
         assert!(crate::worker::backup_run(p).is_err());
         assert_eq!(crate::worker::backlog(p).unwrap(), 0);
+    }
+
+    /// Codex on #880 (B6): a sound segment can span a range raw.db had lost (written after a
+    /// rewind), so its name overstates what a restore replays; the points past the highest seq
+    /// replayed go, the one gone back to among them.
+    #[test]
+    fn points_go_past_the_highest_seq_replayed_not_past_a_segments_name() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        for i in 0..15 {
+            raw.append(&raw::test_event(&format!("rec zg{i:02}x")))
+                .unwrap();
+        }
+        drop(raw);
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM records WHERE seq BETWEEN 6 AND 10", [])
+            .unwrap();
+        export(p).unwrap(); // one segment named 1-15, holding 1-5 and 11-15
+        let dir = p.join("backups");
+        let ranges: Vec<(i64, i64)> = segments(&dir, Kind::Records)
+            .unwrap()
+            .iter()
+            .map(|s| (s.first, s.last))
+            .collect();
+        assert_eq!(ranges, [(1, 15)]);
+        let mut ten = points(&dir).unwrap().remove(0);
+        ten.records = 10; // a point noted when raw.db still held 6-10
+        std::fs::write(
+            dir.join(POINTS),
+            format!("{}\n", serde_json::to_string(&ten).unwrap()),
+        )
+        .unwrap();
+        // The restore alone, with no export after it: its own pruning is what is checked.
+        let config = crate::settings::config_lock(p).unwrap();
+        restore_report_holding_to(p, None, None, Some(&ten), &mut |_| {}).unwrap();
+        drop(config);
+        assert!(points(&dir).unwrap().iter().all(|x| x.records <= 5));
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 5);
+    }
+
+    /// Codex on #880 (B6): the points past raw's end go at every export, before the segments past
+    /// it, so a stop between the two leaves them to the next export.
+    #[test]
+    fn points_past_raws_end_go_even_when_its_segments_already_went() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 5); // points (5, 0) and (10, 0)
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM records WHERE seq > 6", [])
+            .unwrap();
+        // As if an export had set the segment past raw's end aside and stopped there.
+        let dir = p.join("backups");
+        let past: Vec<Segment> = segments(&dir, Kind::Records)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.last > 6)
+            .collect();
+        set_aside_report(&past, &mut |_| Ok(())).unwrap();
+        export(p).unwrap();
+        let cursors: Vec<i64> = points(&dir).unwrap().iter().map(|x| x.records).collect();
+        assert!(cursors.iter().all(|&r| r <= 6), "{cursors:?}");
     }
 
     /// docs/backup-points.md test 7: a segment the point cuts is replayed up to it and set aside,

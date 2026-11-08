@@ -7281,6 +7281,17 @@ impl Rebuild {
         })
     }
 
+    /// docs/backup-points.md B6: the highest seq of this device's records replayed so far, before
+    /// `finish` adds a forget's tombstones at new seqs.
+    pub(crate) fn max_seq(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM records
+             WHERE device = (SELECT value FROM meta WHERE key = 'device_id')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// docs/backup-points.md B5: the live raw.db's exclusion ops (op seq, body), which `finish`
     /// appends again where this store lacks them: the ones past a cut, and the ones no export
     /// backed up yet.
