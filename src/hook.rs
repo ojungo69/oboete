@@ -103,6 +103,8 @@ fn run_io(
     // G22: why curation stopped, read with that manifest.
     let mut stopped = None;
     let mut injecting = false;
+    // X18: an agent oboete has no adapter for, which is recorded and given nothing.
+    let mut raw_host = false;
     // Task 8 Step 6: what this call's prompt gets (spec 4.2, 4.6), and the session the shown set
     // is kept under.
     let mut prompted: Option<Prompted> = None;
@@ -147,11 +149,16 @@ fn run_io(
             return Ok(());
         };
         agent = resolved;
-        if !crate::setup::AGENTS.contains(&agent)
+        raw_host = raw_agent(agent);
+        if !(crate::setup::AGENTS.contains(&agent) || raw_host)
             || (matches!(agent, "agy" | "cursor") && agent_workspace(agent, &payload).is_none())
             || is_agent_internal(agent, &payload)
+            || (raw_host && !RAW_EVENTS.contains(&event))
         {
             return Ok(());
+        }
+        if raw_host {
+            raw_fields(&mut payload);
         }
         // X5 (docs/file-note.md): Claude Code's and Codex's reads get the note on their files.
         // Nothing is recorded here (the read's PostToolUse is), and a failure is no note: the
@@ -217,7 +224,7 @@ fn run_io(
         // Before the write too: when this call is the agent's injection point and its own
         // write fails, the point still carries the recording-failure line. Grok's and agy's
         // points stay taken then (the line is shown once per session, not at every call).
-        injecting = injects(home, agent, event, &labels, &mut took);
+        injecting = !raw_host && injects(home, agent, event, &labels, &mut took);
         if injecting
             && took.compacted
             && matches!(
@@ -298,6 +305,7 @@ fn run_io(
                 && serde_json::from_str::<Value>(&e.body).is_ok_and(|b| b.get("prompt").is_some())
         });
         let ask = match (agent, event) {
+            _ if raw_host => None,
             ("grok", "UserPromptSubmit") => prompt.map(|p| Ask::Keep(p, sendable)),
             ("grok", "PreToolUse") => Some(Ask::Turn),
             ("agy", "PreInvocation") | (_, "UserPromptSubmit") => {
@@ -549,7 +557,8 @@ fn run_io(
             }
         });
         // Cursor gets its field even when empty: a reinjection is consumed either way.
-        if !text.is_empty() || (injecting && agent == "cursor") || note.is_some() {
+        // X18: a host with no adapter has no known answer format, so it is given nothing.
+        if !raw_host && (!text.is_empty() || (injecting && agent == "cursor") || note.is_some()) {
             let mut response = injection(agent, event, &text);
             if let Some(note) = note {
                 response["systemMessage"] = json!(note);
@@ -585,6 +594,53 @@ fn run_io(
 /// and, after its compaction marker, the next prompt. A point is claimed before the manifest is
 /// read, so a session whose checkout has none yet gets none later either, as at SessionStart
 /// (Claude; overrulable).
+/// X18 (docs/raw-adapter.md): a name outside the agents oboete sets up that it records as an
+/// agent with no adapter of its own: a word of 1 to 32 lowercase ASCII letters, digits, `-` and
+/// `_`, starting with a letter. The name comes from the person's hook command, never the payload.
+pub(crate) fn raw_agent(name: &str) -> bool {
+    !crate::setup::AGENTS.contains(&name)
+        && (1..=32).contains(&name.len())
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && (name.bytes())
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// The events of an agent with no adapter that are recorded, by Claude Code's names, which
+/// claude-mem's raw adapter takes too.
+const RAW_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "SessionEnd",
+];
+
+/// An agent with no adapter's payload read with claude-mem's raw field names (`adapters/raw.ts`):
+/// a camelCase field stands for the snake_case one capture reads when that one is missing. No
+/// transcript is read, its format being unknown.
+fn raw_fields(payload: &mut Value) {
+    let Some(fields) = payload.as_object_mut() else {
+        return;
+    };
+    for (camel, snake) in [
+        ("sessionId", "session_id"),
+        ("toolName", "tool_name"),
+        ("toolInput", "tool_input"),
+        ("toolResponse", "tool_response"),
+        ("toolUseId", "tool_use_id"),
+        ("lastAssistantMessage", "last_assistant_message"),
+    ] {
+        if let Some(value) = fields.remove(camel)
+            && !fields.contains_key(snake)
+        {
+            fields.insert(snake.into(), value);
+        }
+    }
+    fields.remove("transcript_path");
+    fields.remove("transcriptPath");
+}
+
 fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut Took) -> bool {
     let session = session_label(payload);
     match (agent, event) {
@@ -2688,7 +2744,8 @@ pub(crate) fn prompt_blocks_line(home: &Path, now: i64) -> Option<String> {
         .fold((0, 0, 0), |a, d| (a.0 + d.1, a.1 + d.2, a.2 + d.3));
     (prompts > 0).then(|| {
         format!(
-            "  in the last 7 days: {prompts} prompts, {blocks} took a block, {chars} characters injected"
+            "  in the last 7 days: {prompts} prompt{s}, {blocks} took a block, {chars} characters injected",
+            s = if prompts == 1 { "" } else { "s" }
         )
     })
 }
@@ -3941,6 +3998,149 @@ mod tests {
         }
     }
 
+    /// X18 (docs/raw-adapter.md): an agent oboete has no adapter for is recorded under the name its
+    /// hook command gives, its payload read with claude-mem's raw field names, snake_case or
+    /// camelCase, with no transcript read; it is given nothing back, and only Claude Code's
+    /// session, prompt, tool and stop events are recorded.
+    #[test]
+    fn a_host_with_no_adapter_is_recorded_under_its_name() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let cwd = h.to_string_lossy().into_owned();
+        let transcript = h.join("transcript.jsonl");
+        // A line of Claude Code's transcript, which a known agent's empty Stop would read.
+        let line = json!({"type": "assistant", "message": {"content": "From the transcript."}});
+        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+        let sent = [
+            (
+                "SessionStart",
+                json!({"session_id": "k1", "cwd": cwd, "source": "startup"}),
+            ),
+            (
+                "UserPromptSubmit",
+                json!({"session_id": "k1", "cwd": cwd, "prompt": "Fix the parser."}),
+            ),
+            (
+                "PreToolUse",
+                json!({"session_id": "k1", "cwd": cwd, "tool_name": "Read"}),
+            ),
+            (
+                "PostToolUse",
+                json!({"sessionId": "k1", "cwd": cwd, "toolName": "Bash",
+                "toolInput": {"command": "cargo test"}, "toolResponse": "ok"}),
+            ),
+            (
+                "PreCompact",
+                json!({"session_id": "k1", "cwd": cwd, "trigger": "auto"}),
+            ),
+            (
+                "Stop",
+                json!({"sessionId": "k1", "cwd": cwd, "lastAssistantMessage": "Fixed it."}),
+            ),
+            (
+                "Stop",
+                json!({"session_id": "k1", "cwd": cwd, "last_assistant_message": "",
+                "transcript_path": transcript}),
+            ),
+        ];
+        for (event, payload) in &sent {
+            assert_eq!(hook(h, "kimi", event, payload), "", "{event}");
+        }
+        let events = recorded(h, "kimi", "k1");
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["start", "prompt", "tool", "reply"], "{kinds:?}");
+        assert!(
+            events[1].body.contains("Fix the parser."),
+            "{}",
+            events[1].body
+        );
+        assert!(
+            events[2].body.contains("cargo test") && events[2].body.contains("Bash"),
+            "{}",
+            events[2].body
+        );
+        assert!(
+            events[3].body.contains("Fixed it.") || events[3].body.contains("Rml4ZWQgaXQu"),
+            "{}",
+            events[3].body
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !e.body.contains("From the transcript."))
+        );
+    }
+
+    /// X18: a known agent's session start says a recording that failed; a host with no adapter is
+    /// given nothing, that line neither, as no answer format of its is known.
+    #[test]
+    fn a_host_with_no_adapter_is_given_nothing_even_a_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        // A store that cannot be opened: the record fails, and its failure is said.
+        std::fs::create_dir_all(h.join("raw.db")).unwrap();
+        let start = json!({"session_id": "k1", "cwd": h, "source": "startup"}).to_string();
+        let _contending = crate::worker::contending();
+        let _worker = crate::worker::lock(h).unwrap();
+        let said = |agent: &str| {
+            let mut out = Vec::new();
+            // The hook's own error is the caller's to log; what it wrote is the answer.
+            let _ = run_io(h, agent, "SessionStart", start.as_bytes(), &mut out);
+            String::from_utf8(out).unwrap()
+        };
+        assert!(said("claude").contains("oboete"), "a known agent is told");
+        assert_eq!(said("kimi"), "");
+    }
+
+    /// X18: a name that is not such a word, or one of the agents oboete sets up spelled otherwise,
+    /// records nothing.
+    #[test]
+    fn a_hook_name_that_is_no_word_records_nothing() {
+        for name in ["kimi", "my-agent_2", "raw"] {
+            assert!(raw_agent(name), "{name}");
+        }
+        let long = "k".repeat(33);
+        for name in [
+            "claude",
+            "codex",
+            "Kimi",
+            "a b",
+            "1kimi",
+            "-kimi",
+            "",
+            "kimi!",
+            long.as_str(),
+        ] {
+            assert!(!raw_agent(name), "{name}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let payload = json!({"session_id": "k1", "cwd": h, "prompt": "Fix the parser."});
+        for name in ["Kimi", "a b", "1kimi", "", long.as_str()] {
+            assert_eq!(hook(h, name, "UserPromptSubmit", &payload), "", "{name}");
+        }
+        assert!(!h.join("raw.db").exists());
+    }
+
+    /// X18: an excluded folder keeps a host with no adapter out, as any agent.
+    #[test]
+    fn an_excluded_folder_keeps_a_host_with_no_adapter_out() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let folder = tempfile::tempdir().unwrap();
+        let settings = crate::capture::Settings::load(h).unwrap();
+        let label =
+            crate::capture::exclusion_label("cwd", &folder.path().to_string_lossy(), &settings);
+        crate::raw::open(h)
+            .unwrap()
+            .exclude_capture(("folder", &label), false)
+            .unwrap();
+        let payload =
+            json!({"session_id": "k1", "cwd": folder.path(), "prompt": "canary-raw-excluded"});
+        assert_eq!(hook(h, "kimi", "UserPromptSubmit", &payload), "");
+        assert!(recorded(h, "kimi", "k1").is_empty());
+    }
+
     fn recorded(home: &Path, agent: &str, session: &str) -> Vec<crate::raw::Event> {
         let raw = crate::raw::open(home).unwrap();
         assert!(!home.join("oboete.db").exists());
@@ -4324,9 +4524,10 @@ mod tests {
         let prompt = br#"{"session_id":"s","prompt":"first"}"#;
         assert!(run_io(home, "claude", "UserPromptSubmit", &prompt[..], Vec::new()).is_err());
         let failed = crate::failure::since(home).expect("marked");
-        // An unported caller still writes v1's store: that says nothing about raw.db.
+        // A caller oboete records nothing for says nothing about raw.db: a name that is no agent's
+        // and no word a host with no adapter is recorded under (X18).
         let grok = br#"{"session_id":"g","prompt":"hello","hook_event_name":"UserPromptSubmit"}"#;
-        run_io(home, "legacy", "UserPromptSubmit", &grok[..], Vec::new()).unwrap();
+        run_io(home, "Legacy!", "UserPromptSubmit", &grok[..], Vec::new()).unwrap();
         assert_eq!(crate::failure::since(home), Some(failed));
     }
 
@@ -8141,6 +8342,10 @@ mod tests {
         );
         // A count weeks later keeps its own day alone: the days older than its week go.
         note_block_on(h, noon + 30 * 86_400_000, 1, 0);
+        assert_eq!(
+            prompt_blocks_line(h, noon + 30 * 86_400_000).as_deref(),
+            Some("  in the last 7 days: 1 prompt, 0 took a block, 0 characters injected")
+        );
         let text = std::fs::read_to_string(h.join("state/prompt-blocks")).unwrap();
         assert_eq!(text, "2026-12-09 1 0 0\n");
     }

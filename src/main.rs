@@ -132,7 +132,8 @@ enum CaptureCmd {
 enum Cmd {
     /// Receive one agent hook event on stdin and store it (fail-open, always exit 0)
     Hook {
-        /// Agent name: claude | codex | grok | agy | opencode | pi | cursor
+        /// Agent name: claude | codex | grok | agy | opencode | pi | cursor, or another host's own
+        /// name, recorded with no adapter (docs/raw-adapter.md)
         agent: String,
         /// Hook event name (e.g. SessionStart, PreInvocation, UserPromptSubmit, PostToolUse, Stop, PreCompact, SessionEnd)
         event: String,

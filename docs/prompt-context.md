@@ -140,10 +140,10 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   vector); the settings page shows the same under the wait, in both languages.
 - **What it injected.** Each prompt that reaches the prompt point adds to its day's counts in
   `state/prompt-blocks`: the prompt, whether a block came, and the characters the agent got of its
-  blocks, each with its fence, after the hook's cut (counts, never text; the 7 calendar days ending
-  today kept). Grok's turn is one prompt,
+  blocks, each with its fence, after the hook's cut (counts, never text; the 7 UTC days ending today
+  kept). Grok's turn is one prompt,
   counted at its prompt, and its block at the tool call that shows it. Doctor's per-prompt part
-  sums the last 7 days: `in the last 7 days: N prompts, B took a block, C characters injected`. A
+  sums the same 7 UTC days: `in the last 7 days: N prompts, B took a block, C characters injected`. A
   prompt that finds another writing the counts is not counted.
 - **The reader's model.** In a home that embeds with the local model and has its files, the
   resident viewer loads its model, or keeps it, whenever the hooks record again (it looks every
