@@ -264,7 +264,7 @@ enum Cmd {
         /// A time: 2026-11-07T05:30:12.345Z as the list prints it, or 2026-11-07 05:30 (UTC)
         #[arg(long)]
         to: Option<String>,
-        /// Go back, after the preview
+        /// Go back to the point the preview named: give its time exactly as the preview prints it
         #[arg(long, requires = "to")]
         yes: bool,
     },
@@ -1020,22 +1020,24 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::Restore { to: Some(to), yes } => {
-            let point = backup::point_at(&home, backup::parse_time(&to)?)?;
+            let at = backup::parse_time(&to)?;
             if yes {
+                let point = backup::point_named(&home, at)?;
                 println!("{}", worker::restore_to(&home, &point)?);
             } else {
-                println!("{}", backup::point_preview(&home, &point)?);
+                println!(
+                    "{}",
+                    backup::point_preview(&home, &backup::point_at(&home, at)?)?
+                );
             }
             Ok(())
         }
         Cmd::Backup {
             cmd: BackupCmd::List { all },
-        } => {
-            for line in backup::list_points(&home, all)? {
-                println!("{line}");
-            }
-            Ok(())
-        }
+        } => emit(&format!(
+            "{}\n",
+            backup::list_points(&home, all)?.join("\n")
+        )),
         Cmd::Backup {
             cmd: BackupCmd::Run,
         } => {

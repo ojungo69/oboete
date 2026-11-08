@@ -341,8 +341,9 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
         after.extend(records.iter().filter(|s| s.last > point.records).cloned());
         records.retain(|s| s.first <= point.records);
     }
+    // A point noted before the first record keeps none (Codex on #880).
     anyhow::ensure!(
-        !records.is_empty(),
+        !records.is_empty() || point.is_some_and(|p| p.records == 0),
         "no usable backup segment of device {device} in {}",
         backup.display()
     );
@@ -984,52 +985,66 @@ pub(crate) fn point_at(home: &Path, at: i64) -> Result<Point> {
         })
 }
 
+/// docs/backup-points.md B4: the point of this store's device noted at exactly `at`, as the
+/// preview and the list print its time: what `--yes` goes back to, so it is the point previewed
+/// even when a backup since added a newer one (cubic on #880).
+pub(crate) fn point_named(home: &Path, at: i64) -> Result<Point> {
+    let (_, _, mine) = my_points(home)?;
+    mine.into_iter().find(|p| p.at == at).with_context(|| {
+        format!(
+            "no backup point at {}: with --yes, give a point's time exactly as the preview or `oboete backup list` prints it",
+            point_time(at)
+        )
+    })
+}
+
 /// raw.db read without changing a store (SQLite may add its `-wal` and `-shm` beside it, as any
-/// open of a WAL store does): its device and that device's highest seq and op seq.
-fn raw_read(home: &Path) -> Result<(rusqlite::Connection, String, i64, i64)> {
+/// open of a WAL store does), and its device.
+fn raw_read(home: &Path) -> Result<(rusqlite::Connection, String)> {
     let conn = rusqlite::Connection::open_with_flags(
         raw::path(home),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .context("open raw.db to read")?;
     let device = crate::db::device_id(&conn)?;
-    let records = conn.query_row(
-        "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
-        [&device],
-        |r| r.get(0),
-    )?;
-    let ops = conn.query_row(
-        "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
-        [&device],
-        |r| r.get(0),
-    )?;
-    Ok((conn, device, records, ops))
+    Ok((conn, device))
 }
 
 /// docs/backup-points.md B4: what going back to `point` keeps and takes, for its preview.
 pub(crate) fn point_preview(home: &Path, point: &Point) -> Result<String> {
-    let (conn, device, records, ops) = raw_read(home)?;
-    let gates: i64 = conn.query_row(
+    let (conn, device) = raw_read(home)?;
+    // Rows, not seq distance: a damaged segment a restore skipped leaves a gap (cubic on #880).
+    let count = |sql: &str, at: i64| -> Result<i64> {
+        Ok(conn.query_row(sql, rusqlite::params![device, at], |r| r.get(0))?)
+    };
+    let records = count(
+        "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq > ?2",
+        point.records,
+    )?;
+    let ops = count(
+        "SELECT COUNT(*) FROM ops WHERE device = ?1 AND op_seq > ?2",
+        point.ops,
+    )?;
+    let gates = count(
         "SELECT COUNT(*) FROM ops WHERE device = ?1 AND op_seq > ?2
            AND type IN ('forget', 'exclusion')",
-        rusqlite::params![device, point.ops],
-        |r| r.get(0),
+        point.ops,
     )?;
     Ok(format!(
         "Going back to the backup point of {}:\n\
          - keeps the records through seq {} and the ops through op {};\n\
-         - takes back the {} record(s) and {} op(s) after them (raw.db ends at seq {records} and op {ops} now): \
+         - takes back the {records} record(s) and {} op(s) after them: \
          the corrections, mutes, imports, summaries and work states made after the point go with them;\n\
          - keeps the {gates} forget and exclusion op(s) made after the point: forgotten text stays gone, \
          and excluded repositories stay excluded.\n\
          raw.db and knowledge.db as they are now, and the backup segments past the point, are set aside on disk, not deleted.\n\
-         Run it again with --yes to go back.",
+         To go back to it, run: oboete restore --to {} --yes",
         point_time(point.at),
         point.records,
         point.ops,
-        (records - point.records).max(0),
         // The gates' ops after the point are kept, not taken back.
-        (ops - point.ops - gates).max(0),
+        (ops - gates).max(0),
+        point_time(point.at),
     ))
 }
 
@@ -1043,7 +1058,15 @@ pub(crate) fn list_points(home: &Path, all: bool) -> Result<Vec<String>> {
             dir.display()
         )]);
     }
-    let (_, _, records, ops) = raw_read(home)?;
+    let (conn, device) = raw_read(home)?;
+    let seqs = |sql: &str| -> Result<Vec<i64>> {
+        let mut st = conn.prepare(sql)?;
+        let rows = st.query_map([&device], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    };
+    let records = seqs("SELECT seq FROM records WHERE device = ?1 ORDER BY seq")?;
+    let ops = seqs("SELECT op_seq FROM ops WHERE device = ?1 ORDER BY op_seq")?;
+    let after = |all: &[i64], at: i64| all.len() - all.partition_point(|&s| s <= at);
     let day = |at: i64| point_time(at)[..10].to_owned();
     let since = crate::db::now_ms() - 86_400_000;
     let mut lines = Vec::new();
@@ -1055,9 +1078,9 @@ pub(crate) fn list_points(home: &Path, all: bool) -> Result<Vec<String>> {
                 "{}  through seq {} ({} after) and op {} ({} after)",
                 point_time(p.at),
                 p.records,
-                (records - p.records).max(0),
+                after(&records, p.records),
                 p.ops,
-                (ops - p.ops).max(0)
+                after(&ops, p.ops)
             ));
         }
     }
@@ -2151,6 +2174,24 @@ type Owed = Vec<(String, i64, i64)>;
 /// that still reads holds, read under the swap lock without opening it as a store. A lost database
 /// or unreadable table has none (F1); once the table opens, a bad row must stop the restore rather
 /// than discard other live requests.
+/// docs/backup-points.md B5: `device`'s exclusion ops as the live raw.db holds them, in op order,
+/// those no export has backed up yet too. None when it cannot be read: a damaged store's restore
+/// keeps the backups' own.
+fn live_exclusions(home: &Path, device: &str) -> Vec<(i64, String)> {
+    let read = || -> Result<Vec<(i64, String)>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            raw::path(home),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut st = conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE device = ?1 AND type = 'exclusion' ORDER BY op_seq",
+        )?;
+        let rows = st.query_map([device], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    };
+    read().unwrap_or_default()
+}
+
 fn held_requests(home: &Path) -> Result<(Vec<crate::forget::Request>, Owed)> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         raw::path(home),
@@ -2245,12 +2286,19 @@ fn restore_locked(
         Some(device_of(home, &segments(&dir, Kind::Records)?)?),
         point,
     )?;
-    // A point is this device's: one noted for another names other seqs.
+    // A point is this device's: one noted for another names other seqs. It is checked again
+    // here, under the locks, as listed still: a worker that stepped aside may have dropped it
+    // since it was chosen, with the seqs past it used again (B6, cubic on #880).
     if let Some(point) = point {
         anyhow::ensure!(
             point.device == device,
             "the backup point is device {}'s, and this store is device {device}'s",
             point.device
+        );
+        anyhow::ensure!(
+            points(&dir)?.contains(point),
+            "the backup point of {} is no longer listed: `oboete backup list` shows the points there are now",
+            point_time(point.at)
         );
     }
     receipt.skipped_segments = (bad.len() + ops_bad.len()) as u64;
@@ -2328,6 +2376,7 @@ fn restore_locked(
     if let Some(point) = point {
         rebuild.keep_ops_through(point.ops);
     }
+    rebuild.carry_exclusions(live_exclusions(home, &device));
     let raw::Finished {
         dropped,
         ops_through,
@@ -2370,10 +2419,10 @@ fn restore_locked(
         effect("segments_quarantined", committed)
     })?;
     // B6: before the swap, so a restore that stops leaves no point past what raw.db will hold.
-    let records_through = match point {
-        Some(point) => point.records,
-        None => ok.iter().map(|s| s.last).max().unwrap_or(0),
-    };
+    // The highest seq replayed: past it, seqs are used again. A gap below it (a damaged segment
+    // skipped) is never used again, so a point past the gap still names what it named.
+    let replayed = ok.iter().map(|s| s.last).max().unwrap_or(0);
+    let records_through = point.map_or(replayed, |p| p.records.min(replayed));
     keep_points(&dir, &device, |p| {
         p.records <= records_through && p.ops <= ops_through
     })?;
@@ -4238,9 +4287,10 @@ pub(crate) mod tests {
         let raw = raw::open(p).unwrap();
         assert_eq!(raw.max_seq().unwrap(), 5);
         use raw::OpKind::{Claim, Exclusion, Forget, Window};
+        // The gates in their op order: the exclusion (op 6) before the forget (op 7).
         assert_eq!(
             op_kinds(&raw, &dev),
-            [(1, Window), (2, Claim), (3, Forget), (4, Exclusion)]
+            [(1, Window), (2, Claim), (3, Exclusion), (4, Forget)]
         );
         assert!(raw.forgotten(&uid).unwrap());
         assert_eq!(raw.exclusions().unwrap(), ["github.com/o/secret"]);
@@ -4268,7 +4318,7 @@ pub(crate) mod tests {
         crate::worker::restore_to(p, &a).unwrap();
         let raw = raw::open(p).unwrap();
         assert_eq!(raw.max_seq().unwrap(), 5);
-        assert_eq!(op_kinds(&raw, &dev), [(1, Forget), (2, Exclusion)]);
+        assert_eq!(op_kinds(&raw, &dev), [(1, Exclusion), (2, Forget)]);
         assert_eq!(raw.exclusions().unwrap(), ["github.com/o/secret"]);
         let after_a = points(&dir).unwrap();
         assert_eq!(after_a.first(), Some(&a));
@@ -4335,6 +4385,16 @@ pub(crate) mod tests {
         assert_eq!(files(p), before);
         let chosen = point_at(p, parse_time(&to).unwrap()).unwrap();
         assert_eq!(chosen, b);
+        assert!(
+            preview.contains(&format!("oboete restore --to {to} --yes")),
+            "{preview}"
+        );
+        // `--yes` takes the point at exactly the time the preview printed, and no other.
+        assert_eq!(point_named(p, b.at).unwrap(), b);
+        let off = point_named(p, b.at + 1).unwrap_err().to_string();
+        assert!(off.contains("exactly as the preview"), "{off}");
+        let none = point_at(p, b.at - 86_400_000).unwrap_err().to_string();
+        assert!(none.contains("no backup point at or before"), "{none}");
         assert_eq!(
             parse_time("2026-11-07 05:30").unwrap(),
             parse_time("2026-11-07T05:30:00Z").unwrap()
@@ -4344,6 +4404,88 @@ pub(crate) mod tests {
             parse_time("2026-11-07T05:30:00Z").unwrap()
         );
         assert!(parse_time("yesterday").is_err());
+    }
+
+    /// docs/backup-points.md test 11 (B5, Codex on #880): an exclusion raw.db holds and no export
+    /// backed up yet is carried across the swap, by a restore to a point and by a restore of the
+    /// whole backup alike, and the same op is never appended twice.
+    #[test]
+    fn an_exclusion_no_backup_holds_yet_is_carried_across_a_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 5, 5); // a point at seq 5, no op
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        raw.exclude("github.com/o/new", false).unwrap(); // after the last export
+        drop(raw);
+        let a = points(&p.join("backups")).unwrap().remove(0);
+        crate::worker::restore_to(p, &a).unwrap();
+        let raw = raw::open(p).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["github.com/o/new"]);
+        use raw::OpKind::Exclusion;
+        assert_eq!(op_kinds(&raw, &dev), [(1, Exclusion)]);
+        drop(raw);
+        let mut raw = raw::open(p).unwrap();
+        raw.exclude("github.com/o/new", true).unwrap(); // the undo, not backed up either
+        drop(raw);
+        crate::worker::restore(p).unwrap();
+        let raw = raw::open(p).unwrap();
+        assert!(raw.exclusions().unwrap().is_empty());
+        assert_eq!(op_kinds(&raw, &dev), [(1, Exclusion), (2, Exclusion)]);
+    }
+
+    /// Codex on #880: a point noted before the first record (an export of ops alone) can be gone
+    /// back to: no record is kept, and its ops are.
+    #[test]
+    fn a_point_before_any_record_can_be_gone_back_to() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.exclude("github.com/o/first", false).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        segmented(p, 3, 3);
+        let first = points(&p.join("backups")).unwrap().remove(0);
+        assert_eq!((first.records, first.ops), (0, 1));
+        crate::worker::restore_to(p, &first).unwrap();
+        let raw = raw::open(p).unwrap();
+        assert_eq!(raw.max_seq().unwrap(), 0);
+        assert_eq!(raw.exclusions().unwrap(), ["github.com/o/first"]);
+    }
+
+    /// cubic on #880: a point dropped after it was chosen (raw.db lost records past it, and their
+    /// seqs were used again) is refused under the locks, and raw.db is left as it was.
+    #[test]
+    fn a_point_no_longer_listed_is_refused() {
+        let (home, _, _) = three_points();
+        let p = home.path();
+        let dir = p.join("backups");
+        let [a, b, c]: [Point; 3] = points(&dir).unwrap().try_into().unwrap();
+        let kept = [a, c]
+            .iter()
+            .map(|x| format!("{}\n", serde_json::to_string(x).unwrap()))
+            .collect::<String>();
+        std::fs::write(dir.join(POINTS), kept).unwrap();
+        let why = crate::worker::restore_to(p, &b).unwrap_err().to_string();
+        assert!(why.contains("no longer listed"), "{why}");
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 10);
+    }
+
+    /// cubic on #880 (B6): when the segment that ends at the point is damaged, the restore brings
+    /// back less than the point named, and the seqs past what came back are used again: that
+    /// point goes too.
+    #[test]
+    fn a_point_whose_records_did_not_all_come_back_is_dropped() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 5); // points (5, 0) and (10, 0)
+        let dir = p.join("backups");
+        let [five, ten]: [Point; 2] = points(&dir).unwrap().try_into().unwrap();
+        let newest = segments(&dir, Kind::Records).unwrap().remove(1).path;
+        std::fs::write(&newest, b"damaged").unwrap();
+        crate::worker::restore_to(p, &ten).unwrap();
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 5);
+        assert_eq!(points(&dir).unwrap(), [five]);
     }
 
     /// docs/backup-points.md test 7: a segment the point cuts is replayed up to it and set aside,

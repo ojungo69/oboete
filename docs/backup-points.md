@@ -30,9 +30,13 @@ back, because forget and retention already rewrite the segments.
   aside, as `restore` and `rebuild` do. It says what it wrote, or that the backups were up to date.
 - B4. **`oboete restore --to <time>`** goes back to the newest point of this device at or before
   `<time>`. The time is RFC 3339 (`2026-11-07T05:30:12.345Z` as the list prints it, or with an offset),
-  or `YYYY-MM-DD HH:MM` taken as UTC. Without `--yes` it changes nothing and prints a preview: the
-  point's time, seq and op seq, the records and ops that stay and those that go, counted from
-  raw.db. With `--yes` it restores as `oboete restore` does: the current raw.db and knowledge.db are
+  or `YYYY-MM-DD HH:MM` taken as UTC. With no point of this device at or before the time, it refuses
+  and names `oboete backup list`. Without `--yes` it changes nothing and prints a preview: the
+  point's time, seq and op seq, the records and ops that stay and those that go (rows counted in
+  raw.db), and the command that goes back to it. `--yes` takes the point at exactly the time given,
+  as the preview prints it, so a backup made in between cannot change which point it goes back to.
+  The restore checks under its locks that the point is still listed (B6), and refuses if it is
+  not. With `--yes` it restores as `oboete restore` does: the current raw.db and knowledge.db are
   set aside, never deleted; knowledge.db is rebuilt; forget requests are applied again. It differs in
   two ways:
   - Records past the point's seq and ops past its op seq are not replayed. Forget and exclusion
@@ -45,8 +49,10 @@ back, because forget and retention already rewrite the segments.
     rule for a range no segment covers).
 - B5. **Going back keeps the two gates.** A forget op past any cut is appended again. That was
   already done for a restore that lost records (D5): forgotten text stays gone. An exclusion op
-  past any cut is appended again too, the undone ones with it, in op order. So going back never
-  sends again what the owner excluded from sending. This also covers a restore of a damaged store,
+  past any cut is appended again too, the undone ones with it, the gates' ops in their op order.
+  So is an exclusion op that raw.db holds and the backups do not yet (one made after the last
+  export), read from raw.db before the swap; the same op is never appended twice. So going back
+  never sends again what the owner excluded from sending. This also covers a restore of a damaged store,
   which used to drop every exclusion op after its first lost record. Like any new op, one appended
   again is in the backups from the next export, which the restore's own drain runs before the
   command returns. Mutes, corrections, hides,
@@ -54,8 +60,9 @@ back, because forget and retention already rewrite the segments.
   choice about noise, never a gate (spec 6.1, Mute).
 - B6. **No point outlives what it names.** The seqs past a cut are used again by new records, so a
   point past them would name other records. A restore keeps in `points.jsonl` only the points whose
-  seq and op seq it brought back: the point it went to and the ones before it, or, for a damaged
-  store, those within the records and the op prefix it replayed. An export that sets aside segments
+  seq and op seq it brought back: those through the highest seq it replayed (at most the point's)
+  and through the op prefix it kept. A gap below that seq (a damaged segment skipped) is never used
+  again, so a point past the gap still names the records it named, less those that segment lost. An export that sets aside segments
   past raw's end (MUST-M14) drops the points past that end too.
 - B7. **doctor** prints the newest point's time and how many records and ops came after it. When
   that point is more than two days old and raw.db holds records or ops past it, the line is a
@@ -86,3 +93,10 @@ back, because forget and retention already rewrite the segments.
    its first lost record.
 9. doctor warns when the newest point is more than two days old and records came after it.
 10. `oboete backup run` exports under the worker's lock and adds a point.
+11. An exclusion that raw.db holds and no export backed up yet survives a restore to a point and a
+    restore of the whole backup, and the same op is not appended twice.
+12. A point noted before the first record can be gone back to.
+13. A point that is no longer listed when the restore takes its locks is refused, and raw.db is
+    left as it was.
+14. When the segment that ends at the point is damaged, the restore keeps no point past the
+    records that came back.
