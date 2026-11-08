@@ -154,9 +154,13 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   prompt, and the agent's work and pauses of up to 4 hours keep it; a prompt after 4 hours with
   nothing recorded still takes words alone and starts the load. Until 2026-10-17 only searches counted, for 10 minutes: of the 16 prompts
   of the week before, 15 came to a dropped model, where 13 came within 30 minutes of the hooks'
-  last record (parity row 31). An MCP server or a CLI command that searches keeps its own model 10
-  minutes after its last search (`READER_IDLE`), as before. The model holds about 2.5 GB while
-  loaded.
+  last record (parity row 31). An agent's MCP server takes its query's vector from the resident
+  viewer (`POST /api/query-vector`, within the query's `QUERY_TIMEOUT`), and loads a model of its
+  own only when no viewer listens; a viewer that does not answer in time leaves the search to full
+  text. Until 2026-11-08 each MCP server that searched loaded its own copy (about 1.7 GB each,
+  beside the viewer's), which on a PC short of memory slowed the hooks past their limit. A CLI
+  command that searches keeps its own model 10 minutes after its last search (`READER_IDLE`), as
+  before. The model holds about 2.5 GB while loaded.
 
 ## As built (the second slice: imported history, #506)
 

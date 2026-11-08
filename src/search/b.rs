@@ -41,6 +41,15 @@ pub(crate) fn keep_warm() {
     WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether this process serves the page: its own model answers its searches (D14). Any other
+/// reader, an agent's MCP server, asks the resident viewer for a query's vector first, so each
+/// agent's server does not load a copy of the model of its own (about 1.7 GB each).
+static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn serving() {
+    SERVING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Parity row 31: whether the hooks' newest record, `(seq, ts)`, warms the model: one after the
 /// record `seen` before; at the viewer's start, with none seen, one within `WARM_IDLE`, as the
 /// session start that started the viewer (Codex and CodeRabbit on #560), and no older one.
@@ -353,7 +362,7 @@ pub enum Vector {
     Skipped(VectorSkip),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VectorSkip {
     /// No embedder is configured, or the caller gave no vector.
@@ -1151,6 +1160,18 @@ fn local_query(
         Caller::Cli { .. } => None,
         Caller::Reader => Some(QUERY_TIMEOUT),
     };
+    // The page's viewer holds the model: another reader takes the vector from it within the
+    // query's timeout, and loads a model of its own only when no viewer answers.
+    if matches!(caller, Caller::Reader) && !SERVING.load(std::sync::atomic::Ordering::Relaxed) {
+        let repo = q
+            .caller
+            .as_deref()
+            .or(q.repo.as_deref())
+            .unwrap_or_default();
+        if let Some(answer) = viewer_vector(home, repo, &sent, Instant::now() + QUERY_TIMEOUT) {
+            return answer.map(|vector| Near::new(crate::embed::EMBEDDER.to_owned(), vector));
+        }
+    }
     match reader(home)?.embed(&[sent], wait) {
         Ok(mut vectors) => (vectors.pop())
             .map(|vector| Near::new(crate::embed::EMBEDDER.to_owned(), vector))
@@ -1162,6 +1183,45 @@ fn local_query(
             Err(VectorSkip::Error)
         }
     }
+}
+
+/// `text`'s query vector from the resident viewer (`POST /api/query-vector`), given up at
+/// `deadline`: `None` when no viewer listens, else its vector or why there is none (a viewer that
+/// does not answer in time is a timeout: the search answers from full text, as a load would).
+pub(crate) fn viewer_vector(
+    home: &Path,
+    repo: &str,
+    text: &str,
+    deadline: Instant,
+) -> Option<Result<Vec<f32>, VectorSkip>> {
+    if repo.is_empty() {
+        return None;
+    }
+    let (port, token) = crate::view::resident_answering(home)?;
+    let body = serde_json::json!({"repo": repo, "text": text}).to_string();
+    let Some(answer) =
+        crate::hook::post_json(port, &token, "/api/query-vector", body.as_bytes(), deadline)
+    else {
+        return Some(Err(VectorSkip::Timeout));
+    };
+    if let Some(vector) = answer.get("vector") {
+        return Some(match serde_json::from_value::<Vec<f32>>(vector.clone()) {
+            Ok(v) if v.len() == crate::embed::DIM => Ok(v),
+            _ => Err(VectorSkip::Error),
+        });
+    }
+    let skip = answer.get("skip").cloned().map(serde_json::from_value);
+    Some(Err(skip.and_then(Result::ok).unwrap_or(VectorSkip::Error)))
+}
+
+/// `local_query` as an agent's MCP server runs it (tests): whether it got a vector.
+#[cfg(test)]
+pub(crate) fn reader_query(
+    home: &Path,
+    q: &Query,
+    active: Option<String>,
+) -> Result<(), VectorSkip> {
+    local_query(home, q, active, Caller::Reader).map(drop)
 }
 
 /// Parity row 31: the local model started, or kept, because the hooks recorded again, so the

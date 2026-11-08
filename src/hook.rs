@@ -2577,7 +2577,7 @@ fn post_prompt(
 
 /// One `POST` of `body` to `path` of the viewer at 127.0.0.1:`port`, with its token, given up at
 /// `deadline`: its JSON answer when it answered 200 in time.
-fn post_json(
+pub(crate) fn post_json(
     port: u16,
     token: &str,
     path: &str,
@@ -6169,6 +6169,51 @@ mod tests {
                           "hookEventName": "PreToolUse", "toolName": "Read"});
         let tool = injected("grok", &hook(&home, "grok", "PreToolUse", &tool));
         assert!(tool.contains(line), "{tool}");
+    }
+
+    /// An agent's MCP server takes a query's vector from the resident viewer, which holds the
+    /// model, instead of loading a copy of its own: a vector is used, a skip is said, and with no
+    /// viewer the reader goes on to its own model as before (none is there here).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reader_takes_the_query_vector_from_the_resident_viewer() {
+        use crate::search::b::{Query, VectorSkip, reader_query, viewer_vector};
+        let q = Query {
+            text: "where do the parser errors go".into(),
+            caller: Some("github.com/o/r".into()),
+            ..Default::default()
+        };
+        let active = || Some(crate::embed::EMBEDDER.to_owned());
+        let soon = || std::time::Instant::now() + Duration::from_secs(2);
+        let none = tempfile::tempdir().unwrap();
+        assert!(viewer_vector(none.path(), "github.com/o/r", "x", soon()).is_none());
+        assert!(
+            reader_query(none.path(), &q, active()).is_err(),
+            "no viewer, no model"
+        );
+        let home = tempfile::tempdir().unwrap();
+        let vector = vec![0.5f32; crate::embed::DIM];
+        let r = Resident::answering(home.path(), 2_000, json!({ "vector": vector }));
+        assert!(
+            reader_query(home.path(), &q, active()).is_ok(),
+            "the viewer's vector"
+        );
+        assert_eq!(
+            r.asked(),
+            [json!({"repo": "github.com/o/r", "text": "where do the parser errors go"})]
+        );
+        let loading = tempfile::tempdir().unwrap();
+        let _l = Resident::answering(loading.path(), 2_000, json!({"skip": "loading"}));
+        assert_eq!(
+            reader_query(loading.path(), &q, active()).err(),
+            Some(VectorSkip::Loading)
+        );
+        let short = tempfile::tempdir().unwrap();
+        let _s = Resident::answering(short.path(), 2_000, json!({"vector": [0.5]}));
+        assert_eq!(
+            reader_query(short.path(), &q, active()).err(),
+            Some(VectorSkip::Error)
+        );
     }
 
     /// Decision 52: a claude-mem name past `import::NAME_BYTES`, which the viewer would refuse with

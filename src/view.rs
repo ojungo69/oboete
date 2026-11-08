@@ -398,6 +398,8 @@ pub fn run(home: &Path, port: Option<u16>, open: bool) -> Result<()> {
     }
     let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))?;
     let port = listener.local_addr()?.port();
+    // This run serves the page: its searches use its own model (D14).
+    crate::search::b::serving();
     let token = fresh_token()?;
     let url = format!("http://127.0.0.1:{port}/#t={token}");
     let viewer = Arc::new(Viewer::new(
@@ -758,6 +760,7 @@ pub fn resident(home: &Path) -> Result<()> {
     // Parity row 31: every model this viewer loads, a search's before the first hook record's
     // too, stays as long as the hooks keep it (Codex and CodeRabbit on #560).
     crate::search::b::keep_warm();
+    crate::search::b::serving();
     let Some(Resident {
         lock,
         listener,
