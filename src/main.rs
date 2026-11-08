@@ -107,6 +107,19 @@ enum PrefCmd {
 }
 
 #[derive(Subcommand)]
+enum BackupCmd {
+    /// The backup points to go back to with `oboete restore --to`, newest first: each one of the
+    /// last 24 hours and the newest of each day before
+    List {
+        /// Every point
+        #[arg(long)]
+        all: bool,
+    },
+    /// Back up now (a running worker steps aside while it runs)
+    Run,
+}
+
+#[derive(Subcommand)]
 enum CaptureCmd {
     /// Never record a repository (on any device, and never send it out) or a folder of this
     /// device: nothing there is written from now on. The repository in the current directory
@@ -244,8 +257,22 @@ enum Cmd {
         undo: bool,
     },
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
-    /// The worker does this by itself when raw.db is damaged.
-    Restore,
+    /// The worker does this by itself when raw.db is damaged. With --to, go back to the newest
+    /// backup point at or before that time (`oboete backup list` shows them): a preview first,
+    /// then --yes. Forgotten text stays gone and excluded repositories stay excluded.
+    Restore {
+        /// A time: 2026-11-07T05:30:12.345Z as the list prints it, or 2026-11-07 05:30 (UTC)
+        #[arg(long)]
+        to: Option<String>,
+        /// Go back, after the preview
+        #[arg(long, requires = "to")]
+        yes: bool,
+    },
+    /// The backup points to go back to, or a backup now
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
+    },
     /// Print the context a new session in the current directory gets (OpenCode's plugin reads it)
     Inject {
         /// The session it is for, so it is not listed among the other active sessions
@@ -987,9 +1014,39 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("unmuted {uid}");
             Ok(())
         }
-        Cmd::Restore => {
+        Cmd::Restore { to: None, .. } => {
             let said = worker::restore(&home)?;
             println!("{said}");
+            Ok(())
+        }
+        Cmd::Restore { to: Some(to), yes } => {
+            let point = backup::point_at(&home, backup::parse_time(&to)?)?;
+            if yes {
+                println!("{}", worker::restore_to(&home, &point)?);
+            } else {
+                println!("{}", backup::point_preview(&home, &point)?);
+            }
+            Ok(())
+        }
+        Cmd::Backup {
+            cmd: BackupCmd::List { all },
+        } => {
+            for line in backup::list_points(&home, all)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Cmd::Backup {
+            cmd: BackupCmd::Run,
+        } => {
+            let wrote = worker::backup_run(&home)?;
+            if wrote.is_empty() {
+                println!("the backups were up to date");
+            } else {
+                for path in wrote {
+                    println!("wrote {}", path.display());
+                }
+            }
             Ok(())
         }
         Cmd::View { resident: true, .. } => view::resident(&home),

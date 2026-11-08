@@ -2234,6 +2234,44 @@ pub(crate) fn restore_report(
     caller: crate::executable::CommandCaller,
     committed: &mut impl FnMut(&MaintenanceCommit),
 ) -> std::result::Result<MaintenanceOutcome, MaintenanceFailure> {
+    restore_report_to(home, expected, caller, None, committed)
+}
+
+/// docs/backup-points.md B4: the CLI's restore back to `point`, as `restore` runs one.
+pub fn restore_to(home: &Path, point: &crate::backup::Point) -> Result<String> {
+    restore_report_to(
+        home,
+        None,
+        crate::executable::CommandCaller::Worker,
+        Some(point),
+        &mut |_| {},
+    )
+    .map(|outcome| {
+        outcome
+            .restore
+            .expect("successful restore has a receipt")
+            .note
+    })
+    .map_err(MaintenanceFailure::into_cause)
+}
+
+/// docs/backup-points.md B3: a backup now, under the worker's lock (a running worker steps
+/// aside, as for a restore). The segments written.
+pub fn backup_run(home: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let _held = lock_asking(home)?;
+    Ok(crate::backup::export_timed(home)?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
+}
+
+pub(crate) fn restore_report_to(
+    home: &Path,
+    expected: Option<&str>,
+    caller: crate::executable::CommandCaller,
+    point: Option<&crate::backup::Point>,
+    committed: &mut impl FnMut(&MaintenanceCommit),
+) -> std::result::Result<MaintenanceOutcome, MaintenanceFailure> {
     use crate::backup::{MaintenanceCode as Code, MaintenanceOperation as Operation};
     let mut outcome = MaintenanceOutcome::new(Operation::Restore);
     let command = crate::executable::CommandHome::new(home, caller)
@@ -2245,10 +2283,13 @@ pub(crate) fn restore_report(
         .map_err(|cause| maintenance_failure(outcome.clone(), cause, Code::Busy))?;
     let _config = crate::settings::config_lock(home)
         .map_err(|cause| maintenance_failure(outcome.clone(), cause.into(), Code::Busy))?;
-    let restored =
-        crate::backup::restore_report_holding(home, expected, held.2.as_ref(), &mut |stage| {
-            committed(&MaintenanceCommit::Effect { stage })
-        });
+    let restored = crate::backup::restore_report_holding_to(
+        home,
+        expected,
+        held.2.as_ref(),
+        point,
+        &mut |stage| committed(&MaintenanceCommit::Effect { stage }),
+    );
     let failure = match restored {
         Ok(receipt) => {
             outcome.restore = Some(receipt);

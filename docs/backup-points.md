@@ -1,0 +1,88 @@
+# Going back to an earlier point (parity row X24, 2026-11-08)
+
+claude-mem 15.3 can keep daily snapshots of its database (off by default; a copy 5 minutes after
+start, then every 24 hours, the newest 7 kept) and restore a chosen one at its worker's next start,
+keeping the live file as a pre-restore copy. `backup run`, `status` and `list` go with it, and so do
+a Backups section on its page and a doctor warning when there is no snapshot or the newest is older
+than two intervals.
+
+oboete always backs up: raw.db's records and ops go into sealed, checked segments every 30 minutes,
+at idle and before a command takes the store ([milestone-2.md](milestone-2.md), Backups). A restore
+replays every sound segment, so it brings back the latest state only. This note adds points to go
+back to, made from the same segments: no second copy of the store, and nothing a forget took comes
+back, because forget and retention already rewrite the segments.
+
+## Rules
+
+- B1. **A point is an export.** Each export that writes a segment then appends one line to
+  `points.jsonl` in the backup directory: `{"at", "device", "records", "ops"}`. The fields are the
+  time the export ended and the seq and op seq where that device's segments then end. A point names
+  what the backups held at that moment. It does not use the records' own times: an import's records
+  keep their source's times on new seqs (the owner's store has 575,009 imported records, the oldest
+  from 2025), so a cut by record time would not be a prefix of the store. The line is appended and
+  synced after the segments are sealed. A torn or unreadable line is skipped. A lost `points.jsonl`
+  loses the points and no record: `oboete restore` with no point replays every segment, as before.
+- B2. **`oboete backup list`** prints this device's points, newest first: each one's time (UTC, in
+  the form `--to` takes), the seq and op seq it keeps through, and how many records and ops raw.db
+  holds past it. It prints every point of the last 24 hours and the newest point of each day before
+  that; `--all` prints them all. It reads only `points.jsonl` and raw.db, and changes nothing.
+- B3. **`oboete backup run`** exports now, under the worker's lock: it asks a running worker to step
+  aside, as `restore` and `rebuild` do. It says what it wrote, or that the backups were up to date.
+- B4. **`oboete restore --to <time>`** goes back to the newest point of this device at or before
+  `<time>`. The time is RFC 3339 (`2026-11-07T05:30:12.345Z` as the list prints it, or with an offset),
+  or `YYYY-MM-DD HH:MM` taken as UTC. Without `--yes` it changes nothing and prints a preview: the
+  point's time, seq and op seq, the records and ops that stay and those that go, counted from
+  raw.db. With `--yes` it restores as `oboete restore` does: the current raw.db and knowledge.db are
+  set aside, never deleted; knowledge.db is rebuilt; forget requests are applied again. It differs in
+  two ways:
+  - Records past the point's seq and ops past its op seq are not replayed. Forget and exclusion
+    ops past it are appended again, in their order (B5).
+  - Every segment that ends past the point, of records or ops, is set aside at the swap under the
+    name a damaged segment gets (`.quarantined-<ms>`). So an automatic restore after it cannot
+    replay what was rolled back, and a later forget's purge still reaches those files (it walks set
+    aside segments too). Nothing is deleted. A segment that the point cuts is replayed up to the
+    point and set aside; the next export writes its first part again from raw.db (the cursor's
+    rule for a range no segment covers).
+- B5. **Going back keeps the two gates.** A forget op past any cut is appended again. That was
+  already done for a restore that lost records (D5): forgotten text stays gone. An exclusion op
+  past any cut is appended again too, the undone ones with it, in op order. So going back never
+  sends again what the owner excluded from sending. This also covers a restore of a damaged store,
+  which used to drop every exclusion op after its first lost record. Like any new op, one appended
+  again is in the backups from the next export, which the restore's own drain runs before the
+  command returns. Mutes, corrections, hides,
+  work states, imports, curation and My Work's jobs go back with the point. A mute is a reversible
+  choice about noise, never a gate (spec 6.1, Mute).
+- B6. **No point outlives what it names.** The seqs past a cut are used again by new records, so a
+  point past them would name other records. A restore keeps in `points.jsonl` only the points whose
+  seq and op seq it brought back: the point it went to and the ones before it, or, for a damaged
+  store, those within the records and the op prefix it replayed. An export that sets aside segments
+  past raw's end (MUST-M14) drops the points past that end too.
+- B7. **doctor** prints the newest point's time and how many records and ops came after it. When
+  that point is more than two days old and raw.db holds records or ops past it, the line is a
+  warning naming `oboete backup run`, and doctor turns red. The age is measured from the export's
+  own time, never from a record's.
+- B8. **The settings page** (History and recovery) gets the list and the go-back, with its preview,
+  in a later slice. It goes through the same restore, and its consent binds the point and
+  `points.jsonl` as well as the files a restore binds now.
+
+## Acceptance tests (this slice)
+
+1. An export that writes a segment appends one point with both cursors. An export that writes
+   nothing appends none.
+2. A restore to a point leaves raw.db with the records through its seq and the ops through its op
+   seq. A forget op past it is kept (the uid stays forgotten), and so is an exclusion op past it
+   (the repository stays excluded). A mute past it goes.
+3. After a restore to a point, raw.db damaged and restored by the worker still ends at the point's
+   seq: the segments past it were set aside at the swap.
+4. Records whose own times are older than the point but whose seqs are past it (an import after
+   the point) go. Records before the point stay, whatever their times.
+5. After a restore, `points.jsonl` holds no point past it. A new export adds one, and restoring to
+   the older point again still works.
+6. A preview changes no file (raw.db, knowledge.db, segments, `points.jsonl`) and names the point
+   that `--yes` then restores.
+7. A segment that the point cuts is replayed up to the point and set aside. The next export writes
+   the cut part again.
+8. A restore of a damaged store that loses its newest record segment keeps the exclusion ops after
+   its first lost record.
+9. doctor warns when the newest point is more than two days old and records came after it.
+10. `oboete backup run` exports under the worker's lock and adds a point.

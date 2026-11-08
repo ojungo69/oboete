@@ -7210,6 +7210,16 @@ pub struct Rebuild {
     forget: Vec<crate::forget::Request>,
     home_id: Option<String>,
     home_id_proven: Option<bool>,
+    /// docs/backup-points.md B4: the op seq a restore to a point keeps this device's ops through.
+    ops_through: Option<i64>,
+}
+
+/// What `Rebuild::finish_report` did: how many ops went (those appended again not counted), and
+/// the op seq this device's ops from the backup are kept through, before any is appended again
+/// (docs/backup-points.md B6).
+pub(crate) struct Finished {
+    pub(crate) dropped: usize,
+    pub(crate) ops_through: i64,
 }
 
 impl Rebuild {
@@ -7264,7 +7274,14 @@ impl Rebuild {
             forget: Vec::new(),
             home_id: None,
             home_id_proven: None,
+            ops_through: None,
         })
+    }
+
+    /// docs/backup-points.md B4: a restore to a point keeps this device's ops through `op_seq`.
+    /// The later ones go as the ops past lost records do, the gates' appended again (B5).
+    pub(crate) fn keep_ops_through(&mut self, op_seq: i64) {
+        self.ops_through = Some(op_seq);
     }
 
     /// One backup line. Bodies are stored as zstd where that is smaller, as the compress
@@ -7566,32 +7583,57 @@ impl Rebuild {
     }
 
     pub fn finish(self) -> Result<usize> {
-        let cut = self.cut()?;
+        Ok(self.finish_report()?.dropped)
+    }
+
+    pub(crate) fn finish_report(self) -> Result<Finished> {
+        let mut cut = self.cut()?;
+        let device: String =
+            self.conn
+                .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
+                    r.get(0)
+                })?;
+        // docs/backup-points.md B4: a restore to a point cuts this device's ops after it as well.
+        if let Some(through) = self.ops_through {
+            let from = cut.entry(device.clone()).or_insert(through + 1);
+            *from = (*from).min(through + 1);
+        }
         // D5: a forget op among them derives nothing from the lost records. It is appended again
         // below, at a reused op seq as any new op is, so the uid stays forgotten when no request
         // log brings it back (Codex's adversarial review of slice 2a); as this device's, the only
-        // one whose ops a backup holds until sync (milestone 6).
-        let (mut forgets, mut dropped) = (Vec::<String>::new(), 0);
+        // one whose ops a backup holds until sync (milestone 6). docs/backup-points.md B5: an
+        // exclusion op derives nothing from records either, and is appended again in its order,
+        // so a restore never sends again what was excluded from sending.
+        let (mut forgets, mut exclusions, mut dropped) =
+            (Vec::<String>::new(), Vec::<String>::new(), 0);
         for (device, from) in &cut {
             let mut st = self.conn.prepare(
-                "SELECT body FROM ops WHERE device = ?1 AND op_seq >= ?2 AND type = 'forget'
+                "SELECT type, body FROM ops WHERE device = ?1 AND op_seq >= ?2
+                   AND type IN ('forget', 'exclusion')
                  ORDER BY op_seq",
             )?;
-            for body in st.query_map(params![device, from], |r| r.get(0))? {
-                forgets.push(body?);
+            for row in st.query_map(params![device, from], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })? {
+                let (kind, body) = row?;
+                if kind == OpKind::Forget.name() {
+                    forgets.push(body);
+                } else {
+                    exclusions.push(body);
+                }
             }
             dropped += self.conn.execute(
                 "DELETE FROM ops WHERE device = ?1 AND op_seq >= ?2",
                 params![device, from],
             )?;
         }
+        let ops_through: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
+            [&device],
+            |r| r.get(0),
+        )?;
         // After that check: a forget's tombstones take new seqs, which must not make an old window
         // look as if the records a damaged backup lost were there.
-        let device: String =
-            self.conn
-                .query_row("SELECT value FROM meta WHERE key = 'device_id'", [], |r| {
-                    r.get(0)
-                })?;
         for body in &forgets {
             let uid: String = serde_json::from_str::<serde_json::Value>(body)?["uid"]
                 .as_str()
@@ -7605,6 +7647,13 @@ impl Rebuild {
                 )?;
             }
         }
+        for body in &exclusions {
+            insert_ops(
+                &self.conn,
+                &device,
+                &[(OpKind::Exclusion.name(), body.clone())],
+            )?;
+        }
         link_live_denials(&self.conn)?;
         for r in &self.forget {
             r.check()?;
@@ -7612,8 +7661,12 @@ impl Rebuild {
         }
         self.conn.execute_batch("COMMIT")?;
         self.conn.close().map_err(|(_, e)| e)?;
-        // No forget op among them is lost: each is appended again, or its uid is forgotten already.
-        Ok(dropped - forgets.len())
+        // No forget or exclusion op among them is lost: each is appended again, or a forget's uid
+        // is forgotten already.
+        Ok(Finished {
+            dropped: dropped - forgets.len() - exclusions.len(),
+            ops_through,
+        })
     }
 }
 
