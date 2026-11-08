@@ -157,7 +157,8 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
   last record (parity row 31). An agent's MCP server takes its query's vector from the resident
   viewer (`POST /api/query-vector`, within the query's `QUERY_TIMEOUT`), and loads a model of its
   own only when no viewer listens; a viewer that does not answer in time leaves the search to full
-  text. Until 2026-11-08 each MCP server that searched loaded its own copy (about 1.7 GB each,
+  text and names a timeout, and one that refuses or breaks its answer before then (a 503 while the
+  memory is restored or rebuilt) names an error (#879). Until 2026-11-08 each MCP server that searched loaded its own copy (about 1.7 GB each,
   beside the viewer's), which on a PC short of memory slowed the hooks past their limit. A CLI
   command that searches keeps its own model 10 minutes after its last search (`READER_IDLE`), as
   before. The model holds about 2.5 GB while loaded.

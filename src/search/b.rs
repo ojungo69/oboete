@@ -1187,7 +1187,8 @@ fn local_query(
 
 /// `text`'s query vector from the resident viewer (`POST /api/query-vector`), given up at
 /// `deadline`: `None` when no viewer listens, else its vector or why there is none (a viewer that
-/// does not answer in time is a timeout: the search answers from full text, as a load would).
+/// does not answer in time is a timeout: the search answers from full text, as a load would; one
+/// that refuses or breaks its answer before then is an error, #879).
 pub(crate) fn viewer_vector(
     home: &Path,
     repo: &str,
@@ -1202,7 +1203,13 @@ pub(crate) fn viewer_vector(
     let Some(answer) =
         crate::hook::post_json(port, &token, "/api/query-vector", body.as_bytes(), deadline)
     else {
-        return Some(Err(VectorSkip::Timeout));
+        // Within a timer's grain of the deadline it is the deadline that ended the wait.
+        let late = Instant::now() + Duration::from_millis(100) >= deadline;
+        return Some(Err(if late {
+            VectorSkip::Timeout
+        } else {
+            VectorSkip::Error
+        }));
     };
     if let Some(vector) = answer.get("vector") {
         return Some(match serde_json::from_value::<Vec<f32>>(vector.clone()) {

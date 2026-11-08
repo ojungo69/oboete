@@ -6012,7 +6012,48 @@ mod tests {
             Self::serve(home, wait_ms, Some(answer), Duration::ZERO)
         }
 
+        /// One that answers every request with `status` and no body (#879: a 503 while the
+        /// memory is restored or rebuilt).
+        fn refusing(home: &Path, status: u16) -> Self {
+            Self::serve_with(home, 2_000, Some(Value::Null), Duration::ZERO, status)
+        }
+
+        /// One whose lock and outcome say it listens, with nothing on its port (#879).
+        fn gone(home: &Path) -> Self {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let r = Self::serve(home, 2_000, None, Duration::ZERO);
+            let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+            let config = config
+                .lines()
+                .map(|l| {
+                    if l.starts_with("port = ") {
+                        format!("port = {port}")
+                    } else {
+                        l.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(home.join("config.toml"), format!("{config}\n")).unwrap();
+            std::fs::write(home.join("state/view-outcome"), format!("listening {port}")).unwrap();
+            r
+        }
+
         fn serve(home: &Path, wait_ms: u64, answer: Option<Value>, delay: Duration) -> Self {
+            Self::serve_with(home, wait_ms, answer, delay, 200)
+        }
+
+        fn serve_with(
+            home: &Path,
+            wait_ms: u64,
+            answer: Option<Value>,
+            delay: Duration,
+            status: u16,
+        ) -> Self {
             use std::os::unix::fs::PermissionsExt;
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -6067,10 +6108,14 @@ mod tests {
                         continue;
                     };
                     std::thread::sleep(delay);
-                    let answer = answer.to_string();
+                    let answer = if answer.is_null() {
+                        String::new()
+                    } else {
+                        answer.to_string()
+                    };
                     let _ = conn.write_all(
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                             answer.len()
                         )
@@ -6213,6 +6258,47 @@ mod tests {
         assert_eq!(
             reader_query(short.path(), &q, active()).err(),
             Some(VectorSkip::Error)
+        );
+    }
+
+    /// #879: a viewer that refuses (a 503 while the memory is restored or rebuilt), or whose lock
+    /// is held with nothing on its port, gives an error before the deadline; one that has not
+    /// answered by the deadline gives a timeout.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_viewer_that_refuses_is_an_error_and_one_that_waits_a_timeout() {
+        use crate::search::b::{VectorSkip, viewer_vector};
+        let ask = |home: &Path, within: Duration| {
+            viewer_vector(
+                home,
+                "github.com/o/r",
+                "where",
+                std::time::Instant::now() + within,
+            )
+        };
+        let busy = tempfile::tempdir().unwrap();
+        let _b = Resident::refusing(busy.path(), 503);
+        assert_eq!(
+            ask(busy.path(), Duration::from_secs(2)),
+            Some(Err(VectorSkip::Error))
+        );
+        let gone = tempfile::tempdir().unwrap();
+        let _g = Resident::gone(gone.path());
+        assert_eq!(
+            ask(gone.path(), Duration::from_secs(2)),
+            Some(Err(VectorSkip::Error))
+        );
+        let slow = tempfile::tempdir().unwrap();
+        let vector = vec![0.5f32; crate::embed::DIM];
+        let _s = Resident::serve(
+            slow.path(),
+            2_000,
+            Some(json!({ "vector": vector })),
+            Duration::from_millis(1_500),
+        );
+        assert_eq!(
+            ask(slow.path(), Duration::from_millis(400)),
+            Some(Err(VectorSkip::Timeout))
         );
     }
 
