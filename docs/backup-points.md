@@ -14,8 +14,8 @@ back, because forget and retention already rewrite the segments.
 
 ## Rules
 
-- B1. **A point is an export.** Each export that writes a segment then appends one line to
-  `points.jsonl` in the backup directory: `{"at", "device", "records", "ops"}`. The fields are the
+- B1. **A point is an export.** Each export that writes a segment, once the device has a record
+  backed up, then appends one line to `points.jsonl` in the backup directory: `{"at", "device", "records", "ops"}`. The fields are the
   time the export ended and the seq and op seq where that device's segments then end. A point names
   what the backups held at that moment. It does not use the records' own times: an import's records
   keep their source's times on new seqs (the owner's store has 575,009 imported records, the oldest
@@ -50,10 +50,9 @@ back, because forget and retention already rewrite the segments.
     aside segments too). Nothing is deleted. A segment that the point cuts is replayed up to the
     point and set aside; the next export writes its first part again from raw.db (the cursor's
     rule for a range no segment covers).
-  - A point noted before the first record keeps no record. A store gone back to it has ops segments
-    only; a restore of it, and the device of a damaged raw.db, are read from those, when no record
-    segment is damaged and the device's newest point kept no record. Record segments damaged, or
-    lost while the newest point kept records, still stop a restore.
+  - No point is noted before the first record is backed up: a store then has nothing to go back to
+    that a restore does not keep anyway (its forgets and exclusions survive every restore), so no
+    point restores a store with no record, and a restore still needs a sound record segment.
   - Each sound ops segment that holds an op past the ops the rebuild kept from the backups (a cut
     by the point or by lost records) is set aside at the swap too: the ops appended again after
     the cut take those op seqs with other bodies, and the next export writes that range again.
@@ -76,7 +75,7 @@ back, because forget and retention already rewrite the segments.
   the op prefix it kept. A gap below that seq (a damaged segment skipped) is never used again, so
   a point past the gap still names the records it named, less those that segment lost. Every
   export drops the points past raw's end (raw lost commits, MUST-M14) before it sets aside the
-  segments past it, so a stop between the two leaves the points to the next export.
+  segments past it, so a stop or a failure between the two is retried by the next export.
 - B7. **doctor** prints the newest point's time and how many records and ops came after it. When
   that point is more than two days old and raw.db holds records or ops past it, the line is a
   warning naming `oboete backup run`, and doctor turns red. The age is measured from the export's
@@ -108,20 +107,17 @@ back, because forget and retention already rewrite the segments.
 10. `oboete backup run` exports under the worker's lock and adds a point.
 11. An exclusion that raw.db holds and no export backed up yet survives a restore to a point and a
     restore of the whole backup, and the same op is not appended twice.
-12. A point noted before the first record can be gone back to.
+12. No point is noted before the first record is backed up.
 13. A point that is no longer listed when the restore takes its locks is refused, and raw.db is
     left as it was.
 14. When the segment that ends at the point is damaged, the restore keeps no point past the
     records that came back.
-15. A store gone back to a point before its first record is restored again from its ops segments,
-    damaged or not.
-16. raw.db that cannot be read for a reason other than damage stops the restore, and stays.
-17. A backup run indexes the records that came while it held the lock, even when its export
+15. raw.db that cannot be read for a reason other than damage stops the restore, and stays.
+16. A backup run indexes the records that came while it held the lock, even when its export
     fails.
-18. When a restore cuts the ops and appends exclusions again in the op seqs it freed, the backups
+17. When a restore cuts the ops and appends exclusions again in the op seqs it freed, the backups
     afterwards hold those exclusions in place of the old ops, and a later restore brings them back.
-19. A backup whose record segments were lost, its newest point having kept records, is not
-    restored from its ops alone.
-20. A restore keeps no point past the highest seq it replayed, though a segment's name goes further.
-21. An export drops the points past raw's end even when the segments past it were set aside
+18. A backup whose record segments were lost is not restored from its ops alone.
+19. A restore keeps no point past the highest seq it replayed, though a segment's name goes further.
+20. An export drops the points past raw's end even when the segments past it were set aside
     before.

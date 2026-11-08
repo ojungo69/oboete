@@ -330,7 +330,7 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
     let all = segments(backup, Kind::Records)?;
     let device = match device {
         Some(device) => device,
-        None => unique_device(&device_segments(backup)?)?,
+        None => unique_device(&all)?,
     };
     let (mut records, bad_records): (Vec<_>, Vec<_>) = all
         .into_iter()
@@ -356,21 +356,8 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
     if let Some(point) = point {
         after.extend(ops.iter().filter(|s| s.last > point.ops).cloned());
     }
-    // A point noted before the first record keeps none, and a store gone back to such a point has
-    // ops segments only, none damaged, and its newest point keeps no record (Codex on #880). Record
-    // segments damaged or lost (a newest point that kept records) still stop it (cubic on #880).
-    let no_records_yet = || {
-        points(backup).is_ok_and(|all| {
-            all.iter()
-                .filter(|p| p.device == device)
-                .max_by_key(|p| p.at)
-                .is_some_and(|p| p.records == 0)
-        })
-    };
     anyhow::ensure!(
-        !records.is_empty()
-            || point.is_some_and(|p| p.records == 0)
-            || (bad_records.is_empty() && !ops.is_empty() && no_records_yet()),
+        !records.is_empty(),
         "no usable backup segment of device {device} in {}",
         backup.display()
     );
@@ -869,7 +856,9 @@ fn export_from_report(
             crate::watchdog::progressed();
         }
     }
-    if !wrote.is_empty() {
+    // A point once a record is backed up: before it, a store has nothing to go back to that a
+    // restore does not keep anyway (its forgets and exclusions survive every restore).
+    if !wrote.is_empty() && ends[0] > 0 {
         let point = Point {
             at: crate::db::now_ms(),
             device: device.to_owned(),
@@ -974,7 +963,7 @@ pub(crate) fn parse_time(text: &str) -> Result<i64> {
 /// This store's device and the backup directory's points of it, oldest first.
 fn my_points(home: &Path) -> Result<(PathBuf, String, Vec<Point>)> {
     let dir = dir(home)?;
-    let device = device_of(home, &device_segments(&dir)?)?;
+    let device = device_of(home, &segments(&dir, Kind::Records)?)?;
     let mut mine: Vec<Point> = points(&dir)?
         .into_iter()
         .filter(|p| p.device == device)
@@ -2041,19 +2030,6 @@ fn restore_file_change(
     }
 }
 
-/// The segments a device is discovered from when raw.db cannot tell: the record segments, or the
-/// ops segments when there is no record segment (a store gone back to a point before its first
-/// record, Codex on #880). Ops segments of other devices a forget rewrote may share a directory
-/// with one device's records, so they count only then.
-fn device_segments(dir: &Path) -> Result<Vec<Segment>> {
-    let records = segments(dir, Kind::Records)?;
-    if records.is_empty() {
-        segments(dir, Kind::Ops)
-    } else {
-        Ok(records)
-    }
-}
-
 /// The device whose history the backups hold: the damaged file's own id when it can still be
 /// read, else the one device the segments name. Never a guess between two.
 fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
@@ -2316,7 +2292,11 @@ fn restore_locked(
         ops: ops_ok,
         bad_ops: ops_bad,
         after,
-    } = select(&dir, Some(device_of(home, &device_segments(&dir)?)?), point)?;
+    } = select(
+        &dir,
+        Some(device_of(home, &segments(&dir, Kind::Records)?)?),
+        point,
+    )?;
     // A point is this device's: one noted for another names other seqs. It is checked again
     // here, under the locks, as listed still: a worker that stepped aside may have dropped it
     // since it was chosen, with the seqs past it used again (B6, cubic on #880).
@@ -4475,35 +4455,27 @@ pub(crate) mod tests {
         assert_eq!(op_kinds(&raw, &dev), [(1, Exclusion), (2, Exclusion)]);
     }
 
-    /// Codex on #880: a point noted before the first record (an export of ops alone) can be gone
-    /// back to: no record is kept, and its ops are.
+    /// Codex on #880: no point is noted before the first record is backed up (an export of ops
+    /// alone), so no point restores a store with no record; the first export with a record notes
+    /// one.
     #[test]
-    fn a_point_before_any_record_can_be_gone_back_to() {
+    fn no_point_is_noted_before_the_first_record() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let mut raw = raw::open(p).unwrap();
         raw.exclude("github.com/o/first", false).unwrap();
         drop(raw);
         export(p).unwrap();
+        let dir = p.join("backups");
+        assert_eq!(segments(&dir, Kind::Ops).unwrap().len(), 1);
+        assert!(points(&dir).unwrap().is_empty());
         segmented(p, 3, 3);
-        let first = points(&p.join("backups")).unwrap().remove(0);
-        assert_eq!((first.records, first.ops), (0, 1));
-        crate::worker::restore_to(p, &first).unwrap();
-        let raw = raw::open(p).unwrap();
-        assert_eq!(raw.max_seq().unwrap(), 0);
-        assert_eq!(raw.exclusions().unwrap(), ["github.com/o/first"]);
-        drop(raw);
-        // The store now has ops segments only: a damaged raw.db is still restored from them, and so
-        // is a restore of the whole backup.
-        damage_raw(p);
-        let raw = open_raw(p).unwrap();
-        assert_eq!(raw.exclusions().unwrap(), ["github.com/o/first"]);
-        drop(raw);
-        crate::worker::restore(p).unwrap();
-        assert_eq!(
-            raw::open(p).unwrap().exclusions().unwrap(),
-            ["github.com/o/first"]
-        );
+        let cursors: Vec<(i64, i64)> = points(&dir)
+            .unwrap()
+            .iter()
+            .map(|x| (x.records, x.ops))
+            .collect();
+        assert_eq!(cursors, [(3, 1)]);
     }
 
     /// cubic on #880: raw.db that cannot be read for a reason other than damage stops the restore,
