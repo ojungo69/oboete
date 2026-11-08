@@ -257,9 +257,10 @@ enum Cmd {
         undo: bool,
     },
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
-    /// The worker does this by itself when raw.db is damaged. With --to, go back to the newest
-    /// backup point at or before that time (`oboete backup list` shows them): a preview first,
-    /// then --yes. Forgotten text stays gone and excluded repositories stay excluded.
+    /// The worker does this by itself when raw.db is damaged. With --to, preview going back to
+    /// the newest backup point at or before that time (`oboete backup list` shows them); with
+    /// --yes too, go back to the point at exactly the time the preview prints. Forgotten text
+    /// stays gone and excluded repositories stay excluded.
     Restore {
         /// A time: 2026-11-07T05:30:12.345Z as the list prints it, or 2026-11-07 05:30 (UTC)
         #[arg(long)]

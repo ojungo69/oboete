@@ -27,7 +27,9 @@ back, because forget and retention already rewrite the segments.
   holds past it. It prints every point of the last 24 hours and the newest point of each day before
   that; `--all` prints them all. It reads only `points.jsonl` and raw.db, and changes nothing.
 - B3. **`oboete backup run`** exports now, under the worker's lock: it asks a running worker to step
-  aside, as `restore` and `rebuild` do. It says what it wrote, or that the backups were up to date.
+  aside, as `restore` and `rebuild` do. Before the lock goes it indexes what hooks wrote meanwhile,
+  as a restore's drain does, with no model call. It says what it wrote, or that the backups were
+  up to date.
 - B4. **`oboete restore --to <time>`** goes back to the newest point of this device at or before
   `<time>`. The time is RFC 3339 (`2026-11-07T05:30:12.345Z` as the list prints it, or with an offset),
   or `YYYY-MM-DD HH:MM` taken as UTC. With no point of this device at or before the time, it refuses
@@ -47,12 +49,16 @@ back, because forget and retention already rewrite the segments.
     aside segments too). Nothing is deleted. A segment that the point cuts is replayed up to the
     point and set aside; the next export writes its first part again from raw.db (the cursor's
     rule for a range no segment covers).
+  - A point noted before the first record keeps no record. A store gone back to it has ops segments
+    only; a restore of it, and the device of a damaged raw.db, are read from those. Every record
+    segment damaged still stops a restore.
 - B5. **Going back keeps the two gates.** A forget op past any cut is appended again. That was
   already done for a restore that lost records (D5): forgotten text stays gone. An exclusion op
   past any cut is appended again too, the undone ones with it, the gates' ops in their op order.
   So is an exclusion op that raw.db holds and the backups do not yet (one made after the last
-  export), read from raw.db before the swap; the same op is never appended twice. So going back
-  never sends again what the owner excluded from sending. This also covers a restore of a damaged store,
+  export), read from raw.db before the swap; the same op is never appended twice. raw.db that is
+  missing or damaged gives none (the backups' own are kept); one that cannot be read for another
+  reason stops the restore. So going back never sends again what the owner excluded from sending. This also covers a restore of a damaged store,
   which used to drop every exclusion op after its first lost record. Like any new op, one appended
   again is in the backups from the next export, which the restore's own drain runs before the
   command returns. Mutes, corrections, hides,
@@ -100,3 +106,7 @@ back, because forget and retention already rewrite the segments.
     left as it was.
 14. When the segment that ends at the point is damaged, the restore keeps no point past the
     records that came back.
+15. A store gone back to a point before its first record is restored again from its ops segments,
+    damaged or not.
+16. raw.db that cannot be read for a reason other than damage stops the restore, and stays.
+17. A backup run indexes the records that came while it held the lock.

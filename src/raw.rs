@@ -7643,8 +7643,9 @@ impl Rebuild {
         // and all) never twice.
         for (op_seq, body) in &self.exclusions {
             let held: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ops WHERE type = 'exclusion' AND body = ?1)",
-                [body],
+                "SELECT EXISTS(SELECT 1 FROM ops
+                   WHERE device = ?1 AND type = 'exclusion' AND body = ?2)",
+                params![device, body],
                 |r| r.get(0),
             )?;
             if !held

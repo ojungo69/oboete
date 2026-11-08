@@ -330,7 +330,7 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
     let all = segments(backup, Kind::Records)?;
     let device = match device {
         Some(device) => device,
-        None => unique_device(&all)?,
+        None => unique_device(&device_segments(backup)?)?,
     };
     let (mut records, bad_records): (Vec<_>, Vec<_>) = all
         .into_iter()
@@ -341,12 +341,6 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
         after.extend(records.iter().filter(|s| s.last > point.records).cloned());
         records.retain(|s| s.first <= point.records);
     }
-    // A point noted before the first record keeps none (Codex on #880).
-    anyhow::ensure!(
-        !records.is_empty() || point.is_some_and(|p| p.records == 0),
-        "no usable backup segment of device {device} in {}",
-        backup.display()
-    );
     let (mut ops, mut bad_ops, mut next) = (Vec::new(), Vec::new(), 1);
     for segment in segments(backup, Kind::Ops)?
         .into_iter()
@@ -362,6 +356,15 @@ fn select(backup: &Path, device: Option<String>, point: Option<&Point>) -> Resul
     if let Some(point) = point {
         after.extend(ops.iter().filter(|s| s.last > point.ops).cloned());
     }
+    // A point noted before the first record keeps none, and a store gone back to such a point has
+    // ops segments only, none damaged (Codex on #880). Every record segment damaged still stops.
+    anyhow::ensure!(
+        !records.is_empty()
+            || point.is_some_and(|p| p.records == 0)
+            || (bad_records.is_empty() && !ops.is_empty()),
+        "no usable backup segment of device {device} in {}",
+        backup.display()
+    );
     Ok(Selection {
         device,
         records,
@@ -962,7 +965,7 @@ pub(crate) fn parse_time(text: &str) -> Result<i64> {
 /// This store's device and the backup directory's points of it, oldest first.
 fn my_points(home: &Path) -> Result<(PathBuf, String, Vec<Point>)> {
     let dir = dir(home)?;
-    let device = device_of(home, &segments(&dir, Kind::Records)?)?;
+    let device = device_of(home, &device_segments(&dir)?)?;
     let mut mine: Vec<Point> = points(&dir)?
         .into_iter()
         .filter(|p| p.device == device)
@@ -2029,6 +2032,19 @@ fn restore_file_change(
 
 /// The device whose history the backups hold: the damaged file's own id when it can still be
 /// read, else the one device the segments name. Never a guess between two.
+/// The segments a device is discovered from when raw.db cannot tell: the record segments, or the
+/// ops segments when there is no record segment (a store gone back to a point before its first
+/// record, Codex on #880). Ops segments of other devices a forget rewrote may share a directory
+/// with one device's records, so they count only then.
+fn device_segments(dir: &Path) -> Result<Vec<Segment>> {
+    let records = segments(dir, Kind::Records)?;
+    if records.is_empty() {
+        segments(dir, Kind::Ops)
+    } else {
+        Ok(records)
+    }
+}
+
 fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
     let from_file = rusqlite::Connection::open_with_flags(
         raw::path(home),
@@ -2170,17 +2186,18 @@ pub(crate) fn restore_report_holding_to(
 /// A retention batch's records: device, seq and time.
 type Owed = Vec<(String, i64, i64)>;
 
-/// The forget requests (D1 rule 14) and the retention batch begun (docs/retention.md) a raw.db
-/// that still reads holds, read under the swap lock without opening it as a store. A lost database
-/// or unreadable table has none (F1); once the table opens, a bad row must stop the restore rather
-/// than discard other live requests.
 /// docs/backup-points.md B5: `device`'s exclusion ops as the live raw.db holds them, in op order,
-/// those no export has backed up yet too. None when it cannot be read: a damaged store's restore
-/// keeps the backups' own.
-fn live_exclusions(home: &Path, device: &str) -> Vec<(i64, String)> {
+/// those no export has backed up yet too. None when there is no raw.db or it is damaged: that
+/// store's restore keeps the backups' own. Any other failure to read them stops the restore, so an
+/// exclusion is never dropped unsaid (cubic on #880).
+fn live_exclusions(home: &Path, device: &str) -> Result<Vec<(i64, String)>> {
+    let path = raw::path(home);
+    if !path.try_exists()? {
+        return Ok(Vec::new());
+    }
     let read = || -> Result<Vec<(i64, String)>> {
         let conn = rusqlite::Connection::open_with_flags(
-            raw::path(home),
+            &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let mut st = conn.prepare(
@@ -2189,9 +2206,16 @@ fn live_exclusions(home: &Path, device: &str) -> Vec<(i64, String)> {
         let rows = st.query_map([device], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     };
-    read().unwrap_or_default()
+    match read() {
+        Err(e) if damaged(&e) => Ok(Vec::new()),
+        read => read.context("read raw.db's exclusions before the restore"),
+    }
 }
 
+/// The forget requests (D1 rule 14) and the retention batch begun (docs/retention.md) a raw.db
+/// that still reads holds, read under the swap lock without opening it as a store. A lost database
+/// or unreadable table has none (F1); once the table opens, a bad row must stop the restore rather
+/// than discard other live requests.
 fn held_requests(home: &Path) -> Result<(Vec<crate::forget::Request>, Owed)> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         raw::path(home),
@@ -2281,11 +2305,7 @@ fn restore_locked(
         ops: ops_ok,
         bad_ops: ops_bad,
         after,
-    } = select(
-        &dir,
-        Some(device_of(home, &segments(&dir, Kind::Records)?)?),
-        point,
-    )?;
+    } = select(&dir, Some(device_of(home, &device_segments(&dir)?)?), point)?;
     // A point is this device's: one noted for another names other seqs. It is checked again
     // here, under the locks, as listed still: a worker that stepped aside may have dropped it
     // since it was chosen, with the seqs past it used again (B6, cubic on #880).
@@ -2376,7 +2396,7 @@ fn restore_locked(
     if let Some(point) = point {
         rebuild.keep_ops_through(point.ops);
     }
-    rebuild.carry_exclusions(live_exclusions(home, &device));
+    rebuild.carry_exclusions(live_exclusions(home, &device)?);
     let raw::Finished {
         dropped,
         ops_through,
@@ -4451,6 +4471,57 @@ pub(crate) mod tests {
         let raw = raw::open(p).unwrap();
         assert_eq!(raw.max_seq().unwrap(), 0);
         assert_eq!(raw.exclusions().unwrap(), ["github.com/o/first"]);
+        drop(raw);
+        // The store now has ops segments only: a damaged raw.db is still restored from them, and so
+        // is a restore of the whole backup.
+        damage_raw(p);
+        let raw = open_raw(p).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["github.com/o/first"]);
+        drop(raw);
+        crate::worker::restore(p).unwrap();
+        assert_eq!(
+            raw::open(p).unwrap().exclusions().unwrap(),
+            ["github.com/o/first"]
+        );
+    }
+
+    /// cubic on #880: raw.db that cannot be read for a reason other than damage stops the restore,
+    /// rather than dropping the exclusions no backup holds yet; raw.db stays where it is.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_store_stops_the_restore_rather_than_drop_its_exclusions() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 5, 5);
+        let mut raw = raw::open(p).unwrap();
+        raw.exclude("github.com/o/new", false).unwrap();
+        drop(raw);
+        let a = points(&p.join("backups")).unwrap().remove(0);
+        let file = raw::path(p);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let config = crate::settings::config_lock(p).unwrap();
+        let failed = restore_report_holding_to(p, None, None, Some(&a), &mut |_| {});
+        drop(config);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let why = format!("{:#}", failed.err().unwrap().cause);
+        assert!(why.contains("read raw.db's exclusions"), "{why}");
+        let raw = raw::open(p).unwrap();
+        assert_eq!(raw.exclusions().unwrap(), ["github.com/o/new"]);
+    }
+
+    /// Codex on #880: a backup run indexes what came while the worker stood aside, before its
+    /// lock goes, as a restore's drain does.
+    #[test]
+    fn a_backup_run_indexes_what_came_while_it_held_the_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event("came while it held the lock zw1"))
+            .unwrap();
+        drop(raw);
+        crate::worker::backup_run(p).unwrap();
+        assert_eq!(crate::worker::backlog(p).unwrap(), 0);
     }
 
     /// cubic on #880: a point dropped after it was chosen (raw.db lost records past it, and their

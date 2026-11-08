@@ -2258,11 +2258,15 @@ pub fn restore_to(home: &Path, point: &crate::backup::Point) -> Result<String> {
 /// docs/backup-points.md B3: a backup now, under the worker's lock (a running worker steps
 /// aside, as for a restore). The segments written.
 pub fn backup_run(home: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let _held = lock_asking(home)?;
-    Ok(crate::backup::export_timed(home)?
+    let held = lock_asking(home)?;
+    let wrote = crate::backup::export_timed(home)?
         .into_iter()
         .map(|(path, _)| path)
-        .collect())
+        .collect();
+    // A hook that appended while the worker stood aside started no other: what it wrote is
+    // indexed before the lock goes, as a restore's drain does, with no model call (Codex on #880).
+    run_once_holding_report(home, held, &mut |_| {}).1?;
+    Ok(wrote)
 }
 
 pub(crate) fn restore_report_to(
