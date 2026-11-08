@@ -1200,16 +1200,16 @@ pub(crate) fn viewer_vector(
     }
     let (port, token) = crate::view::resident_answering(home)?;
     let body = serde_json::json!({"repo": repo, "text": text}).to_string();
-    let Some(answer) =
-        crate::hook::post_json(port, &token, "/api/query-vector", body.as_bytes(), deadline)
-    else {
-        // Within a timer's grain of the deadline it is the deadline that ended the wait.
-        let late = Instant::now() + Duration::from_millis(100) >= deadline;
-        return Some(Err(if late {
-            VectorSkip::Timeout
-        } else {
-            VectorSkip::Error
-        }));
+    let answer = match crate::hook::post_json_why(
+        port,
+        &token,
+        "/api/query-vector",
+        body.as_bytes(),
+        deadline,
+    ) {
+        Ok(answer) => answer,
+        Err(crate::hook::Unanswered::Late) => return Some(Err(VectorSkip::Timeout)),
+        Err(crate::hook::Unanswered::Failed) => return Some(Err(VectorSkip::Error)),
     };
     if let Some(vector) = answer.get("vector") {
         return Some(match serde_json::from_value::<Vec<f32>>(vector.clone()) {

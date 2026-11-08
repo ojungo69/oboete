@@ -7450,7 +7450,7 @@ curate = false
             std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000),
         )
         .unwrap();
-        let _contending = crate::worker::contending();
+        let contending = crate::worker::contending();
         assert_eq!(
             get(&v, "/api/rests")["paused"],
             json!({"kind": "rebuild", "since": 1_700_000_000_000_i64, "curate": false})
@@ -7466,6 +7466,9 @@ curate = false
         assert_eq!(get(&v, "/api/rests")["paused"]["curate"], json!(true));
         std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
         assert_eq!(get(&v, "/api/rests")["paused"]["curate"], json!(true));
+        // The lock freed is read as `try_lock` reads it under `cargo test`, which waits out a
+        // child another test thread forked with the file open (it failed on macOS without).
+        drop(contending);
         drop(lock);
         assert_eq!(get(&v, "/api/rests")["paused"], json!(null));
     }
