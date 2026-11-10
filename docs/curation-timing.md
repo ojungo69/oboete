@@ -144,13 +144,22 @@ days hold whichever binary was installed, the grown window among them from its r
 | of the wait: with no call out | 31% | 59% |
 | a window's op to the next call's start, p50 and p90 | 2.3 s, 14.9 s | 6.4 s, 31.1 s |
 
-One window now holds 3.4 tool records where it held 2.0, so the same work took fewer calls, and
-the wait behind other sessions' calls is nearly gone: that is what the larger window was for. The
-wait before the first call fell by two fifths at the median and to under a quarter at the ninth
-decile.
+One window now holds 3.4 tool records where it held 2.0, so the same work took fewer calls: that
+much is the larger window at work. The wait before the first call fell by two fifths at the median
+and to under a quarter at the ninth decile, and the share of it behind other sessions' calls fell
+from 34% to 4%.
+
+Those two are one period against the next (the table's two columns: nine days from 2026-10-26,
+then seven from 2026-11-04), not the larger window against none. Split by day (#923), a day's
+median runs from 4 s to 3.9 hours, and the two periods hold different days. Of the first's nine,
+five (10-28 to 11-01) had between 1,100 and 5,500 refused calls each, with the chain's entries
+changing; of the second's seven, four (11-04 to 11-07) had none refused and three (11-08 to
+11-10) had 1,049, 165 and 1,042, all of one entry's cap. How many conversations ran at once
+differed too. What the larger window gave of the fall is not separated from what the days gave.
 
 It is still minutes at the median, not the replay's 29 s. The replay was a model of the queue
 with a call's time drawn from the chain's; these are the live windows, where three fifths of the
 wait is now with no call out at all. Where that time goes is not broken down here: a window not
 yet cut, an entry stopped or cooling down, or the worker at its other work (a window's op to the
-next call took 6.4 s where it took 2.3 s). It is the next thing to measure for row 54.
+next call took 6.4 s where it took 2.3 s). Nothing kept today says which; #923 is to make the
+worker write it down, and to measure a day of it before anything is changed.
