@@ -1,0 +1,29 @@
+Cargo.lock
+  s_b837d726e3a0bf::t_a34d3b318f4bab 138-146,259-264,309-317,362-370,498-499,503-513,814,833-841,1048,1050,1242,1539,1541,1553,1563,1565,1586,1588,1776-1788
+Cargo.toml
+  s_b837d726e3a0bf::t_127f5e7b85b5f2 18-19,56
+src/crash.rs
+  s_b837d726e3a0bf::t_88bd5f1f040a44 13
+src/knowledge.rs
+  s_b837d726e3a0bf::t_382e3d2c11211a 42-44,46
+src/providers_db.rs
+  s_b837d726e3a0bf::t_6dbdcfb5231b41 186
+src/raw.rs
+  s_b837d726e3a0bf::t_ba09a6479d846a 1579
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3a8ccfe061a37346d0d1d933f4bb9eb18587b103",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
