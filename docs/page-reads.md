@@ -147,3 +147,40 @@ too); `settings::privacy::tests::repositories_the_index_never_names_are_listed_f
 (a rule's record's repository and another device's are listed, with the index and without, with
 knowledge.db and without, and a read builds no index);
 `worker::tests::the_repository_index_is_built_in_a_pause_beside_the_session_index`.
+
+## W4: a page of cards is read in an index's order
+
+Measured on 2026-11-10 with `main` at 5e775fda, on this PC's store (43,767 cards). A read of My
+Work (`my_work::listed`, every range) took 550 to 575 ms inside the process, timed step by step:
+
+| Step | Time |
+|---|---|
+| the newest 300 cards (`cards::page`) | 123 to 132 ms |
+| the newest 100 summaries | 45 to 54 ms |
+| the work-state writes and their links | 42 to 48 ms |
+| the prompts' labels, then their texts | 33 to 36 ms |
+| the requests' answers | 108 to 123 ms |
+| the copies and the products | 75 to 87 ms |
+| the subagents | 85 to 104 ms |
+
+The cards came first. `cards::page` asks for them the newest first (`ts`, `device`, `op_seq`, `n`,
+all descending), and the table had no index in that order: SQLite's plan was `SCAN cards` and
+`USE TEMP B-TREE FOR ORDER BY`, so every card the store holds was read, with every column the page
+returns, and sorted, for a page of 300. The timeline's page of cards and the cards around a time
+(`cards::around`) run the same plan. On a copy of the table in memory the statement took 85 ms; a
+read grew with the store, not with the page.
+
+`cards_newest`, on `(ts, device, op_seq, n)`, is that order. The page is now read from the index's
+end and stops at its last row: 0.2 ms for the same statement on the same copy, and the index took
+16 ms to build there. `cards::schema` makes it where it makes the table, so a store gets it at the
+worker's next pass or at the first search, whichever opens it first; a reader that finds none
+reads as before.
+
+One repository's page (`repo = ?1`) reads in the same order and passes over the other
+repositories' cards, where it sorted its own before. For a repository with few cards far back
+that is still every card read, as it was, without the sort.
+
+The other steps of a My Work read are not looked into here (#899).
+
+Test: `cards::tests::the_newest_cards_are_read_in_the_order_of_an_index` (the page's statement and
+both sides of `around` are read through `cards_newest`, with no sort).

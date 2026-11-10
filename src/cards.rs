@@ -115,7 +115,9 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            replaced_by INTEGER,
            PRIMARY KEY (device, op_seq, n)
          );
-         CREATE INDEX IF NOT EXISTS cards_repo ON cards(repo, ts);",
+         CREATE INDEX IF NOT EXISTS cards_repo ON cards(repo, ts);
+         -- The order every reader's page is in (`page_sql`, `around_sql`): W4.
+         CREATE INDEX IF NOT EXISTS cards_newest ON cards(ts, device, op_seq, n);",
     )?;
     // Parity row 3: 1 for a card removed from the page (`hide`), left out by every reader. Before
     // the full-text backfill below, which leaves such a card out.
@@ -612,6 +614,32 @@ pub fn recent(
 /// session's alone, K2). The one reader still skips K4-hidden rows without using a slot. The
 /// boolean says another visible row exists: at most one extra is inspected for exhaustion, never
 /// returned or used as a cursor.
+/// `page`'s rows, the newest first. Its order is `cards_newest`'s, so a page reads its own rows
+/// from the index's end and stops; without that index every card was read and sorted for each
+/// page (W4: 85 ms of each read at 43,767 cards).
+fn page_sql(shown: &str) -> String {
+    format!(
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
+           AND (?1 IS NULL OR repo = ?1)
+           AND (?6 IS NULL OR (agent = ?6 AND session = ?7))
+           AND (?2 IS NULL OR (ts, device, op_seq, n) < (?2, ?3, ?4, ?5))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+    )
+}
+
+/// `around`'s rows on one side of `?2`, in `cards_newest`'s order too.
+fn around_sql(shown: &str, older: bool) -> String {
+    let side = if older {
+        "ts <= ?2 ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+    } else {
+        "ts > ?2 ORDER BY ts, device, op_seq, n"
+    };
+    format!(
+        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
+           AND (?1 IS NULL OR repo = ?1) AND {side}"
+    )
+}
+
 pub fn page(
     k: &Connection,
     raw: &Raw,
@@ -623,14 +651,7 @@ pub fn page(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok((Vec::new(), false));
     }
-    let shown = crate::hide::shown(k, "cards", "")?;
-    let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
-           AND (?1 IS NULL OR repo = ?1)
-           AND (?6 IS NULL OR (agent = ?6 AND session = ?7))
-           AND (?2 IS NULL OR (ts, device, op_seq, n) < (?2, ?3, ?4, ?5))
-         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
-    ))?;
+    let mut st = k.prepare(&page_sql(&crate::hide::shown(k, "cards", "")?))?;
     let mut rows = st.query(rusqlite::params![
         repo,
         before.map(|p| p.0),
@@ -667,16 +688,7 @@ pub fn around(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(Vec::new());
     }
-    let side = if older {
-        "ts <= ?2 ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
-    } else {
-        "ts > ?2 ORDER BY ts, device, op_seq, n"
-    };
-    let shown = crate::hide::shown(k, "cards", "")?;
-    let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
-           AND (?1 IS NULL OR repo = ?1) AND {side}"
-    ))?;
+    let mut st = k.prepare(&around_sql(&crate::hide::shown(k, "cards", "")?, older))?;
     let mut rows = st.query(rusqlite::params![repo, at])?;
     let mut out = Vec::new();
     while out.len() < limit
@@ -1074,6 +1086,40 @@ pub fn get(k: &Connection, raw: &Raw, id: &str, rules: &Rules) -> Result<Option<
 mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone};
+
+    /// W4: a page of cards, every repository's or one's, and the cards on either side of a time
+    /// are read in an index's order: none is read to be sorted, however many the store holds.
+    #[test]
+    fn the_newest_cards_are_read_in_the_order_of_an_index() {
+        let k = Connection::open_in_memory().unwrap();
+        schema(&k).unwrap();
+        let shown = crate::hide::shown(&k, "cards", "").unwrap();
+        assert!(
+            shown.contains("hidden"),
+            "the store has the column the readers filter on"
+        );
+        // A plan is the statement's, whatever is bound to it: every parameter is left NULL.
+        let plan = |sql: &str| -> Vec<String> {
+            let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let unbound = vec![rusqlite::types::Null; st.parameter_count()];
+            st.query_map(rusqlite::params_from_iter(unbound), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        for sql in [
+            page_sql(&shown),
+            around_sql(&shown, true),
+            around_sql(&shown, false),
+        ] {
+            let plan = plan(&sql);
+            assert!(
+                plan.iter().any(|p| p.contains("USING INDEX cards_newest"))
+                    && !plan.iter().any(|p| p.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+    }
 
     fn jst() -> FixedOffset {
         FixedOffset::east_opt(9 * 3600).unwrap()
