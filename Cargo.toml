@@ -2,6 +2,16 @@
 name = "oboete"
 version = "0.1.0"
 edition = "2024"
+# The oldest toolchain that builds it: the code uses `Atomic*::try_update`, stable since 1.95.
+# Checked with `cargo +1.95.0 check --locked`, with and without `local-embed`; 1.89.0, the
+# newest minimum among the dependencies, does not build it.
+rust-version = "1.95"
+description = "Local memory for coding agents: one binary, SQLite on your own disk"
+license = "Apache-2.0"
+repository = "https://github.com/ojungo69/oboete"
+readme = "README.md"
+keywords = ["claude-code", "codex", "mcp", "memory", "coding-agents"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 aho-corasick = "1"
