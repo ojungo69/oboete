@@ -225,12 +225,18 @@ pub fn lookup(tool: &str, args: &Value, cwd: &Path, roots: &Roots) -> Option<Loo
 /// the search fails or has not answered within `LOOKUP_WAIT` (`Late`; the native lookup goes on as
 /// it would). A subagent's lookup gets it too, as claude-mem's handler runs before its subagent
 /// check.
-pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Option<String>> {
+pub fn answer(
+    home: &Path,
+    payload: &Value,
+    room: usize,
+    clock: &crate::hook_time::Clock,
+) -> anyhow::Result<Option<String>> {
     #[cfg(test)]
     if let Some(wait) = TEST_WAIT.get() {
-        return answer_within(home, payload, room, wait);
+        return answer_within(home, payload, room, clock.left(wait));
     }
-    answer_within(home, payload, room, LOOKUP_WAIT)
+    // What remains of the hook's time when that is less (docs/hook-time.md).
+    answer_within(home, payload, room, clock.left(LOOKUP_WAIT))
 }
 
 /// A lookup whose search did not answer within its wait: it spent the hook's time, so the hook

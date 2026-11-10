@@ -86,6 +86,21 @@ const CURSOR_EVENTS: [(&str, &str); 7] = [
     ("sessionEnd", "SessionEnd"),
 ];
 
+/// The timeout `setup` writes for `agent`'s hook on `event`, which the hook's own time is counted
+/// from (docs/hook-time.md): none where oboete writes no timeout (OpenCode's and Pi's plugins, an
+/// agent with no adapter) or no such hook.
+pub(crate) fn hook_timeout(agent: &str, event: &str) -> Option<std::time::Duration> {
+    let secs = match agent {
+        "claude" => CLAUDE_EVENTS.iter().find(|(e, _)| *e == event)?.1,
+        "codex" => CODEX_EVENTS.iter().find(|(e, ..)| *e == event)?.2,
+        "grok" => GROK_EVENTS.iter().find(|(e, _)| *e == event)?.1,
+        "agy" => (AGY_FLAT_EVENTS.contains(&event) || event == "PostToolUse").then_some(10_u32)?,
+        "cursor" => (CURSOR_EVENTS.iter().any(|(_, e)| *e == event)).then_some(10_u32)?,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(u64::from(secs)))
+}
+
 /// MUST-M10 (spec 4.7): each agent's injection points (`POINTS`), each with the tests that drive
 /// it through `run_io`, `inject_text` or a Node harness. None is live-verified yet: Task 8 Step
 /// 10's live checks mark the ones seen working in a live session of the agent.
@@ -3082,6 +3097,10 @@ pub fn doctor(home: &Path) -> Result<()> {
             if let Some(line) = crate::hook::prompt_blocks_line(home, crate::db::now_ms()) {
                 println!("{line}");
             }
+            // The hooks that were still running at 2 s (docs/hook-time.md).
+            if let Some(line) = crate::hook_time::doctor_line(home, crate::db::now_ms()) {
+                println!("{line}");
+            }
             match i.correction {
                 true => println!(
                     "corrections: on, up to {} characters at the next prompt",
@@ -3946,6 +3965,46 @@ fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/hook-time.md: a hook's own time is counted from the timeout its agent's settings
+    /// were given, and there is none where oboete writes no timeout.
+    #[test]
+    fn a_hooks_timeout_is_the_one_setup_writes() {
+        fn secs(agent: &str, event: &str) -> Option<u64> {
+            hook_timeout(agent, event).map(|t| t.as_secs())
+        }
+        assert_eq!(secs("claude", "UserPromptSubmit"), Some(5));
+        assert_eq!(secs("claude", "SessionStart"), Some(10));
+        assert_eq!(secs("claude", "SessionEnd"), Some(3));
+        assert_eq!(secs("codex", "PostToolUse"), Some(5));
+        assert_eq!(secs("codex", "SessionStart"), Some(10));
+        assert_eq!(secs("grok", "SessionStart"), Some(5));
+        assert_eq!(secs("agy", "PreInvocation"), Some(10));
+        assert_eq!(secs("agy", "PostToolUse"), Some(10));
+        assert_eq!(secs("cursor", "UserPromptSubmit"), Some(10));
+        // Every hook `setup` writes for Claude Code has one, as written.
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        for (event, group) in claude_groups(&cmd) {
+            assert_eq!(
+                secs("claude", &event),
+                group["hooks"][0]["timeout"].as_u64(),
+                "{event}"
+            );
+        }
+        for (agent, event) in [
+            ("claude", "Nope"),
+            ("agy", "SessionEnd"),
+            ("cursor", "beforeSubmitPrompt"),
+            ("opencode", "SessionStart"),
+            ("pi", "SessionStart"),
+            ("aider", "Stop"),
+        ] {
+            assert_eq!(secs(agent, event), None, "{agent} {event}");
+        }
+    }
 
     /// Parity row 50 (CodeRabbit on #618): the delete command is copied as it is, so neither
     /// PowerShell nor a POSIX shell reads anything in the home's path.

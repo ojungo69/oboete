@@ -27,6 +27,7 @@ mod forget;
 mod gates;
 mod hide;
 mod hook;
+mod hook_time;
 mod hookstate;
 mod import;
 mod isolation;
@@ -518,6 +519,8 @@ enum WorkerAction {
 }
 
 fn main() {
+    // First: a hook's time is counted from here (docs/hook-time.md).
+    hook_time::init();
     executable::init();
     let cli = Cli::parse();
     let home = cli

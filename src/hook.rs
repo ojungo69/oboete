@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::consumer::manifest::{Shown, Start};
+use crate::hook_time::{Clock, Phase};
 use crate::{config, db, redact};
 
 /// Largest text kept per field. Tool outputs beyond this are clipped with a marker.
@@ -56,13 +57,33 @@ const ENVELOPES: &[&str] = &[
 ];
 
 pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
-    run_io(
+    // docs/hook-time.md: this hook is its process, so its time is the agent's timeout from the
+    // process's start. The thread beside it writes down a hook that is still running at 2 s.
+    let clock = Clock::of_process();
+    clock.watch(home, agent, event);
+    let result = run_clocked(
         home,
         agent,
         event,
         std::io::stdin().lock(),
         std::io::stdout().lock(),
-    )
+        &clock,
+    );
+    clock.finish(home, agent, event);
+    result
+}
+
+/// A hook with a clock that starts now and no agent's timeout to keep: a hook run inside another
+/// process (a loaded test run of a debug build is no hook).
+#[cfg(test)]
+fn run_io(
+    home: &Path,
+    agent: &str,
+    event: &str,
+    input: impl Read,
+    output: impl Write,
+) -> Result<()> {
+    run_clocked(home, agent, event, input, output, &Clock::starting_now())
 }
 
 /// What `agent` is given at the start of session `session` in `cwd`: the SessionStart of Claude
@@ -80,12 +101,13 @@ pub(crate) fn started(home: &Path, agent: &str, session: &str, cwd: &Path) -> St
     String::from_utf8(out).unwrap()
 }
 
-fn run_io(
+fn run_clocked(
     home: &Path,
     mut agent: &str,
     event: &str,
     mut input: impl Read,
     mut output: impl Write,
+    clock: &Clock,
 ) -> Result<()> {
     // MUST-M16, for raw.db: whether this call tried to write there (skips and filtered sessions
     // never do), and whether a row was written. Only a written row shows that recording works
@@ -149,6 +171,11 @@ fn run_io(
             return Ok(());
         };
         agent = resolved;
+        // docs/hook-time.md: a hook that is its process keeps its agent's timeout, the resolved
+        // agent's where the command line named another.
+        if clock.keeps_timeouts() {
+            clock.inject_within(crate::setup::hook_timeout(agent, event));
+        }
         raw_host = raw_agent(agent);
         if !(crate::setup::AGENTS.contains(&agent) || raw_host)
             || (matches!(agent, "agy" | "cursor") && agent_workspace(agent, &payload).is_none())
@@ -168,15 +195,17 @@ fn run_io(
             // claude-mem's bridge first (docs/memory-lookup.md): a lookup of the agent's own memory
             // gets oboete's search of it, and then no file note; nor does one past its wait, which
             // spent the hook's time (CodeRabbit on #568).
-            let looked = crate::memory_lookup::answer(home, &payload, NOTE_ROOM);
+            clock.begin(Phase::Lookup);
+            let looked = crate::memory_lookup::answer(home, &payload, NOTE_ROOM, clock);
             let late = (looked.as_ref()).is_err_and(|e| e.is::<crate::memory_lookup::Late>());
             noted = looked.unwrap_or_else(|e| {
                 eprintln!("oboete: no memory for the lookup: {e:#}");
                 None
             });
             if noted.is_none() && !late {
-                noted =
-                    file_notes(home, agent, &payload, &mut fence, NOTE_ROOM).unwrap_or_else(|e| {
+                clock.begin(Phase::Note);
+                noted = file_notes(home, agent, &payload, &mut fence, NOTE_ROOM, clock)
+                    .unwrap_or_else(|e| {
                         eprintln!("oboete: no note on the file: {e:#}");
                         None
                     });
@@ -234,7 +263,10 @@ fn run_io(
         {
             took_compaction = Some((session_label(&labels).to_owned(), took.flag().to_owned()));
         }
+        clock.begin(Phase::Settings);
         let settings = crate::capture::Settings::load(home)?;
+        // Recording keeps its own waits whatever the hook's time is (docs/hook-time.md).
+        clock.begin(Phase::Open);
         let mut store = match crate::raw::open_within(home, STORE_WAIT) {
             Ok(store) => store,
             Err(e) => {
@@ -252,6 +284,7 @@ fn run_io(
             }
         };
         let mut written_back = 0;
+        clock.begin(Phase::Record);
         let recorded = record(
             home,
             &mut store,
@@ -314,15 +347,24 @@ fn run_io(
             _ => None,
         };
         if injecting || ask.is_some() {
-            fence = crate::dispatch::reading(home, READ_WAIT)
-                .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
-                .ok();
+            clock.begin(Phase::Fence);
+            // docs/hook-time.md: what a hook injects takes what remains of its time. With none
+            // left it injects nothing, as when the fence is not had: the record is written.
+            fence = if clock.over() {
+                eprintln!("oboete: nothing injected: the hook's time is over");
+                None
+            } else {
+                crate::dispatch::reading(home, clock.left(READ_WAIT))
+                    .inspect_err(|e| eprintln!("oboete: nothing injected: {e:#}"))
+                    .ok()
+            };
             if fence.is_none() {
                 took.give_back(home, agent, &session);
             }
         }
         // A manifest that cannot be read is no recording failure: the row is written.
         if injecting {
+            clock.begin(Phase::Manifest);
             if fence.is_some() {
                 // Pi's extension has no MCP client, so no work state tools: no section for it.
                 let work = agent != "pi";
@@ -343,6 +385,7 @@ fn run_io(
                 });
         }
         if let Some(ask) = ask.filter(|_| fence.is_some()) {
+            clock.begin(Phase::Prompt);
             asked = Some(!matches!(ask, Ask::Turn));
             prompted = prompt_point(
                 home,
@@ -352,6 +395,7 @@ fn run_io(
                 &settings,
                 ask,
                 manifest.as_ref(),
+                clock,
             )
             .unwrap_or_else(|e| {
                 eprintln!("oboete: nothing injected for the prompt: {e:#}");
@@ -363,6 +407,7 @@ fn run_io(
     if ended == 0 {
         ended = crate::failure::now(); // a failure: the operation ended when it returned
     }
+    clock.begin(Phase::After);
     let mut out = None;
     if tried {
         // The marker lives outside the stores, so it is written when they cannot be.
@@ -402,6 +447,7 @@ fn run_io(
                 }
             }
         }
+        clock.begin(Phase::Output);
         // The recording-failure line at every SessionStart the agent reads (also when this call
         // failed before it knew whether it injects), then the manifest in its fence.
         let failed = crate::failure::since(home).or_else(|| {
@@ -532,7 +578,7 @@ fn run_io(
         let text = match &grok_read {
             Some(read) => {
                 let room = NOTE_ROOM.saturating_sub(text.encode_utf16().count() + 1);
-                match file_notes(home, agent, read, &mut fence, room) {
+                match file_notes(home, agent, read, &mut fence, room, clock) {
                     Ok(Some(notes)) if text.is_empty() => notes,
                     Ok(Some(notes)) => format!("{text}\n{notes}"),
                     Ok(None) => text,
@@ -841,7 +887,12 @@ fn file_notes(
     payload: &Value,
     fence: &mut Option<std::fs::File>,
     room: usize,
+    clock: &Clock,
 ) -> Result<Option<String>> {
+    // docs/hook-time.md: a hook whose time is over gives no note, and the read goes on.
+    if clock.over() {
+        return Ok(None);
+    }
     // F8: a subagent's read gets none, as in claude-mem.
     if payload.get("agent_id").is_some() {
         return Ok(None);
@@ -857,7 +908,8 @@ fn file_notes(
     let settings = crate::capture::Settings::load(home)?;
     let session = session_label(payload);
     let (_, repo, _) = crate::capture::checkout(payload, &settings);
-    let store = crate::raw::open_within(home, Duration::from_secs(2))?;
+    // A note is injected, so its waits take what remains of the hook's time (docs/hook-time.md).
+    let store = crate::raw::open_within(home, clock.left(Duration::from_secs(2)))?;
     // F8, F15: none in a checkout nothing is recorded from, whatever cards or imported history
     // name its files from before.
     let list = store.capture_exclusions()?;
@@ -869,7 +921,7 @@ fn file_notes(
         return Ok(None);
     }
     // #439: held until what the notes considered is recorded and they are written (Codex on #446).
-    *fence = Some(crate::dispatch::reading(home, READ_WAIT)?);
+    *fence = Some(crate::dispatch::reading(home, clock.left(READ_WAIT))?);
     let k = rusqlite::Connection::open_with_flags(
         &knowledge,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1998,6 +2050,7 @@ struct Prompted {
 /// first tool call (`Ask`). knowledge.db is read only when one of them is on (the corrections need
 /// a shown set), and never written. A picked claim joins the shown set (OpenCode's does not: its
 /// plugin shows it for one turn). A harness envelope gets nothing.
+#[allow(clippy::too_many_arguments)]
 fn prompt_point(
     home: &Path,
     raw: &crate::raw::Raw,
@@ -2006,9 +2059,11 @@ fn prompt_point(
     settings: &crate::capture::Settings,
     ask: Ask,
     manifest: Option<&Start>,
+    clock: &Clock,
 ) -> Result<Option<Prompted>> {
     use crate::consumer::manifest::{body_line, fingerprint};
-    // G23: the prompt point's deadline runs from here, just after the hook's read fence.
+    // G23: the prompt point's deadline runs from here, just after the hook's read fence, and
+    // ends no later than the hook's time for what it injects (docs/hook-time.md).
     let started = std::time::Instant::now();
     let inject = config::inject(home)?;
     let label = session_label(labels);
@@ -2128,8 +2183,10 @@ fn prompt_point(
                 label,
                 labels,
                 settings,
-                deadline: started
-                    + Duration::from_millis(inject.per_prompt_wait_ms.try_into().unwrap_or(0)),
+                deadline: clock.no_later(
+                    started
+                        + Duration::from_millis(inject.per_prompt_wait_ms.try_into().unwrap_or(0)),
+                ),
             };
             prompt_picks(&asking, prompt, sendable, &not_shown, &was_shown)?
         }
@@ -3973,16 +4030,28 @@ mod tests {
     use rusqlite::Connection;
 
     fn hook(home: &Path, agent: &str, event: &str, payload: &Value) -> String {
+        hook_clocked(home, agent, event, payload, &Clock::starting_now())
+    }
+
+    /// `hook`, on `clock`: a hook whose time for what it injects is the test's to set.
+    fn hook_clocked(
+        home: &Path,
+        agent: &str,
+        event: &str,
+        payload: &Value,
+        clock: &Clock,
+    ) -> String {
         // Hooks run at once on several threads here: one holds the lock, the others go on.
         let _contending = crate::worker::contending();
         let _worker = crate::worker::lock(home).unwrap();
         let mut output = Vec::new();
-        run_io(
+        run_clocked(
             home,
             agent,
             event,
             payload.to_string().as_bytes(),
             &mut output,
+            clock,
         )
         .unwrap();
         String::from_utf8(output).unwrap().trim().to_owned()
@@ -4725,6 +4794,32 @@ mod tests {
         assert!(recorded(r.s.home.path(), "claude", "s9").is_empty());
     }
 
+    /// docs/hook-time.md: a read whose hook has no time left gets no note, and the read goes on;
+    /// the same read with time left gets it.
+    #[test]
+    fn a_read_whose_hook_has_no_time_left_gets_no_note() {
+        let mut r = Reads::new();
+        r.cards(
+            2,
+            json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+        );
+        let payload = json!({"session_id": "s9", "cwd": r.c, "tool_name": "Read",
+            "tool_input": {"file_path": format!("{}/src/a.rs", r.c)}});
+        let over = Clock::started_process(Duration::from_millis(4_200));
+        let home = r.s.home.path();
+        assert_eq!(
+            hook_clocked(home, "claude", "PreToolUse", &payload, &over),
+            ""
+        );
+        assert_eq!(over.begun(), ["parse", "lookup", "after"]);
+        // The note itself is not read past the hook's time, whatever came before it.
+        let mut fence = None;
+        let noted = file_notes(home, "claude", &payload, &mut fence, NOTE_ROOM, &over).unwrap();
+        assert_eq!(noted, None);
+        assert!(fence.is_none());
+        assert!(r.read("s9", "src/a.rs").contains("The parser was fixed"));
+    }
+
     /// Milestone 5 D5 (#439; Codex on #446): a forget registered while a read's notes are read
     /// waits until the call has recorded what they considered: the note is the one read before the
     /// commit.
@@ -5259,7 +5354,15 @@ mod tests {
             "tool_input": {"target_file": file}});
         let mut fence = None;
         assert_eq!(
-            file_notes(r.s.home.path(), "grok", &payload, &mut fence, 0).unwrap(),
+            file_notes(
+                r.s.home.path(),
+                "grok",
+                &payload,
+                &mut fence,
+                0,
+                &Clock::starting_now()
+            )
+            .unwrap(),
             None
         );
         drop(fence);
@@ -5617,6 +5720,36 @@ mod tests {
         assert!(took < Duration::from_millis(900), "{took:?}");
     }
 
+    /// docs/hook-time.md: a memory lookup waits no longer than the hook's time lasts. A forget
+    /// holds the stores back and the lookup's own wait is 30 s; the hook has 300 ms left, and
+    /// gives nothing well inside a second.
+    #[test]
+    fn a_memory_lookup_waits_within_the_hooks_time() {
+        let mut p = Prompts::new(false);
+        p.decided(1, "Deploys wait for the canary.", &[]);
+        p.s.run();
+        let checkout = Path::new(&p.c);
+        let notes = checkout.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(checkout.join(".claude")).unwrap();
+        let settings = json!({ "autoMemoryDirectory": notes });
+        std::fs::write(checkout.join(".claude/settings.json"), settings.to_string()).unwrap();
+        let file = notes.join("deploys.md");
+        std::fs::write(&file, "Deploys wait for the canary.\n").unwrap();
+        let read = json!({"tool_name": "Read", "tool_input": {"file_path": file}});
+        crate::memory_lookup::TEST_WAIT.set(Some(Duration::from_secs(30)));
+        let forget = crate::dispatch::exclusive_within(p.s.home.path(), Duration::from_secs(1));
+        let clock = Clock::started(Duration::ZERO, crate::hook_time::SLOW);
+        clock.inject_within(Some(crate::hook_time::MARGIN + Duration::from_millis(300)));
+        let started = std::time::Instant::now();
+        let got = p.hook_clocked("PreToolUse", "s1", read, &clock);
+        let took = started.elapsed();
+        drop(forget.unwrap());
+        crate::memory_lookup::TEST_WAIT.set(None);
+        assert_eq!(got, "");
+        assert!(took < Duration::from_millis(900), "{took:?}");
+    }
+
     /// N5 (CodeRabbit on #568): the wait holds the lookup's reads of the stores too: a restore
     /// holding raw.db's lock costs the lookup no more than its wait.
     #[test]
@@ -5751,6 +5884,11 @@ mod tests {
 
         /// `event` of `session` in the checkout through the hook: the context it injects, or "".
         fn hook(&self, event: &str, session: &str, extra: Value) -> String {
+            self.hook_clocked(event, session, extra, &Clock::starting_now())
+        }
+
+        /// `hook`, on `clock`: a hook whose time for what it injects is the test's to set.
+        fn hook_clocked(&self, event: &str, session: &str, extra: Value, clock: &Clock) -> String {
             let mut payload = json!({"session_id": session, "cwd": self.c});
             payload
                 .as_object_mut()
@@ -5758,12 +5896,13 @@ mod tests {
                 .extend(extra.as_object().unwrap().clone());
             let mut out = Vec::new();
             let input = payload.to_string();
-            run_io(
+            run_clocked(
                 self.s.home.path(),
                 "claude",
                 event,
                 input.as_bytes(),
                 &mut out,
+                clock,
             )
             .unwrap();
             let out = String::from_utf8(out).unwrap();
@@ -7041,6 +7180,114 @@ mod tests {
             p.hook("SessionStart", "b", json!({}))
                 .contains("Parser errors")
         );
+    }
+
+    /// A clock of Claude Code's prompt hook (5 s) with `left` of its time for what it injects.
+    fn prompt_clock(left: Duration) -> std::sync::Arc<Clock> {
+        let timeout = crate::setup::hook_timeout("claude", "UserPromptSubmit").unwrap();
+        let clock = Clock::started(
+            timeout - crate::hook_time::MARGIN - left,
+            crate::hook_time::SLOW,
+        );
+        clock.inject_within(Some(timeout));
+        clock
+    }
+
+    /// docs/hook-time.md: what a hook injects takes what remains of its agent's timeout. A prompt
+    /// whose hook has none left is recorded and given nothing, and a session's start shows no
+    /// manifest; with time left each gets its own.
+    #[test]
+    fn a_hook_with_no_time_left_records_and_injects_nothing() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "The output goes to stderr when we quit.", &[]);
+        p.s.run();
+        let ask = json!({"prompt": "where does the output go when we quit"});
+        let records = || p.s.raw.after(p.s.raw.device(), 0, 1_000).unwrap().len();
+        let before = records();
+        // A hook that is its process takes Claude Code's 5 s for a prompt by itself: 4.2 s after
+        // its start, the margin kept, its time is over.
+        let over = Clock::started_process(Duration::from_millis(4_200));
+        assert!(!over.over());
+        assert_eq!(
+            p.hook_clocked("UserPromptSubmit", "a", ask.clone(), &over),
+            ""
+        );
+        assert!(over.over());
+        // What it did, marked as it went: no manifest and no prompt point.
+        assert_eq!(
+            over.begun(),
+            [
+                "parse", "settings", "open", "record", "fence", "after", "output"
+            ]
+        );
+        let after_prompt = records();
+        assert!(after_prompt > before);
+        // A start's hook has 10 s: 9.5 s after its start it shows nothing either.
+        let over = Clock::started_process(Duration::from_millis(9_500));
+        let shown = p.hook_clocked("SessionStart", "b", json!({}), &over);
+        assert!(!shown.contains("The output goes to stderr"), "{shown}");
+        assert!(records() > after_prompt);
+        // With its time before it, the prompt takes its block and the start its manifest.
+        let ample = Clock::started(Duration::ZERO, crate::hook_time::SLOW);
+        ample.inject_within(Some(Duration::from_secs(600)));
+        let text = p.hook_clocked("UserPromptSubmit", "c", ask, &ample);
+        assert!(
+            text.contains("decision: The output goes to stderr when we quit."),
+            "{text}"
+        );
+        assert!(ample.begun().contains(&"prompt"), "{:?}", ample.begun());
+        let shown = p.hook_clocked("SessionStart", "d", json!({}), &ample);
+        assert!(shown.contains("The output goes to stderr"), "{shown}");
+        assert!(ample.begun().contains(&"manifest"), "{:?}", ample.begun());
+    }
+
+    /// docs/hook-time.md: the read fence is waited for no longer than the hook's time lasts. A
+    /// forget's write holds it; the hook has 300 ms left, and returns well inside `READ_WAIT`.
+    #[test]
+    fn the_read_fence_is_waited_for_within_the_hooks_time() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "Parser errors go to stderr.", &[]);
+        p.s.run();
+        let held = crate::dispatch::exclusive(p.s.home.path()).unwrap();
+        let clock = prompt_clock(Duration::from_millis(300));
+        let start = std::time::Instant::now();
+        let ask = json!({"prompt": "where do parser errors go"});
+        assert_eq!(p.hook_clocked("UserPromptSubmit", "a", ask, &clock), "");
+        assert!(
+            start.elapsed() < READ_WAIT - Duration::from_millis(100),
+            "{:?}",
+            start.elapsed()
+        );
+        drop(held);
+    }
+
+    /// docs/hook-time.md: the prompt point's wait for the resident viewer ends with the hook's
+    /// time where that comes first. The viewer answers at 2.5 s and `per_prompt_wait_ms` would
+    /// wait 3 s for it; the hook has 800 ms left, and the prompt takes the words side.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_prompt_points_wait_ends_with_the_hooks_time() {
+        let mut p = Prompts::new(true);
+        p.decided(1, "The output goes to stderr when we quit.", &[]);
+        let (card, _) = work(&mut p, 2, "Streams flush on exit", "", "Flush the streams");
+        let near = json!([{"key": card, "kind": "card", "cosine": 0.9}]);
+        let r = Resident::start(p.s.home.path(), 3_000, near, Duration::from_millis(2_500));
+        let clock = prompt_clock(Duration::from_millis(800));
+        let start = std::time::Instant::now();
+        let ask = json!({"prompt": "where does the output go when we quit"});
+        let text = p.hook_clocked("UserPromptSubmit", "s1", ask, &clock);
+        assert!(
+            start.elapsed() < Duration::from_millis(2_000),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            text.contains("decision: The output goes to stderr when we quit."),
+            "{text}"
+        );
+        assert!(!text.contains(&card), "{text}");
+        assert_eq!(r.asked().len(), 1);
+        assert_eq!(last_side(p.s.home.path()).unwrap().1, "late");
     }
 
     /// Codex on #446: a one-shot injection point (Grok's first tool call, and its first after a
