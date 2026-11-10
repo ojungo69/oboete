@@ -1321,6 +1321,9 @@ impl Viewer {
     }
 
     fn serve(&self, mut stream: TcpStream) {
+        // W1: this request's texts are checked with one clone of each rule's regex, let go when
+        // the request is answered (`redact::Warm`).
+        let _warm = crate::redact::warm();
         self.requests.fetch_add(1, Ordering::SeqCst);
         let deadline = Instant::now() + REQUEST_TIME;
         let mut buf = Vec::with_capacity(2048);

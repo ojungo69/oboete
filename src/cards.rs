@@ -1154,11 +1154,17 @@ mod tests {
                     && !plan.iter().any(|p| p.contains("TEMP B-TREE FOR ORDER BY")),
                 "{repo} {session} {before}: {plan:?}"
             );
-            // Every repository's page sorts nothing at all, and one after a card seeks to it.
+            // Every repository's page sorts nothing at all.
             if !repo && !session {
                 assert!(!plan.iter().any(|p| p.contains("TEMP B-TREE")), "{plan:?}");
-                assert_eq!(plan[0].contains("SEARCH cards"), before, "{plan:?}");
             }
+            // A page after a card seeks: every repository's to the card, on its four columns;
+            // one repository's and one session's to the card's `ts`, where their indexes end.
+            let seek = match (repo, session) {
+                (false, false) => "((ts,device,op_seq,n)<(?,?,?,?))",
+                _ => " AND ts<?)",
+            };
+            assert_eq!(plan[0].contains(seek), before, "{plan:?}");
         }
         for (repo, older) in [(false, true), (false, false), (true, true), (true, false)] {
             let plan = plan(&around_sql(&shown, repo, older));
