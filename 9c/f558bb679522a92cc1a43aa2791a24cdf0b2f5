@@ -1,0 +1,31 @@
+docs/milestone-1.md
+  s_b837d726e3a0bf::t_3f6f7afae54eff 15
+CLAUDE.md
+  s_b837d726e3a0bf::t_eaa256ff4990c4 6-7
+docs/claude-mem-parity.md
+  s_b837d726e3a0bf::t_205bb569ebc771 12,50,136-140,303-313,375
+docs/milestone-4-plan.md
+  s_b837d726e3a0bf::t_048330d6ef1679 110
+docs/milestone-4.md
+  s_b837d726e3a0bf::t_522f7c2415fa60 62
+docs/session-start.md
+  s_b837d726e3a0bf::t_8a629964db2742 58
+docs/spec.md
+  s_b837d726e3a0bf::t_8e8811d7933211 114-124,329,467,1203,1216,1223,1592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9cf558bb679522a92cc1a43aa2791a24cdf0b2f5",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
