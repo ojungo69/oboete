@@ -81,9 +81,10 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
 /// `work_state_entries` and v67 lets the sync ledgers name that kind (13.40.0); v68 (15.0.2) adds
 /// `observation_files`, an index of each observation's `files_read` and `files_modified`, which
 /// the import reads from the observation itself. v69 to v71 (15.7.0) and v72 (15.12.0) add the
-/// tables of kept images and their links to observations; v73 and v74 (15.12.0) add the records
-/// of deleted sessions and the triggers that keep a deleted session's earlier content out. The
-/// import reads none of them.
+/// tables of kept images and their links to observations; v73 and v74 (15.12.0) add the tool
+/// uses already stored (against a transcript read twice), the records of deleted sessions and
+/// the triggers that keep a deleted session's earlier content out. The import reads none of
+/// them.
 const NEWEST_SCHEMA: i64 = 74;
 
 /// The plain import, as the tests run it.

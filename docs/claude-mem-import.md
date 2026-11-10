@@ -34,11 +34,12 @@ claude-mem's lookup by file; the import reads those lists from the observation i
 from the index. v69 to v71 (15.7.0) and v72 (15.12.0) add the tables of kept images
 (`media_events`, `media_attachments` and their links to observations and events): an image is a
 file under claude-mem's `media-v1` folder, and an observation's text is as it was. The import
-reads neither the tables nor the files, so claude-mem's kept images stay where they are. v73 and
-v74 (15.12.0) add the records of deleted sessions (`deleted_content_sessions`,
-`deleted_memory_sessions`, `committed_observation_tool_uses`) and triggers that keep a deleted
-session's earlier content from coming back; a deleted session's rows are gone from the tables the
-import reads, and the import reads none of the three. A database whose `schema_versions` names a
+reads neither the tables nor the files, so claude-mem's kept images stay where they are. v73
+(15.12.0) adds `committed_observation_tool_uses`, the tool uses whose observations were stored,
+so a transcript read again after a restart stores none twice, and the records of deleted sessions
+(`deleted_content_sessions`, `deleted_memory_sessions`); v74 (15.12.0) adds triggers that keep a
+deleted session's earlier content from coming back. A deleted session's rows are gone from the
+tables the import reads, and the import reads none of the three. A database whose `schema_versions` names a
 version above 74 is refused, with nothing imported: a newer claude-mem may keep what this import
 would leave behind. The newest version is the highest one named, wherever its row is: the media
 migration runs after the others, so v72 is stamped after v74. The message names both versions.
