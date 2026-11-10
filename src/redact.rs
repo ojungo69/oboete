@@ -7,6 +7,7 @@
 //! is anchored as a whole (gitleaks#2293). A copy taken again from upstream must keep it.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
@@ -186,7 +187,7 @@ impl Rules {
             }
             extra.push(Extra {
                 id,
-                regex,
+                regex: Regex::clone(&regex),
                 keywords: rule.keywords.iter().map(|k| k.to_lowercase()).collect(),
                 entropy: rule.entropy,
                 secret_group: rule.secret_group,
@@ -399,10 +400,86 @@ impl Compiled {
 static COMPILED: std::sync::LazyLock<Compiled> =
     std::sync::LazyLock::new(|| Compiled::new(COMPILED_CAP));
 
+/// One thread's regexes while a `Warm` lives: one clone of each regex the thread has used. A clone
+/// shares the compiled program and has a cache of its own, which a search fills as it goes. Taken
+/// anew for every use, as `Compiled::get` hands them out, each use built that cache from nothing
+/// (W1: a fifth of a My Work read's CPU); kept, a regex's cache is built once for the thread's
+/// texts.
+#[derive(Default)]
+struct Warmed {
+    /// The `Warm`s alive on this thread.
+    held: usize,
+    regexes: HashMap<String, Option<Rc<Regex>>>,
+    /// The clones taken, which the tests count.
+    taken: usize,
+}
+
+impl Warmed {
+    /// `pattern`'s regex as this thread keeps it, taken with `take` on its first use; `None` is a
+    /// pattern that does not compile, and nothing else. Past `cap` the map starts again, as the
+    /// process's does.
+    fn get(
+        &mut self,
+        pattern: &str,
+        cap: usize,
+        take: impl FnOnce() -> Option<Regex>,
+    ) -> Option<Rc<Regex>> {
+        if let Some(kept) = self.regexes.get(pattern) {
+            return kept.clone();
+        }
+        if self.regexes.len() >= cap {
+            self.regexes.clear();
+        }
+        self.taken += 1;
+        let regex = take().map(Rc::new);
+        self.regexes.insert(pattern.to_owned(), regex.clone());
+        regex
+    }
+}
+
+thread_local! {
+    static WARM: std::cell::RefCell<Warmed> = std::cell::RefCell::default();
+}
+
+/// While one lives, its thread keeps the regexes it uses (`Warmed`), and the last one to go takes
+/// them with it: what one request scans, not what a resident thread has ever scanned.
+#[must_use = "the regexes are kept only while this lives"]
+pub(crate) struct Warm(std::marker::PhantomData<*const ()>);
+
+/// A `Warm` for the thread that calls it.
+pub(crate) fn warm() -> Warm {
+    // A thread whose locals are gone keeps nothing, and `compiled` clones for it as before.
+    let _ = WARM.try_with(|w| w.borrow_mut().held += 1);
+    Warm(std::marker::PhantomData)
+}
+
+impl Drop for Warm {
+    fn drop(&mut self) {
+        let _ = WARM.try_with(|w| {
+            let mut w = w.borrow_mut();
+            w.held = w.held.saturating_sub(1);
+            if w.held == 0 {
+                w.regexes = HashMap::new();
+            }
+        });
+    }
+}
+
 /// A pattern's regex, compiled on first use and kept until the map starts again at
-/// `COMPILED_CAP` (a scan compiles every rule whose keyword hits): `Compiled::get`.
-fn compiled(pattern: &str) -> Option<Regex> {
-    COMPILED.get(pattern)
+/// `COMPILED_CAP` (a scan compiles every rule whose keyword hits): `Compiled::get`. While a `Warm`
+/// lives on this thread it is the thread's own clone, the same one at every use; without one, or
+/// on a thread whose locals are gone, it is a clone for this use, as it was before `Warm`. `None`
+/// is a pattern that does not compile, on either path.
+fn compiled(pattern: &str) -> Option<Rc<Regex>> {
+    let kept = WARM.try_with(|w| {
+        let mut w = w.borrow_mut();
+        let held = w.held > 0;
+        held.then(|| w.get(pattern, COMPILED_CAP, || COMPILED.get(pattern)))
+    });
+    match kept {
+        Ok(Some(regex)) => regex,
+        _ => COMPILED.get(pattern).map(Rc::new),
+    }
 }
 
 /// The one gate for text that leaves this machine: summary providers now; embeddings, sync and
@@ -1705,6 +1782,89 @@ mod tests {
         assert_eq!(c.compiles.load(Ordering::Relaxed), 2);
         // The process's own map is the one `compiled` reads.
         assert!(compiled(pattern).unwrap().is_match("m4-one-map-789"));
+    }
+
+    /// W1: while a `Warm` lives a thread takes one clone of a regex and uses it for every text;
+    /// without one each use takes its own, as before. A `Warm` inside another ends nothing, and
+    /// the last to go takes the thread's regexes with it.
+    #[test]
+    fn a_thread_keeps_one_clone_of_a_regex_while_a_warm_lives() {
+        let kept = || WARM.with(|w| (w.borrow().regexes.len(), w.borrow().taken));
+        let pattern = "w1-warm-[0-9]{3}";
+        assert!(compiled(pattern).unwrap().is_match("w1-warm-123"));
+        assert_eq!(kept(), (0, 0), "nothing is kept without a Warm");
+        let outer = warm();
+        for text in ["w1-warm-123", "w1-warm-456"] {
+            assert!(compiled(pattern).unwrap().is_match(text));
+        }
+        assert_eq!(kept(), (1, 1), "one clone for both uses");
+        let inner = warm();
+        assert!(compiled(pattern).unwrap().is_match("w1-warm-789"));
+        drop(inner);
+        assert_eq!(kept(), (1, 1), "a Warm inside another ends nothing");
+        // A pattern that does not compile is asked for once, and stays None.
+        assert!(compiled("(w1-unclosed").is_none() && compiled("(w1-unclosed").is_none());
+        assert_eq!(kept(), (2, 2));
+        drop(outer);
+        assert_eq!(kept().0, 0, "the last Warm takes the regexes with it");
+        assert!(compiled(pattern).unwrap().is_match("w1-warm-123"));
+        assert_eq!(kept(), (0, 2), "and nothing is kept after it");
+    }
+
+    /// W1: a thread's map starts again past its cap, and a regex it still holds is not taken
+    /// again.
+    #[test]
+    fn a_threads_regexes_start_again_past_their_cap() {
+        let mut w = Warmed::default();
+        let take = |p: &'static str| move || Regex::new(p).ok();
+        assert!(w.get("a1", 2, take("a1")).is_some() && w.get("b2", 2, take("b2")).is_some());
+        assert!(
+            w.get("a1", 2, || panic!("a kept regex is not taken again"))
+                .is_some()
+        );
+        assert_eq!((w.regexes.len(), w.taken), (2, 2));
+        assert!(w.get("c3", 2, take("c3")).unwrap().is_match("c3"));
+        assert_eq!((w.regexes.len(), w.taken), (1, 3));
+        assert!(w.get("a1", 2, take("a1")).unwrap().is_match("a1"));
+        assert_eq!((w.regexes.len(), w.taken), (2, 4));
+        // What does not compile is kept as None, not asked for again.
+        assert!(w.get("(", 9, || None).is_none());
+        assert!(w.get("(", 9, || panic!("asked again")).is_none());
+    }
+
+    /// W1: a secret is masked with a `Warm` as without one: on the thread that made it, on
+    /// another thread with its own, and right after a thread's map started again.
+    #[test]
+    fn a_secret_is_masked_with_a_warm_as_without() {
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: secret scanners
+        let text = format!("token {key} ok");
+        let plain = redact(&text);
+        assert!(!plain.contains(&key) && plain.contains(MASK));
+        let _warm = warm();
+        assert_eq!(redact(&text), plain);
+        assert_eq!(redact(&text), plain, "the kept regex masks again");
+        assert!(
+            WARM.with(|w| w.borrow().regexes.len()) > 0,
+            "this thread kept what it used"
+        );
+        let other = std::thread::spawn({
+            let (text, plain) = (text.clone(), plain.clone());
+            move || {
+                let _warm = warm();
+                redact(&text) == plain && redact(&text) == plain
+            }
+        });
+        assert!(other.join().unwrap(), "another thread, with its own Warm");
+        // The map at its cap: the next regex starts it again, and the secret is masked all the same.
+        WARM.with(|w| {
+            let mut w = w.borrow_mut();
+            w.regexes.clear();
+            for i in 0..COMPILED_CAP {
+                w.regexes.insert(format!("w1-fill-{i}"), None);
+            }
+        });
+        assert_eq!(redact(&text), plain);
+        assert!(WARM.with(|w| w.borrow().regexes.len()) < COMPILED_CAP);
     }
 
     /// M4: past its cap the map starts again, so a process whose rules change does not keep every

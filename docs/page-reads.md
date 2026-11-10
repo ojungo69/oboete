@@ -214,3 +214,49 @@ Test: `cards::tests::the_newest_cards_are_read_in_the_order_of_an_index` (every 
 page's statement and of `around`'s is read through the index in its order, none sorts more than
 the cards of one `ts`, every repository's page sorts nothing, and a page after a card seeks to
 it).
+
+## W1: a request keeps one clone of each rule's regex
+
+The same read, by its CPU: a profile of the viewer over six My Work reads (7,120 samples) put a
+fifth of it, 20.6%, in the regex crate, most of that in building a lazy DFA's states
+(`determinize::next`, `epsilon_closure`, `add_nfa_states`).
+
+`redact::Compiled::get` hands out a clone of the cached `Regex` for every use: `spans_in` once for
+each rule whose keyword is in the text, `allows` once for each allowlist regex of each candidate.
+A clone shares the compiled program and has a cache pool of its own. So every use allocated a
+cache, built the DFA's states from nothing, searched and freed it. #888 made a pattern compile
+once in the process; the cache was still thrown away at every use.
+
+While a `redact::Warm` lives on a thread, that thread keeps one clone of each regex it uses and
+uses it for every text; the last `Warm` to go takes them with it. The viewer serves a request on
+a thread of its own, and `serve` holds a `Warm` for it, so a request's regexes are built once for
+all of its texts and are gone when it is answered. A thread with no `Warm` gets a clone for each
+use, as before.
+
+What was weighed against it, on a harness apart from oboete (regex 1.13.1, the bundled rules,
+176,987 lines of this repository as the texts, 37,667 rule uses):
+
+| How a use gets its regex | Time | Memory kept after the run |
+|---|---|---|
+| a clone for each use (before) | 0.46 s | +6 MB |
+| one regex shared by every thread | 0.11 to 0.18 s | +10 MB on one thread, +39 MB after 16, +60 MB after 64 |
+| one clone a thread, dropped with the thread | 0.11 to 0.14 s | +10 MB while the thread lives |
+
+One regex for every thread keeps a cache for each of its pool's stacks, for as long as the process
+lives; a resident process cannot take that. A clone kept for a request costs nothing after it.
+
+On this PC's store, a My Work read inside the process, with a `Warm` and without, three of each
+in turn: 479 to 512 ms against 550 to 575 ms. The requests' answers went from 108-123 ms to
+55-62 ms; the other steps did not move. That is 11% of the read, not the 20% of the profile: the
+rest of the regex share is the module's own regexes on the prompts' texts.
+
+Not given a `Warm`: a hook (three replays of the 1,000-event fixture with one and without showed
+no difference: a hook's process compiles its rules at each start, which is its cost), the MCP
+server's calls and the worker's passes (not measured).
+
+Tests: `redact::tests::a_thread_keeps_one_clone_of_a_regex_while_a_warm_lives` (nothing kept
+without a `Warm`; one clone for every use with one; one inside another ends nothing; the last to
+go takes them; what does not compile is asked for once),
+`redact::tests::a_threads_regexes_start_again_past_their_cap`,
+`redact::tests::a_secret_is_masked_with_a_warm_as_without` (on the thread, on another thread, and
+right after the thread's map started again).
