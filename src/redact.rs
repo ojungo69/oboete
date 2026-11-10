@@ -344,11 +344,11 @@ fn short_hash_full(s: &str) -> String {
 /// rules change keeps the regexes of the rules it uses, not of every rule it has seen.
 const COMPILED_CAP: usize = 1_024;
 
-/// The regexes compiled so far, one cell for each pattern, for every thread of the process: the
-/// viewer serves each connection on a thread of its own, which compiled them all again when each
-/// thread had its own map (M4). A hit takes the read lock only, to clone its cell; a pattern's
-/// cell is compiled once, outside the lock, and a thread that asks for it meanwhile waits for that
-/// cell alone.
+/// The regexes compiled so far, one map shared by every thread of the process, with one cell for
+/// each pattern. The viewer serves each connection on a thread of its own: before M4 each thread
+/// kept a map of its own and compiled the rules again; now every connection reuses them. A hit
+/// takes the read lock only, to clone its cell; a pattern's cell is compiled once, outside the
+/// lock, and a thread that asks for it meanwhile waits for that cell alone.
 struct Compiled {
     cells: std::sync::RwLock<HashMap<String, std::sync::Arc<OnceLock<Option<Regex>>>>>,
     cap: usize,
