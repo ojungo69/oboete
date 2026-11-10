@@ -1,0 +1,25 @@
+src/mcp.rs
+  s_b837d726e3a0bf::t_b8802f8b8347d5 880-882
+docs/session-start.md
+  s_b837d726e3a0bf::t_2f0cc493163ef9 55-58
+src/consumer/manifest.rs
+  s_b837d726e3a0bf::t_68008b59f78953 197-201,346-349,358,388,1613-1620,2149-2150,2225-2230,2255,2355-2361,3013
+src/view.rs
+  s_b837d726e3a0bf::t_ba87ee37401f7d 8172-8174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4a9aa78fbccb25364132db2a8a72f7142387b9e9",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
