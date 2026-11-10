@@ -183,7 +183,7 @@ pub(crate) fn open_report(
     }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
-    crate::crash::arm(&conn);
+    crate::crash::arm(&mut conn);
     crate::db::wal_until(&conn, "NORMAL", deadline)?;
     if crate::db::ensure_schema_until(&conn, SCHEMA, deadline).context("providers schema")? {
         committed("stores_changed");

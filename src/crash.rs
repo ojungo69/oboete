@@ -10,7 +10,7 @@ thread_local! {
 }
 
 /// Counts this connection's commits, and rolls them back once the crash point is reached.
-pub fn arm(conn: &Connection) {
+pub fn arm(conn: &mut Connection) {
     conn.commit_hook(Some(|| {
         let n = COMMITS.get() + 1;
         COMMITS.set(n);
