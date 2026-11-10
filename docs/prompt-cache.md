@@ -37,7 +37,10 @@ Why:
    `MY_WORK_SYSTEM` and the schema) and codex's `model_instructions_file`. The turn on stdin starts
    at that sentence; its `@` are read as before. When codex's file cannot be named (a path that is
    not UTF-8), codex keeps its own instructions and the turn the whole prompt. An unfenced prompt
-   goes as before.
+   goes as before. Live on 2026-11-10, claude's curator read 2,177 tokens from its cache in a call
+   (714 before), and its summary up to 981 (none before). codex's call was refused by the isolation
+   gate before anything was sent (a codex feature oboete has not reviewed is on), as on this PC
+   all week: its part is checked by the unit tests only.
 2. **OpenAI's own API**, for its GPT-6 models (`config::gpt6`), gets a fenced prompt as two text
    parts of the user message: the instructions, with `prompt_cache_breakpoint: {"mode":
    "explicit"}`, then the rest, which is neither cached nor written; an entry's own
@@ -86,11 +89,13 @@ sqlite3 -readonly ~/.oboete/providers.db "SELECT provider, role, COUNT(*), SUM(p
 `prompt_tokens` counts every input token, those written to and read from the cache too
 (`provider::usage_anthropic`; OpenAI's `prompt_tokens`).
 
-The CLIs now read the instructions as system text: compare each entry's outcomes with the week
-before the install too, the answers `curate::check` refused (`unanchored`, `shape`, `invalid`)
-among them:
+The CLIs now read the instructions as system text: compare each entry's outcomes in the week
+after the install with the week before, the answers `curate::check` refused (`unanchored`,
+`shape`, `prose`) and those that did not parse (`invalid`) among them:
 
 ```sh
-sqlite3 -readonly ~/.oboete/providers.db "SELECT provider, role, outcome, COUNT(*)
-  FROM provider_calls WHERE ts > <the install, unix ms> GROUP BY 1, 2, 3;"
+sqlite3 -readonly ~/.oboete/providers.db "SELECT provider, role, outcome,
+  SUM(ts < <the install, unix ms>), SUM(ts >= <the install, unix ms>)
+  FROM provider_calls WHERE ts >= <the install, unix ms> - 7 * 86400000
+  AND ts < <the install, unix ms> + 7 * 86400000 GROUP BY 1, 2, 3;"
 ```
