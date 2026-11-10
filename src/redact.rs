@@ -6,7 +6,6 @@
 //! One line of the file differs from upstream: the global allowlist's `true`, `false` or `null`
 //! is anchored as a whole (gitleaks#2293). A copy taken again from upstream must keep it.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -340,27 +339,70 @@ fn short_hash_full(s: &str) -> String {
         .collect()
 }
 
-thread_local! {
-    static COMPILED: RefCell<HashMap<String, Regex>> = RefCell::new(HashMap::new());
+/// The most patterns the process keeps compiled: about three times the bundled rules' and
+/// allowlists', more than a home's rules take. Past it the map starts again, so a process whose
+/// rules change keeps the regexes of the rules it uses, not of every rule it has seen.
+const COMPILED_CAP: usize = 1_024;
+
+/// The regexes compiled so far, one map shared by every thread of the process, with one cell for
+/// each pattern. The viewer serves each connection on a thread of its own: before M4 each thread
+/// kept a map of its own and compiled the rules again; now every connection reuses them. A hit
+/// takes the read lock only, to clone its cell; a pattern's cell is compiled once, outside the
+/// lock, and a thread that asks for it meanwhile waits for that cell alone.
+struct Compiled {
+    cells: std::sync::RwLock<HashMap<String, std::sync::Arc<OnceLock<Option<Regex>>>>>,
+    cap: usize,
+    /// The compiles made, which the tests count.
+    compiles: std::sync::atomic::AtomicUsize,
 }
 
-/// Regexes are compiled on first use and kept for the process (a hook compiles a handful at most).
-/// ASCII mode first: that is what gitleaks' Go RE2 means by `\w`/`\s`/`\b`, and it compiles
-/// ~30x faster than Unicode mode for the generic rules (measured: 90 ms vs 3 ms, debug build).
-/// The few patterns ASCII mode rejects (negated classes that could match non-UTF-8) fall back.
-fn compiled(pattern: &str) -> Option<Regex> {
-    COMPILED.with(|c| {
-        if let Some(re) = c.borrow().get(pattern) {
-            return Some(re.clone());
+impl Compiled {
+    fn new(cap: usize) -> Self {
+        Self {
+            cells: Default::default(),
+            cap,
+            compiles: Default::default(),
         }
-        let re = regex::RegexBuilder::new(pattern)
-            .unicode(false)
-            .build()
-            .or_else(|_| Regex::new(pattern))
-            .ok()?;
-        c.borrow_mut().insert(pattern.to_string(), re.clone());
-        Some(re)
-    })
+    }
+
+    /// ASCII mode first: that is what gitleaks' Go RE2 means by `\w`/`\s`/`\b`, and it compiles
+    /// ~30x faster than Unicode mode for the generic rules (measured: 90 ms vs 3 ms, debug build).
+    /// The few patterns ASCII mode rejects (negated classes that could match non-UTF-8) fall back;
+    /// a pattern neither compiles is kept as `None`, not compiled again.
+    fn get(&self, pattern: &str) -> Option<Regex> {
+        use std::sync::PoisonError;
+        let found = (self.cells.read().unwrap_or_else(PoisonError::into_inner))
+            .get(pattern)
+            .cloned();
+        let cell = match found {
+            Some(cell) => cell,
+            None => {
+                let mut cells = self.cells.write().unwrap_or_else(PoisonError::into_inner);
+                if !cells.contains_key(pattern) && cells.len() >= self.cap {
+                    cells.clear();
+                }
+                std::sync::Arc::clone(cells.entry(pattern.to_owned()).or_default())
+            }
+        };
+        cell.get_or_init(|| {
+            (self.compiles).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            regex::RegexBuilder::new(pattern)
+                .unicode(false)
+                .build()
+                .or_else(|_| Regex::new(pattern))
+                .ok()
+        })
+        .clone()
+    }
+}
+
+static COMPILED: std::sync::LazyLock<Compiled> =
+    std::sync::LazyLock::new(|| Compiled::new(COMPILED_CAP));
+
+/// A pattern's regex, compiled on first use and kept for the process (a hook compiles a handful at
+/// most): `Compiled::get`.
+fn compiled(pattern: &str) -> Option<Regex> {
+    COMPILED.get(pattern)
 }
 
 /// The one gate for text that leaves this machine: summary providers now; embeddings, sync and
@@ -1641,6 +1683,46 @@ fn shannon_entropy(s: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4: a pattern is compiled once for every thread of the process, as the viewer's, one per
+    /// connection, read the same rules: by threads that ask for it at once, and by one that asks
+    /// later. A pattern that does not compile is not compiled again.
+    #[test]
+    fn a_pattern_is_compiled_once_for_every_thread() {
+        use std::sync::atomic::Ordering;
+        let c = Compiled::new(16);
+        let pattern = "m4-one-map-[0-9]{3}";
+        std::thread::scope(|s| {
+            let asked: Vec<_> = (0..8).map(|_| s.spawn(|| c.get(pattern))).collect();
+            for ask in asked {
+                assert!(ask.join().unwrap().unwrap().is_match("m4-one-map-123"));
+            }
+        });
+        let later = std::thread::scope(|s| s.spawn(|| c.get(pattern)).join().unwrap());
+        assert!(later.unwrap().is_match("m4-one-map-456"));
+        assert_eq!(c.compiles.load(Ordering::Relaxed), 1);
+        assert!(c.get("(unclosed").is_none() && c.get("(unclosed").is_none());
+        assert_eq!(c.compiles.load(Ordering::Relaxed), 2);
+        // The process's own map is the one `compiled` reads.
+        assert!(compiled(pattern).unwrap().is_match("m4-one-map-789"));
+    }
+
+    /// M4: past its cap the map starts again, so a process whose rules change does not keep every
+    /// regex it has compiled; a pattern it still holds is not compiled again.
+    #[test]
+    fn the_compiled_map_keeps_at_most_its_cap() {
+        use std::sync::atomic::Ordering;
+        let c = Compiled::new(2);
+        let len = |c: &Compiled| c.cells.read().unwrap().len();
+        assert!(c.get("a1").is_some() && c.get("b2").is_some());
+        assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (2, 2));
+        assert!(c.get("a1").is_some());
+        assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (2, 2));
+        assert!(c.get("c3").is_some());
+        assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (1, 3));
+        assert!(c.get("a1").is_some());
+        assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (2, 4));
+    }
 
     #[test]
     fn every_bundled_regex_compiles() {
