@@ -127,5 +127,30 @@ the larger size applies to a backlog only. An entry whose request limit a grown 
 skipped for it (`too_big`), as for any window over it. The replay's scripts and outputs are kept
 outside the repository (`../oboete-work/d57/parity/`).
 
-Next: the wait and calls a day measured again on this PC a week after release, against the figures
-above.
+Measured again on 2026-11-11, on this PC's live windows of 2026-11-04 to 11-10, with the script
+and the definitions of this section's first figures (`lag-fixed.py`, read-only, counts only). The
+days hold whichever binary was installed, the grown window among them from its release on.
+
+| | 2026-10-26 to 11-04 | 2026-11-04 to 11-10 |
+|---|---|---|
+| tool records | 26,214 | 32,495 |
+| curated windows | 13,340 | 9,574 |
+| a tool call's wait before its window's first call, p50 | 281 s | 172 s |
+| the same, p75 | 1,731 s | 743 s |
+| the same, p90 | 12,991 s | 2,895 s |
+| from that call's start to the window's op, p50 and p90 | 10.5 s, 37.9 s | 8.1 s, 22.9 s |
+| of the wait: behind a call of its own session | 35% | 37% |
+| of the wait: behind other sessions' calls only | 34% | 4% |
+| of the wait: with no call out | 31% | 59% |
+| a window's op to the next call's start, p50 and p90 | 2.3 s, 14.9 s | 6.4 s, 31.1 s |
+
+One window now holds 3.4 tool records where it held 2.0, so the same work took fewer calls, and
+the wait behind other sessions' calls is nearly gone: that is what the larger window was for. The
+wait before the first call fell by two fifths at the median and to under a quarter at the ninth
+decile.
+
+It is still minutes at the median, not the replay's 29 s. The replay was a model of the queue
+with a call's time drawn from the chain's; these are the live windows, where three fifths of the
+wait is now with no call out at all. Where that time goes is not broken down here: a window not
+yet cut, an entry stopped or cooling down, or the worker at its other work (a window's op to the
+next call took 6.4 s where it took 2.3 s). It is the next thing to measure for row 54.
