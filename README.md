@@ -18,7 +18,8 @@
 **oboete** (覚えて, Japanese for "remember this") is one Rust binary that records what your coding
 agents do, keeps it in SQLite files on your own disk, and gives the next session what the last one
 left behind. You can search it from the terminal, from the agent itself over MCP, or on a local web
-page. Nothing is sent anywhere until you turn on AI summaries or an online embedder.
+page. oboete itself sends nothing anywhere until you turn on AI summaries or an online embedder;
+what it hands to an agent becomes part of that agent's own conversation.
 
 It works with **Claude Code**, **Codex** and **Grok Build**, the three the maintainer runs every
 day. Adapters for Cursor, OpenCode, Antigravity and Pi are built and tested, and have not been used
@@ -175,6 +176,11 @@ All agents write to the same store, so what Codex did yesterday is there for Cla
 
 - **Everything, by default.** A fresh install calls no AI and sends nothing: summaries are off and
   search is full-text. oboete sends no telemetry.
+- **What is handed to an agent goes where the agent goes.** The session start, the notes and what
+  the agent reads through the MCP tools become part of that agent's conversation, and so reach the
+  service that agent talks to, as the rest of your work with it does. To keep something out of
+  it: `<private>…</private>` in a prompt is never stored, `oboete capture exclude` records nothing
+  of a repository or folder, and the hand-over at session start can be switched off in Settings.
 - **Your data is files you own.** `~/.oboete` holds SQLite databases (`raw.db` for the record,
   `knowledge.db` for what is made from it). `--home <dir>` or `OBOETE_HOME` puts them elsewhere:
   give the same value to `setup` and to every later command.
@@ -345,6 +351,9 @@ oboete setup all --remove   # take oboete's entries out of every agent it finds
 cargo uninstall oboete
 rm -rf ~/.oboete            # your recorded memory: only if you want it gone
 ```
+
+If you gave another folder with `--home` or `OBOETE_HOME`, that folder holds your memory, not
+`~/.oboete`.
 
 What these leave behind:
 
