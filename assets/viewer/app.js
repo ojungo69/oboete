@@ -335,6 +335,10 @@ const storedView = recall('oboete-view', 'my_work');
 let view = !firstMyWork && VIEWS.includes(storedView) ? storedView : 'my_work';
 let currentRepo = '';
 let reposLoaded = false;
+// A poll left the list unread under a view that reads none: the next view that reads it reads it
+// again (`show`). And the last read of the list failed: a poll's retry asks the list alone.
+let reposStale = false;
+let reposFailed = false;
 
 // --- The address (X10, decision 70): where the page is, as claude-mem 15.6 keeps it ------------
 
@@ -10915,6 +10919,13 @@ const LOADERS = new Map([
 let generation = 0;
 let drawnWithoutBaseline = false;
 
+// Whether the view on the page reads the repository list. My Work, My Rules, Settings and Stats
+// with no search do not: they wait for no list, and a poll under them reads none (the list is
+// counted from every record on each read).
+function usesRepos() {
+  return !['my_work', 'my_rules', 'settings'].includes(view) && !(view === 'stats' && !$('q').value.trim());
+}
+
 async function show() {
   // First, so a settings render still out cannot draw over the tab opened after it.
   const mine = ++generation;
@@ -10922,8 +10933,11 @@ async function show() {
   feed = null;
   sessionsList?.observer?.disconnect();
   sessionsList = null;
-  // The settings tab needs no repository: it names the config.toml mistake that fails their list (#325).
-  if (!reposLoaded && view !== 'settings') return refresh();
+  // The settings tab needs no repository: it names the config.toml mistake that fails their list
+  // (#325). Nor does a view that reads no list wait for one.
+  if (!reposLoaded && usesRepos()) return refresh();
+  // The list a poll left unread is read again beside this view's own read.
+  if (reposStale && usesRepos()) void loadRepos().catch(() => { reposStale = true; });
   const repo = $('repo').value;
   const q = $('q').value.trim();
   if (view === 'timeline' || view === 'sessions') {
@@ -10948,6 +10962,7 @@ async function show() {
 // All repositories leads the list; the current checkout is listed before its first stored record
 // too, and stays selectable in Records. The resident viewer has none (docs/resident.md R8).
 async function loadRepos() {
+  reposStale = false;
   const { current, repos } = await api('repos');
   const keep = reposLoaded ? $('repo').value : view === 'timeline' ? '' : current;
   currentRepo = current;
@@ -10968,21 +10983,40 @@ async function loadRepos() {
 }
 
 async function refresh(live, selectedRepo) {
+  const seen = generation;
+  const free = view !== 'settings' && !usesRepos();
+  // A poll under a view that reads no list reads none.
+  if (live && free && reposLoaded) {
+    reposStale = true;
+    return view === 'my_work' && mw.rows ? myWorkLive() : show();
+  }
+  // Such a view's own read begins beside the list's, not after it. Not on a poll's retry of a list
+  // that failed: the view is drawn already, and the list alone is asked again.
+  const beside = free && !(live && reposFailed) ? show() : null;
   let listed = true;
   try {
     await loadRepos();
+    reposFailed = false;
     // An explicit scope is applied after the initial list chooses its default checkout.
     if(selectedRepo!==undefined)$('repo').value=selectedRepo;
   } catch (e) {
+    reposFailed = true;
     if (view !== 'settings') {
+      // A read still on its way draws nothing over the error.
+      if (beside) generation += 1;
       showError(e, selectedRepo===undefined?refresh:()=>refresh(live,selectedRepo));
       return false;
     }
     listed = false;
   }
+  if (beside) return beside;
   // Preserve unsaved settings, including when a poll began before the Settings tab opened. The
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
+  // A click or a search that began while the list was read has read the view itself, after the
+  // version this poll saw: reading it again would only repeat it. Not My Work, whose way back
+  // from a request moves the count with no read behind it (`routeShow`).
+  if (live && generation !== seen && view !== 'my_work') return true;
   if (live && activeFeed(feed) && feed.session) ses.stale = true;
   if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
   if (live && activeSessions(sessionsList) && sessionsList.repo === $('repo').value) return readSessions(sessionsList, 'live');

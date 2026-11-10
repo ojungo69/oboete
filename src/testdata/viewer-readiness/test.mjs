@@ -7399,3 +7399,118 @@ assert.equal(mark.className,'mark-wrap');
 delete document.visibilityState;
 console.log('PASS: decision 67: the records waiting to be curated beside the mark, turning, held, off and unreachable');
 }
+// Audit W3 and W6 (docs/page-reads.md): a view that reads no repository list waits for none and
+// has none read under it by a poll, and a click made while a poll reads the list is not read
+// twice. Each view's read here is one request that draws nothing: what is counted is what the page
+// asks the viewer for.
+{
+const run=code=>vm.runInContext(code,ctx);
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const reply=value=>({ok:true,status:200,json:async()=>value});
+const q=document.getElementById('q');q.value='';
+run(`globalThis.__reads={view,reposLoaded,reposStale,reposFailed,version,rows:mw.rows,fetched:mw.fetched,loaders:[...LOADERS]};
+for(const [v,name] of [['my_work','my-work'],['my_rules','my-rules'],['stats','stats'],['records','timeline']])
+  LOADERS.set(v,async()=>{await api(name);return()=>{setStatus('');};});`);
+let asked=[],held=null,heldView=null,listFails=false,v='v1';
+const count=name=>asked.filter(url=>url.split('?')[0]===`/api/${name}`).length;
+const listing=()=>reply({current:'',repos:[]});
+ctx.fetch=url=>{
+  url=String(url);asked.push(url);
+  if(url.startsWith('/api/version'))return Promise.resolve(reply({v}));
+  if(!url.startsWith('/api/repos'))return heldView?new Promise(resolve=>heldView.push(()=>resolve(reply({})))):Promise.resolve(reply({}));
+  if(listFails)return Promise.resolve({ok:false,status:503,json:async()=>({})});
+  return held?new Promise(resolve=>held.push(()=>resolve(listing()))):Promise.resolve(listing());
+};
+const release=()=>{const waiting=held;held=null;waiting.forEach(go=>go());};
+const on=(view,state)=>{asked=[];run(`view=${JSON.stringify(view)};mw.rows=null;mw.fetched=Date.now();polling=false;${state}`);};
+const polled=async()=>{run('polling=false');await run('poll()');await settle();};
+document.visibilityState='visible';
+
+// The first paint: My Work's own read begins beside the list's, not after it.
+on('my_work','reposLoaded=false;reposFailed=false;reposStale=false;version=null');
+held=[];
+const first=run('refresh(true)');await settle();
+assert.equal(count('repos'),1);
+assert.equal(count('my-work'),1,'My Work is asked for while the list is still being read');
+assert.equal(run('reposLoaded'),false);
+release();
+assert.equal(await first,true,'the refresh ends with what My Work drew');
+assert.equal(run('reposLoaded'),true,'and the list is read all the same');
+assert.equal(count('my-work'),1,'My Work is read once');
+
+// A poll under Stats reads the statistics and no list.
+on('stats','reposLoaded=true;reposStale=false;version="v1"');
+await polled();await polled();await polled();
+assert.equal(count('repos'),0,'a poll under Stats reads no list');
+assert.equal(count('stats'),3,'and the statistics each time');
+// A search there reads the list: its results are of the repository chosen.
+q.value='port';v='v2';
+on('stats','reposLoaded=true;reposStale=false;version="v1"');
+await polled();
+assert.equal(count('repos'),1,'Stats with a search reads the list');
+q.value='';v='v1';
+
+// A change under My Work or My Rules reads no list, and leaves it to the next view that reads it.
+for(const name of ['my_work','my_rules']){
+  on(name,'reposLoaded=true;reposStale=false');
+  assert.equal(await run('refresh(true)'),true);
+  assert.equal(count('repos'),0,`a live refresh under ${name} reads no list`);
+  assert.equal(run('reposStale'),true);
+}
+run("view='records'");asked=[];
+assert.equal(await run('show()'),true);await settle();
+assert.equal(count('repos'),1,'the next view that reads the list reads it again');
+assert.equal(count('timeline'),1,'beside its own read');
+asked=[];await run('show()');await settle();
+assert.equal(count('repos'),0,'once');
+// Under a view that reads the list, a poll's refresh reads it as before.
+on('records','reposLoaded=true;reposStale=false');
+assert.equal(await run('refresh(true)'),true);
+assert.equal(count('repos'),1,'a view that reads the list has it read live');
+assert.equal(count('timeline'),1);
+
+// The Refresh button reads the list under any view.
+on('stats','reposLoaded=true;reposStale=false');
+assert.equal(await run('refresh()'),true);
+assert.equal(count('repos'),1,'the Refresh button reads the list under Stats too');
+assert.equal(count('stats'),1);
+
+// A list that fails at the first paint: its error stays, and the poll asks the list alone again.
+on('my_work','reposLoaded=false;reposFailed=false;reposStale=false;version=null');
+listFails=true;heldView=[];
+assert.equal(await run('refresh(true)'),false,'a list that fails fails the refresh');
+assert.equal(count('my-work'),1);
+assert(run("$('status').textContent").includes('503'),'its error is shown');
+// My Work's answer comes after the error: it draws nothing over it.
+{const waiting=heldView;heldView=null;waiting.forEach(go=>go());}
+await settle();await settle();
+assert(run("$('status').textContent").includes('503'),'and a read still on its way draws nothing over it');
+asked=[];await polled();
+assert.equal(count('repos'),1,'the poll asks the list again');
+assert.equal(count('my-work'),0,'and the list alone, while it fails');
+listFails=false;
+asked=[];await polled();
+assert.equal(count('repos'),1);
+assert.equal(count('my-work'),1,'once the list is read, the view is');
+assert.equal(run('reposFailed'),false);
+
+// W6: a click or a search while a poll reads the list reads the view itself; the poll's refresh
+// does not read it a second time.
+on('records','reposLoaded=true;reposStale=false');
+held=[];
+const live=run('refresh(true)');await settle();
+assert.equal(count('repos'),1);
+assert.equal(count('timeline'),0,'the poll waits for the list');
+const click=run('show()');await settle();
+assert.equal(count('timeline'),1,'the click reads the view');
+release();
+assert.equal(await live,true,'the poll\'s refresh ends');
+await click;await settle();
+assert.equal(count('timeline'),1,'and does not read the view again');
+
+run(`LOADERS.clear();for(const [v,f] of __reads.loaders)LOADERS.set(v,f);
+view=__reads.view;reposLoaded=__reads.reposLoaded;reposStale=__reads.reposStale;reposFailed=__reads.reposFailed;
+version=__reads.version;mw.rows=__reads.rows;mw.fetched=__reads.fetched;polling=false;delete globalThis.__reads;`);
+delete document.visibilityState;
+console.log('PASS: W3 and W6: a view that reads no list waits for none, a poll under it reads none, a click while the list is read is read once');
+}
