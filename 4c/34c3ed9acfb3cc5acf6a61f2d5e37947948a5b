@@ -1,0 +1,23 @@
+docs/claude-mem-import.md
+  s_b837d726e3a0bf::t_1816c01b009f07 37-42
+docs/claude-mem-parity.md
+  s_b837d726e3a0bf::t_bbcfe6a78d3d6b 98
+src/import.rs
+  s_b837d726e3a0bf::t_b7278f745fa563 84-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4c34c3ed9acfb3cc5acf6a61f2d5e37947948a5b",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
