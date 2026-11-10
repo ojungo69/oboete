@@ -7412,12 +7412,13 @@ run(`globalThis.__reads={view,reposLoaded,reposStale,reposFailed,version,rows:mw
   picker:[...$('repo').children],picked:$('repo').value};
 for(const [v,name] of [['my_work','my-work'],['my_rules','my-rules'],['stats','stats'],['records','timeline'],['settings','settings-read']])
   LOADERS.set(v,async(repo)=>{await api(name,{repo:repo??''});return()=>{setStatus('');};});`);
-let asked=[],held=null,heldView=null,listFails=false,v='v1',repos=[];
+let asked=[],held=null,heldView=null,listFails=false,viewFails=false,v='v1',repos=[];
 const count=name=>asked.filter(url=>url.split('?')[0]===`/api/${name}`).length;
 const listing=()=>reply({current:'',repos});
 ctx.fetch=url=>{
   url=String(url);asked.push(url);
   if(url.startsWith('/api/version'))return Promise.resolve(reply({v}));
+  if(!url.startsWith('/api/repos')&&viewFails)return Promise.resolve({ok:false,status:503,json:async()=>({})});
   if(!url.startsWith('/api/repos'))return heldView?new Promise(resolve=>heldView.push(()=>resolve(reply({})))):Promise.resolve(reply({}));
   if(listFails)return Promise.resolve({ok:false,status:503,json:async()=>({})});
   return held?new Promise(resolve=>held.push(()=>resolve(listing()))):Promise.resolve(listing());
@@ -7508,6 +7509,24 @@ release();
 assert.equal(await live,true,'the poll\'s refresh ends');
 await click;await settle();
 assert.equal(count('timeline'),1,'and does not read the view again');
+// #903: where the click's read fails, the poll ends as it did, keeps its version, and the next
+// poll reads the view again.
+on('records','reposLoaded=true;reposStale=false;version="v1"');
+v='v2';held=[];
+const failing=run('poll()');await settle();
+assert.equal(count('repos'),1,'the poll saw a change and reads the list');
+viewFails=true;
+const missed=run('show()');await settle();
+viewFails=false;
+assert.equal(count('timeline'),1,'the click reads the view, and its read fails');
+release();
+await failing;assert.equal(await missed,false);await settle();
+assert.equal(run('version'),'v1','a poll that ended at a read that failed keeps its version');
+assert.equal(count('timeline'),1,'and reads no view itself');
+asked=[];await polled();
+assert.equal(count('timeline'),1,'the next poll reads the view again');
+assert.equal(run('version'),'v2');
+v='v1';
 // My Work opened while a poll reads the list is read once too (cubic's review of #902).
 on('records','reposLoaded=true;reposStale=false');
 held=[];

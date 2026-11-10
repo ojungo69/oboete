@@ -47,7 +47,9 @@ answers are as they were.
   after the version the poll saw. The count that guards drawing (`generation`) also moves where
   nothing is read (My Work's way back from a request, `routeShow`), so it is not the one used.
   Where the poll's list dropped the picker's choice, the click's read was for that choice: the
-  refresh does not end there, and reads the view for what the picker says.
+  refresh does not end there, and reads the view for what the picker says. The poll ends as the
+  click's read ended (`lastShow`): where that read failed, the poll keeps its version, and the
+  next one reads the view again (#903).
 
 Unchanged: under Settings a poll reads the list only while none was ever read (it keeps unsaved
 drafts and the note of a config.toml mistake by it); the Refresh button, a forget and a restore
@@ -78,7 +80,8 @@ counted:
 - a list that fails at the first paint leaves its error shown, the poll asks the list alone, and
   once it loads the view is read;
 - a click while a poll reads the list: the view is read once, My Work opened then too; a count
-  moved with no read behind it does not end the poll;
+  moved with no read behind it does not end the poll; a click whose read fails leaves the poll's
+  version where it was, and the next poll reads the view (#903, with two mutants of its own);
 - Settings opened on a list left unread reads it, once; a change under Settings reads no list
   and leaves it to the next view; Settings opened before any list was read leaves it to the poll;
 - a choice gone from the list read beside the view: the picker is at All repositories and the

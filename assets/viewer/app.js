@@ -10930,10 +10930,18 @@ function usesRepos() {
   return !['my_work', 'my_rules', 'settings'].includes(view) && !(view === 'stats' && !$('q').value.trim());
 }
 
-async function show() {
+// The view's read, begun and kept: a poll that ends at a click's read answers with how that read
+// went (`refresh`), so one that failed is read again by the next poll (#903).
+let lastShow = null;
+function show() {
+  shows += 1;
+  lastShow = showView();
+  return lastShow;
+}
+
+async function showView() {
   // First, so a settings render still out cannot draw over the tab opened after it.
   const mine = ++generation;
-  shows += 1;
   feed?.observer?.disconnect();
   feed = null;
   sessionsList?.observer?.disconnect();
@@ -11037,9 +11045,10 @@ async function refresh(live, selectedRepo) {
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
   // A click or a search that began while the list was read has read the view itself, after the
-  // version this poll saw: reading it again would only repeat it. Not where the list dropped the
-  // picker's choice: that read was for the choice, and the view is read for what the picker says.
-  if (live && shows !== seen && kept) return true;
+  // version this poll saw: reading it again would only repeat it, and the poll ends as that read
+  // does. Not where the list dropped the picker's choice: that read was for the choice, and the
+  // view is read for what the picker says.
+  if (live && shows !== seen && kept) return lastShow;
   if (live && activeFeed(feed) && feed.session) ses.stale = true;
   if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
   if (live && activeSessions(sessionsList) && sessionsList.repo === $('repo').value) return readSessions(sessionsList, 'live');
