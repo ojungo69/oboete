@@ -7567,6 +7567,20 @@ await scoped;await settle();await settle();
 assert.equal(run("$('repo').value"),'','a choice no longer listed goes back to All repositories');
 assert.deepEqual(timelines(),['gone',''],'and the view is read again for it');
 assert.equal(count('repos'),1);
+// The same where it is a poll that reads the list while a click reads the view for the choice:
+// the poll's refresh does not end at the click's read, and reads the view for All repositories
+// (Codex's second review of #902).
+pick('gone');
+on('records','reposLoaded=true;reposStale=false');
+held=[];
+const dropping=run('refresh(true)');await settle();
+const clicked=run('show()');await settle();
+assert.deepEqual(timelines(),['gone'],'the click reads the view for the repository chosen');
+release();
+assert.equal(await dropping,true);
+await clicked;await settle();
+assert.equal(run("$('repo').value"),'');
+assert.deepEqual(timelines(),['gone',''],'a poll whose list dropped the choice reads the view for what the picker says');
 // One still listed is kept, and the view is read once.
 repos=[{repo:'kept',claims:0,imported:0,records:1}];
 pick('kept');

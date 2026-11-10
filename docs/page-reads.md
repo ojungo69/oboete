@@ -31,9 +31,11 @@ answers are as they were.
   - A choice the list no longer holds (a repository forgotten meanwhile) goes back to All
     repositories, and the view, asked for beside the list with the old choice, is read again for
     what the picker says.
-  - Under Stats with no search the picker is on the page and reads no list: a repository first
-    recorded since the list was last read is in it after a search, another tab or the Refresh
-    button.
+  - Under Stats with no search the picker is on the page and reads no list. Each poll there
+    marks the list unread, so a search or another tab then reads it, and a repository first
+    recorded meanwhile is in the picker. One made within the 3 seconds before any poll saw it
+    comes with the next poll's read of the list, under the view that reads it. The Refresh
+    button reads the list at once.
 - A list that fails is shown as before, and a read still on its way draws nothing over the
   error. While no list was ever read, the poll asks the list again each time, as before, and the
   list alone: the view is not read again every 3 seconds while the list fails (`reposFailed`).
@@ -44,6 +46,8 @@ answers are as they were.
   or a search moved it while the list was read, the poll's refresh ends there: the view was read
   after the version the poll saw. The count that guards drawing (`generation`) also moves where
   nothing is read (My Work's way back from a request, `routeShow`), so it is not the one used.
+  Where the poll's list dropped the picker's choice, the click's read was for that choice: the
+  refresh does not end there, and reads the view for what the picker says.
 
 Unchanged: under Settings a poll reads the list only while none was ever read (it keeps unsaved
 drafts and the note of a config.toml mistake by it); the Refresh button, a forget and a restore
@@ -78,8 +82,9 @@ counted:
 - Settings opened on a list left unread reads it, once; a change under Settings reads no list
   and leaves it to the next view; Settings opened before any list was read leaves it to the poll;
 - a choice gone from the list read beside the view: the picker is at All repositories and the
-  view is read again for it; a choice still listed is read once;
+  view is read again for it, and the same where a poll reads the list while a click reads the
+  view; a choice still listed is read once;
 - a list read before that fails on the Refresh button: no poll under Stats asks for it, and the
   next view that reads the list does.
 
-24 hand-made mutants of the page's change, each run against the harness, all fail it.
+25 hand-made mutants of the page's change, each run against the harness, all fail it.

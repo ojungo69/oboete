@@ -11018,8 +11018,9 @@ async function refresh(live, selectedRepo) {
   // that failed: the view is drawn already, and the list alone is asked again.
   const beside = free && !(live && reposFailed) ? show() : null;
   let listed = true;
+  let kept = true;
   try {
-    await loadRepos();
+    kept = await loadRepos();
     // An explicit scope is applied after the initial list chooses its default checkout.
     if(selectedRepo!==undefined)$('repo').value=selectedRepo;
   } catch (e) {
@@ -11036,8 +11037,9 @@ async function refresh(live, selectedRepo) {
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
   // A click or a search that began while the list was read has read the view itself, after the
-  // version this poll saw: reading it again would only repeat it.
-  if (live && shows !== seen) return true;
+  // version this poll saw: reading it again would only repeat it. Not where the list dropped the
+  // picker's choice: that read was for the choice, and the view is read for what the picker says.
+  if (live && shows !== seen && kept) return true;
   if (live && activeFeed(feed) && feed.session) ses.stale = true;
   if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
   if (live && activeSessions(sessionsList) && sessionsList.repo === $('repo').value) return readSessions(sessionsList, 'live');
