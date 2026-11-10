@@ -76,12 +76,16 @@ pub fn lock(home: &Path) -> Result<std::fs::File> {
     }
 }
 
-/// The newest claude-mem schema the import reads all of: 15.0.2's (docs/claude-mem-import.md I2).
+/// The newest claude-mem schema the import reads all of: 15.15.0's (docs/claude-mem-import.md I2).
 /// v65 (13.36.0) only recomputes `observations.title_norm_key`; v66 adds cloud sync columns to
 /// `work_state_entries` and v67 lets the sync ledgers name that kind (13.40.0); v68 (15.0.2) adds
 /// `observation_files`, an index of each observation's `files_read` and `files_modified`, which
-/// the import reads from the observation itself. The import reads none of them.
-const NEWEST_SCHEMA: i64 = 68;
+/// the import reads from the observation itself. v69 to v71 (15.7.0) and v72 (15.12.0) add the
+/// tables of kept images and their links to observations; v73 and v74 (15.12.0) add the tool
+/// uses already stored (against a transcript read twice), the records of deleted sessions and
+/// the triggers that keep a deleted session's earlier content out. The import reads none of
+/// them.
+const NEWEST_SCHEMA: i64 = 74;
 
 /// The plain import, as the tests run it.
 #[cfg(test)]
@@ -1711,10 +1715,12 @@ mod tests {
 
     /// Test 1: a database at a schema newer than the import knows is refused, nothing written.
     #[test]
-    fn a_database_newer_than_v68_is_refused_with_nothing_written() {
+    fn a_database_newer_than_v74_is_refused_with_nothing_written() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("claude-mem.db");
         claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        // The newest version is not the last row: claude-mem's media migration runs after the
+        // others, so its v72 is stamped after v73 and v74.
         Connection::open(&src)
             .unwrap()
             .execute_batch(
@@ -1722,7 +1728,13 @@ mod tests {
                  INSERT INTO schema_versions VALUES(4, 66, '');
                  INSERT INTO schema_versions VALUES(5, 67, '');
                  INSERT INTO schema_versions VALUES(6, 68, '');
-                 INSERT INTO schema_versions VALUES(7, 69, '');",
+                 INSERT INTO schema_versions VALUES(7, 69, '');
+                 INSERT INTO schema_versions VALUES(8, 70, '');
+                 INSERT INTO schema_versions VALUES(9, 71, '');
+                 INSERT INTO schema_versions VALUES(10, 73, '');
+                 INSERT INTO schema_versions VALUES(11, 74, '');
+                 INSERT INTO schema_versions VALUES(12, 75, '');
+                 INSERT INTO schema_versions VALUES(13, 72, '');",
             )
             .unwrap();
         let mut raw = crate::raw::open(dir.path()).unwrap();
@@ -1730,23 +1742,26 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(said.contains("v69") && said.contains("v68"), "{said}");
+        assert!(said.contains("v75") && said.contains("v74"), "{said}");
         assert!(docs(&raw).is_empty() && work_ops(&raw).is_empty());
     }
 
     /// I2: 13.36.0's v65, which only recomputes `observations.title_norm_key`, 13.40.0's v67,
-    /// which adds the work state's sync columns, and 15.0.2's v68, which adds an index of the
-    /// observations' files, come in as v64 does: a path only that index holds comes in nowhere.
+    /// which adds the work state's sync columns, 15.0.2's v68, which adds an index of the
+    /// observations' files, and 15.12.0's v74, with the tables of kept images, the records of
+    /// deleted sessions and their triggers, come in as v64 does: a path only that index holds
+    /// comes in nowhere, and neither does an image's link or a deleted session's record.
     #[test]
-    fn a_v65_v67_or_v68_database_comes_in_as_v64_does() {
+    fn a_v65_v67_v68_or_v74_database_comes_in_as_v64_does() {
         let dir = tempfile::tempdir().unwrap();
-        let (v64, v65, v67, v68) = (
+        let (v64, v65, v67, v68, v74) = (
             dir.path().join("v64.db"),
             dir.path().join("v65.db"),
             dir.path().join("v67.db"),
             dir.path().join("v68.db"),
+            dir.path().join("v74.db"),
         );
-        for db in [&v64, &v65, &v67, &v68] {
+        for db in [&v64, &v65, &v67, &v68, &v74] {
             claude_mem_v64(db, "2025-12-14T16:09:58.769Z");
         }
         let v65_batch = "ALTER TABLE observations ADD COLUMN title_norm_key TEXT;
@@ -1762,21 +1777,141 @@ mod tests {
              ALTER TABLE work_state_entries ADD COLUMN sync_rev TEXT NOT NULL DEFAULT '1';
              INSERT INTO schema_versions VALUES(4, 66, '2026-10-16T14:58:42.000Z');
              INSERT INTO schema_versions VALUES(5, 67, '2026-10-16T14:58:42.000Z');";
-        for db in [&v67, &v68] {
+        for db in [&v67, &v68, &v74] {
             let c = Connection::open(db).unwrap();
             c.execute_batch(v65_batch).unwrap();
             c.execute_batch(v67_batch).unwrap();
         }
-        Connection::open(&v68)
+        let v68_batch = "CREATE TABLE observation_files(path TEXT NOT NULL,
+               observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+               PRIMARY KEY (path, observation_id));
+             CREATE INDEX idx_observation_files_observation
+               ON observation_files(observation_id);
+             INSERT INTO observation_files VALUES('src/only-in-the-index.rs', 10);
+             INSERT INTO schema_versions VALUES(6, 68, '2026-10-23T21:24:16.070Z');";
+        for db in [&v68, &v74] {
+            Connection::open(db)
+                .unwrap()
+                .execute_batch(v68_batch)
+                .unwrap();
+        }
+        // claude-mem 15.15.0's tables, as `sqlite/media.ts` (v69 to v72) and `SessionStore.ts`
+        // (v73, v74) make them, with a row in each a person's use fills, and its triggers on
+        // the tables the import reads, their bodies shortened, made after the rows. An image is
+        // linked to observation 10; a session and a memory session other than the fixture's
+        // were deleted. The versions are stamped in the order a real database holds them: the
+        // media migration runs last.
+        Connection::open(&v74)
             .unwrap()
             .execute_batch(
-                "CREATE TABLE observation_files(path TEXT NOT NULL,
-                   observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
-                   PRIMARY KEY (path, observation_id));
-                 CREATE INDEX idx_observation_files_observation
-                   ON observation_files(observation_id);
-                 INSERT INTO observation_files VALUES('src/only-in-the-index.rs', 10);
-                 INSERT INTO schema_versions VALUES(6, 68, '2026-10-23T21:24:16.070Z');",
+                "CREATE TABLE tool_uses(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   tool_use_id TEXT NOT NULL, content_session_id TEXT NOT NULL,
+                   memory_session_id TEXT, session_db_id INTEGER, project TEXT NOT NULL,
+                   platform_source TEXT NOT NULL DEFAULT 'claude', tool_name TEXT NOT NULL,
+                   tool_input TEXT, tool_response TEXT, created_at TEXT NOT NULL,
+                   created_at_epoch INTEGER NOT NULL, UNIQUE(content_session_id, tool_use_id));
+                 CREATE TABLE media_events(event_key TEXT PRIMARY KEY,
+                   session_db_id INTEGER NOT NULL, platform TEXT NOT NULL,
+                   event_identity TEXT NOT NULL,
+                   state TEXT NOT NULL DEFAULT 'retained' CHECK(state IN ('retained','deleted')),
+                   result_state TEXT NOT NULL DEFAULT 'unprocessed'
+                     CHECK(result_state IN ('unprocessed','stored','skipped')),
+                   created_at INTEGER NOT NULL, carry_prompt_number INTEGER);
+                 CREATE TABLE media_attachments(id TEXT PRIMARY KEY,
+                   replay_key TEXT NOT NULL UNIQUE, provenance TEXT NOT NULL,
+                   recipe TEXT NOT NULL CHECK(recipe IN ('screenshot-v1','photo-v1')),
+                   state TEXT NOT NULL CHECK(state IN ('converting','ready','failed','deleted')),
+                   failure_code TEXT, encoder_version TEXT, variants TEXT,
+                   lease_until INTEGER NOT NULL DEFAULT 0,
+                   upload_state TEXT NOT NULL DEFAULT 'pending'
+                     CHECK(upload_state IN ('pending','uploaded','failed','cancelled')),
+                   created_at INTEGER NOT NULL, origin TEXT NOT NULL DEFAULT 'native',
+                   upload_attempts INTEGER NOT NULL DEFAULT 0,
+                   upload_retry_at INTEGER NOT NULL DEFAULT 0, upload_error TEXT);
+                 CREATE TABLE media_event_refs(event_key TEXT NOT NULL,
+                   attachment_id TEXT NOT NULL, label TEXT NOT NULL,
+                   PRIMARY KEY(event_key, attachment_id), UNIQUE(event_key, label),
+                   FOREIGN KEY(event_key) REFERENCES media_events(event_key),
+                   FOREIGN KEY(attachment_id) REFERENCES media_attachments(id));
+                 CREATE TABLE observation_media_links(observation_id INTEGER NOT NULL,
+                   attachment_id TEXT NOT NULL, event_key TEXT NOT NULL, label TEXT NOT NULL,
+                   inspection TEXT NOT NULL DEFAULT 'uninspected'
+                     CHECK(inspection IN ('inspected','uninspected')),
+                   PRIMARY KEY(observation_id, attachment_id),
+                   FOREIGN KEY(attachment_id) REFERENCES media_attachments(id));
+                 CREATE TABLE media_cleanup_jobs(attachment_id TEXT PRIMARY KEY,
+                   directory TEXT NOT NULL, queued_at INTEGER NOT NULL,
+                   attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0,
+                   last_error TEXT);
+                 CREATE TABLE media_event_results(event_key TEXT NOT NULL,
+                   observation_id INTEGER NOT NULL, PRIMARY KEY(event_key, observation_id));
+                 CREATE TABLE media_cloud_deletions(attachment_id TEXT PRIMARY KEY,
+                   queued_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                   retry_at INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+                 CREATE TABLE committed_observation_tool_uses(platform_source TEXT NOT NULL,
+                   content_session_id TEXT NOT NULL, tool_use_id TEXT NOT NULL,
+                   committed_at_epoch_ms INTEGER NOT NULL,
+                   PRIMARY KEY (platform_source, content_session_id, tool_use_id));
+                 CREATE TABLE deleted_content_sessions(platform_source TEXT NOT NULL,
+                   content_session_id TEXT NOT NULL, deleted_at_epoch_ms INTEGER NOT NULL,
+                   PRIMARY KEY (platform_source, content_session_id));
+                 CREATE TABLE deleted_memory_sessions(memory_session_id TEXT PRIMARY KEY,
+                   deleted_at_epoch_ms INTEGER NOT NULL);
+                 INSERT INTO tool_uses(tool_use_id, content_session_id, memory_session_id,
+                   session_db_id, project, platform_source, tool_name, created_at,
+                   created_at_epoch)
+                   VALUES('tool-1', 'agent-1', 'mem-1', 1, 'free-mem', 'codex', 'Read', '', 1650);
+                 INSERT INTO media_events VALUES('ev-1', 1, 'codex', 'tool-1', 'retained',
+                   'stored', 1650, NULL);
+                 INSERT INTO media_attachments(id, replay_key, provenance, recipe, state,
+                   variants, created_at)
+                   VALUES('att-1', 'replay-1', 'tool_result', 'screenshot-v1', 'ready', '{}', 1650);
+                 INSERT INTO media_event_refs VALUES('ev-1', 'att-1', 'image 1');
+                 INSERT INTO observation_media_links VALUES(10, 'att-1', 'ev-1', 'image 1',
+                   'uninspected');
+                 INSERT INTO media_event_results VALUES('ev-1', 10);
+                 INSERT INTO committed_observation_tool_uses VALUES('codex', 'agent-1', 'tool-1',
+                   1650);
+                 INSERT INTO deleted_content_sessions VALUES('codex', 'agent-gone', 1900);
+                 INSERT INTO deleted_memory_sessions VALUES('mem-gone', 1900);
+                 CREATE TRIGGER media_observation_delete AFTER DELETE ON observations BEGIN
+                   DELETE FROM observation_media_links WHERE observation_id = OLD.id;
+                   DELETE FROM media_event_results WHERE observation_id = OLD.id;
+                 END;
+                 CREATE TRIGGER media_session_delete BEFORE DELETE ON sdk_sessions BEGIN
+                   DELETE FROM media_event_refs WHERE event_key IN
+                     (SELECT event_key FROM media_events WHERE session_db_id = OLD.id);
+                   UPDATE media_events SET state = 'deleted' WHERE session_db_id = OLD.id;
+                 END;
+                 CREATE TRIGGER block_pre_deletion_sdk_session_insert
+                   BEFORE INSERT ON sdk_sessions
+                   WHEN EXISTS (SELECT 1 FROM deleted_content_sessions
+                       WHERE platform_source = NEW.platform_source
+                         AND content_session_id = NEW.content_session_id
+                         AND NEW.started_at_epoch <= deleted_at_epoch_ms)
+                     OR EXISTS (SELECT 1 FROM deleted_memory_sessions
+                       WHERE memory_session_id = NEW.memory_session_id)
+                   BEGIN SELECT RAISE(ABORT, 'session_deleted'); END;
+                 CREATE TRIGGER block_deleted_sdk_session_rekey
+                   BEFORE UPDATE OF memory_session_id, content_session_id, platform_source
+                   ON sdk_sessions
+                   WHEN EXISTS (SELECT 1 FROM deleted_memory_sessions
+                       WHERE memory_session_id = NEW.memory_session_id)
+                   BEGIN SELECT RAISE(ABORT, 'session_deleted'); END;
+                 CREATE TRIGGER block_pre_deletion_tool_use_insert BEFORE INSERT ON tool_uses
+                   WHEN EXISTS (SELECT 1 FROM deleted_content_sessions
+                       WHERE platform_source = NEW.platform_source
+                         AND content_session_id = NEW.content_session_id)
+                     AND NOT EXISTS (SELECT 1 FROM sdk_sessions
+                       WHERE id = NEW.session_db_id AND platform_source = NEW.platform_source
+                         AND content_session_id = NEW.content_session_id)
+                   BEGIN SELECT RAISE(ABORT, 'session_deleted'); END;
+                 INSERT INTO schema_versions VALUES(7, 69, '');
+                 INSERT INTO schema_versions VALUES(8, 70, '');
+                 INSERT INTO schema_versions VALUES(9, 71, '');
+                 INSERT INTO schema_versions VALUES(10, 73, '');
+                 INSERT INTO schema_versions VALUES(11, 74, '');
+                 INSERT INTO schema_versions VALUES(12, 72, '');",
             )
             .unwrap();
         let import = |src: &Path, home: &Path| {
@@ -1800,16 +1935,18 @@ mod tests {
                 files,
             )
         };
-        let (a, b, c, d) = (
+        let (a, b, c, d, e) = (
             dir.path().join("a"),
             dir.path().join("b"),
             dir.path().join("c"),
             dir.path().join("d"),
+            dir.path().join("e"),
         );
         let want = import(&v64, &a);
         assert_eq!(import(&v65, &b), want);
         assert_eq!(import(&v67, &c), want);
         assert_eq!(import(&v68, &d), want);
+        assert_eq!(import(&v74, &e), want);
     }
 
     /// Test 2: what is read is found by its columns, whatever version the log names: an older

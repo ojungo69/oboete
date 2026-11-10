@@ -20,7 +20,7 @@ rule and nothing more.
 I1. **Where.** Without `--eval-store` the import goes into the home given, the default one
 included. `--eval-store` keeps its meaning, an evaluation home: it still refuses the default home.
 
-I2. **Which databases.** claude-mem's schema from 13.28.0 (migrations to v52) to 15.0.2 (v68).
+I2. **Which databases.** claude-mem's schema from 13.28.0 (migrations to v52) to 15.15.0 (v74).
 The importer reads what it finds by table and column (`PRAGMA table_info`), not by version number:
 another claude-mem draft (#4341) also numbers a migration v61. v65 (13.36.0,
 `refreshUnicodeTitleNormKeys`) only recomputes `observations.title_norm_key`, the key claude-mem
@@ -31,9 +31,18 @@ import reads neither. 13.41.0 to 15.0.1 add only work state telemetry receipts a
 of their own, My Work's reviews, neither of which the import reads. v68 (15.0.2) adds
 `observation_files`, an index of each observation's `files_read` and `files_modified` for
 claude-mem's lookup by file; the import reads those lists from the observation itself (I9), not
-from the index. A database whose `schema_versions` names a version above 68 is refused, with
-nothing imported: a newer claude-mem may keep what this import would leave behind. The message
-names both versions.
+from the index. v69 to v71 (15.7.0) and v72 (15.12.0) add the tables of kept images
+(`media_events`, `media_attachments` and their links to observations and events): an image is a
+file under claude-mem's `media-v1` folder, and an observation's text is as it was. The import
+reads neither the tables nor the files, so claude-mem's kept images stay where they are. v73
+(15.12.0) adds `committed_observation_tool_uses`, the tool uses whose observations were stored,
+so a transcript read again after a restart stores none twice, and the records of deleted sessions
+(`deleted_content_sessions`, `deleted_memory_sessions`); v74 (15.12.0) adds triggers that keep a
+deleted session's earlier content from coming back. A deleted session's rows are gone from the
+tables the import reads, and the import reads none of the three. A database whose `schema_versions` names a
+version above 74 is refused, with nothing imported: a newer claude-mem may keep what this import
+would leave behind. The newest version is the highest one named, wherever its row is: the media
+migration runs after the others, so v72 is stamped after v74. The message names both versions.
 
 I3. **What comes in.** As before: observations (the title; the narrative, then each fact), session
 summaries and prompts, as import ops, gated on the way in, each once (by source id). Two changes:
@@ -104,8 +113,9 @@ left to the plain import and not counted.
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,
-   `work_state_entries`) both import; one at v65, v67 or v68 comes in as at v64, a path only v68's
-   index holds in no file record; one naming v69 is refused with nothing written.
+   `work_state_entries`) both import; one at v65, v67, v68 or v74 comes in as at v64, a path only
+   v68's index holds in no file record, and v74's image links, deleted-session records and
+   triggers in nothing; one naming v75 is refused with nothing written.
 2. A table is found by its columns, whatever version row names it.
 3. Notes come in as the last line; a merged project's rows come in under the project they were
    merged into.
