@@ -165,11 +165,13 @@ pub(crate) struct DoctorRow {
     pub(crate) version: String,
     pub(crate) passed: bool,
     pub(crate) detail: String,
+    /// When the gate stored it: codex is probed only when the chain reaches it.
+    pub(crate) ts: i64,
 }
 
 pub(crate) fn doctor_rows(db: &Connection) -> Result<Vec<DoctorRow>> {
     let mut stmt = db.prepare(
-        "SELECT cli, version, passed, detail FROM isolation i
+        "SELECT cli, version, passed, detail, ts FROM isolation i
          WHERE ts = (SELECT MAX(ts) FROM isolation WHERE cli = i.cli) ORDER BY cli",
     )?;
     Ok(stmt
@@ -179,21 +181,27 @@ pub(crate) fn doctor_rows(db: &Connection) -> Result<Vec<DoctorRow>> {
                 version: r.get(1)?,
                 passed: r.get(2)?,
                 detail: r.get(3)?,
+                ts: r.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// The newest stored result per CLI, one line each, for doctor.
+/// The newest stored result per CLI, one line each, for doctor, with when it was stored: it is
+/// the last probe's, which an update of oboete or of the CLI since may have made old (#904).
 pub fn doctor(db: &Connection) -> Result<Vec<String>> {
     Ok(doctor_rows(db)?
         .into_iter()
         .map(|row| {
+            let at = crate::db::utc(row.ts);
             if row.passed {
-                format!("{} ({}): cannot act, curates", row.cli, row.version)
+                format!(
+                    "{} ({}): cannot act, curates (as of {at})",
+                    row.cli, row.version
+                )
             } else {
                 format!(
-                    "{} ({}): skipped as a curator: {}",
+                    "{} ({}): skipped as a curator: {} (as of {at})",
                     row.cli, row.version, row.detail
                 )
             }
@@ -506,7 +514,21 @@ mod tests {
             2 * calls.lines().count(),
             "probed again"
         );
-        assert_eq!(doctor(&db).unwrap().len(), 1);
+        // #904: the line is the last probe's, which may be days old, and says when it was.
+        let at = |db: &Connection| -> String {
+            let ts: i64 = db
+                .query_row("SELECT MAX(ts) FROM isolation", [], |r| r.get(0))
+                .unwrap();
+            crate::db::utc(ts)
+        };
+        let version = version(&exe, dir.path()).unwrap();
+        assert_eq!(
+            doctor(&db).unwrap(),
+            [format!(
+                "codex ({version}): cannot act, curates (as of {})",
+                at(&db)
+            )]
+        );
         // A codex that stops answering fails before the probe, and doctor shows that, not the pass.
         std::fs::write(&exe, "#!/bin/sh\nexit 1\n").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -516,7 +538,18 @@ mod tests {
         ));
         assert_eq!(
             doctor(&db).unwrap(),
-            ["codex (unknown version): skipped as a curator: codex --version did not answer"]
+            [format!(
+                "codex (unknown version): skipped as a curator: codex --version did not answer (as of {})",
+                at(&db)
+            )]
+        );
+        // A row of long ago says its own time, not now's.
+        db.execute("UPDATE isolation SET ts = 1_794_303_586_000", [])
+            .unwrap();
+        assert!(
+            doctor(&db).unwrap()[0].ends_with("(as of 2026-11-10 09:39 UTC)"),
+            "{:?}",
+            doctor(&db).unwrap()
         );
     }
 
