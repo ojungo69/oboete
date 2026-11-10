@@ -734,7 +734,7 @@ pub(crate) fn estimate(
     let calibration = factor(p.name())?;
     let call = |input: u32, output: u32| {
         (p.limits()).usd(
-            f64::from(input) * calibration * p.input_weight(),
+            f64::from(input) * calibration * p.input_weight(crate::my_work::ROLE),
             f64::from(output),
         )
     };
@@ -1487,7 +1487,7 @@ mod tests {
         };
         let chain = [
             entry("free", crate::config::Limits::default()),
-            entry("paid", paid),
+            entry("paid", paid.clone()),
         ];
         // A day: 2 groupings, 5 reviews, 1 links, 2 placements (one an Other pass), 1 story, 0.5
         // rules, 1 goals.
@@ -1531,6 +1531,16 @@ mod tests {
         assert!((typical - expected * 5.0 / 12.5).abs() < 1e-9, "{typical}");
         let free = estimate(&s.raw, &chain[..1], 100, (5_000, &flat), now).unwrap();
         assert_eq!((free.calls, free.usd, free.priced), ((13, 100), None, None));
+        // Decision 86: on a Messages entry each input is priced as an hour's cache write, twice the
+        // input price, the most a My Work call's input may bill.
+        let mut messages = entry("paid", paid);
+        if let crate::config::Provider::Openai { api, .. } = &mut messages {
+            *api = crate::config::Api::Anthropic;
+        }
+        let (typical, _) = (estimate(&s.raw, &[messages], 100, (5_000, &flat), now).unwrap())
+            .usd
+            .unwrap();
+        assert!((typical - doubled).abs() < 1e-9, "{typical} {doubled}");
     }
 
     /// A6: doctor names the switch and what turning it on would cost.

@@ -28,7 +28,12 @@ Why:
 - **The Messages API.** The fenced prompt's instructions have their own block with a breakpoint
   (G09), and the 2,618 tokens are those instructions with the schema the API adds. A summary or a
   My Work job often comes more than five minutes after the last one of its kind, when the entry has
-  already expired.
+  already expired. Of the curator's 257 calls that read nothing, 91 came more than five minutes
+  after the call before, and 166 within five minutes without overlapping it: its instructions name
+  the cards a window may give (`curate::most_cards`), more for a grown window (decision 72), so a
+  grown window's instructions are other bytes with an entry of their own. A second breakpoint before
+  that sentence would let such a call read the first 1,800 or so tokens instead of writing them,
+  166 times a week: a few cents, so the instructions stay as they are.
 
 ## Decision 86 (2026-11-10)
 
@@ -52,7 +57,10 @@ Why:
    reads nothing, at no cost.
 3. **The Messages API** keeps its breakpoint; an entry's own `cache_control` still wins, and at the
    request's top level it writes the whole prompt, the record included. Summary and My Work calls
-   are to keep their entry for an hour (next change: a 1-hour write costs twice the input price, which the budget must count).
+   keep their entry for an hour (`config::cache_hour`): their marker asks for `"ttl": "1h"` when
+   the entry marks nothing of its own (its markers come first, and an hour's may not follow five
+   minutes'), and the budget prices their writes at twice the input price
+   (`Provider::input_weight`, `Provider::billed_input`).
    In the week to 2026-11-10, 310 of the 535 summary calls came within five minutes of the one
    before and 522 within an hour. In input prices per instruction token a miss costs 1.25 with five
    minutes' entry and 2 with an hour's, a read 0.1: the summary's instructions would cost about a

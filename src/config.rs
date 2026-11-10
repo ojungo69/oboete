@@ -485,21 +485,21 @@ impl Provider {
             Self::Openai { enabled, .. } | Self::Cli { enabled, .. } => *enabled,
         }
     }
-    /// The most one input token may be billed, in input prices. A Messages entry writes its prompt
-    /// cache: a fenced prompt's instructions (`provider::anthropic_request`) at 1.25 times the input
-    /// price, for five minutes' cache, and at up to twice when its `extra` asks for a cache of its
-    /// own anywhere (`own_cache`); an entry of OpenAI's own API at 1.25 times (decision 80); any
-    /// other entry once. Only prices: a paid call's input is priced
-    /// at this where its usage is not known (admission, the reservation, a call whose usage never
-    /// comes back, recuration's estimate), and its tokens count once against every token limit
-    /// (Codex on #409).
-    pub fn input_weight(&self) -> f64 {
+    /// The most one input token of a `role`'s call may be billed, in input prices. A Messages entry
+    /// writes its prompt cache: a fenced prompt's instructions (`provider::anthropic_request`) at
+    /// 1.25 times the input price, for five minutes' cache, and at twice for an hour's, a summary's
+    /// or My Work's (`cache_hour`), or when its `extra` asks for a cache of its own anywhere
+    /// (`own_cache`); an entry of OpenAI's own API at 1.25 times (decision 80); any other entry
+    /// once. Only prices: a paid call's input is priced at this where its usage is not known
+    /// (admission, the reservation, a call whose usage never comes back, recuration's estimate),
+    /// and its tokens count once against every token limit (Codex on #409).
+    pub fn input_weight(&self, role: &str) -> f64 {
         match self {
             Provider::Openai {
                 api: Api::Anthropic,
                 extra,
                 ..
-            } if own_cache(extra) => 2.0,
+            } if own_cache(extra) || cache_hour(role) => 2.0,
             Provider::Openai {
                 api: Api::Anthropic,
                 ..
@@ -512,15 +512,22 @@ impl Provider {
         }
     }
 
-    /// What a call's input is billed as, in input tokens at the input price, from its reported
-    /// `prompt` (every input token, those its cache wrote and read too), never less than the bill.
-    /// A Messages entry bills a token read from its prompt cache at a tenth of the input price or
-    /// less (Claude's models), and one written at 1.25 times for oboete's own five-minute marker;
-    /// at twice when its `extra` asks for a cache of its own anywhere (`own_cache`), whose lifetime
-    /// the usage does not tell apart (Codex on #636). OpenAI's own API bills a written token at
-    /// 1.25 times and a read one as its model's (`openai_cached_rate`, decision 80). Elsewhere a
-    /// written token counts twice and a read one once.
-    pub fn billed_input(&self, prompt: i64, cached: Option<i64>, written: Option<i64>) -> f64 {
+    /// What a `role`'s call's input is billed as, in input tokens at the input price, from its
+    /// reported `prompt` (every input token, those its cache wrote and read too), never less than
+    /// the bill. A Messages entry bills a token read from its prompt cache at a tenth of the input
+    /// price or less (Claude's models), and one written at 1.25 times for oboete's own five-minute
+    /// marker; at twice for its hour's marker (`cache_hour`), and when its `extra` asks for a cache
+    /// of its own anywhere (`own_cache`), whose lifetime oboete does not read apart (Codex on #636).
+    /// OpenAI's own API bills a written token at 1.25 times and a read one as its model's
+    /// (`openai_cached_rate`, decision 80). Elsewhere a written token counts twice and a read one
+    /// once.
+    pub fn billed_input(
+        &self,
+        role: &str,
+        prompt: i64,
+        cached: Option<i64>,
+        written: Option<i64>,
+    ) -> f64 {
         let (cached, written) = (cached.unwrap_or(0).max(0), written.unwrap_or(0).max(0));
         match self {
             Provider::Openai {
@@ -528,7 +535,11 @@ impl Provider {
                 extra,
                 ..
             } => {
-                let write = if own_cache(extra) { 2.0 } else { 1.25 };
+                let write = if own_cache(extra) || cache_hour(role) {
+                    2.0
+                } else {
+                    1.25
+                };
                 let fresh = prompt.saturating_sub(cached).saturating_sub(written).max(0);
                 fresh as f64 + written as f64 * write + cached as f64 * 0.1
             }
@@ -1518,6 +1529,14 @@ pub fn autostart(home: &Path) -> bool {
 /// the request, or on a block of its `system`, `tools` or `messages`, for any lifetime.
 fn own_cache(extra: &serde_json::Map<String, serde_json::Value>) -> bool {
     cache_markers(extra) > 0
+}
+
+/// Whether oboete's own cache marker on a `role`'s Messages request keeps its entry for an hour,
+/// written at twice the input price: a summary's and My Work's calls come minutes to an hour apart,
+/// where five minutes' entry is mostly written again; the curator's come minutes apart and keep
+/// five minutes (decision 86, docs/prompt-cache.md).
+pub(crate) fn cache_hour(role: &str) -> bool {
+    role == "summary" || role == crate::my_work::ROLE
 }
 
 /// The cache breakpoints a Messages entry's `extra` takes: the request's own at the top (automatic
