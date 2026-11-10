@@ -65,7 +65,8 @@ has a note of its own (card-hide.md, slice 9).
   - it opens with "You are " and the, a, an, one, on or in, or with "Task: " or "Branch: ", and
     runs past 400 characters.
 - Prompts of excluded projects drop out (`index.ts:103-104,142`). The reader ignores
-  `CLAUDE_CONFIG_DIR` (`readers.ts:151`).
+  `CLAUDE_CONFIG_DIR` (`readers.ts:151`), up to 15.12; since 15.12.1 it follows it, as oboete's
+  transcript import does (`src/main.rs:756`, `src/setup.rs:1284-1289`).
 - Grouping and reviews skip only the prompt ids the setup scan saved as an agent's. A prompt the
   hooks record after the scan is not tested (`request-groups.mjs:30-31,88-91`).
 
