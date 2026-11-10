@@ -246,7 +246,13 @@ What was weighed against it, on a harness apart from oboete (regex 1.13.1, the b
 | one clone a thread, dropped with the thread | 0.11 to 0.14 s | +10 MB while the thread lives |
 
 One regex for every thread keeps a cache for each of its pool's stacks, for as long as the process
-lives; a resident process cannot take that. A clone kept for a request costs nothing after it.
+lives; a resident process cannot take that. A clone kept for a request is let go with it.
+
+That is not nothing left behind. Measured after the merge, on this PC's store, a thread a read as
+the viewer runs them: after 40 reads of My Work the process held 174 MB with a `Warm` and 161 MB
+without one, and neither grew over the next 20. A `Warm` adds 12 to 13 MB to where the process's
+memory settles. Most of what settles there is not the `Warm`'s: counting anonymous memory alone,
+a thread a read left 152 MB after 40 reads and the same 40 reads on one thread left 37 MB (#922).
 
 On this PC's store, a My Work read inside the process, with a `Warm` and without, three of each
 in turn: 479 to 512 ms against 550 to 575 ms. The requests' answers went from 108-123 ms to
